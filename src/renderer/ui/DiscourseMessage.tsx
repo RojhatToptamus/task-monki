@@ -17,7 +17,7 @@ import {
 } from './DiscourseIcons';
 import { MessageMarkdown } from './MessageMarkdown';
 import { DiscourseHistoryContent } from './DiscourseHistoryContent';
-import { MessageContent } from './MessageContent';
+import { MessageContent } from './Message';
 import { MessageHeader } from './MessageHeader';
 import { messageModelName } from '../model/messageIdentity';
 import type { AgentModel } from '../../shared/contracts';

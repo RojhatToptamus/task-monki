@@ -1,9 +1,5 @@
 # Task Monki — Interface Guide
 
-<!-- Audit revision + colour/edge correction. Deltas vs the audit draft: §2.2 chroma
-     rule, §2.6 four line weights and two-layer light shadows, §3 Fields rim,
-     §11 borders, A.3 input row, checklist. See report/IMPLEMENTATION.md. -->
-
 The contract for anyone building UI here, human or agent. Read it before writing
 markup and check your work against §10 before you open a PR. It is deliberately
 short: everything in it is load-bearing. If something you need isn't here, it is

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
-import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type {
   AgentModel,
   AgentRuntimeState,
@@ -12,6 +12,15 @@ import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import type { DesignProjectDetail } from '../model/designs';
 import { DesignsWorkspace, type DesignsWorkspaceProps } from './DesignsWorkspace';
+
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query.includes('reduced-motion'),
+    addEventListener() {},
+    removeEventListener() {}
+  }));
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

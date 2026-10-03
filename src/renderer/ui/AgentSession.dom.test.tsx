@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeAgentItemRecord, makeRawMessage, makeRunRecord, makeTaskRecord } from '../../testSupport/rendererRecords';
@@ -7,6 +7,7 @@ import { AgentSession, type AgentSessionProps } from './AgentSession';
 beforeEach(() => {
   sessionStorage.clear();
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduced-motion'), addEventListener() {}, removeEventListener() {} }));
   HTMLElement.prototype.scrollIntoView = vi.fn();
 });
 function props(overrides: Partial<AgentSessionProps> = {}): AgentSessionProps {
@@ -18,8 +19,7 @@ function props(overrides: Partial<AgentSessionProps> = {}): AgentSessionProps {
     onQueue: vi.fn().mockResolvedValue(undefined), onEditQueue: vi.fn(), onSendQueue: vi.fn(),
     onSteer: vi.fn().mockResolvedValue(undefined), onContinue: vi.fn().mockResolvedValue(undefined),
     onRetry: vi.fn().mockResolvedValue(undefined), onStop: vi.fn(), onRespond: vi.fn(),
-    onShowDebug: vi.fn(), onShowReview: vi.fn(), request: <p>Request</p>, preRunAction: null,
-    capture: () => null, attentionRequested: 0, ...overrides
+    onShowDebug: vi.fn(), onShowReview: vi.fn(), capture: () => null, attentionRequested: 0, ...overrides
   };
 }
 
@@ -96,6 +96,38 @@ describe('Agent session interactions', () => {
     expect(document.activeElement).toBe(field);
   });
 
+  it('keeps a working indicator between provider events until the run ends', () => {
+    const input = props({ items: [makeAgentItemRecord({ payload: { text: 'Checking the parser.' }, status: 'COMPLETED' })] });
+    const view = render(<AgentSession {...input} />);
+    expect(screen.getByRole('status').textContent).toBe('Working…');
+    const tool = makeAgentItemRecord({ id: 'tool', type: 'COMMAND_EXECUTION', status: 'COMPLETED',
+      createdAt: '2026-07-19T12:01:00Z', payload: { command: 'npm test' } });
+    view.rerender(<AgentSession {...input} items={[...input.items, tool]} />);
+    expect(screen.getByRole('status').textContent).toBe('Working…');
+    const completed = { ...input.run!, status: 'COMPLETED' as const };
+    view.rerender(<AgentSession {...input} run={completed} runs={[completed]} />);
+    expect(screen.queryByText('Working…')).toBeNull();
+  });
+
+  it('keeps Queue visible while a run waits for approval and explains that the request must be answered first', () => {
+    const run = makeRunRecord({ status: 'AWAITING_APPROVAL', providerTurnId: 'turn-1' });
+    render(<AgentSession {...props({
+      run, runs: [run], runtimeUnavailable: 'Live Codex is disabled for deterministic seed data.',
+      interactions: [{
+        id: 'interaction-1', runtimeId: 'codex', serverInstanceId: 'server-1', providerRequestId: 1,
+        taskId: 'task-1', iterationId: 'iteration-1', runId: run.id, sessionId: 'session-1',
+        type: 'COMMAND_APPROVAL', status: 'PENDING', request: { startedAtMs: Date.parse(run.startedAt), command: 'npm test' },
+        allowedActions: ['ACCEPT', 'DECLINE'], policyWarnings: [],
+        requestRawMessage: makeRawMessage(), requestedAt: run.startedAt
+      }]
+    })} />);
+    const queue = screen.getByRole('button', { name: 'Queue' });
+    expect(queue).toHaveProperty('disabled', true);
+    expect(screen.getByText('Answer the agent request before sending an instruction.')).toBeTruthy();
+    expect(screen.queryByText('Live Codex is disabled for deterministic seed data.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop' })).toHaveProperty('disabled', false);
+  });
+
   it('edits the queue with keyboard save and cancel, retains a rejected edit, and returns focus without changing the composer draft', async () => {
     const input = props({ instructions: [{ id: 'instruction-1', taskId: 'task-1', iterationId: 'iteration-1',
       worktreeId: 'worktree-1', sessionId: 'session-1', sourceRunId: 'run-1', order: 1, text: 'Check the README.',
@@ -125,23 +157,46 @@ describe('Agent session interactions', () => {
   });
 
 
-  it('keeps the reading position while output grows until the reader chooses Jump to latest', () => {
-    let resize!: () => void;
+  it('follows output and viewport resizing only at the bottom and resumes with Jump to latest', async () => {
+    const observed = new Map<Element, (entries: Array<{ contentRect: { height: number } }>) => void>();
     vi.stubGlobal('ResizeObserver', class {
-      constructor(callback: () => void) { resize = callback; }
-      observe() {} disconnect() {}
+      constructor(private readonly callback: (entries: Array<{ contentRect: { height: number } }>) => void) {}
+      observe(target: Element) { observed.set(target, this.callback); }
+      disconnect() {}
     });
-    const earlier = makeRunRecord({ id: 'earlier', status: 'COMPLETED', startedAt: '2026-07-18T12:00:00Z' });
     const input = props();
-    render(<AgentSession {...input} runs={[earlier, input.run!]} />);
-    const history = screen.getByLabelText('Session history');
-    Object.defineProperties(history, { scrollHeight: { value: 1000 }, clientHeight: { value: 400 } });
-    history.scrollTop = 300;
-    fireEvent.scroll(history);
-    resize();
-    expect(history.scrollTop).toBe(300);
-    fireEvent.click(screen.getByRole('button', { name: 'Jump to latest' }));
-    expect(history.scrollTop).toBe(1000);
+    render(<AgentSession {...input} />);
+    const viewport = screen.getByLabelText('Session history');
+    let height = 1000;
+    let viewportHeight = 400;
+    Object.defineProperties(viewport, { scrollHeight: { get: () => height }, clientHeight: { get: () => viewportHeight } });
+    const resize = (next: number) => act(() => {
+      viewportHeight = next;
+      observed.get(viewport)?.([{ contentRect: { height: next } }]);
+    });
+    const grow = (next: number) => act(() => {
+      height = next;
+      const content = viewport.firstElementChild!;
+      observed.get(content)?.([{ contentRect: { height: next } }]);
+    });
+    await grow(1000);
+    await waitFor(() => expect(viewport.scrollTop).toBe(599));
+    fireEvent.scroll(viewport);
+    viewport.scrollTop = 300;
+    fireEvent.scroll(viewport);
+    const jump = await screen.findByRole('button', { name: 'Jump to latest' });
+    await grow(1400);
+    await resize(500);
+    expect(viewport.scrollTop).toBe(300);
+    await resize(400);
+    expect(viewport.scrollTop).toBe(300);
+    fireEvent.click(jump);
+    await waitFor(() => expect(viewport.scrollTop).toBe(999));
+    expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+    await grow(1600);
+    await waitFor(() => expect(viewport.scrollTop).toBe(1199));
+    await resize(300);
+    await waitFor(() => expect(viewport.scrollTop).toBe(1299));
   });
 
   it('marks a stale active plan step unfinished after the run completes without changing provider steps', () => {
@@ -150,12 +205,28 @@ describe('Agent session interactions', () => {
       steps: [{ step: 'Inspect the files', status: 'IN_PROGRESS' as const }], rawMessage: makeRawMessage(), observedAt: run.startedAt };
     const input = props({ plans: [plan] });
     const view = render(<AgentSession {...input} />);
-    fireEvent.click(screen.getByText('Plan'));
     expect(screen.getByRole('listitem', { name: 'In progress: Inspect the files' })).toBeTruthy();
     const completed = { ...run, status: 'COMPLETED' as const };
     view.rerender(<AgentSession {...input} run={completed} runs={[completed]} />);
     expect(screen.getByRole('listitem', { name: 'Unfinished: Inspect the files' })).toBeTruthy();
     expect(plan.steps[0].status).toBe('IN_PROGRESS');
+  });
+
+  it('opens live reasoning while it streams and collapses it when the run finishes', () => {
+    const run = makeRunRecord();
+    const item = makeAgentItemRecord({
+      type: 'REASONING_SUMMARY',
+      status: 'IN_PROGRESS',
+      payload: { text: 'Checking the parser first.' }
+    });
+    const input = props({ items: [item] });
+    const view = render(<AgentSession {...input} />);
+    expect(screen.getByText('Checking the parser first.')).toBeTruthy();
+    const completed = { ...run, status: 'COMPLETED' as const };
+    view.rerender(<AgentSession {...input} run={completed} runs={[completed]} />);
+    expect(screen.queryByText('Checking the parser first.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Reasoning|Thought/ }));
+    expect(screen.getByText('Checking the parser first.')).toBeTruthy();
   });
 
   it('reveals the stored command and permission error instead of an empty failed-tool disclosure', () => {
@@ -164,15 +235,16 @@ describe('Agent session interactions', () => {
       tool: 'bash', state: { status: 'error', input: { command: 'sleep 90' }, error: 'Permission was declined.' }
     } });
     render(<AgentSession {...props({ run: completed, runs: [completed], items: [item] })} />);
-    const summary = screen.getByText('Failed').closest('summary')!;
-    fireEvent.click(summary);
-    expect(summary.parentElement?.hasAttribute('open')).toBe(true);
+    const step = screen.getByRole('button', { name: /Command failed.*sleep 90/ });
+    expect(screen.queryByText('Permission was declined.')).toBeNull();
+    fireEvent.click(step);
+    expect(step.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText('Permission was declined.')).toBeTruthy();
     expect(screen.queryByText('Working…')).toBeNull();
     expect(item.status).toBe('FAILED');
   });
 
-  it('shows exchanges without opening runs and prepends bounded history without moving the reader', () => {
+  it('opens history with the original request and prepends bounded history without moving the reader', () => {
     const first = makeRunRecord({ id: 'first', status: 'COMPLETED', startedAt: '2026-07-18T12:00:00Z', finalMessage: 'First response.' });
     const input = props();
     const items = Array.from({ length: 100 }, (_, index) => makeAgentItemRecord({
@@ -180,7 +252,7 @@ describe('Agent session interactions', () => {
       createdAt: new Date(Date.UTC(2026, 6, 19, 12, index)).toISOString()
     }));
     render(<AgentSession {...input} runs={[first, input.run!]} items={items} />);
-    expect(screen.getByText(input.task.prompt)).toBeTruthy();
+    expect(screen.queryByText(input.task.prompt)).toBeNull();
     expect(screen.queryByText('First response.')).toBeNull();
     expect(screen.getByText('Response number 99')).toBeTruthy();
     expect(screen.queryByText('Response number 0')).toBeNull();
@@ -192,6 +264,7 @@ describe('Agent session interactions', () => {
     const load = screen.getByRole('button', { name: 'Load earlier messages' });
     fireEvent.click(load);
     expect(screen.getByText('First response.')).toBeTruthy();
+    expect(screen.getByText(input.task.prompt)).toBeTruthy();
     expect(screen.getByText('Response number 0')).toBeTruthy();
     expect(viewport.scrollTop).toBe(750);
     expect(screen.queryByRole('button', { name: 'Load earlier messages' })).toBeNull();

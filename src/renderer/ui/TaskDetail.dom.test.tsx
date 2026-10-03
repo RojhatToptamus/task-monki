@@ -1,6 +1,9 @@
 import type { ComponentProps } from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
+import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
+import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
 
@@ -35,7 +38,7 @@ describe('imported task actions', () => {
     props.artifacts = [{ id: 'diff-captured', taskId: 'task-1', kind: 'diff', path: '/tmp/captured.diff', byteCount: 120, createdAt: TEST_NOW, updatedAt: TEST_NOW }];
     const view = render(<TaskDetail {...props} />);
     fireEvent.click(await screen.findByText('1 file changed'));
-    fireEvent.click(screen.getByRole('button', { name: 'View captured diff' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
     expect(screen.getByText('Historical Git capture')).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
 
@@ -62,7 +65,11 @@ describe('imported task actions', () => {
     fireEvent.click(start);
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), { target: { value: 'Fix the imported validation bug.' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start implementation' }));
-    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', 'Fix the imported validation bug.'));
+    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
+      'task-1',
+      'Fix the imported validation bug.',
+      props.task!.agentSettings
+    ));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Run agent review' }));
     await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
@@ -177,8 +184,95 @@ describe('imported task actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Address findings' }));
     const drawer = await screen.findByRole('dialog');
     fireEvent.click(within(drawer).getByRole('button', { name: /Start|Send|Address/ }));
-    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', expect.stringContaining('Invalid input accepted')));
+    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
+      'task-1',
+      expect.stringContaining('Invalid input accepted'),
+      props.task!.agentSettings
+    ));
     expect(props.onContinue).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
+  });
+});
+
+describe('Agent pre-run setup', () => {
+  function readyRuntime(): { models: AgentModel[]; runtimes: AgentRuntimeState[] } {
+    const model: AgentModel = {
+      id: 'codex:test-model',
+      runtimeId: 'codex',
+      model: 'test-model',
+      displayName: 'Test model',
+      hidden: false,
+      isDefault: true,
+      supportedReasoningEfforts: ['low', 'medium'],
+      defaultReasoningEffort: 'medium',
+      serviceTiers: [],
+      inputModalities: ['text']
+    };
+    return {
+      models: [model],
+      runtimes: [{
+        preflight: {
+          runtime: CODEX_RUNTIME_DESCRIPTOR,
+          readiness: createRuntimeReadiness('READY', 'Codex is ready.'),
+          capabilities: codexCapabilities()
+        },
+        models: [model],
+        refreshedAt: TEST_NOW
+      }]
+    };
+  }
+
+  it('shows the request and one prepare action before the first run', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = undefined;
+    props.task = makeTaskRecord({
+      workflowPhase: 'IN_PROGRESS',
+      prompt: 'Add a multiply helper and cover it with tests.',
+      projection: { worktree: 'NOT_CREATED' }
+    });
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Test task' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Start this task' })).toBeTruthy();
+    expect(screen.getByText('Add a multiply helper and cover it with tests.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Request' })).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Network' })).toBeTruthy();
+  });
+
+  it('does not present a different permission preset as the saved execution settings', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    props.task = makeTaskRecord({ ...props.task, agentSettings: {
+      sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'on-request', approvalsReviewer: 'user'
+    } });
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    expect(screen.getByRole('button', { name: 'Execution policy: Custom settings' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
+    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings));
+  });
+
+  it('starts implementation with the execution settings reviewed on the Agent tab', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Network' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
+    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, {
+      networkAccess: true
+    }));
+    expect(screen.queryByRole('button', { name: 'Prepare worktree' })).toBeNull();
   });
 });

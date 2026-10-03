@@ -20,6 +20,12 @@ describe('OpenCodeProtocol', () => {
     })).toBe('MCP_TOOL_CALL');
   });
 
+  it('keeps the native todo tool a plan update instead of a file change', () => {
+    const part = { id: 'part-1', sessionID: 'session-1', messageID: 'message-1', type: 'tool' as const };
+    expect(mapOpenCodePartType({ ...part, tool: 'todowrite' })).toBe('PLAN');
+    expect(mapOpenCodePartType({ ...part, tool: 'write' })).toBe('FILE_CHANGE');
+  });
+
   it('strictly parses native session permission rules', () => {
     expect(parseOpenCodePermissionRules([
       { permission: 'edit', pattern: '*', action: 'ask' }

@@ -1,4 +1,8 @@
+import { useState } from 'react';
+import * as Collapsible from '@radix-ui/react-collapsible';
+import { ListChecks } from 'lucide-react';
 import type { AgentPlanStep } from '../../shared/agent';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export type PlanStepStatus = AgentPlanStep['status'];
 
@@ -29,17 +33,11 @@ export interface PlanListMarker {
  */
 export function PlanList({
   steps,
-  showCaptions = false,
-  marker,
-  animate = true
+  marker
 }: {
   steps: PlanListStep[];
-  /** Retained for caller compatibility; every collection row names its state. */
-  showCaptions?: boolean;
   /** Pin a run-outcome marker (failed/stopped) to a single step. */
   marker?: PlanListMarker;
-  /** Retained for caller compatibility; list state no longer animates. */
-  animate?: boolean;
 }) {
   return (
     <div className="tm-plan__steps" role="list">
@@ -74,6 +72,28 @@ export function PlanList({
       })}
     </div>
   );
+}
+
+/**
+ * The plan inside a conversation: open while the agent works through it or
+ * when a run ended partway, otherwise one line with its progress.
+ */
+export function PlanCard({ steps, marker, live = false }: {
+  steps: PlanListStep[];
+  marker?: PlanListMarker;
+  live?: boolean;
+}) {
+  const [userOpen, setUserOpen] = useState<boolean>();
+  const done = steps.filter((step) => step.status === 'COMPLETED').length;
+  return <Collapsible.Root className="tm-plan-card" open={userOpen ?? (live || Boolean(marker))} onOpenChange={setUserOpen}>
+    <Collapsible.Trigger className="tm-plan-card__head" data-disclosure="">
+      <ListChecks size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+      <span className="tm-plan-card__title">Plan</span>
+      <span className="tm-plan-card__count">{done} of {steps.length} done</span>
+      <DisclosureChevron />
+    </Collapsible.Trigger>
+    <Collapsible.Content className="tm-plan-card__body"><PlanList steps={steps} marker={marker} /></Collapsible.Content>
+  </Collapsible.Root>;
 }
 
 function planStepAriaLabel(step: PlanListStep, marker?: PlanStepMarker): string {

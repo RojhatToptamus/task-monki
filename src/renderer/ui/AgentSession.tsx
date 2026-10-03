@@ -6,21 +6,25 @@ import type {
 import { TASK_INSTRUCTION_MAX_LENGTH, isImplementationRunMode } from '../../shared/contracts';
 import { getPostRunActionState } from '../model/postRunActions';
 import { canStopTaskRun } from '../model/runProgress';
-import { sessionEntries } from '../model/agentSession';
-import { humanizeEnum } from './display';
-import { MessageContent } from './MessageContent';
-import { StatusGlyph } from './StatusBadge';
-import { MessageMarkdown } from './MessageMarkdown';
-import { InteractionPanel } from './InteractionPanel';
-import { RunActivityTimeline } from './RunActivityTimeline';
-import { PlanList } from './Plan';
+import type { RunFailureBannerViewModel } from '../model/taskView';
+import {
+  clampClip, earlierHistory, formatElapsed, isActiveRunStatus, planMarker, sessionTurn, turnOutcomeLabel,
+  type HistoryWindow, type SessionTurn
+} from '../model/agentSession';
 import { ActionMenu } from './ActionMenu';
-import { DisclosureChevron } from './DisclosureChevron';
-import { ArrowDown, ArrowUp, ChevronDown, CornerDownRight, Info, ListOrdered, MoreHorizontal, Pencil, Play, RotateCcw, Square, X } from 'lucide-react';
+import { ActivitySteps } from './ActivitySteps';
+import { Conversation, useConversationScroll } from './Conversation';
+import { InteractionPanel } from './InteractionPanel';
+import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
+import { MessageMarkdown } from './MessageMarkdown';
+import { PlanCard } from './Plan';
+import { StatusGlyph } from './StatusBadge';
+import {
+  ArrowUp, Check, ChevronDown, CircleAlert, Copy, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw, ShieldCheck, X
+} from 'lucide-react';
 
 export interface AgentSessionProps {
   task: Task;
-  header?: ReactNode;
   worktreePath?: string;
   runtimeName?: string;
   run?: RunRecord;
@@ -33,6 +37,8 @@ export interface AgentSessionProps {
   requiresRecovery: boolean;
   steeringSupported: boolean;
   runtimeUnavailable?: string;
+  /** Curated explanation of why the current implementation needs attention. */
+  failure?: RunFailureBannerViewModel;
   draft: string;
   draftError?: string;
   onDraftChange(text: string): void;
@@ -48,13 +54,17 @@ export interface AgentSessionProps {
   onReadArtifact?(id: string): Promise<string>;
   onShowDebug(): void;
   onShowReview(): void;
-  request: ReactNode;
-  preRunAction: ReactNode;
+  preRun?: ReactNode;
   capture(run: RunRecord): ReactNode;
   attentionRequested: number;
+  header?: ReactNode;
 }
 
 type SendMode = 'QUEUE' | 'STEER' | 'CONTINUE' | 'RETRY';
+interface ReadingPosition { taskId: string; top: number; firstTurnKey?: string; clip: number; following: boolean }
+
+const READING_KEY = 'task-monki:agent-reading';
+const SHORTCUT = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/u.test(navigator.userAgent) ? '⌘↵' : 'Ctrl+Enter';
 
 export function AgentSession(props: AgentSessionProps) {
   const { task, run, draft } = props;
@@ -63,72 +73,86 @@ export function AgentSession(props: AgentSessionProps) {
   const busy = pendingAction !== undefined;
   const [error, setError] = useState<{ runId?: string; text: string }>();
   const currentError = error?.runId === run?.id ? error?.text : undefined;
-  const [reading] = useState(() => {
-    try {
-      const saved = JSON.parse(sessionStorage.getItem('task-monki:agent-reading') ?? 'null');
-      return saved?.taskId === task.id && typeof saved.top === 'number' && Number.isFinite(saved.top) ? saved as { taskId: string; top: number; firstKey: string; following: boolean } : undefined;
-    } catch { return undefined; }
-  });
-  const [following, setFollowing] = useState(reading?.following ?? true);
+  const [reading] = useState(() => savedReading(task.id));
+  const scroller = useConversationScroll({ startAtBottom: !reading || reading.following });
   const prepend = useRef<{ height: number; top: number } | undefined>(undefined);
   const [editing, setEditing] = useState<{ id: string; text: string }>();
   const inFlight = useRef(false);
   const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string } | undefined>(undefined);
-  const history = useRef<HTMLDivElement>(null);
-  const historyContent = useRef<HTMLDivElement>(null);
   const attention = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const followRef = useRef(reading?.following ?? true);
-  const turns = useMemo(() => props.runs.filter((item) => isImplementationRunMode(item.mode) || item.mode === 'REVIEW')
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt)), [props.runs]);
+
+  const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.worktreePath);
   const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).sort((a, b) => a.order - b.order);
   const queuedCount = pending.filter((item) => item.status === 'QUEUED').length;
   const heldCount = pending.length - queuedCount;
   const attentionPending = props.interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status));
-  const activeReview = props.runs.find((item) => item.mode === 'REVIEW' && ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(item.status));
+  const activeReview = props.runs.find((item) => item.mode === 'REVIEW' && isActiveRunStatus(item.status));
   const displayedRun = activeReview ?? run;
-  const active = Boolean(displayedRun && ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(displayedRun.status));
+  const active = Boolean(displayedRun && isActiveRunStatus(displayedRun.status));
   const actions = run ? getPostRunActionState(run, props.requiresRecovery) : undefined;
-  const queueable = Boolean(run && run.status === 'RUNNING' && !activeReview);
+  const queueable = Boolean(run && ['RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) && !activeReview);
   const allowed: SendMode[] = queueable
     ? ['QUEUE', ...(run?.status === 'RUNNING' && props.steeringSupported ? ['STEER' as const] : [])]
     : actions?.primaryRecoveryAction === 'retry' ? ['RETRY', 'CONTINUE']
     : actions?.canFollowUp || actions?.canContinue ? ['CONTINUE', ...(actions.canRetry ? ['RETRY' as const] : [])] : [];
   const mode = choice && choice.runId === run?.id && allowed.includes(choice.mode) ? choice.mode : allowed[0];
-  const needsText = mode === 'QUEUE' || mode === 'STEER' || (run?.status === 'COMPLETED' && !props.requiresRecovery);
-  const labels: Record<SendMode, string> = { QUEUE: 'Queue', STEER: 'Send now', CONTINUE: run?.status === 'COMPLETED' && !props.requiresRecovery ? 'Send' : 'Continue', RETRY: 'Retry' };
-  const blocked = props.runtimeUnavailable ?? (activeReview ? 'Wait for the review to finish.'
+  const followUp = run?.status === 'COMPLETED' && !props.requiresRecovery;
+  const needsText = mode === 'QUEUE' || mode === 'STEER' || followUp;
+  const delivery: Record<SendMode, { label: string; description: string; placeholder: string }> = {
+    QUEUE: { label: 'Queue', description: 'Send after the current response', placeholder: 'Queue a message for after this response' },
+    STEER: { label: 'Send now', description: 'Add to the current response', placeholder: 'Guide the current response' },
+    CONTINUE: followUp
+      ? { label: 'Send', description: 'Follow up in this session', placeholder: 'Ask for follow-up changes' }
+      : { label: 'Continue', description: 'Resume the unfinished work', placeholder: 'Add guidance (optional)' },
+    RETRY: { label: 'Retry', description: 'Start the implementation again from the current worktree', placeholder: 'Add guidance for the retry (optional)' }
+  };
+  const sessionBlocked = activeReview ? 'Wait for the review to finish.'
     : attentionPending ? 'Answer the agent request before sending an instruction.'
     : run?.status === 'INTERRUPTING' ? 'Waiting for the agent to stop.'
     : ['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase) ? 'Reopen the task to continue work.'
-    : !mode ? 'The agent is not ready for another instruction.' : undefined);
-  const conversation = useMemo(() => turns.flatMap((turn) => {
-    const entries = turn.mode === 'REVIEW' ? [] : sessionEntries(turn, props.items, props.instructions, props.worktreePath, props.plans);
-    return [...entries.map((entry) => ({ ...entry, run: turn })),
-      { key: `${turn.id}:outcome`, at: turn.endedAt ?? turn.startedAt, kind: 'outcome' as const, run: turn }];
-  }), [turns, props.items, props.instructions, props.worktreePath, props.plans]);
-  const lastResponseKeys = useMemo(() => {
-    const keys = new Map<string, string>();
-    for (const entry of conversation) if (entry.kind === 'message' && entry.author === 'Agent') keys.set(entry.run.id, entry.key);
-    return keys;
-  }, [conversation]);
-  const [firstEntry, setFirstEntry] = useState(() => {
-    const saved = reading ? conversation.findIndex((entry) => entry.key === reading.firstKey) : -1;
-    return saved >= 0 ? saved : Math.max(0, conversation.length - 80);
+    : !mode ? 'The agent is not ready for another instruction.' : undefined;
+  const blocked = sessionBlocked ?? props.runtimeUnavailable;
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow>(() => {
+    const saved = reading?.firstTurnKey ? turns.findIndex((turn) => turn.key === reading.firstTurnKey) : -1;
+    return saved >= 0 ? { first: saved, clip: clampClip(turns[saved], reading!.clip) }
+      : earlierHistory(turns, { first: turns.length, clip: 0 });
   });
-  const visible = conversation.slice(firstEntry);
-  const firstKey = useRef(visible[0]?.key);
-  firstKey.current = visible[0]?.key;
-  const workingLabel = displayedRun?.status === 'INTERRUPTING' ? 'Stopping…'
-    : attentionPending ? 'Waiting for your answer' : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
-    : activeReview ? 'Reviewing…' : 'Working…';
-  // Loading older messages is a prepend, not a request to follow new output.
+  const visibleTurns = turns.slice(historyWindow.first);
+  const lastImplementation = [...turns].reverse().find((turn) => turn.run.mode !== 'REVIEW');
+  const lastVisible = visibleTurns.at(-1);
+  const lastLiveEntry = lastVisible?.state === 'active' ? lastVisible.entries.at(-1) : undefined;
+  const liveWorkVisible = lastLiveEntry?.kind === 'steps' && lastLiveEntry.steps.some((step) =>
+    step.kind === 'reasoning' ? step.active : step.row.status === 'active');
+  const unattached = props.instructions.filter((item) => item.mode !== 'STEER' && !props.runs.some((turn) => turn.id === item.runId)
+    && ['SENDING', 'FAILED', 'UNCERTAIN'].includes(item.status));
+  const position = useRef({ firstTurnKey: visibleTurns[0]?.key, clip: historyWindow.clip });
+  position.current = { firstTurnKey: visibleTurns[0]?.key, clip: historyWindow.clip };
+
+  // Loading older turns is a prepend: keep the reader on the same line.
   useLayoutEffect(() => {
-    if (prepend.current && history.current) {
-      history.current.scrollTop = prepend.current.top + history.current.scrollHeight - prepend.current.height;
+    const viewport = scroller.scrollRef.current;
+    if (prepend.current && viewport) {
+      viewport.scrollTop = prepend.current.top + viewport.scrollHeight - prepend.current.height;
       prepend.current = undefined;
     }
-  }, [firstEntry]);
+  }, [historyWindow]);
+
+  // The reading position is local view state; it is restored once per mount.
+  useLayoutEffect(() => {
+    const viewport = scroller.scrollRef.current;
+    if (!viewport) return;
+    if (reading && !reading.following) viewport.scrollTop = reading.top;
+    const remember = () => {
+      try {
+        sessionStorage.setItem(READING_KEY, JSON.stringify({
+          taskId: task.id, top: viewport.scrollTop, ...position.current, following: scroller.state.isAtBottom
+        } satisfies ReadingPosition));
+      } catch { /* Reading position is optional. */ }
+    };
+    window.addEventListener('pagehide', remember);
+    return () => { remember(); window.removeEventListener('pagehide', remember); };
+  }, []);
 
   const focusAttention = () => {
     attention.current?.scrollIntoView({ block: 'nearest' });
@@ -138,23 +162,6 @@ export function AgentSession(props: AgentSessionProps) {
   useEffect(() => {
     if (props.attentionRequested) focusAttention();
   }, [props.attentionRequested]);
-  // Follow content growth only while the user is already at the bottom. Never steal focus.
-  useEffect(() => {
-    const viewport = history.current;
-    const content = historyContent.current;
-    if (!viewport || !content) return;
-    const observer = new ResizeObserver(() => {
-      if (followRef.current) viewport.scrollTop = viewport.scrollHeight;
-    });
-    observer.observe(content);
-    observer.observe(viewport);
-    viewport.scrollTop = reading && !reading.following ? reading.top : viewport.scrollHeight;
-    const remember = () => {
-      try { sessionStorage.setItem('task-monki:agent-reading', JSON.stringify({ taskId: task.id, top: viewport.scrollTop, firstKey: firstKey.current, following: followRef.current })); } catch { /* Optional local reading position. */ }
-    };
-    window.addEventListener('pagehide', remember);
-    return () => { remember(); observer.disconnect(); window.removeEventListener('pagehide', remember); };
-  }, []);
 
   async function act(action: () => Promise<void>, kind: 'submit' | 'other' = 'other') {
     if (inFlight.current) return;
@@ -182,128 +189,113 @@ export function AgentSession(props: AgentSessionProps) {
       props.onDraftChange('');
       await props.onFlushDraft();
       messageId.current = undefined;
-      followRef.current = true; setFollowing(true);
+      void scroller.scrollToBottom();
       composer.current?.focus();
     }, 'submit');
   }
 
-  const pauseFollowing = () => { followRef.current = false; setFollowing(false); };
   const cancelEdit = () => { setEditing(undefined); setError(undefined); composer.current?.focus(); };
   const saveEdit = () => {
     if (!editing?.text.trim() || busy) return;
     void act(async () => { await props.onEditQueue(editing.id, editing.text); cancelEdit(); });
   };
+  const loadEarlier = () => {
+    const viewport = scroller.scrollRef.current;
+    if (viewport) prepend.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
+    setHistoryWindow((current) => earlierHistory(turns, current));
+  };
+  const workingLabel = displayedRun?.status === 'INTERRUPTING' ? 'Stopping…'
+    : attentionPending ? 'Waiting for your answer'
+    : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
+    : activeReview ? 'Reviewing…' : 'Working…';
+  const canSend = !busy && !blocked && !(needsText && !draft.trim());
+  const hint = editing ? `${SHORTCUT} to save` : blocked;
+  const model = displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model;
 
   return <section className="tm-agent-session" aria-label="Agent session">
-    <div className="tm-agent-session__conversation">
-      <div ref={history} className="tm-agent-session__history" tabIndex={0} aria-label="Session history"
-        onClickCapture={(event) => { if ((event.target as HTMLElement).closest('summary')) pauseFollowing(); }}
-        onScroll={() => {
-          const el = history.current!;
-          const nearEnd = el.scrollHeight - el.clientHeight - el.scrollTop < 64;
-          followRef.current = nearEnd; setFollowing(nearEnd);
-        }}>
-        <div ref={historyContent}>
-          {props.header}
-          <div className="tm-agent-session__messages">
-          {run ? <ConversationMessage user text={task.prompt} time={task.createdAt} /> : <div className="tm-agent-session__empty">{props.request}{props.preRunAction}</div>}
-          {firstEntry > 0 ? <button className="ghost-button tm-agent-session__earlier" onClick={() => {
-            pauseFollowing();
-            if (history.current) prepend.current = { height: history.current.scrollHeight, top: history.current.scrollTop };
-            setFirstEntry((index) => Math.max(0, index - 80));
-          }}>Load earlier messages</button> : null}
-          {visible.map((entry) => {
-            if (entry.kind === 'message') return <ConversationMessage key={entry.key} user={entry.author === 'You'} text={entry.text} time={entry.at} status={entry.status}
-              details={lastResponseKeys.get(entry.run.id) === entry.key && entry.run.endedAt ? <SessionDetails run={entry.run} onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} /> : undefined} />;
-            if (entry.kind === 'activity') return <RunActivityTimeline key={entry.key} rows={entry.rows} live={false} compact onShowDebug={props.onShowDebug} />;
-            if (entry.kind === 'reasoning') return <details key={entry.key} className="tm-agent-session__support" onClick={pauseFollowing}>
-              <summary><DisclosureChevron />Reasoning</summary><MessageMarkdown text={entry.text} />
-            </details>;
-            if (entry.kind === 'plan') return <details key={entry.key} className="tm-agent-session__support" onClick={pauseFollowing}>
-              <summary><DisclosureChevron />Plan <span>{entry.plan.steps.filter((step) => step.status === 'COMPLETED').length} / {entry.plan.steps.length}</span></summary>
-              <PlanList steps={entry.plan.steps} marker={['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST', 'RECOVERY_REQUIRED'].includes(entry.run.status)
-                ? { index: entry.plan.steps.findIndex((step) => step.status === 'IN_PROGRESS'), kind: entry.run.status === 'COMPLETED' ? 'unfinished' : entry.run.status === 'INTERRUPTED' ? 'stopped' : 'failed' } : undefined} />
-            </details>;
-            if (entry.run.mode === 'REVIEW') return <div key={entry.key} className="tm-agent-session__outcome"><button className="ghost-button" onClick={props.onShowReview}>View agent review</button></div>;
-            if (['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(entry.run.status)) return null;
-            return <div key={entry.key} className="tm-agent-session__outcome">
-              {entry.run.status !== 'COMPLETED' ? <span className="tm-agent-session__outcome-label" data-failed={entry.run.status !== 'INTERRUPTED'}>
-                {entry.run.status === 'INTERRUPTED' ? 'Stopped' : 'The agent could not finish.'}
-              </span> : null}
-              <div className="tm-agent-session__capture">{props.capture(entry.run)}</div>
-              {!lastResponseKeys.has(entry.run.id) ? <SessionDetails run={entry.run} onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} /> : null}
-            </div>;
-          })}
-          {props.instructions.filter((item) => !props.runs.some((turn) => turn.id === item.runId) && ['FAILED', 'UNCERTAIN'].includes(item.status)).map((item) =>
-            <ConversationMessage key={item.id} user text={item.text} time={item.createdAt} status={item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}
-          {active ? <div className="tm-agent-session__working" role="status">
-            <StatusGlyph kind={attentionPending ? 'waiting' : 'working'} /><span>{workingLabel}</span>
+    <Conversation instance={scroller} label="Session history" className="tm-agent-session__conversation">
+      {props.header}
+      <div className="tm-agent-session__column">
+        {!run ? props.preRun : null}
+        {historyWindow.first > 0 || historyWindow.clip > 0
+          ? <button type="button" className="ghost-button tm-agent-session__earlier" data-disclosure="" onClick={loadEarlier}>Load earlier messages</button>
+          : null}
+        {visibleTurns.map((turn, index) => turn.run.mode === 'REVIEW'
+          ? <ReviewTurn key={turn.key} turn={turn} onShowReview={props.onShowReview} />
+          : <Turn key={turn.key} turn={turn} clip={index === 0 ? historyWindow.clip : 0}
+            failure={turn === lastImplementation && turn.state !== 'active' ? props.failure : undefined}
+            capture={turn.state === 'completed' ? props.capture(turn.run) : null}
+            onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} />)}
+        {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
+          status={item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}
+        {active && displayedRun && (attentionPending || displayedRun.status === 'INTERRUPTING'
+          || displayedRun.status === 'STARTING' || displayedRun.status === 'QUEUED' || !liveWorkVisible)
+          ? <div className="tm-agent-session__working">
+            <StatusGlyph kind={attentionPending ? 'waiting' : 'working'} />
+            <span role="status">{workingLabel}</span>
+            <Elapsed since={displayedRun.startedAt} />
           </div> : null}
-          <div ref={attention} tabIndex={-1} className="tm-agent-session__requests">
-            <InteractionPanel interactions={props.interactions} sessions={props.sessions} onRespond={props.onRespond} />
-          </div>
-          </div>
+        <div ref={attention} tabIndex={-1} className="tm-agent-session__requests">
+          <InteractionPanel interactions={props.interactions} sessions={props.sessions} onRespond={props.onRespond} />
         </div>
       </div>
-      {!following ? <button className="tm-agent-session__latest" onClick={() => {
-        followRef.current = true; setFollowing(true);
-        if (history.current) history.current.scrollTop = history.current.scrollHeight;
-      }}><ArrowDown size={13} strokeWidth={1.5} aria-hidden="true" />Jump to latest</button> : null}
-    </div>
+    </Conversation>
     {run ? <div className="tm-agent-session__footer">
       <form className="tm-composer tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
-        {pending.length ? <details className="tm-agent-session__queue" open>
-          <summary><DisclosureChevron /><ListOrdered size={16} strokeWidth={1.5} aria-hidden="true" />
-            <span>{pending.length} {heldCount ? 'pending' : 'queued'}</span>
-            <span className="tm-agent-session__hint">{heldCount ? (queuedCount ? `${queuedCount} queued · ${heldCount} paused` : 'Paused · Continue when ready') : 'After this response'}</span>
-          </summary>
-          <ol aria-label="Pending instructions">{pending.map((item, index) => <li key={item.id} aria-current={editing?.id === item.id ? true : undefined}>
-            <span className="tm-agent-session__queue-order" aria-hidden="true">{index + 1}</span>
-            <span className="tm-agent-session__queued-text" title={item.text}>{item.text}</span>
-            <div className="tm-agent-session__queue-actions">
-              {heldCount > 0 && queuedCount > 0 && item.status === 'HELD' ? <span className="tm-agent-session__hint">Paused</span> : null}
-              {item.status === 'HELD' && !active ? <button type="button" className="tm-iconbtn" aria-label={`Continue instruction ${index + 1}`} disabled={busy || Boolean(blocked)} title={blocked ?? 'Continue with this instruction'}
-                onClick={() => void act(async () => { await props.onSendQueue(item.id, run.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><Play size={16} strokeWidth={1.5} aria-hidden="true" /></button> : null}
-              <button type="button" className="tm-iconbtn" aria-label={`Edit instruction ${index + 1}`} title="Edit instruction" disabled={busy} onClick={() => { setEditing({ id: item.id, text: item.text }); setError(undefined); composer.current?.focus(); }}><Pencil size={16} strokeWidth={1.5} aria-hidden="true" /></button>
-              <button type="button" className="tm-iconbtn" aria-label={`Remove instruction ${index + 1}`} title="Remove instruction" disabled={busy} onClick={() => void act(async () => { await props.onEditQueue(item.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><X size={16} strokeWidth={1.5} aria-hidden="true" /></button>
-            </div>
+        {pending.length ? <div className="tm-queue">
+          <div className="tm-queue__head">
+            <span className="tm-queue__title">{pending.length} {heldCount ? 'pending' : 'queued'}</span>
+            <span className="tm-queue__hint">{heldCount
+              ? queuedCount ? `${queuedCount} queued · ${heldCount} paused` : 'Paused · continue when ready'
+              : 'Sends after this response'}</span>
+          </div>
+          <ol aria-label="Pending instructions">{pending.map((item, index) => <li key={item.id} className="tm-queue__item" aria-current={editing?.id === item.id ? true : undefined}>
+            <span className="tm-queue__order" aria-hidden="true">{index + 1}</span>
+            <span className="tm-queue__text" title={item.text}>{item.text}</span>
+            {heldCount > 0 && queuedCount > 0 && item.status === 'HELD' ? <span className="tm-queue__hint">Paused</span> : null}
+            {item.status === 'HELD' && !active ? <button type="button" className="tm-iconbtn" aria-label={`Continue instruction ${index + 1}`} disabled={busy || Boolean(blocked)} title={blocked ?? 'Continue with this instruction'}
+              onClick={() => void act(async () => { await props.onSendQueue(item.id, run.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><Play size={16} strokeWidth={1.5} aria-hidden="true" /></button> : null}
+            <button type="button" className="tm-iconbtn" aria-label={`Edit instruction ${index + 1}`} title="Edit instruction" disabled={busy}
+              onClick={() => { setEditing({ id: item.id, text: item.text }); setError(undefined); composer.current?.focus(); }}><Pencil size={16} strokeWidth={1.5} aria-hidden="true" /></button>
+            <button type="button" className="tm-iconbtn" aria-label={`Remove instruction ${index + 1}`} title="Remove instruction" disabled={busy}
+              onClick={() => void act(async () => { await props.onEditQueue(item.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><X size={16} strokeWidth={1.5} aria-hidden="true" /></button>
           </li>)}</ol>
-        </details> : null}
-        {editing ? <div className="tm-agent-session__edit-label"><Pencil size={13} strokeWidth={1.5} aria-hidden="true" />Editing queued message <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button></div> : null}
+        </div> : null}
+        {editing ? <div className="tm-agent-session__editing">
+          <Pencil size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />Editing queued message
+          <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button>
+        </div> : null}
         <label className="tm-visually-hidden" htmlFor={`agent-draft-${task.id}`}>{editing ? 'Edit queued instruction' : 'Instruction'}</label>
-        <textarea ref={composer} id={`agent-draft-${task.id}`} rows={2} value={editing?.text ?? draft} readOnly={busy}
-          aria-describedby={`agent-composer-note-${task.id}`} maxLength={TASK_INSTRUCTION_MAX_LENGTH} placeholder={queueable ? 'What should the agent do next?' : 'Continue the work…'}
+        <textarea ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy}
+          aria-describedby={hint ? `agent-composer-note-${task.id}` : undefined} maxLength={TASK_INSTRUCTION_MAX_LENGTH}
+          placeholder={mode ? delivery[mode].placeholder : 'Continue the work…'}
           onChange={(event) => { if (editing) setEditing({ ...editing, text: event.target.value }); else props.onDraftChange(event.target.value); }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return;
             if (editing && event.key === 'Escape' && !busy) { event.preventDefault(); event.stopPropagation(); cancelEdit(); }
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (editing) saveEdit(); else void submit(); }
           }} />
-        <div className="tm-agent-session__compose-actions">
-          <span className="tm-agent-session__model" title={displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model}>
-            {props.runtimeName ?? task.runtimeId}<span>{displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model}</span>
-          </span>
-          <span id={`agent-composer-note-${task.id}`} className="tm-visually-hidden">{editing ? '⌘/Ctrl Enter to save' : blocked ?? '⌘/Ctrl Enter to send'}</span>
-          {editing ? <button className="primary-button" type="submit" disabled={busy || !editing.text.trim()}>{busy ? 'Saving…' : 'Save'}</button> : <>
-            {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="ghost-button tm-composer-action" aria-label="Stop" title="Stop response" disabled={busy} onClick={() => void act(() => props.onStop(displayedRun.id))}><Square size={14} strokeWidth={1.5} aria-hidden="true" /></button> : null}
+        <div className="tm-composer__toolbar">
+          <span className="tm-agent-session__model" title={model}>{props.runtimeName ?? task.runtimeId}{model ? <span>{model}</span> : null}</span>
+          {hint ? <span id={`agent-composer-note-${task.id}`} className="tm-composer__hint">{hint}</span> : null}
+          {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || !editing.text.trim()}>{busy ? 'Saving…' : 'Save'}</button> : <>
             {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" disabled={busy}
               trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
               items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
                 onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}
-            <div className="tm-agent-session__send">
-              {allowed.length > 1 ? <ActionMenu label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
-                trigger={<>{mode === 'QUEUE' ? 'After response' : mode === 'STEER' ? 'Send now' : labels[mode]}<ChevronDown size={13} strokeWidth={1.5} aria-hidden="true" /></>}
-                items={allowed.map((item) => ({ label: item === 'QUEUE' ? 'Queue after run' : labels[item], pressed: mode === item,
-                  description: item === 'STEER' ? 'Apply to the active response' : item === 'QUEUE' ? 'Send when the current work finishes' : undefined,
-                  onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : mode === 'QUEUE' ? <span className="tm-agent-session__hint">After response</span> : null}
-              <button className="primary-button tm-composer-action" type="submit" aria-label={mode ? labels[mode] : 'Send'}
-                disabled={busy || Boolean(blocked) || (needsText && !draft.trim())}
-                title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${mode ? labels[mode] : 'Send'} · ⌘/Ctrl Enter`)}>
-                {pendingAction === 'submit' ? <StatusGlyph kind="working" /> : mode === 'QUEUE' ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" />
-                  : mode === 'RETRY' ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
-                  : mode === 'CONTINUE' && !needsText ? <Play size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+            {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
+              title="Stop the current response" onClick={() => void act(() => props.onStop(displayedRun.id))}>Stop</button> : null}
+            {mode ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
+              <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
+                aria-label={delivery[mode].label}
+                title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
+                {pendingAction === 'submit' ? <StatusGlyph kind="working" /> : sendControl(mode, followUp)}
               </button>
-            </div>
+              {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
+                trigger={<ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />}
+                items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,
+                  onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : null}
+            </div> : null}
           </>}
         </div>
       </form>
@@ -312,30 +304,176 @@ export function AgentSession(props: AgentSessionProps) {
   </section>;
 }
 
-function ConversationMessage({ user = false, text, time, status, details }: { user?: boolean; text: string; time: string; status?: string; details?: ReactNode }) {
-  return <article className={`tm-agent-session__message ${user ? 'tm-agent-session__message--user' : ''}`} aria-label={user ? 'Your message' : 'Agent response'}>
-    <MessageContent user={user}>{user ? <p>{text}</p> : <MessageMarkdown text={text} />}</MessageContent>
-    <footer><time dateTime={time} title={new Date(time).toLocaleString()}>{new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(time))}</time>{status ? <span role="status">{status}</span> : null}{details}</footer>
-  </article>;
+/**
+ * Projects each run into a turn. Task detail arrives as a fresh snapshot on
+ * every refresh, so finished turns are reused by record revision; only the
+ * live turn is re-projected while output streams.
+ */
+function useSessionTurns(prompt: string, runs: RunRecord[], items: AgentItemRecord[], instructions: TaskInstruction[],
+  plans: AgentPlanRevisionRecord[], cwd?: string): SessionTurn[] {
+  const cache = useRef(new Map<string, { fingerprint: string; turn: SessionTurn }>());
+  return useMemo(() => {
+    const ordered = runs.filter((item) => isImplementationRunMode(item.mode) || item.mode === 'REVIEW')
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const first = ordered.find((item) => item.mode !== 'REVIEW');
+    const itemsByRun = groupByRun(items);
+    const instructionsByRun = groupByRun(instructions);
+    const plansByRun = groupByRun(plans);
+    const next = new Map<string, { fingerprint: string; turn: SessionTurn }>();
+    const turns = ordered.map((turnRun) => {
+      const runItems = itemsByRun.get(turnRun.id) ?? [];
+      const runInstructions = instructionsByRun.get(turnRun.id) ?? [];
+      const runPlans = plansByRun.get(turnRun.id) ?? [];
+      const turnPrompt = turnRun === first ? prompt : undefined;
+      const fingerprint = isActiveRunStatus(turnRun.status) ? '' : [
+        turnRun.status, turnRun.endedAt, turnRun.lastEventAt, turnRun.eventCount, turnRun.finalMessage, turnRun.terminalReason,
+        turnPrompt, cwd,
+        ...runItems.map((record) => `${record.id}@${record.updatedAt}`),
+        ...runInstructions.map((record) => `${record.id}@${record.updatedAt}`),
+        ...runPlans.map((record) => `${record.id}@${record.revision}`)
+      ].join('\u0000');
+      const cached = cache.current.get(turnRun.id);
+      const turn = fingerprint && cached?.fingerprint === fingerprint ? cached.turn
+        : sessionTurn(turnRun, runItems, runInstructions, { prompt: turnPrompt, cwd, plans: runPlans });
+      if (fingerprint) next.set(turnRun.id, { fingerprint, turn });
+      return turn;
+    });
+    cache.current = next;
+    return turns;
+  }, [prompt, runs, items, instructions, plans, cwd]);
 }
 
-function SessionDetails({ run, onReadArtifact, onShowDebug }: {
-  run: RunRecord; onReadArtifact?: (id: string) => Promise<string>; onShowDebug(): void;
+function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const record of records) {
+    if (!record.runId) continue;
+    const list = grouped.get(record.runId);
+    if (list) list.push(record);
+    else grouped.set(record.runId, [record]);
+  }
+  return grouped;
+}
+
+function Turn({ turn, clip, failure, capture, onReadArtifact, onShowDebug }: {
+  turn: SessionTurn;
+  clip: number;
+  failure?: RunFailureBannerViewModel;
+  capture: ReactNode;
+  onReadArtifact?: (id: string) => Promise<string>;
+  onShowDebug(): void;
 }) {
-  const [prompt, setPrompt] = useState<string>();
-  const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  return <details className="tm-agent-session__details">
-    <summary title="Run details" aria-label="Run details"><Info size={13} strokeWidth={1.5} aria-hidden="true" /></summary>
-    <div className="tm-agent-session__details-body">
-      <p>{humanizeEnum(run.mode)} · {humanizeEnum(run.status)} · <code>{run.id}</code></p>
-      {run.terminalReason ? <p>{run.terminalReason}</p> : null}
-      <button type="button" className="ghost-button" onClick={onShowDebug}>Open Debug</button>
-      {onReadArtifact && run.promptArtifactId ? <details className="tm-agent-session__prompt" onToggle={(event) => {
-        if (!event.currentTarget.open || prompt !== undefined || loading) return;
-        setLoading(true); setError(undefined);
-        void onReadArtifact(run.promptArtifactId).then(setPrompt).catch((caught: unknown) => setError(String(caught))).finally(() => setLoading(false));
-      }}><summary><DisclosureChevron />View sent prompt</summary>{loading ? <p>Loading prompt…</p> : error ? <p role="alert">{error}</p> : <pre>{prompt}</pre>}</details> : null}
+  const entries = clip ? turn.entries.slice(clip) : turn.entries;
+  const live = turn.state === 'active';
+  return <div className="tm-turn">
+    {turn.opener && !clip ? turn.opener.kind === 'prompt'
+      ? <UserMessage text={turn.opener.text} time={turn.opener.at} />
+      : <Message from="user" className="tm-message--action">
+        <span className="tm-message__action">{turn.opener.label === 'Retried'
+          ? <RotateCcw size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+          : <Play size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />}{turn.opener.label}</span>
+        <MessageMeta><MessageTime value={turn.opener.at} /></MessageMeta>
+      </Message> : null}
+    {entries.map((entry, index) => {
+      if (entry.kind === 'message') return entry.author === 'You'
+        ? <UserMessage key={entry.key} text={entry.text} time={entry.at} status={entry.status} />
+        : <Message key={entry.key} from="agent" label="Agent response"><MessageContent><MessageMarkdown text={entry.text} /></MessageContent></Message>;
+      if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
+      return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
+    })}
+    {failure ? <div className="tm-turn__notice" data-status={failure.status}>
+      <CircleAlert size={16} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
+      <div><strong>{failure.title}</strong><p>{failure.detail}</p></div>
+    </div> : null}
+    {capture ? <div className="tm-turn__changes">{capture}</div> : null}
+    {live ? null : <TurnFooter turn={turn} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
+  </div>;
+}
+
+function ReviewTurn({ turn, onShowReview }: { turn: SessionTurn; onShowReview(): void }) {
+  const state = { active: 'In progress', completed: 'Completed', stopped: 'Stopped', failed: 'Failed', interrupted: 'Interrupted' }[turn.state];
+  return <div className="tm-turn tm-turn--review">
+    <ShieldCheck size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+    <span>Agent review</span>
+    <span className="tm-turn__review-state">{state}</span>
+    <button type="button" className="ghost-button" onClick={onShowReview}>View review</button>
+  </div>;
+}
+
+function UserMessage({ text, time, status }: { text: string; time: string; status?: string }) {
+  return <Message from="user" label="Your message">
+    <MessageContent user><p>{text}</p></MessageContent>
+    <MessageMeta className={status ? 'tm-message__meta--status' : undefined}>
+      <MessageTime value={time} />{status ? <span role="status">{status}</span> : null}
+    </MessageMeta>
+  </Message>;
+}
+
+function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
+  turn: SessionTurn; onReadArtifact?: (id: string) => Promise<string>; onShowDebug(): void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [prompt, setPrompt] = useState<{ open: boolean; text?: string; error?: string }>({ open: false });
+  const end = turn.run.endedAt ?? turn.run.lastEventAt;
+  const promptArtifactId = turn.run.promptArtifactId;
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  const showPrompt = () => {
+    if (prompt.open) { setPrompt((current) => ({ ...current, open: false })); return; }
+    setPrompt((current) => ({ ...current, open: true, error: undefined }));
+    if (prompt.text !== undefined || !onReadArtifact || !promptArtifactId) return;
+    void onReadArtifact(promptArtifactId)
+      .then((text) => setPrompt((current) => ({ ...current, text })))
+      .catch((caught: unknown) => setPrompt((current) => ({ ...current, error: caught instanceof Error ? caught.message : String(caught) })));
+  };
+  return <>
+    <div className="tm-turn__footer">
+      <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
+      {end ? <><span aria-hidden="true">·</span><MessageTime value={end} /></> : null}
+      {turn.answer ? <button type="button" className="tm-iconbtn tm-turn__action" aria-label={copied ? 'Copied' : 'Copy response'} title={copied ? 'Copied' : 'Copy response'}
+        onClick={() => void navigator.clipboard?.writeText(turn.answer!).then(() => setCopied(true))}>
+        {copied ? <Check size={14} strokeWidth={1.5} aria-hidden="true" /> : <Copy size={14} strokeWidth={1.5} aria-hidden="true" />}
+      </button> : null}
+      <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
+        items={[
+          ...(onReadArtifact && promptArtifactId ? [{ label: prompt.open ? 'Hide sent prompt' : 'View sent prompt', description: 'The exact instructions the agent received', onSelect: showPrompt }] : []),
+          { label: 'Open in Debug', description: 'Raw events and run records', onSelect: onShowDebug }
+        ]} />
     </div>
-  </details>;
+    {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">
+      {prompt.error ? <p role="alert">{prompt.error}</p> : prompt.text === undefined ? <p>Loading prompt…</p> : <pre>{prompt.text}</pre>}
+    </section> : null}
+  </>;
+}
+
+function Elapsed({ since }: { since: string }) {
+  const start = Date.parse(since);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return Number.isFinite(start) ? <span className="tm-agent-session__elapsed" aria-hidden="true">{formatElapsed(now - start)}</span> : null;
+}
+
+function sendUsesIcon(mode: SendMode, followUp: boolean): boolean {
+  return mode === 'QUEUE' || mode === 'STEER' || (mode === 'CONTINUE' && followUp);
+}
+
+function sendControl(mode: SendMode, followUp: boolean) {
+  if (mode === 'RETRY') return <><RotateCcw size={13} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />Retry</>;
+  if (mode === 'CONTINUE' && !followUp) return <><Play size={13} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />Continue</>;
+  if (mode === 'QUEUE') return <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" />;
+  return <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />;
+}
+
+function savedReading(taskId: string): ReadingPosition | undefined {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(READING_KEY) ?? 'null') as Partial<ReadingPosition> | null;
+    return saved?.taskId === taskId && typeof saved.top === 'number' && Number.isFinite(saved.top)
+      ? { taskId, top: saved.top, firstTurnKey: saved.firstTurnKey, clip: typeof saved.clip === 'number' ? saved.clip : 0, following: saved.following !== false }
+      : undefined;
+  } catch { return undefined; }
 }

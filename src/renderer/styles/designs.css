@@ -455,12 +455,10 @@
   border-bottom: 1px solid var(--hair);
 }
 
+.tm-design-conversation__log { flex: 1; min-height: 0; }
 .tm-design-conversation__transcript {
   min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px 16px 24px;
-  scrollbar-gutter: stable;
+  padding: 20px 16px 24px;
 }
 
 .tm-design-conversation__transcript > * {
@@ -503,24 +501,13 @@
   line-height: 1.5;
 }
 
-.tm-design-turn + .tm-design-turn {
-  margin-top: 24px;
-  padding-top: 20px;
-  border-top: 1px solid var(--hair);
-}
-
-.tm-design-message {
-  min-width: 0;
-}
-
-.tm-design-message + .tm-design-message {
-  margin-top: 12px;
-}
+.tm-design-turn { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.tm-design-turn + .tm-design-turn { margin-top: 16px; }
 
 .tm-design-message__ready-actions {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
 }
 
 .tm-design-conversation__origin {
@@ -533,20 +520,11 @@
   font-size: 10.5px;
 }
 
-.tm-design-message--user {
-  width: min(90%, 720px);
-  margin-left: auto;
-}
-.tm-design-message--user footer { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.tm-design-message--user footer time { margin-left: auto; color: var(--muted); font: var(--t-meta) var(--font-mono); }
-
 .tm-design-message__references {
-  display: block;
-  margin-top: 0;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 9.5px;
-  line-height: 1.4;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -554,9 +532,9 @@
 .tm-design-message__turn-status {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: var(--t-meta);
 }
 
 .tm-design-message__turn-status[data-tone='working'] {
@@ -587,14 +565,14 @@
 }
 
 .tm-design-message__detail {
-  margin-top: 9px;
+  margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--hair);
 }
 
-.tm-design-conversation__transcript > .tm-run-activity,
+.tm-design-conversation__transcript > .tm-steps,
 .tm-design-conversation__transcript > .interaction-card {
-  margin-top: 18px;
+  margin-top: 16px;
 }
 
 .tm-design-conversation__transcript > .interaction-card {
@@ -664,9 +642,9 @@
 }
 
 .tm-design-composer textarea {
-  min-height: 68px;
-  padding: 9px 10px;
-  font-size: 12px;
+  min-height: 88px;
+  padding: 12px 12px 4px;
+  font: var(--t-body)/1.62 var(--font-ui);
 }
 
 .tm-design-composer__shell textarea,
@@ -693,7 +671,7 @@
   color: var(--placeholder);
 }
 
-.tm-design-composer .field__prompt-toolbar > button {
+.tm-design-composer .tm-composer__toolbar > button {
   flex-shrink: 0;
   height: var(--h-toolbar);
   padding: 0 10px;

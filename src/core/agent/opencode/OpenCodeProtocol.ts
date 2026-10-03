@@ -442,6 +442,8 @@ export function mapOpenCodePartType(part: OpenCodePart): AgentItemType {
     case 'tool': {
       const tool = part.tool?.toLowerCase() ?? '';
       if (tool === OPENCODE_DESIGN_TOOL_NAME) return 'MCP_TOOL_CALL';
+      // The todo tools carry the native plan, which todo.updated records as plan revisions.
+      if (tool === 'todowrite' || tool === 'todoread') return 'PLAN';
       if (['bash', 'shell', 'terminal'].some((name) => tool.includes(name))) return 'COMMAND_EXECUTION';
       if (['edit', 'write', 'patch', 'apply'].some((name) => tool.includes(name))) return 'FILE_CHANGE';
       if (tool.includes('web')) return 'WEB_SEARCH';

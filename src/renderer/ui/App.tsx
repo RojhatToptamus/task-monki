@@ -16,6 +16,7 @@ import {
   type CreateBoardRequest,
   type Board,
   type BoardSnapshot,
+  type AgentExecutionSettings,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
@@ -2024,10 +2025,10 @@ export function App() {
     }
   };
 
-  const startRun = async (taskId: string, instruction?: string) => {
+  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION' }));
+      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings }));
       notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
@@ -3242,6 +3243,9 @@ export function App() {
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
+            models={runtimeModels}
+            runtimes={runtimeCatalog?.runtimes ?? []}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             reviewDisabledReason={reviewDisabledReason}
             previewRecipeGenerationDisabledReason={
               previewRecipeGenerationSelection.unavailableReason

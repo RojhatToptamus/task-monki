@@ -466,15 +466,6 @@
 /* No hover fill on a text surface: at rest it already reads as a field, and
    the caret is the confirmation that matters. */
 
-.field__prompt-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  padding: 6px 8px;
-  border-top: 1px solid var(--hair);
-}
-
 .task-attachment-input {
   display: none;
 }
@@ -489,7 +480,7 @@
   font-size: var(--t-meta);
 }
 
-.field__prompt-toolbar .tm-profile-picker select {
+.tm-composer__toolbar .tm-profile-picker select {
   width: auto;
   max-width: 180px;
   min-width: 0;
@@ -506,11 +497,11 @@
   text-overflow: ellipsis;
 }
 
-.field__prompt-toolbar .tm-profile-picker select:not(:disabled):hover {
+.tm-composer__toolbar .tm-profile-picker select:not(:disabled):hover {
   background: var(--hover);
 }
 
-.field__prompt-toolbar .tm-profile-picker select:disabled {
+.tm-composer__toolbar .tm-profile-picker select:disabled {
   color: var(--text-disabled);
   cursor: default;
 }

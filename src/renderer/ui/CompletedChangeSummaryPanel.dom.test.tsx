@@ -51,7 +51,7 @@ describe('CompletedChangeSummaryPanel', () => {
       onViewDiff={onViewDiff} />);
     fireEvent.click(await screen.findByText('1 file changed'));
     expect(screen.getByText('Historical capture')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'View captured diff' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
     expect(onViewDiff).toHaveBeenCalledWith('git-1');
   });
 

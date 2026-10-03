@@ -52,7 +52,7 @@ export function AttachmentComposerShell({
           ))}
         </ul>
       ) : null}
-      <div className="field__prompt-toolbar">
+      <div className="tm-composer__toolbar">
         <input
           ref={attachments.inputRef}
           className="task-attachment-input"

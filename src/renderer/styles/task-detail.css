@@ -10,16 +10,29 @@
   flex-direction: column;
 }
 
-.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug { overflow-y: auto; }
-.tm-detail--overview > .tm-detail__body, .tm-detail--evidence > .tm-detail__body, .tm-detail--debug > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
+.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug, .tm-detail--preview { overflow-y: auto; }
+.tm-detail--overview > .tm-detail__body, .tm-detail--evidence > .tm-detail__body, .tm-detail--debug > .tm-detail__body, .tm-detail--preview > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
 
-.tm-detail__head {
+.tm-detail__chrome {
+  flex: 0 0 auto;
+  background: var(--surface);
+}
+
+.tm-detail__masthead {
   position: relative;
   flex: 0 0 auto;
-  padding: 14px 24px 0;
+  padding: 14px 24px 12px;
   background: var(--surface);
-  border-bottom: 1px solid var(--hair);
 }
+
+.tm-detail__nav {
+  flex: 0 0 auto;
+  padding: 0 24px;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--hair);
+}
+
+.tm-detail--agent { overflow: hidden; }
 
 .tm-detail__back {
   display: inline-flex;
@@ -42,7 +55,7 @@
 }
 
 /* Reserve the completion mascot's footprint so the title never slides under it. */
-.tm-detail__head--with-mascot .tm-detail__row {
+.tm-detail__masthead--with-mascot .tm-detail__row {
   padding-right: 144px;
 }
 
@@ -163,7 +176,6 @@
 .tm-tabs {
   display: flex;
   gap: 2px;
-  margin-top: 14px;
 }
 
 .tm-tab {
@@ -5274,8 +5286,12 @@
     justify-content: flex-end;
   }
 
-  .tm-detail__head {
-    padding: 12px 14px 0;
+  .tm-detail__masthead {
+    padding: 12px 14px 10px;
+  }
+
+  .tm-detail__nav {
+    padding: 0 14px;
   }
 
   .tm-detail__row {
@@ -5283,7 +5299,7 @@
     gap: 10px;
   }
 
-  .tm-detail__head--with-mascot .tm-detail__row {
+  .tm-detail__masthead--with-mascot .tm-detail__row {
     padding-right: 0;
   }
 

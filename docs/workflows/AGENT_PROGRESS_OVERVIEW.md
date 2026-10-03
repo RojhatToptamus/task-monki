@@ -21,11 +21,13 @@ on the content sheet. Exchanges remain readable without opening run accordions.
 
 The active response ends with one working or attention indicator. Stop, provider,
 model, and delivery controls live in the composer. Create, Prepare worktree, and
-Start implementation remain separate actions before a run. Detached review
-entries open the existing review surface.
+Start implementation remain separate actions before a run. Pre-run model and access
+choices use the runtime catalog and pass settings to the existing start operation.
+Unmatched saved permissions remain custom settings until a preset is explicitly
+chosen. Detached review entries open the existing review surface.
 
-`MessageContent`, `MessageMarkdown`, `PlanList`, `InteractionPanel`,
-`RunActivityTimeline`, and `ActionMenu` are shared presentation primitives.
+`Conversation`, `Message`, `MessageMarkdown`, `ActivitySteps`, `PlanCard`,
+`InteractionPanel`, and `ActionMenu` are shared presentation primitives.
 Agent, Design, Discourse, and New task composers use the shared `tm-composer`
 field surface and focus boundary. Their controllers retain separate ownership.
 Design and Agent activity exclude prose already owned by their conversations.
@@ -45,7 +47,7 @@ Activity follows the existing provider-neutral projections:
 Provider adapter/materializer
   -> AgentItemRecord / AgentPlanRevisionRecord / InteractionRequestRecord
   -> runActivity / overviewRunActivity
-  -> agentSession / RunActivityTimeline
+  -> agentSession / ActivitySteps
 ```
 
 Tool rows summarize file reads, searches, edits, commands, verification commands,
@@ -67,16 +69,17 @@ and consecutive captures of unchanged Git state do not repeat in the conversatio
 A later changed worktree marks the earlier summary as historical. Provider completion and
 claims about tests do not become verified Task Monki outcomes.
 
-The initial conversation renders up to 80 entries, with an explicit control to
-load 80 earlier entries at a time. Output appends without advancing the loaded
+The initial conversation renders about 80 blocks, with an explicit control to
+load another page. Run boundaries stay internal; page boundaries keep an outcome
+with at least its last entry. Output appends without advancing the loaded
 start. Prepending history preserves the reader's offset. Scrolling follows output
 only while the reader is near the bottom; Jump to latest resumes following
 without moving keyboard focus. The last viewed task's loaded start and reading
 position survive tab changes and renderer reloads within the window session.
 
-Run identifiers, terminal diagnostics, and sent execution prompts remain in the
-response footer's secondary Run details disclosure. Task request configuration and
-attachment metadata remain in Overview's Request section.
+The response footer's secondary Response details menu opens the sent execution
+prompt or Debug. Run identifiers and terminal diagnostics stay in Debug. Task
+request configuration and attachment metadata remain in Overview's Request section.
 
 ## Composer and queue
 
@@ -100,8 +103,8 @@ An in-flight submission cannot repeat. Successful submission returns focus to
 the composer; rejected submission preserves text and exposes the error.
 Drafts persist per task across tabs, reloads, and application restarts.
 
-Pending instructions appear in a bounded, collapsible list inside the composer.
-The action row uses shared icon controls with accessible labels and tooltips.
+Pending instructions appear in a bounded list inside the composer.
+The action row uses shared controls with accessible labels and tooltips.
 Its delivery menu distinguishes an active-run message from an after-response queue.
 Agent, Design, and Discourse action menus use Radix (the shadcn foundation) for
 portals, viewport collision handling, dismissal, and keyboard navigation.

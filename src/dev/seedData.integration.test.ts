@@ -354,7 +354,7 @@ describe('Task Monki development seed data', () => {
     const runningTask = taskForScenario(manifest, snapshot, 'agent-running');
     const runningRun = snapshot.runs.find((run) => run.id === runningTask.currentRunId);
     expect(runningRun).toMatchObject({ status: 'RUNNING' });
-    const runningActivity = sessionEntries(runningRun!, snapshot.agentItems, []).flatMap((entry) => entry.kind === 'activity' ? entry.rows : []);
+    const runningActivity = sessionEntries(runningRun!, snapshot.agentItems, []).flatMap((entry) => entry.kind === 'steps' ? entry.steps.flatMap((step) => step.kind === 'tool' ? [step.row] : []) : []);
     expect(runningActivity).toEqual(expect.arrayContaining([
       expect.objectContaining({ category: 'read', detail: 'src/renderer/ui/TaskDetail.tsx' }),
       expect.objectContaining({ category: 'edit', metric: '+2 -1' }),

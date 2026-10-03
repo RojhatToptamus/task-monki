@@ -161,20 +161,28 @@ export function CompletedChangeSummaryCard({
   if (compact) {
     if (captureStatus === 'NO_CHANGES' || captureStatus === 'NOT_CAPTURED') return null;
     if (!summary) return <CaptureStatusMessage status={captureStatus} incomplete={incomplete} />;
-    return <details className="tm-change-summary-inline">
-      <summary><DisclosureChevron /><FilePlus2 size={14} strokeWidth={1.5} aria-hidden="true" />
-        <span>{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
+    const note = [
+      historical ? 'Historical capture' : undefined,
+      incomplete ? 'Incomplete' : undefined
+    ].filter(Boolean).join(' · ');
+    return <section className="tm-changes" aria-label="Changed files">
+      <header className="tm-changes__head">
+        <FilePlus2 size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+        <span className="tm-changes__title">{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
         <DiffStat additions={summary.additions} deletions={summary.deletions} />
-        <span className="tm-change-summary-inline__capture">{historical ? 'Historical capture' : 'Captured changes'}{incomplete ? ' · Incomplete' : ''}</span>
-      </summary>
-      <div className="tm-change-summary-inline__files">
-        {[...summary.previewFiles, ...summary.hiddenFiles].map((file) => <ChangeFileRow key={file.path} file={file} />)}
+        {note ? <span className="tm-changes__note" title={historical
+          ? `Captured ${snapshot ? formatCaptureTime(snapshot.capturedAt) : ''}; the worktree changed later.`.replace(' ;', ';')
+          : undefined}>{note}</span> : null}
+        {onViewDiff ? <button type="button" className="ghost-button tm-changes__action" onClick={onViewDiff}>View diff</button> : null}
+      </header>
+      <div className="tm-changes__files">
+        {summary.previewFiles.map((file) => <ChangeFileRow key={file.path} file={file} />)}
+        {summary.hiddenFileCount > 0 ? <details className="tm-changes__more">
+          <summary>Show {summary.hiddenFileCount} more {plural(summary.hiddenFileCount, 'file')}<DisclosureChevron /></summary>
+          {summary.hiddenFiles.map((file) => <ChangeFileRow key={file.path} file={file} />)}
+        </details> : null}
       </div>
-      <div className="tm-change-summary-inline__footer">
-        {snapshot ? <time dateTime={snapshot.capturedAt}>{formatCaptureTime(snapshot.capturedAt)}</time> : null}
-        {onViewDiff ? <button className="ghost-button" onClick={onViewDiff}>View captured diff</button> : null}
-      </div>
-    </details>;
+    </section>;
   }
   const title =
     incomplete && summary

@@ -120,11 +120,13 @@ interface NewTaskPanelProps {
 export function ExecutionPolicySelect({
   presets,
   selectedPreset,
+  unmatchedSummary,
   disabled,
   onChange
 }: {
   presets: readonly AgentExecutionPolicyPreset[];
   selectedPreset?: AgentExecutionPolicyPreset;
+  unmatchedSummary?: { label: string; detail: string };
   disabled: boolean;
   onChange(presetId: string): void;
 }) {
@@ -171,7 +173,7 @@ export function ExecutionPolicySelect({
         ref={triggerRef}
         type="button"
         className="tm-access-select__trigger"
-        aria-label={`Execution policy: ${selectedPreset?.label ?? 'Unavailable'}`}
+        aria-label={`Execution policy: ${selectedPreset?.label ?? unmatchedSummary?.label ?? 'Unavailable'}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? popupId : undefined}
@@ -179,8 +181,8 @@ export function ExecutionPolicySelect({
         onClick={() => setOpen((current) => !current)}
       >
         <span className="tm-access-select__summary">
-          <strong>{selectedPreset?.label ?? 'No execution policy'}</strong>
-          <small>{selectedPreset?.detail ?? 'The selected agent does not expose an execution policy.'}</small>
+          <strong>{selectedPreset?.label ?? unmatchedSummary?.label ?? 'No execution policy'}</strong>
+          <small>{selectedPreset?.detail ?? unmatchedSummary?.detail ?? 'The selected agent does not expose an execution policy.'}</small>
         </span>
         <SelectChevronIcon open={open} />
       </button>

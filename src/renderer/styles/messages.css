@@ -35,7 +35,7 @@
 }
 
 .tm-message-markdown li + li {
-  margin-top: 3px;
+  margin-top: 4px;
 }
 
 .tm-message-markdown blockquote {
@@ -54,7 +54,7 @@
 
 .tm-message-markdown pre {
   max-width: 100%;
-  padding: 9px 10px;
+  padding: 8px 10px;
   overflow-x: auto;
   border: 0;
   border-radius: var(--r-sm);
@@ -93,5 +93,65 @@
 .tm-message-header__status[data-tone='blocked'] { color: var(--blocked-ink); }
 
 .tm-message-content { min-width: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: var(--t-body); line-height: 1.62; }
-.tm-message-content--user { padding: 12px 16px; border-radius: var(--r-md); background: var(--field); }
+.tm-message-content--user, .tm-message--user > .tm-message-content { padding: 10px 14px; border-radius: var(--r-md); background: var(--field); }
+.tm-message--user > .tm-message-content { max-width: min(80%, 560px); }
 .tm-message-content > p { margin: 0; white-space: pre-wrap; }
+
+/* Conversation log — one scrolling body; the jump back sits centred above the composer. */
+.tm-conversation { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
+.tm-conversation__viewport { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable both-edges; }
+.tm-conversation__content { min-width: 0; }
+.tm-conversation__latest {
+  position: absolute; bottom: 12px; left: 50%; translate: -50% 0;
+  display: grid; place-items: center; width: var(--h-icon); height: var(--h-icon);
+  border-radius: var(--r-pill); background: var(--overlay); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); color: var(--muted);
+}
+.tm-conversation__latest:hover { color: var(--text); }
+
+/* Message anatomy — the user's words in a right-aligned bubble, agent prose on the sheet. */
+.tm-message { display: flex; flex-direction: column; min-width: 0; }
+.tm-message--user { align-items: flex-end; }
+.tm-message__meta { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-top: 4px; color: var(--muted); font-size: var(--t-meta); }
+.tm-message__meta time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-message__action { display: inline-flex; align-items: center; gap: 6px; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }
+
+/* Steps — tool calls and reasoning between messages, quieter than prose. */
+.tm-steps { display: grid; min-width: 0; }
+.tm-step { min-width: 0; }
+.tm-step__row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--h-compact); padding: 0; color: var(--muted); font-size: var(--t-help); text-align: left; }
+.tm-step__trigger { border-radius: var(--r-xs); cursor: pointer; }
+.tm-step__trigger:hover, .tm-step__trigger:hover .tm-step__label { color: var(--text); }
+.tm-step__trigger .tm-disclosure__chevron { color: var(--faint); }
+.tm-step__trigger[data-state='open'] .tm-disclosure__chevron { transform: rotate(90deg); }
+.tm-step__icon { display: grid; flex: 0 0 14px; place-items: center; width: 14px; height: 14px; }
+.tm-step__copy { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
+.tm-step__label { flex: 0 0 auto; color: var(--text-soft); white-space: nowrap; }
+.tm-step__detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-step__detail--mono, .tm-step__metric { font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-step__metric { flex: 0 0 auto; color: var(--faint); }
+.tm-step--failed .tm-step__label, .tm-step__failed { color: var(--blocked-ink); }
+.tm-step__failed { font-size: var(--t-meta); }
+.tm-steps__summary .tm-step__label { color: var(--muted); }
+.tm-steps__list { display: grid; min-width: 0; margin-left: 6px; padding-left: 13px; border-left: 1px solid var(--hair); }
+.tm-step__body { display: grid; gap: 6px; min-width: 0; padding: 2px 0 8px 22px; }
+.tm-steps__list .tm-step__body { padding-left: 22px; }
+.tm-step__reasoning .tm-message-markdown { color: var(--muted); font-size: var(--t-help); line-height: 1.55; }
+.tm-step__execution { display: grid; gap: 6px; min-width: 0; }
+.tm-step__execution pre {
+  max-height: 240px; margin: 0; padding: 8px 10px; overflow: auto; border-radius: var(--r-sm); background: var(--well);
+  color: var(--text-soft); font: var(--t-meta)/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tm-step__execution .tm-step__command { color: var(--text); }
+.tm-step__error { margin: 0; color: var(--blocked-ink); font-size: var(--t-help); line-height: 1.45; }
+.tm-step__children { display: grid; }
+.tm-step__child { display: flex; align-items: center; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }
+
+/* Plan — a card in the conversation; open while it is being worked or ended partway. */
+.tm-plan-card { min-width: 0; border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); }
+.tm-plan-card__head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--h-control); padding: 0 12px; border-radius: var(--r-md); color: var(--muted); font-size: var(--t-help); text-align: left; cursor: pointer; }
+.tm-plan-card__head:hover { color: var(--text); }
+.tm-plan-card__head[data-state='open'] .tm-disclosure__chevron { transform: rotate(90deg); }
+.tm-plan-card__title { color: var(--text-soft); font-weight: 600; }
+.tm-plan-card__count { margin-right: auto; font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-plan-card__body { padding: 0 12px 8px; border-top: 1px solid var(--hair); }
+.tm-plan-card__body > .tm-plan__steps { max-height: 280px; overflow: auto; }

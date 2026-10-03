@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AgentModel,
   AgentInteractionDecision,
@@ -14,14 +14,13 @@ import {
   designActivityRows,
   designDetailedActivityRows,
   designTurnView,
-  formatDesignUpdatedAt,
   type DesignProjectDetail
 } from '../model/designs';
-import { MessageContent } from './MessageContent';
+import { ActivityRows, ActivitySteps } from './ActivitySteps';
+import { Conversation, useConversationScroll } from './Conversation';
+import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
-import { MessageHeader } from './MessageHeader';
 import { InteractionPanel } from './InteractionPanel';
-import { RunActivityTimeline } from './RunActivityTimeline';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments } from './useTaskAttachments';
@@ -128,6 +127,8 @@ export function DesignConversation({
   attachmentsRef.current = attachments;
   const activityRows = designActivityRows(project);
   const detailedActivityRows = designDetailedActivityRows(project);
+  const scroller = useConversationScroll({ startAtBottom: true });
+  const prepend = useRef<{ height: number; top: number } | undefined>(undefined);
   const canSubmit =
     canRefine &&
     message.trim().length > 0 &&
@@ -284,8 +285,17 @@ export function DesignConversation({
     void submit();
   };
 
+  useLayoutEffect(() => {
+    const viewport = scroller.scrollRef.current;
+    if (prepend.current && viewport) {
+      viewport.scrollTop = prepend.current.top + viewport.scrollHeight - prepend.current.height;
+      prepend.current = undefined;
+    }
+  }, [project.conversation.length]);
+
   return (
     <section className="tm-design-conversation" aria-label="Design conversation">
+      <Conversation instance={scroller} label="Design conversation" className="tm-design-conversation__log">
       <div className="tm-design-conversation__transcript" aria-live="polite">
         {project.origin && project.conversation.length === 0 ? (
           <p className="tm-design-conversation__origin">
@@ -301,6 +311,8 @@ export function DesignConversation({
             className="tm-design-conversation__earlier"
             disabled={loadingEarlier}
             onClick={() => {
+              const viewport = scroller.scrollRef.current;
+              if (viewport) prepend.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
               setLoadingEarlier(true);
               setError(undefined);
               void onLoadEarlier()
@@ -368,13 +380,13 @@ export function DesignConversation({
         )}
 
         {activityRows.length > 0 ? (
-          <RunActivityTimeline rows={activityRows} live={false} compact />
+          <ActivitySteps steps={activityRows.map((row) => ({ key: row.key, at: row.at, kind: 'tool' as const, row }))} />
         ) : null}
 
         {detailedActivityRows.length > 0 ? (
           <details className="tm-design-technical-details">
             <summary><DisclosureChevron /><span>Technical details</span></summary>
-            <RunActivityTimeline rows={detailedActivityRows} live={false} />
+            <ActivityRows rows={detailedActivityRows} />
           </details>
         ) : null}
 
@@ -385,6 +397,7 @@ export function DesignConversation({
           onRespond={onRespond}
         />
       </div>
+      </Conversation>
 
       <form
         className="tm-design-composer"
@@ -422,7 +435,7 @@ export function DesignConversation({
                   {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               ) : null}
-              {activeWork ? <span className="tm-agent-session__hint">After response</span> : null}
+              {activeWork ? <span className="tm-composer__hint">After response</span> : null}
               <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
                 aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
                 title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
@@ -516,51 +529,39 @@ function DesignTurnMessages({
   const view = designTurnView(entry);
   return (
     <article className="tm-design-turn">
-      <MessageContent user className="tm-design-message tm-design-message--user">
-        <p>{entry.userMessage}</p>
-        <footer>
-          {references.length > 0 ? (
-            <small className="tm-design-message__references">
-              {references.join(', ')}
-            </small>
-          ) : null}
-          <time dateTime={entry.turn.createdAt}>
-            {formatDesignUpdatedAt(entry.turn.createdAt)}
-          </time>
-        </footer>
-      </MessageContent>
+      <Message from="user" label="Your message">
+        <MessageContent><p>{entry.userMessage}</p></MessageContent>
+        <MessageMeta>
+          {references.length > 0 ? <span className="tm-design-message__references">{references.join(', ')}</span> : null}
+          <MessageTime value={entry.turn.createdAt} />
+        </MessageMeta>
+      </Message>
 
-      <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
-        <MessageHeader author="Design agent">
-          <div className="tm-design-message__ready-actions">
-            <span className="tm-design-message__turn-status" data-tone={view.tone}>
-              {entry.readyRevision
-                ? `Ready state ${entry.readyRevision.ordinal}`
-                : view.statusLabel}
-            </span>
-            {entry.readyRevision ? (
-              <DesignReadyMenu
-                ordinal={entry.readyRevision.ordinal}
-                isCurrent={entry.readyRevision.id === latestRevisionId}
-                canRestore={canRestore}
-                canDuplicate={canDuplicate}
-                onRestore={() => onRestore(entry.readyRevision!.id)}
-                onDuplicate={() => onDuplicate(entry.readyRevision!.id)}
-              />
-            ) : null}
-          </div>
-        </MessageHeader>
+      <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
         {entry.assistantMessage ? (
-          <MessageMarkdown text={entry.assistantMessage} />
+          <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
         ) : (
-          <p className="tm-design-message__pending">
-            {view.detail ?? view.statusLabel}
-          </p>
+          <p className="tm-design-message__pending">{view.detail ?? view.statusLabel}</p>
         )}
         {view.detail && entry.assistantMessage ? (
           <p className="tm-design-message__detail">{view.detail}</p>
         ) : null}
-      </div>
+        <MessageMeta className="tm-design-message__ready-actions">
+          <span className="tm-design-message__turn-status" data-tone={view.tone}>
+            {entry.readyRevision ? `Ready state ${entry.readyRevision.ordinal}` : view.statusLabel}
+          </span>
+          {entry.readyRevision ? (
+            <DesignReadyMenu
+              ordinal={entry.readyRevision.ordinal}
+              isCurrent={entry.readyRevision.id === latestRevisionId}
+              canRestore={canRestore}
+              canDuplicate={canDuplicate}
+              onRestore={() => onRestore(entry.readyRevision!.id)}
+              onDuplicate={() => onDuplicate(entry.readyRevision!.id)}
+            />
+          ) : null}
+        </MessageMeta>
+      </Message>
     </article>
   );
 }

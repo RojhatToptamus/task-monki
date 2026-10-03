@@ -32,6 +32,8 @@ import type {
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
   AgentUsageSnapshotRecord,
+  AgentExecutionSettings,
+  AgentModel,
   AgentRuntimeState,
   AgentServerInstance,
   UpdateAgentNativeSessionRequest,
@@ -66,6 +68,7 @@ import {
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
 import { AgentSession, type AgentSessionProps } from './AgentSession';
+import { PreRunSetup } from './PreRunSetup';
 import { EvidencePanel } from './EvidencePanel';
 import { InteractionAuditPanel } from './InteractionAuditPanel';
 import { ProviderActivityPanel } from './ProviderActivityPanel';
@@ -135,6 +138,7 @@ import {
 } from './ReviewPanel';
 import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
+import { conversationPreview, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
@@ -190,6 +194,9 @@ interface TaskDetailProps {
   settingsObservations: AgentSettingsObservationRecord[];
   subagentObservations: AgentSubagentObservationRecord[];
   runtimeState?: AgentRuntimeState;
+  models?: AgentModel[];
+  runtimes?: AgentRuntimeState[];
+  onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
   textExcerpts?: ClientTextExcerpt[];
@@ -213,7 +220,7 @@ interface TaskDetailProps {
   previewRecipeGenerationDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
   worktreePreparationPending?: boolean;
-  onStart(taskId: string, instruction?: string): Promise<void>;
+  onStart(taskId: string, instruction?: string, settings?: AgentExecutionSettings): Promise<void>;
   onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
   onReconnectWorktree?(taskId: string, worktreePath: string): Promise<void>;
   onUpdateWorktreeComparison?(taskId: string, baseRef: string): Promise<void>;
@@ -325,6 +332,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<{ taskId: string; settings: AgentExecutionSettings }>();
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestNote, setRequestNote] = useState('');
@@ -481,6 +489,8 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   }
 
+  const executionSettings = draftSettings?.taskId === task.id ? draftSettings.settings : task.agentSettings;
+  const startWithSettings = (taskId: string, instruction?: string) => props.onStart(taskId, instruction, executionSettings);
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
   const activeTurnSteeringSupported = Boolean(
     props.runtimeState &&
@@ -578,6 +588,9 @@ export function TaskDetail(props: TaskDetailProps) {
     [taskActivityLedger]
   );
   const progressRun = selectProgressRun(run, props.runs);
+  const overviewPreview = useMemo(() => progressRun
+    ? conversationPreview(sessionTurn(progressRun, props.items, props.agentInstructions, { plans: planRevisions }))
+    : undefined, [progressRun, props.items, props.agentInstructions, planRevisions]);
   const evidenceGitSnapshot = evidenceGitSnapshotId
     ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId)
     : gitSnapshot;
@@ -693,7 +706,7 @@ export function TaskDetail(props: TaskDetailProps) {
         if (reviewRequest.sourceRunId) {
           await props.onContinue(reviewRequest.sourceRunId, requestInstruction.trim());
         } else {
-          await props.onStart(task.id, requestInstruction.trim());
+          await startWithSettings(task.id, requestInstruction.trim());
         }
         setReviewRequest(undefined);
       } catch {
@@ -755,7 +768,7 @@ export function TaskDetail(props: TaskDetailProps) {
     await runDeliveryAction(async () => {
       const instruction = buildFailingChecksInvestigationPrompt(prStatus);
       if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
-      else await props.onStart(task.id, instruction);
+      else await startWithSettings(task.id, instruction);
     });
   };
 
@@ -883,7 +896,7 @@ export function TaskDetail(props: TaskDetailProps) {
     worktree,
     onPrepareWorktree: props.onPrepareWorktree,
     onStart: externalWork ? async () => setExistingWorkModal('instruction') : async (taskId) => {
-      setTab('agent'); await props.onStart(taskId);
+      setTab('agent'); await startWithSettings(taskId);
     }
   });
   const implementationRetryRequired = isImplementationRetryRequired(task, run);
@@ -906,7 +919,7 @@ export function TaskDetail(props: TaskDetailProps) {
       onClick: () => void props.onTransition(task.id, 'REVIEW')
     });
   }
-  if (primaryAction) {
+  if (primaryAction && tab !== 'agent') {
     headActions.push({
       label: primaryAction.label,
       kind: directImportReview ? 'soft' : 'primary',
@@ -985,8 +998,8 @@ export function TaskDetail(props: TaskDetailProps) {
   });
 
   const detailHeadClassName = props.showMascot
-    ? 'tm-detail__head tm-detail__head--with-mascot'
-    : 'tm-detail__head';
+    ? 'tm-detail__masthead tm-detail__masthead--with-mascot'
+    : 'tm-detail__masthead';
   const showPrStatus = shouldShowPrStatusOnOverview(prStatus) &&
     !(implementationRetryRequired && prStatus.kind === 'NO_PR');
   const previewPanelProps = {
@@ -1067,7 +1080,7 @@ export function TaskDetail(props: TaskDetailProps) {
       </>
     }
               />);
-  const taskHeader = (
+  const taskMasthead = (
       <div
         className={detailHeadClassName}
         inert={taskDetailModalOpen ? true : undefined}
@@ -1165,6 +1178,10 @@ export function TaskDetail(props: TaskDetailProps) {
             setTab('agent'); setAgentAttentionRequest((value) => value + 1);
           }}>Agent needs your answer</button>
         ) : null}
+      </div>
+  );
+  const taskNav = (
+        <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
         <div className="tm-tabs" role="tablist" aria-label="Task sections">
           <AccessibleTab
             id="task-detail-tab-overview"
@@ -1211,7 +1228,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
   return (
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
-      {tab !== 'agent' ? taskHeader : null}
+      {tab !== 'agent' ? <div className="tm-detail__chrome">{taskMasthead}{taskNav}</div> : null}
 
       <div
         id="task-detail-panel"
@@ -1231,7 +1248,11 @@ export function TaskDetail(props: TaskDetailProps) {
               <TaskWorkPanels>
                 <div className="tm-panel tm-agent-overview">
                   <button className="tm-agent-overview__link" onClick={() => setTab('agent')}>
-                    <span><strong>Agent conversation</strong><span>{props.runtimeState?.preflight.runtime.displayName ?? task.runtimeId}</span></span>
+                    <span>
+                      <strong>Agent conversation</strong>
+                      <span>{props.runtimeState?.preflight.runtime.displayName ?? task.runtimeId}</span>
+                      {overviewPreview ? <span className="tm-agent-overview__excerpt">{overviewPreview}</span> : null}
+                    </span>
                     <span className="tm-agent-overview__state">{implementationRetryRequired ? 'Needs retry' : progressRun ? humanizeEnum(progressRun.status) : 'Not started'}<span aria-hidden="true">→</span></span>
                   </button>
                   {runFailure ? <p className="tm-agent-overview__failure">{runFailure.detail}</p> : null}
@@ -1312,20 +1333,38 @@ export function TaskDetail(props: TaskDetailProps) {
           </div>
         ) : null}
 
-        {tab === 'agent' ? <AgentSession key={task.id} header={taskHeader} task={task} run={run} runs={props.runs} worktreePath={worktree?.worktreePath}
+        {tab === 'agent' ? <AgentSession key={task.id} task={task} run={run} runs={props.runs} worktreePath={worktree?.worktreePath}
           runtimeName={props.runtimeState?.preflight.runtime.displayName}
           sessions={sessions} items={props.items} plans={planRevisions} interactions={interactions}
-          instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired}
-          runtimeUnavailable={props.runtimeState && !props.runtimeState.preflight.readiness.canStart ? props.runtimeState.preflight.readiness.summary : undefined}
+          instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired} failure={runFailure}
+          runtimeUnavailable={props.runtimeState && !props.runtimeState.preflight.readiness.canStart ? (props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary) : undefined}
           steeringSupported={activeTurnSteeringSupported} draft={props.agentDraft} draftError={props.agentDraftError}
           onDraftChange={props.onAgentDraftChange} onFlushDraft={props.onFlushAgentDraft}
           onQueue={props.onQueueInstruction} onEditQueue={props.onEditInstruction} onSendQueue={props.onSendInstruction}
           onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('overview')}
-          attentionRequested={agentAttentionRequest} request={requestCard}
-          preRunAction={primaryAction ? <button className="primary-button" disabled={primaryAction.disabled}
-            onClick={primaryAction.onClick}>{primaryAction.label}</button> : null}
+          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskMasthead}{taskNav}</div>}
+          preRun={!run ? <PreRunSetup
+            prompt={task.prompt}
+            attachments={props.attachments}
+            worktree={worktree}
+            runtimeId={task.runtimeId}
+            settings={executionSettings}
+            models={props.models ?? props.runtimeState?.models ?? []}
+            runtimes={props.runtimes ?? (props.runtimeState ? [props.runtimeState] : [])}
+            disabled={Boolean(primaryAction?.disabled)}
+            action={primaryAction ? {
+              label: primaryAction.label,
+              disabled: primaryAction.disabled || reviewActionsPaused || props.repository?.status !== 'AVAILABLE',
+              title: props.repository?.status !== 'AVAILABLE'
+                ? 'Reconnect this repository before running repository actions.'
+                : undefined,
+              onClick: primaryAction.onClick
+            } : undefined}
+            onSettingsChange={(settings) => setDraftSettings({ taskId: task.id, settings })}
+            onDiscoverModels={props.onDiscoverAgentRuntimeModels}
+          /> : null}
           capture={(capturedRun) => captureRunIds.has(capturedRun.id) ? <CompletedChangeSummaryPanel compact run={capturedRun}
             capturePending={props.postRunEvidencePendingRunIds?.includes(capturedRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
@@ -1415,7 +1454,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onListCheckouts={props.onListExistingWorktrees}
           onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
           onSubmit={async (value) => {
-            if (existingWorkModal === 'instruction') await props.onStart(task.id, value);
+            if (existingWorkModal === 'instruction') await startWithSettings(task.id, value);
             else if (existingWorkModal === 'comparison') await props.onUpdateWorktreeComparison?.(task.id, value);
             else await props.onReconnectWorktree?.(task.id, value);
           }} />

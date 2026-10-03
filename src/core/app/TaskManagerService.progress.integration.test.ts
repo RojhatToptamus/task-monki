@@ -110,7 +110,7 @@ describe('TaskManagerService progress harness', () => {
       let snapshot = await scenario.store.snapshot();
       const entries = sessionEntries(startedRun, snapshot.agentItems, []);
       expect(entries).toContainEqual(expect.objectContaining({ kind: 'message', author: 'Agent', text: 'Progress: Finished discovery and will add hello.txt next.' }));
-      expect(entries.flatMap((entry) => entry.kind === 'activity' ? entry.rows : [])).toEqual([
+      expect(entries.flatMap((entry) => entry.kind === 'steps' ? entry.steps.flatMap((step) => step.kind === 'tool' ? [step.row] : []) : [])).toEqual([
         expect.objectContaining({ category: 'read', detail: 'README.md', metric: '1 line' }),
         expect.objectContaining({ category: 'write', detail: 'hello.txt', metric: '+1' })
       ]);
