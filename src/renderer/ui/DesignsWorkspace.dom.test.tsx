@@ -1635,6 +1635,39 @@ describe('mounted Design workspace', () => {
     boundsSpy.mockRestore();
   });
 
+  it('keeps Design actions above the native canvas and restores the preview after dismissal', async () => {
+    const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 1_600, height: 600, top: 0, left: 0,
+      right: 1_600, bottom: 600, toJSON: () => ({})
+    });
+    onTestFinished(() => boundsSpy.mockRestore());
+    const onShowCanvas = vi.fn();
+    const onHideCanvas = vi.fn();
+    render(<DesignsWorkspace {...workspaceProps({ onShowCanvas, onHideCanvas })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
+    expect(onShowCanvas).toHaveBeenCalled();
+    const trigger = screen.getByRole('button', { name: 'Design options for Quiet portfolio' });
+    trigger.focus();
+    onHideCanvas.mockClear();
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: 'Delete…' })).toBeTruthy();
+    expect(onHideCanvas).toHaveBeenCalled();
+    onShowCanvas.mockClear();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    expect(onShowCanvas).toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    onShowCanvas.mockClear();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+    expect(screen.getByRole('textbox', { name: 'Name' })).toBeTruthy();
+    expect(onShowCanvas).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onShowCanvas).toHaveBeenCalled();
+  });
+
   it('hides the native canvas while a reference preview is open and restores it on Escape', async () => {
     const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, width: 1_600, height: 600, top: 0, left: 0,

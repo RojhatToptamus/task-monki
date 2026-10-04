@@ -8,7 +8,7 @@ import { RepositorySwitcher } from './RepositorySwitcher';
 describe('Menu trigger dismissal', () => {
   it.each([
     ['Design options', () => <DesignProjectMenu title="Example" canOpenInFinder canDuplicate canArchive canDelete
-      onOpenInFinder={vi.fn()} onDuplicate={vi.fn()} onRename={vi.fn()} onArchive={vi.fn()} onDelete={vi.fn()} />],
+      onOpenInFinder={vi.fn()} onDuplicate={vi.fn()} onRename={vi.fn()} onArchive={vi.fn()} onDelete={vi.fn()} onOpenChange={vi.fn()} />],
     ['Ready version options', () => <DesignReadyMenu ordinal={1} isCurrent={false} canRestore canDuplicate
       onRestore={vi.fn()} onDuplicate={vi.fn()} />],
     ['Conversation actions', () => <ActionMenu className="tm-action-menu" label="Conversation actions"

@@ -228,6 +228,7 @@ export function DesignsWorkspace({
   const [filesOpen, setFilesOpen] = useState(false);
   const [previewSetupModalOpen, setPreviewSetupModalOpen] = useState(false);
   const [attachmentPreviewOpen, setAttachmentPreviewOpen] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [referenceSelection, setReferenceSelection] = useState(() => ({
     designId: project?.design.id,
     draftRevision: draft?.recordRevision,
@@ -548,6 +549,7 @@ export function DesignsWorkspace({
               layout={renderedLayout}
               availableLayouts={contentLayout.availableModes}
               filesOpen={filesOpen}
+              onMenuOpenChange={setProjectMenuOpen}
               onHistoryCollapsedChange={onHistoryCollapsedChange}
               onLayoutChange={(nextLayout) => {
                 setLayout(nextLayout);
@@ -663,7 +665,7 @@ export function DesignsWorkspace({
                     ) : undefined}
                     setupRequired={Boolean(project.repositorySetup?.blocker) || (project.revisions.length === 0 && project.turns.some((turn) => !turn.runId && !turn.outcome))}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || historyModalOpen || deleteOpen || renameOpen || previewSetupModalOpen || attachmentPreviewOpen}
+                    occluded={projectMenuOpen || canvasOccluded || historyModalOpen || deleteOpen || renameOpen || previewSetupModalOpen || attachmentPreviewOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
@@ -757,7 +759,8 @@ function DesignHeader({
   onDuplicate,
   onRename,
   onArchive,
-  onDelete
+  onDelete,
+  onMenuOpenChange
 }: {
   project: DesignProjectDetail;
   historyCollapsed: boolean;
@@ -772,6 +775,7 @@ function DesignHeader({
   onRename(): void;
   onArchive(): void;
   onDelete(): void;
+  onMenuOpenChange(open: boolean): void;
 }) {
   const status = designStatusView(designProjectStatus(project));
   const revision = project.revisions.at(-1)?.ordinal;
@@ -829,6 +833,7 @@ function DesignHeader({
           onRename={onRename}
           onArchive={onArchive}
           onDelete={onDelete}
+          onOpenChange={onMenuOpenChange}
         />
       </div>
     </header>
