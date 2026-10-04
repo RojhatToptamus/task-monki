@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ArtifactRecord, GitSnapshotRecord, RunRecord } from '../../shared/contracts';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
@@ -41,6 +41,18 @@ describe('CompletedChangeSummaryPanel', () => {
     expect(screen.getByText('Captured Git changes · 1 file')).toBeDefined();
     expect(screen.getByText('app.ts')).toBeDefined();
     expect(screen.queryByText('Loading captured Git changes…')).toBeNull();
+  });
+
+  it('opens the response capture even when newer worktree evidence exists', async () => {
+    api.readArtifact.mockResolvedValue(diffEvidence());
+    const onViewDiff = vi.fn();
+    render(<CompletedChangeSummaryPanel compact run={runFixture()} artifacts={[artifactFixture()]}
+      gitSnapshots={[gitSnapshotFixture(), gitSnapshotFixture({ id: 'newer', capturedAt: '2026-07-07T11:00:00Z', dirtyFingerprint: 'changed' })]}
+      onViewDiff={onViewDiff} />);
+    fireEvent.click(await screen.findByText('1 file changed'));
+    expect(screen.getByText('Historical capture')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
+    expect(onViewDiff).toHaveBeenCalledWith('git-1');
   });
 
   it('does not convert an artifact read failure into an empty capture', async () => {

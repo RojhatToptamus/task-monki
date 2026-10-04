@@ -160,7 +160,7 @@ export class ApplicationPersistence {
         tasks.createAgentRuntimeEventSink()
       );
       tasks.bindAgentRuntime(taskRuntime);
-      const discourse = new SqliteDiscourseStore(database);
+      const discourse = new SqliteDiscourseStore(database, managedFiles);
       const settings = new AppSettingsStore(database);
       const designDrafts = new SqliteDesignDraftStore(database);
       const previewPrivateVault = options.previewSecretProtector

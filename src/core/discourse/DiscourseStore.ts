@@ -34,6 +34,7 @@ export interface CreateDiscourseConversationInput {
 }
 
 export interface AppendHumanDiscourseMessageInput {
+  attachmentDraftId?: string;
   conversationId: string;
   body: string;
   replyToMessageId?: string;
@@ -81,6 +82,9 @@ export interface CreateDiscourseWaveInput {
 }
 
 export interface DiscourseStore {
+  getAttachmentDraft(draftId: string): Promise<import('../../shared/attachments').AttachmentDraftSnapshot>;
+  readAttachment(conversationId: string, attachmentId: string): Promise<import('../../shared/attachments').AttachmentContent>;
+  verifyAttachments(conversationId: string, attachmentIds: readonly string[]): Promise<import('../agent/AgentAttachmentDelivery').AgentTurnAttachment[]>;
   init(): Promise<void>;
   close(): Promise<void>;
   createConversation(

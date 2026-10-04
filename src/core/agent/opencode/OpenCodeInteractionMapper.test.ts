@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   mapOpenCodeInteractionResponse,
@@ -126,6 +128,7 @@ describe('OpenCodeInteractionMapper', () => {
   });
 
   it('maps command and file permissions with reviewable native context', () => {
+    const externalDirectory = path.join(os.tmpdir(), 'outside', 'repo');
     expect(
       mapOpenCodePermission(
         {
@@ -165,7 +168,7 @@ describe('OpenCodeInteractionMapper', () => {
           id: 'per_3',
           sessionID: 'ses_1',
           permission: 'external_directory',
-          patterns: ['/outside/repo']
+          patterns: [externalDirectory]
         },
         '/repo'
       )
@@ -175,7 +178,7 @@ describe('OpenCodeInteractionMapper', () => {
         request: expect.objectContaining({
           permissions: {
             fileSystem: {
-              entries: [{ path: { path: '/outside/repo' }, access: 'write' }]
+              entries: [{ path: { type: 'path', path: externalDirectory }, access: 'write' }]
             }
           }
         })
@@ -328,6 +331,16 @@ describe('OpenCodeInteractionMapper', () => {
         mapped.request
       )
     ).toThrow('does not expose a session-scoped permission reply');
+  });
+
+  it('does not turn a partial grant into approval of the complete native request', () => {
+    const mapped = mapOpenCodePermission({
+      id: 'per_paths', sessionID: 'ses_1', permission: 'external_directory',
+      patterns: ['/repo/src/*', '/repo/tests/*']
+    }, '/repo');
+    expect(() => mapOpenCodeInteractionResponse({
+      interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: {}
+    }, mapped.request)).toThrow('complete permission request');
   });
 
   it('fails closed for questions that may contain credentials', () => {

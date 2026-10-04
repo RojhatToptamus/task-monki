@@ -197,6 +197,7 @@ export type DiscourseMessageAuthor =
 export type DiscourseMessageFreshness = 'FRESH' | 'CHANGED_DURING_JOB' | 'UNKNOWN';
 
 export interface DiscourseMessageRecord {
+  attachments?: import('./attachments').AttachmentDescriptor[];
   id: string;
   conversationId: string;
   ordinal: number;
@@ -635,6 +636,7 @@ export interface DiscourseDraftToken {
 export type DiscourseDraftTokenInput = Omit<DiscourseDraftToken, 'id'>;
 
 export interface DiscourseDraftRecord {
+  attachmentDraftId?: string;
   id: string;
   conversationId?: string;
   recordRevision: number;
@@ -726,6 +728,7 @@ export interface CreateDiscourseConversationRequest {
 }
 
 export interface AppendHumanDiscourseMessageRequest {
+  attachmentDraftId?: string;
   conversationId: string;
   body: string;
   replyToMessageId?: string;
@@ -783,6 +786,7 @@ export interface SetPinnedDiscourseContextRequest {
 }
 
 export interface SaveDiscourseDraftRequest {
+  attachmentDraftId?: string;
   draftId?: string;
   conversationId?: string;
   expectedRevision?: number;

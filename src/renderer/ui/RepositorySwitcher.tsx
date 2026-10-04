@@ -125,7 +125,7 @@ export function RepositorySwitcher({
           <UiFolderIcon />
         </span>
         <span className="tm-nav__repo-text">
-          <span className="tm-nav__repo-label">New task repository</span>
+          <span className="tm-nav__repo-label">Repository</span>
           <span className="tm-nav__repo-name">{triggerLabel}</span>
         </span>
         <UiChevronDownIcon open={open} className="tm-nav__repo-chevron" />

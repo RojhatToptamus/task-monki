@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -2997,6 +2997,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     operation: string,
     update: Partial<Pick<AgentSessionRecord, 'status' | 'materialized'>> = {}
   ): Promise<AgentSessionRecord> {
+    // Each inspection observes mutable settings, even within the same native session.
     try {
       return await this.taskRuntime.updateAgentSession(session.id, {
         ...update,
@@ -3004,7 +3005,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         observedSettings: this.safeObservedSettings(
           settingsFromSession(providerSession, settings)
         )
-      }, runtimeOperationId('session/permission-attestation', session.id, providerSession.id, operation));
+      }, runtimeOperationId('session/permission-attestation', session.id, randomUUID()));
     } catch (cause) {
       const diagnostic = this.redactProviderText(errorMessage(cause));
       await this.quarantineSessionRuntime(
@@ -4155,21 +4156,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
     }, protocolOperationId('item/upsert', raw, run.id, part.id));
-    const interactionPending =
-      typeof part.callID === 'string' &&
-      (await this.taskRuntime.snapshot()).interactionRequests.some(
-        (interaction) =>
-          interaction.runId === run.id &&
-          interaction.sessionId === session.id &&
-          interaction.serverInstanceId === run.serverInstanceId &&
-          interaction.providerItemId === part.callID &&
-          (interaction.status === 'PENDING' ||
-            interaction.status === 'RESPONDING')
-      );
     await this.recordRunActivity(run, `item/${part.type}/${status.toLowerCase()}`, {
       providerItemId: part.id,
-      tool: part.tool,
-      ...(interactionPending ? { interactionPending: true } : {})
+      tool: part.tool
     });
   }
 
@@ -5722,6 +5711,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     payload: Record<string, unknown>
   ): Promise<void> {
     payload = this.redactProviderValue(payload);
+    const interactionPending = (await this.taskRuntime.snapshot()).interactionRequests.some(
+      (interaction) =>
+        interaction.runId === run.id &&
+        interaction.sessionId === run.sessionId &&
+        interaction.serverInstanceId === run.serverInstanceId &&
+        (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+    );
+    if (interactionPending) payload = { ...payload, interactionPending: true };
     await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',

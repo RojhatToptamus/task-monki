@@ -354,10 +354,11 @@ describe('DesignUpdateCoordinator', () => {
 
     await harness.coordinator.cancelTurn(harness.designId, queued.id);
     expect(interruptRun).not.toHaveBeenCalled();
-    expect((await harness.store.getDesignDetail(harness.designId)).turns[1]).toMatchObject({
-      id: queued.id,
-      outcome: 'CANCELED'
-    });
+    const afterCancel = await harness.store.getDesignDetail(harness.designId);
+    expect(afterCancel.turns[1]).toMatchObject({ id: queued.id, outcome: 'CANCELED' });
+    expect(afterCancel.design.status).toBe(active.design.status);
+    expect(afterCancel.currentRun?.id).toBe(firstRun.id);
+    expect(afterCancel.actions).toMatchObject({ canStop: true, stopTurnId: firstTurn.id, queuedTurnCount: 0 });
 
     await harness.coordinator.cancelTurn(harness.designId, firstTurn.id);
     expect(interruptRun).toHaveBeenCalledWith(firstRun.id);

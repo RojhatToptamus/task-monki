@@ -3,6 +3,7 @@
 /* ======================================================================= */
 
 .tm-detail {
+  background: var(--surface);
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -10,13 +11,29 @@
   flex-direction: column;
 }
 
-.tm-detail__head {
+.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug, .tm-detail--preview { overflow-y: auto; scrollbar-gutter: stable; }
+.tm-detail--overview > .tm-detail__body, .tm-detail--evidence > .tm-detail__body, .tm-detail--debug > .tm-detail__body, .tm-detail--preview > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
+
+.tm-detail__chrome {
+  flex: 0 0 auto;
+  background: var(--surface);
+}
+
+.tm-detail__masthead {
   position: relative;
   flex: 0 0 auto;
-  padding: 14px 24px 0;
+  padding: 16px 24px 12px;
   background: var(--surface);
-  border-bottom: 1px solid var(--hair);
 }
+
+.tm-detail__nav {
+  flex: 0 0 auto;
+  padding: 0 24px;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--hair);
+}
+
+.tm-detail--agent { overflow: hidden; }
 
 .tm-detail__back {
   display: inline-flex;
@@ -39,7 +56,7 @@
 }
 
 /* Reserve the completion mascot's footprint so the title never slides under it. */
-.tm-detail__head--with-mascot .tm-detail__row {
+.tm-detail__masthead--with-mascot .tm-detail__row {
   padding-right: 144px;
 }
 
@@ -60,7 +77,7 @@
 .tm-detail__title {
   min-width: 0;
   margin: 0;
-  font-size: 22px;
+  font-size: var(--t-heading);
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.18;
@@ -160,7 +177,6 @@
 .tm-tabs {
   display: flex;
   gap: 2px;
-  margin-top: 14px;
 }
 
 .tm-tab {
@@ -446,6 +462,8 @@
   box-shadow: var(--shadow-card);
   padding: 14px;
 }
+
+.tm-panel__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 .tm-panel__title {
   margin: 0 0 12px;
@@ -3037,7 +3055,7 @@
   border: 1px solid var(--edge);
   border-radius: 14px;
   background: var(--overlay);
-  padding: 22px;
+  padding: 24px;
   box-shadow: var(--shadow-modal);
 }
 
@@ -3293,49 +3311,18 @@
   flex: 1;
 }
 
-.tm-prepare-worktree__commit {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  gap: 12px;
-  align-items: baseline;
-  margin-top: 14px;
-}
-
-.tm-prepare-worktree__commit span {
-  color: var(--muted);
-  font-size: var(--t-help);
-  font-weight: 600;
-}
-
-.tm-prepare-worktree__commit code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font: 600 var(--t-help)/1.45 var(--font-mono);
-}
-
-.tm-prepare-worktree__base {
-  margin-top: 16px;
-}
-
-.tm-prepare-worktree__trust {
-  color: var(--muted);
-  font-size: var(--t-meta);
-  line-height: 1.45;
-}
-
-.tm-prepare-worktree__error {
-  margin-top: 14px;
-}
-
-.tm-prepare-worktree__trust {
-  display: block;
-  margin-top: 14px;
-}
-
-.tm-prepare-worktree .tm-modal__actions {
-  margin-top: 20px;
-}
+.tm-prepare-worktree { display: flex; flex-direction: column; gap: 16px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.tm-prepare-worktree__header { display: grid; gap: 4px; }
+.tm-prepare-worktree__header h3 { margin: 0; font-size: var(--t-heading); }
+.tm-prepare-worktree .tm-prepare-worktree__header p { color: var(--muted); }
+.tm-prepare-worktree p { margin: 0; font-size: var(--t-help); }
+.tm-prepare-worktree__base { margin: 0; }
+.tm-prepare-worktree__commit { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: baseline; padding-top: 8px; }
+.tm-prepare-worktree__commit span { color: var(--muted); font-size: var(--t-help); }
+.tm-prepare-worktree__commit code { min-width: 0; overflow-wrap: anywhere; font-size: var(--t-meta); }
+.tm-prepare-worktree__trust { color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
+.tm-prepare-worktree__error { margin: 0; }
+.tm-prepare-worktree .tm-modal__actions { margin: 0; padding-top: 16px; border-top: 1px solid var(--hair); gap: 8px; }
 
 @media (max-width: 620px) {
   .tm-board-editor__options,
@@ -3502,50 +3489,6 @@
   white-space: pre-wrap;
 }
 
-/* failure card */
-.tm-failure {
-  border: 1px solid var(--edge-raised);
-  border-radius: 13px;
-  background: var(--card);
-  padding: 18px;
-  box-shadow: var(--shadow-card);
-}
-
-.tm-failure__head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 10px;
-}
-
-.tm-failure__eyebrow {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.tm-panel__title--failure {
-  margin: 0 0 7px;
-}
-
-.tm-panel__lead--flush {
-  margin: 0;
-}
-
-.tm-failure pre {
-  margin: 0;
-  padding: 11px;
-  border-radius: 8px;
-  background: var(--well);
-  color: var(--text-soft);
-  font: 11px/1.5 var(--font-mono);
-  overflow: auto;
-  white-space: pre-wrap;
-  max-height: 180px;
-}
-
 /* One run header for any async operation: state · name · scope · elapsed · Stop. */
 .tm-runheader {
   display: flex;
@@ -3653,9 +3596,7 @@
 }
 
 
-.tm-run-activity,
-.tm-change-summary,
-.tm-run-progress__footer {
+.tm-change-summary {
   margin-top: 9px;
   padding-top: 8px;
   border-top: 1px solid var(--hair);
@@ -3811,307 +3752,6 @@
 .tm-change-summary__more[open] .tm-change-summary__chevron {
   color: var(--muted);
   transform: rotate(90deg);
-}
-
-/* A quiet tail (spec §Activity): borderless icons, verb in UI type, target in
-   mono, duration right-aligned. Hover fills surface2 at a 7px radius, bleeding
-   8px past the text column. No progress bars, no bordered icon chips. */
-.tm-run-activity__head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 2px 0 7px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--muted);
-  text-transform: uppercase;
-}
-
-.tm-run-activity__head span:last-child {
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 400;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  opacity: 0.72;
-}
-
-.tm-run-activity__list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.tm-run-activity__row {
-  border-radius: 7px;
-}
-
-/* New tail rows enter with a 6px fade-up (spec §Motion). */
-.tm-run-activity--live .tm-run-activity__row {
-  animation: tm-fade 240ms ease both;
-}
-
-.tm-run-activity__row:not(details),
-.tm-run-activity__summary {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: center;
-  gap: 0 9px;
-  min-height: 30px;
-  margin: 0 -8px;
-  padding: 4px 8px;
-  border-radius: 7px;
-}
-
-/* Prose rows top-align: the icon sits with the first line of wrapped text. */
-.tm-run-activity__row--prose:not(details) {
-  align-items: start;
-  min-height: 0;
-  padding: 6px 8px;
-}
-
-.tm-run-activity__row:not(details):hover,
-.tm-run-activity__summary:hover {
-  background: var(--hover);
-}
-
-.tm-run-activity__summary {
-  position: relative;
-  grid-template-columns: 18px minmax(0, 1fr) 12px;
-  align-items: center;
-  gap: 0 9px;
-  list-style: none;
-  cursor: pointer;
-}
-
-.tm-run-activity__summary::-webkit-details-marker {
-  display: none;
-}
-
-.tm-run-activity__chevron {
-  justify-self: center;
-  color: var(--muted);
-  transform: rotate(0deg);
-  transition: transform 150ms ease;
-}
-
-.tm-run-activity__row[open] > .tm-run-activity__summary .tm-run-activity__chevron {
-  transform: rotate(90deg);
-}
-
-/* Borderless glyphs — the icon is the target-type cue, not a bordered chip. */
-.tm-run-activity__icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-}
-
-.tm-run-activity__row--prose > .tm-run-activity__icon {
-  padding-top: 3px;
-  align-self: start;
-}
-
-.tm-run-activity__icon svg {
-  width: 13px;
-  height: 13px;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.tm-run-activity__row--active > .tm-run-activity__icon,
-.tm-run-activity__row--active > .tm-run-activity__summary .tm-run-activity__icon {
-  color: var(--working);
-}
-
-.tm-run-activity__row--failed > .tm-run-activity__icon,
-.tm-run-activity__row--failed > .tm-run-activity__summary .tm-run-activity__icon {
-  color: var(--blocked-ink);
-}
-
-.tm-run-activity__copy {
-  min-width: 0;
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 0 6px;
-  align-items: baseline;
-  overflow: hidden;
-}
-
-/* Prose narration wraps to full width rather than truncating. */
-.tm-run-activity__row--prose .tm-run-activity__copy {
-  flex-wrap: wrap;
-  overflow: visible;
-}
-
-.tm-run-activity__summary .tm-run-activity__copy {
-  grid-column: 2;
-}
-
-.tm-run-activity__copy--child {
-  font-size: 11.5px;
-}
-
-.tm-run-activity__label {
-  flex: 0 0 auto;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text-soft);
-  font-weight: 400;
-}
-
-/* "Ran 2 commands" — the count itself is the bright artifact. */
-.tm-run-activity__row--command .tm-run-activity__label,
-.tm-run-activity__row--context .tm-run-activity__label {
-  color: var(--text-soft);
-}
-
-.tm-run-activity__row--prose .tm-run-activity__label {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text-soft);
-  overflow-wrap: anywhere;
-}
-
-.tm-run-activity__detail {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text-soft);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-run-activity__detail--command,
-.tm-run-activity__detail--path {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-soft);
-}
-
-.tm-run-activity__detail--count {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.tm-run-activity__row--active .tm-run-activity__label,
-.tm-run-activity__row--active .tm-run-activity__detail--command {
-  color: var(--text);
-}
-
-.tm-run-activity__metric {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* Grouped-command children indent under a 1px left rail. */
-.tm-run-activity__children {
-  margin: 2px 0 6px 8px;
-  padding-left: 18px;
-  border-left: 1px solid var(--hair);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.tm-run-activity__child {
-  display: flex;
-  align-items: center;
-  min-height: 24px;
-}
-
-.tm-run-activity__child .tm-run-activity__copy {
-  flex: 1;
-}
-
-.tm-run-activity__output {
-  margin-top: 7px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.tm-run-activity__output:hover:not(:disabled) {
-  color: var(--muted);
-}
-
-.tm-run-activity__output:disabled {
-  cursor: default;
-  color: var(--muted);
-  opacity: 0.7;
-}
-
-/* State-dependent outcome footer (spec §Failed/§Interrupted/§Completed): the
-   footer states the fact and tints only for failure. Title tone tracks the run
-   result; detail stays muted so the sentence, not the color, carries meaning. */
-.tm-run-progress__footer {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-
-.tm-run-progress__footer-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.tm-run-progress__footer-title {
-  color: var(--text-soft);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.tm-run-progress__footer-detail {
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-
-/* Failed is the one focal point: a softly tinted footer with an error-ink title. */
-.tm-run-progress__footer--error {
-  margin-top: 12px;
-  padding: 11px 13px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--error-bg);
-}
-
-.tm-run-progress__footer--error .tm-run-progress__footer-title {
-  color: var(--blocked-ink);
-}
-
-/* Completed reads success in the title; no changes still gets a calm green line. */
-.tm-run-progress__footer--success .tm-run-progress__footer-title {
-  color: var(--verified-ink);
-}
-
-/* Completed is already told by the green header dot: the footer drops the dot and
-   title and states only the fact the dot can't carry (files · verification). */
-.tm-run-progress__footer--quiet {
-  align-items: baseline;
-}
-
-.tm-run-progress__footer--quiet .tm-run-progress__footer-detail {
-  font-size: 12px;
-  color: var(--muted);
 }
 
 /* config grid */
@@ -5323,8 +4963,12 @@
     justify-content: flex-end;
   }
 
-  .tm-detail__head {
-    padding: 12px 14px 0;
+  .tm-detail__masthead {
+    padding: 12px 14px 10px;
+  }
+
+  .tm-detail__nav {
+    padding: 0 14px;
   }
 
   .tm-detail__row {
@@ -5332,7 +4976,7 @@
     gap: 10px;
   }
 
-  .tm-detail__head--with-mascot .tm-detail__row {
+  .tm-detail__masthead--with-mascot .tm-detail__row {
     padding-right: 0;
   }
 
@@ -5642,21 +5286,7 @@
   }
 
   .tm-status-glyph--working,
-  .tm-exec__spinner,
-  .tm-run-activity--live .tm-run-activity__row,
-  .tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
+  .tm-exec__spinner {
     animation: none;
   }
-
-  .tm-run-activity--live
-    .tm-run-activity__row--active
-    .tm-run-activity__copy
-    .tm-run-activity__label,
-  .tm-run-activity--live
-    .tm-run-activity__row--active
-    .tm-run-activity__copy
-    .tm-run-activity__detail--command {
-    color: var(--text);
-  }
-
 }

@@ -211,6 +211,8 @@ export interface DiscardTaskAttachmentDraftRequest {
 }
 
 export interface ReadTaskAttachmentRequest {
+  draftId?: string;
+  conversationId?: string;
   attachmentId: string;
 }
 

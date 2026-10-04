@@ -97,7 +97,7 @@ export interface DesignRepositorySetup {
   workspaceSnapshotId?: string;
 }
 
-export const TASK_STORE_SCHEMA_VERSION = 27 as const;
+export const TASK_STORE_SCHEMA_VERSION = 28 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -474,8 +474,71 @@ export interface StatusProjection {
   updatedAt: string;
 }
 
+export const TASK_INSTRUCTION_MAX_LENGTH = 65_536;
+export const TASK_INSTRUCTION_QUEUE_LIMIT = 20;
+
+export interface InstructionAttachments {
+  attachmentDraftId?: string;
+  attachmentIds?: string[];
+}
+
+/** Authored intent and admission only. Execution/delivery of linked turns belongs to RunRecord. */
+export interface TaskInstruction extends InstructionAttachments {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  sourceRunId: string;
+  sessionId: string;
+  order: number;
+  text: string;
+  mode: 'QUEUE' | 'FOLLOW_UP' | 'RETRY' | 'STEER';
+  status: 'QUEUED' | 'HELD' | 'SENDING' | 'SUBMITTED' | 'FAILED' | 'UNCERTAIN';
+  /** Reserved before admission; may be absent from runtime storage after a crash. */
+  runId?: string;
+  detail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QueueTaskInstructionRequest extends InstructionAttachments {
+  taskId: string;
+  runId: string;
+  id: string;
+  instruction: string;
+}
+
+export interface EditTaskInstructionRequest extends InstructionAttachments {
+  taskId: string;
+  id: string;
+  /** Omit to remove a pending instruction. */
+  instruction?: string;
+}
+
+export interface SendTaskInstructionRequest {
+  taskId: string;
+  id: string;
+  runId: string;
+}
+
+export interface SaveTaskPromptRequest extends InstructionAttachments {
+  taskId: string;
+  prompt: string;
+  draftOnly?: boolean;
+}
+
+export interface SaveTaskAgentDraftRequest {
+  taskId: string;
+  text?: string;
+  attachmentDraftId?: string | null;
+}
+
 export interface Task {
   id: string;
+  agentDraft?: string;
+  promptDraft?: string;
+  agentAttachmentDraftId?: string;
+  initialAttachmentIds?: string[];
   kind: 'NORMAL' | 'DESIGN';
   /** Selected instructions, independent of later library edits. Historical turns retain their prompt artifacts. */
   agentProfile?: import('./agentProfiles').CustomAgentProfile;
@@ -843,6 +906,7 @@ export interface TaskSnapshot {
   repositories: Repository[];
   boards: Board[];
   tasks: Task[];
+  taskInstructions: TaskInstruction[];
   designTurns: DesignTurn[];
   designReferences: DesignReference[];
   designRevisions: DesignRevision[];
@@ -968,6 +1032,8 @@ export interface ClientTextExcerpt {
 }
 
 export interface TaskDetailSnapshot {
+  agentAttachmentDraft?: AttachmentDraftSnapshot;
+  taskInstructions: TaskInstruction[];
   schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
   task: Task;
   repository?: Repository;
@@ -1082,20 +1148,23 @@ export interface CancelRunRequest {
   runId: string;
 }
 
-export interface SteerRunRequest {
+export interface SteerRunRequest extends InstructionAttachments {
+  clientMessageId?: string;
   taskId: string;
   runId: string;
   instruction: string;
 }
 
-export interface ContinueRunRequest {
+export interface ContinueRunRequest extends InstructionAttachments {
+  clientMessageId?: string;
   taskId: string;
   runId: string;
   instruction?: string;
   settings?: AgentExecutionSettings;
 }
 
-export interface RetryRunRequest {
+export interface RetryRunRequest extends InstructionAttachments {
+  clientMessageId?: string;
   taskId: string;
   runId: string;
   strategy: AgentRetryStrategy;
@@ -1609,6 +1678,7 @@ export interface TaskManagerApi {
     input: import('./discourse').ConfirmDiscourseWaveContextRequest
   ): Promise<import('./discourse').DiscourseResponseWaveRecord>;
   stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  getAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot>;
   discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;
   readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
@@ -1620,6 +1690,11 @@ export interface TaskManagerApi {
   inspectWorktreePreparation(input: InspectWorktreePreparationRequest): Promise<WorktreePreparationInspection>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<PrepareWorktreeResult>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
+  queueTaskInstruction(input: QueueTaskInstructionRequest): Promise<TaskInstruction>;
+  editTaskInstruction(input: EditTaskInstructionRequest): Promise<void>;
+  sendTaskInstruction(input: SendTaskInstructionRequest): Promise<RunRecord>;
+  saveTaskAgentDraft(input: SaveTaskAgentDraftRequest): Promise<void>;
+  saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void>;
   steerRun(input: SteerRunRequest): Promise<void>;
   continueRun(input: ContinueRunRequest): Promise<RunRecord>;
   retryRun(input: RetryRunRequest): Promise<RunRecord>;

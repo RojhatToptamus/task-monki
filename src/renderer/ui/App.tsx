@@ -16,6 +16,7 @@ import {
   type CreateBoardRequest,
   type Board,
   type BoardSnapshot,
+  type AgentExecutionSettings,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
@@ -204,17 +205,6 @@ function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
 }
 
-function isHorizontalCanvasControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    Boolean(
-      target.closest(
-        '.tm-titlebar, button, input, textarea, select, a, summary, [role="button"], [role="separator"]'
-      )
-    )
-  );
-}
-
 export function App() {
   const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);
@@ -247,6 +237,41 @@ export function App() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const pendingAppActions = useRef(0);
+  const [agentDrafts, setAgentDrafts] = useState<Record<string, string>>({});
+  const [agentDraftErrors, setAgentDraftErrors] = useState<Record<string, string | undefined>>({});
+  const agentDraftWrites = useRef(new Map<string, { text: string; work?: Promise<void>; error?: string }>());
+  const saveAgentDraft = (taskId: string, text: string) => {
+    setAgentDrafts((current) => {
+      const entries = Object.entries(current).filter(([id]) => id !== taskId).slice(-39);
+      return { ...Object.fromEntries(entries), [taskId]: text };
+    });
+    const entry = agentDraftWrites.current.get(taskId) ?? { text };
+    entry.text = text;
+    entry.error = undefined;
+    agentDraftWrites.current.set(taskId, entry);
+    if (!entry.work) {
+      entry.work = (async () => {
+        let saved: string;
+        do {
+          saved = entry.text;
+          await taskManagerApi.saveTaskAgentDraft({ taskId, text: saved });
+        } while (saved !== entry.text);
+        setAgentDraftErrors((current) => ({ ...current, [taskId]: undefined }));
+      })().catch((caught: unknown) => {
+        entry.error = `Draft could not be saved: ${String(caught)}`;
+        setAgentDraftErrors((current) => ({ ...current, [taskId]: entry.error }));
+        throw caught;
+      }).finally(() => {
+        entry.work = undefined;
+        for (const [id, previous] of agentDraftWrites.current) {
+          if (agentDraftWrites.current.size <= 40) break;
+          if (id !== taskId && !previous.work && !previous.error) agentDraftWrites.current.delete(id);
+        }
+      });
+      void entry.work.catch(() => undefined);
+    }
+  };
+
   const withAppAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     pendingAppActions.current += 1;
     try { return await action(); }
@@ -268,6 +293,7 @@ export function App() {
   }>();
   const [worktreePreparation, setWorktreePreparation] = useState<{
     inspection: WorktreePreparationInspection;
+    returnFocus: HTMLElement | null;
     selectedBaseRef?: string;
     busy: boolean;
     error?: string;
@@ -313,6 +339,10 @@ export function App() {
   const selectedDesignIdRef = useRef<string | undefined>(undefined);
   const designListReadGenerationRef = useRef(0);
   const designReadGenerationRef = useRef(0);
+  const designDraftReadRef = useRef<{
+    designId: string;
+    promise: Promise<DesignDraftRecord | null>;
+  } | undefined>(undefined);
   const pendingDesignTurnRef = useRef<{
     designId: string;
     message: string;
@@ -449,7 +479,8 @@ export function App() {
         isNewTaskClosing ||
         event.pointerType !== 'mouse' ||
         event.button !== 0 ||
-        isHorizontalCanvasControl(event.target)
+        !(event.target instanceof HTMLElement) ||
+        !event.target.matches('.tm-body, .tm-canvas, .tm-canvas__workspace, .tm-canvas__content')
       ) {
         return;
       }
@@ -695,7 +726,6 @@ export function App() {
     ) => {
       const select = options.select ?? false;
       const showLoading = options.showLoading ?? false;
-      const loadDraft = select || showLoading;
       if (select) {
         selectedDesignIdRef.current = designId;
         setSelectedDesignId(designId);
@@ -708,6 +738,17 @@ export function App() {
       }
 
       const generation = ++designReadGenerationRef.current;
+      if (select || showLoading) {
+        designDraftReadRef.current = {
+          designId,
+          promise: taskManagerApi.getDesignDraft(designId)
+        };
+      }
+      // Background detail updates must finish the selection's draft read before
+      // mounting the composer with its saved text, attachments, and revision.
+      const draftRead = designDraftReadRef.current?.designId === designId
+        ? designDraftReadRef.current
+        : undefined;
       if (showLoading) {
         setDesignsLoading(true);
         setDesignsError(undefined);
@@ -715,9 +756,7 @@ export function App() {
       try {
         const [detail, draft] = await Promise.all([
           taskManagerApi.getDesign(designId),
-          loadDraft
-            ? taskManagerApi.getDesignDraft(designId)
-            : Promise.resolve(undefined)
+          draftRead?.promise
         ]);
         if (
           generation !== designReadGenerationRef.current ||
@@ -726,7 +765,12 @@ export function App() {
           return;
         }
         setDesignDetail((current) => mergeDesignDetailHistory(current, detail));
-        if (draft !== undefined) setDesignDraft(draft);
+        if (draft !== undefined) {
+          setDesignDraft(draft);
+          if (designDraftReadRef.current === draftRead) {
+            designDraftReadRef.current = undefined;
+          }
+        }
         upsertDesignSummary(detail.design);
         setDesignsError(undefined);
       } catch (caught) {
@@ -736,6 +780,7 @@ export function App() {
         ) {
           const message =
             caught instanceof Error ? caught.message : 'Could not load this Design.';
+          if (draftRead) setDesignDetail(undefined);
           setDesignsError(message);
           if (showLoading) {
             notify(message, 'error');
@@ -788,7 +833,7 @@ export function App() {
     }
     await loadDesign(nextDesignId, {
       select: nextDesignId !== currentDesignId,
-      showLoading: false
+      showLoading: true
     });
   }, [designs, loadDesign, refreshDesignList]);
   const createDesign = useCallback(
@@ -949,7 +994,8 @@ export function App() {
       try {
         const detail = await taskManagerApi.cancelDesignTurn({ designId, turnId });
         applyDesignActionDetail(detail, false);
-        notify('Stopping Design work.', 'info');
+        const turn = detail.turns.find((candidate) => candidate.id === turnId);
+        notify(turn?.outcome === 'CANCELED' && !turn.runId ? 'Queued message removed.' : 'Stopping Design work.', 'info');
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : 'Could not stop work.';
         notify(message, 'error');
@@ -1029,7 +1075,6 @@ export function App() {
       } catch (caught) {
         const message =
           caught instanceof Error ? caught.message : 'Could not submit the response.';
-        notify(message, 'error');
         throw caught instanceof Error ? caught : new Error(message);
       }
     },
@@ -1992,10 +2037,10 @@ export function App() {
     }
   };
 
-  const startRun = async (taskId: string, instruction?: string) => {
+  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION' }));
+      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings }));
       notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
@@ -2026,6 +2071,7 @@ export function App() {
 
   const prepareWorktree = async (taskId: string) => {
     if (worktreePreparationActionRef.current) return;
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const generation = ++worktreePreparationGenerationRef.current;
     worktreePreparationActionRef.current = { taskId, generation };
     setWorktreePreparationActionTaskId(taskId);
@@ -2041,6 +2087,7 @@ export function App() {
         : undefined;
       setWorktreePreparation({
         inspection,
+        returnFocus,
         selectedBaseRef: selectedBase?.refName,
         busy: false
       });
@@ -2101,6 +2148,7 @@ export function App() {
         refreshed.bases[0];
       setWorktreePreparation({
         inspection: refreshed,
+        returnFocus: pending.returnFocus,
         selectedBaseRef: nextSelection?.refName,
         busy: false,
         error:
@@ -2447,14 +2495,14 @@ export function App() {
     }
   };
 
-  const steerRun = async (runId: string, instruction: string) => {
+  const steerRun = async (runId: string, instruction: string, clientMessageId?: string) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
       if (!run) {
         throw new Error('Run not found.');
       }
-      await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction }));
+      await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction, clientMessageId }));
       notify('Instruction sent.', 'success');
       await refresh();
     } catch (caught) {
@@ -2463,7 +2511,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string) => {
+  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2473,7 +2521,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction }));
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2488,7 +2536,9 @@ export function App() {
   const retryRun = async (
     runId: string,
     strategy: AgentRetryStrategy,
-    instruction?: string
+    instruction?: string,
+    clientMessageId?: string,
+    files?: import('../../shared/contracts').InstructionAttachments
   ) => {
     setError(undefined);
     try {
@@ -2500,7 +2550,9 @@ export function App() {
         taskId: run.taskId,
         runId,
         strategy,
-        instruction
+        instruction,
+        clientMessageId,
+        ...files
       }));
       if (strategy === 'FORK') {
         await taskDataCoordinator.refreshBoard();
@@ -2581,19 +2633,14 @@ export function App() {
     decision: AgentInteractionDecision
   ) => {
     setError(undefined);
-    try {
-      await taskManagerApi.respondToInteraction({
-        taskId: interaction.taskId,
-        runId: interaction.runId,
-        interactionRequestId: interaction.id,
-        decision
-      });
-      notify('Provider request answered.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to submit approval decision.');
-      throw caught;
-    }
+    await taskManagerApi.respondToInteraction({
+      taskId: interaction.taskId,
+      runId: interaction.runId,
+      interactionRequestId: interaction.id,
+      decision
+    });
+    notify('Provider request answered.', 'success');
+    await refresh();
   };
 
   const selectRepository = useCallback(
@@ -3163,6 +3210,45 @@ export function App() {
 
         {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
+            attachmentOptions={{
+              enabled: true,
+              model: selectModel(runtimeModels, selectedRun?.requestedSettings.model ?? selectedTask.agentSettings.model, selectedTask.runtimeId, selectedTask.agentSettings.modelProvider),
+              initialDraft: taskDetail.agentAttachmentDraft,
+              onStageBatch: taskManagerApi.stageTaskAttachmentBatch,
+              onDiscard: (draftId) => taskManagerApi.discardTaskAttachmentDraft({ draftId }),
+              onReadClipboardImage: taskManagerApi.readClipboardImage,
+              onReadDraftAttachment: (attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId, draftId: taskDetail.agentAttachmentDraft?.id }),
+              onPersistDraft: async (attachmentDraftId) => {
+                await taskManagerApi.saveTaskAgentDraft({ taskId: selectedTask.id, attachmentDraftId: attachmentDraftId ?? null });
+                await refresh();
+              }
+            }}
+            onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
+            onSavePrompt={async (prompt, draftOnly, files) => {
+              await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt, draftOnly, ...files });
+              if (!draftOnly) await refresh();
+            }}
+            agentInstructions={taskDetail.taskInstructions}
+            agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
+            agentDraftError={agentDraftErrors[selectedTask.id]}
+            onAgentDraftChange={(text) => saveAgentDraft(selectedTask.id, text)}
+            onFlushAgentDraft={async () => {
+              const pending = agentDraftWrites.current.get(selectedTask.id);
+              await pending?.work;
+              if (pending?.error) throw new Error(pending.error);
+            }}
+            onQueueInstruction={async (runId, instruction, id, files) => {
+              await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id, ...files }));
+              await refresh();
+            }}
+            onEditInstruction={async (id, instruction, files) => {
+              await withAppAction(() => taskManagerApi.editTaskInstruction({ taskId: selectedTask.id, id, instruction, ...files }));
+              await refresh();
+            }}
+            onSendInstruction={async (id, runId) => {
+              await withAppAction(() => taskManagerApi.sendTaskInstruction({ taskId: selectedTask.id, id, runId }));
+              await refresh();
+            }}
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
@@ -3187,6 +3273,9 @@ export function App() {
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
             runtimeState={selectedTaskRuntimeState}
+            models={runtimeModels}
+            runtimes={runtimeCatalog?.runtimes ?? []}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             reviewDisabledReason={reviewDisabledReason}
             previewRecipeGenerationDisabledReason={
               previewRecipeGenerationSelection.unavailableReason
@@ -3309,6 +3398,7 @@ export function App() {
             onReadDesignDraftAttachment={(designId, attachmentId) =>
               taskManagerApi.readDesignDraftAttachment({ designId, attachmentId })
             }
+            onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
             onAddReferences={addDesignReferences}
             onRemoveReference={removeDesignReference}
             onImportReferenceAsset={importDesignReferenceAsset}
@@ -3480,6 +3570,7 @@ export function App() {
       {worktreePreparation?.inspection.mode === 'CREATE' ? (
         <PrepareWorktreeModal
           inspection={worktreePreparation.inspection}
+          returnFocus={worktreePreparation.returnFocus}
           taskTitle={
             snapshot.tasks.find(
               (task) => task.id === worktreePreparation.inspection.taskId
@@ -3507,6 +3598,7 @@ export function App() {
       {worktreePreparation?.inspection.mode === 'RECOVER' ? (
         <RecoverWorktreeModal
           inspection={worktreePreparation.inspection}
+          returnFocus={worktreePreparation.returnFocus}
           taskTitle={
             snapshot.tasks.find((task) => task.id === worktreePreparation.inspection.taskId)
               ?.title ?? 'Selected task'

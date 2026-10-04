@@ -106,7 +106,7 @@ describe('run activity projection', () => {
     ]);
   });
 
-  it('sanitizes verification commands and excludes raw output from overview rows', () => {
+  it('keeps shell wrappers and raw output out of activity labels while retaining execution details', () => {
     const run = runFixture();
     const projection = buildRunActivityProjection({
       run,
@@ -134,9 +134,10 @@ describe('run activity projection', () => {
       }
     ]);
     expect(projection.outputSummary).toBe('show output · 2 lines');
-    expect(JSON.stringify(projection.rows)).not.toContain('/bin/zsh');
-    expect(JSON.stringify(projection.rows)).not.toContain('/Users/rojhat/project');
-    expect(JSON.stringify(projection.rows)).not.toContain('secret output');
+    expect(projection.rows[0].detail).not.toContain('/bin/zsh');
+    expect(projection.rows[0].detail).not.toContain('/Users/rojhat/project');
+    expect(projection.rows[0].detail).not.toContain('secret output');
+    expect(projection.rows[0].execution?.output).toBe('secret output\nsecond line');
   });
 
   it('maps file changes to write, edit, and patch rows', () => {

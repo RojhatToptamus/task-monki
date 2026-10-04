@@ -258,7 +258,7 @@ type CodexTaskDomainStore = Pick<
   | 'getTask'
   | 'getWorktree'
   | 'getRepository'
-  | 'verifyRunAttachments'
+  | 'prepareRunAttachments'
   | 'verifyTaskAttachments'
 >;
 
@@ -2173,7 +2173,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       let retainRecoveryClaim = false;
       try {
         const attachments = toAgentTurnAttachments(
-          await this.taskStore.verifyRunAttachments(run.id, run.taskId)
+          await this.taskStore.prepareRunAttachments(run.id, run.taskId)
         );
         assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
         const response = await this.resumeSessionWithProfile(

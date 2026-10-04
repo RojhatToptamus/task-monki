@@ -71,7 +71,6 @@ describe('overview run activity projection', () => {
         label: 'Ran',
         detail: '3 commands',
         grouped: true,
-        defaultOpen: true,
         children: [
           { label: 'Ran', detail: 'git diff --check' },
           { label: 'Ran', detail: 'npm test -- reviewActivity' },

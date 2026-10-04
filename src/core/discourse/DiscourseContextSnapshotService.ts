@@ -21,6 +21,8 @@ import type {
   ResolvedDiscourseContextReference
 } from './DiscourseContextResolver';
 import type { DiscourseWorkspace } from './DiscourseWorkspace';
+import type { DiscourseStore } from './DiscourseStore';
+import type { AgentTurnAttachment } from '../agent/AgentAttachmentDelivery';
 
 // An app planning ceiling, not an assertion about an unreported model capacity.
 const PLANNING_CONTEXT_TOKENS = 128_000;
@@ -32,6 +34,7 @@ export interface DiscourseReadOnlyExecutionScopeInput {
   readRoots: AgentAttestedReadRoot[];
   modelSettings: AgentExecutionSettings;
   clientOperationId: string;
+  attachments?: readonly AgentTurnAttachment[];
 }
 
 export type BuildDiscourseExecutionContext = (
@@ -58,6 +61,7 @@ export class DiscourseContextSnapshotService {
     private readonly resolver: DiscourseContextResolver,
     private readonly workspace: DiscourseWorkspace,
     private readonly buildExecutionContext: BuildDiscourseExecutionContext,
+    private readonly store: Pick<DiscourseStore, 'verifyAttachments'>,
     private readonly now: () => string = () => new Date().toISOString()
   ) {}
 
@@ -123,12 +127,15 @@ export class DiscourseContextSnapshotService {
       })
     );
     const scope = await this.executionScope(filesystemRoots, input.assignment);
+    const attachmentIds = [...input.transcript].reverse().find((message) => message.author.kind === 'USER')?.attachments?.map(({ id }) => id) ?? [];
+    const attachments = await this.store.verifyAttachments(input.conversationId, attachmentIds);
     const executionContext = unavailable
       ? undefined
       : await this.buildExecutionContext({
           sessionId: input.sessionId,
           runtimeId: input.assignment.runtimeId,
           ...scope,
+          attachments,
           clientOperationId: input.clientOperationId
         });
     const createdAt = this.now();
@@ -142,7 +149,7 @@ export class DiscourseContextSnapshotService {
           status: 'BLOCKED',
           sources,
           transcriptOrdinals: input.transcript.map((message) => message.ordinal),
-          attachmentIds: [],
+          attachmentIds,
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
           contextSchemaVersion: 2,
@@ -167,7 +174,7 @@ export class DiscourseContextSnapshotService {
             : 'READY',
           sources,
           transcriptOrdinals: input.transcript.map((message) => message.ordinal),
-          attachmentIds: [],
+          attachmentIds,
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
           contextSchemaVersion: 2,
@@ -273,6 +280,7 @@ export class DiscourseContextSnapshotService {
       sessionId: input.sessionId,
       runtimeId: input.assignment.runtimeId,
       ...scope,
+      attachments: await this.store.verifyAttachments(input.snapshot.conversationId, input.snapshot.attachmentIds),
       clientOperationId: input.clientOperationId
     });
     // Native policy identity belongs to this runtime session, not the shared

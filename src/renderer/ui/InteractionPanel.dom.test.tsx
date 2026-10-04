@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { InteractionRequestRecord } from '../../shared/contracts';
 import { InteractionPanel } from './InteractionPanel';
@@ -40,6 +40,28 @@ describe('mounted agent user-input interaction', () => {
         }
       }
     );
+  });
+
+  it('keeps failed approval delivery recoverable without exposing transport diagnostics as the alert', async () => {
+    const interaction = { ...userInputInteraction(), type: 'PERMISSION_APPROVAL' as const,
+      allowedActions: ['GRANT_TURN', 'DECLINE'] as InteractionRequestRecord['allowedActions'],
+      request: { startedAtMs: 0, cwd: '/work/project', permissions: {
+        fileSystem: { entries: [{ path: { type: 'path', path: '/work/project/src' }, access: 'write' as const }] }
+      } } };
+    const onRespond = vi.fn().mockRejectedValueOnce(new Error('Transport failed: internal-request-123')).mockResolvedValue(undefined);
+    render(<InteractionPanel interactions={[interaction]} sessions={[]} onRespond={onRespond} />);
+    const allow = screen.getByRole('button', { name: 'Grant for turn' });
+    fireEvent.click(allow);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).not.toContain('internal-request-123');
+    expect(screen.getByText('Write files')).toBeTruthy();
+    expect(screen.getByTitle('/work/project/src').textContent).toBe('src');
+    expect(screen.getByText('Transport failed: internal-request-123').closest('details')?.open).toBe(false);
+    await waitFor(() => expect(allow).toHaveProperty('disabled', false));
+    fireEvent.click(allow);
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(onRespond).toHaveBeenCalledTimes(2);
+    expect(onRespond.mock.lastCall?.[1]).toEqual({ interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: interaction.request.permissions });
   });
 
   it('lets a Design user return every choice to the agent exactly once', async () => {

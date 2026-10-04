@@ -1,4 +1,8 @@
 import crypto, { randomUUID } from 'node:crypto';
+import { ATTACHMENT_MAX_COUNT, ATTACHMENT_MAX_TOTAL_BYTES, type AttachmentContent, type AttachmentDescriptor } from '../../../shared/attachments';
+import { toAgentTurnAttachments, type AgentTurnAttachment } from '../../agent/AgentAttachmentDelivery';
+import { adoptDiscourseAttachmentDraft, deleteUnownedDraftAttachments, loadDraftFromReader } from './SqliteTaskAttachmentStore';
+import { ManagedFileStore } from './ManagedFileStore';
 import {
   DISCOURSE_LIMITS,
   type AgentAssignmentSnapshot,
@@ -746,6 +750,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
 
   constructor(
     private readonly database: AppDatabase,
+    private readonly managedFiles: ManagedFileStore,
     options: SqliteDiscourseStoreOptions = {}
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -761,6 +766,51 @@ export class SqliteDiscourseStore implements DiscourseStore {
   async close(): Promise<void> {
     this.closing = true;
     await Promise.allSettled([...this.active]);
+  }
+
+  private attachmentRecords(conversationId: string, ids: string[]) {
+    if (ids.length > ATTACHMENT_MAX_COUNT || new Set(ids).size !== ids.length) {
+      throw new Error('Select at most ten distinct files.');
+    }
+    return this.read((reader) => ids.map((id) => {
+      const row = reader.get<{ descriptor: string; storageKey: string; sha256: string; byteCount: number }>(
+        `SELECT a.value AS descriptor, f.storage_key AS storageKey,
+                f.content_sha256 AS sha256, f.byte_count AS byteCount
+           FROM discourse_messages m, json_each(m.payload_json, '$.attachments') a
+           JOIN managed_files f ON f.id = 'staged-attachment:' || json_extract(a.value, '$.id')
+          WHERE m.conversation_id = ? AND json_extract(a.value, '$.id') = ?
+            AND f.domain = 'DISCOURSE' AND f.owner_id = m.id
+            AND f.role = 'ATTACHMENT' AND f.state = 'LIVE'`,
+        [conversationId, id]
+      );
+      if (!row) throw new Error('The conversation attachment is no longer available.');
+      const record = parsePayload<AttachmentDescriptor>(row.descriptor, 'attachment');
+      if (record.sha256 !== row.sha256 || record.byteCount !== row.byteCount) {
+        throw storedIntegrity('attachment metadata does not match its managed file');
+      }
+      return { record, reference: { storageKey: row.storageKey, sha256: row.sha256, byteCount: row.byteCount } };
+    }));
+  }
+
+  getAttachmentDraft(draftId: string) {
+    return this.read((reader) => loadDraftFromReader(reader, draftId).snapshot);
+  }
+
+  async readAttachment(conversationId: string, attachmentId: string): Promise<AttachmentContent> {
+    const [entry] = await this.attachmentRecords(conversationId, [attachmentId]);
+    const bytes = await this.managedFiles.read(entry!.reference, ATTACHMENT_MAX_TOTAL_BYTES);
+    return { ...entry!.record, attachmentId: entry!.record.id, bytes: Uint8Array.from(bytes).buffer };
+  }
+
+  async verifyAttachments(conversationId: string, ids: string[]): Promise<AgentTurnAttachment[]> {
+    const entries = await this.attachmentRecords(conversationId, ids);
+    if (entries.reduce((total, { record }) => total + record.byteCount, 0) > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new Error('Attached files exceed the 20 MB message limit.');
+    }
+    return toAgentTurnAttachments(await Promise.all(entries.map(async ({ record, reference }, ordinal) => ({
+      record: { ...record, ordinal },
+      absolutePath: await this.managedFiles.resolveVerifiedPath(reference)
+    }))));
   }
 
   createConversation(
@@ -1037,7 +1087,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
         if (!acceptedSend) throw storedIntegrity('accepted send receipt target is missing');
         return { message: presentMessage(message), acceptedSend: clone(acceptedSend), aggregate: clone(loaded.aggregate) };
       },
-      (loaded) => {
+      (loaded, transaction) => {
         const aggregate = loaded.aggregate;
         if (aggregate.conversation.status !== 'OPEN') {
           throw new Error('Archived discourse conversations cannot accept messages.');
@@ -1102,6 +1152,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
           sourceMessageIds,
           contextRevisionId: contextUpdate.revision.id,
           clientMessageId: input.clientMessageId,
+          ...(input.attachmentDraftId ? { attachments: adoptDiscourseAttachmentDraft(transaction, input.attachmentDraftId, messageId) } : {}),
           requestFingerprint: input.requestFingerprint,
           createdAt: timestamp
         };
@@ -1195,6 +1246,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
       body: input.body,
       replyToMessageId: input.replyToMessageId ?? null,
       supersedesMessageId: input.supersedesMessageId ?? null,
+      attachmentDraftId: input.attachmentDraftId ?? null,
       sourceMessageIds,
       context
     });
@@ -1207,7 +1259,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
         requireReceiptId(receipt, 'messageId'),
         input.conversationId
       )),
-      (loaded) => {
+      (loaded, transaction) => {
         if (loaded.aggregate.conversation.status !== 'OPEN') {
           throw new Error('Archived discourse conversations cannot accept messages.');
         }
@@ -1234,6 +1286,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
           contextRevisionId: contextUpdate.revision.id,
           clientMessageId: input.clientMessageId,
           requestFingerprint: fingerprint,
+          ...(input.attachmentDraftId ? { attachments: adoptDiscourseAttachmentDraft(transaction, input.attachmentDraftId, messageId) } : {}),
           createdAt: timestamp
         };
         assertMessageAgainstLookup(loaded, message);
@@ -1592,7 +1645,27 @@ export class SqliteDiscourseStore implements DiscourseStore {
           input.conversationId
         ]
       );
+      const files = transaction.all<{ storageKey: string }>(
+        `SELECT storage_key AS storageKey FROM managed_files WHERE domain = 'DISCOURSE'
+           AND role = 'ATTACHMENT' AND owner_id IN (SELECT id FROM discourse_messages WHERE conversation_id = ?)`,
+        [input.conversationId]
+      );
+      transaction.run(`DELETE FROM managed_files WHERE domain = 'DISCOURSE' AND role = 'ATTACHMENT'
+        AND owner_id IN (SELECT id FROM discourse_messages WHERE conversation_id = ?)`, [input.conversationId]);
+      const drafts = transaction.all<{ id: string }>(
+        `SELECT a.id FROM attachment_drafts a JOIN discourse_drafts d
+           ON a.id = json_extract(d.payload_json, '$.attachmentDraftId')
+          WHERE d.conversation_id = ?`,
+        [input.conversationId]
+      );
       transaction.run('DELETE FROM discourse_conversations WHERE id = ?', [input.conversationId]);
+      const storageKeys = [
+        ...files.map((file) => file.storageKey),
+        ...deleteUnownedDraftAttachments(transaction, drafts.map(({ id }) => id))
+      ];
+      transaction.afterCommitDeferred(async () => {
+        await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
+      });
       return clone(tombstone);
     });
   }
@@ -1675,6 +1748,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
         assertConversationReadable(transaction, input.conversationId);
       }
       const existing = readDraft(transaction, id);
+      if (input.attachmentDraftId) loadDraftFromReader(transaction, input.attachmentDraftId);
       if (existing && input.expectedRevision !== existing.recordRevision) {
         throw new Error('Discourse draft changed before it could be saved.');
       }
@@ -1686,6 +1760,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
         ...(input.conversationId ? { conversationId: input.conversationId } : {}),
         recordRevision: (existing?.recordRevision ?? 0) + 1,
         body: input.body,
+        ...(input.attachmentDraftId ? { attachmentDraftId: input.attachmentDraftId } : {}),
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
         ...(input.supersedesMessageId ? { supersedesMessageId: input.supersedesMessageId } : {}),
         sourceMessageIds: uniqueIds(input.sourceMessageIds ?? []),
@@ -1744,6 +1819,12 @@ export class SqliteDiscourseStore implements DiscourseStore {
         throw new Error('Discourse draft changed before it could be deleted.');
       }
       transaction.run('DELETE FROM discourse_drafts WHERE id = ?', [input.draftId]);
+      const storageKeys = deleteUnownedDraftAttachments(
+        transaction, existing.attachmentDraftId ? [existing.attachmentDraftId] : []
+      );
+      transaction.afterCommitDeferred(async () => {
+        await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
+      });
     });
   }
 
@@ -2057,7 +2138,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
       loaded: LoadedConversation,
       transaction: AppDatabaseTransaction
     ) => T,
-    apply: (loaded: LoadedConversation) => MutationResult<T>
+    apply: (loaded: LoadedConversation, transaction: AppDatabaseTransaction) => MutationResult<T>
   ): Promise<T> {
     requireSafeId(conversationId, 'conversation id');
     requireFingerprint(requestFingerprint, 'request fingerprint');
@@ -2075,7 +2156,7 @@ export class SqliteDiscourseStore implements DiscourseStore {
       }
 
       loaded.aggregate.latestEventSequence += 1;
-      const mutation = apply(loaded);
+      const mutation = apply(loaded, transaction);
       for (const message of mutation.messages ?? []) persistMessage(transaction, message);
       validateLoaded(loaded, transaction);
       persistAggregate(transaction, loaded.aggregate);

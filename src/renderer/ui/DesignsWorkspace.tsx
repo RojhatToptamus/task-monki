@@ -6,7 +6,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent
+  type FormEvent,
+  type SetStateAction
 } from 'react';
 import type {
   AgentInteractionDecision,
@@ -125,6 +126,7 @@ export interface DesignsWorkspaceProps {
     designId: string,
     attachmentId: string
   ): Promise<AttachmentContent>;
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
   onAddReferences(designId: string, attachmentDraftId: string): Promise<string[]>;
   onRemoveReference(designId: string, referenceId: string): Promise<void>;
   onImportReferenceAsset(designId: string, referenceId: string): Promise<void>;
@@ -183,6 +185,7 @@ export function DesignsWorkspace({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onReadDesignDraftAttachment,
+  onReadAttachment,
   onAddReferences,
   onRemoveReference,
   onImportReferenceAsset,
@@ -224,16 +227,41 @@ export function DesignsWorkspace({
   const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [previewSetupModalOpen, setPreviewSetupModalOpen] = useState(false);
-  const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
-  const referenceDesignId = useRef<string | undefined>(undefined);
-  const restoredDraftRevision = useRef<number | undefined>(undefined);
+  const [attachmentPreviewOpen, setAttachmentPreviewOpen] = useState(false);
+  const [referenceSelection, setReferenceSelection] = useState(() => ({
+    designId: project?.design.id,
+    draftRevision: draft?.recordRevision,
+    ids: draft?.referenceIds ?? []
+  }));
+  if (
+    referenceSelection.designId !== project?.design.id ||
+    referenceSelection.draftRevision !== draft?.recordRevision
+  ) {
+    if (referenceSelection.designId !== project?.design.id) setFilesOpen(false);
+    setReferenceSelection({
+      designId: project?.design.id,
+      draftRevision: draft?.recordRevision,
+      ids: draft?.referenceIds ?? []
+    });
+  }
+  const selectedReferenceIds = referenceSelection.ids.filter((id) =>
+    project?.references.some((reference) => reference.id === id && reference.state === 'ACTIVE')
+  );
+  const setSelectedReferenceIds = (update: SetStateAction<string[]>) => {
+    setReferenceSelection((current) => ({
+      ...current,
+      ids: typeof update === 'function' ? update(current.ids) : update
+    }));
+  };
   const projectModelDiscoveryRef = useRef<string | undefined>(undefined);
   const visibleDesigns = visibleDesignProjects(designs, historyQuery, historyFilter);
   const activeDesignId = project?.design.id ?? selectedDesignId;
   const layoutView = designWorkspaceLayout(workspaceWidth, historyCollapsed, historyWidth);
-  const renderedLayout = layoutView.availableModes.includes(layout) ? layout : 'chat';
+  const filesWidth = filesOpen ? 300 : 0;
+  const contentLayout = designWorkspaceLayout(layoutView.mainWidth - filesWidth, true);
+  const renderedLayout = contentLayout.availableModes.includes(layout) ? layout : filesOpen ? 'canvas' : 'chat';
   const compact = workspaceWidth > 0 && !layoutView.splitAvailable;
-  const maxConversationWidth = Math.max(320, layoutView.mainWidth - 485);
+  const maxConversationWidth = Math.max(320, contentLayout.mainWidth - 485);
   const renderedConversationWidth = Math.min(conversationWidth, maxConversationWidth);
   const historyModalOpen = compact && !historyCollapsed;
   const projectRuntime = project
@@ -309,37 +337,6 @@ export function DesignsWorkspace({
     active: historyModalOpen
   });
 
-  useEffect(() => {
-    if (!project) {
-      setSelectedReferenceIds([]);
-      referenceDesignId.current = undefined;
-      restoredDraftRevision.current = undefined;
-      return;
-    }
-    const activeSet = new Set(project.references
-      .filter((reference) => reference.state === 'ACTIVE')
-      .map((reference) => reference.id));
-    if (referenceDesignId.current !== project.design.id) {
-      referenceDesignId.current = project.design.id;
-      restoredDraftRevision.current = draft?.recordRevision;
-      setSelectedReferenceIds(
-        (draft?.referenceIds ?? []).filter((referenceId) => activeSet.has(referenceId))
-      );
-      setFilesOpen(false);
-      return;
-    }
-    if (draft && restoredDraftRevision.current !== draft.recordRevision) {
-      restoredDraftRevision.current = draft.recordRevision;
-      setSelectedReferenceIds(
-        draft.referenceIds.filter((referenceId) => activeSet.has(referenceId))
-      );
-      return;
-    }
-    setSelectedReferenceIds((current) =>
-      current.filter((referenceId) => activeSet.has(referenceId))
-    );
-  }, [draft, project?.design.id, project?.references]);
-
   useLayoutEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
@@ -357,7 +354,8 @@ export function DesignsWorkspace({
     if (!workspace) return;
     workspace.style.setProperty('--design-history-width', `${historyWidth}px`);
     workspace.style.setProperty('--design-conversation-width', `${renderedConversationWidth}px`);
-  }, [historyWidth, renderedConversationWidth]);
+    workspace.style.setProperty('--design-files-width', `${filesWidth}px`);
+  }, [historyWidth, renderedConversationWidth, filesWidth]);
 
   const showCreate =
     creatingBlank || (!loading && !error && designs.length === 0 && !project);
@@ -548,7 +546,7 @@ export function DesignsWorkspace({
               project={project}
               historyCollapsed={historyCollapsed}
               layout={renderedLayout}
-              availableLayouts={layoutView.availableModes}
+              availableLayouts={contentLayout.availableModes}
               filesOpen={filesOpen}
               onHistoryCollapsedChange={onHistoryCollapsedChange}
               onLayoutChange={(nextLayout) => {
@@ -576,6 +574,7 @@ export function DesignsWorkspace({
               }
               onDelete={() => setDeleteOpen(true)}
             />
+            <div className="tm-designs-content">
             <div
               className={`tm-designs-split tm-designs-split--${renderedLayout}`}
             >
@@ -605,6 +604,8 @@ export function DesignsWorkspace({
                       onDiscardAttachmentDraft({ draftId })
                     }
                     onReadClipboardImage={onReadClipboardImage}
+                    onReadAttachment={onReadAttachment}
+                    onPreviewOpenChange={setAttachmentPreviewOpen}
                     onReadDraftAttachment={(attachmentId) =>
                       onReadDesignDraftAttachment(project.design.id, attachmentId)
                     }
@@ -660,9 +661,9 @@ export function DesignsWorkspace({
                         onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
                         onModalOpenChange={setPreviewSetupModalOpen} />
                     ) : undefined}
-                    setupRequired={Boolean(project.repositorySetup?.blocker) || project.turns.some((turn) => !turn.runId && !turn.outcome)}
+                    setupRequired={Boolean(project.repositorySetup?.blocker) || (project.revisions.length === 0 && project.turns.some((turn) => !turn.runId && !turn.outcome))}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen || previewSetupModalOpen}
+                    occluded={canvasOccluded || historyModalOpen || deleteOpen || renameOpen || previewSetupModalOpen || attachmentPreviewOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}
@@ -694,6 +695,7 @@ export function DesignsWorkspace({
                 selectedReferenceIds={selectedReferenceIds}
                 onSelectionChange={setSelectedReferenceIds}
                 onClose={() => setFilesOpen(false)}
+                onPreviewOpenChange={setAttachmentPreviewOpen}
                 onStageAttachmentBatch={onStageAttachmentBatch}
                 onDiscardAttachmentDraft={onDiscardAttachmentDraft}
                 onReadClipboardImage={onReadClipboardImage}
@@ -712,6 +714,7 @@ export function DesignsWorkspace({
                 }
               />
             ) : null}
+            </div>
           </>
         )}
       </section>

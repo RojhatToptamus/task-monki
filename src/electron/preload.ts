@@ -45,6 +45,11 @@ import type {
   StartRunRequest,
   StartPreviewRequest,
   StartReviewRequest,
+  QueueTaskInstructionRequest,
+  EditTaskInstructionRequest,
+  SendTaskInstructionRequest,
+  SaveTaskAgentDraftRequest,
+  SaveTaskPromptRequest,
   SteerRunRequest,
   RetryRunRequest,
   RestartDesignPreviewRequest,
@@ -209,6 +214,7 @@ const api: TaskManagerApi = {
   },
   discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
     invokeIpc('attachment:draft:discard', input),
+  getAttachmentDraft: (draftId: string) => invokeIpc('attachment:draft:get', draftId),
   readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
     attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
       invokeIpc('attachment:read', input)
@@ -268,6 +274,11 @@ const api: TaskManagerApi = {
   inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
     invokeIpc('worktree:inspectPreparation', input),
   startRun: (input: StartRunRequest) => invokeIpc('agent:startRun', input),
+  queueTaskInstruction: (input: QueueTaskInstructionRequest) => invokeIpc('agent:queueTaskInstruction', input),
+  editTaskInstruction: (input: EditTaskInstructionRequest) => invokeIpc('agent:editTaskInstruction', input),
+  sendTaskInstruction: (input: SendTaskInstructionRequest) => invokeIpc('agent:sendTaskInstruction', input),
+  saveTaskPrompt: (input: SaveTaskPromptRequest) => invokeIpc('task:savePrompt', input),
+  saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => invokeIpc('agent:saveTaskAgentDraft', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
     invokeIpc('agent:continueRun', input),

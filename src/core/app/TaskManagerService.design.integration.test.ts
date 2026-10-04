@@ -294,7 +294,7 @@ routes:
       oldDatabase.exec(`
         UPDATE app_settings
         SET settings_json = json_remove(json_set(settings_json, '$.schemaVersion', 12), '$.agentProfiles');
-        PRAGMA user_version = 2;
+        DROP TABLE task_instructions; PRAGMA user_version = 2;
       `);
     } finally {
       oldDatabase.close();

@@ -112,7 +112,7 @@ describe('ApplicationPersistence', () => {
     const legacy = new DatabaseSync(paths.databasePath);
     legacy.prepare('UPDATE runtime_sessions SET role = ?, payload_json = ? WHERE id = ?')
       .run('SUBAGENT', JSON.stringify(corrupted), root.id);
-    legacy.exec(`PRAGMA user_version = 5;
+    legacy.exec(`DROP TABLE task_instructions; PRAGMA user_version = 5;
       CREATE TRIGGER fail_role_repair BEFORE UPDATE ON runtime_sessions
       BEGIN SELECT RAISE(ABORT, 'test role repair failure'); END;`);
     legacy.close();
@@ -183,7 +183,7 @@ describe('ApplicationPersistence', () => {
       result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Mixed result.', findings: [] }
     };
     legacy.prepare('UPDATE tasks SET payload_json = ? WHERE id = ?').run(JSON.stringify(payload), task.id);
-    legacy.exec(`PRAGMA user_version = 3;
+    legacy.exec(`DROP TABLE task_instructions; PRAGMA user_version = 3;
       CREATE TRIGGER fail_review_repair BEFORE UPDATE ON tasks
       BEGIN SELECT RAISE(ABORT, 'test repair write failure'); END;`);
     legacy.close();

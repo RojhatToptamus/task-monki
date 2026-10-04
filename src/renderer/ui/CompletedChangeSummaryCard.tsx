@@ -19,6 +19,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 interface CompletedChangeSummaryPanelProps {
   run?: RunRecord;
   capturePending?: boolean;
+  compact?: boolean;
   gitSnapshots: GitSnapshotRecord[];
   artifacts: ArtifactRecord[];
   onViewDiff(snapshotId: string): void;
@@ -43,6 +44,7 @@ type DiffArtifactLoadState =
 export function CompletedChangeSummaryPanel({
   run,
   capturePending = false,
+  compact = false,
   gitSnapshots,
   artifacts,
   onViewDiff
@@ -128,6 +130,7 @@ export function CompletedChangeSummaryPanel({
 
   return (
     <CompletedChangeSummaryCard
+      compact={compact}
       summary={summary}
       captureStatus={captureStatus}
       snapshot={snapshot}
@@ -139,6 +142,7 @@ export function CompletedChangeSummaryPanel({
 }
 
 export function CompletedChangeSummaryCard({
+  compact = false,
   summary,
   captureStatus,
   snapshot,
@@ -146,6 +150,7 @@ export function CompletedChangeSummaryCard({
   historical = false,
   onViewDiff
 }: {
+  compact?: boolean;
   summary?: CompletedChangeSummary;
   captureStatus: CaptureStatus;
   snapshot?: GitSnapshotRecord;
@@ -153,6 +158,32 @@ export function CompletedChangeSummaryCard({
   historical?: boolean;
   onViewDiff?(): void;
 }) {
+  if (compact) {
+    if (captureStatus === 'NO_CHANGES' || captureStatus === 'NOT_CAPTURED') return null;
+    if (!summary) return <CaptureStatusMessage status={captureStatus} incomplete={incomplete} />;
+    const note = [
+      historical ? 'Historical capture' : undefined,
+      incomplete ? 'Incomplete' : undefined
+    ].filter(Boolean).join(' · ');
+    return <section className="tm-changes" aria-label="Changed files">
+      <header className="tm-changes__head">
+        <FilePlus2 size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+        <span className="tm-changes__title">{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
+        <DiffStat additions={summary.additions} deletions={summary.deletions} />
+        {note ? <span className="tm-changes__note" title={historical
+          ? `Captured ${snapshot ? formatCaptureTime(snapshot.capturedAt) : ''}; the worktree changed later.`.replace(' ;', ';')
+          : undefined}>{note}</span> : null}
+        {onViewDiff ? <button type="button" className="ghost-button tm-changes__action" onClick={onViewDiff}>View diff</button> : null}
+      </header>
+      <div className="tm-changes__files">
+        {summary.previewFiles.map((file) => <ChangeFileRow key={file.path} file={file} />)}
+        {summary.hiddenFileCount > 0 ? <details className="tm-changes__more">
+          <summary>Show {summary.hiddenFileCount} more {plural(summary.hiddenFileCount, 'file')}<DisclosureChevron /></summary>
+          {summary.hiddenFiles.map((file) => <ChangeFileRow key={file.path} file={file} />)}
+        </details> : null}
+      </div>
+    </section>;
+  }
   const title =
     incomplete && summary
       ? `Incomplete captured diff · ${summary.fileCount} observed ${plural(summary.fileCount, 'file')}`

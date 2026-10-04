@@ -151,6 +151,13 @@ const COLLECTIONS: readonly CollectionCodec[] = [
     })
   },
   {
+    key: 'taskInstructions', table: 'task_instructions', orderBy: 'instruction_order, id',
+    values: (r) => ({
+      id: field(r, 'id'), task_id: field(r, 'taskId'), instruction_order: field(r, 'order'),
+      payload_json: json(r)
+    })
+  },
+  {
     key: 'designTurns', table: 'design_turns', orderBy: 'turn_ordinal DESC, id', recordRevision: true,
     values: (r) => ({
       id: field(r, 'id'), design_id: field(r, 'designId'), client_message_id: field(r, 'clientMessageId'),
@@ -641,7 +648,7 @@ export class TaskStateMapper {
 function emptyPersistedTaskState(): PersistedTaskState {
   return {
     schemaVersion: TASK_STORE_SCHEMA_VERSION,
-    repositories: [], boards: [], tasks: [], designTurns: [], designReferences: [],
+    repositories: [], boards: [], tasks: [], taskInstructions: [], designTurns: [], designReferences: [],
     designRevisions: [], designSourceActions: [], iterations: [], worktrees: [], gitSnapshots: [],
     githubRepositories: [], branchPublications: [], pullRequests: [], ciRollups: [], reviewRollups: [],
     mergeSnapshots: [], previewPlans: [], previewApprovals: [], previewComposeProjects: [],

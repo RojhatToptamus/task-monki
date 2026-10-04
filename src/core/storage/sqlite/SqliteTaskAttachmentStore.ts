@@ -243,17 +243,8 @@ export class SqliteTaskAttachmentStore {
   discardDraft(draftId: string): Promise<void> {
     return this.enqueue(async () => {
       await this.database.write((transaction) => {
-        const draft = loadDraftFromReader(transaction, draftId);
-        transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draftId]);
-        transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draftId]);
-        for (const { record } of draft.references) {
-          transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
-        }
-        transaction.afterCommitDeferred(() =>
-          this.deleteManagedFiles(
-            draft.references.map(({ reference }) => reference.storageKey)
-          )
-        );
+        const storageKeys = deleteAttachmentDraftRecords(transaction, draftId);
+        transaction.afterCommitDeferred(() => this.deleteManagedFiles(storageKeys));
       });
     });
   }
@@ -272,7 +263,8 @@ export class SqliteTaskAttachmentStore {
   prepareDraftForExistingTask(
     draftId: string,
     taskId: string,
-    existingRecords: readonly TaskAttachmentRecord[]
+    existingRecords: readonly TaskAttachmentRecord[],
+    limitScope: 'TASK' | 'MESSAGE'
   ): Promise<PreparedSqliteAttachmentAppend> {
     return this.enqueue(async () => {
       const draft = await this.loadDraft(draftId);
@@ -280,8 +272,9 @@ export class SqliteTaskAttachmentStore {
         throw new AttachmentStoreError('ATTACHMENT_INVALID_REQUEST', 'Add at least one reference.', 400);
       }
       const incomingBytes = draft.snapshot.attachments.reduce((sum, record) => sum + record.byteCount, 0);
-      assertTaskLimits(existingRecords.length, existingRecords.reduce((sum, record) => sum + record.byteCount, 0), draft.snapshot.attachments.length, incomingBytes);
-      await this.verifyTaskRecords(existingRecords);
+      const countedRecords = limitScope === 'TASK' ? existingRecords : [];
+      assertTaskLimits(countedRecords.length, countedRecords.reduce((sum, record) => sum + record.byteCount, 0), draft.snapshot.attachments.length, incomingBytes);
+      if (limitScope === 'TASK') await this.verifyTaskRecords(existingRecords);
       const records = draft.snapshot.attachments.map<TaskAttachmentRecord>((staged, index) => ({
         id: this.createId(),
         taskId,
@@ -420,7 +413,7 @@ export class SqliteTaskAttachmentStore {
         await this.database.read((reader) =>
           reader.all<{ storage_key: string }>(
             `SELECT storage_key FROM managed_files
-             WHERE domain = 'TASK' AND role IN ('ATTACHMENT', 'STAGED_ATTACHMENT')`
+             WHERE domain IN ('TASK', 'DISCOURSE') AND role IN ('ATTACHMENT', 'STAGED_ATTACHMENT')`
           ).map((row) => row.storage_key)
         )
       );
@@ -435,16 +428,8 @@ export class SqliteTaskAttachmentStore {
 
   private async discardDraftDirect(draft: DraftWithReferences): Promise<void> {
     await this.database.write((transaction) => {
-      transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draft.snapshot.id]);
-      transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draft.snapshot.id]);
-      for (const { record } of draft.references) {
-        transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
-      }
-      transaction.afterCommitDeferred(() =>
-        this.deleteManagedFiles(
-          draft.references.map(({ reference }) => reference.storageKey)
-        )
-      );
+      const storageKeys = deleteAttachmentDraftRecords(transaction, draft.snapshot.id);
+      transaction.afterCommitDeferred(() => this.deleteManagedFiles(storageKeys));
     });
   }
 
@@ -487,7 +472,7 @@ export class SqliteTaskAttachmentStore {
     const used = await this.database.read((reader) => reader.get<{ bytes: number | bigint }>(
       `SELECT coalesce(sum(byte_count), 0) AS bytes
        FROM managed_files
-       WHERE domain = 'TASK' AND role IN ('ATTACHMENT', 'STAGED_ATTACHMENT') AND state = 'LIVE'`
+       WHERE domain IN ('TASK', 'DISCOURSE') AND role IN ('ATTACHMENT', 'STAGED_ATTACHMENT') AND state = 'LIVE'`
     ));
     if (Number(used?.bytes ?? 0) + additionalBytes > this.quota) {
       throw new AttachmentStoreError(
@@ -542,7 +527,7 @@ export class SqliteTaskAttachmentStore {
   }
 }
 
-function loadDraftFromReader(reader: SqlReader, draftId: string): DraftWithReferences {
+export function loadDraftFromReader(reader: SqlReader, draftId: string): DraftWithReferences {
   const draft = reader.get<DraftRow>(
     'SELECT id, created_at, updated_at FROM attachment_drafts WHERE id = ?',
     [draftId]
@@ -586,6 +571,41 @@ function loadDraftFromReader(reader: SqlReader, draftId: string): DraftWithRefer
     },
     references
   };
+}
+
+export function deleteUnownedDraftAttachments(transaction: AppDatabaseTransaction, draftIds: readonly string[]): string[] {
+  return draftIds.flatMap((draftId) => {
+    const unowned = transaction.get<{ id: string }>(
+      `SELECT id FROM attachment_drafts WHERE id = ?
+         AND NOT EXISTS (SELECT 1 FROM discourse_drafts WHERE json_extract(payload_json, '$.attachmentDraftId') = ?)
+         AND NOT EXISTS (SELECT 1 FROM design_drafts WHERE attachment_draft_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM tasks WHERE json_extract(payload_json, '$.agentAttachmentDraftId') = ?)`,
+      [draftId, draftId, draftId, draftId]
+    );
+    return unowned ? deleteAttachmentDraftRecords(transaction, draftId) : [];
+  });
+}
+
+/** Removes references before the caller deletes their bytes after commit. */
+function deleteAttachmentDraftRecords(transaction: AppDatabaseTransaction, draftId: string): string[] {
+  const draft = loadDraftFromReader(transaction, draftId);
+  transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draftId]);
+  transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draftId]);
+  for (const { record } of draft.references) {
+    transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
+  }
+  return draft.references.map(({ reference }) => reference.storageKey);
+}
+
+/** Transfers immutable staged bytes in the same transaction that admits their message. */
+export function adoptDiscourseAttachmentDraft(transaction: AppDatabaseTransaction, draftId: string, messageId: string): import('../../../shared/attachments').AttachmentDescriptor[] {
+  const draft = loadDraftFromReader(transaction, draftId);
+  for (const { record } of draft.references) {
+    transaction.run(`UPDATE managed_files SET domain = 'DISCOURSE', owner_id = ?, role = 'ATTACHMENT' WHERE id = ?`, [messageId, stagedManagedFileId(record.id)]);
+  }
+  transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draftId]);
+  transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draftId]);
+  return draft.snapshot.attachments.map(({ draftId: _draftId, clientToken: _clientToken, ...record }) => record);
 }
 
 function insertManagedFile(

@@ -198,11 +198,9 @@ button {
 
 /* Text entry is exempt from modality suppression: a caret with no visible host
    is the most reported dark-theme complaint in the product. */
-.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea, select):focus,
+.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea:not(.tm-composer textarea), select):focus,
 .app-shell :where(
-  .field__prompt-shell,
-  .tm-discourse-composer,
-  .tm-design-composer__shell,
+  .tm-composer:has(textarea:focus),
   .tm-discourse-search,
   .tm-filefilter__search,
   .tm-agent-console__search
@@ -220,7 +218,7 @@ button {
 
 .app-shell[data-input-modality='keyboard'] :where(
   input:not([type='checkbox']):not([type='radio']),
-  textarea,
+  textarea:not(.tm-composer textarea),
   select,
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
@@ -228,9 +226,7 @@ button {
   .tm-repository-select__trigger
 ):focus,
 .app-shell[data-input-modality='keyboard'] :where(
-  .field__prompt-shell,
-  .tm-discourse-composer,
-  .tm-design-composer__shell,
+  .tm-composer:has(textarea:focus),
   .tm-discourse-search,
   .tm-filefilter__search,
   .tm-agent-console__search

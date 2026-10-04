@@ -50,6 +50,22 @@ export interface AgentPermissionSettings {
   approvalsReviewer: AgentApprovalsReviewer;
 }
 
+export function matchingExecutionPolicyPreset(
+  presets: readonly AgentExecutionPolicyPreset[],
+  settings: AgentExecutionSettings
+): AgentExecutionPolicyPreset | undefined {
+  const sandbox = settings.sandbox ?? 'WORKSPACE_WRITE';
+  const approvalPolicy = settings.approvalPolicy ?? 'on-request';
+  const approvalsReviewer = normalizeAgentApprovalsReviewer(settings.approvalsReviewer);
+  return presets.find((preset) =>
+    preset.sandbox === sandbox &&
+    preset.approvalPolicy === approvalPolicy &&
+    preset.approvalsReviewer === approvalsReviewer &&
+    (preset.networkAccess !== 'DISABLED' || !isAgentNetworkAccessEnabled(settings)) &&
+    (preset.networkAccess !== 'REQUIRED' || isAgentNetworkAccessEnabled(settings))
+  );
+}
+
 export function settingsForExecutionPolicyPreset(
   preset: AgentExecutionPolicyPreset,
   options: { networkAccess?: boolean } = {}

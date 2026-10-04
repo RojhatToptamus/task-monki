@@ -73,7 +73,8 @@ export class DiscourseRuntimeHost {
       ),
       async (input) => {
         return options.agents.buildExecutionContext(input.runtimeId, input);
-      }
+      },
+      options.discourseStore
     );
     this.service = new DiscourseService(
       options.discourseStore,

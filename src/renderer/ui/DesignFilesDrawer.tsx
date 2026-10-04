@@ -25,6 +25,7 @@ export function DesignFilesDrawer({
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
+  onPreviewOpenChange,
   onAddReferences,
   onRemoveReference,
   onImportReferenceAsset
@@ -34,6 +35,7 @@ export function DesignFilesDrawer({
   selectedReferenceIds: string[];
   onSelectionChange(referenceIds: string[]): void;
   onClose(): void;
+  onPreviewOpenChange(open: boolean): void;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
@@ -138,7 +140,7 @@ export function DesignFilesDrawer({
       <header className="tm-design-files__head">
         <div>
           <h2 id="design-files-title">Files and references</h2>
-          <p>Checked items ride along with your next message.</p>
+          <p>Select references to include in your next message.</p>
         </div>
         <button type="button" aria-label="Close files and references" onClick={onClose}>
           <UiCloseIcon size={12} />
@@ -182,6 +184,7 @@ export function DesignFilesDrawer({
             <ul className="task-attachments" aria-label="References to add">
               {attachments.items.map((item) => (
                 <AttachmentChip
+                onPreviewOpenChange={onPreviewOpenChange}
                   key={item.clientId}
                   item={item}
                   disabled={submitting}

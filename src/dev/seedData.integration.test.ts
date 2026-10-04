@@ -22,7 +22,7 @@ import {
   selectLatestReviewRollup
 } from '../renderer/model/selectors';
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
-import { buildRunProgressViewModel } from '../renderer/model/runProgress';
+import { sessionEntries } from '../renderer/model/agentSession';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
 import { selectBoardTasks } from '../renderer/model/boards';
 import { buildPreviewViewModel } from '../renderer/model/preview';
@@ -332,33 +332,10 @@ describe('Task Monki development seed data', () => {
       }
     });
     const approvalRun = snapshot.runs.find((run) => run.id === approvalTask.currentRunId);
-    const approvalProgress = buildRunProgressViewModel({
-      preferredRun: approvalRun,
-      runs: snapshot.runs.filter((run) => run.taskId === approvalTask.id),
-      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === approvalTask.id),
-      items: snapshot.agentItems.filter((item) => item.taskId === approvalTask.id)
-    });
-    expect(approvalProgress).toMatchObject({
-      state: 'RUNNING',
-      headerLabel: 'Current run'
-    });
-    expect(approvalProgress?.steps.map((step) => step.step)).toEqual([
-      'Prepare interaction request',
-      'Wait for user response',
-      'Continue implementation'
+    expect(approvalRun?.status).toBe('AWAITING_APPROVAL');
+    expect(snapshot.agentPlanRevisions.find((plan) => plan.runId === approvalRun?.id)?.steps.map((step) => step.step)).toEqual([
+      'Prepare interaction request', 'Wait for user response', 'Continue implementation'
     ]);
-    expect(approvalProgress?.activityTail).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ category: 'read', label: 'Read' }),
-        expect.objectContaining({ category: 'edit', label: 'Edited' }),
-        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' })
-      ])
-    );
-    expect(approvalProgress?.activityTail).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ category: 'permission', label: 'Waiting' })
-      ])
-    );
 
     const runningReviewTask = taskForScenario(manifest, snapshot, 'review-running');
     const runningReviewRun = snapshot.runs.find(
@@ -377,44 +354,12 @@ describe('Task Monki development seed data', () => {
     const runningTask = taskForScenario(manifest, snapshot, 'agent-running');
     const runningRun = snapshot.runs.find((run) => run.id === runningTask.currentRunId);
     expect(runningRun).toMatchObject({ status: 'RUNNING' });
-    const runningProgress = buildRunProgressViewModel({
-      preferredRun: runningRun,
-      runs: snapshot.runs.filter((run) => run.taskId === runningTask.id),
-      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === runningTask.id),
-      items: snapshot.agentItems.filter((item) => item.taskId === runningTask.id)
-    });
-    expect(runningProgress).toMatchObject({
-      state: 'RUNNING',
-      headerLabel: 'Current run'
-    });
-    expect(runningProgress?.steps.map((step) => step.step)).toEqual([
-      'Read task context',
-      'Update overview progress panel',
-      'Verify seeded UI state'
-    ]);
-    expect(runningProgress?.activityTail).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          category: 'read',
-          label: 'Read',
-          detail: 'src/renderer/ui/TaskDetail.tsx',
-          metric: '12 lines'
-        }),
-        expect.objectContaining({
-          category: 'edit',
-          label: 'Edited',
-          detail: 'src/renderer/model/runProgress.ts',
-          metric: '+2 -1'
-        }),
-        expect.objectContaining({
-          category: 'verify',
-          label: 'Running',
-          detail: 'npm run typecheck',
-          status: 'active'
-        })
-      ])
-    );
-    expect(runningProgress?.activityOutputSummary).toBe('show output · 12 lines');
+    const runningActivity = sessionEntries(runningRun!, snapshot.agentItems, []).flatMap((entry) => entry.kind === 'steps' ? entry.steps.flatMap((step) => step.kind === 'tool' ? [step.row] : []) : []);
+    expect(runningActivity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: 'read', detail: 'src/renderer/ui/TaskDetail.tsx' }),
+      expect.objectContaining({ category: 'edit', metric: '+2 -1' }),
+      expect.objectContaining({ category: 'verify', detail: 'npm run typecheck', status: 'active' })
+    ]));
 
     const failedTask = taskForScenario(manifest, snapshot, 'agent-failed');
     expect(failedTask).toMatchObject({
@@ -435,25 +380,9 @@ describe('Task Monki development seed data', () => {
 
     const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
     const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
-    const completedProgress = buildRunProgressViewModel({
-      preferredRun: completedRun,
-      runs: snapshot.runs.filter((run) => run.taskId === completedTask.id),
-      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === completedTask.id),
-      items: snapshot.agentItems.filter((item) => item.taskId === completedTask.id)
-    });
-    expect(completedProgress).toMatchObject({
-      state: 'COMPLETED',
-      headerLabel: 'Final plan',
-      activityTail: [],
-      footer: {
-        title: 'Agent run completed',
-        tone: 'neutral'
-      }
-    });
-    expect(completedProgress?.steps.map((step) => step.step)).toEqual([
-      'Read task context',
-      'Implement seeded change',
-      'Verify local state'
+    expect(completedRun?.status).toBe('COMPLETED');
+    expect(snapshot.agentPlanRevisions.find((plan) => plan.runId === completedRun?.id)?.steps.map((step) => step.step)).toEqual([
+      'Read task context', 'Implement seeded change', 'Verify local state'
     ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
