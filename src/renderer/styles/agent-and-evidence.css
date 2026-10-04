@@ -58,17 +58,6 @@
 .tm-agent-session__editing { display: flex; align-items: center; gap: 8px; padding: 6px 8px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-agent-session__editing > button { margin-left: auto; }
 
-.tm-queue { padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--hair); }
-.tm-queue__head { display: flex; align-items: baseline; gap: 8px; min-height: var(--h-compact); padding-top: 2px; }
-.tm-queue__title { color: var(--text-soft); font-size: var(--t-help); font-weight: 600; }
-.tm-queue__hint { color: var(--muted); font-size: var(--t-meta); }
-.tm-queue ol { max-height: min(152px, 20vh); margin: 0; padding: 0; overflow: auto; list-style: none; }
-.tm-queue__item { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--h-icon); border-radius: var(--r-xs); font-size: var(--t-help); }
-.tm-queue__item[aria-current] { background: var(--sel); }
-.tm-queue__order { flex: 0 0 16px; color: var(--faint); font: var(--t-meta)/1.5 var(--font-mono); text-align: center; }
-.tm-queue__text { flex: 1; min-width: 0; overflow: hidden; color: var(--text-soft); line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
-.tm-queue__item .tm-iconbtn { flex: 0 0 auto; width: var(--h-icon); height: var(--h-icon); color: var(--muted); }
-
 /* Overview — the agent's state and latest answer, one click from the conversation. */
 .tm-agent-overview__link { display: flex; width: 100%; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 0; text-align: left; }
 .tm-agent-overview__link > span:first-child { display: grid; gap: 4px; min-width: 0; }

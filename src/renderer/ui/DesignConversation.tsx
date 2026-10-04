@@ -20,6 +20,7 @@ import { ActivityRows, ActivitySteps } from './ActivitySteps';
 import { Conversation, useConversationScroll } from './Conversation';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
+import { MessageQueue } from './MessageQueue';
 import { InteractionPanel } from './InteractionPanel';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
@@ -90,10 +91,13 @@ export function DesignConversation({
   const [submitting, setSubmitting] = useState(false);
   const [submissionOutcomeUnknown, setSubmissionOutcomeUnknown] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [removingQueuedTurn, setRemovingQueuedTurn] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
+  const focusAfterSubmit = useRef(false);
   const draftRevisionRef = useRef(draft?.recordRevision ?? 0);
   const savedDraftSignatureRef = useRef(
     draftSignature(
@@ -129,6 +133,12 @@ export function DesignConversation({
   const detailedActivityRows = designDetailedActivityRows(project);
   const scroller = useConversationScroll({ startAtBottom: true });
   const prepend = useRef<{ height: number; top: number } | undefined>(undefined);
+  const pending = project.conversation.filter((entry) => !entry.turn.runId && entry.turn.outcome === undefined);
+  const conversation = project.conversation.filter((entry) => entry.turn.runId || (entry.turn.outcome !== undefined && entry.turn.outcome !== 'CANCELED'));
+  const referenceNames = (ids: string[]) => ids.map((id) => {
+    const reference = project.references.find((candidate) => candidate.id === id);
+    return project.attachments.find((attachment) => attachment.id === reference?.attachmentId)?.displayName ?? 'Unavailable reference';
+  });
   const canSubmit =
     canRefine &&
     message.trim().length > 0 &&
@@ -275,9 +285,17 @@ export function DesignConversation({
       );
     } finally {
       submittingRef.current = false;
+      focusAfterSubmit.current = true;
       setSubmitting(false);
     }
   };
+
+  useLayoutEffect(() => {
+    if (!submitting && focusAfterSubmit.current) {
+      focusAfterSubmit.current = false;
+      composerRef.current?.focus();
+    }
+  }, [submitting]);
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
@@ -329,7 +347,7 @@ export function DesignConversation({
             {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
           </button>
         ) : null}
-        {project.conversation.length === 0 ? (
+        {conversation.length === 0 && pending.length === 0 ? (
           <div className="tm-design-conversation__empty">
             <strong>
               {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
@@ -347,7 +365,7 @@ export function DesignConversation({
             </span>
           </div>
         ) : (
-          project.conversation.map((entry) => (
+          conversation.map((entry) => (
             <DesignTurnMessages
               key={entry.turn.id}
               entry={entry}
@@ -364,17 +382,7 @@ export function DesignConversation({
                   setError(caught instanceof Error ? caught.message : 'Could not duplicate this version.')
                 )
               }
-              references={entry.turn.referenceIds.map((referenceId) => {
-                const reference = project.references.find(
-                  (candidate) => candidate.id === referenceId
-                );
-                const attachment = reference
-                  ? project.attachments.find(
-                      (candidate) => candidate.id === reference.attachmentId
-                    )
-                  : undefined;
-                return attachment?.displayName ?? 'Unavailable reference';
-              })}
+              references={referenceNames(entry.turn.referenceIds)}
             />
           ))
         )}
@@ -435,7 +443,6 @@ export function DesignConversation({
                   {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               ) : null}
-              {activeWork ? <span className="tm-composer__hint">After response</span> : null}
               <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
                 aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
                 title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
@@ -453,17 +460,28 @@ export function DesignConversation({
                   ? `${attachments.activeItems.length} ${
                       attachments.activeItems.length === 1 ? 'new file' : 'new files'
                     } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : project.actions.queuedTurnCount > 0 ? `${project.actions.queuedTurnCount} queued` : '⌘ Enter')
+                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : '⌘ Enter')
           }</span>}
         >
+          <MessageQueue items={pending.map((entry) => ({ id: entry.turn.id, text: entry.userMessage,
+            detail: referenceNames(entry.turn.referenceIds).join(', ') || undefined }))}
+            disabled={removingQueuedTurn || submitting || submissionOutcomeUnknown || stopping}
+            onRemove={(id) => {
+              setRemovingQueuedTurn(true); setError(undefined);
+              void onStop(id)
+                .then(() => composerRef.current?.focus())
+                .catch((caught) => setError(caught instanceof Error ? caught.message : 'Could not remove the queued message.'))
+                .finally(() => setRemovingQueuedTurn(false));
+            }} />
           <label className="tm-visually-hidden" htmlFor="design-refinement-message">
             Refine this Design
           </label>
           <textarea
+            ref={composerRef}
             id="design-refinement-message"
             value={message}
             rows={3}
-            placeholder="Describe the next change…"
+            placeholder={activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
             disabled={
               !canRefine ||
               submitting ||
@@ -540,10 +558,8 @@ function DesignTurnMessages({
       <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
-        ) : (
-          <p className="tm-design-message__pending">{view.detail ?? view.statusLabel}</p>
-        )}
-        {view.detail && entry.assistantMessage ? (
+        ) : null}
+        {view.detail ? (
           <p className="tm-design-message__detail">{view.detail}</p>
         ) : null}
         <MessageMeta className="tm-design-message__ready-actions">

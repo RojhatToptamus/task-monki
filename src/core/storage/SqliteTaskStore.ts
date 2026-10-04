@@ -7370,12 +7370,13 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
     .filter((turn) => turn.designId === task.id)
     .sort((left, right) => left.order - right.order);
   const latestTurn = turns.at(-1);
+  const currentTurn = turns.find((turn) => turn.outcome === undefined) ?? latestTurn;
   const latestRevision = state.designRevisions
     .filter((revision) => revision.designId === task.id)
     .sort((left, right) => left.ordinal - right.ordinal)
     .at(-1);
-  const run = latestTurn?.runId
-    ? state.runs.find((candidate) => candidate.id === latestTurn.runId)
+  const run = currentTurn?.runId
+    ? state.runs.find((candidate) => candidate.id === currentTurn.runId)
     : undefined;
   const needsInput = state.interactionRequests.some(
     (interaction) =>
@@ -7412,12 +7413,12 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
       ? 'NEEDS_ATTENTION'
       : needsInput
         ? 'NEEDS_INPUT'
-        : latestTurn?.outcome === 'FAILED' ||
-        latestTurn?.outcome === 'NEEDS_ATTENTION' ||
-        (latestTurn?.outcome === 'CANCELED' && !latestRevision) ||
+        : currentTurn?.outcome === 'FAILED' ||
+        currentTurn?.outcome === 'NEEDS_ATTENTION' ||
+        (currentTurn?.outcome === 'CANCELED' && !latestRevision) ||
         previewNeedsRestart
       ? 'NEEDS_ATTENTION'
-      : sourceAction || (latestTurn && latestTurn.outcome === undefined) || activeRun
+      : sourceAction || (currentTurn && currentTurn.outcome === undefined) || activeRun
         ? latestRevision
           ? 'UPDATING'
           : 'STARTING'

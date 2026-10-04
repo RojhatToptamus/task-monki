@@ -17,10 +17,11 @@ import { Conversation, useConversationScroll } from './Conversation';
 import { InteractionPanel } from './InteractionPanel';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
+import { MessageQueue } from './MessageQueue';
 import { PlanCard } from './Plan';
 import { StatusGlyph } from './StatusBadge';
 import {
-  ArrowUp, Check, ChevronDown, CircleAlert, Copy, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw, ShieldCheck, X
+  ArrowUp, Check, ChevronDown, CircleAlert, Copy, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw, ShieldCheck
 } from 'lucide-react';
 
 export interface AgentSessionProps {
@@ -84,8 +85,6 @@ export function AgentSession(props: AgentSessionProps) {
 
   const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.worktreePath);
   const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).sort((a, b) => a.order - b.order);
-  const queuedCount = pending.filter((item) => item.status === 'QUEUED').length;
-  const heldCount = pending.length - queuedCount;
   const attentionPending = props.interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status));
   const activeReview = props.runs.find((item) => item.mode === 'REVIEW' && isActiveRunStatus(item.status));
   const displayedRun = activeReview ?? run;
@@ -213,8 +212,7 @@ export function AgentSession(props: AgentSessionProps) {
   const model = displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model;
 
   return <section className="tm-agent-session" aria-label="Agent session">
-    <Conversation instance={scroller} label="Session history" className="tm-agent-session__conversation">
-      {props.header}
+    <Conversation instance={scroller} label="Session history" className="tm-agent-session__conversation" header={props.header}>
       <div className="tm-agent-session__column">
         {!run ? props.preRun : null}
         {historyWindow.first > 0 || historyWindow.clip > 0
@@ -242,25 +240,18 @@ export function AgentSession(props: AgentSessionProps) {
     </Conversation>
     {run ? <div className="tm-agent-session__footer">
       <form className="tm-composer tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
-        {pending.length ? <div className="tm-queue">
-          <div className="tm-queue__head">
-            <span className="tm-queue__title">{pending.length} {heldCount ? 'pending' : 'queued'}</span>
-            <span className="tm-queue__hint">{heldCount
-              ? queuedCount ? `${queuedCount} queued · ${heldCount} paused` : 'Paused · continue when ready'
-              : 'Sends after this response'}</span>
-          </div>
-          <ol aria-label="Pending instructions">{pending.map((item, index) => <li key={item.id} className="tm-queue__item" aria-current={editing?.id === item.id ? true : undefined}>
-            <span className="tm-queue__order" aria-hidden="true">{index + 1}</span>
-            <span className="tm-queue__text" title={item.text}>{item.text}</span>
-            {heldCount > 0 && queuedCount > 0 && item.status === 'HELD' ? <span className="tm-queue__hint">Paused</span> : null}
-            {item.status === 'HELD' && !active ? <button type="button" className="tm-iconbtn" aria-label={`Continue instruction ${index + 1}`} disabled={busy || Boolean(blocked)} title={blocked ?? 'Continue with this instruction'}
-              onClick={() => void act(async () => { await props.onSendQueue(item.id, run.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><Play size={16} strokeWidth={1.5} aria-hidden="true" /></button> : null}
-            <button type="button" className="tm-iconbtn" aria-label={`Edit instruction ${index + 1}`} title="Edit instruction" disabled={busy}
-              onClick={() => { setEditing({ id: item.id, text: item.text }); setError(undefined); composer.current?.focus(); }}><Pencil size={16} strokeWidth={1.5} aria-hidden="true" /></button>
-            <button type="button" className="tm-iconbtn" aria-label={`Remove instruction ${index + 1}`} title="Remove instruction" disabled={busy}
-              onClick={() => void act(async () => { await props.onEditQueue(item.id); if (editing?.id === item.id) cancelEdit(); composer.current?.focus(); })}><X size={16} strokeWidth={1.5} aria-hidden="true" /></button>
-          </li>)}</ol>
-        </div> : null}
+        <MessageQueue items={pending.map((item) => ({ id: item.id, text: item.text, held: item.status === 'HELD' }))}
+          editingId={editing?.id} disabled={busy} continueDisabledReason={blocked}
+          onContinue={!active ? (id) => void act(async () => {
+            await props.onSendQueue(id, run.id); if (editing?.id === id) cancelEdit(); composer.current?.focus();
+          }) : undefined}
+          onEdit={(id) => {
+            const item = pending.find((candidate) => candidate.id === id);
+            if (item) { setEditing({ id, text: item.text }); setError(undefined); composer.current?.focus(); }
+          }}
+          onRemove={(id) => void act(async () => {
+            await props.onEditQueue(id); if (editing?.id === id) cancelEdit(); composer.current?.focus();
+          })} />
         {editing ? <div className="tm-agent-session__editing">
           <Pencil size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />Editing queued message
           <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button>

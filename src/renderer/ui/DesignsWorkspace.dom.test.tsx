@@ -952,30 +952,37 @@ describe('mounted Design workspace', () => {
     await waitFor(() => expect(onAddReferences).toHaveBeenCalledWith('design-1', 'post-create-draft'));
   });
 
-  it('queues another message during active work and exposes Stop', async () => {
+  it('keeps pending messages in the composer queue and cancels only the selected message', async () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('queued-message-draft')
     );
     const onSubmitRefinement = vi.fn(async () => undefined);
     const onStopTurn = vi.fn(async () => undefined);
-    render(
+    const project = designProject({
+      design: designListItem({ status: 'UPDATING' }),
+      currentRun: { id: 'run-1', status: 'RUNNING' } as DesignProjectDetail['currentRun'],
+      conversation: [
+        {
+          ...designProject().conversation[0]!,
+          turn: { ...designProject().conversation[0]!.turn, runId: 'run-1', outcome: undefined },
+          runStatus: 'RUNNING',
+          assistantMessage: 'Updating the page.'
+        },
+        {
+          turn: {
+            id: 'turn-2', designId: 'design-1', clientMessageId: 'message-2', order: 2,
+            messageSource: 'INLINE_MESSAGE', referenceIds: [],
+            createdAt: '2026-08-20T10:01:00Z', checkpoint: { boundary: 'QUEUED' }
+          },
+          userMessage: 'Add another theme.'
+        }
+      ],
+      actions: { canRefine: true, queuedTurnCount: 1, canStop: true, stopTurnId: 'turn-1', canRestart: false, canRestore: false, canDuplicate: false, canArchive: false, canDelete: false }
+    });
+    const view = render(
       <DesignsWorkspace
         {...workspaceProps({
-          project: designProject({
-            design: designListItem({ status: 'UPDATING' }),
-            currentRun: { id: 'run-1', status: 'RUNNING' } as DesignProjectDetail['currentRun'],
-            actions: {
-              canRefine: true,
-              queuedTurnCount: 1,
-              canStop: true,
-              stopTurnId: 'turn-1',
-              canRestart: false,
-              canRestore: false,
-              canDuplicate: false,
-              canArchive: false,
-              canDelete: false
-            }
-          }),
+          project,
           onStageAttachmentBatch,
           onSubmitRefinement,
           onStopTurn
@@ -983,7 +990,10 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByText('1 queued')).toBeTruthy();
+    const queue = screen.getByRole('list', { name: 'Pending instructions' });
+    expect(within(queue).getByText('Add another theme.')).toBeTruthy();
+    expect(screen.getAllByText('Add another theme.')).toHaveLength(1);
+    expect(screen.queryByText('Queued')).toBeNull();
     const input = conversationReferenceInput(document.body);
     fireEvent.change(input, {
       target: { files: [attachmentFile('queued.txt', 'text/plain', 'Queued direction')] }
@@ -1001,8 +1011,35 @@ describe('mounted Design workspace', () => {
       )
     );
 
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Refine this Design' })));
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(onStopTurn).toHaveBeenCalledWith('design-1', 'turn-1');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' }).hasAttribute('disabled')).toBe(false));
+
+    const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    fireEvent.change(composer, { target: { value: 'Keep this unsent draft.' } });
+    onStopTurn.mockRejectedValueOnce(new Error('Could not cancel the queued message.'));
+    fireEvent.click(within(queue).getByRole('button', { name: 'Remove instruction 1' }));
+    await screen.findByRole('alert');
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this unsent draft.');
+    expect(within(queue).getByText('Add another theme.')).toBeTruthy();
+    fireEvent.click(within(queue).getByRole('button', { name: 'Remove instruction 1' }));
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+    expect(onStopTurn).toHaveBeenLastCalledWith('design-1', 'turn-2');
+    view.rerender(<DesignsWorkspace {...workspaceProps({
+      project: {
+        ...project,
+        conversation: project.conversation.map((entry) => entry.turn.id === 'turn-2'
+          ? { ...entry, turn: { ...entry.turn, outcome: 'CANCELED' } }
+          : entry),
+        actions: { ...project.actions, queuedTurnCount: 0 }
+      },
+      onStopTurn
+    })} />);
+    expect(screen.queryByRole('list', { name: 'Pending instructions' })).toBeNull();
+    expect(screen.queryByText('Add another theme.')).toBeNull();
+    expect(screen.getByText('Updating the page.')).toBeTruthy();
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this unsent draft.');
   });
 
   it('restores and persists an unsent draft outside the task transcript', async () => {

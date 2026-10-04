@@ -556,7 +556,6 @@
   line-height: 1.62;
 }
 
-.tm-design-message__pending,
 .tm-design-message__detail {
   margin: 0;
   color: var(--muted);

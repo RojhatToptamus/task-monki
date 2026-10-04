@@ -13,9 +13,10 @@ retry and no PR exists, Overview omits the inactive PR card. The Agent summary
 owns the recovery explanation; existing PR evidence remains visible.
 
 The Agent tab is a chronological conversation with one history scroller and a
-pinned composer. The task heading and tabs scroll with the conversation rather
-than reserving a fixed header. The original request is its first user message. Authored
-follow-ups appear when admitted; live instructions appear within the active
+pinned composer. The task heading and tabs reappear when scrolling upward and hide
+when scrolling downward. Keyboard focus keeps them visible. Header motion uses
+the shared duration and reduced-motion rules. The original request is its first
+user message. Authored follow-ups appear when admitted; live instructions appear within the active
 response. User messages use the shared filled message surface; agent prose stays
 on the content sheet. Exchanges remain readable without opening run accordions.
 
@@ -103,12 +104,15 @@ An in-flight submission cannot repeat. Successful submission returns focus to
 the composer; rejected submission preserves text and exposes the error.
 Drafts persist per task across tabs, reloads, and application restarts.
 
-Pending instructions appear in a bounded list inside the composer.
+Agent and Design use `MessageQueue` for a bounded pending list inside the composer.
+Design keeps pending turns out of the transcript until execution starts. Its queue
+offers cancellation through the existing Design turn operation. Agent retains its
+own edit, remove, and held-instruction controls.
 The action row uses shared controls with accessible labels and tooltips.
 Its delivery menu distinguishes an active-run message from an after-response queue.
 Agent, Design, and Discourse action menus use Radix (the shadcn foundation) for
 portals, viewport collision handling, dismissal, and keyboard navigation.
-Pending instructions can be edited or removed until claimed. Editing uses the same text field
+Pending Agent instructions can be edited or removed until claimed. Editing uses the same text field
 while keeping the unsent draft separate. Cmd/Ctrl+Enter saves an edit; Escape cancels
 it. A rejected edit keeps its text. Save and Cancel return focus to the composer
 without changing its draft.

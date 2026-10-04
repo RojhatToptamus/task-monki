@@ -982,7 +982,8 @@ export function App() {
       try {
         const detail = await taskManagerApi.cancelDesignTurn({ designId, turnId });
         applyDesignActionDetail(detail, false);
-        notify('Stopping Design work.', 'info');
+        const turn = detail.turns.find((candidate) => candidate.id === turnId);
+        notify(turn?.outcome === 'CANCELED' && !turn.runId ? 'Queued message removed.' : 'Stopping Design work.', 'info');
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : 'Could not stop work.';
         notify(message, 'error');

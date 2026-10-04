@@ -72,14 +72,13 @@ import {
   DiscourseContextPreviewIcon,
   DiscourseMoreIcon,
   DiscoursePanelRightIcon,
-  DiscoursePinIcon as PinIcon,
-  DiscourseRepositoryIcon as RepositoryIcon,
-  DiscourseTaskIcon as TaskIcon
+  DiscoursePinIcon as PinIcon
 } from './DiscourseIcons';
 import { PanelIcon } from './AppNavigation';
 import {
   ConfirmDialog,
   ContextPreview,
+  ContextReference,
   InspectorSidebar,
   InspectorSection
 } from './DiscourseOverlays';
@@ -2236,15 +2235,12 @@ export function DiscourseWorkspace({
             ) : (
               <ul className="tm-discourse-context-list">
                 {pinned.map((reference) => (
-                  <li key={reference.contextLinkId}>
-                    <span className={`tm-discourse-context-kind tm-discourse-context-kind--${reference.entityKind.toLowerCase()}`}>
-                      {reference.entityKind === 'TASK' ? <TaskIcon /> : <RepositoryIcon />}
-                    </span>
-                    <span><strong>{reference.labelSnapshot}</strong><small>{reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · {availabilityLabel(reference.availability)}</small></span>
+                  <ContextReference key={reference.contextLinkId} kind={reference.entityKind} label={reference.labelSnapshot}
+                    description={`${reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · ${availabilityLabel(reference.availability)}`}>
                     <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
                       <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
                     </button>
-                  </li>
+                  </ContextReference>
                 ))}
               </ul>
             )}
