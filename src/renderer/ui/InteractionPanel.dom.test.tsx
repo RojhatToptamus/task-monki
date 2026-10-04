@@ -5,7 +5,8 @@ import { InteractionPanel } from './InteractionPanel';
 
 describe('mounted agent user-input interaction', () => {
   it('submits native multiple-choice, custom, and free-text answers exactly once', async () => {
-    const onRespond = vi.fn(async () => undefined);
+    let finish!: () => void;
+    const onRespond = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
     render(
       <InteractionPanel
         interactions={[userInputInteraction()]}
@@ -18,6 +19,8 @@ describe('mounted agent user-input interaction', () => {
     expect((submit as HTMLButtonElement).disabled).toBe(true);
     const checks = screen.getByRole('group', { name: 'Which checks should run?' });
     fireEvent.click(within(checks).getByRole('checkbox', { name: /Unit/ }));
+    expect(screen.queryByRole('textbox', { name: 'Checks other answer' })).toBeNull();
+    fireEvent.click(within(checks).getByRole('checkbox', { name: 'Other…' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Checks other answer' }), {
       target: { value: 'Smoke' }
     });
@@ -28,6 +31,8 @@ describe('mounted agent user-input interaction', () => {
     fireEvent.click(submit);
     fireEvent.click(submit);
 
+    expect(screen.getByRole('button', { name: 'Sending…' }).getAttribute('aria-busy')).toBe('true');
+    expect(within(checks).getByRole('checkbox', { name: /Unit/ })).toHaveProperty('disabled', true);
     expect(onRespond).toHaveBeenCalledOnce();
     expect(onRespond).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'interaction-input' }),
@@ -40,6 +45,8 @@ describe('mounted agent user-input interaction', () => {
         }
       }
     );
+    finish();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull());
   });
 
   it('keeps failed approval delivery recoverable without exposing transport diagnostics as the alert', async () => {
@@ -104,8 +111,18 @@ describe('mounted agent user-input interaction', () => {
     );
 
     fireEvent.click(screen.getByRole('radio', { name: /New customers/ }));
-    fireEvent.focus(screen.getByRole('textbox', { name: 'Audience other answer' }));
+    const audience = screen.getByRole('group', { name: 'Who is this page for?' });
+    const other = within(audience).getByRole('radio', { name: 'Other…' });
+    other.focus();
     expect(screen.getByRole('radio', { name: /New customers/ })).toHaveProperty('checked', true);
+    fireEvent.click(other);
+    expect(screen.getByRole('radio', { name: /New customers/ })).toHaveProperty('checked', false);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Audience other answer' }), { target: { value: 'Local partners' } });
+    fireEvent.click(screen.getByRole('radio', { name: /New customers/ }));
+    expect(screen.queryByRole('textbox', { name: 'Audience other answer' })).toBeNull();
+    fireEvent.click(other);
+    expect(screen.getByRole('textbox', { name: 'Audience other answer' })).toHaveProperty('value', 'Local partners');
+    fireEvent.click(screen.getByRole('radio', { name: /New customers/ }));
     const decide = screen.getByRole('button', { name: 'Decide the rest' });
     fireEvent.click(decide);
     fireEvent.click(decide);

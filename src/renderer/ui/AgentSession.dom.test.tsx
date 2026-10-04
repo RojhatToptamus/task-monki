@@ -221,6 +221,11 @@ describe('Agent session interactions', () => {
         id: 'audience', header: 'Audience', question: 'Who uses the app?', isOther: true, isSecret: false
       }] }, allowedActions: ['ANSWER'], policyWarnings: [], requestRawMessage: makeRawMessage(), requestedAt: run.startedAt
     }] })} />);
+    const composer = screen.getByRole('textbox', { name: 'Instruction' });
+    expect(composer).toHaveProperty('readOnly', true);
+    expect(composer.getAttribute('placeholder')).toBe('Answer above to continue');
+    expect(screen.queryByRole('button', { name: 'Queue' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy();
     const answer = screen.getByRole('textbox', { name: 'Who uses the app?' });
     fireEvent.change(answer, { target: { value: 'Staff only; keep keyboard access.' } });
     const submit = screen.getByRole('button', { name: 'Submit answers' });

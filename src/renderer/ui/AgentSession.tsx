@@ -89,8 +89,11 @@ export function AgentSession(props: AgentSessionProps) {
   const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string; attachmentDraftId?: string; attachmentClientIds: string[] } | undefined>(undefined);
   const attention = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const questionPending = !editing && props.interactions.some((item) => item.type === 'USER_INPUT' && ['PENDING', 'RESPONDING'].includes(item.status));
+  const questionPrompt = props.interactions.some((item) => item.type === 'USER_INPUT' && item.status === 'PENDING')
+    ? 'Answer above to continue' : 'Waiting for confirmation…';
   const files = useTaskAttachments({ ...props.attachmentOptions, enabled: Boolean(run) && props.attachmentOptions.enabled,
-    initialDraft: run ? props.attachmentOptions.initialDraft : undefined, blocked: busy || Boolean(editing), preserveDraftOnClose: true });
+    initialDraft: run ? props.attachmentOptions.initialDraft : undefined, blocked: busy || Boolean(editing) || questionPending, preserveDraftOnClose: true });
   const editFiles = useTaskAttachments({ ...props.attachmentOptions, enabled: Boolean(editing) && props.attachmentOptions.enabled,
     blocked: busy, initialDraft: undefined, onPersistDraft: undefined, preserveDraftOnClose: false });
   const composerFiles = editing ? editFiles : files;
@@ -291,7 +294,7 @@ export function AgentSession(props: AgentSessionProps) {
     </Conversation>
     {run ? <div className="tm-agent-session__footer">
       <form className="tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
-        <AttachmentComposerShell attachments={composerFiles} attachmentLabel="Message attachments" addButtonTitle="Attach images or text files"
+        <AttachmentComposerShell compact={questionPending} attachments={composerFiles} attachmentLabel="Message attachments" addButtonTitle="Attach images or text files"
           hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
           toolbarAction={<>
             {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}>{busy ? 'Saving…' : 'Save'}</button> : <>
@@ -301,7 +304,7 @@ export function AgentSession(props: AgentSessionProps) {
                   onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}
               {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
                 title="Stop the current response" onClick={() => void act(() => props.onStop(displayedRun.id))}>Stop</button> : null}
-              {mode ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
+              {mode && !questionPending ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
                 <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
                   aria-label={delivery[mode].label}
                   title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
@@ -332,9 +335,9 @@ export function AgentSession(props: AgentSessionProps) {
           <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button>
         </div> : null}
         <label className="tm-visually-hidden" htmlFor={`agent-draft-${task.id}`}>{editing ? 'Edit queued instruction' : 'Instruction'}</label>
-        <textarea className="tm-composer__input" ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy}
+        <textarea className="tm-composer__input" ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy || questionPending} aria-disabled={questionPending || undefined}
           aria-describedby={hint ? `agent-composer-note-${task.id}` : undefined} maxLength={TASK_INSTRUCTION_MAX_LENGTH}
-          placeholder={mode ? delivery[mode].placeholder : 'Continue the work…'}
+          placeholder={questionPending ? questionPrompt : mode ? delivery[mode].placeholder : 'Continue the work…'}
           onPaste={composerFiles.paste}
           onChange={(event) => { if (editing) setEditing({ ...editing, text: event.target.value }); else props.onDraftChange(event.target.value); }}
           onKeyDown={(event) => {

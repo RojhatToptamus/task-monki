@@ -1199,6 +1199,7 @@ describe('mounted Design workspace', () => {
 
   it('embeds one blocking provider response in the conversation', () => {
     const onRespondToInteraction = vi.fn(async () => undefined);
+    const onSubmitRefinement = vi.fn(async () => undefined);
     render(
       <DesignsWorkspace
         {...workspaceProps({
@@ -1206,8 +1207,7 @@ describe('mounted Design workspace', () => {
             design: designListItem({ status: 'NEEDS_INPUT' }),
             interactions: [userInputInteraction()],
             actions: {
-              canRefine: false,
-              refineDisabledReason: 'Answer the current question first.',
+              canRefine: true,
               queuedTurnCount: 0,
               canStop: true,
               stopTurnId: 'turn-1',
@@ -1218,12 +1218,21 @@ describe('mounted Design workspace', () => {
               canDelete: false
             }
           }),
+          draft: { designId: 'design-1', body: 'Preserve this draft.', referenceIds: [], recordRevision: 1, updatedAt: '2026-08-20T10:00:00.000Z' },
+          onSubmitRefinement,
           onRespondToInteraction
         })}
       />
     );
 
     expect(screen.getAllByText('Needs input').length).toBeGreaterThan(0);
+    const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    expect(composer).toHaveProperty('readOnly', true);
+    expect(composer).toHaveProperty('value', 'Preserve this draft.');
+    fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true });
+    expect(onSubmitRefinement).not.toHaveBeenCalled();
+    expect(composer.getAttribute('placeholder')).toBe('Answer above to continue');
+    expect(screen.queryByRole('button', { name: 'Queue' })).toBeNull();
     const choices = screen.getByRole('group', { name: 'Which theme should the preview use?' });
     fireEvent.click(within(choices).getByRole('radio', { name: /Light/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));

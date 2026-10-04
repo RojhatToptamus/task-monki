@@ -412,6 +412,8 @@ In Progress:
   earlier answer makes them relevant. Without a structured tool, safe choices
   use judgment; a material unresolved blocker requires a user follow-up.
 - Question forms keep native choices, custom answers, and multiple selections.
+  Selecting **Other…** reveals an input that grows with the answer.
+  While questions await an answer or confirmation, the regular composer stays compact and read-only. Stop remains available.
   Design's **Decide for me** delegates unanswered choices and preserves completed
   answers. Answered interactions appear once in conversation history. Unconfirmed
   delivery remains labelled and never triggers an automatic resend.

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check } from 'lucide-react';
 import type {
   AgentCommandApprovalRequest,
   AgentFileChangeApprovalRequest,
@@ -694,18 +695,6 @@ function UserInputRequest({
       </div>
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
-          <ActionButton
-            label={submitting ? 'Sending…' : 'Submit answers'}
-            busy={submitting}
-            disabled={disabled || !canSubmit}
-            onClick={() =>
-              onRespond({
-                interactionType: 'USER_INPUT',
-                action: 'ANSWER',
-                answers
-              })
-            }
-          />
           {canDelegate ? (
             <ActionButton
               label={unanswered.length < request.questions.length ? 'Decide the rest' : 'Decide for me'}
@@ -726,6 +715,18 @@ function UserInputRequest({
               }
             />
           ) : null}
+          <ActionButton
+            label={submitting ? 'Sending…' : 'Submit answers'}
+            busy={submitting}
+            disabled={disabled || !canSubmit}
+            onClick={() =>
+              onRespond({
+                interactionType: 'USER_INPUT',
+                action: 'ANSWER',
+                answers
+              })
+            }
+          />
         </div>
       ) : null}
     </>
@@ -745,10 +746,11 @@ function UserInputQuestion({
 }) {
   if (!question.options?.length) {
     return (
-      <label className="field">
+      <label className="field interaction-question">
         <span>{question.question}</span>
         <textarea
-          rows={3}
+          className="interaction-question__input"
+          rows={1}
           disabled={disabled}
           value={typeof value === 'string' ? value : ''}
           onChange={(event) => onChange(event.target.value)}
@@ -789,6 +791,7 @@ function UserInputQuestion({
         {question.options.map((option, index) => (
           <label className="interaction-choice" key={`${index}:${option.label}`}>
             <input
+              className="tm-visually-hidden"
               type={inputType}
               name={question.id}
               disabled={disabled}
@@ -799,34 +802,32 @@ function UserInputQuestion({
               <strong>{option.label}</strong>
               {option.description ? <small>{option.description}</small> : null}
             </span>
+            <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
           </label>
         ))}
         {question.isOther ? (
-          <div className="interaction-choice interaction-choice--other">
-            <label>
+          <div className="interaction-choice-custom">
+            <label className="interaction-choice">
               <input
+                className="tm-visually-hidden"
                 type={inputType}
                 name={question.id}
                 disabled={disabled}
                 checked={choice.customSelected}
                 onChange={(event) => chooseCustom(event.target.checked)}
               />
-              <strong>Other</strong>
+              <span><strong>Other…</strong></span>
+              <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
             </label>
-            <textarea
-              rows={2}
+            {choice.customSelected ? <textarea
+              className="interaction-question__input"
+              rows={1}
+              placeholder="Your answer…"
               aria-label={`${question.header} other answer`}
               disabled={disabled}
               value={choice.custom}
-              onChange={(event) =>
-                onChange({
-                  ...choice,
-                  selected: question.allowsMultiple ? choice.selected : [],
-                  customSelected: true,
-                  custom: event.target.value
-                })
-              }
-            />
+              onChange={(event) => onChange({ ...choice, custom: event.target.value })}
+            /> : null}
           </div>
         ) : null}
       </div>

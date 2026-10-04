@@ -16,6 +16,7 @@ export function AttachmentComposerShell({
   toolbarStart,
   toolbarAction,
   className = '',
+  compact = false,
   removeDisabled = false,
   bindDropTarget = true
 }: {
@@ -30,12 +31,13 @@ export function AttachmentComposerShell({
   toolbarStart?: ReactNode;
   toolbarAction?: ReactNode;
   className?: string;
+  compact?: boolean;
   removeDisabled?: boolean;
   bindDropTarget?: boolean;
 }) {
   return (
     <div
-      className={`tm-composer field__prompt-shell ${className} ${
+      className={`tm-composer field__prompt-shell ${className} ${compact ? 'tm-composer--paused' : ''} ${
         attachments.isDragging ? 'field__prompt-shell--dragging' : ''
       }`.trim()}
       onDragEnter={bindDropTarget ? attachments.dragEnter : undefined}
@@ -44,6 +46,7 @@ export function AttachmentComposerShell({
       onDrop={bindDropTarget ? attachments.drop : undefined}
     >
       {children}
+      {compact ? <span className="tm-visually-hidden">{hint}</span> : null}
       {attachments.items.length > 0 ? (
         <ul className="task-attachments" aria-label={attachmentLabel}>
           {attachments.items.map((item) => (
@@ -58,32 +61,34 @@ export function AttachmentComposerShell({
         </ul>
       ) : null}
       <div className="tm-composer__toolbar">
-        {toolbarStart}
-        <input
-          ref={attachments.inputRef}
-          className="task-attachment-input"
-          type="file"
-          multiple
-          accept={ATTACHMENT_FILE_INPUT_ACCEPT}
-          disabled={attachments.interactionBlocked}
-          tabIndex={-1}
-          aria-hidden="true"
-          onChange={attachments.selectFiles}
-        />
-        <button
-          type="button"
-          className="task-attachment-add"
-          disabled={attachments.interactionBlocked}
-          title={addButtonTitle}
-          onClick={() => {
-            if (onAddButtonClick) onAddButtonClick();
-            else attachments.inputRef.current?.click();
-          }}
-        >
-          <PaperclipIcon />
-          <span>{addButtonLabel}</span>
-        </button>
-        <span className="task-attachment-hint">{hint}</span>
+        {!compact ? <>
+          {toolbarStart}
+          <input
+            ref={attachments.inputRef}
+            className="task-attachment-input"
+            type="file"
+            multiple
+            accept={ATTACHMENT_FILE_INPUT_ACCEPT}
+            disabled={attachments.interactionBlocked}
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={attachments.selectFiles}
+          />
+          <button
+            type="button"
+            className="task-attachment-add"
+            disabled={attachments.interactionBlocked}
+            title={addButtonTitle}
+            onClick={() => {
+              if (onAddButtonClick) onAddButtonClick();
+              else attachments.inputRef.current?.click();
+            }}
+          >
+            <PaperclipIcon />
+            <span>{addButtonLabel}</span>
+          </button>
+          <span className="task-attachment-hint">{hint}</span>
+        </> : null}
         {toolbarAction}
       </div>
       {attachments.isDragging ? (

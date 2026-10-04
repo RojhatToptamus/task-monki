@@ -2929,6 +2929,18 @@ async function createInteraction(
                 ]
               },
               {
+                id: 'seed_checks',
+                header: 'Checks',
+                question: 'Which checks should run before the agent hands this task back for review?',
+                isOther: true,
+                isSecret: false,
+                allowsMultiple: true,
+                options: [
+                  { label: 'Focused tests', description: 'Check the affected behavior.' },
+                  { label: 'Desktop walkthrough', description: 'Exercise keyboard navigation, long answers, and recovery in the running desktop app.' }
+                ]
+              },
+              {
                 id: 'seed_detail',
                 header: 'Details',
                 question: 'What should the agent preserve while it continues?',
