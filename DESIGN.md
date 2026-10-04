@@ -15,7 +15,8 @@ seen the app should be indistinguishable from one that shipped a year ago.
 When two sources disagree, the higher one wins. Never average them.
 
 1. **The bound design system** — fonts, palette, components, and any existing
-   mock of this product. If it has a component for what you're building, fork it.
+   mock of this product. Reuse the shared component. Improve it when the
+   requirement is shared. Keep workflow-specific behavior with its existing owner.
 2. **This document** — the rules that keep additions consistent.
 3. **The existing implementation** — match the closest shipped surface for
    anything the two above leave open. "Closest" means same layout archetype
@@ -220,8 +221,8 @@ planes.
   box-shadow, never a border, so no geometry moves between rest, hover and focus.
   Focus does not add a second line and does not recolour this one — it swaps the
   same rim to `--field-edge-focus`, one notch up in the identical neutral ink.
-  What §11 still rejects is two lines on one control, or a line drawn **instead
-  of** the fill step. An object — something with a boundary that sits above its plane and could
+  Do not put two lines on one control or draw a line **instead of** the fill step.
+  An object — something with a boundary that sits above its plane and could
   conceptually be picked up — gets `--edge-raised` instead.
 - **Polarity is automatic, and it is the whole reason this works in both modes.**
   All three tokens are alpha over `ink`, so the same token is a dark hairline in
@@ -458,9 +459,12 @@ rather than aligning boxes, and keep 8–9px between icon and label.
 
 ## 4. Spacing and geometry
 
-4px grid. The whole vocabulary: **4 · 6 · 8 · 10 · 12 · 14 · 16 · 20 · 24 · 32**.
-Lay sibling groups out with flex/grid `gap` — never per-child margins, never
-whitespace between inline elements.
+Use the shared spacing and geometry defaults below. Align related headings,
+content, fields, and actions to common edges. Keep spacing within a group smaller
+than spacing between groups. Give containers consistent internal padding,
+including expanded and error states. Place actions beside the content they affect
+or in its established footer. Add a container only when it communicates a
+meaningful grouping or boundary.
 
 | Thing | Padding / gap |
 |---|---|
@@ -511,15 +515,19 @@ but it opens at these values and never below the minimum.
 
 ## 5. Component contracts
 
-A component is a reusable pattern: if it appears twice, or plausibly will, it is
-one component with props — not two similar blocks. Before adding a new one,
-answer §9.
+Reuse components for equivalent content and interactions across screens. Similar
+appearance alone does not justify a shared abstraction. When an existing component
+fails the required interaction, improve or replace it and remove the superseded
+implementation. Adapt established primitives, including shadcn/ui or AI Elements,
+to Task Monki's tokens and behavior. Adopting UI primitives does not require
+replacing the runtime.
 
 **Buttons — four families, no fifth.** Primary (`--primary` fill, `--on-primary`
 ink; one per surface), secondary (`--field` fill), ghost (transparent, `--hover`
 on hover), destructive (soft tint, never a filled red block). Primary and
-secondary share geometry so a pair aligns. Icon-only buttons are ghost, 16px
-glyph, and always carry an `aria-label`.
+secondary share geometry so a pair aligns. Choose button emphasis by action
+priority, not by whether the button contains an icon or a label. Icon-only buttons use a
+16px glyph and always carry an `aria-label`.
 
 Primary and secondary are **one geometry with different fills** — same height,
 same padding, same radius, same minimum width — so a pair aligns to the pixel. A
@@ -546,13 +554,16 @@ Never rely on placeholder as the label.
 the caret is the real confirmation; a multi-line surface repainting under the
 mouse is the noisiest thing a quiet app can do.
 
-**Composer — one pattern everywhere** (briefs, messages, follow-ups): context
-chips above the text area, run configuration below it, primary action bottom-right,
-keyboard hint at `--t-meta` `--muted`. The composer is a single `--field` surface
-at `--r-md` with its toolbar inside the same fill divided by a `--hair` — not a
-bordered box, not a stack of separately outlined parts, and not a surface that
-changes colour when the pointer crosses it. Drag-over is a fill step plus a 1px
-accent line, on the same element that will receive the drop.
+**Conversations.** Keep messages chronological and readable. Distinguish authors
+through consistent placement and treatment. Show identity labels when they resolve
+ambiguity. Keep tools, plans, and diagnostics subordinate to the exchange.
+Collapse verbose supporting detail, not entire messages.
+
+**Composers.** Present text, attachments, pending messages, and delivery controls
+as one interaction. Use the shared composer surface without another input-shaped
+container inside it. Separate mode selection from actions. Make delivery timing
+and held states clear where the user sends or edits a message. Preserve the draft
+and selected files through supported navigation, failure, and restart paths.
 
 **Segmented vs menu.** Segmented for 2–4 options whose labels fit on one line at
 the narrowest width the container reaches; a dropdown for anything longer or
@@ -566,8 +577,8 @@ closes, arrow keys move, focus returns to the trigger.
 optional one-line description under the label. Rows are separated by `--hair`
 inside one panel. Never wrap each setting in its own card.
 
-**Cards — fixed content order.** Machine context and status on the first line
-(context left in mono `--muted`, status pill right), then the title at 12–12.5/600
+**Task collection cards — fixed content order.** Machine context and status on
+the first line (context left in mono `--muted`, status pill right), then the title at 12–12.5/600
 over at most two lines, then a `--hair`, then a metadata footer in mono `--faint`.
 Actions live in the footer or a hover-revealed ghost button — never a row of
 buttons in the header. No card inside a card. If the whole card is clickable, the
@@ -615,8 +626,9 @@ single action that resolves it. No illustration, no second button.
   cleared only by the user. Scroll position is restored when returning to a list.
 - **Tooltips are for names and shortcuts**, delayed ~400ms, never for information
   needed to make the decision in front of you.
-- **One primary action per surface**, and it is the same action the Enter key
-  performs.
+- **One primary action per surface.** Use the established keyboard behavior for
+  each control. Multiline editing and input composition must not trigger
+  accidental submission.
 
 ---
 
@@ -624,18 +636,18 @@ single action that resolves it. No illustration, no second button.
 
 - **In a collection, state is a word, not a mark.** A column of coloured dots is
   unreadable; a column of words is scannable. Marks belong on a detail surface.
-- **One mark per surface.** The status mark is the loudest thing available. If a
-  panel already carries one, the second becomes a word.
 - **One tone per unit, carried by one element.** Never tint the mark, the heading
   and the border of the same card. A tinted pill is the usual carrier.
-- **Progress is one component at two sizes**, not two designs. Steps read
-  `label … state`, right-aligned state in `--muted` unless it is terminal. An
-  indeterminate phase says what it is waiting for, in words.
+- Place current activity beside the work it describes. Distinguish execution
+  status, provider-exposed reasoning, plans, and final results. Derive progress
+  from observed state; never invent steps, percentages, or reasoning.
 - **Stale is one ribbon**, with the same wording wherever it appears: the evidence
   shown no longer matches the current diff, and here is the one action that
   refreshes it. A ribbon or a state word — never both.
-- Failures state what failed, what it means, and the next action. Never a raw
-  error string alone; put the raw output behind a disclosure.
+- Present each status or error once within the interaction. State what happened
+  and the available next action. Keep raw diagnostics available through secondary
+  details. Add explanatory copy only when it changes the user's decision or
+  prevents a likely mistake.
 
 ---
 
@@ -666,8 +678,11 @@ repeats what the rail already says.
   focused modes need no "Exit" control and no breadcrumb.
 - **The sidebar is one surface at two widths** — icons collapsed, icons plus
   labels expanded. Not two components.
-- Each panel scrolls its own body; headers and footers stay pinned. Overflow is
-  clipped by the panel, never leaked into the shell.
+- Give each workspace a clear scroll owner. Keep navigation and actions reachable
+  without unnecessarily reducing the reading area. Menus and popovers must escape
+  clipping containers and remain within the window.
+- Related tabs share the same shell geometry. Switching tabs must not introduce
+  unexplained gutters, background seams, or header movement.
 - Every boundary between two panels is a resize handle: 5px hit area, visible
   only on hover, with a keyboard-reachable equivalent.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
@@ -715,9 +730,12 @@ repeats what the rail already says.
 - Live regions announce state changes that happen without user action (a run
   finishing, a review arriving).
 - Honour `prefers-reduced-motion`: transitions collapse, nothing loops.
-- Keyboard: Escape closes the topmost layer, Enter activates the default action,
-  arrow keys move within a list or segmented control, and every action reachable
-  by mouse is reachable by keyboard.
+- Use the established keyboard behavior for each control. Multiline editing and
+  input composition must not trigger accidental submission. Escape closes the
+  topmost layer. Arrow keys move within a list or segmented control. Every action
+  reachable by mouse is reachable by keyboard.
+- Preserve normal selection and copying of messages, code, and filenames. Drag
+  regions and click handlers must not intercept those interactions.
 
 ---
 
@@ -744,135 +762,11 @@ is actually running.
 
 ---
 
-## 10. Verification checklist
+## 10. Verification
 
-Run this before submitting. Measure, don't eyeball — the first three are
-invisible to review and trivial to check in the inspector.
-
-**Measured**
-- [ ] No colour literal anywhere in the diff (grep the diff for `#`, `rgb`,
-      `rgba`, colour names — including SVG and shadows).
-- [ ] Every `var(--x)` used is defined in **both** modes.
-- [ ] `--muted`, `--placeholder` and every status ink measured ≥4.5:1 against the
-      actual surface behind them, in both modes — pills against their own tint.
-- [ ] No control shifts size or position between rest, hover, focus and active.
-- [ ] No focused field carries an accent-coloured rim: the focus boundary is
-      `--field-edge-focus`, and the only hue in a focus state is the keyboard-only
-      `--focus-ring` sitting outside the control.
-- [ ] No `opacity` expressing a state. Disabled uses `--field-disabled` and
-      `--text-disabled`.
-- [ ] Every state step measured smaller than the resting separation of the thing
-      it applies to.
-- [ ] Clicked into every text field with the mouse: the caret's host is visible,
-      and no halo appeared. Tabbed to it: the halo appeared.
-
-**Both modes**
-- [ ] Light and dark screenshotted; no mode-specific override was needed.
-- [ ] Light mode contains no pure white; dark cards carry no shadow but do carry
-      `--edge-raised`.
-- [ ] Every line in the diff is one of `--hair` / `--field-edge` /
-      `--edge-raised` / `--edge`, and matches what the thing is (divider /
-      filled control / object / seam). No control carries two.
-- [ ] Sheet reads lighter than the rail; selected rows read lighter than the
-      track.
-
-**States**
-- [ ] Empty, loading, error, stale, disabled and overflow all rendered once.
-- [ ] One status mark per surface; collections use words.
-- [ ] Every disabled control explains itself.
-
-**Structure**
-- [ ] Spacing values all on the scale; groups laid out with `gap`.
-- [ ] Radii and control heights come from `--r-*` and `--h-*`, not literals;
-      font sizes from `--t-*`.
-- [ ] One control height per row; radii step concentrically.
-- [ ] Mono used only for machine values.
-
-**Keyboard and a11y**
-- [ ] Tabbed the whole surface: order matches the layout, focus always visible.
-- [ ] Escape, Enter and arrow keys behave per §8.
-- [ ] Icon-only controls have labels; console is clean.
-
-**Width**
-- [ ] Checked at minimum width and at a wide window; primary task unchanged in
-      order and prominence.
-- [ ] Buttons collapsed label-last; no wrapped toolbar or segmented control.
-
-**Visual**
-- [ ] Screenshotted and actually looked at — not assumed from the markup.
-- [ ] Compared side by side with the nearest existing surface of the same
-      archetype (§7.1); a stranger could not tell which one is new.
-- [ ] Scanned for the four cheap tells: an outline on a filled control, an
-      off-scale gap, two control heights in a row, mono setting prose.
-- [ ] Optical check at 50% zoom: the intended reading order is what stands out,
-      and no single element pulls the eye without earning it.
-
----
-
-## 11. Anti-patterns — reject on sight
-
-**Colour and surfaces**
-- A hex or `rgba()` in a component.
-- A hand-picked value "just for this theme".
-- Pure white in light mode; a black shadow used as a divider.
-- A darker fill for a selected or raised element in dark mode.
-- Opacity used to express "inactive", or `opacity` used for `:disabled`.
-- A hover fill on a text area or composer.
-- A hover that moves an element further than its resting separation, or onto
-  another role's token (`--field-hover` on a card).
-- A shadow tier change on hover; any shadow at all on a dark card.
-- A focus ring, heavy outline or border-width change from a pointer click.
-- **An accent-coloured border, rim or outline on a focused input, textarea,
-  composer or select.** The focus rim is neutral (`--field-edge-focus`); hue on a
-  control boundary means the value is blocked or waiting, nothing else.
-- `--field-focus` equal to `--field-hover`: focus must outrank hover.
-- `--field-edge-focus` within 0.25 of `--field-edge`'s ratio: the swap must be
-  visible without being loud.
-- A new token that resolves to an existing one in every theme.
-
-**Borders**
-- A **second** line on something that already carries one — a border *and* an
-  inset ring on an input, an edge on a card that already has `--edge-raised`, a
-  rim on a `--well`. One boundary per boundary. (A filled control carries
-  `--field-edge` and nothing else; a line drawn **instead of** the fill step is
-  still the regression this rule was written against.)
-- Conversely: an **object** with no edge at all — a card, panel, popover or modal
-  drawn only as a fill step. In dark mode, where the cast shadow is `none`, that
-  leaves nothing whatsoever describing its boundary.
-- A box drawn around a **region** that a single seam line would separate, or a
-  divider sitting immediately beside a plane change.
-- A decorative left-border accent stripe on a card.
-- Border colour used to signal state instead of fill or ink.
-
-**Status**
-- A column of coloured dots in a list.
-- Two status marks on one surface.
-- A tinted mark plus tinted heading plus tinted border for one state.
-- A spinner for something that is not running; a pill that restates the sentence
-  next to it.
-
-**Type, icons and layout**
-- A third font family; mono setting prose; Inter or Inter Tight; weight 300 or 700.
-- A filled icon in an outline set; an emoji or mono glyph standing in for a
-  missing icon; a coloured icon doing a status word's job.
-- Proportional digits in a column of numbers.
-- Centred paragraphs; a marketing hero; a full-width centred content column.
-- Off-scale spacing (13, 15, 18, 22); margins where `gap` belongs.
-- Two control heights in one row; equal nested radii.
-
-**Structure and behaviour**
-- A new component that duplicates an existing one with different padding.
-- A card wrapping every single setting; a card inside a card; a list of cards
-  where rows would compare better.
-- A modal for something that doesn't need to block; two stacked modals; a drawer
-  opened from a modal; a toast for something the user must act on.
-- A hover-only affordance that is the sole route to an action; hover actions that
-  shift the row when they appear.
-- Breadcrumbs, a duplicate in-body page title, or a tab bar repeating the rail.
-- A single click that mutates data; a confirm dialog where undo would serve.
-- Geometry that moves on hover or focus.
-- Emoji as UI, decorative gradients, looping animation with no running work.
-- A raw error string as the whole error state.
+Follow the UI implementation and verification procedure in `AGENTS.md`. Use this
+guide's component contracts to assess the rendered result. Run the repository's
+applicable theme, architecture, and behavior checks.
 
 ---
 

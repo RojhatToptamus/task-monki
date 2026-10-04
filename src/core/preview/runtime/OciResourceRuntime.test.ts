@@ -42,6 +42,19 @@ describe('OciResourceRuntime', () => {
     expect(second.bindings.cache.redisUrl).toBe(first.bindings.cache.redisUrl);
   });
 
+  it('stops archived Design resources without deleting their data during shutdown, then allows explicit deletion', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    const resource = managed.resources[0];
+    fixture.store.archived = true;
+    await fixture.runtime.cleanupTaskResources();
+    expect(fixture.cli.objects.get(resource.container.objectId!)?.running).toBe(false);
+    expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(false);
+    expect(fixture.credentials.require(resource.id).password).toBeTruthy();
+    await fixture.runtime.cleanupTaskResources('task-1');
+    expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(true);
+  });
+
   it('delivers Redis credentials only through the one-shot container stdin channel', async () => {
     const fixture = createFixture();
     const managed = await fixture.runtime.ensureManagedPreview(
@@ -826,6 +839,8 @@ class FakeRedisProbe {
 class MemoryManagedStore {
   environments: PreviewManagedEnvironmentRecord[] = [];
   resources: PreviewManagedResourceRecord[] = [];
+  archived = false;
+  async getTask() { return this.archived ? { kind: 'DESIGN', workflowPhase: 'ARCHIVED' } : undefined; }
   getStoreIdentity() { return 'store-identity'; }
   async savePreviewManagedEnvironment(environment: PreviewManagedEnvironmentRecord) {
     this.environments = [structuredClone(environment), ...this.environments.filter((candidate) => candidate.id !== environment.id)];
@@ -908,6 +923,11 @@ class FakeOciCli {
       return this.create(command[0] as 'network' | 'volume', command);
     }
     if (command[0] === 'container' && command[1] === 'create') return this.create('container', command);
+    if (command[0] === 'container' && command[1] === 'stop') {
+      const object = this.objects.get(command[2]);
+      if (object) object.running = false;
+      return output('ok\n');
+    }
     if (command[0] === 'container' && command[1] === 'start') {
       const object = this.objects.get(command[2]);
       if (object) object.running = true;

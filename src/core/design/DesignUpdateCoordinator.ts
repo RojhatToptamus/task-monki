@@ -66,6 +66,7 @@ export interface DesignUpdateCoordinatorOptions {
   events: AppEventBus;
   resolveExecutionSettings(task: Task): Promise<AgentExecutionSettings>;
   refreshGitEvidence(designId: string): Promise<GitSnapshotRecord>;
+  prepareTurn?(detail: DesignDetailSnapshot, before: GitSnapshotRecord): Promise<string | undefined>;
   ensurePostRunEvidence(runId: string): Promise<void>;
   ensureDesignWorktree(designId: string): Promise<WorktreeRecord>;
 }
@@ -96,12 +97,14 @@ export class DesignUpdateCoordinator {
     for (const design of designs) {
       await this.withDesignLock(design.id, async () => {
         const detail = await this.options.store.getDesignDetail(design.id);
+        if (detail.task.workflowPhase === 'ARCHIVED') return;
         const unsettled = detail.turns.find((turn) => turn.outcome === undefined);
         if (unsettled) {
           await this.recoverTurn(detail, unsettled);
         }
         const refreshed = await this.options.store.getDesignDetail(design.id);
         if (
+          refreshed.repository.kind === 'DESIGN_MANAGED' &&
           refreshed.revisions.length > 0 &&
           !isActiveReadyGeneration(refreshed.currentPreview)
         ) {
@@ -252,7 +255,16 @@ export class DesignUpdateCoordinator {
       if (!turn?.finalOpenedCandidate || turn.outcome !== undefined) {
         throw new Error('This Design Run has no current verified candidate.');
       }
-      return this.options.browser.inspect(run.id, input.operation);
+      const opened = turn.finalOpenedCandidate;
+      try {
+        await this.options.previews.requireLiveDesignCandidate(opened.previewGenerationId);
+        const result = await this.options.browser.inspect(run.id, input.operation);
+        await this.options.previews.requireLiveDesignCandidate(opened.previewGenerationId);
+        return result;
+      } catch (error) {
+        await this.closeBrowserRun(run.id);
+        throw error;
+      }
     }
     return this.withDesignLock(run.taskId, () => this.openCandidateUnlocked(run));
   }
@@ -423,6 +435,13 @@ export class DesignUpdateCoordinator {
     const targetDetail = await this.options.store.getDesignDetail(
       action.targetDesignId
     );
+    if (targetDetail.repository.kind === 'USER_REGISTERED') {
+      const observed = await this.options.refreshGitEvidence(action.targetDesignId);
+      await this.options.store.acceptDesignWorkspaceSnapshot(action.targetDesignId, observed.id);
+      await this.options.store.completeRepositoryDesignDuplicate(action.id);
+      this.emitUpdated(action.targetDesignId, { reason: 'design-duplicated' });
+      return;
+    }
     const context = requireReadyContext(targetDetail);
     const generation = await this.ensureSourceActionCandidate({
       action,
@@ -501,6 +520,7 @@ export class DesignUpdateCoordinator {
   private async dispatchUnlocked(designId: string): Promise<void> {
     this.assertAccepting();
     const detail = await this.options.store.getDesignDetail(designId);
+    if (detail.task.workflowPhase === 'ARCHIVED') return;
     const turn = detail.turns.find((candidate) => candidate.outcome === undefined);
     if (!turn) return;
     const existing = await this.options.store.getRunByGenerationKey(designId, turn.id);
@@ -530,6 +550,10 @@ export class DesignUpdateCoordinator {
       const before = await this.options.refreshGitEvidence(designId);
       if (!before.headSha) {
         throw new Error('Design worktree does not have a readable source commit.');
+      }
+      if (await this.options.prepareTurn?.(detail, before)) {
+        this.emitUpdated(designId, { reason: 'setup-required' });
+        return;
       }
       const userContext = await readTaskUserContext(this.options.store, designId, { beforeDesignTurnOrder: turn.order });
       const prompt = promptForTurn(detail, turn, context, before.headSha, userContext);
@@ -636,6 +660,7 @@ export class DesignUpdateCoordinator {
           }
         });
       }
+      await this.acceptRunObservation(run);
       await this.finishSourceAndPreview(run, currentTurn);
       this.emitUpdated(run.taskId, { reason: 'turn-settled', runId });
       await this.dispatchNextUnlocked(run.taskId);
@@ -700,7 +725,7 @@ export class DesignUpdateCoordinator {
         expectedParentCommit: before.headSha
       });
       if (captured.kind === 'NO_CHANGE') {
-        if (detail.revisions.length > 0) {
+        if (detail.revisions.length > 0 && await this.canKeepReadyWithoutChange(detail, context)) {
           await this.stopOpenedCandidate(turn).catch(() => undefined);
           await this.options.store.settleDesignTurn({
             designId: run.taskId,
@@ -759,13 +784,23 @@ export class DesignUpdateCoordinator {
     }
 
     opened = requireFinalOpenedCandidate(turn);
+    if (JSON.stringify(opened.target) !== JSON.stringify(detail.task.designPreviewTarget)) {
+      throw new Error('The selected application changed after browser inspection.');
+    }
     if (opened.source.candidateCommitSha !== commitSha) {
       throw new Error('The final source does not match the final verified candidate.');
     }
+    if (detail.repository.kind === 'USER_REGISTERED') {
+      const observed = await this.options.refreshGitEvidence(run.taskId);
+      if (observed.headSha !== commitSha || observed.branch !== context.worktree.branchName ||
+          observed.stagedCount || observed.unstagedCount || observed.untrackedCount ||
+          observed.conflictedCount || observed.operationInProgress || ['UNAVAILABLE', 'UNKNOWN'].includes(observed.status)) {
+        throw new Error('The workspace changed after inspection. Its changes were preserved; inspect it again before Ready.');
+      }
+      await this.options.store.acceptDesignWorkspaceSnapshot(run.taskId, observed.id);
+    }
     const generation = await this.ensureOpenedCandidateAvailable({
       designId: run.taskId,
-      turnId: turn.id,
-      context,
       opened
     });
     if (turn.checkpoint?.boundary !== 'PREVIEW_CANDIDATE_READY') {
@@ -831,7 +866,11 @@ export class DesignUpdateCoordinator {
     } catch (error) {
       throw new RecoverableCheckpointWriteError('INDEX_REPAIRED', error);
     }
-    await this.options.refreshGitEvidence(ownership.designId);
+    const observed = await this.options.refreshGitEvidence(ownership.designId);
+    if (ownership.repository.kind === 'USER_REGISTERED' && observed.headSha === published.candidateCommitSha &&
+        !observed.stagedCount && !observed.unstagedCount && !observed.untrackedCount && !observed.conflictedCount && !observed.operationInProgress) {
+      await this.options.store.acceptDesignWorkspaceSnapshot(ownership.designId, observed.id);
+    }
     return published.candidateCommitSha;
   }
 
@@ -877,12 +916,13 @@ export class DesignUpdateCoordinator {
           });
 
     await this.closeBrowserRun(run.id);
-    let generation = await this.reusableOpenedGeneration(turn, source);
+    let generation = await this.reusableOpenedGeneration(turn, source, detail, context);
     if (!generation) {
       await this.stopOpenedCandidate(turn).catch(() => undefined);
       const prepared = await this.options.previews.prepareManagedDesignExactCommit({
         context,
-        commitSha: source.candidateCommitSha
+        commitSha: source.candidateCommitSha,
+        runId: run.id
       });
       try {
         await this.requireActiveDesignRun(run.id);
@@ -905,6 +945,8 @@ export class DesignUpdateCoordinator {
         runId: run.id,
         generationId: generation.id,
         origin: lease.origin,
+        entryPath: lease.entryPath,
+        allowedOrigins: lease.allowedOrigins,
         lease
       });
       await this.requireActiveDesignRun(run.id);
@@ -912,7 +954,7 @@ export class DesignUpdateCoordinator {
       await this.options.store.updateDesignOpenedCandidate({
         designId: run.taskId,
         turnId: turn.id,
-        candidate: { source, previewGenerationId: generation.id }
+        candidate: { source, previewGenerationId: generation.id, target: detail.task.designPreviewTarget }
       });
       this.emitUpdated(run.taskId, {
         reason: 'candidate-opened-for-verification',
@@ -950,47 +992,36 @@ export class DesignUpdateCoordinator {
 
   private async reusableOpenedGeneration(
     turn: DesignTurn,
-    source: PublishedDesignCandidateCheckpoint
+    source: PublishedDesignCandidateCheckpoint,
+    detail: DesignDetailSnapshot,
+    context: PreviewTaskContext
   ): Promise<PreviewGenerationRecord | undefined> {
     const opened = turn.finalOpenedCandidate;
-    if (!opened || !sameSource(opened.source, source)) return undefined;
+    if (!opened || !sameSource(opened.source, source) || JSON.stringify(opened.target) !== JSON.stringify(detail.task.designPreviewTarget)) return undefined;
     const generation = await this.options.store.getPreviewGeneration(
       opened.previewGenerationId
     );
-    return isLiveVerificationCandidate(generation, turn.designId, source)
-      ? generation
-      : undefined;
+    if (!isLiveVerificationCandidate(generation, turn.designId, source)) return undefined;
+    if (detail.repository.kind === 'USER_REGISTERED') {
+      const resolution = await this.options.previews.resolve(context, detail.task.designPreviewTarget?.scenarioId);
+      if (resolution.status !== 'PLAN' || !resolution.approval || generation.executionAuthority.executionDigest !== resolution.plan.executionDigest) return undefined;
+    }
+    try { return await this.options.previews.requireLiveDesignCandidate(generation.id); }
+    catch { return undefined; }
   }
 
   private async ensureOpenedCandidateAvailable(input: {
     designId: string;
-    turnId: string;
-    context: PreviewTaskContext;
     opened: DesignOpenedCandidateCheckpoint;
   }): Promise<PreviewGenerationRecord> {
     const existing = await this.options.store.getPreviewGeneration(
       input.opened.previewGenerationId
     );
     if (isLiveVerificationCandidate(existing, input.designId, input.opened.source)) {
+      await this.options.previews.requireLiveDesignCandidate(existing.id);
       return existing;
     }
-    const prepared = await this.options.previews.prepareManagedDesignExactCommit({
-      context: input.context,
-      commitSha: input.opened.source.candidateCommitSha
-    });
-    const replacement = await this.options.previews.executeManagedDesignCandidate(prepared, {
-      designId: input.designId,
-      onCandidateReady: async () => undefined
-    });
-    await this.options.store.updateDesignOpenedCandidate({
-      designId: input.designId,
-      turnId: input.turnId,
-      candidate: {
-        source: input.opened.source,
-        previewGenerationId: replacement.id
-      }
-    });
-    return replacement;
+    throw new Error('The inspected Preview generation stopped. Inspect the new candidate before Ready.');
   }
 
   private async requireActiveDesignRun(runId: string): Promise<RunRecord> {
@@ -1070,13 +1101,36 @@ export class DesignUpdateCoordinator {
           : 'This Design does not have a ready revision to restart.'
       );
     }
+    if (detail.task.workflowPhase === 'ARCHIVED') throw new Error('Archived Designs do not restart Preview.');
+    if (detail.turns.some((turn) => !turn.outcome)) throw new Error('Wait for the Design turn before changing versions.');
     const context = requireReadyContext(detail);
     await this.options.previews.restartManagedDesign({
-      context,
+      context: { ...context, task: { ...context.task, designPreviewTarget: revision.target ?? context.task.designPreviewTarget } },
       commitSha: revision.commitSha,
       designRevisionId: revision.id,
       fence: this.options.fence
     });
+  }
+
+  private async acceptRunObservation(run: RunRecord): Promise<void> {
+    const state = await this.options.store.snapshot();
+    const task = state.tasks.find((item) => item.id === run.taskId);
+    if (state.repositories.find((item) => item.id === task?.repositoryId)?.kind !== 'USER_REGISTERED') return;
+    const before = state.gitSnapshots.find((item) => item.id === run.beforeGitSnapshotId);
+    const after = state.gitSnapshots.find((item) => item.id === run.afterGitSnapshotId);
+    if (after && before && after.headSha === before.headSha && after.branch === before.branch &&
+        after.gitCommonDir === before.gitCommonDir && !after.conflictedCount && !after.operationInProgress) {
+      await this.options.store.acceptDesignWorkspaceSnapshot(run.taskId, after.id);
+    }
+  }
+
+  private async canKeepReadyWithoutChange(detail: DesignDetailSnapshot, context: PreviewTaskContext): Promise<boolean> {
+    const previous = detail.revisions.at(-1);
+    if (!previous || JSON.stringify(previous.target) !== JSON.stringify(detail.task.designPreviewTarget)) return false;
+    if (detail.repository.kind === 'DESIGN_MANAGED') return true;
+    const resolved = await this.options.previews.resolve(context, detail.task.designPreviewTarget?.scenarioId);
+    return resolved.status === 'PLAN' && Boolean(resolved.approval) &&
+      detail.currentPreview?.executionAuthority.executionDigest === resolved.plan.executionDigest;
   }
 
   private async settleTerminalFailure(
@@ -1084,6 +1138,8 @@ export class DesignUpdateCoordinator {
     turnId: string,
     run: RunRecord
   ): Promise<void> {
+    await this.options.ensurePostRunEvidence(run.id);
+    await this.acceptRunObservation((await this.options.store.getRun(run.id)) ?? run);
     await this.options.store.settleDesignTurn({
       designId,
       turnId,

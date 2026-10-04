@@ -18,11 +18,41 @@ export interface DesignSourceCheckpoint {
   expectedParentCommit: string;
   treeSha: string;
   candidateCommitSha?: string;
+  indexTreeSha?: string;
 }
 
 export interface DesignOpenedCandidateCheckpoint {
   source: DesignSourceCheckpoint & { candidateCommitSha: string };
   previewGenerationId: string;
+  target?: DesignPreviewTarget;
+}
+
+export interface DesignPreviewTarget {
+  routeId: string;
+  entryPath: string;
+  scenarioId?: string;
+}
+
+export interface StartDesignRequest { designId: string; acceptWorkspaceSnapshotId?: string }
+export interface InspectDesignRepositoryRequest { repositoryId: string }
+export interface UpdateDesignPreviewTargetRequest {
+  designId: string;
+  target: DesignPreviewTarget;
+}
+export function validateDesignPreviewTarget(target: DesignPreviewTarget): void {
+  if (!target || typeof target.routeId !== 'string' || !target.routeId.trim() || target.routeId.length > 128 ||
+      (target.scenarioId !== undefined && (typeof target.scenarioId !== 'string' || !target.scenarioId.trim()))) {
+    throw new Error('Select a Preview route and scenario.');
+  }
+  validateDesignEntryPath(target.entryPath);
+}
+
+export function validateDesignEntryPath(entryPath: unknown): asserts entryPath is string {
+  if (typeof entryPath !== 'string' || entryPath.length > 2048 || !entryPath.startsWith('/') ||
+      entryPath.startsWith('//') || /[\\\u0000-\u0020]/u.test(entryPath) ||
+      new URL(entryPath, 'http://design.local').origin !== 'http://design.local') {
+    throw new Error('The application path must begin with / and remain within its Preview route.');
+  }
 }
 
 export type DesignTurnCheckpoint =
@@ -94,6 +124,9 @@ interface DesignRevisionBase {
   commitSha: string;
   routeId: string;
   createdAt: string;
+  /** Original verification identity, retained independently of runtime pruning. */
+  verificationGenerationId?: string;
+  target?: DesignPreviewTarget;
 }
 
 export type DesignRevision = DesignRevisionBase &
@@ -167,7 +200,13 @@ export type DesignSourceAction = DesignSourceActionBase &
       }
   );
 
-export interface CreateBlankDesignRequest {
+export interface CreateDesignRequest {
+  source?: { kind: 'BLANK' } | {
+    kind: 'EXISTING_REPOSITORY';
+    repositoryId: string;
+    baseRef?: string;
+    expectedBaseSha: string;
+  };
   agentProfileId?: string;
   brief: string;
   creationToken: string;

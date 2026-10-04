@@ -19,7 +19,8 @@ export function DesignProjectMenu({
   onDuplicate,
   onRename,
   onArchive,
-  onDelete
+  onDelete,
+  onOpenChange
 }: {
   title: string;
   canOpenInFinder: boolean;
@@ -31,10 +32,12 @@ export function DesignProjectMenu({
   onRename(): void;
   onArchive(): void;
   onDelete(): void;
+  onOpenChange(open: boolean): void;
 }) {
   return (
     <DesignMenu
       label={`Design options for ${title}`}
+      onOpenChange={onOpenChange}
       items={[
         { label: 'Open in Finder', disabled: !canOpenInFinder, action: onOpenInFinder },
         { label: 'Duplicate current', disabled: !canDuplicate, action: onDuplicate },
@@ -66,12 +69,12 @@ export function DesignReadyMenu({
       label={`Ready state ${ordinal} options`}
       compact
       items={[
-        {
+        ...(canRestore ? [{
           label: 'Restore this version',
-          disabled: isCurrent || !canRestore,
+          disabled: isCurrent,
           disabledReason: isCurrent ? 'Already the current version.' : undefined,
           action: onRestore
-        },
+        }] : []),
         {
           label: 'Duplicate from here',
           disabled: !canDuplicate,
@@ -82,10 +85,12 @@ export function DesignReadyMenu({
   );
 }
 
-function DesignMenu({ label, items, compact = false }: {
+function DesignMenu({ label, items, compact = false, onOpenChange }: {
   label: string; items: readonly DesignMenuItem[]; compact?: boolean;
+  onOpenChange?(open: boolean): void;
 }) {
   return <ActionMenu className={compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'} label={label}
+    onOpenChange={onOpenChange}
     trigger={<MoreHorizontal aria-hidden="true" size={16} strokeWidth={1.5} />}
     items={items.map(({ action, ...item }) => ({ ...item, onSelect: action }))} />;
 }

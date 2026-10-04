@@ -1434,8 +1434,16 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   },
   {
     version: 7,
+    name: 'existing-repository-design',
+    // JSON payloads retain target and Git observation references. The version
+    // prevents older clients from opening repository Designs they cannot own.
+    sql: 'SELECT 1;'
+  },
+  {
+    version: 8,
     name: 'task-agent-instructions',
-    sql: `CREATE TABLE task_instructions (
+    // Pre-release agent-session profiles already contain this table at version 7.
+    sql: `CREATE TABLE IF NOT EXISTS task_instructions (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       instruction_order INTEGER NOT NULL CHECK (instruction_order > 0),
@@ -1444,7 +1452,7 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     ) STRICT;`
   },
   {
-    version: 8,
+    version: 9,
     name: 'message-attachment-selection',
     sql: `UPDATE tasks SET payload_json = json_set(payload_json, '$.initialAttachmentIds',
       json(COALESCE((SELECT json_group_array(id) FROM task_attachments WHERE task_id = tasks.id), '[]')))

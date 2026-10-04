@@ -253,7 +253,7 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
           {presentation.detail ? <p>{presentation.detail}</p> : null}
         </div>
         <div className="tm-preview-workspace__actions">
-          {plan && plan.executionPlan.scenarios.length > 1 ? (
+          {props.task.kind !== 'DESIGN' && plan && plan.executionPlan.scenarios.length > 1 ? (
             <label className="tm-preview-scenario-control">
               <span>Scenario</span>
               <select
@@ -412,7 +412,7 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
         </div>
 
         <div className="tm-preview-workspace__column tm-preview-workspace__column--side">
-          {showOperationalEvidence ? (
+          {showOperationalEvidence && props.task.kind !== 'DESIGN' ? (
             <PreviewRoutesSection
               view={controller.view}
               onOpen={(generation, route) =>

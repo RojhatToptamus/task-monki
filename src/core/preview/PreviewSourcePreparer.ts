@@ -82,6 +82,22 @@ export class PreviewSourcePreparer {
     return path.resolve(this.previewRoot, taskId, generationId);
   }
 
+  async cleanupOrphanedGenerations(recordedIds: ReadonlySet<string>): Promise<void> {
+    const tasks = await fs.readdir(this.previewRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const task of tasks) {
+      if (!task.isDirectory() || task.isSymbolicLink()) continue;
+      for (const generation of await fs.readdir(path.join(this.previewRoot, task.name), { withFileTypes: true })) {
+        if (!generation.isDirectory() || generation.isSymbolicLink() || recordedIds.has(generation.name)) continue;
+        // Export can finish before the exact recipe and generation are recorded.
+        // Unknown directories remain untouched unless the existing marker proves ownership.
+        await this.cleanupOwnedGeneration({ taskId: task.name, generationId: generation.name }).catch(() => undefined);
+      }
+    }
+  }
+
   async prepare(input: PreparePreviewSourceInput): Promise<PreparedPreviewSource> {
     const repositoryRoot = await fs.realpath(
       path.resolve((await git(input.repositoryPath, ['rev-parse', '--show-toplevel'])).trim())
@@ -288,7 +304,7 @@ export class PreviewSourcePreparer {
 }
 
 interface ExactCommitTreeEntry {
-  mode: '100644' | '100755';
+  mode: '100644' | '100755' | '120000';
   objectId: string;
   path: string;
   size: number;
@@ -326,13 +342,10 @@ async function readExactCommitTree(
           `Preview source path exceeds ${limits.maxPathBytes} bytes: ${relativePath}`
         );
       }
-      if (mode === '120000') {
-        throw new Error(`Git symlinks are unsupported by exact-commit previews: ${relativePath}`);
-      }
       if (mode === '160000') {
         throw new Error(`Git submodules are unsupported by exact-commit previews: ${relativePath}`);
       }
-      if ((mode !== '100644' && mode !== '100755') || objectType !== 'blob') {
+      if ((mode !== '100644' && mode !== '100755' && mode !== '120000') || objectType !== 'blob') {
         throw new Error(`Unsupported exact-commit source entry: ${relativePath}`);
       }
       const size = Number(rawSize);
@@ -398,6 +411,20 @@ async function exportExactCommitBlobs(input: {
       const destination = path.join(input.sourcePath, treeEntry.path);
       assertPathWithin(input.sourcePath, destination, 'Prepared exact-commit source path');
       await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      if (treeEntry.mode === '120000') {
+        if (size > input.limits.maxPathBytes) throw new Error(`Preview symlink target is too long: ${treeEntry.path}`);
+        const chunks: Buffer[] = [];
+        await reader.consume(size, async (chunk) => { chunks.push(Buffer.from(chunk)); });
+        const bytes = Buffer.concat(chunks);
+        if (!isUtf8(bytes) || (await reader.readByte()) !== 0x0a) throw new Error('Invalid Git symlink content.');
+        const target = bytes.toString('utf8');
+        if (!target || target.includes('\0') || path.isAbsolute(target) || target.includes('\\')) {
+          throw new Error(`Unsafe Preview source symlink: ${treeEntry.path}`);
+        }
+        assertPathWithin(input.sourcePath, path.resolve(path.dirname(destination), target), 'Preview symlink target');
+        entries.push({ path: treeEntry.path, kind: 'symlink', target, digest: hashText(`symlink\0${treeEntry.path}\0${target}`) });
+        continue;
+      }
       const mode = treeEntry.mode === '100755' ? 0o755 : 0o644;
       const handle = await fs.open(destination, 'wx', mode);
       const hash = createHash('sha256');
@@ -428,6 +455,16 @@ async function exportExactCommitBlobs(input: {
         digest: hash.digest('hex')
       });
       await input.afterEntryCopied?.(treeEntry.path);
+    }
+    // Materialize links after regular files so no export write follows a link.
+    for (const entry of entries) {
+      if (entry.kind !== 'symlink') continue;
+      await fs.symlink(entry.target, path.join(input.sourcePath, entry.path));
+    }
+    for (const entry of entries) {
+      if (entry.kind !== 'symlink') continue;
+      assertPathWithin(input.sourcePath, await fs.realpath(path.join(input.sourcePath, entry.path)), 'Resolved Preview symlink');
+      await input.afterEntryCopied?.(entry.path);
     }
     child.stdin.end();
     const status = await exit;

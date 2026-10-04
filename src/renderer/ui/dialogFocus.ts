@@ -46,7 +46,9 @@ export function handleDialogKeyDown(
     onClose(): void;
   }
 ): void {
-  if (event.defaultPrevented) {
+  // A portalled modal owns Escape and focus while it covers a parallel panel.
+  const modal = (event.target as Element | null)?.closest?.('[aria-modal="true"]');
+  if (event.defaultPrevented || (modal && !modal.contains(dialog))) {
     return;
   }
   if (event.key === 'Escape') {

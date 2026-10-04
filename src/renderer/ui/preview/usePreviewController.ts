@@ -20,6 +20,9 @@ export function usePreviewController(
   const [confirmation, setConfirmation] = useState<PreviewConfirmation>();
   const [confirmationBusy, setConfirmationBusy] = useState(false);
   const view = buildPreviewViewModel(props);
+  if (props.task.kind === 'DESIGN') {
+    view.actions = view.actions.filter((action) => !['START', 'OPEN'].includes(action.id));
+  }
   const resetGeneration =
     view.recoveryGeneration ?? view.activeGeneration ?? view.generation;
   const resettableResources = selectPreviewResetResources(props, view);

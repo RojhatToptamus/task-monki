@@ -998,6 +998,11 @@ async function createHarness(
     );
   });
   const previews = {
+    requireLiveDesignCandidate: vi.fn(async (id: string) => {
+      const candidate = await store.getPreviewGeneration(id);
+      if (!candidate || candidate.state !== 'READY') throw new Error('Preview generation stopped.');
+      return candidate;
+    }),
     abortManagedDesignCandidateStartups: vi.fn(async () => undefined),
     prepareManagedDesignExactCommit: vi.fn(async (input) => input),
     executeManagedDesign: vi.fn(async () => {

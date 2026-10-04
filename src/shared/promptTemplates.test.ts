@@ -44,7 +44,7 @@ describe('prompt templates', () => {
       'For a first complete build or large redesign, apply the final-polish guidance for a broad review before you report.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
-      'Do not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.'
+      'Standalone Designs must not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.'
     );
     expect(DESIGN_AGENT_DEVELOPER_INSTRUCTIONS).toContain(
       'index.html contains semantic structure and content. Link ./styles.css and load ./app.js with defer.'

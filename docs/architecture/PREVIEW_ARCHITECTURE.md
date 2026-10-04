@@ -175,6 +175,24 @@ fingerprint, a bounded source manifest, file modes and hashes, and a workspace
 ownership marker. Absolute or escaping symlinks, submodules, special files,
 oversized inputs, or source changes during capture fail safely.
 
+Design candidates use an exact Git commit export through the same source owner.
+Standalone Designs use the managed static adapter. Repository Designs resolve
+their approved recipe from the exported commit and use native or Compose execution.
+The export retains the existing 100,000-entry and 2 GiB limits. Contained source
+symlinks work; escaping links, submodules, and unresolved LFS pointers fail.
+Repository source remains in Git, outside SQLite source history.
+
+The browser and Electron canvas receive generation-bound forward proxies for
+all declared routes. HTTP, API, and WebSocket traffic uses that generation's
+actual targets. Replacement, failure, and stop revoke its leases. Browser
+navigation accepts paths within the selected application. External SSO and
+personal browser sessions are unsupported; use approved local development state.
+These network controls do not make local Preview an OS sandbox.
+
+Ready retains the exact verification generation and application target. A stopped
+candidate must be opened and inspected again. Restarting a saved Ready revision
+runs its saved source and target without creating new verification evidence.
+
 Ignored dependency directories such as `node_modules` are never copied from
 the live worktree. An approved generic installation job may create them inside
 the captured generation workspace. The job runs once for that generation,
@@ -438,6 +456,10 @@ A Compose plan names explicit relative Compose files, one project directory,
 profiles, root services, exposed target ports, bounded HTTP/TCP readiness, and
 routes. Every routed service needs a declared Task Monki readiness check.
 
+Compose inspection keeps build contexts and file inputs relative to the captured
+source with `config --no-path-resolution`. Host-path validation still rejects
+absolute paths and paths outside the repository.
+
 Before approval, the inspector:
 
 1. pre-scans only enough YAML to bound host-read authority;
@@ -531,6 +553,12 @@ Retry Setup is available only for failed setup evidence when every selected
 migration/seed job is explicitly `retrySafe: true`, the current plan and
 approval still match, and exact resource authority verifies. It reuses the
 same resource and data. Ambiguous or non-retry-safe completion is not replayed.
+
+Repository Designs use these same repair controls after the conversation turn
+settles. Retry Setup runs the approved failed commit and retains repaired data,
+then stops the unverified application. Reset Data removes the selected resource;
+the next candidate inspection recreates it. Neither action publishes Ready.
+Stop Preview & Delete Data also remains available for complete owned cleanup.
 
 ### Reset data
 

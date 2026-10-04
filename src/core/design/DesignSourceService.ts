@@ -18,6 +18,8 @@ import {
   syncDirectoryIfSupported
 } from '../filesystem/secureFilesystem';
 import { git, type GitExecutionOptions } from '../git/gitCli';
+import { resolveAgentGitMetadata } from '../git/AgentGitMetadata';
+import { detectOperationInProgress } from '../git/GitSnapshotService';
 import { listGitWorktrees } from '../worktree/WorktreeService';
 
 export const DESIGN_REPOSITORY_MARKER = '.task-monki-design-repository.json';
@@ -217,7 +219,7 @@ export class DesignSourceService {
     input: DesignProjectOwnership
   ): Promise<DesignProjectFileList> {
     await this.assertManagedProjectOwnership(input);
-    const output = await managedGit(input.worktree.worktreePath, [
+    const output = await (input.repository.kind === 'USER_REGISTERED' ? git : managedGit)(input.worktree.worktreePath, [
       'ls-files',
       '--cached',
       '--others',
@@ -329,14 +331,19 @@ export class DesignSourceService {
     input: CaptureDesignCandidateInput
   ): Promise<DesignCandidateCapture> {
     await this.assertSourceOwnership(input, input.expectedParentCommit);
+    const indexTreeSha = input.repository.kind === 'USER_REGISTERED'
+      ? cleanGitOutput(await git(input.worktree.worktreePath, ['write-tree']))
+      : undefined;
     const firstTree = await this.captureWorktreeTree(
       input.worktree.worktreePath,
-      input.expectedParentCommit
+      input.expectedParentCommit,
+      input.repository.kind
     );
     await this.assertSourceOwnership(input, input.expectedParentCommit);
     const secondTree = await this.captureWorktreeTree(
       input.worktree.worktreePath,
-      input.expectedParentCommit
+      input.expectedParentCommit,
+      input.repository.kind
     );
     await this.assertSourceOwnership(input, input.expectedParentCommit);
     if (firstTree !== secondTree) {
@@ -363,7 +370,8 @@ export class DesignSourceService {
         worktreeId: input.worktree.id,
         branchName: input.worktree.branchName,
         expectedParentCommit: input.expectedParentCommit,
-        treeSha: firstTree
+        treeSha: firstTree,
+        indexTreeSha
       }
     };
   }
@@ -375,7 +383,7 @@ export class DesignSourceService {
     const recovered = await this.recoverCandidate(input);
     if (recovered.state === 'CANDIDATE_REF') return recovered.checkpoint;
 
-    const recoverableCommit = await this.findRecoverableCandidateCommit(input);
+    const recoverableCommit = input.checkpoint.candidateCommitSha;
     if (recoverableCommit) {
       await this.assertCandidateCommit(input, recoverableCommit);
       return { ...input.checkpoint, candidateCommitSha: recoverableCommit };
@@ -423,6 +431,9 @@ export class DesignSourceService {
       throw new Error('Design candidate branch no longer matches its expected parent.');
     }
     await this.assertCandidateCommit(input, input.checkpoint.candidateCommitSha);
+    if (input.repository.kind === 'USER_REGISTERED' && cleanGitOutput(await git(input.worktree.worktreePath, ['write-tree'])) !== input.checkpoint.indexTreeSha) {
+      throw new Error('The Design index changed after inspection. Its contents were preserved.');
+    }
     await managedGit(input.repository.path, [
       'update-ref',
       `refs/heads/${input.checkpoint.branchName}`,
@@ -471,6 +482,28 @@ export class DesignSourceService {
       throw new Error('Design candidate branch changed before index repair.');
     }
     await this.assertCandidateCommit(input, currentCommit);
+    if (input.repository.kind === 'USER_REGISTERED') {
+      const metadata = await resolveAgentGitMetadata({ repositoryPath: input.repository.path, worktreePath: input.worktree.worktreePath });
+      const indexPath = path.join(metadata.gitDir, 'index');
+      const lockPath = `${indexPath}.lock`;
+      // Hold Git's normal index lock across the comparison and replacement.
+      // This prevents a concurrent git add from being lost after validation.
+      const lock = await fs.open(lockPath, 'wx', 0o600);
+      try {
+        await lock.writeFile(await fs.readFile(indexPath));
+        await lock.close();
+        const currentIndex = cleanGitOutput(await git(input.worktree.worktreePath, ['write-tree'], { env: { GIT_INDEX_FILE: lockPath } }));
+        if (currentIndex !== input.checkpoint.indexTreeSha && currentIndex !== input.checkpoint.treeSha) {
+          throw new Error('The Design index changed during publication. Its contents were preserved.');
+        }
+        await git(input.worktree.worktreePath, ['read-tree', input.checkpoint.treeSha], { env: { GIT_INDEX_FILE: lockPath } });
+        await fs.rename(lockPath, indexPath);
+      } finally {
+        await lock.close();
+        await fs.rm(lockPath, { force: true });
+      }
+      return;
+    }
     await managedGit(input.worktree.worktreePath, [
       'read-tree',
       `${input.checkpoint.candidateCommitSha}^{tree}`
@@ -789,12 +822,33 @@ export class DesignSourceService {
   ): Promise<void> {
     await this.ensureRoots();
     if (
-      input.repository.kind !== 'DESIGN_MANAGED' ||
+      input.worktree.ownership !== 'MANAGED' ||
       input.worktree.taskId !== input.designId ||
       input.worktree.repositoryId !== input.repository.id ||
       !UUID.test(input.designId)
     ) {
       throw new Error('Design project ownership is inconsistent.');
+    }
+    if (input.repository.kind === 'USER_REGISTERED') {
+      const expectedPath = path.join(this.worktreeRoot, input.designId);
+      if (!samePath(path.resolve(input.worktree.worktreePath), expectedPath)) {
+        throw new Error('Design source worktree escaped its managed root.');
+      }
+      await assertPrivateOwnedDirectory(expectedPath, await fs.lstat(expectedPath));
+      const metadata = await resolveAgentGitMetadata({
+        repositoryPath: input.repository.path, worktreePath: expectedPath
+      });
+      if (samePath(metadata.repositoryRoot, metadata.worktreeRoot) ||
+          cleanGitOutput(await git(expectedPath, ['symbolic-ref', '--quiet', 'HEAD'])) !==
+            `refs/heads/${input.worktree.branchName}`) {
+        throw new Error('Design source requires its registered isolated branch and worktree.');
+      }
+      if (await detectOperationInProgress(expectedPath) ||
+          (await git(expectedPath, ['ls-files', '--unmerged'])).trim()) {
+        throw new Error('Resolve the unfinished Git operation or conflicts before continuing Design.');
+      }
+      await git(expectedPath, ['merge-base', '--is-ancestor', input.worktree.baseSha, 'HEAD']);
+      return;
     }
     const expectedRepositoryPath = this.expectedRepositoryPath(input.repository.id);
     const expectedWorktreePath = path.join(this.worktreeRoot, input.designId);
@@ -836,6 +890,9 @@ export class DesignSourceService {
   }
 
   private async assertRestoreOwnership(input: DesignRestoreOwnership): Promise<void> {
+    if (input.repository.kind !== 'DESIGN_MANAGED') {
+      throw new Error('Continue from a repository version with Duplicate from here.');
+    }
     await this.assertManagedProjectOwnership(input);
     if (!UUID.test(input.actionId) || !UUID.test(input.sourceRevisionId)) {
       throw new Error('Design restore ownership is inconsistent.');
@@ -927,25 +984,6 @@ export class DesignSourceService {
     }
   }
 
-  private async findRecoverableCandidateCommit(
-    input: PrepareDesignCandidateInput
-  ): Promise<string | undefined> {
-    const output = await managedGit(input.repository.path, [
-      'fsck',
-      '--full',
-      '--unreachable',
-      '--no-reflogs',
-      '--no-progress'
-    ]);
-    const candidates = [...output.matchAll(/^(?:dangling|unreachable) commit ([a-f0-9]{40,64})$/gmu)]
-      .map((match) => match[1]!)
-      .sort();
-    for (const candidate of candidates) {
-      if (await this.candidateCommitMatches(input, candidate)) return candidate;
-    }
-    return undefined;
-  }
-
   private async candidateCommitMatches(
     input: PrepareDesignCandidateInput,
     candidateCommitSha: string
@@ -1004,7 +1042,8 @@ export class DesignSourceService {
 
   private async captureWorktreeTree(
     worktreePath: string,
-    expectedParentCommit: string
+    expectedParentCommit: string,
+    repositoryKind: Repository['kind']
   ): Promise<string> {
     const temporaryRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-design-index-')
@@ -1012,11 +1051,12 @@ export class DesignSourceService {
     await enforcePosixMode(temporaryRoot, 0o700);
     const indexPath = path.join(temporaryRoot, 'index');
     const env = { GIT_INDEX_FILE: indexPath };
+    const captureGit = repositoryKind === 'USER_REGISTERED' ? git : managedGit;
     try {
-      await managedGit(worktreePath, ['read-tree', expectedParentCommit], { env });
-      await managedGit(worktreePath, ['add', '-A', '--', '.'], { env, timeout: 60_000 });
+      await captureGit(worktreePath, ['read-tree', expectedParentCommit], { env });
+      await captureGit(worktreePath, ['add', '-A', '--', '.'], { env, timeout: 60_000 });
       const treeSha = cleanGitOutput(
-        await managedGit(worktreePath, ['write-tree'], { env })
+        await captureGit(worktreePath, ['write-tree'], { env })
       );
       assertGitObjectId(treeSha, 'captured tree');
       return treeSha;

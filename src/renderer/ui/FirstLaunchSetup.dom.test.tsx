@@ -84,7 +84,7 @@ describe('FirstLaunchSetup', () => {
     );
 
     expect(screen.getByText('No repository yet')).toBeTruthy();
-    expect(screen.getByText('Design projects do not need one.')).toBeTruthy();
+    expect(screen.getByText('Blank Designs do not need one.')).toBeTruthy();
     expect(screen.getByText('Default model')).toBeTruthy();
     expect(screen.getByText('Needs on this machine')).toBeTruthy();
     expect(

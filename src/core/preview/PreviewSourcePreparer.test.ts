@@ -77,6 +77,20 @@ describe('PreviewSourcePreparer', () => {
     );
   });
 
+  it('recovers an unrecorded exact export without removing recorded or foreign source directories', async () => {
+    const fixture = await createRepositoryFixture();
+    const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await fixture.preparer.prepareExactCommit({ repositoryPath: fixture.repo, taskId: 'design', generationId: 'interrupted', commitSha });
+    const recorded = await fixture.preparer.prepareExactCommit({ repositoryPath: fixture.repo, taskId: 'design', generationId: 'recorded', commitSha });
+    const foreign = path.join(fixture.previewRoot, 'design', 'foreign');
+    await fs.mkdir(foreign);
+    await fs.writeFile(path.join(foreign, 'source.txt'), 'retained');
+    await fixture.preparer.cleanupOrphanedGenerations(new Set(['recorded']));
+    await expect(fs.access(path.join(fixture.previewRoot, 'design', 'interrupted'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(path.join(recorded.sourcePath, 'tracked.txt'), 'utf8')).toBeTruthy();
+    expect(await fs.readFile(path.join(foreign, 'source.txt'), 'utf8')).toBe('retained');
+  });
+
   it('removes the empty task directory after its final generation is cleaned', async () => {
     const fixture = await createRepositoryFixture();
     const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
@@ -310,7 +324,7 @@ describe('PreviewSourcePreparer', () => {
     });
   });
 
-  it('requires a full commit SHA and rejects committed symlinks and gitlinks', async () => {
+  it('exports contained committed symlinks but rejects escaping links, gitlinks and short revisions', async () => {
     const fixture = await createRepositoryFixture();
     const initialCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
     await expect(
@@ -326,14 +340,21 @@ describe('PreviewSourcePreparer', () => {
     await git(fixture.repo, ['add', 'tracked-link']);
     await git(fixture.repo, ['commit', '-m', 'Add a symlink']);
     const symlinkCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-    await expect(
-      fixture.preparer.prepareExactCommit({
+    const linked = await fixture.preparer.prepareExactCommit({
         repositoryPath: fixture.repo,
         taskId: 'task-1',
         generationId: 'exact-symlink',
         commitSha: symlinkCommit
-      })
-    ).rejects.toThrow('symlinks are unsupported');
+      });
+    expect(await fs.readlink(path.join(linked.sourcePath, 'tracked-link'))).toBe('tracked.txt');
+    expect(await fs.readFile(path.join(linked.sourcePath, 'tracked-link'), 'utf8')).toBe(await fs.readFile(path.join(linked.sourcePath, 'tracked.txt'), 'utf8'));
+
+    await fs.rm(path.join(fixture.repo, 'tracked-link'));
+    await fs.symlink('../outside', path.join(fixture.repo, 'tracked-link'));
+    await git(fixture.repo, ['add', 'tracked-link']);
+    await git(fixture.repo, ['commit', '-m', 'Add an escaping symlink']);
+    const escapingCommit = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
+    await expect(fixture.preparer.prepareExactCommit({ repositoryPath: fixture.repo, taskId: 'task-1', generationId: 'escaping-link', commitSha: escapingCommit })).rejects.toThrow(/symlink/);
 
     await fs.rm(path.join(fixture.repo, 'tracked-link'));
     await git(fixture.repo, ['add', '-u']);

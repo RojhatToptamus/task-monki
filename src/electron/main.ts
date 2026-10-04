@@ -25,7 +25,7 @@ import type {
   AddDesignReferencesRequest,
   AppUpdateEvent,
   ContinueRunRequest,
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   CancelDesignTurnRequest,
   CancelPromptRefinementRequest,
   CreateBoardRequest,
@@ -542,9 +542,12 @@ function installIpcHandlers(): void {
     'design:draft:delete',
     async (_, input: DeleteDesignDraftRequest) => service.deleteDesignDraft(input)
   );
+  handleTrustedIpc('design:repository:inspect', async (_, input: import('../shared/design').InspectDesignRepositoryRequest) => service.inspectDesignRepository(input));
+  handleTrustedIpc('design:target:update', async (_, input: import('../shared/design').UpdateDesignPreviewTargetRequest) => service.updateDesignPreviewTarget(input));
+  handleTrustedIpc('design:start', async (_, input: import('../shared/design').StartDesignRequest) => service.startDesign(input));
   handleTrustedIpc(
     'design:create',
-    async (_, input: CreateBlankDesignRequest) => service.createBlankDesign(input)
+    async (_, input: CreateDesignRequest) => service.createDesign(input)
   );
   handleTrustedIpc(
     'design:turn:submit',

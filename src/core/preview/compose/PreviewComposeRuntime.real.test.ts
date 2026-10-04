@@ -45,6 +45,22 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
     const repository = path.join(root, 'repository');
     await fs.mkdir(repository);
     const task = await store.createTask({ title: 'Real Compose matrix', prompt: 'Verify', repositoryId: (await addTestRepository(store, repository)).id });
+    const { iteration, worktree } = await store.createIterationAndWorktree({ task,
+      branchName: 'codex/compose-real', worktreePath: repository, baseSha: 'a'.repeat(40) });
+    const now = new Date().toISOString();
+    const previewPlan = await store.savePreviewPlan({ id: randomUUID(), taskId: task.id,
+      iterationId: iteration.id, worktreeId: worktree.id,
+      planSource: { type: 'REPOSITORY_RECIPE', recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'real-fixture' },
+      executionDigest: 'real-fixture', executionPlan: { version: 1, adapter: 'COMPOSE', jobs: [], resources: [],
+        services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      warnings: [], createdAt: now });
+    const approval = await store.savePreviewApproval({ id: randomUUID(), taskId: task.id, planId: previewPlan.id,
+      executionDigest: previewPlan.executionDigest, scope: 'TASK', approvedAt: now });
+    const sourceSnapshot = await store.recordGitSnapshot({ taskId: task.id, iterationId: iteration.id,
+      worktreeId: worktree.id, worktreePath: repository, repoRoot: repository, gitCommonDir: path.join(repository, '.git'),
+      headSha: 'a'.repeat(40), branch: worktree.branchName, aheadCount: 0, behindCount: 0,
+      stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictedCount: 0, commitsAheadOfBase: 0,
+      committedDiffFileCount: 0, workingDiffFileCount: 0, diffStat: '', dirtyFingerprint: 'clean', status: 'CLEAN' }, '');
     const projectName = previewComposeProjectName(task.id);
     const runId = randomUUID().replace(/-/g, '').slice(0, 16);
     const externalVolume = `taskmonki_external_volume_${runId}`;
@@ -82,6 +98,17 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
     const inspector = new PreviewComposeInspector(cli, path.join(controlRoot, 'inspection'));
     const runtime = new PreviewComposeRuntime(store, cli, inspector, engine);
 
+    // The runtime persists foreign keys to the generation prepared by PreviewManager.
+    const applyRecorded = async (input: Parameters<PreviewComposeRuntime['apply']>[0]) => {
+      await store.savePreviewGeneration({ id: input.generationId, taskId: task.id,
+        iterationId: iteration.id, worktreeId: worktree.id, planId: previewPlan.id, previewKey: input.previewKey,
+        adapter: 'COMPOSE', executionAuthority: { type: 'USER_APPROVAL', approvalId: approval.id, executionDigest: previewPlan.executionDigest },
+        source: { type: 'WORKTREE_SNAPSHOT', gitSnapshotId: sourceSnapshot.id, headSha: sourceSnapshot.headSha!, dirtyFingerprint: sourceSnapshot.dirtyFingerprint },
+        workspacePath: input.generationRoot, state: 'PREPARING_SOURCE', routingState: 'CANDIDATE', freshness: 'REVISION',
+        routes: [], attachmentReadiness: [], createdAt: now, updatedAt: now });
+      return runtime.apply(input);
+    };
+
     await engine.run(engine.contextArgs(identity.contextName, [
       'volume', 'create', '--label', externalLabel, externalVolume
     ]));
@@ -115,7 +142,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
         projectName,
         plan
       });
-      const result = await runtime.apply({
+      const result = await applyRecorded({
         taskId: task.id,
         previewKey: 'real-compose-matrix',
         generationId,
@@ -155,6 +182,10 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
       expect(stateless.change).toBe('IN_PLACE_UPDATE');
       expect(requiredVolume(stateless.project, 'database-data').object).toEqual(initialDataVolume.object);
       expect(await readDatabaseValues(engine, identity, stateless.project)).toContain('initial-data');
+      const builtSource = await engine.run(engine.contextArgs(identity.contextName, [
+        'exec', requiredContainer(stateless.project, 'app').object.objectId!, 'cat', '/revision.txt'
+      ]));
+      expect(builtSource.stdout.trim()).toBe('REVISION_TWO');
 
       const restarted = await apply(
         { revisionKey: 'REVISION_TWO', scratchVolume: true },
@@ -174,7 +205,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
         externalNetwork,
         { revisionKey: 'REVISION_RESET', scratchVolume: true, databaseCommand: true }
       );
-      await expect(runtime.apply({
+      await expect(applyRecorded({
         taskId: task.id,
         previewKey: 'real-compose-matrix',
         generationId: resetSource.generationId,
@@ -197,7 +228,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
       if (resetCleanup !== 'CLEANED') {
         throw new Error(`Explicit reset cleanup refused: ${(await requiredProject(store, task.id)).cleanupError ?? 'no reason'}`);
       }
-      const reset = await runtime.apply({
+      const reset = await applyRecorded({
         taskId: task.id,
         previewKey: 'real-compose-matrix',
         generationId: resetSource.generationId,
@@ -231,7 +262,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
       );
       let readinessFailure: PreviewComposeActivationError | undefined;
       try {
-        await runtime.apply({
+        await applyRecorded({
           taskId: task.id,
           previewKey: 'real-compose-matrix',
           generationId: failedSource.generationId,
@@ -274,7 +305,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
         { revisionKey: 'REVISION_CANCEL_BEFORE', scratchVolume: true, databaseCommand: true }
       );
       const beforeSource = await canceledBefore;
-      await expect(runtime.apply({
+      await expect(applyRecorded({
         taskId: task.id,
         previewKey: 'real-compose-matrix',
         generationId: beforeSource.generationId,
@@ -304,7 +335,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
         externalNetwork,
         { revisionKey: 'REVISION_CANCEL_AFTER', scratchVolume: true, databaseCommand: true }
       );
-      await expect(runtime.apply({
+      await expect(applyRecorded({
         taskId: task.id,
         previewKey: 'real-compose-matrix',
         generationId: afterSource.generationId,
@@ -397,10 +428,10 @@ async function writeComposeSource(
         }
       },
       app: {
-        image: 'alpine:3.21',
+        build: '.',
         command: variant.appFails
           ? ['sh', '-c', 'exit 23']
-          : ['nc', '-lk', '-p', '8080'],
+          : ['node', '/server.mjs'],
         depends_on: { db: { condition: 'service_healthy', required: true } },
         environment: { [variant.revisionKey]: 'enabled' },
         expose: [8080],
@@ -417,6 +448,9 @@ async function writeComposeSource(
     networks: { default: {}, [externalNetwork]: { external: true } }
   };
   await fs.writeFile(path.join(sourceRoot, 'compose.yaml'), `${JSON.stringify(compose, null, 2)}\n`, { mode: 0o600 });
+  await fs.writeFile(path.join(sourceRoot, 'Dockerfile'), 'FROM node:22.23.0-bookworm-slim\nCOPY revision.txt server.mjs /\n');
+  await fs.writeFile(path.join(sourceRoot, 'server.mjs'), "import http from 'node:http'; http.createServer((req, res) => res.end('ready')).listen(8080, '0.0.0.0');\n");
+  await fs.writeFile(path.join(sourceRoot, 'revision.txt'), variant.revisionKey);
   await fs.writeFile(path.join(sourceRoot, 'database-password.txt'), randomUUID(), { mode: 0o600 });
 }
 

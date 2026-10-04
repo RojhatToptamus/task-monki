@@ -143,7 +143,7 @@ reserved ID only when the runtime store confirms that no run was admitted and th
 original task, worktree, and session still match. Matching draft clearing shares
 the admission transaction.
 
-SQLite migration 7 adds the task instruction table. Old tasks have an empty
+SQLite migration 8 adds the task instruction table. Old tasks have an empty
 queue and optional empty draft. Existing runtime and prompt artifacts remain
 readable. See `../architecture/PERSISTENCE_ARCHITECTURE.md` for storage limits
 and `AGENT_REVIEW_WORKFLOW_LIFECYCLE.md` for review transitions.

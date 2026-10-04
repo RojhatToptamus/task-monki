@@ -40,14 +40,6 @@
   pointer-events: none;
 }
 
-.tm-discourse-workspace-loading {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .tm-discourse--failed {
   grid-template-columns: minmax(0, 1fr);
   place-items: center;

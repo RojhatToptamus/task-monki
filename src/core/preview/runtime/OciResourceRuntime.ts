@@ -391,6 +391,25 @@ export class OciResourceRuntime {
     return stop;
   }
 
+  async suspendTaskResources(taskId: string): Promise<void> {
+    await this.healthStops.get(taskId)?.();
+    for (const resource of await this.store.getPreviewManagedResources(taskId)) {
+      if (resource.state === 'STOPPED') continue;
+      await this.requireEngine(resource.container.engine);
+      const objectId = await this.findVerifiedOwnedObject('container', resource.container,
+        expectedManagedResourceLabels(this.store.getStoreIdentity(), resource, 'container'));
+      if (objectId) {
+        await this.engine.run(['--context', resource.container.engine.contextName,
+          'container', 'stop', objectId], this.engine.environment(), { timeoutMs: MUTATION_TIMEOUT_MS });
+        const inspection = await this.inspect('container', objectId, resource.container.engine.contextName);
+        if (asRecord(inspection.State, 'container state').Running === true) throw new Error('Preview dependency is still running.');
+      }
+      await this.store.savePreviewManagedResource({ ...resource, state: 'RECOVERY_REQUIRED',
+        failureReason: 'Stopped for archive. Container, volume, and credentials are retained.',
+        updatedAt: new Date().toISOString() });
+    }
+  }
+
   stopManagedResource(resourceId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
     const existing = this.resourceCleanup.get(resourceId);
     if (existing) return existing;
@@ -508,14 +527,26 @@ export class OciResourceRuntime {
     const resources = (await this.store.getPreviewManagedResources(taskId)).filter(
       (resource) => resource.state !== 'STOPPED'
     );
-    for (const resource of resources) {
-      changed = true;
-      if (await this.stopManagedResource(resource.id) === 'REFUSED') refused = true;
-    }
     const environments = (await this.store.getPreviewManagedEnvironments()).filter(
       (environment) => (!taskId || environment.taskId === taskId) && environment.state !== 'STOPPED'
     );
+    const retainedTaskIds = new Set<string>();
+    if (!taskId) {
+      for (const id of new Set([...resources, ...environments].map((item) => item.taskId))) {
+        const task = await this.store.getTask(id);
+        if (task?.kind === 'DESIGN' && task.workflowPhase === 'ARCHIVED') {
+          try { await this.suspendTaskResources(id); } catch { refused = true; }
+          retainedTaskIds.add(id);
+        }
+      }
+    }
+    for (const resource of resources) {
+      if (retainedTaskIds.has(resource.taskId)) continue;
+      changed = true;
+      if (await this.stopManagedResource(resource.id) === 'REFUSED') refused = true;
+    }
     for (const environment of environments) {
+      if (retainedTaskIds.has(environment.taskId)) continue;
       changed = true;
       if (await this.stopManagedEnvironment(environment.id) === 'REFUSED') refused = true;
     }

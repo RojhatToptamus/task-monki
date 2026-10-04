@@ -192,6 +192,14 @@ export function designCanvasPresentation(input: {
       restart: false
     };
   }
+  if (displayStatus === 'ARCHIVED') {
+    return {
+      kind: 'PLACEHOLDER',
+      title: 'Design archived',
+      detail: 'This Design has no Ready preview.',
+      restart: false
+    };
+  }
   if (displayStatus === 'NEEDS_ATTENTION') {
     return {
       kind: 'PLACEHOLDER',

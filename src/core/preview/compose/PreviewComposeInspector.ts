@@ -98,7 +98,7 @@ export class PreviewComposeInspector {
       profiles: input.plan.profiles,
       rootServices: input.plan.rootServices,
       composeVersion: capability.version,
-      flags: ['--no-interpolate', '--no-env-resolution'],
+      flags: ['--no-interpolate', '--no-env-resolution', '--no-path-resolution'],
       hostInputs: dedupedHostInputs
     };
     return {

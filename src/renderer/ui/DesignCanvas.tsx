@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   HideDesignCanvasRequest,
   RefreshDesignCanvasRequest,
@@ -42,6 +42,8 @@ export interface DesignCanvasProps {
   project: DesignProjectDetail;
   desktopAvailable: boolean;
   occluded?: boolean;
+  setup?: ReactNode;
+  setupRequired?: boolean;
   onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRefresh(request: DesignCanvasRefreshRequest): Promise<void>;
@@ -63,6 +65,8 @@ export function DesignCanvas({
   project,
   desktopAvailable,
   occluded = false,
+  setup,
+  setupRequired = false,
   onShowCanvas,
   onHideCanvas,
   onRefresh,
@@ -78,7 +82,9 @@ export function DesignCanvas({
   const [device, setDevice] = useState<CanvasDevice>('desktop');
   const [error, setError] = useState<string>();
   const [failedGenerationId, setFailedGenerationId] = useState<string>();
-  const presentation = designCanvasPresentation({ project, desktopAvailable, occluded });
+  const [setupOpen, setSetupOpen] = useState<boolean>();
+  const setupVisible = Boolean(setup && (setupOpen ?? setupRequired));
+  const presentation = designCanvasPresentation({ project, desktopAvailable, occluded: occluded || setupVisible });
   const generationId = presentation.kind === 'NATIVE' ? presentation.target.generationId : undefined;
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;
   const previewInProgress = presentation.kind === 'NATIVE' && presentation.progress;
@@ -92,6 +98,8 @@ export function DesignCanvas({
   );
   const activeOrdinal = latestRevision?.ordinal ?? 1;
   const selectedDevice = DEVICE_OPTIONS.find((option) => option.id === device)!;
+  const displayedTarget = previewInProgress
+    ? project.task.designPreviewTarget : selectedRevision?.target ?? project.task.designPreviewTarget;
   const sourceFile =
     project.projectFiles.find((file) => file.path.endsWith('/index.html') || file.path === 'index.html') ??
     project.projectFiles[0];
@@ -263,7 +271,7 @@ export function DesignCanvas({
   return (
     <section className="tm-design-canvas" aria-label="Design canvas">
       <header className="tm-design-canvas__toolbar">
-        <nav className="tm-design-canvas__versions" aria-label="Design versions">
+        {setupVisible ? <strong className="tm-design-canvas__setup-title">Preview setup</strong> : <nav className="tm-design-canvas__versions" aria-label="Design versions">
           {project.revisions.length === 0 ? (
             <span aria-current="true">v1</span>
           ) : project.revisions.map((revision) => {
@@ -302,8 +310,18 @@ export function DesignCanvas({
               v{latestRevision.ordinal + 1}
             </span>
           ) : null}
-        </nav>
+        </nav>}
         <div className="tm-design-canvas__tools">
+          {setup ? <button
+            type="button"
+            className="outline-button"
+            aria-expanded={setupVisible}
+            aria-controls="design-preview-setup"
+            onClick={() => setSetupOpen(!setupVisible)}
+          >
+            {setupVisible ? 'Back to preview' : 'Preview setup'}
+          </button> : null}
+          {!setupVisible ? <>
           <div className="tm-design-canvas__devices" role="group" aria-label="Canvas device">
             {DEVICE_OPTIONS.map((option) => (
               <button
@@ -353,10 +371,11 @@ export function DesignCanvas({
           >
             <UiExternalLinkIcon />
           </button>
+          </> : null}
         </div>
       </header>
 
-      {viewingEarlierRevision && selectedRevision && latestRevision ? (
+      {!setupVisible && viewingEarlierRevision && selectedRevision && latestRevision ? (
         <div className="tm-design-canvas__revision-actions" aria-label="Earlier version preview">
           <span>Viewing v{selectedRevision.ordinal}</span>
           <div>
@@ -372,7 +391,7 @@ export function DesignCanvas({
             >
               Back to v{latestRevision.ordinal}
             </button>
-            <button
+            {project.actions.canRestore ? <button
               type="button"
               className="primary-button"
               aria-label={`Restore version ${selectedRevision.ordinal} as a new version`}
@@ -384,23 +403,25 @@ export function DesignCanvas({
               )}
             >
               {operation === 'restore' ? 'Restoring…' : 'Restore as new'}
-            </button>
+            </button> : null}
           </div>
         </div>
       ) : null}
 
-      <div className="tm-design-canvas__stage">
+      {setupVisible ? <div id="design-preview-setup" className="tm-design-canvas__setup">{setup}</div> : <div className="tm-design-canvas__stage">
         <div className="tm-design-canvas__viewport" data-device={device}>
           {previewContent}
         </div>
-      </div>
+      </div>}
 
       <footer className="tm-design-canvas__footer">
         <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
           <StatusGlyph kind={canvasStatus.tone} />
           {canvasStatus.label}
         </span>
-        {sourceFile && !viewingEarlierRevision ? (
+        {displayedTarget ? <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
+          {displayedTarget.routeId}{displayedTarget.entryPath}
+        </span> : sourceFile && !viewingEarlierRevision ? (
           <>
             <span aria-hidden="true">·</span>
             <span className="tm-design-canvas__source" title={sourceFile.path}>

@@ -13,7 +13,7 @@ export interface ActionMenuItem {
 }
 
 /** shadcn's Radix menu foundation, styled with Task Monki's shared tokens. */
-export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', disabled, label, trigger, items }: {
+export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', disabled, label, trigger, items, onOpenChange }: {
   className?: string;
   selection?: 'single' | 'multiple';
   align?: 'start' | 'end';
@@ -21,6 +21,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
   label: string;
   trigger: ReactNode;
   items: ActionMenuItem[];
+  onOpenChange?(open: boolean): void;
 }) {
   const id = useId();
   const selected = items.find((item) => item.pressed)?.label;
@@ -44,7 +45,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
       : selection === 'single' ? <DropdownMenu.RadioItem key={item.label} value={item.label} {...props}>{copy}</DropdownMenu.RadioItem>
       : <DropdownMenu.CheckboxItem key={item.label} checked={item.pressed} {...props}>{copy}</DropdownMenu.CheckboxItem>;
   };
-  return <DropdownMenu.Root modal={false}>
+  return <DropdownMenu.Root modal={false} onOpenChange={onOpenChange}>
     <div className={className}>
       <DropdownMenu.Trigger asChild><button type="button" className={`tm-action-menu__trigger ${className}__trigger`} title={label} aria-label={label} disabled={disabled}>{trigger}</button></DropdownMenu.Trigger>
     </div>

@@ -86,11 +86,29 @@ export class PreviewComposeRuntime {
     const refusedTaskIds = new Set<string>();
     for (const project of await this.store.getPreviewComposeProjects()) {
       if (project.state === 'STOPPED') continue;
-      if (await this.cleanupTask(project.taskId, { deleteData: true }) === 'REFUSED') {
+      const task = await this.store.getTask(project.taskId);
+      const archivedDesign = task?.kind === 'DESIGN' && task.workflowPhase === 'ARCHIVED';
+      if (await this.cleanupTask(project.taskId, { deleteData: !archivedDesign }) === 'REFUSED') {
         refusedTaskIds.add(project.taskId);
       }
     }
     return refusedTaskIds;
+  }
+
+  async assertGenerationRunning(taskId: string, generationId: string): Promise<void> {
+    const project = await this.store.getPreviewComposeProject(taskId);
+    if (!project || project.state !== 'READY' || project.activeGenerationId !== generationId) {
+      throw new Error('The inspected Compose generation is no longer active.');
+    }
+    await this.engine.requireReady(project.engine);
+    for (const container of project.containers) {
+      const inspection = await this.inspectObject('container', container.object.objectId!, project.engine.contextName);
+      this.assertOwnedInspection('container', inspection, container.object, expectedLabels(project));
+      const state = asRecord(inspection.State, 'container state');
+      if (state.Running !== true || state.Paused === true || state.Restarting === true) {
+        throw new Error(`Compose service ${container.serviceId} is no longer running.`);
+      }
+    }
   }
 
   async watch(
