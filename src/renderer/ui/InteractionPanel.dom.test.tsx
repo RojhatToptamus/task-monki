@@ -16,12 +16,12 @@ describe('mounted agent user-input interaction', () => {
 
     const submit = screen.getByRole('button', { name: 'Submit answers' });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
-    const checks = screen.getByRole('group', { name: 'Checks' });
+    const checks = screen.getByRole('group', { name: 'Which checks should run?' });
     fireEvent.click(within(checks).getByRole('checkbox', { name: /Unit/ }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Checks other answer' }), {
       target: { value: 'Smoke' }
     });
-    fireEvent.change(screen.getByRole('textbox', { name: /Detail/ }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent preserve?' }), {
       target: { value: 'Preserve current behavior.' }
     });
     expect((submit as HTMLButtonElement).disabled).toBe(false);
@@ -64,7 +64,7 @@ describe('mounted agent user-input interaction', () => {
     expect(onRespond.mock.lastCall?.[1]).toEqual({ interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: interaction.request.permissions });
   });
 
-  it('lets a Design user return every choice to the agent exactly once', async () => {
+  it('preserves selected answers while delegating only unresolved Design choices, without changing selection on focus', async () => {
     const onRespond = vi.fn(async () => undefined);
     const interaction = userInputInteraction();
     interaction.request = {
@@ -103,7 +103,10 @@ describe('mounted agent user-input interaction', () => {
       />
     );
 
-    const decide = screen.getByRole('button', { name: 'Decide for me' });
+    fireEvent.click(screen.getByRole('radio', { name: /New customers/ }));
+    fireEvent.focus(screen.getByRole('textbox', { name: 'Audience other answer' }));
+    expect(screen.getByRole('radio', { name: /New customers/ })).toHaveProperty('checked', true);
+    const decide = screen.getByRole('button', { name: 'Decide the rest' });
     fireEvent.click(decide);
     fireEvent.click(decide);
 
@@ -112,10 +115,21 @@ describe('mounted agent user-input interaction', () => {
       interactionType: 'USER_INPUT',
       action: 'ANSWER',
       answers: {
-        audience: ['Decide for me'],
+        audience: ['New customers'],
         scope: ['Decide for me']
       }
     });
+  });
+
+  it('shows persisted answers during confirmation after remount, without allowing a resend', () => {
+    const interaction = userInputInteraction();
+    interaction.status = 'RESPONDING';
+    interaction.decision = { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { checks: ['Unit', 'Smoke'], detail: ['Keep keyboard support.'] } };
+    render(<InteractionPanel interactions={[interaction]} sessions={[]} onRespond={vi.fn()} />);
+    expect(screen.getByText('Unit; Smoke')).toBeTruthy();
+    expect(screen.getByText('Keep keyboard support.')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe('Confirmation pending');
+    expect(screen.queryByRole('button', { name: 'Submit answers' })).toBeNull();
   });
 
   it('hides agent delegation when the provider does not accept custom input', () => {

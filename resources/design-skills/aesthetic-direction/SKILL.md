@@ -17,7 +17,8 @@ If a system exists, preserve it unless the user requests a redesign.
 Use `design-system-inspection` instead of inventing a new system.
 
 If no system exists and the brief is clear, choose a direction yourself.
-If the missing direction can change the main result, use one combined discovery round.
+If missing product intent can change the main result, use `discovery-questions`.
+Group independent questions and wait for earlier answers before asking dependent questions.
 
 ## Connect the direction to the brief
 

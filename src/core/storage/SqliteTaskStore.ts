@@ -7569,6 +7569,8 @@ async function projectDesignConversationEntry(
           ? await readPrivateArtifactFile(artifact.path, artifact.byteCount)
           : '',
     assistantMessage: run?.finalMessage,
+    userInputInteractions: state.interactionRequests.filter((interaction) =>
+      interaction.runId === run?.id && interaction.type === 'USER_INPUT'),
     runStatus: run?.status,
     readyRevision:
       turn.outcome === 'READY'

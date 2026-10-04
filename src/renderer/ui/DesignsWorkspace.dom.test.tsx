@@ -1224,7 +1224,7 @@ describe('mounted Design workspace', () => {
     );
 
     expect(screen.getAllByText('Needs input').length).toBeGreaterThan(0);
-    const choices = screen.getByRole('group', { name: 'Theme' });
+    const choices = screen.getByRole('group', { name: 'Which theme should the preview use?' });
     fireEvent.click(within(choices).getByRole('radio', { name: /Light/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));
 

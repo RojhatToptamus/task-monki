@@ -109,9 +109,7 @@ export function buildInteractionPolicy(input: {
       }
       return {
         allowedActions: ['ANSWER'],
-        warnings: [
-          'User-input requests are runtime-controlled and may interrupt an active agent turn.'
-        ]
+        warnings: []
       };
     }
     case 'DYNAMIC_TOOL':

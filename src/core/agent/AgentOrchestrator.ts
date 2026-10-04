@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readTaskUserContext } from '../prompt/TaskUserContext';
 import type {
   AgentExecutionSettings,
   AgentInstructionProfile,
@@ -1928,6 +1929,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const reviewSessionOperationId =
       `review-session:${input.task.id}:${reviewSessionId}`;
     const prompt = buildAgentReviewPrompt({
+      userContext: await readTaskUserContext(this.store, input.task.id),
       task: input.task,
       worktree: input.worktree,
       target: input.target

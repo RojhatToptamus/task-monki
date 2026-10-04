@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { UserInputSummary } from './UserInputSummary';
 import type {
   AgentModel,
   AgentInteractionDecision,
@@ -412,7 +413,10 @@ export function DesignConversation({
           interactions={[...project.interactions]}
           sessions={[...project.sessions]}
           offerAgentDecision
-          onRespond={onRespond}
+          onRespond={async (interaction, decision) => {
+            await onRespond(interaction, decision);
+            if (interaction.type === 'USER_INPUT') composerRef.current?.focus();
+          }}
         />
       </div>
       </Conversation>
@@ -578,6 +582,8 @@ function DesignTurnMessages({
         </MessageMeta>
       </Message>
 
+      {entry.userInputInteractions?.filter((interaction) => !['PENDING', 'RESPONDING'].includes(interaction.status))
+        .map((interaction) => <UserInputSummary key={interaction.id} interaction={interaction} />)}
       <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>

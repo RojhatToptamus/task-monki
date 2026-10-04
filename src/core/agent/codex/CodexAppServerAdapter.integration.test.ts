@@ -4313,6 +4313,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const server = (await store.snapshot()).agentServers[0]!;
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const outboundMessages = readOutboundMessages(journal);
+    expect(outboundMessages.find((message) => message.method === 'thread/start')?.params).toMatchObject({
+      config: { 'features.send_message_to_user_async': false }
+    });
     const turnStart = outboundMessages.find((message) => message.method === 'turn/start');
     expect(turnStart?.params).toMatchObject({
       collaborationMode: {

@@ -14,6 +14,7 @@ import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
+import { UserInputSummary } from './UserInputSummary';
 
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
@@ -51,15 +52,16 @@ export function InteractionPanel({
   }
 
   const commandApproval = active.type === 'COMMAND_APPROVAL';
+  const userInput = active.type === 'USER_INPUT';
 
   return (
     <section
-      className={`interaction-card ${commandApproval ? 'interaction-card--command' : ''}`}
+      className={`interaction-card ${commandApproval ? 'interaction-card--command' : userInput ? 'interaction-card--question' : ''}`}
       id="action-required"
-      aria-live="polite"
+      aria-live={userInput ? undefined : 'polite'}
     >
       <header className="interaction-card__header">
-        {commandApproval ? (
+        {userInput ? <h3>Question{(active.request as AgentUserInputRequest).questions.length > 1 ? 's' : ''}</h3> : commandApproval ? (
           <h3>
             <StatusGlyph kind="waiting" />
             {interactionTitle(active)}
@@ -73,7 +75,7 @@ export function InteractionPanel({
             <h3>{interactionTitle(active)}</h3>
           </div>
         )}
-        {commandApproval ? (
+        {userInput ? null : commandApproval ? (
           activeCount > 1 ? (
             <span className="interaction-card__waiting">{activeCount} pending</span>
           ) : null
@@ -129,7 +131,7 @@ function InteractionBody({
 
   return (
     <>
-      {interaction.type === 'COMMAND_APPROVAL'
+      {interaction.type === 'COMMAND_APPROVAL' || (interaction.type === 'USER_INPUT' && hasAction(interaction, 'ANSWER'))
         ? null
         : interaction.policyWarnings.map((warning) => (
             <p className="interaction-card__warning" key={warning}>
@@ -163,26 +165,28 @@ function InteractionBody({
           onRespond={respond}
         />
       ) : interaction.type === 'USER_INPUT' ? (
+        interaction.status === 'RESPONDING' && interaction.decision ? <UserInputSummary interaction={interaction} /> :
         <UserInputRequest
           interaction={interaction}
           disabled={disabled}
           formValues={formValues}
           setFormValues={setFormValues}
           offerAgentDecision={offerAgentDecision}
+          submitting={submitting}
           onRespond={respond}
         />
       ) : (
         <p className="muted">This dynamic client tool was rejected automatically.</p>
       )}
-      {interaction.type === 'COMMAND_APPROVAL' ? null : (
+      {interaction.type === 'COMMAND_APPROVAL' || interaction.type === 'USER_INPUT' ? null : (
         <InteractionTechnicalDetails
           interaction={interaction}
           sourceSession={sourceSession}
         />
       )}
-      {interaction.status === 'RESPONDING' ? (
+      {interaction.status === 'RESPONDING' && interaction.type !== 'USER_INPUT' ? (
         <p className="muted">
-          {interaction.type === 'USER_INPUT' ? 'Answer' : 'Decision'} sent. Waiting for provider
+          Decision sent. Waiting for provider
           confirmation…
         </p>
       ) : null}
@@ -653,23 +657,23 @@ function UserInputRequest({
   formValues,
   setFormValues,
   offerAgentDecision,
+  submitting,
   onRespond
-}: InteractionSectionProps & FormStateProps & { offerAgentDecision: boolean }) {
+}: InteractionSectionProps & FormStateProps & { offerAgentDecision: boolean; submitting: boolean }) {
   const request = interaction.request as AgentUserInputRequest;
   const answers = Object.fromEntries(
     request.questions.map((question) => [
       question.id,
-      userInputAnswers(question, formValues[question.id])
+      userInputAnswers(question, formValues[question.id]).filter((answer) => answer.trim())
     ])
   );
   const canSubmit = Object.values(answers).every(
     (values) => values.length > 0 && values.every((value) => value.trim())
   );
-  const canDelegate =
-    offerAgentDecision &&
-    request.questions.every(
-      (question) => question.isOther && Boolean(question.options?.length)
-    );
+  const unanswered = request.questions.filter((question) => !answers[question.id]?.some((answer) => answer.trim()));
+  const canDelegate = offerAgentDecision && unanswered.length > 0 && unanswered.every(
+    (question) => question.isOther && Boolean(question.options?.length)
+  );
   return (
     <>
       <div className="interaction-form">
@@ -691,7 +695,8 @@ function UserInputRequest({
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
           <ActionButton
-            label="Submit answers"
+            label={submitting ? 'Sending…' : 'Submit answers'}
+            busy={submitting}
             disabled={disabled || !canSubmit}
             onClick={() =>
               onRespond({
@@ -703,7 +708,8 @@ function UserInputRequest({
           />
           {canDelegate ? (
             <ActionButton
-              label="Decide for me"
+              label={unanswered.length < request.questions.length ? 'Decide the rest' : 'Decide for me'}
+              busy={submitting}
               variant="secondary"
               disabled={disabled}
               onClick={() =>
@@ -713,7 +719,7 @@ function UserInputRequest({
                   answers: Object.fromEntries(
                     request.questions.map((question) => [
                       question.id,
-                      ['Decide for me']
+                      unanswered.includes(question) ? ['Decide for me'] : answers[question.id]
                     ])
                   )
                 })
@@ -740,9 +746,9 @@ function UserInputQuestion({
   if (!question.options?.length) {
     return (
       <label className="field">
-        <span>{question.header}</span>
-        <small>{question.question}</small>
-        <input
+        <span>{question.question}</span>
+        <textarea
+          rows={3}
           disabled={disabled}
           value={typeof value === 'string' ? value : ''}
           onChange={(event) => onChange(event.target.value)}
@@ -777,8 +783,8 @@ function UserInputQuestion({
 
   return (
     <fieldset className="interaction-question">
-      <legend>{question.header}</legend>
-      <p className="interaction-question__prompt">{question.question}</p>
+      <legend>{question.question}</legend>
+      {question.allowsMultiple ? <p className="interaction-question__prompt">Choose all that apply.</p> : null}
       <div className="interaction-choice-list">
         {question.options.map((option, index) => (
           <label className="interaction-choice" key={`${index}:${option.label}`}>
@@ -807,11 +813,11 @@ function UserInputQuestion({
               />
               <strong>Other</strong>
             </label>
-            <input
+            <textarea
+              rows={2}
               aria-label={`${question.header} other answer`}
               disabled={disabled}
               value={choice.custom}
-              onFocus={() => chooseCustom(true)}
               onChange={(event) =>
                 onChange({
                   ...choice,
@@ -1044,19 +1050,23 @@ function ActionButton({
   label,
   variant = 'primary',
   disabled,
+  busy = false,
   onClick
 }: {
   label: string;
   variant?: 'primary' | 'secondary';
   disabled: boolean;
+  busy?: boolean;
   onClick(): Promise<void>;
 }) {
   return (
     <button
       type="button"
       className={variant === 'primary' ? 'primary-button' : 'outline-button'}
-      disabled={disabled}
-      onClick={() => void onClick()}
+      disabled={disabled && !busy}
+      aria-disabled={disabled || undefined}
+      aria-busy={busy || undefined}
+      onClick={() => { if (!disabled) void onClick(); }}
     >
       {label}
     </button>

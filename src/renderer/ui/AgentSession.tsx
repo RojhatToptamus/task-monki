@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { UserInputSummary } from './UserInputSummary';
 import type {
   AgentItemRecord, AgentPlanRevisionRecord, AgentSessionRecord, InteractionRequestRecord,
   AgentInteractionDecision, RunRecord, Task, TaskInstruction, InstructionAttachments, TaskAttachmentRecord
@@ -96,11 +97,12 @@ export function AgentSession(props: AgentSessionProps) {
   const fileError = composerFiles.modelError ?? composerFiles.overflowError ?? composerFiles.draftError;
   const hasFiles = files.activeItems.length > 0;
 
-  const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.worktreePath);
+  const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.interactions, props.worktreePath);
   const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)
     || (item.status === 'FAILED' && item.mode !== 'STEER' && item.runId && !props.runs.some((turn) => turn.id === item.runId)))
     .sort((a, b) => a.order - b.order);
-  const attentionPending = props.interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status));
+  const answerPending = props.interactions.some((item) => item.status === 'PENDING');
+  const attentionPending = answerPending || props.interactions.some((item) => item.status === 'RESPONDING');
   const activeReview = props.runs.find((item) => item.mode === 'REVIEW' && isActiveRunStatus(item.status));
   const displayedRun = activeReview ?? run;
   const active = Boolean(displayedRun && isActiveRunStatus(displayedRun.status));
@@ -122,7 +124,8 @@ export function AgentSession(props: AgentSessionProps) {
     RETRY: { label: 'Retry', description: 'Start the implementation again from the current worktree', placeholder: 'Add guidance for the retry (optional)' }
   };
   const sessionBlocked = activeReview ? 'Wait for the review to finish.'
-    : attentionPending ? 'Answer the agent request before sending an instruction.'
+    : answerPending ? 'Answer the agent request before sending an instruction.'
+    : attentionPending ? 'Waiting for confirmation before sending an instruction.'
     : run?.status === 'INTERRUPTING' ? 'Waiting for the agent to stop.'
     : ['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase) ? 'Reopen the task to continue work.'
     : !mode ? 'The agent is not ready for another instruction.' : undefined;
@@ -245,7 +248,8 @@ export function AgentSession(props: AgentSessionProps) {
     setHistoryWindow((current) => earlierHistory(turns, current));
   };
   const workingLabel = displayedRun?.status === 'INTERRUPTING' ? 'Stopping…'
-    : attentionPending ? 'Waiting for your answer'
+    : answerPending ? 'Waiting for your answer'
+    : attentionPending ? 'Waiting for confirmation'
     : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
     : activeReview ? 'Reviewing…' : 'Working…';
   const canSend = !busy && !blocked && !files.busy && !files.hasErrors && !files.modelError && !(needsText && !draft.trim());
@@ -278,7 +282,10 @@ export function AgentSession(props: AgentSessionProps) {
             <Elapsed since={displayedRun.startedAt} />
           </div> : null}
         <div ref={attention} tabIndex={-1} className="tm-agent-session__requests">
-          <InteractionPanel interactions={props.interactions} sessions={props.sessions} onRespond={props.onRespond} />
+          <InteractionPanel interactions={props.interactions} sessions={props.sessions} onRespond={async (interaction, decision) => {
+            await props.onRespond(interaction, decision);
+            if (interaction.type === 'USER_INPUT') composer.current?.focus();
+          }} />
         </div>
       </div>
     </Conversation>
@@ -354,7 +361,7 @@ export function AgentSession(props: AgentSessionProps) {
  * live turn is re-projected while output streams.
  */
 function useSessionTurns(prompt: string, runs: RunRecord[], items: AgentItemRecord[], instructions: TaskInstruction[],
-  plans: AgentPlanRevisionRecord[], cwd?: string): SessionTurn[] {
+  plans: AgentPlanRevisionRecord[], interactions: InteractionRequestRecord[], cwd?: string): SessionTurn[] {
   const cache = useRef(new Map<string, { fingerprint: string; turn: SessionTurn }>());
   return useMemo(() => {
     const ordered = runs.filter((item) => isImplementationRunMode(item.mode) || item.mode === 'REVIEW')
@@ -363,28 +370,31 @@ function useSessionTurns(prompt: string, runs: RunRecord[], items: AgentItemReco
     const itemsByRun = groupByRun(items);
     const instructionsByRun = groupByRun(instructions);
     const plansByRun = groupByRun(plans);
+    const interactionsByRun = groupByRun(interactions);
     const next = new Map<string, { fingerprint: string; turn: SessionTurn }>();
     const turns = ordered.map((turnRun) => {
       const runItems = itemsByRun.get(turnRun.id) ?? [];
       const runInstructions = instructionsByRun.get(turnRun.id) ?? [];
       const runPlans = plansByRun.get(turnRun.id) ?? [];
+      const runInteractions = interactionsByRun.get(turnRun.id) ?? [];
       const turnPrompt = turnRun === first ? prompt : undefined;
       const fingerprint = isActiveRunStatus(turnRun.status) ? '' : [
         turnRun.status, turnRun.endedAt, turnRun.lastEventAt, turnRun.eventCount, turnRun.finalMessage, turnRun.terminalReason,
         turnPrompt, cwd,
         ...runItems.map((record) => `${record.id}@${record.updatedAt}`),
         ...runInstructions.map((record) => `${record.id}@${record.updatedAt}`),
+        ...runInteractions.map((record) => `${record.id}@${record.status}@${record.respondedAt}@${record.resolvedAt}`),
         ...runPlans.map((record) => `${record.id}@${record.revision}`)
       ].join('\u0000');
       const cached = cache.current.get(turnRun.id);
       const turn = fingerprint && cached?.fingerprint === fingerprint ? cached.turn
-        : sessionTurn(turnRun, runItems, runInstructions, { prompt: turnPrompt, cwd, plans: runPlans });
+        : sessionTurn(turnRun, runItems, runInstructions, { prompt: turnPrompt, cwd, plans: runPlans, interactions: runInteractions });
       if (fingerprint) next.set(turnRun.id, { fingerprint, turn });
       return turn;
     });
     cache.current = next;
     return turns;
-  }, [prompt, runs, items, instructions, plans, cwd]);
+  }, [prompt, runs, items, instructions, plans, interactions, cwd]);
 }
 
 function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]> {
@@ -423,6 +433,7 @@ function Turn({ turn, clip, failure, capture, onReadArtifact, onShowDebug, attac
       if (entry.kind === 'message') return entry.author === 'You'
         ? <UserMessage key={entry.key} text={entry.text} time={entry.at} status={entry.status} />
         : <Message key={entry.key} from="agent" label="Agent response"><MessageContent><MessageMarkdown text={entry.text} /></MessageContent></Message>;
+      if (entry.kind === 'interaction') return <UserInputSummary key={entry.key} interaction={entry.interaction} />;
       if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
     })}

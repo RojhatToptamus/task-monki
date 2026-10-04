@@ -732,7 +732,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         cwd: input.cwd,
         approvalPolicy: input.approvalPolicy,
         approvalsReviewer: input.approvalsReviewer,
-        config: input.config
+        // Task Monki answers native server requests; asynchronous message questions
+        // have no request ID to acknowledge and cannot use that delivery contract.
+        config: { ...input.config, 'features.send_message_to_user_async': false }
       };
       const response: CodexThreadMutationResponse = input.operation === 'thread/resume'
         ? await client.requestMutation(
@@ -7075,7 +7077,7 @@ function codexInteractiveCollaborationMode(
       settings: {
         model,
         reasoning_effort: settings.reasoningEffort ?? null,
-        developer_instructions: developerInstructions
+        developer_instructions: `${developerInstructions}\nFor clarification, use the synchronous request_user_input tool. Do not use request_user_input_async or send_message_to_user_async; Task Monki answers the native server request and then resumes this turn.`
       }
     }
   };

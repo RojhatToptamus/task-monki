@@ -406,8 +406,22 @@ In Progress:
   in **Needs input** and shows its choices or free-text fields. Submit one answer
   to that same run and keep the interaction visible as responding until the
   native protocol confirms delivery or lifecycle cleanup. A normal prose
-  question is not a blocking interaction. Design agents must use structured
-  questions or make a reasonable decision and continue.
+  question is not a blocking interaction. Task and Design agents inspect existing
+  evidence first and ask only about material unresolved intent. Clear tasks and
+  detailed Design briefs proceed directly. Dependent questions wait until an
+  earlier answer makes them relevant. Without a structured tool, safe choices
+  use judgment; a material unresolved blocker requires a user follow-up.
+- Question forms keep native choices, custom answers, and multiple selections.
+  Design's **Decide for me** delegates unanswered choices and preserves completed
+  answers. Answered interactions appear once in conversation history. Unconfirmed
+  delivery remains labelled and never triggers an automatic resend.
+- Existing instructions and saved question answers supply user context for
+  continuation, retry, review, and replacement sessions. Design context includes
+  admitted messages beyond the recent conversation window. Forks include only
+  intent admitted through the source run. Queued messages are not active intent.
+  A later explicit correction replaces only a conflicting earlier decision;
+  unrelated requirements remain in effect. Provider summaries cannot override
+  user decisions. No separate requirements record is stored.
 - After an interrupted, lost, or recovery-required implementation run, keep the
   task in progress and make Continue work the primary recovery action. After a
   definitive failure, make Retry implementation primary. Both actions and Fork

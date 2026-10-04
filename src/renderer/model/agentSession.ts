@@ -1,4 +1,4 @@
-import type { AgentItemRecord, AgentPlanRevisionRecord, RunRecord, TaskInstruction } from '../../shared/contracts';
+import type { AgentItemRecord, AgentPlanRevisionRecord, RunRecord, TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { buildRunActivityProjection } from './runActivity';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
 
@@ -9,6 +9,7 @@ export type SessionStep =
 export type SessionEntry =
   | { key: string; at: string; kind: 'message'; author: 'You' | 'Agent'; text: string; status?: string }
   | { key: string; at: string; kind: 'steps'; steps: SessionStep[] }
+  | { key: string; at: string; kind: 'interaction'; interaction: InteractionRequestRecord }
   | { key: string; at: string; kind: 'plan'; plan: AgentPlanRevisionRecord };
 
 export type SessionTurnState = 'active' | 'completed' | 'stopped' | 'failed' | 'interrupted';
@@ -39,7 +40,7 @@ export function isActiveRunStatus(status: RunRecord['status']): boolean {
  * echoes contain generated prompts; authored text has its own owner.
  */
 export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructions: TaskInstruction[], options: {
-  prompt?: string; cwd?: string; plans?: AgentPlanRevisionRecord[];
+  prompt?: string; cwd?: string; plans?: AgentPlanRevisionRecord[]; interactions?: InteractionRequestRecord[];
 } = {}): SessionTurn {
   const runInstructions = instructions.filter((item) => item.runId === run.id);
   const authored = runInstructions.find((item) => item.mode !== 'STEER');
@@ -51,7 +52,7 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
     : undefined;
   // A review is a detached gate; its findings belong to the review surface.
   const entries = run.mode === 'REVIEW' ? []
-    : sessionEntries(run, items, runInstructions.filter((item) => item.mode === 'STEER'), options.cwd, options.plans);
+    : sessionEntries(run, items, runInstructions.filter((item) => item.mode === 'STEER'), options.cwd, options.plans, options.interactions);
   const state = turnState(run);
   const end = run.endedAt ?? (state === 'active' ? undefined : run.lastEventAt);
   const durationMs = end ? Date.parse(end) - Date.parse(run.startedAt) : undefined;
@@ -63,13 +64,19 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
     answer: answer?.kind === 'message' ? answer.text : undefined };
 }
 
-export function sessionEntries(run: RunRecord, items: AgentItemRecord[], steers: TaskInstruction[], cwd?: string, plans: AgentPlanRevisionRecord[] = []): SessionEntry[] {
-  const runItems = items.filter((item) => item.runId === run.id);
+export function sessionEntries(run: RunRecord, items: AgentItemRecord[], steers: TaskInstruction[], cwd?: string, plans: AgentPlanRevisionRecord[] = [], interactions: InteractionRequestRecord[] = []): SessionEntry[] {
+  const questions = interactions.filter((interaction) => interaction.runId === run.id && interaction.type === 'USER_INPUT');
+  const questionItemIds = new Set(questions.flatMap((interaction) => interaction.providerItemId ? [interaction.providerItemId] : []));
+  const runItems = items.filter((item) => item.runId === run.id && !questionItemIds.has(item.providerItemId));
   const live = isActiveRunStatus(run.status);
   const entries: Array<SessionEntry | SessionStep> = steers.map((item) => ({
     key: item.id, at: item.createdAt, kind: 'message', author: 'You', text: item.text,
     status: ({ SENDING: 'Sending now…', SUBMITTED: undefined, FAILED: 'Not delivered', UNCERTAIN: 'Delivery uncertain', QUEUED: 'Queued', HELD: 'Held' } as const)[item.status]
   }));
+  for (const interaction of questions) {
+    if (interaction.status === 'PENDING' || interaction.status === 'RESPONDING') continue;
+    entries.push({ key: interaction.id, at: interaction.respondedAt ?? interaction.requestedAt, kind: 'interaction', interaction });
+  }
   for (const item of runItems) {
     if (item.type === 'REASONING_SUMMARY') {
       const payload = item.payload as { summary?: unknown; text?: unknown } | null;

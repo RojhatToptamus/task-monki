@@ -211,6 +211,31 @@ describe('Agent session interactions', () => {
     expect(screen.queryByText('Working…')).toBeNull();
   });
 
+  it('keeps question answers after failed delivery and returns focus to the composer after success', async () => {
+    const run = makeRunRecord({ status: 'AWAITING_USER_INPUT', providerTurnId: 'turn-1' });
+    const onRespond = vi.fn().mockRejectedValueOnce(new Error('Delivery unavailable')).mockResolvedValue(undefined);
+    render(<AgentSession {...props({ run, runs: [run], onRespond, interactions: [{
+      id: 'question-1', runtimeId: 'codex', serverInstanceId: 'server-1', providerRequestId: 1,
+      taskId: 'task-1', iterationId: 'iteration-1', runId: run.id, sessionId: 'session-1',
+      type: 'USER_INPUT', status: 'PENDING', request: { questions: [{
+        id: 'audience', header: 'Audience', question: 'Who uses the app?', isOther: true, isSecret: false
+      }] }, allowedActions: ['ANSWER'], policyWarnings: [], requestRawMessage: makeRawMessage(), requestedAt: run.startedAt
+    }] })} />);
+    const answer = screen.getByRole('textbox', { name: 'Who uses the app?' });
+    fireEvent.change(answer, { target: { value: 'Staff only; keep keyboard access.' } });
+    const submit = screen.getByRole('button', { name: 'Submit answers' });
+    submit.focus();
+    fireEvent.click(submit);
+    await screen.findByRole('alert');
+    expect(answer).toHaveProperty('value', 'Staff only; keep keyboard access.');
+    expect(document.activeElement).toBe(submit);
+    await waitFor(() => expect(submit).toHaveProperty('disabled', false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Instruction' })));
+    expect(onRespond).toHaveBeenCalledTimes(2);
+    expect(onRespond.mock.calls[0][1]).toEqual(onRespond.mock.calls[1][1]);
+  });
+
   it('keeps Queue visible while a run waits for approval and explains that the request must be answered first', () => {
     const run = makeRunRecord({ status: 'AWAITING_APPROVAL', providerTurnId: 'turn-1' });
     render(<AgentSession {...props({
