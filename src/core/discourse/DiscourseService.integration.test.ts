@@ -55,6 +55,39 @@ function currentParticipantModels(
 }
 
 describe('DiscourseService', () => {
+  it('retains files after unsupported delivery and supplies the accepted selection to the runtime', async () => {
+    const catalog = runtimeCatalog();
+    const fixture = await serviceFixture('message-files', () => catalog);
+    const draft = await fixture.taskStore.createAttachmentDraft();
+    const file = await fixture.taskStore.stageTaskAttachment({ draftId: draft.id, displayName: 'notes.txt', bytes: Buffer.from('Read the exact selected bytes.') });
+    const conversation = await fixture.service.createConversation({ title: 'File delivery', defaultPolicy: 'CHAT', agents: selections('builtin.lead'), clientOperationId: 'create-file-chat' });
+    const preview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: [] });
+    const request: SendDiscourseMessageRequest = { conversationId: conversation.id, body: 'Summarize the file.', context: [], attachmentDraftId: draft.id, policy: 'CHAT', agents: selections('builtin.lead'), clientMessageId: 'send-file', previewFingerprint: preview.fingerprint };
+    catalog.runtimes[0]!.preflight.capabilities.attachmentDelivery = { maturity: 'unsupported' };
+    await expect(fixture.service.sendMessage(request)).rejects.toThrow('cannot receive files');
+    expect((await fixture.taskStore.listAttachmentDraft(draft.id)).attachments).toHaveLength(1);
+    expect((await fixture.discourseStore.listMessages({ conversationId: conversation.id })).messages).toHaveLength(0);
+    catalog.runtimes[0]!.preflight.capabilities.attachmentDelivery = { maturity: 'stable' };
+    const start = vi.spyOn(fixture.provider as import('../agent/AgentRuntimeCoordinator').AgentRuntimeCoordinator, 'startPreparedTurn');
+    const sent = await fixture.service.sendMessage(request);
+    expect(sent.message.attachments?.map(({ id }) => id)).toEqual([file.id]);
+    expect(fixture.executionContextInputs.at(-1)?.attachments?.map(({ attachmentId }) => attachmentId)).toEqual([file.id]);
+    const [entry] = await fixture.scheduler.leaseAvailable('lease-files');
+    await fixture.coordinator.dispatchLeasedJob(entry!.id, 'dispatch-files');
+    const delivered = start.mock.calls[0]?.[2];
+    expect(delivered?.map(({ attachmentId }) => attachmentId)).toEqual([file.id]);
+    expect(await fs.readFile(delivered![0]!.path, 'utf8')).toBe('Read the exact selected bytes.');
+    const run = (await fixture.runtimeStore.getRun(sent.jobs[0]!.runId!))!;
+    expect(run.attachmentSelection[0]).not.toHaveProperty('path');
+    await markRepositoryUnchanged(fixture.runtimeStore, run.id, 'file-integrity');
+    await fixture.coordinator.ingestSuccessfulTerminal({ runId: run.id, providerTurnId: run.providerTurnId!,
+      body: 'The selected file was read.', freshnessAtCompletion: 'FRESH', clientOperationId: 'file-terminal',
+      completedAt: '2026-07-13T00:10:00.000Z', providerTerminalSource: 'TEST_TERMINAL' });
+    const nextPreview = await fixture.service.previewContext({ conversationId: conversation.id, messageContext: [] });
+    await fixture.service.sendMessage({ ...request, body: 'Now answer without additional files.',
+      clientMessageId: 'send-without-file', attachmentDraftId: undefined, previewFingerprint: nextPreview.fingerprint });
+    expect(fixture.executionContextInputs.at(-1)?.attachments).toEqual([]);
+  });
   it('stops every queued retired response during recovery without rebuilding old prompts', async () => {
     const fixture = await serviceFixture('retired-queue');
     const initial = await startChat(fixture);
@@ -310,6 +343,7 @@ describe('DiscourseService', () => {
         },
         clientOperationId: input.clientOperationId
       }),
+      discourseStore,
       () => '2026-07-13T00:01:00.000Z'
     );
     const agents = new ScriptedAgentRuntimeCoordinator(runtimeStore);
@@ -1317,6 +1351,7 @@ function composeServiceFixture(
         clientOperationId: input.clientOperationId
       };
     },
+    discourseStore,
     () => '2026-07-13T00:01:00.000Z'
   );
   const provider = new ScriptedAgentRuntimeCoordinator(runtimeStore);
@@ -1347,6 +1382,7 @@ function composeServiceFixture(
   );
   return {
     service,
+    taskStore,
     discourseStore,
     runtimeStore,
     coordinator,

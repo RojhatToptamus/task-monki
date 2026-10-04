@@ -520,15 +520,6 @@
   font-size: 10.5px;
 }
 
-.tm-design-message__references {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: var(--t-meta);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .tm-design-message__turn-status {
   display: inline-flex;
   align-items: center;

@@ -14,8 +14,46 @@ import type {
 } from '../../../shared/discourse';
 import { AppDatabase } from './AppDatabase';
 import { SqliteDiscourseStore } from './SqliteDiscourseStore';
+import { ManagedFileStore } from './ManagedFileStore';
+import { SqliteTaskAttachmentStore } from './SqliteTaskAttachmentStore';
 
 describe('SqliteDiscourseStore', () => {
+  it('adopts message files atomically, survives restart, and deletes only the requested conversation files', async () => {
+    const fixture = await createFixture();
+    const managed = new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files'));
+    const uploads = new SqliteTaskAttachmentStore(fixture.database, managed);
+    const conversation = await createConversation(fixture.store);
+    const other = await createConversation(fixture.store, 'other-conversation', 'create-other');
+    const stage = async (text: string) => {
+      const draft = await uploads.createDraft();
+      const file = await uploads.stageBytes({ draftId: draft.id, displayName: 'notes.txt', bytes: Buffer.from(text) });
+      return { draft, file };
+    };
+    const selected = await stage('selected bytes');
+    const unrelated = await stage('unrelated bytes');
+    const request = { conversationId: conversation.id, body: 'Read this file.', clientMessageId: 'with-file', attachmentDraftId: selected.draft.id };
+    await expect(fixture.store.appendHumanMessage({ ...request, sourceMessageIds: ['missing-message'] })).rejects.toThrow();
+    expect((await uploads.listDraft(selected.draft.id)).attachments).toHaveLength(1);
+    const message = await fixture.store.appendHumanMessage(request);
+    expect(message.attachments?.map((file) => file.id)).toEqual([selected.file.id]);
+    await expect(fixture.store.appendHumanMessage(request)).resolves.toEqual(message);
+    await fixture.store.appendHumanMessage({ conversationId: other.id, body: 'Keep this.', clientMessageId: 'other-file', attachmentDraftId: unrelated.draft.id });
+    await uploads.reconcile([]);
+    await fixture.store.close();
+    await fixture.database.close();
+    const database = await AppDatabase.open(fixture.databasePath, { acquireLease: false });
+    const reopened = new SqliteDiscourseStore(database, managed);
+    await reopened.init();
+    expect(new TextDecoder().decode((await reopened.readAttachment(conversation.id, selected.file.id)).bytes)).toBe('selected bytes');
+    await expect(reopened.readAttachment(other.id, selected.file.id)).rejects.toThrow();
+    const [delivered] = await reopened.verifyAttachments(conversation.id, [selected.file.id]);
+    const current = await reopened.getConversation(conversation.id);
+    await reopened.deleteConversation({ conversationId: conversation.id, expectedRevision: current.conversation.recordRevision, clientOperationId: 'delete-with-files' });
+    await expect(fs.stat(delivered!.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(new TextDecoder().decode((await reopened.readAttachment(other.id, unrelated.file.id)).bytes)).toBe('unrelated bytes');
+    await reopened.close();
+    await database.close();
+  });
   it('upgrades conversation defaults without changing history, models, or an unsent draft', async () => {
     const fixture = await createFixture();
     const conversation = await createConversation(fixture.store);
@@ -47,7 +85,7 @@ describe('SqliteDiscourseStore', () => {
         expect(backup.prepare('SELECT COUNT(*) AS count FROM discourse_messages').get()).toMatchObject({ count: 1 });
         backup.close();
       } });
-    const store = new SqliteDiscourseStore(upgraded);
+    const store = new SqliteDiscourseStore(upgraded, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await store.init();
     const after = await store.getConversation(conversation.id);
     expect(after.conversation.defaultPolicy).toBe('CHAT');
@@ -85,7 +123,7 @@ describe('SqliteDiscourseStore', () => {
     await fixture.database.close();
 
     const reopenedDatabase = await AppDatabase.open(fixture.databasePath, { acquireLease: false });
-    const reopened = new SqliteDiscourseStore(reopenedDatabase);
+    const reopened = new SqliteDiscourseStore(reopenedDatabase, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await reopened.init();
 
     await expect(reopened.getConversation(conversation.id)).resolves.toMatchObject({
@@ -306,7 +344,7 @@ describe('SqliteDiscourseStore', () => {
     const reopenedDatabase = await AppDatabase.open(fixture.databasePath, {
       acquireLease: false
     });
-    const reopened = new SqliteDiscourseStore(reopenedDatabase);
+    const reopened = new SqliteDiscourseStore(reopenedDatabase, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await reopened.init();
     const durable = await reopened.getConversation('conversation-1');
     expect(durable.participants.map(({ id }) => id)).toEqual([
@@ -350,7 +388,7 @@ describe('SqliteDiscourseStore', () => {
     const reopenedDatabase = await AppDatabase.open(fixture.databasePath, {
       acquireLease: false
     });
-    const reopened = new SqliteDiscourseStore(reopenedDatabase);
+    const reopened = new SqliteDiscourseStore(reopenedDatabase, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await expect(reopened.init()).rejects.toThrow('Stored discourse aggregate is invalid');
     await reopened.close();
     await reopenedDatabase.close();
@@ -372,7 +410,7 @@ describe('SqliteDiscourseStore', () => {
     const reopenedDatabase = await AppDatabase.open(fixture.databasePath, {
       acquireLease: false
     });
-    const reopened = new SqliteDiscourseStore(reopenedDatabase);
+    const reopened = new SqliteDiscourseStore(reopenedDatabase, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await expect(reopened.init()).rejects.toThrow(/participant column agentProfileId/);
     await reopened.close();
     await reopenedDatabase.close();
@@ -419,7 +457,7 @@ describe('SqliteDiscourseStore', () => {
     const reopenedDatabase = await AppDatabase.open(fixture.databasePath, {
       acquireLease: false
     });
-    const reopened = new SqliteDiscourseStore(reopenedDatabase);
+    const reopened = new SqliteDiscourseStore(reopenedDatabase, new ManagedFileStore(path.join(path.dirname(fixture.databasePath), 'files')));
     await expect(reopened.init()).rejects.toThrow('conversation participant roster is inconsistent');
     await reopened.close();
     await reopenedDatabase.close();
@@ -489,7 +527,7 @@ async function createFixture(): Promise<{
   const databasePath = path.join(root, 'task-monki.sqlite');
   const database = await AppDatabase.open(databasePath, { acquireLease: false });
   let tick = 0;
-  const store = new SqliteDiscourseStore(database, {
+  const store = new SqliteDiscourseStore(database, new ManagedFileStore(path.join(root, 'files')), {
     now: () => new Date(Date.UTC(2026, 6, 13, 0, 0, tick++)).toISOString()
   });
   await store.init();

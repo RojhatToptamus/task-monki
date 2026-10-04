@@ -116,6 +116,7 @@ export interface DesignsWorkspaceProps {
     designId: string,
     attachmentId: string
   ): Promise<AttachmentContent>;
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
   onAddReferences(designId: string, attachmentDraftId: string): Promise<string[]>;
   onRemoveReference(designId: string, referenceId: string): Promise<void>;
   onImportReferenceAsset(designId: string, referenceId: string): Promise<void>;
@@ -171,6 +172,7 @@ export function DesignsWorkspace({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onReadDesignDraftAttachment,
+  onReadAttachment,
   onAddReferences,
   onRemoveReference,
   onImportReferenceAsset,
@@ -211,6 +213,7 @@ export function DesignsWorkspace({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [attachmentPreviewOpen, setAttachmentPreviewOpen] = useState(false);
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
   const referenceDesignId = useRef<string | undefined>(undefined);
   const restoredDraftRevision = useRef<number | undefined>(undefined);
@@ -583,6 +586,8 @@ export function DesignsWorkspace({
                       onDiscardAttachmentDraft({ draftId })
                     }
                     onReadClipboardImage={onReadClipboardImage}
+                    onReadAttachment={onReadAttachment}
+                    onPreviewOpenChange={setAttachmentPreviewOpen}
                     onReadDraftAttachment={(attachmentId) =>
                       onReadDesignDraftAttachment(project.design.id, attachmentId)
                     }
@@ -633,7 +638,7 @@ export function DesignsWorkspace({
                   <DesignCanvas
                     project={project}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen}
+                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen || attachmentPreviewOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}

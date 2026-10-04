@@ -13,6 +13,7 @@ beforeEach(() => {
 function props(overrides: Partial<AgentSessionProps> = {}): AgentSessionProps {
   const run = makeRunRecord();
   return {
+    attachments: [], onReadAttachment: vi.fn(), attachmentOptions: { enabled: true, onStageBatch: vi.fn(), onDiscard: vi.fn() },
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentRunId: run.id }), run, runs: [run], sessions: [],
     items: [], plans: [], interactions: [], instructions: [], requiresRecovery: false, steeringSupported: true,
     draft: 'Check the parser next.', onDraftChange: vi.fn(), onFlushDraft: vi.fn().mockResolvedValue(undefined),
@@ -24,13 +25,39 @@ function props(overrides: Partial<AgentSessionProps> = {}): AgentSessionProps {
 }
 
 describe('Agent session interactions', () => {
+  it('persists pasted files, prevents unsupported live steering, and retains files after a rejected queue send', async () => {
+    const file = new File(['parser notes'], 'notes.txt', { type: 'text/plain' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new TextEncoder().encode('parser notes').buffer });
+    const input = props({
+      onQueue: vi.fn().mockRejectedValueOnce(new Error('Queue unavailable')).mockResolvedValue(undefined),
+      attachmentOptions: {
+        enabled: true, onDiscard: vi.fn(), onPersistDraft: vi.fn().mockResolvedValue(undefined),
+        onStageBatch: vi.fn().mockResolvedValue({ id: 'draft-files', attachments: [], createdAt: '', updatedAt: '' })
+      }
+    });
+    render(<AgentSession {...input} />);
+    fireEvent.paste(screen.getByRole('textbox', { name: 'Instruction' }), {
+      clipboardData: { getData: () => '', items: [{ kind: 'file', getAsFile: () => file }] }
+    });
+    await waitFor(() => expect(input.attachmentOptions.onPersistDraft).toHaveBeenCalledWith('draft-files'));
+    expect(screen.getByText('notes.txt')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Instruction delivery' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await screen.findByText('Queue unavailable');
+    expect(screen.getByRole('button', { name: 'Remove notes.txt' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove notes.txt' })).toBeNull());
+    expect(input.onQueue).toHaveBeenLastCalledWith('run-1', input.draft, expect.any(String), { attachmentDraftId: 'draft-files' });
+    expect(input.attachmentOptions.onStageBatch).toHaveBeenCalledTimes(1);
+  });
+
   it('queues by default, gates steering by capability, and preserves a draft after rejected delivery', async () => {
     const input = props({ steeringSupported: false, onQueue: vi.fn().mockRejectedValue(new Error('Run changed')) });
     const view = render(<AgentSession {...input} />);
     expect(screen.queryByRole('button', { name: 'Instruction delivery' })).toBeNull();
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Instruction' }), { key: 'Enter', ctrlKey: true });
     await screen.findByRole('alert');
-    expect(input.onQueue).toHaveBeenCalledWith('run-1', 'Check the parser next.', expect.any(String));
+    expect(input.onQueue).toHaveBeenCalledWith('run-1', 'Check the parser next.', expect.any(String), undefined);
     expect(input.onDraftChange).not.toHaveBeenCalled();
     view.rerender(<AgentSession {...input} steeringSupported />);
     fireEvent.keyDown(screen.getByRole('button', { name: 'Instruction delivery' }), { key: 'ArrowDown' });
@@ -44,7 +71,7 @@ describe('Agent session interactions', () => {
     const input = props({ run: failed, runs: [failed] });
     const view = render(<AgentSession {...input} />);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(input.onRetry).toHaveBeenCalledWith('run-1', 'SAME_SESSION', 'Check the parser next.', expect.any(String)));
+    await waitFor(() => expect(input.onRetry).toHaveBeenCalledWith('run-1', 'SAME_SESSION', 'Check the parser next.', expect.any(String), undefined));
     fireEvent.keyDown(screen.getByRole('button', { name: 'Instruction delivery' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Continue' }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -133,8 +160,10 @@ describe('Agent session interactions', () => {
       worktreeId: 'worktree-1', sessionId: 'session-1', sourceRunId: 'run-1', order: 1, text: 'Check the README.',
       mode: 'QUEUE', status: 'QUEUED', createdAt: '2026-10-03T12:00:00Z', updatedAt: '2026-10-03T12:00:00Z' }],
       onEditQueue: vi.fn().mockRejectedValueOnce(new Error('Could not save')).mockResolvedValue(undefined) });
-    render(<AgentSession {...input} />);
-    fireEvent.click(screen.getByRole('button', { name: /^Edit/ }));
+    input.instructions.push({ ...input.instructions[0]!, id: 'instruction-2', order: 2, text: 'Run the tests.' });
+    const view = render(<AgentSession {...input} />);
+    fireEvent.click(screen.getAllByRole('button', { name: /^Edit/ })[0]!);
+    expect(screen.getAllByRole('button', { name: /^Edit/ })[1]).toHaveProperty('disabled', true);
     const editor = screen.getByRole('textbox', { name: 'Edit queued instruction' });
     expect(document.activeElement).toBe(editor);
     fireEvent.change(editor, { target: { value: 'Check the README and script.' } });
@@ -143,13 +172,16 @@ describe('Agent session interactions', () => {
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
     await screen.findByRole('alert');
     expect((editor as HTMLTextAreaElement).value).toBe('Check the README and script.');
+    const nextRun = makeRunRecord({ id: 'run-2' });
+    view.rerender(<AgentSession {...input} run={nextRun} runs={[input.run!, nextRun]} />);
+    expect(screen.getByRole('alert').textContent).toContain('Could not save');
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Edit queued instruction' })).toBeNull());
     const composer = screen.getByRole('textbox', { name: 'Instruction' });
     expect(document.activeElement).toBe(composer);
-    expect(input.onEditQueue).toHaveBeenLastCalledWith('instruction-1', 'Check the README and script.');
+    expect(input.onEditQueue).toHaveBeenLastCalledWith('instruction-1', 'Check the README and script.', { attachmentIds: [], attachmentDraftId: undefined });
     expect(input.onDraftChange).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /^Edit/ }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^Edit/ })[0]!);
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Edit queued instruction' }), { key: 'Escape' });
     expect(screen.queryByRole('textbox', { name: 'Edit queued instruction' })).toBeNull();
     expect(document.activeElement).toBe(composer);

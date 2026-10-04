@@ -14,6 +14,8 @@ vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: {
   getDiscourseConversation: vi.fn(),
   listDiscourseMessages: vi.fn().mockResolvedValue({ messages: [] }),
   saveDiscourseDraft: vi.fn(),
+  getAttachmentDraft: vi.fn(),
+  readTaskAttachment: vi.fn(),
   onUpdate: vi.fn(() => () => undefined)
 } }));
 
@@ -56,6 +58,36 @@ describe('Discourse conversation loading', () => {
     await screen.findByRole('button', { name: /A provider and model:.*removed-exact-model/ });
     expect((screen.getByRole('button', { name: /Send/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(onDefaultsChange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { policy: 'DIRECT' as const, imageCapable: true, enabled: true },
+    { policy: 'DIRECT' as const, imageCapable: false, enabled: false },
+    { policy: 'NONE' as const, imageCapable: false, enabled: true }
+  ])('restores image drafts with $policy and image capability $imageCapable', async ({ policy, imageCapable, enabled }) => {
+    const catalog = settingsCatalog();
+    if (imageCapable) catalog.runtimeCatalog.models[0]!.inputModalities = ['text', 'image'];
+    vi.mocked(taskManagerApi.listDiscourseConversations).mockResolvedValue({ conversations: [] });
+    vi.mocked(taskManagerApi.getDiscourseMentionCatalog).mockResolvedValue(catalog);
+    const draft = { id: 'message-draft', recordRevision: 1, body: 'Describe this image.',
+      policy, attachmentDraftId: 'image-draft', sourceMessageIds: [], tokens: [],
+      agentSelections: [{ agentProfileId: 'builtin.lead' as const, runtimeId: 'codex', modelId: 'exact-model' }],
+      updatedAt: '2026-09-13T10:00:00Z' };
+    vi.mocked(taskManagerApi.listDiscourseDrafts).mockResolvedValueOnce([draft]);
+    vi.mocked(taskManagerApi.getAttachmentDraft).mockResolvedValue({ id: 'image-draft',
+      attachments: [{ id: 'image-file', draftId: 'image-draft', ordinal: 0, displayName: 'reference.png',
+        kind: 'image', mediaType: 'image/png', byteCount: 3, sha256: 'a'.repeat(64), createdAt: draft.updatedAt }],
+      createdAt: draft.updatedAt, updatedAt: draft.updatedAt });
+    vi.mocked(taskManagerApi.readTaskAttachment).mockResolvedValue({ attachmentId: 'image-file',
+      displayName: 'reference.png', kind: 'image', mediaType: 'image/png', byteCount: 3,
+      bytes: new Uint8Array([1, 2, 3]).buffer });
+    vi.mocked(taskManagerApi.saveDiscourseDraft).mockResolvedValue(draft);
+    render(<DiscourseWorkspace onNotify={vi.fn()} onError={vi.fn()} />);
+    await screen.findByRole('button', { name: 'reference.png' });
+    const send = screen.getByRole('button', { name: policy === 'NONE' ? 'Save' : 'Send' }) as HTMLButtonElement;
+    await waitFor(() => expect(send.disabled).toBe(!enabled));
+    if (enabled) expect(screen.queryByText(/image-capable|does not support image/)).toBeNull();
+    else expect(screen.getByRole('alert').textContent).toMatch(/does not support image/);
   });
 
   it('keeps the pending load when the user selects the already selected conversation', async () => {

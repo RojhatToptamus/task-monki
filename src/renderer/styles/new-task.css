@@ -1277,3 +1277,21 @@
     grid-template-columns: 1fr;
   }
 }
+.task-attachment__open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.task-attachment__open:hover { text-decoration: underline; }
+.task-attachment-preview { width: min(800px, calc(100vw - 32px)); }
+.task-attachment-preview__header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.task-attachment-preview__header h3 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.task-attachment-preview__header button { flex: 0 0 auto; }
+.task-attachment-preview__content { max-height: 65vh; overflow: auto; }
+.task-attachment-preview__image { display: block; max-width: 100%; max-height: 65vh; margin: auto; object-fit: contain; }
+.task-attachment-preview__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--t-help); }

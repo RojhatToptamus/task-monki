@@ -1,9 +1,9 @@
-# Task Attachment and Design Reference Lifecycle
+# Attachment Lifecycle
 
 Date: 2026-08-29
 
-Attachments are immutable task inputs or Design references. They are neither
-provider artifacts nor repository files. They never live in a Git worktree.
+Attachments are immutable inputs for tasks, Design turns, and Discourse messages.
+They are neither provider artifacts nor repository files. They never live in a Git worktree.
 
 This document describes current implemented behavior.
 Task Monki owns the files and the selected file set.
@@ -37,7 +37,7 @@ native-decoder-normalized image bytes before core admission.
 
 Limits are:
 
-- 10 files and 20 MiB total per task;
+- 10 files and 20 MiB per message selection, or per Design reference collection;
 - 10 MiB per image and 2 MiB per text file;
 - 16 megapixels per selected image and 12 megapixels per native clipboard image;
 - 32 staging batches and 100 MiB of staged bytes;
@@ -97,7 +97,7 @@ An unsent Design draft stores its text, selected existing reference ids, and
 one attachment staging id. File bytes remain in the existing staging store.
 The draft file does not copy attachment metadata or file bytes.
 
-Task Monki keeps only staging that a valid Design draft owns during startup.
+Task Monki retains staging owned by a saved Agent, Design, or Discourse draft during startup.
 It verifies the retained manifest and each file. It removes all other staging.
 One staging id cannot belong to two Design drafts.
 
@@ -115,6 +115,24 @@ references. A user can select an active reference again in the Files drawer.
 Each send uses one stable message id and the same staging id for an unchanged
 retry. A confirmed retry returns the stored turn. A failed publication keeps
 the private staging data and does not publish partial message state.
+
+## Agent and Discourse messages
+
+The Agent composer stores unsent text and a staging id on the task.
+Saving an initial prompt adopts new files with the prompt in one transaction.
+Preparation and execution require an explicit save of pending prompt changes.
+The first run makes the initial prompt read-only.
+
+Queued instructions and follow-ups store their selected attachment ids.
+A queue edit retains existing files unless the user removes them from that message.
+New files and the instruction publish together. Failed publication retains the staged files for retry.
+Live steering does not support files. A message with files uses the queue instead.
+
+Discourse drafts use the same staging store and shared composer controls.
+Accepting a message transfers its managed-file ownership and publishes its descriptors in one transaction.
+Discourse responses receive files from the latest user message in their bounded transcript.
+Older message files remain available for preview but are not automatically sent again.
+Deleting a conversation removes only its owned files after the database transaction commits.
 
 ## Storage
 
@@ -173,9 +191,13 @@ an orphan left by interrupted cleanup. Deletion is not secure erasure.
 
 ## Run, reload, review, and debugging
 
-Normal task runs reuse all immutable task-owned files. Each Design turn uses
-only its stored reference selection. The first turn selects the references
-adopted during Design creation.
+Normal task runs use the initial files and the files selected for the current instruction.
+Queued files do not enter an earlier run. Each Design turn uses only its stored reference selection.
+The first Design turn selects the references adopted during creation.
+
+Schema migration 8 records the existing task files as the initial selection.
+It preserves the bytes and existing run records. New code requires this explicit selection.
+There is no fallback that sends every task file.
 
 A restricted Codex session binds its first exact file grant before its first
 provider prompt. At that point, the local session has no provider history.
@@ -262,8 +284,9 @@ Managed copies make tasks independent of their selected source files. Use the
 complete backup service. A copy of only the SQLite file or attachment directory
 is not a valid backup. A verified backup takes one SQLite snapshot and includes
 every live managed attachment that snapshot references. It also preserves
-Design draft rows and their retained staged files. Other staging is disposable
-and is removed on restart. Task attachments last for the task lifetime.
+saved Agent, Design, and Discourse drafts and their retained staged files. Other
+staging is disposable and is removed on restart. Task attachments last for the
+task lifetime.
 
 Provider conversation history can retain files, paths, or derived discussion
 after local task deletion. Task Monki cannot erase that provider history.

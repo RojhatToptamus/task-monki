@@ -42,11 +42,11 @@ export interface DiscourseMentionInputProps {
   autoFocus?: boolean;
   onChange?(state: DiscourseComposerMentionState): void;
   onSubmit?(state: DiscourseComposerMentionState): void;
+  onPaste?: React.ClipboardEventHandler<HTMLTextAreaElement>;
 }
 
 /**
- * Phase-1 accessibility prototype and the intended shipping DOM seam: the
- * multiline editable combobox retains focus while a separate grouped listbox
+ * The multiline editable combobox retains focus while a separate grouped listbox
  * exposes active-descendant navigation. Structured tokens remain outside the
  * plain-text textarea.
  */
@@ -61,7 +61,8 @@ export function DiscourseMentionInput({
   disabled,
   autoFocus,
   onChange,
-  onSubmit
+  onSubmit,
+  onPaste
 }: DiscourseMentionInputProps) {
   const [state, setState] = useState(() => ({
     ...createDiscourseComposerMentionState(initialText),
@@ -278,6 +279,7 @@ export function DiscourseMentionInput({
         disabled={disabled}
         autoFocus={autoFocus}
         onChange={(event) => updateFromTextarea(event.currentTarget)}
+        onPaste={onPaste}
         onSelect={(event) => {
           const textarea = event.currentTarget;
           if (

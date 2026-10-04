@@ -20,7 +20,6 @@ describe('agent attachment delivery', () => {
       [{
         record: {
           id: 'attachment-1',
-          taskId: 'task-1',
           ordinal: 0,
           displayName: 'data.json',
           kind: 'text',

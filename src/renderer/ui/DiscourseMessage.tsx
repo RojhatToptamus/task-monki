@@ -21,6 +21,8 @@ import { MessageContent } from './Message';
 import { MessageHeader } from './MessageHeader';
 import { messageModelName } from '../model/messageIdentity';
 import type { AgentModel } from '../../shared/contracts';
+import { StoredAttachmentChip } from './AttachmentChip';
+import { taskManagerApi } from '../api/taskManagerClient';
 
 export function DiscourseMessage({
   message,
@@ -191,7 +193,12 @@ export function DiscourseMessage({
           <MessageMarkdown text={message.body} />
         ) : (
           <p className="tm-discourse-message__body">{message.body}</p>
-        )}</MessageContent>
+        )}
+        {message.status !== 'TOMBSTONE' && message.attachments?.length ? <ul className="task-attachments" aria-label="Message files">
+          {message.attachments.map((attachment) => <StoredAttachmentChip key={attachment.id} attachment={attachment}
+            onRead={() => taskManagerApi.readTaskAttachment({ conversationId: message.conversationId, attachmentId: attachment.id })} />)}
+        </ul> : null}
+        </MessageContent>
         </>}
         {context.length > 0 ? (
           <div className="tm-discourse-message__context" aria-label="Message context">

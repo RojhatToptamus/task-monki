@@ -6,6 +6,7 @@ import type { AgentModel } from '../../shared/agent';
 import type {
   AgentAttachmentSelection,
   AttachmentSubmissionRecord,
+  AttachmentDescriptor,
   StagedAttachmentRecord,
   TaskAttachmentRecord
 } from '../../shared/attachments';
@@ -68,7 +69,7 @@ export class AgentAttachmentDeliveryError extends Error {
 
 export function toAgentTurnAttachments(
   verified: readonly {
-    record: TaskAttachmentRecord | StagedAttachmentRecord;
+    record: AttachmentDescriptor;
     absolutePath: string;
   }[],
   verifiedAt = new Date().toISOString()

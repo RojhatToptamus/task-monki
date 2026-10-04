@@ -175,7 +175,7 @@ describe('OpenCodeInteractionMapper', () => {
         request: expect.objectContaining({
           permissions: {
             fileSystem: {
-              entries: [{ path: { path: '/outside/repo' }, access: 'write' }]
+              entries: [{ path: { type: 'path', path: '/outside/repo' }, access: 'write' }]
             }
           }
         })
@@ -328,6 +328,16 @@ describe('OpenCodeInteractionMapper', () => {
         mapped.request
       )
     ).toThrow('does not expose a session-scoped permission reply');
+  });
+
+  it('does not turn a partial grant into approval of the complete native request', () => {
+    const mapped = mapOpenCodePermission({
+      id: 'per_paths', sessionID: 'ses_1', permission: 'external_directory',
+      patterns: ['/repo/src/*', '/repo/tests/*']
+    }, '/repo');
+    expect(() => mapOpenCodeInteractionResponse({
+      interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: {}
+    }, mapped.request)).toThrow('complete permission request');
   });
 
   it('fails closed for questions that may contain credentials', () => {

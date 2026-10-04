@@ -1462,6 +1462,39 @@ describe('mounted Design workspace', () => {
     boundsSpy.mockRestore();
   });
 
+  it('hides the native canvas while a reference preview is open and restores it on Escape', async () => {
+    const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 1_600, height: 600, top: 0, left: 0,
+      right: 1_600, bottom: 600, toJSON: () => ({})
+    });
+    onTestFinished(() => boundsSpy.mockRestore());
+    const onShowCanvas = vi.fn();
+    const onHideCanvas = vi.fn();
+    const project = projectWithTwoReferences();
+    render(<DesignsWorkspace {...workspaceProps({
+      project, onShowCanvas, onHideCanvas,
+      draft: { designId: project.design.id, body: '', referenceIds: ['reference-first'],
+        recordRevision: 1, updatedAt: '2026-08-20T10:00:00.000Z' },
+      onReadAttachment: async (attachmentId) => ({ attachmentId, displayName: 'first-direction.txt',
+        kind: 'text', mediaType: 'text/plain', byteCount: 16,
+        bytes: new TextEncoder().encode('First direction.').buffer })
+    })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
+    expect(onShowCanvas).toHaveBeenCalled();
+    onHideCanvas.mockClear();
+    const chip = screen.getByRole('button', { name: 'first-direction.txt' });
+    chip.focus();
+    fireEvent.click(chip);
+    const preview = await screen.findByRole('dialog', { name: 'first-direction.txt' });
+    expect(await within(preview).findByText('First direction.')).toBeTruthy();
+    expect(onHideCanvas).toHaveBeenCalled();
+    onShowCanvas.mockClear();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(onShowCanvas).toHaveBeenCalled();
+    expect(document.activeElement).toBe(chip);
+  });
+
   it('preserves the native preview while follow-ups queue, stop, or finish without a replacement', () => {
     const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, width: 800, height: 600, top: 0, left: 0,

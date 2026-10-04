@@ -21,6 +21,41 @@ async function running() {
 }
 
 describe('Task instructions', () => {
+  it('saves the initial prompt before preparation and never rewrites an executed prompt', async () => {
+    const s = await scenarios.create({ name: 'initial-prompt-edit' });
+    const task = await s.createTask();
+    await s.service.saveTaskPrompt({ taskId: task.id, prompt: 'An unfinished edit', draftOnly: true });
+    expect((await s.store.getTaskDetail(task.id)).task).toMatchObject({ prompt: task.prompt, promptDraft: 'An unfinished edit' });
+    const files = await s.service.stageTaskAttachmentBatch({ attachments: [{ clientToken: randomUUID(), displayName: 'requirements.txt', bytes: new TextEncoder().encode('Report parser errors.').buffer }] });
+    await s.service.saveTaskPrompt({ taskId: task.id, prompt: 'Read the parser and summarize its errors.', attachmentDraftId: files.id });
+    await prepareTestWorktree(s.service, task.id);
+    const run = await s.service.startRun({ taskId: task.id });
+    expect(s.agent.startedTurns[0]?.prompt).toContain('Read the parser and summarize its errors.');
+    expect(s.agent.startedTurns[0]?.attachments).toEqual([expect.objectContaining({ displayName: 'requirements.txt' })]);
+    await expect(s.service.saveTaskPrompt({ taskId: task.id, prompt: 'Rewrite history' })).rejects.toThrow('already run');
+    await expect(s.service.saveTaskPrompt({ taskId: task.id, prompt: 'Rewrite history', draftOnly: true })).rejects.toThrow('already run');
+    expect((await s.store.getTaskDetail(task.id)).task.prompt).toBe('Read the parser and summarize its errors.');
+    await s.completeRun(run.id);
+  }, 25_000);
+
+  it('delivers queued files only with their owning message and preserves the earlier run selection', async () => {
+    const s = await running();
+    const draft = await s.service.stageTaskAttachmentBatch({ attachments: [{
+      clientToken: randomUUID(), displayName: 'queued-context.txt', bytes: new TextEncoder().encode('Only the queued response receives this context.').buffer
+    }] });
+    await s.service.saveTaskAgentDraft({ taskId: s.task.id, text: 'Read the attached context.', attachmentDraftId: draft.id });
+    const request = { taskId: s.task.id, runId: s.run.id, id: randomUUID(), instruction: 'Read the attached context.', attachmentDraftId: draft.id };
+    const queued = await s.service.queueTaskInstruction(request);
+    expect(queued.attachmentIds).toHaveLength(1);
+    expect((await s.store.getRun(s.run.id))?.attachmentSelection).toEqual([]);
+    expect((await s.store.prepareRunAttachments(s.run.id, s.task.id))).toEqual([]);
+    expect((await s.service.queueTaskInstruction(request)).id).toBe(queued.id);
+    await s.service.cancelRun({ runId: s.run.id });
+    const next = await s.service.sendTaskInstruction({ taskId: s.task.id, id: queued.id, runId: s.run.id });
+    expect(next.attachmentSelection.map((file) => file.attachmentId)).toEqual(queued.attachmentIds);
+    expect(s.agent.startedTurns.at(-1)?.attachments).toEqual([expect.objectContaining({ displayName: 'queued-context.txt' })]);
+  }, 25_000);
+
   it('claims FIFO instructions once after local evidence, preserving authored text and the exact predecessor', async () => {
     const s = await running();
     await s.service.saveTaskAgentDraft({ taskId: s.task.id, text: 'First queued instruction.' });
@@ -100,8 +135,10 @@ describe('Task instructions', () => {
 
   it('holds queued work on restart and retains the task draft without starting another turn', async () => {
     const s = await running();
-    await s.queue('Wait until I return.');
-    await s.service.saveTaskAgentDraft({ taskId: s.task.id, text: 'An unfinished thought.' });
+    const queueFiles = await s.service.stageTaskAttachmentBatch({ attachments: [{ clientToken: randomUUID(), displayName: 'queued.txt', bytes: new TextEncoder().encode('Queued bytes').buffer }] });
+    const queued = await s.service.queueTaskInstruction({ taskId: s.task.id, runId: s.run.id, id: randomUUID(), instruction: 'Wait until I return.', attachmentDraftId: queueFiles.id });
+    const draftFiles = await s.service.stageTaskAttachmentBatch({ attachments: [{ clientToken: randomUUID(), displayName: 'draft.txt', bytes: new TextEncoder().encode('Unsent bytes').buffer }] });
+    await s.service.saveTaskAgentDraft({ taskId: s.task.id, text: 'An unfinished thought.', attachmentDraftId: draftFiles.id });
     await s.service.shutdown();
     await s.persistence.close();
     const persistence = await openTestPersistence(s.persistence.paths.profileRoot);
@@ -112,6 +149,9 @@ describe('Task instructions', () => {
       const detail = await restarted.getTaskDetail(s.task.id);
       expect(detail.task.agentDraft).toBe('An unfinished thought.');
       expect(detail.taskInstructions[0]?.status).toBe('HELD');
+      expect(detail.taskInstructions[0]?.attachmentIds).toEqual(queued.attachmentIds);
+      expect(detail.agentAttachmentDraft?.attachments[0]?.displayName).toBe('draft.txt');
+      expect(new TextDecoder().decode((await restarted.readTaskAttachment({ attachmentId: queued.attachmentIds![0]! })).bytes)).toBe('Queued bytes');
       expect(fixture.adapter.startedTurns).toEqual([]);
     } finally { await restarted.shutdown(); await persistence.close(); }
   }, 25_000);

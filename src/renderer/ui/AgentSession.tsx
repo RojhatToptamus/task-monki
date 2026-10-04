@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   AgentItemRecord, AgentPlanRevisionRecord, AgentSessionRecord, InteractionRequestRecord,
-  AgentInteractionDecision, RunRecord, Task, TaskInstruction
+  AgentInteractionDecision, RunRecord, Task, TaskInstruction, InstructionAttachments, TaskAttachmentRecord
 } from '../../shared/contracts';
 import { TASK_INSTRUCTION_MAX_LENGTH, isImplementationRunMode } from '../../shared/contracts';
 import { getPostRunActionState } from '../model/postRunActions';
@@ -12,6 +12,9 @@ import {
   type HistoryWindow, type SessionTurn
 } from '../model/agentSession';
 import { ActionMenu } from './ActionMenu';
+import { AttachmentComposerShell } from './AttachmentComposerShell';
+import { StoredAttachmentChip } from './AttachmentChip';
+import { useTaskAttachments, type UseTaskAttachmentsOptions } from './useTaskAttachments';
 import { ActivitySteps } from './ActivitySteps';
 import { Conversation, useConversationScroll } from './Conversation';
 import { InteractionPanel } from './InteractionPanel';
@@ -28,6 +31,9 @@ export interface AgentSessionProps {
   task: Task;
   worktreePath?: string;
   runtimeName?: string;
+  attachmentOptions: Omit<UseTaskAttachmentsOptions, 'blocked' | 'preserveDraftOnClose'>;
+  attachments: TaskAttachmentRecord[];
+  onReadAttachment(id: string): Promise<import('../../shared/attachments').AttachmentContent>;
   run?: RunRecord;
   runs: RunRecord[];
   sessions: AgentSessionRecord[];
@@ -44,12 +50,12 @@ export interface AgentSessionProps {
   draftError?: string;
   onDraftChange(text: string): void;
   onFlushDraft(): Promise<void>;
-  onQueue(runId: string, text: string, id: string): Promise<void>;
-  onEditQueue(id: string, text?: string): Promise<void>;
+  onQueue(runId: string, text: string, id: string, files?: InstructionAttachments): Promise<void>;
+  onEditQueue(id: string, text?: string, files?: InstructionAttachments): Promise<void>;
   onSendQueue(id: string, runId: string): Promise<void>;
   onSteer(runId: string, text: string, id?: string): Promise<void>;
-  onContinue(runId: string, text?: string, id?: string): Promise<void>;
-  onRetry(runId: string, strategy: 'SAME_SESSION' | 'FORK', text?: string, id?: string): Promise<void>;
+  onContinue(runId: string, text?: string, id?: string, files?: InstructionAttachments): Promise<void>;
+  onRetry(runId: string, strategy: 'SAME_SESSION' | 'FORK', text?: string, id?: string, files?: InstructionAttachments): Promise<void>;
   onStop(runId: string): Promise<void>;
   onRespond(interaction: InteractionRequestRecord, decision: AgentInteractionDecision): Promise<void>;
   onReadArtifact?(id: string): Promise<string>;
@@ -73,15 +79,22 @@ export function AgentSession(props: AgentSessionProps) {
   const [pendingAction, setPendingAction] = useState<'submit' | 'other'>();
   const busy = pendingAction !== undefined;
   const [error, setError] = useState<{ runId?: string; text: string }>();
-  const currentError = error?.runId === run?.id ? error?.text : undefined;
   const [reading] = useState(() => savedReading(task.id));
   const scroller = useConversationScroll({ startAtBottom: !reading || reading.following });
   const prepend = useRef<{ height: number; top: number } | undefined>(undefined);
-  const [editing, setEditing] = useState<{ id: string; text: string }>();
+  const [editing, setEditing] = useState<{ id: string; text: string; attachmentIds: string[] }>();
+  const currentError = editing || error?.runId === run?.id ? error?.text : undefined;
   const inFlight = useRef(false);
-  const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string } | undefined>(undefined);
+  const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string; attachmentDraftId?: string } | undefined>(undefined);
   const attention = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const files = useTaskAttachments({ ...props.attachmentOptions, enabled: Boolean(run) && props.attachmentOptions.enabled,
+    initialDraft: run ? props.attachmentOptions.initialDraft : undefined, blocked: busy || Boolean(editing), preserveDraftOnClose: true });
+  const editFiles = useTaskAttachments({ ...props.attachmentOptions, enabled: Boolean(editing) && props.attachmentOptions.enabled,
+    blocked: busy, initialDraft: undefined, onPersistDraft: undefined, preserveDraftOnClose: false });
+  const composerFiles = editing ? editFiles : files;
+  const fileError = composerFiles.modelError ?? composerFiles.overflowError ?? composerFiles.draftError;
+  const hasFiles = files.activeItems.length > 0;
 
   const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.worktreePath);
   const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).sort((a, b) => a.order - b.order);
@@ -92,12 +105,12 @@ export function AgentSession(props: AgentSessionProps) {
   const actions = run ? getPostRunActionState(run, props.requiresRecovery) : undefined;
   const queueable = Boolean(run && ['RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) && !activeReview);
   const allowed: SendMode[] = queueable
-    ? ['QUEUE', ...(run?.status === 'RUNNING' && props.steeringSupported ? ['STEER' as const] : [])]
+    ? ['QUEUE', ...(run?.status === 'RUNNING' && props.steeringSupported && !hasFiles ? ['STEER' as const] : [])]
     : actions?.primaryRecoveryAction === 'retry' ? ['RETRY', 'CONTINUE']
     : actions?.canFollowUp || actions?.canContinue ? ['CONTINUE', ...(actions.canRetry ? ['RETRY' as const] : [])] : [];
   const mode = choice && choice.runId === run?.id && allowed.includes(choice.mode) ? choice.mode : allowed[0];
   const followUp = run?.status === 'COMPLETED' && !props.requiresRecovery;
-  const needsText = mode === 'QUEUE' || mode === 'STEER' || followUp;
+  const needsText = mode === 'QUEUE' || mode === 'STEER' || followUp || hasFiles;
   const delivery: Record<SendMode, { label: string; description: string; placeholder: string }> = {
     QUEUE: { label: 'Queue', description: 'Send after the current response', placeholder: 'Queue a message for after this response' },
     STEER: { label: 'Send now', description: 'Add to the current response', placeholder: 'Guide the current response' },
@@ -171,20 +184,23 @@ export function AgentSession(props: AgentSessionProps) {
     finally { inFlight.current = false; setPendingAction(undefined); }
   }
   async function submit() {
-    if (!run || !mode || blocked || busy || (needsText && !draft.trim())) return;
+    if (!run || !mode || blocked || busy || files.busy || files.hasErrors || files.modelError || (needsText && !draft.trim())) return;
     const text = draft;
     const sentRun = run.id;
     const selectedMode = mode;
     await act(async () => {
       await props.onFlushDraft();
-      if (messageId.current?.text !== text || messageId.current.mode !== selectedMode || messageId.current.runId !== sentRun) {
-        messageId.current = { text, mode: selectedMode, runId: sentRun, id: crypto.randomUUID() };
+      const attachmentDraftId = await files.flushDraft();
+      if (messageId.current?.attachmentDraftId !== attachmentDraftId || messageId.current?.text !== text || messageId.current.mode !== selectedMode || messageId.current.runId !== sentRun) {
+        messageId.current = { text, mode: selectedMode, runId: sentRun, id: crypto.randomUUID(), attachmentDraftId };
       }
       const id = messageId.current.id;
-      if (selectedMode === 'QUEUE') await props.onQueue(sentRun, text, id);
+      const selection = attachmentDraftId ? { attachmentDraftId } : undefined;
+      if (selectedMode === 'QUEUE') await props.onQueue(sentRun, text, id, selection);
       else if (selectedMode === 'STEER') await props.onSteer(sentRun, text, id);
-      else if (selectedMode === 'RETRY') await props.onRetry(sentRun, 'SAME_SESSION', text, id);
-      else await props.onContinue(sentRun, text, id);
+      else if (selectedMode === 'RETRY') await props.onRetry(sentRun, 'SAME_SESSION', text, id, selection);
+      else await props.onContinue(sentRun, text, id, selection);
+      await files.finishAdoption();
       props.onDraftChange('');
       await props.onFlushDraft();
       messageId.current = undefined;
@@ -193,10 +209,18 @@ export function AgentSession(props: AgentSessionProps) {
     }, 'submit');
   }
 
-  const cancelEdit = () => { setEditing(undefined); setError(undefined); composer.current?.focus(); };
+  const cancelEdit = () => {
+    void editFiles.markCreateFailed(false).then(() => editFiles.finishAdoption());
+    setEditing(undefined); setError(undefined); composer.current?.focus();
+  };
   const saveEdit = () => {
-    if (!editing?.text.trim() || busy) return;
-    void act(async () => { await props.onEditQueue(editing.id, editing.text); cancelEdit(); });
+    if (!editing?.text.trim() || busy || editFiles.busy || editFiles.hasErrors || editFiles.modelError) return;
+    void act(async () => {
+      const attachmentDraftId = await editFiles.prepareForCreate();
+      await props.onEditQueue(editing.id, editing.text, { attachmentIds: editing.attachmentIds, attachmentDraftId });
+      await editFiles.finishAdoption();
+      setEditing(undefined); composer.current?.focus();
+    });
   };
   const loadEarlier = () => {
     const viewport = scroller.scrollRef.current;
@@ -207,7 +231,7 @@ export function AgentSession(props: AgentSessionProps) {
     : attentionPending ? 'Waiting for your answer'
     : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
     : activeReview ? 'Reviewing…' : 'Working…';
-  const canSend = !busy && !blocked && !(needsText && !draft.trim());
+  const canSend = !busy && !blocked && !files.busy && !files.hasErrors && !files.modelError && !(needsText && !draft.trim());
   const hint = editing ? `${SHORTCUT} to save` : blocked;
   const model = displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model;
 
@@ -221,10 +245,13 @@ export function AgentSession(props: AgentSessionProps) {
         {visibleTurns.map((turn, index) => turn.run.mode === 'REVIEW'
           ? <ReviewTurn key={turn.key} turn={turn} onShowReview={props.onShowReview} />
           : <Turn key={turn.key} turn={turn} clip={index === 0 ? historyWindow.clip : 0}
+            attachments={props.attachments.filter((file) => (props.instructions.find((item) => item.id === turn.opener?.key)?.attachmentIds ?? (turn.opener?.key === `${turn.run.id}:prompt` ? task.initialAttachmentIds : []))?.includes(file.id))}
+            onReadAttachment={props.onReadAttachment}
             failure={turn === lastImplementation && turn.state !== 'active' ? props.failure : undefined}
             capture={turn.state === 'completed' ? props.capture(turn.run) : null}
             onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} />)}
         {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
+          attachments={props.attachments.filter((file) => item.attachmentIds?.includes(file.id))} onReadAttachment={props.onReadAttachment}
           status={item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}
         {active && displayedRun && (attentionPending || displayedRun.status === 'INTERRUPTING'
           || displayedRun.status === 'STARTING' || displayedRun.status === 'QUEUED' || !liveWorkVisible)
@@ -239,15 +266,39 @@ export function AgentSession(props: AgentSessionProps) {
       </div>
     </Conversation>
     {run ? <div className="tm-agent-session__footer">
-      <form className="tm-composer tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
-        <MessageQueue items={pending.map((item) => ({ id: item.id, text: item.text, held: item.status === 'HELD' }))}
-          editingId={editing?.id} disabled={busy} continueDisabledReason={blocked}
+      <form className="tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
+        <AttachmentComposerShell attachments={composerFiles} attachmentLabel="Message attachments" addButtonTitle="Attach images or text files"
+          hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
+          toolbarAction={<>
+            {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}>{busy ? 'Saving…' : 'Save'}</button> : <>
+              {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" disabled={busy || hasFiles}
+                trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
+                items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
+                  onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}
+              {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
+                title="Stop the current response" onClick={() => void act(() => props.onStop(displayedRun.id))}>Stop</button> : null}
+              {mode ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
+                <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
+                  aria-label={delivery[mode].label}
+                  title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
+                  {pendingAction === 'submit' ? <StatusGlyph kind="working" /> : sendControl(mode, followUp)}
+                </button>
+                {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
+                  trigger={<ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />}
+                  items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,
+                    onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : null}
+              </div> : null}
+            </>}
+          </>}>
+        <MessageQueue items={pending.map((item) => ({ id: item.id, text: item.text,
+          detail: item.attachmentIds?.map((id) => props.attachments.find((file) => file.id === id)?.displayName).filter(Boolean).join(', '), held: item.status === 'HELD' }))}
+          editingId={editing?.id} disabled={busy || Boolean(editing)} continueDisabledReason={blocked}
           onContinue={!active ? (id) => void act(async () => {
             await props.onSendQueue(id, run.id); if (editing?.id === id) cancelEdit(); composer.current?.focus();
           }) : undefined}
           onEdit={(id) => {
             const item = pending.find((candidate) => candidate.id === id);
-            if (item) { setEditing({ id, text: item.text }); setError(undefined); composer.current?.focus(); }
+            if (item) { setEditing({ id, text: item.text, attachmentIds: item.attachmentIds ?? [] }); setError(undefined); composer.current?.focus(); }
           }}
           onRemove={(id) => void act(async () => {
             await props.onEditQueue(id); if (editing?.id === id) cancelEdit(); composer.current?.focus();
@@ -257,40 +308,25 @@ export function AgentSession(props: AgentSessionProps) {
           <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button>
         </div> : null}
         <label className="tm-visually-hidden" htmlFor={`agent-draft-${task.id}`}>{editing ? 'Edit queued instruction' : 'Instruction'}</label>
-        <textarea ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy}
+        <textarea className="tm-composer__input" ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy}
           aria-describedby={hint ? `agent-composer-note-${task.id}` : undefined} maxLength={TASK_INSTRUCTION_MAX_LENGTH}
           placeholder={mode ? delivery[mode].placeholder : 'Continue the work…'}
+          onPaste={composerFiles.paste}
           onChange={(event) => { if (editing) setEditing({ ...editing, text: event.target.value }); else props.onDraftChange(event.target.value); }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return;
             if (editing && event.key === 'Escape' && !busy) { event.preventDefault(); event.stopPropagation(); cancelEdit(); }
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (editing) saveEdit(); else void submit(); }
           }} />
-        <div className="tm-composer__toolbar">
-          <span className="tm-agent-session__model" title={model}>{props.runtimeName ?? task.runtimeId}{model ? <span>{model}</span> : null}</span>
-          {hint ? <span id={`agent-composer-note-${task.id}`} className="tm-composer__hint">{hint}</span> : null}
-          {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || !editing.text.trim()}>{busy ? 'Saving…' : 'Save'}</button> : <>
-            {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" disabled={busy}
-              trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
-              items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
-                onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}
-            {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
-              title="Stop the current response" onClick={() => void act(() => props.onStop(displayedRun.id))}>Stop</button> : null}
-            {mode ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
-              <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
-                aria-label={delivery[mode].label}
-                title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
-                {pendingAction === 'submit' ? <StatusGlyph kind="working" /> : sendControl(mode, followUp)}
-              </button>
-              {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
-                trigger={<ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />}
-                items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,
-                  onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : null}
-            </div> : null}
-          </>}
-        </div>
+        {editing?.attachmentIds.length ? <ul className="task-attachments" aria-label="Queued attachments">{editing.attachmentIds.map((id) => {
+          const attachment = props.attachments.find((file) => file.id === id);
+          return attachment ? <StoredAttachmentChip key={id} attachment={attachment} label="Attached" disabled={busy}
+            onRead={() => props.onReadAttachment(id)}
+            onRemove={() => setEditing({ ...editing, attachmentIds: editing.attachmentIds.filter((value) => value !== id) })} /> : null;
+        })}</ul> : null}
+        </AttachmentComposerShell>
       </form>
-      {currentError || props.draftError ? <p className="tm-error" role="alert">{currentError ?? props.draftError}</p> : null}
+      {currentError || props.draftError || fileError ? <p className="tm-error" role="alert">{currentError ?? props.draftError ?? fileError}</p> : null}
     </div> : null}
   </section>;
 }
@@ -345,19 +381,21 @@ function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]
   return grouped;
 }
 
-function Turn({ turn, clip, failure, capture, onReadArtifact, onShowDebug }: {
+function Turn({ turn, clip, failure, capture, onReadArtifact, onShowDebug, attachments, onReadAttachment }: {
   turn: SessionTurn;
   clip: number;
   failure?: RunFailureBannerViewModel;
   capture: ReactNode;
   onReadArtifact?: (id: string) => Promise<string>;
   onShowDebug(): void;
+  attachments: TaskAttachmentRecord[];
+  onReadAttachment: AgentSessionProps['onReadAttachment'];
 }) {
   const entries = clip ? turn.entries.slice(clip) : turn.entries;
   const live = turn.state === 'active';
   return <div className="tm-turn">
     {turn.opener && !clip ? turn.opener.kind === 'prompt'
-      ? <UserMessage text={turn.opener.text} time={turn.opener.at} />
+      ? <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
       : <Message from="user" className="tm-message--action">
         <span className="tm-message__action">{turn.opener.label === 'Retried'
           ? <RotateCcw size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
@@ -390,9 +428,14 @@ function ReviewTurn({ turn, onShowReview }: { turn: SessionTurn; onShowReview():
   </div>;
 }
 
-function UserMessage({ text, time, status }: { text: string; time: string; status?: string }) {
+function UserMessage({ text, time, status, attachments, onReadAttachment }: {
+  text: string; time: string; status?: string; attachments?: TaskAttachmentRecord[]; onReadAttachment?: AgentSessionProps['onReadAttachment'];
+}) {
   return <Message from="user" label="Your message">
     <MessageContent user><p>{text}</p></MessageContent>
+    {attachments?.length ? <ul className="task-attachments" aria-label="Message attachments">
+      {attachments.map((file) => <StoredAttachmentChip key={file.id} attachment={file} onRead={onReadAttachment ? () => onReadAttachment(file.id) : undefined} />)}
+    </ul> : null}
     <MessageMeta className={status ? 'tm-message__meta--status' : undefined}>
       <MessageTime value={time} />{status ? <span role="status">{status}</span> : null}
     </MessageMeta>

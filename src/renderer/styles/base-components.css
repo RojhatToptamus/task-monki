@@ -1546,6 +1546,8 @@ details[open] > summary .tm-disclosure__chevron {
    keyboard hint and the primary action right. */
 .tm-composer__toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 6px 8px; border-top: 1px solid var(--hair); }
 .tm-composer__hint { min-width: 0; margin-left: auto; overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+.tm-composer__input { display: block; width: 100%; min-height: 88px; max-height: min(200px, 24vh); padding: 12px 12px 4px; resize: none; field-sizing: content; color: var(--text); font: var(--t-body)/1.62 var(--font-ui); }
+.tm-composer__input::placeholder { color: var(--placeholder); }
 .tm-composer__toolbar > .tm-composer__hint + * { margin-left: 4px; }
 .tm-composer__primary, .tm-composer__secondary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--h-toolbar); min-width: 64px; padding: 0 12px; font-size: var(--t-help); }
 .tm-composer__primary--icon { min-width: var(--h-toolbar); width: var(--h-toolbar); padding: 0; }

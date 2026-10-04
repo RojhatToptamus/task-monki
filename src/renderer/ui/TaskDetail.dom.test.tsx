@@ -13,7 +13,8 @@ vi.mock('../api/taskManagerClient', () => ({
 
 function detailProps(): ComponentProps<typeof TaskDetail> {
   return {
-    agentInstructions: [], agentDraft: '', onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
+    attachmentOptions: { enabled: true, onStageBatch: vi.fn(), onDiscard: vi.fn() },
+    agentInstructions: [], agentDraft: '', onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1', projection: { worktree: 'PRESENT', git: 'DIRTY' } }),
     repository: { id: 'repository-1', kind: 'USER_REGISTERED', name: 'Project', path: '/tmp/project', status: 'AVAILABLE', remotes: [], createdAt: TEST_NOW, updatedAt: TEST_NOW },
     worktree: { id: 'worktree-1', taskId: 'task-1', repositoryId: 'repository-1', iterationId: 'iteration-1', ownership: 'EXTERNAL', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'main', baseSha: 'abc123', status: 'PRESENT', createdAt: TEST_NOW, updatedAt: TEST_NOW },
@@ -195,6 +196,34 @@ describe('imported task actions', () => {
 });
 
 describe('Agent pre-run setup', () => {
+  it('keeps an edited prompt and prevents preparation until an explicit save succeeds', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = undefined;
+    props.task = makeTaskRecord({ prompt: 'Original request', workflowPhase: 'READY', projection: { worktree: 'NOT_CREATED' } });
+    let rejectSave = true;
+    props.onSavePrompt = vi.fn(async (_prompt, draftOnly) => {
+      if (!draftOnly && rejectSave) throw new Error('Storage unavailable');
+    });
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    const editor = screen.getByRole('textbox', { name: 'Task prompt' });
+    fireEvent.change(editor, { target: { value: 'Use the revised request.' } });
+    expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    await screen.findByText('Storage unavailable');
+    expect(editor).toHaveProperty('value', 'Use the revised request.');
+    expect(props.onPrepareWorktree).not.toHaveBeenCalled();
+    rejectSave = false;
+    fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
+    expect(props.onSavePrompt).toHaveBeenLastCalledWith('Use the revised request.', false, undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
+    expect(props.onPrepareWorktree).toHaveBeenCalled();
+  });
+
   function readyRuntime(): { models: AgentModel[]; runtimes: AgentRuntimeState[] } {
     const model: AgentModel = {
       id: 'codex:test-model',
@@ -234,8 +263,7 @@ describe('Agent pre-run setup', () => {
     });
     Object.assign(props, readyRuntime());
     render(<TaskDetail {...props} />);
-    expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
-    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Set up worktree' }));
     expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Test task' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Start this task' })).toBeTruthy();

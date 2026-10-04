@@ -161,8 +161,11 @@ import {
 } from './TaskDetailModals';
 
 interface TaskDetailProps {
+  attachmentOptions: AgentSessionProps['attachmentOptions'];
   agentInstructions: AgentSessionProps['instructions'];
   agentDraft: string;
+  onSavePrompt: import('react').ComponentProps<typeof PreRunSetup>['onSavePrompt'];
+  onReadAttachment: import('react').ComponentProps<typeof PreRunSetup>['onReadAttachment'];
   agentDraftError?: string;
   onAgentDraftChange: AgentSessionProps['onDraftChange'];
   onFlushAgentDraft: AgentSessionProps['onFlushDraft'];
@@ -227,8 +230,8 @@ interface TaskDetailProps {
   onRefreshEvidence?(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
   onSteer(runId: string, instruction: string, id?: string): Promise<void>;
-  onContinue(runId: string, instruction?: string, id?: string): Promise<void>;
-  onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string, id?: string): Promise<void>;
+  onContinue: AgentSessionProps['onContinue'];
+  onRetry: AgentSessionProps['onRetry'];
   onReview(runId?: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
@@ -919,21 +922,6 @@ export function TaskDetail(props: TaskDetailProps) {
       onClick: () => void props.onTransition(task.id, 'REVIEW')
     });
   }
-  if (primaryAction && tab !== 'agent') {
-    headActions.push({
-      label: primaryAction.label,
-      kind: directImportReview ? 'soft' : 'primary',
-      disabled:
-        primaryAction.disabled ||
-        reviewActionsPaused ||
-        props.repository?.status !== 'AVAILABLE',
-      title:
-        props.repository?.status !== 'AVAILABLE'
-          ? 'Reconnect this repository before running repository actions.'
-          : undefined,
-      onClick: primaryAction.onClick
-    });
-  }
 
   const model =
     run?.observedSettings?.model ?? run?.requestedSettings.model ?? task.agentSettings.model ?? 'unknown';
@@ -1173,7 +1161,7 @@ export function TaskDetail(props: TaskDetailProps) {
             placement="task"
           />
         ) : null}
-        {tab !== 'agent' && interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) ? (
+        {interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status)) ? (
           <button className="outline-button tm-agent-attention" onClick={() => {
             setTab('agent'); setAgentAttentionRequest((value) => value + 1);
           }}>Agent needs your answer</button>
@@ -1256,6 +1244,11 @@ export function TaskDetail(props: TaskDetailProps) {
                     <span className="tm-agent-overview__state">{implementationRetryRequired ? 'Needs retry' : progressRun ? humanizeEnum(progressRun.status) : 'Not started'}<span aria-hidden="true">→</span></span>
                   </button>
                   {runFailure ? <p className="tm-agent-overview__failure">{runFailure.detail}</p> : null}
+                  {primaryAction ? <button type="button" className="outline-button"
+                    disabled={primaryAction.disabled || reviewActionsPaused || props.repository?.status !== 'AVAILABLE'}
+                    onClick={importedBeforeFirstRun ? primaryAction.onClick : () => setTab('agent')}>
+                    {importedBeforeFirstRun ? primaryAction.label : worktree ? 'Set up agent' : 'Set up worktree'}
+                  </button> : null}
                   {progressRun ? <CompletedChangeSummaryPanel compact run={progressRun}
                     capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
                     onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
@@ -1334,6 +1327,7 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
 
         {tab === 'agent' ? <AgentSession key={task.id} task={task} run={run} runs={props.runs} worktreePath={worktree?.worktreePath}
+          attachmentOptions={props.attachmentOptions} attachments={props.attachments} onReadAttachment={props.onReadAttachment}
           runtimeName={props.runtimeState?.preflight.runtime.displayName}
           sessions={sessions} items={props.items} plans={planRevisions} interactions={interactions}
           instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired} failure={runFailure}
@@ -1347,7 +1341,11 @@ export function TaskDetail(props: TaskDetailProps) {
           attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskMasthead}{taskNav}</div>}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
-            attachments={props.attachments}
+            promptDraft={task.promptDraft}
+            onSavePrompt={props.onSavePrompt}
+            attachmentOptions={props.attachmentOptions}
+            onReadAttachment={props.onReadAttachment}
+            attachments={props.attachments.filter((file) => task.initialAttachmentIds?.includes(file.id))}
             worktree={worktree}
             runtimeId={task.runtimeId}
             settings={executionSettings}

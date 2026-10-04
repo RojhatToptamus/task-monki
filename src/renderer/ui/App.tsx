@@ -2497,7 +2497,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string) => {
+  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2507,7 +2507,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId }));
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2523,7 +2523,8 @@ export function App() {
     runId: string,
     strategy: AgentRetryStrategy,
     instruction?: string,
-    clientMessageId?: string
+    clientMessageId?: string,
+    files?: import('../../shared/contracts').InstructionAttachments
   ) => {
     setError(undefined);
     try {
@@ -2536,7 +2537,8 @@ export function App() {
         runId,
         strategy,
         instruction,
-        clientMessageId
+        clientMessageId,
+        ...files
       }));
       if (strategy === 'FORK') {
         await taskDataCoordinator.refreshBoard();
@@ -3199,6 +3201,24 @@ export function App() {
 
         {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
+            attachmentOptions={{
+              enabled: true,
+              model: selectModel(runtimeModels, selectedRun?.requestedSettings.model ?? selectedTask.agentSettings.model, selectedTask.runtimeId, selectedTask.agentSettings.modelProvider),
+              initialDraft: taskDetail.agentAttachmentDraft,
+              onStageBatch: taskManagerApi.stageTaskAttachmentBatch,
+              onDiscard: (draftId) => taskManagerApi.discardTaskAttachmentDraft({ draftId }),
+              onReadClipboardImage: taskManagerApi.readClipboardImage,
+              onReadDraftAttachment: (attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId, draftId: taskDetail.agentAttachmentDraft?.id }),
+              onPersistDraft: async (attachmentDraftId) => {
+                await taskManagerApi.saveTaskAgentDraft({ taskId: selectedTask.id, attachmentDraftId: attachmentDraftId ?? null });
+                await refresh();
+              }
+            }}
+            onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
+            onSavePrompt={async (prompt, draftOnly, files) => {
+              await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt, draftOnly, ...files });
+              if (!draftOnly) await refresh();
+            }}
             agentInstructions={taskDetail.taskInstructions}
             agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
             agentDraftError={agentDraftErrors[selectedTask.id]}
@@ -3208,12 +3228,12 @@ export function App() {
               await pending?.work;
               if (pending?.error) throw new Error(pending.error);
             }}
-            onQueueInstruction={async (runId, instruction, id) => {
-              await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id }));
+            onQueueInstruction={async (runId, instruction, id, files) => {
+              await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id, ...files }));
               await refresh();
             }}
-            onEditInstruction={async (id, instruction) => {
-              await withAppAction(() => taskManagerApi.editTaskInstruction({ taskId: selectedTask.id, id, instruction }));
+            onEditInstruction={async (id, instruction, files) => {
+              await withAppAction(() => taskManagerApi.editTaskInstruction({ taskId: selectedTask.id, id, instruction, ...files }));
               await refresh();
             }}
             onSendInstruction={async (id, runId) => {
@@ -3366,6 +3386,7 @@ export function App() {
             onReadDesignDraftAttachment={(designId, attachmentId) =>
               taskManagerApi.readDesignDraftAttachment({ designId, attachmentId })
             }
+            onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
             onAddReferences={addDesignReferences}
             onRemoveReference={removeDesignReference}
             onImportReferenceAsset={importDesignReferenceAsset}

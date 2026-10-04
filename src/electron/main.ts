@@ -77,6 +77,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskPromptRequest,
   SteerRunRequest,
   RetryRunRequest,
   SyncAgentGoalRequest,
@@ -728,6 +729,8 @@ function installIpcHandlers(): void {
       service.discardTaskAttachmentDraft(input)
   );
 
+  handleTrustedIpc('attachment:draft:get', (_, draftId: string) => service.getAttachmentDraft(draftId));
+
   handleTrustedIpc(
     'attachment:read',
     async (_, input: ReadTaskAttachmentRequest) =>
@@ -785,6 +788,7 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('agent:sendTaskInstruction', async (_, input: SendTaskInstructionRequest) => service.sendTaskInstruction(input));
 
+  handleTrustedIpc('task:savePrompt', async (_, input: SaveTaskPromptRequest) => service.saveTaskPrompt(input));
   handleTrustedIpc('agent:saveTaskAgentDraft', async (_, input: SaveTaskAgentDraftRequest) => service.saveTaskAgentDraft(input));
 
   handleTrustedIpc('agent:steerRun', async (_, input: SteerRunRequest) => {

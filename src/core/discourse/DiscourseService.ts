@@ -65,6 +65,7 @@ import {
 } from './DiscourseState';
 import { discourseTimeExpired } from './DiscourseResponses';
 import type { DiscourseStore } from './DiscourseStore';
+import { assertModelSupportsAttachments } from '../agent/AgentAttachmentDelivery';
 
 export interface DiscourseServiceOptions {
   getRuntimeCatalog(): Promise<AgentRuntimeCatalog> | AgentRuntimeCatalog;
@@ -97,6 +98,10 @@ export class DiscourseService {
 
   listConversations(input: ListDiscourseConversationsRequest = {}): Promise<DiscourseConversationPage> {
     return this.store.listConversations(input);
+  }
+
+  readAttachment(conversationId: string, attachmentId: string) {
+    return this.store.readAttachment(conversationId, attachmentId);
   }
 
   getConversation(conversationId: string): Promise<DiscourseConversationAggregateRecord> {
@@ -224,6 +229,7 @@ export class DiscourseService {
         : {}),
       ...(input.sourceMessageIds ? { sourceMessageIds: input.sourceMessageIds } : {}),
       context: context.map((reference) => reference.snapshot),
+      attachmentDraftId: input.attachmentDraftId,
       clientMessageId: input.clientMessageId
     });
     this.emit('discourse.message.appended', input.conversationId, message);
@@ -299,6 +305,8 @@ export class DiscourseService {
       return this.planAcceptedSend(aggregate, message, acceptedReplay);
     }
     if (!this.options.runtime) throw new Error('Discourse agent execution is not configured.');
+    const attachments = input.attachmentDraftId
+      ? (await this.store.getAttachmentDraft(input.attachmentDraftId)).attachments : [];
     const [runtimeCatalog, settings] = await Promise.all([
       this.options.getRuntimeCatalog(),
       this.options.getAppSettings()
@@ -353,6 +361,15 @@ export class DiscourseService {
         }
       }
       resolvedSelections.set(profileId, resolved);
+      if (attachments.length) {
+        const runtime = runtimeCatalog.runtimes.find(({ preflight }) => preflight.runtime.id === resolved.runtimeId);
+        const model = runtimeCatalog.models.find((candidate) => candidate.runtimeId === resolved.runtimeId && discourseModelMatches(candidate, resolved));
+        if (!runtime || runtime.preflight.capabilities.attachmentDelivery.maturity === 'unsupported') {
+          throw new Error(`${entry.profile.displayName} cannot receive files with the selected runtime.`);
+        }
+        if (!model) throw new Error('The selected model is unavailable for file delivery.');
+        assertModelSupportsAttachments(model, attachments);
+      }
       if (currentRevision && participantSettingsMatch(currentRevision, resolved)) {
         assertParticipantRevisionAvailable(entry.profile.displayName, currentRevision, runtimeCatalog);
       }
@@ -408,6 +425,7 @@ export class DiscourseService {
         : {}),
       ...(input.sourceMessageIds ? { sourceMessageIds: input.sourceMessageIds } : {}),
       context: context.map((reference) => reference.snapshot),
+      attachmentDraftId: input.attachmentDraftId,
       clientMessageId: input.clientMessageId,
       participants: configuration.participants,
       participantRevisions: configuration.participantRevisions,
@@ -1753,6 +1771,7 @@ function discourseSendRequestFingerprint(
   return sha256(JSON.stringify({
     conversationId: input.conversationId,
     body: input.body,
+    attachmentDraftId: input.attachmentDraftId ?? null,
     replyToMessageId: input.replyToMessageId ?? null,
     supersedesMessageId: input.supersedesMessageId ?? null,
     sourceMessageIds: input.sourceMessageIds ?? [],

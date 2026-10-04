@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,7 @@ import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import type { ApplicationPersistence } from './sqlite/ApplicationPersistence';
+import { toAgentAttachmentSelectionFromRecords } from '../agent/AgentAttachmentDelivery';
 
 const persistenceByTaskStore = new WeakMap<SqliteTaskStore, ApplicationPersistence>();
 
@@ -32,6 +34,26 @@ function taskRuntime(store: SqliteTaskStore): TaskAgentRuntimeAccess {
 }
 
 describe('SqliteTaskStore attachments', () => {
+  it('upgrades schema 7 without changing initial files and retains a verified pre-upgrade backup', async () => {
+    const dir = await temporaryDirectory();
+    const store = await createStore(dir);
+    const { draftId, attachmentId } = await stageText(store, 'initial.txt', 'original context');
+    const task = await store.createTask({ title: 'Existing task', prompt: 'Original request',
+      repositoryId: (await addTestRepository(store, dir)).id, attachmentDraftId: draftId });
+    const paths = persistenceFixture(store).paths;
+    await closeStore(store);
+    const legacy = new DatabaseSync(paths.databasePath);
+    legacy.exec("UPDATE tasks SET payload_json = json_remove(payload_json, '$.initialAttachmentIds'); PRAGMA user_version = 7;");
+    legacy.close();
+    const reloaded = await createStore(dir);
+    expect((await reloaded.getTaskDetail(task.id)).task).toMatchObject({ prompt: task.prompt, initialAttachmentIds: [attachmentId] });
+    expect(new TextDecoder().decode((await reloaded.readTaskAttachment(attachmentId)).bytes)).toBe('original context');
+    const backups = await fs.readdir(paths.backupsRoot);
+    expect(backups).toHaveLength(1);
+    const backup = await persistenceFixture(reloaded).backups.verifyBackup(backups[0]!);
+    expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: 7 } });
+  });
+
   it('creates and reloads a task-owned immutable attachment', async () => {
     const dir = await temporaryDirectory();
     const store = await createStore(dir);
@@ -65,6 +87,23 @@ describe('SqliteTaskStore attachments', () => {
     expect(
       new TextDecoder().decode((await reloaded.readTaskAttachment(staged.id)).bytes)
     ).toBe('{"scope":"task"}');
+  });
+
+  it('retains unsaved initial-prompt files and text across restart without changing the saved prompt', async () => {
+    const dir = await temporaryDirectory();
+    const store = await createStore(dir);
+    const task = await store.createTask({ title: 'Edit before launch', prompt: 'Saved request',
+      repositoryId: (await addTestRepository(store, dir)).id });
+    const { draftId, attachmentId } = await stageText(store, 'draft.txt', 'Unsent context');
+    await store.saveTaskAgentDraft(task.id, undefined, draftId);
+    await store.saveTaskPrompt({ taskId: task.id, prompt: 'Unfinished request', draftOnly: true });
+    await closeStore(store);
+
+    const reloaded = await createStore(dir);
+    const detail = await reloaded.getTaskDetail(task.id);
+    expect(detail.task).toMatchObject({ prompt: 'Saved request', promptDraft: 'Unfinished request', agentAttachmentDraftId: draftId });
+    expect(detail.agentAttachmentDraft?.attachments.map((file) => file.id)).toEqual([attachmentId]);
+    expect(new TextDecoder().decode((await reloaded.readDraftAttachment(draftId, attachmentId)).bytes)).toBe('Unsent context');
   });
 
   it('keeps task creation idempotent and rejects token reuse for changed input', async () => {
@@ -357,6 +396,7 @@ async function createRun(
     sessionId: session.id,
     mode: 'IMPLEMENTATION',
     prompt: task.prompt,
+    attachmentSelection: toAgentAttachmentSelectionFromRecords(await store.getTurnAttachments({ taskId: task.id, mode: 'IMPLEMENTATION' })),
     operationId: `test:attachment-run:${runId}`
   });
   await store.recordAgentRunStarted(run);

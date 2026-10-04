@@ -212,7 +212,8 @@ describe('DiscourseContextResolver', () => {
       {} as never,
       async () => {
         throw new Error('Freshness inspection must not build an execution context.');
-      }
+      },
+      { verifyAttachments: async () => { throw new Error('Freshness inspection must not read attachments.'); } }
     );
     expect(await freshness.freshness(snapshot)).toBe('FRESH');
 

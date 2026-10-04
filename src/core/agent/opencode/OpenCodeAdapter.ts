@@ -4156,21 +4156,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
     }, protocolOperationId('item/upsert', raw, run.id, part.id));
-    const interactionPending =
-      typeof part.callID === 'string' &&
-      (await this.taskRuntime.snapshot()).interactionRequests.some(
-        (interaction) =>
-          interaction.runId === run.id &&
-          interaction.sessionId === session.id &&
-          interaction.serverInstanceId === run.serverInstanceId &&
-          interaction.providerItemId === part.callID &&
-          (interaction.status === 'PENDING' ||
-            interaction.status === 'RESPONDING')
-      );
     await this.recordRunActivity(run, `item/${part.type}/${status.toLowerCase()}`, {
       providerItemId: part.id,
-      tool: part.tool,
-      ...(interactionPending ? { interactionPending: true } : {})
+      tool: part.tool
     });
   }
 
@@ -5723,6 +5711,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     payload: Record<string, unknown>
   ): Promise<void> {
     payload = this.redactProviderValue(payload);
+    const interactionPending = (await this.taskRuntime.snapshot()).interactionRequests.some(
+      (interaction) =>
+        interaction.runId === run.id &&
+        interaction.sessionId === run.sessionId &&
+        interaction.serverInstanceId === run.serverInstanceId &&
+        (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
+    );
+    if (interactionPending) payload = { ...payload, interactionPending: true };
     await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',

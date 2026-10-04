@@ -3984,7 +3984,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(journal).not.toContain(
       JSON.stringify(attachmentPathSegment).slice(1, -1)
     );
-    const retained = await store.verifyRunAttachments(run!.id, task.id);
+    const retained = await store.prepareRunAttachments(run!.id, task.id);
     expect(retained).toHaveLength(1);
     await expect(fs.access(retained[0]!.absolutePath)).resolves.toBeUndefined();
 
@@ -5341,7 +5341,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       prompt: task.prompt,
       settings: task.agentSettings
     });
-    const [delivery] = await store.verifyRunAttachments(run.id, task.id);
+    const [delivery] = await store.prepareRunAttachments(run.id, task.id);
     const interaction = await waitForInteraction(store, 'PENDING');
     const permissionRequest = interaction.request as {
       permissions: { fileSystem?: { read?: string[] } };

@@ -10,7 +10,7 @@
   flex-direction: column;
 }
 
-.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug, .tm-detail--preview { overflow-y: auto; }
+.tm-detail--overview, .tm-detail--evidence, .tm-detail--debug, .tm-detail--preview { overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .tm-detail--overview > .tm-detail__body, .tm-detail--evidence > .tm-detail__body, .tm-detail--debug > .tm-detail__body, .tm-detail--preview > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
 
 .tm-detail__chrome {

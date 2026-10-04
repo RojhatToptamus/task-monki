@@ -1700,7 +1700,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const taskAttachments = await this.store.getTurnAttachments({
       taskId: input.task.id,
       mode: input.mode,
-      generationKey: input.generationKey
+      generationKey: input.generationKey,
+      runId: input.runId
     });
     const taskRuntimeSnapshot = await this.taskRuntime.snapshot();
     let session: AgentSessionRecord | undefined;
@@ -1911,7 +1912,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       'REVIEW'
     );
     if (!reviewSupport.supported) throw new Error(reviewSupport.reason);
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const selectedIds = input.sourceRun?.attachmentSelection.map((file) => file.attachmentId) ?? input.task.initialAttachmentIds;
+    if (!selectedIds) throw new Error('Review attachment selection is missing.');
+    const taskAttachments = (await this.store.getTaskAttachments(input.task.id)).filter((file) => selectedIds.includes(file.id));
     const settings = await this.validateSettings(
       adapter,
       { ...input.settings, runtimeId: reviewRuntimeId },
@@ -1919,7 +1922,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     await this.assertCapacity();
     const preflightAttachments = toAgentTurnAttachments(
-      await this.store.verifyTaskAttachments(input.task.id)
+      await this.store.verifyTaskAttachments(input.task.id, selectedIds)
     );
     const reviewSessionId = randomUUID();
     const reviewSessionOperationId =

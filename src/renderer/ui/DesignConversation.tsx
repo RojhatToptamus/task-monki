@@ -3,6 +3,7 @@ import type {
   AgentModel,
   AgentInteractionDecision,
   AttachmentContent,
+  AttachmentDescriptor,
   AttachmentDraftSnapshot,
   ClipboardAttachmentImage,
   DesignConversationEntry,
@@ -48,6 +49,8 @@ export interface DesignConversationProps {
   onDiscardAttachmentDraft(draftId: string): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onReadDraftAttachment(attachmentId: string): Promise<AttachmentContent>;
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
+  onPreviewOpenChange?(open: boolean): void;
   onStop(turnId: string): Promise<void>;
   onLoadEarlier(): Promise<void>;
   onSaveDraft(
@@ -78,6 +81,8 @@ export function DesignConversation({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onReadDraftAttachment,
+  onReadAttachment,
+  onPreviewOpenChange,
   onStop,
   onLoadEarlier,
   onSaveDraft,
@@ -382,7 +387,12 @@ export function DesignConversation({
                   setError(caught instanceof Error ? caught.message : 'Could not duplicate this version.')
                 )
               }
-              references={referenceNames(entry.turn.referenceIds)}
+              references={entry.turn.referenceIds.map((id) => {
+                const reference = project.references.find((candidate) => candidate.id === id);
+                return project.attachments.find((attachment) => attachment.id === reference?.attachmentId);
+              })}
+              onReadAttachment={onReadAttachment}
+              onPreviewOpenChange={onPreviewOpenChange}
             />
           ))
         )}
@@ -416,6 +426,7 @@ export function DesignConversation({
       >
         <AttachmentComposerShell
           attachments={attachments}
+          onPreviewOpenChange={onPreviewOpenChange}
           attachmentLabel="Files for this Design message"
           className="tm-design-composer__shell"
           removeDisabled={submitting || submissionOutcomeUnknown}
@@ -505,6 +516,8 @@ export function DesignConversation({
                   key={referenceId}
                   attachment={attachment}
                   label="Reference"
+                  onPreviewOpenChange={onPreviewOpenChange}
+                  onRead={onReadAttachment ? () => onReadAttachment(attachment.id) : undefined}
                   disabled={submitting || submissionOutcomeUnknown}
                   onRemove={() =>
                     onSelectionChange(
@@ -530,6 +543,8 @@ export function DesignConversation({
 function DesignTurnMessages({
   entry,
   references,
+  onReadAttachment,
+  onPreviewOpenChange,
   latestRevisionId,
   canRestore,
   canDuplicate,
@@ -537,7 +552,9 @@ function DesignTurnMessages({
   onDuplicate
 }: {
   entry: DesignConversationEntry;
-  references: string[];
+  references: (AttachmentDescriptor | undefined)[];
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
+  onPreviewOpenChange?(open: boolean): void;
   latestRevisionId?: string;
   canRestore: boolean;
   canDuplicate: boolean;
@@ -549,8 +566,14 @@ function DesignTurnMessages({
     <article className="tm-design-turn">
       <Message from="user" label="Your message">
         <MessageContent><p>{entry.userMessage}</p></MessageContent>
+        {references.length > 0 ? <ul className="task-attachments" aria-label="Message references">
+          {references.map((attachment, index) => attachment ? <StoredAttachmentChip
+            key={attachment.id} attachment={attachment}
+            onRead={onReadAttachment ? () => onReadAttachment(attachment.id) : undefined}
+            onPreviewOpenChange={onPreviewOpenChange}
+          /> : <li key={index}>Unavailable reference</li>)}
+        </ul> : null}
         <MessageMeta>
-          {references.length > 0 ? <span className="tm-design-message__references">{references.join(', ')}</span> : null}
           <MessageTime value={entry.turn.createdAt} />
         </MessageMeta>
       </Message>

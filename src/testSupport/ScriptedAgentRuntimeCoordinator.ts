@@ -118,7 +118,8 @@ export class ScriptedAgentRuntimeCoordinator implements AgentRuntimeCoordinator 
         requestedSettings: input.executionContext.modelSettings,
         promptArtifactId,
         outputArtifactId,
-        diagnosticArtifactId
+        diagnosticArtifactId,
+        attachmentSelection: [...(input.attachmentSelection ?? [])]
       },
       prompt: input.prompt,
       priority: input.priority,

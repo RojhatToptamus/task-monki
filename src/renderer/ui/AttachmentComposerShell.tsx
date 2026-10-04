@@ -11,6 +11,7 @@ export function AttachmentComposerShell({
   addButtonTitle,
   addButtonLabel = 'Add files',
   onAddButtonClick,
+  onPreviewOpenChange,
   hint,
   toolbarAction,
   className = '',
@@ -23,6 +24,7 @@ export function AttachmentComposerShell({
   addButtonTitle: string;
   addButtonLabel?: string;
   onAddButtonClick?(): void;
+  onPreviewOpenChange?(open: boolean): void;
   hint: ReactNode;
   toolbarAction?: ReactNode;
   className?: string;
@@ -46,6 +48,7 @@ export function AttachmentComposerShell({
             <AttachmentChip
               key={item.clientId}
               item={item}
+              onPreviewOpenChange={onPreviewOpenChange}
               disabled={removeDisabled || attachments.interactionBlocked}
               onRemove={() => void attachments.remove(item.clientId)}
             />

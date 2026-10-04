@@ -3,9 +3,6 @@
 .tm-agent-session { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
 .tm-agent-session__column { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 24px 32px; }
 .tm-prerun { display: grid; gap: 16px; min-width: 0; }
-.tm-prerun__files { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: var(--t-help); }
-.tm-prerun__files li { display: flex; justify-content: space-between; gap: 12px; min-width: 0; }
-.tm-prerun__files span:first-child { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
 .tm-prerun__settings { display: grid; gap: 0; min-width: 0; }
 .tm-prerun__worktree { margin: 12px 0 0; color: var(--muted); font-size: var(--t-meta); font-family: var(--font-mono); }
 .tm-prerun__action { display: flex; justify-content: flex-end; padding-top: 4px; }
@@ -51,10 +48,6 @@
 
 /* Composer — the queue, the draft and the delivery controls are one field. */
 .tm-agent-session__footer { flex: 0 0 auto; display: grid; gap: 8px; width: 100%; max-width: 760px; margin: 0 auto; padding: 0 24px 16px; }
-.tm-agent-session__composer textarea { display: block; width: 100%; min-height: 88px; max-height: min(200px, 24vh); padding: 12px 12px 4px; resize: none; field-sizing: content; color: var(--text); font: var(--t-body)/1.62 var(--font-ui); }
-.tm-agent-session__composer textarea::placeholder { color: var(--placeholder); }
-.tm-agent-session__model { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin-right: auto; overflow: hidden; color: var(--text-soft); font-size: var(--t-help); white-space: nowrap; }
-.tm-agent-session__model > span { overflow: hidden; color: var(--muted); font: var(--t-meta) var(--font-mono); text-overflow: ellipsis; }
 .tm-agent-session__editing { display: flex; align-items: center; gap: 8px; padding: 6px 8px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-agent-session__editing > button { margin-left: auto; }
 
@@ -71,7 +64,6 @@
 @media (max-width: 1100px) {
   .tm-agent-session__column { padding: 20px 16px 24px; }
   .tm-agent-session__footer { padding: 0 16px 12px; }
-  .tm-agent-session__model > span { max-width: 120px; }
 }
 
 .recovery-banner {

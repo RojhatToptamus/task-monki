@@ -65,6 +65,8 @@ import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
+import { DiscourseComposer } from './DiscourseComposer';
+import type { TaskAttachmentController } from './useTaskAttachments';
 import { DiscourseModeMenu } from './DiscourseModeMenu';
 import { DiscourseResponseGroup } from './DiscourseResponseGroup';
 import { messageModelName } from '../model/messageIdentity';
@@ -114,6 +116,7 @@ interface DraftPersistenceInput {
   supersedesMessageId?: string;
   sourceMessageIds?: string[];
   pendingClientMessageId?: string;
+  attachmentDraftId?: string | null;
   required?: boolean;
   quiet?: boolean;
 }
@@ -683,6 +686,7 @@ export function DiscourseWorkspace({
     return draftAutosave.enqueue(input.scope, async (existing) => {
       if (
         !input.snapshot.text &&
+        !input.attachmentDraftId &&
         input.snapshot.tokens.length === 0 &&
         !input.replyToMessageId &&
         !input.supersedesMessageId &&
@@ -697,6 +701,7 @@ export function DiscourseWorkspace({
         ...(existing ? { draftId: existing.id, expectedRevision: existing.recordRevision } : {}),
         ...(conversationId ? { conversationId } : {}),
         body: input.snapshot.text,
+        attachmentDraftId: input.attachmentDraftId === undefined ? existing?.attachmentDraftId : input.attachmentDraftId ?? undefined,
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
         ...(input.supersedesMessageId
           ? { supersedesMessageId: input.supersedesMessageId }
@@ -1159,9 +1164,9 @@ export function DiscourseWorkspace({
     setRailOpen(false);
   };
 
-  const send = async (state = composer) => {
+  const send = async (state: DiscourseComposerMentionState, files: TaskAttachmentController) => {
     const body = state.text.trim();
-    if (!body || sending || activeWave) return;
+    if (!body || sending || activeWave || files.busy || files.hasErrors || files.modelError || files.interactionBlocked) return;
     const sendGeneration = navigationGenerationRef.current;
     const draftScope = draftAutosave.currentScope();
     const sentPolicy = responsePolicy;
@@ -1182,6 +1187,7 @@ export function DiscourseWorkspace({
     );
     const sendFingerprint = discoursePendingSendFingerprint({
       body,
+      attachmentRevision: files.contentRevision,
       ...(sentReplyTargetId ? { replyToMessageId: sentReplyTargetId } : {}),
       ...(sentCorrectionTargetId ? { supersedesMessageId: sentCorrectionTargetId } : {}),
       sourceMessageIds: sentSourceMessageIds,
@@ -1202,6 +1208,7 @@ export function DiscourseWorkspace({
     let supersededConversationIds: string[] = [];
     setSending(true);
     try {
+      const attachmentDraftId = await files.flushDraft();
       await pendingConversationCleanupRef.current;
       await cleanupSupersededConversations([]);
       const title = deriveDiscourseConversationTitle(body);
@@ -1300,6 +1307,7 @@ export function DiscourseWorkspace({
       await taskManagerApi.sendDiscourseMessage({
         conversationId,
         body,
+        attachmentDraftId,
         ...(sentReplyTargetId ? { replyToMessageId: sentReplyTargetId } : {}),
         ...(sentCorrectionTargetId ? { supersedesMessageId: sentCorrectionTargetId } : {}),
         ...(sentSourceMessageIds.length > 0
@@ -1311,6 +1319,7 @@ export function DiscourseWorkspace({
         agents: sentSelections,
         ...(contextPreview ? { previewFingerprint: contextPreview.fingerprint } : {})
       });
+      await files.finishAdoption();
       const savedDraft = draftScope ? draftAutosave.draftFor(draftScope) : undefined;
       if (savedDraft) {
         await taskManagerApi.deleteDiscourseDraft({
@@ -1778,6 +1787,7 @@ export function DiscourseWorkspace({
     );
   }
 
+  const attachmentPersistence = latestDraftPersistenceRef.current;
   return (
     <main
       ref={workspaceRef}
@@ -2110,45 +2120,17 @@ export function DiscourseWorkspace({
           {correctionTarget ? (
             <ComposerTarget label="Correcting your earlier message" message={correctionTarget} onRemove={() => setCorrectionTargetId(undefined)} />
           ) : null}
-          <div className="tm-composer tm-discourse-composer">
-            <DiscourseMentionInput
-              key={`${selectedConversationId ?? 'new'}:${composerVersion}`}
-              candidates={candidates}
-              initialText={composer.text}
-              initialTokens={composer.tokens}
-              showAgentTokens={activeAgentProfileIds.length === 1 && activeAgentProfileIds[0] !== mainProfileId}
-              disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-              label="Message"
-              placeholder={conversationUnavailable
-                ? conversationPending ? 'Loading conversation…' : 'Conversation unavailable'
-                : activeDraftAlreadySent
-                  ? 'Finishing message recovery…'
-                  : responseDecisionPending
-                  ? 'Resume or cancel the interrupted response first'
-                : aggregate?.conversation.status === 'ARCHIVED'
-                  ? 'Restore this conversation to add a message'
-                  : 'Write a message… Type @ to add context or address an agent'}
-              onChange={updateComposer}
-              onSubmit={(state) => { if (!activeWave) void send(state); }}
-            />
-            {contextTokens.length > 0 && aggregate ? (
-              <div className="tm-discourse-pin-actions" aria-label="Pin message context">
-                {contextTokens.map((token) => {
-                  const alreadyPinned = pinned.some(
-                    (reference) => reference.entityKind === token.kind && reference.entityId === token.entityId
-                  );
-                  return alreadyPinned ? null : (
-                    <button
-                      key={token.key}
-                      type="button"
-                      onClick={() => void pinContext(token.kind as 'TASK' | 'REPOSITORY', token.entityId)}
-                    >
-                      <PinIcon /> Pin {token.labelSnapshot}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+          <DiscourseComposer
+            key={selectedConversationId ?? 'new'}
+            model={catalog?.runtimeCatalog.models.find((model) => model.runtimeId === activeAgentSelections[0]?.runtimeId && model.id === activeAgentSelections[0]?.modelId)}
+            validateModel={responsePolicy !== 'NONE'}
+            draftId={activeDraftAlreadySent ? undefined : activeDraft?.attachmentDraftId}
+            blocked={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+            onPersistDraft={(attachmentDraftId) => {
+              if (!attachmentPersistence) return Promise.reject(new Error('The message draft is not ready.'));
+              return persistDraft({ ...attachmentPersistence, attachmentDraftId: attachmentDraftId ?? null, required: true });
+            }}
+            actions={(files) => (
             <div className="tm-discourse-composer__actions">
               <DiscourseModeMenu
                 value={responsePolicy}
@@ -2178,22 +2160,65 @@ export function DiscourseWorkspace({
                 <button
                   type="button"
                   className={`tm-discourse-send tm-composer-action ${activeWave ? 'tm-discourse-send--stop' : ''}`}
-                  disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                  disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : files.busy || files.hasErrors || Boolean(files.modelError) || files.interactionBlocked || !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                   aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
                   title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Save note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
-                  onClick={() => activeWave ? void stopWave(activeWave.id) : void send()}
+                  onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
                   {sending || (activeWave && ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status)) ? <StatusGlyph kind="working" /> : activeWave ? <Square size={14} strokeWidth={1.5} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               </div>
             </div>
+            )}
+          >
+            {(files) => <>
+            <DiscourseMentionInput
+              key={`${selectedConversationId ?? 'new'}:${composerVersion}`}
+              candidates={candidates}
+              initialText={composer.text}
+              initialTokens={composer.tokens}
+              showAgentTokens={activeAgentProfileIds.length === 1 && activeAgentProfileIds[0] !== mainProfileId}
+              disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+              label="Message"
+              placeholder={conversationUnavailable
+                ? conversationPending ? 'Loading conversation…' : 'Conversation unavailable'
+                : activeDraftAlreadySent
+                  ? 'Finishing message recovery…'
+                  : responseDecisionPending
+                  ? 'Resume or cancel the interrupted response first'
+                : aggregate?.conversation.status === 'ARCHIVED'
+                  ? 'Restore this conversation to add a message'
+                  : 'Write a message… Type @ to add context or address an agent'}
+              onPaste={files.paste}
+              onChange={updateComposer}
+              onSubmit={(state) => { if (!activeWave) void send(state, files); }}
+            />
+            {contextTokens.length > 0 && aggregate ? (
+              <div className="tm-discourse-pin-actions" aria-label="Pin message context">
+                {contextTokens.map((token) => {
+                  const alreadyPinned = pinned.some(
+                    (reference) => reference.entityKind === token.kind && reference.entityId === token.entityId
+                  );
+                  return alreadyPinned ? null : (
+                    <button
+                      key={token.key}
+                      type="button"
+                      onClick={() => void pinContext(token.kind as 'TASK' | 'REPOSITORY', token.entityId)}
+                    >
+                      <PinIcon /> Pin {token.labelSnapshot}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
             {!safeResponseReady && responsePolicy !== 'NONE' ? (
               <p id="discourse-response-requirement" className="tm-discourse-composer__requirement" role="status">
                 {responseRequirement}
               </p>
             ) : null}
-          </div>
+            </>}
+          </DiscourseComposer>
         </div>
       </section>
 

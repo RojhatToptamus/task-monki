@@ -913,7 +913,7 @@
 }
 
 .tm-discourse-composer {
-  padding: 8px 10px;
+  padding: 0;
 }
 
 .tm-discourse-composer-target {
@@ -1069,7 +1069,7 @@
   max-height: 180px;
   field-sizing: content;
   resize: none;
-  padding: 7px 2px 8px;
+  padding: 12px 14px;
   overflow-y: auto;
   border: 0;
   outline: 0;
@@ -1255,8 +1255,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 6px;
-  border-top: 1px solid var(--hair);
+  flex: 1;
+  min-width: 0;
 }
 
 .tm-discourse-mode-menu {

@@ -521,6 +521,12 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      const attachmentDraftRoute = /^\/api\/attachments\/drafts\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === 'GET' && attachmentDraftRoute) {
+        sendJson(response, requestId, 200, await options.service.getAttachmentDraft(decodeURIComponent(attachmentDraftRoute[1]!)));
+        return;
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/attachments/content') {
         const attachmentId = requiredQueryParameter(url, 'attachmentId');
         await withAttachmentBudget(
@@ -529,7 +535,7 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
             await sendAttachment(
               response,
               requestId,
-              await options.service.readTaskAttachment({ attachmentId })
+              await options.service.readTaskAttachment({ attachmentId, draftId: url.searchParams.get('draftId') ?? undefined, conversationId: url.searchParams.get('conversationId') ?? undefined })
             );
           }
         );
@@ -949,6 +955,12 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
       if (request.method === 'POST' && url.pathname === '/api/task-instructions/send') {
         const result = await options.service.sendTaskInstruction((await readJson()) as never);
         sendJson(response, requestId, 200, result ?? {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/tasks/prompt') {
+        await options.service.saveTaskPrompt((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
         return;
       }
 
