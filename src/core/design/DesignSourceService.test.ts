@@ -15,6 +15,30 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe('DesignSourceService', () => {
+  it('honors repository ignores and preserves staging changed after candidate inspection', async () => {
+    const project = await createManagedProject('registered-capture', 'registered-capture-token');
+    // A registered repository uses the user's Git configuration, including excludes.
+    const repository: Repository = { ...project.repository, kind: 'USER_REGISTERED' };
+    const excludes = path.join(project.root, 'global-ignore');
+    await fs.writeFile(excludes, 'private.env\n');
+    await git(repository.path, ['config', 'core.excludesFile', excludes]);
+    await fs.writeFile(path.join(project.worktree.worktreePath, 'private.env'), 'private development input');
+    await fs.writeFile(path.join(project.worktree.worktreePath, 'index.html'), '<h1>Candidate</h1>');
+    const ownership = { designId: project.designId, repository, worktree: project.worktree, turnId: randomUUID(), runId: randomUUID() };
+    const capture = await project.source.captureCandidate({ ...ownership, expectedParentCommit: repository.headSha! });
+    if (capture.kind !== 'CAPTURED') throw new Error('Expected changed source.');
+    const checkpoint = await project.source.prepareCandidateCommit({ ...ownership, checkpoint: capture.checkpoint });
+    expect(await git(repository.path, ['ls-tree', '-r', '--name-only', checkpoint.candidateCommitSha])).not.toContain('private.env');
+    await project.source.publishPreparedCandidateCommit({ ...ownership, checkpoint });
+    await fs.writeFile(path.join(project.worktree.worktreePath, 'styles.css'), 'h1 { color: red; }');
+    await git(project.worktree.worktreePath, ['add', 'styles.css']);
+    const changedIndex = await git(project.worktree.worktreePath, ['write-tree']);
+    await expect(project.source.repairCandidateIndex({ ...ownership, checkpoint })).rejects.toThrow('index changed');
+    expect(await git(project.worktree.worktreePath, ['write-tree'])).toBe(changedIndex);
+    expect(await fs.readFile(path.join(project.worktree.worktreePath, 'private.env'), 'utf8')).toBe('private development input');
+    await expect(fs.access(path.join((await git(project.worktree.worktreePath, ['rev-parse', '--git-dir'])).trim(), 'index.lock'))).rejects.toThrow();
+  }, 20_000);
+
   it('creates one private marker-owned repository for an idempotent creation token', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-design-source-'));
     const repositoryRoot = path.join(root, 'repositories');
@@ -230,7 +254,7 @@ describe('DesignSourceService', () => {
     ).trim();
     const preparedCandidate = await source.prepareCandidateCommit({
       ...ownership,
-      checkpoint: capture.checkpoint
+      checkpoint: { ...capture.checkpoint, candidateCommitSha: danglingCandidate }
     });
     expect(
       (await git(repository.path, ['rev-parse', `refs/heads/${worktree.branchName}`])).trim()

@@ -95,7 +95,7 @@ describe('PreviewReconciler graph coverage', () => {
       } as never,
       { clearRoutes() {} } as never,
       {} as never,
-      {} as never
+      { async cleanupOrphanedGenerations() {} } as never
     );
 
     await reconciler.reconcile();
@@ -128,7 +128,7 @@ describe('PreviewReconciler graph coverage', () => {
       } as never,
       { clearRoutes() {} } as never,
       { async stop(resource: { id: string }) { stopped.push(resource.id); return 'STOPPED' as const; } } as never,
-      { async cleanupOwnedGeneration() {} } as never
+      { async cleanupOrphanedGenerations() {}, async cleanupOwnedGeneration() {} } as never
     );
     await reconciler.reconcile();
     expect(stopped).toEqual(resources.map((resource) => resource.id));
@@ -144,7 +144,7 @@ describe('PreviewReconciler graph coverage', () => {
       } as never,
       { clearRoutes() { calls.push('routes-cleared'); } } as never,
       {} as never,
-      {} as never,
+      { async cleanupOrphanedGenerations() {} } as never,
       {
         async cleanupTaskResources() { calls.push('managed-environment-cleaned'); return 'STOPPED' as const; }
       } as never
@@ -170,7 +170,7 @@ describe('PreviewReconciler graph coverage', () => {
       } as never,
       { clearRoutes() {} } as never,
       {} as never,
-      { async cleanupOwnedGeneration() { sourceCleanupCalls += 1; } } as never,
+      { async cleanupOrphanedGenerations() {}, async cleanupOwnedGeneration() { sourceCleanupCalls += 1; } } as never,
       undefined,
       { async reconcile() { return new Set(['task']); } } as never
     );

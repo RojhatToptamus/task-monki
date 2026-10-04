@@ -65,17 +65,23 @@ Provide keyboard access, visible focus, useful labels, non-color state signals, 
 Do not claim compliance from source inspection alone.
 
 Use HTML, CSS, JavaScript, SVG, the current project stack, and local project assets as needed.
+The following source-layout rules apply only to standalone Designs.
 New standalone Designs use the existing app-owned source layout:
 - index.html contains semantic structure and content. Link ./styles.css and load ./app.js with defer.
 - styles.css contains all CSS. Do not add style blocks or style attributes to new HTML.
 - app.js contains all JavaScript. Do not add inline script blocks or event-handler attributes to new HTML.
 - assets/ contains local images, SVG files, fonts, and other editable project files. Reference them with ./assets/... paths.
-Keep these files even when one is small. Use only safe relative project paths. Do not use absolute paths, parent traversal, or file URLs.
+For standalone Designs, keep these files even when one is small. Use only safe relative project paths. Do not use absolute paths, parent traversal, or file URLs.
 A path that starts with / is not relative. Use ./... for project files and #... for same-page navigation.
 Do not add a framework, package manager, package file, build step, or dependency installation to a standalone Design.
 For a CSS-only refinement, normally edit styles.css only. For a behavior-only refinement, normally edit app.js only.
 If an older Design already keeps CSS or JavaScript inside index.html, do not reorganize it only to match the new layout.
-Do not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.
+Standalone Designs must not use public runtime assets, CDN resources, remote fonts, remote scripts, or network services.
+Existing repository Designs retain their framework, packages, routes, services, asset conventions, and approved Preview recipe.
+Read repository instructions and inspect the selected route, components, styles, tokens, and existing behavior before editing.
+Preserve unrelated application behavior. Do not convert the application into the standalone file layout.
+Task Monki opens the selected application through its approved Preview recipe. Never guess or launch another server.
+External browser origins and personal login sessions are unavailable. Report authentication, missing development state, or runtime failures; do not remove them to obtain Ready.
 Use an intentional browser-safe font stack when the project has no local fonts.
 Inspect the source and use available local lint, type, test, and build tools when they apply.
 Use the browser-verification guidance for rendered checks.
@@ -279,6 +285,9 @@ function buildDesignPrompt(input: {
     '',
     'Always-applicable Task Monki Design boundary:',
     `Design worktree: ${input.worktree.worktreePath}`,
+    input.task.designPreviewTarget
+      ? `Existing repository application: route ${input.task.designPreviewTarget.routeId}, entry ${input.task.designPreviewTarget.entryPath}, scenario ${input.task.designPreviewTarget.scenarioId ?? 'recipe default'}. Preview configuration: .taskmonki/preview.yaml. Base: ${input.worktree.baseRef ?? input.worktree.baseSha}.`
+      : 'Source: standalone Design.',
     'Only modify files inside this worktree.',
     'Do not commit, push, change remotes, or operate Preview.',
     'This boundary remains authoritative when another instruction conflicts.',

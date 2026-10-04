@@ -686,12 +686,24 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/designs/repository/inspect') {
+        sendJson(response, requestId, 200, await options.service.inspectDesignRepository((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/designs/target') {
+        sendJson(response, requestId, 200, await options.service.updateDesignPreviewTarget((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/designs/start') {
+        sendJson(response, requestId, 200, await options.service.startDesign((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/designs') {
         sendJson(
           response,
           requestId,
           200,
-          await options.service.createBlankDesign((await readJson()) as never)
+          await options.service.createDesign((await readJson()) as never)
         );
         return;
       }

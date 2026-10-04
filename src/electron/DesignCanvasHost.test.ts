@@ -111,6 +111,28 @@ describe('DesignCanvasHost', () => {
     expect(downloadEvent.preventDefault).toHaveBeenCalledOnce();
   });
 
+  it('opens the selected application path through its generation lease and clears every declared origin on replacement', async () => {
+    const api = 'http://api.design-1.preview.localhost:4000';
+    const close = vi.fn(async () => undefined);
+    const fixture = createFixture({}, async (input) => ({ ...resolvedRoute(input),
+      url: `${resolvedRoute(input).origin}/products?view=grid`,
+      allowedOrigins: [resolvedRoute(input).origin, api],
+      networkLease: { proxyUrl: 'http://127.0.0.1:45000', close }
+    }));
+    const proxy = vi.spyOn(fixture.session, 'setProxy');
+    fixture.host.attachWindow(fixture.window);
+    await showFirst(fixture);
+    expect(fixture.views[0].webContents.loaded).toEqual([`${route('generation-1').origin}/products?view=grid`]);
+    expect(proxy).toHaveBeenCalledWith(expect.objectContaining({ proxyRules: 'http://127.0.0.1:45000' }));
+    expect(fixture.session.request(`${api}/products`, 'xhr', 1)).toBe(true);
+    expect(fixture.session.request(api.replace('http:', 'ws:') + '/events', 'webSocket', 1)).toBe(true);
+    expect(fixture.session.request('http://other.localhost:4000/products', 'xhr', 1)).toBe(false);
+    await fixture.host.begin({ designId: 'design-1', candidate: identity('generation-2'), replaced: identity('generation-1') });
+    expect(close).toHaveBeenCalledOnce();
+    expect(fixture.session.clearedStorage.map((entry) => entry.origin)).toEqual([route('generation-1').origin, api]);
+    expect(fixture.session.request(`${api}/products`, 'xhr', 1)).toBe(false);
+  });
+
   it('denies the old route and does not load an unselected replacement', async () => {
     const fixture = createFixture();
     fixture.host.attachWindow(fixture.window);
@@ -665,6 +687,7 @@ class FakeSession {
   off(_event: 'will-download', listener: FakeSession['download']) {
     if (this.download === listener) this.download = undefined;
   }
+  async setProxy(_config: { proxyRules: string; proxyBypassRules: string }) {}
   async closeAllConnections() { this.closedConnections += 1; }
   async clearStorageData(options: { origin: string; storages: string[] }) {
     this.clearedStorage.push(options);

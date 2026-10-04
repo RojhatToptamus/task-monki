@@ -50,7 +50,7 @@ Discourse, Preview, artifacts, and attachments remain main-process data.
 
 ### Task agent instructions
 
-`Task.agentDraft` owns the persisted composer draft. Migration 7 adds
+`Task.agentDraft` owns the persisted composer draft. Migration 8 adds
 `task_instructions` for authored instruction text and admission receipts. It
 does not copy runtime turn status or provider messages. Each instruction belongs
 to one task, iteration, worktree, source run, and session. The client message ID
@@ -86,7 +86,9 @@ For a profile root, current application-owned paths are:
 ```
 
 `design-worktrees` and `task-artifact-captures` are derived or staging data.
-Managed Design repositories are durable. The desktop host keeps ordinary task
+Managed Design repositories are durable. Registered-repository Design commits
+remain in the registered Git repository; profile backups do not include that
+external repository or uncommitted worktree edits. The desktop host keeps ordinary task
 worktrees outside this persistence root. Preview runtime data and Discourse
 execution workspaces are also outside this root. SQLite stores their durable
 identities and outcomes where required.
@@ -207,6 +209,12 @@ A file-backed upgrade from an existing SQLite schema must first create and
 verify a `PRE_UPGRADE` backup. A migration error rolls back the transaction.
 The backup remains available for explicit recovery. New profiles apply the full
 migration sequence. Future changes add new SQLite migrations.
+
+Migration 8 preserves an existing task instruction table in pre-release profiles.
+Migration 9 backfills missing initial attachment selections without replacing
+explicit selections or changing message files. Both pre-release schema-7 layouts
+and schema 8 upgrade through the same sequence. Task snapshots use schema 28
+for repository Designs and authored agent instructions together.
 
 Migration 6 repairs primary Codex sessions that collaboration messages
 incorrectly classified as children. The original session-creation event,

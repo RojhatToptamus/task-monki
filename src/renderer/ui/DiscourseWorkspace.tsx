@@ -1766,7 +1766,7 @@ export function DiscourseWorkspace({
         aria-busy="true"
         aria-label="Loading Discourse"
       >
-        <div className="tm-discourse-workspace-loading">
+        <div className="tm-workspace-loading">
           <StatusGlyph kind="working" />
           <strong>Loading Discourse</strong>
         </div>

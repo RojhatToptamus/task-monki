@@ -38,8 +38,12 @@ Treat missing stylesheets, scripts, images, fonts, and other local resource erro
 as candidate failures. After changing any linked file, open the fresh complete
 candidate again before you finish.
 
-After an existing Ready result, do not use browser verification for a true
-no-change turn.
+After an existing Ready result, a true no-change turn can keep its history compact.
+A changed route, entry path, scenario, or execution authority requires fresh inspection.
+For repository applications, verify the selected route and required development state.
+Treat authentication gates, missing data, error pages, and framework overlays as blockers.
+Use only the declared local Preview origins; personal login sessions are not available.
+A restarted generation requires fresh inspection even when its source commit is unchanged.
 
 ## Use relevant checks
 
@@ -63,6 +67,7 @@ candidate again and repeat the relevant check.
 Use the exact operation shape:
 
 - Open: `{"operation":"open_candidate"}`
+- Navigate within the selected application: `{"operation":"navigate","path":"/products?view=grid"}`. This keeps the same inspected generation. External URLs are not supported.
 - Viewport: `{"operation":"set_viewport","width":390,"height":844}`
 - Media: `{"operation":"set_media","colorScheme":"light","reducedMotion":true}`
 - Fill: `{"operation":"act","action":"fill","ref":"@e4","value":"name@example.com"}`

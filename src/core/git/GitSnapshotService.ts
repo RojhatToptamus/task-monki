@@ -375,7 +375,7 @@ async function hashDirtyFingerprint(
   return hash.digest('hex');
 }
 
-async function detectOperationInProgress(worktreePath: string): Promise<string | undefined> {
+export async function detectOperationInProgress(worktreePath: string): Promise<string | undefined> {
   const gitDir = (await git(worktreePath, ['rev-parse', '--git-dir'])).trim();
   const markers: Array<[string, string]> = [
     ['MERGE_HEAD', 'merge'],

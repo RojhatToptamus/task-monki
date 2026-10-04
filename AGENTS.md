@@ -160,41 +160,28 @@ projection, or provider state inconsistent.
 - Do not let UI-only state become a second source of truth for task workflow,
   run status, review status, Git state, or delivery state.
 
-## UI Design Rules
+## UI implementation and verification
 
-- UI changes must feel like they belong to the existing app. Do not create
-  disconnected, novelty, or "showcase" components for a single feature.
-- Reuse existing layout patterns, components, typography, spacing, buttons,
-  chips, cards, panels, and CSS tokens from the shared styles before adding new
-  classes.
-- Add new CSS only when the existing system cannot express the needed state, and
-  keep it consistent with the surrounding selectors in the appropriate
-  `src/renderer/styles/*` feature stylesheet. Keep `src/renderer/styles.css`
-  limited to the intentional cascade import order.
-- Do not add explanatory product copy just to justify an implementation detail.
-  If behavior changes, reflect it through the correct state, available actions,
-  disabled reasons, and concise labels.
-- Avoid awkward labels that narrate internal logic, such as "review without
-  changing status" or similar implementation disclaimers. Users should see what
-  state the task is in and what they can do next.
-- Keep provider/debug terminology out of primary workflow UI unless the user is
-  explicitly in a debug surface.
-- Prefer clear action labels over instructional paragraphs. Use detailed text
-  only when it prevents a risky or irreversible user mistake.
-- Before shipping a UI change, compare nearby screens and states so the new
-  state does not create a one-off visual language.
+`DESIGN.md` owns visual and interaction rules. Before a material UI change,
+inspect the running workflow and its closest shared implementations. Identify the
+primary content, next action, supporting information, and state owner before
+editing.
 
-## UI Verification
+Compare equivalent content and states across affected screens. Fix the owning
+layout or shared component when a defect repeats. Remove superseded code and
+styles. Preserve workflow ownership and provider capability boundaries.
 
-- For visible UI changes, run or inspect the rendered app when feasible. Do not
-  rely only on static code review for layout, hierarchy, or state clarity.
-- Check the affected states, not only the default happy path: empty, loading,
-  running, disabled, error, stale, canceled, and completed.
-- When a change is theme-sensitive, check both light and dark themes.
-- Check common viewport widths when touching layout, headers, sidebars, panels,
-  cards, drawers, or modals.
-- Verify that disabled actions explain the reason in the existing UI style
-  without adding noisy implementation copy.
+Verify the final source in the actual desktop app. Exercise a complete affected
+workflow, including relevant pending, failure, retry, and restored states. Check
+both themes and supported narrow and wide windows when layout or styling changes.
+
+Operate the controls. Inspect focus, selection and copying, overlays, scrolling,
+and content movement where affected. Use realistic content lengths and history.
+Recheck affected behavior after corrections.
+
+Passing tests and screenshots do not establish interaction quality. Correct
+observed defects before declaring completion. Report what ran, what was simulated,
+and what remains unverified.
 
 ## Implementation Quality And Performance
 

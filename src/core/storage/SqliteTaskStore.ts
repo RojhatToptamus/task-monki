@@ -25,7 +25,7 @@ import type {
   BranchPublicationRecord,
   CiRollupRecord,
   CreateBoardRequest,
-  CreateBlankDesignRequest,
+  CreateDesignRequest,
   CreateTaskRequest,
   ImportTaskRequest,
   DuplicateDesignRequest,
@@ -75,7 +75,7 @@ import type {
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
-import { DESIGN_LIMITS } from '../../shared/design';
+import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
   BOARD_COLORS,
   TASK_STORE_SCHEMA_VERSION,
@@ -151,9 +151,9 @@ export interface ManagedDesignRepositoryInput {
 
 export interface CreateDesignBundleInput {
   agentProfile?: CustomAgentProfile;
-  request: CreateBlankDesignRequest;
+  request: CreateDesignRequest;
   agentSettings: AgentExecutionSettings;
-  repository: ManagedDesignRepositoryInput;
+  repository: ManagedDesignRepositoryInput | Repository;
 }
 
 export interface CreateDesignBundleResult {
@@ -370,7 +370,7 @@ interface TaskCreationMetadata {
 }
 
 function designCreationMetadata(
-  input: CreateBlankDesignRequest
+  input: CreateDesignRequest
 ): TaskCreationMetadata {
   if (!isTaskCreationToken(input.creationToken)) {
     throw new TaskCreationRequestError(
@@ -378,6 +378,14 @@ function designCreationMetadata(
       'Design creation retry token is invalid.',
       400
     );
+  }
+  if (input.source !== undefined && (input.source === null ||
+      !['BLANK', 'EXISTING_REPOSITORY'].includes(input.source.kind) ||
+      (input.source.kind === 'EXISTING_REPOSITORY' &&
+        (!UUID_FILE_SEGMENT_PATTERN.test(input.source.repositoryId) ||
+          !isGitObjectId(input.source.expectedBaseSha) ||
+          (input.source.baseRef !== undefined && (typeof input.source.baseRef !== 'string' || !input.source.baseRef.startsWith('refs/heads/'))))))) {
+    throw new TaskCreationRequestError('TASK_CREATION_INVALID_REQUEST', 'Select a valid repository and base.', 400);
   }
   const brief = input.brief.trim();
   const runtimeId = input.runtimeId;
@@ -399,7 +407,8 @@ function designCreationMetadata(
     );
   }
   const canonicalRequest = stableJsonStringify({
-    kind: 'DESIGN_BLANK',
+    kind: input.source?.kind === 'EXISTING_REPOSITORY' ? 'DESIGN_REPOSITORY' : 'DESIGN_BLANK',
+    ...(input.source?.kind === 'EXISTING_REPOSITORY' ? { source: input.source } : {}),
     ...(input.agentProfileId !== undefined ? { agentProfileId: input.agentProfileId } : {}),
     brief,
     runtimeId,
@@ -576,6 +585,7 @@ function isCanonicalStoreTimestamp(value: unknown): value is string {
 }
 
 export type TaskCreationRequestErrorCode =
+  | 'BASE_CHANGED'
   | 'TASK_CREATION_INVALID_REQUEST'
   | 'TASK_CREATION_CONFLICT';
 
@@ -1935,6 +1945,8 @@ export class SqliteTaskStore {
             ) + 1,
           commitSha: settlement.commitSha,
           routeId: selectedRoute.id,
+          verificationGenerationId: candidate.id,
+          target: design.designPreviewTarget,
           createdAt: now
         };
         const authority = settlement.settlement;
@@ -2466,40 +2478,32 @@ export class SqliteTaskStore {
       }
       if (!brief) throw new Error('Design brief is required.');
       if (input.agentProfile) validateAgentProfile(input.agentProfile);
-      const repositoryPath = path.resolve(input.repository.path);
-      if (
-        !UUID_FILE_SEGMENT_PATTERN.test(input.repository.id) ||
-        !input.repository.name.trim() ||
-        !input.repository.branch.trim() ||
-        !isGitObjectId(input.repository.headSha) ||
-        !isCanonicalIsoTimestamp(input.repository.checkedAt)
-      ) {
-        throw new Error('Managed Design repository identity is invalid.');
-      }
-      if (
-        this.state.repositories.some(
-          (repository) =>
-            repository.id === input.repository.id ||
-            sameAbsolutePath(path.resolve(repository.path), repositoryPath)
-        )
-      ) {
-        throw new Error('Managed Design repository identity is already registered.');
-      }
-
       const now = new Date().toISOString();
-      const repository: Repository = {
-        id: input.repository.id,
-        kind: 'DESIGN_MANAGED',
-        name: input.repository.name.trim(),
-        path: repositoryPath,
-        status: 'AVAILABLE',
-        headSha: input.repository.headSha,
-        branch: input.repository.branch.trim(),
-        remotes: [],
-        createdAt: now,
-        updatedAt: now,
-        checkedAt: input.repository.checkedAt
-      };
+      const selectedSource = input.request.source;
+      const existingRepository = selectedSource?.kind === 'EXISTING_REPOSITORY'
+        ? this.state.repositories.find((item) => item.id === selectedSource.repositoryId)
+        : undefined;
+      let repository: Repository;
+      if (input.request.source?.kind === 'EXISTING_REPOSITORY') {
+        if (!existingRepository || existingRepository.kind !== 'USER_REGISTERED' ||
+            existingRepository.status !== 'AVAILABLE' || existingRepository.id !== input.repository.id) {
+          throw new Error('Select an available registered repository.');
+        }
+        repository = existingRepository;
+      } else {
+        const candidate = input.repository;
+        if (!UUID_FILE_SEGMENT_PATTERN.test(candidate.id) || !candidate.name.trim() ||
+            !candidate.branch?.trim() || !candidate.headSha || !isGitObjectId(candidate.headSha) ||
+            !candidate.checkedAt || !isCanonicalIsoTimestamp(candidate.checkedAt) ||
+            this.state.repositories.some((item) => item.id === candidate.id ||
+              sameAbsolutePath(path.resolve(item.path), path.resolve(candidate.path)))) {
+          throw new Error('Managed Design repository identity is invalid or already registered.');
+        }
+        repository = {
+          ...candidate, kind: 'DESIGN_MANAGED', path: path.resolve(candidate.path),
+          status: 'AVAILABLE', remotes: [], createdAt: now, updatedAt: now
+        } as Repository;
+      }
       const task: Task = {
         id: randomUUID(),
         kind: 'DESIGN',
@@ -2554,7 +2558,7 @@ export class SqliteTaskStore {
         };
         this.state = {
           ...this.state,
-          repositories: [repository, ...this.state.repositories],
+          repositories: existingRepository ? this.state.repositories : [repository, ...this.state.repositories],
           tasks: [task, ...this.state.tasks],
           designTurns: [turn, ...this.state.designTurns],
           designReferences: [...references, ...this.state.designReferences],
@@ -2600,8 +2604,51 @@ export class SqliteTaskStore {
     });
   }
 
+  async updateDesignPreviewTarget(designId: string, target: import('../../shared/design').DesignPreviewTarget): Promise<void> {
+    validateDesignPreviewTarget(target);
+    await this.serializeMutation(async () => {
+      const task = this.requireDesign(designId);
+      if (task.workflowPhase === 'ARCHIVED' || this.state.designTurns.some((turn) =>
+        turn.designId === designId && !turn.outcome && turn.runId)) {
+        throw new Error('Stop the current Design update before changing its application.');
+      }
+      this.state = { ...this.state, tasks: this.state.tasks.map((item) => item.id === designId
+        ? { ...item, designPreviewTarget: clone(target), updatedAt: new Date().toISOString() } : item) };
+      await this.persistSnapshot();
+    });
+  }
+
+  async acceptDesignWorkspaceSnapshot(designId: string, snapshotId: string): Promise<void> {
+    await this.serializeMutation(async () => {
+      const task = this.requireDesign(designId);
+      const snapshot = this.state.gitSnapshots.find((item) => item.id === snapshotId);
+      if (!snapshot || snapshot.taskId !== task.id || snapshot.worktreeId !== task.currentWorktreeId ||
+          snapshot.iterationId !== task.currentIterationId || snapshot.conflictedCount || snapshot.operationInProgress) {
+        throw new Error('The accepted Design workspace does not match its current Git state.');
+      }
+      this.state = { ...this.state, tasks: this.state.tasks.map((item) => item.id === designId
+        ? { ...item, acceptedWorkspaceSnapshotId: snapshotId } : item) };
+      await this.persistSnapshot();
+    });
+  }
+
+  async completeRepositoryDesignDuplicate(actionId: string): Promise<void> {
+    await this.serializeMutation(async () => {
+      const action = this.state.designSourceActions.find((item) => item.id === actionId);
+      if (!action || action.kind !== 'DUPLICATE' || action.checkpoint.boundary !== 'WORKTREE_CREATED') {
+        throw new Error('The copied Design workspace is not prepared.');
+      }
+      const task = this.requireDesign(action.targetDesignId);
+      if (this.state.repositories.find((item) => item.id === task.repositoryId)?.kind !== 'USER_REGISTERED') {
+        throw new Error('Only a repository Design can complete without a copied Ready revision.');
+      }
+      this.state = { ...this.state, designSourceActions: this.state.designSourceActions.filter((item) => item.id !== actionId) };
+      await this.persistSnapshot();
+    });
+  }
+
   async resolveDesignCreationRetry(
-    request: CreateBlankDesignRequest
+    request: CreateDesignRequest
   ): Promise<CreateDesignBundleResult | undefined> {
     await this.init();
     return clone(this.resolveDesignCreationRetryFromState(request));
@@ -2614,6 +2661,9 @@ export class SqliteTaskStore {
       await this.init();
       validateDesignSourceActionRequest(input);
       const design = this.requireDesign(input.designId);
+      if (this.state.repositories.find((item) => item.id === design.repositoryId)?.kind === 'USER_REGISTERED') {
+        throw new Error('Use Duplicate from here to continue from a repository Design version.');
+      }
       const sourceRevision = this.requireDesignRevision(
         input.designId,
         input.revisionId
@@ -2740,11 +2790,8 @@ export class SqliteTaskStore {
           completed.sourceDesignId !== design.id ||
           completed.sourceDesignRevisionId !== sourceRevision.id ||
           completed.creationRequestFingerprint !== fingerprint ||
-          !this.state.designRevisions.some(
-            (revision) =>
-              revision.designId === completed.id &&
-              revision.changeSource === 'DUPLICATE'
-          )
+          (this.state.repositories.find((item) => item.id === design.repositoryId)?.kind === 'DESIGN_MANAGED' &&
+            !this.state.designRevisions.some((revision) => revision.designId === completed.id && revision.changeSource === 'DUPLICATE'))
         ) {
           throw new Error('This Design action id was already used for another duplicate.');
         }
@@ -2803,6 +2850,9 @@ export class SqliteTaskStore {
           creationRequestFingerprint: fingerprint,
           sourceDesignId: design.id,
           sourceDesignRevisionId: sourceRevision.id,
+          designPreviewTarget: sourceRevision.target ?? design.designPreviewTarget,
+          acceptedWorkspaceSnapshotId: undefined,
+          workflowPhase: 'READY',
           currentRunId: undefined,
           currentAgentSessionId: undefined,
           currentIterationId: undefined,
@@ -4267,7 +4317,7 @@ export class SqliteTaskStore {
   }
 
   private resolveDesignCreationRetryFromState(
-    request: CreateBlankDesignRequest
+    request: CreateDesignRequest
   ): CreateDesignBundleResult | undefined {
     const metadata = designCreationMetadata(request);
     const existing = this.state.tasks.find(
@@ -4468,8 +4518,8 @@ export class SqliteTaskStore {
       return Boolean(
         task?.kind === 'DESIGN' &&
           repository?.id === task.repositoryId &&
-          repository.kind === 'DESIGN_MANAGED' &&
-          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
+          ((repository.kind === 'DESIGN_MANAGED' && plan?.planSource.type === 'MANAGED_DESIGN_STATIC') ||
+            (repository.kind === 'USER_REGISTERED' && plan?.planSource.type === 'REPOSITORY_RECIPE' && authority.type === 'USER_APPROVAL')) &&
           (!source.designRevisionId ||
             (revision?.designId === task.id &&
               revision.commitSha === source.commitSha))
@@ -6818,7 +6868,7 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       task.sourceDesignRevisionId !== undefined;
     if (
       task.kind === 'DESIGN' &&
-      (repository?.kind !== 'DESIGN_MANAGED' ||
+      (!repository ||
         !['READY', 'ARCHIVED'].includes(task.workflowPhase) ||
         task.completionPolicy !== 'MANUAL' ||
         !hasDesignRuntimeSettings(task.runtimeId, task.agentSettings) ||
@@ -6844,6 +6894,21 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       ) {
         invalidPersistedRelationship('copied Design source ownership');
       }
+    }
+    if (task.designPreviewTarget !== undefined) {
+      if (task.kind !== 'DESIGN' || repository?.kind !== 'USER_REGISTERED') invalidPersistedRelationship('Design application target');
+      validateDesignPreviewTarget(task.designPreviewTarget);
+    }
+    if (task.acceptedWorkspaceSnapshotId !== undefined) {
+      const accepted = state.gitSnapshots.find((item) => item.id === task.acceptedWorkspaceSnapshotId);
+      if (task.kind !== 'DESIGN' || !accepted || accepted.taskId !== task.id ||
+          accepted.worktreeId !== task.currentWorktreeId || accepted.iterationId !== task.currentIterationId) {
+        invalidPersistedRelationship('accepted Design workspace observation');
+      }
+    }
+    if (task.kind === 'DESIGN' && repository?.kind === 'USER_REGISTERED' &&
+        state.worktrees.some((item) => item.taskId === task.id && item.ownership !== 'MANAGED')) {
+      invalidPersistedRelationship('Design managed worktree');
     }
     if (task.kind === 'NORMAL' && repository?.kind !== 'USER_REGISTERED') {
       invalidPersistedRelationship('normal task repository ownership');
@@ -7445,8 +7510,9 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
     .filter((revision) => revision.designId === task.id)
     .sort((left, right) => left.ordinal - right.ordinal)
     .at(-1);
-  const run = currentTurn?.runId
-    ? state.runs.find((candidate) => candidate.id === currentTurn.runId)
+  const runId = currentTurn?.runId;
+  const run = runId
+    ? state.runs.find((candidate) => candidate.id === runId)
     : undefined;
   const needsInput = state.interactionRequests.some(
     (interaction) =>
@@ -7483,12 +7549,16 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
       ? 'NEEDS_ATTENTION'
       : needsInput
         ? 'NEEDS_INPUT'
-        : currentTurn?.outcome === 'FAILED' ||
+        : (currentTurn?.runId && !currentTurn.outcome) || activeRun
+          ? latestRevision ? 'UPDATING' : 'STARTING'
+          : (currentTurn && !currentTurn.runId && !currentTurn.outcome &&
+              state.repositories.find((repository) => repository.id === task.repositoryId)?.kind === 'USER_REGISTERED') ||
+        currentTurn?.outcome === 'FAILED' ||
         currentTurn?.outcome === 'NEEDS_ATTENTION' ||
         (currentTurn?.outcome === 'CANCELED' && !latestRevision) ||
         previewNeedsRestart
       ? 'NEEDS_ATTENTION'
-      : sourceAction || (currentTurn && currentTurn.outcome === undefined) || activeRun
+      : sourceAction || (currentTurn && currentTurn.outcome === undefined)
         ? latestRevision
           ? 'UPDATING'
           : 'STARTING'
@@ -7791,7 +7861,8 @@ function selectDesignCandidateCanvasTarget(
     ) {
       continue;
     }
-    const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
+    const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED' &&
+      (!opened.target || candidate.id === opened.target.routeId));
     if (route) return { generationId: generation.id, routeId: route.id };
   }
   return undefined;
@@ -7842,7 +7913,7 @@ function projectDesignActions(
       : undefined;
   const stopTurn = activeRun
     ? unsettledTurns.find((turn) => turn.runId === activeRun.id || turn.id === activeRun.generationKey)
-    : undefined;
+    : unsettledTurns.find((turn) => !turn.runId);
   const canStop = Boolean(stopTurn && activeRun?.status !== 'INTERRUPTING');
   const hasActiveSourceAction = relatedSourceActions.some(
     (action) => !action.failureReason
@@ -7870,8 +7941,9 @@ function projectDesignActions(
     queuedTurnCount,
     canStop,
     stopTurnId: canStop ? stopTurn?.id : undefined,
-    canRestart: Boolean(latestRevision && !previewIsReady),
+    canRestart: Boolean(task.workflowPhase !== 'ARCHIVED' && latestRevision && !previewIsReady),
     canRestore: Boolean(
+      state.repositories.find((item) => item.id === task.repositoryId)?.kind === 'DESIGN_MANAGED' &&
       latestRevision &&
         sourceIdle &&
         task.workflowPhase === 'READY' &&

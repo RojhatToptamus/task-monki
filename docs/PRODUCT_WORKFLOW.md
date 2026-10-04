@@ -83,6 +83,41 @@ description, target model, and attachment revision still match. Project and
 Task Monki instructions remain downstream instructions; refinement does not
 copy their generic rules into every task prompt.
 
+## Designs from an existing repository
+
+New Design offers Blank and Existing repository. Existing repository uses a
+registered repository and an explicitly selected local base. Task Monki creates
+a separate branch and managed worktree. It does not copy primary-checkout edits.
+A moved base requires a new selection.
+
+The queued brief waits for a valid `.taskmonki/preview.yaml`, an application
+route and entry path, Preview approval, and required private inputs. Preview
+setup uses the same controls as task Preview in the Design canvas. Configuration
+and approval open there when required; Preview setup remains available from the
+canvas toolbar. The conversation panel contains chat. A recipe can select a scenario.
+The agent can diagnose startup failures after these prerequisites are met.
+Application execution and browser inspection currently require macOS.
+
+The normal Design conversation edits the application's components, routes,
+styles, and tests. References remain attachments; repository Designs do not
+import them into a standalone `assets/` directory. Ready records the inspected
+Git commit, application target, and Preview generation. Failed or canceled
+turns keep the previous Ready record. Compose replacement can interrupt its
+runtime because it uses one stable project.
+
+External workspace edits require explicit acceptance of the observed changes.
+Refreshing Git evidence does not accept them. Changed commits, changed branches,
+conflicts, and unfinished Git operations require repair before another turn.
+
+Repository Designs offer Duplicate instead of in-place Restore. Duplicate starts
+a fresh branch and worktree at the selected Ready commit, with its saved target.
+It has no new Ready record until its own first turn passes inspection.
+
+Archive stops Design runtimes and retains source, history, and managed data.
+Archived Designs do not restart Preview. Delete retains repository worktrees by
+default and reports their paths. Optional worktree removal refuses unsaved,
+untracked, or ignored files. The repository and branch remain available.
+
 ## Runtime and model configuration
 
 First-launch defaults, New Task, and Settings use the same runtime/model

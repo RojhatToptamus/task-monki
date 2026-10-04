@@ -120,7 +120,7 @@ export function FirstLaunchSetup({
               detail={
                 hasRepository
                   ? activeRepositoryPath
-                  : 'Coding tasks branch and commit here. Design projects use storage that Task Monki manages, so they do not need a repository.'
+                  : 'Coding tasks branch and commit here. Blank Designs use storage that Task Monki manages, so they do not need a repository.'
               }
               tone={repositoryStepTone}
               actions={
@@ -201,7 +201,7 @@ export function FirstLaunchSetup({
           <div className="tm-setup-finish">
             <div className="tm-setup-finish__status" role="status">
               <strong>{statusSentence}</strong>
-              {!hasRepository ? <span>Design projects do not need one.</span> : null}
+              {!hasRepository ? <span>Blank Designs do not need one.</span> : null}
             </div>
             <div className="tm-setup-finish__actions">
               <button

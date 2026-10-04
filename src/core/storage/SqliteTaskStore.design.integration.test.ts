@@ -160,7 +160,7 @@ describe('SqliteTaskStore Design ownership', () => {
       actions: {
         canRefine: true,
         queuedTurnCount: 1,
-        canStop: false,
+        canStop: true,
         canRestart: false,
         canDelete: false,
         deleteDisabledReason: expect.stringContaining('settle')
@@ -281,7 +281,7 @@ describe('SqliteTaskStore Design ownership', () => {
     expect(detail.actions).toMatchObject({
       canRefine: true,
       queuedTurnCount: 2,
-      canStop: false
+      canStop: true
     });
     expect(
       (await store.snapshot()).artifacts.filter(

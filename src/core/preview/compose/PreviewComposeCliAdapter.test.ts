@@ -40,7 +40,7 @@ describe('PreviewComposeCliAdapter', () => {
       '--config', '/safe/docker-config', '--context', 'desktop-linux', 'compose',
       '-p', 'taskmonki_abc', '--project-directory', '/captured/source',
       '--env-file', '/safe/empty.env', '-f', '/captured/source/compose.yaml',
-      '--profile', 'preview', 'config', '--no-interpolate', '--no-env-resolution'
+      '--profile', 'preview', 'config', '--no-interpolate', '--no-env-resolution', '--no-path-resolution'
     ]));
     expect(config.env).toEqual({
       HOME: '/safe/control',
@@ -81,5 +81,12 @@ describe('PreviewComposeCliAdapter', () => {
     expect(error.message).toBe('Docker Compose command failed; command output was withheld from general error surfaces.');
     expect(JSON.stringify(error)).not.toContain('plaintext-canary');
     expect(error.cause).toBeUndefined();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(adapter.run({
+      contextName: 'desktop-linux', projectName: 'taskmonki_cancel',
+      projectDirectory: '/captured/source', files: ['compose.yaml'],
+      profiles: [], envFile: '/safe/empty.env'
+    }, ['build'], { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

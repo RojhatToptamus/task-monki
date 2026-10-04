@@ -8,7 +8,7 @@ import {
 } from './DesignClientToolContract';
 
 describe('DesignClientToolContract', () => {
-  it('defines the one path-free Design browser tool', () => {
+  it('keeps browser identity and connection authority out of the Design tool input', () => {
     expect(INSPECT_DESIGN_TOOL_DEFINITION).toMatchObject({
       name: 'inspect_design',
       inputSchema: {
@@ -18,7 +18,7 @@ describe('DesignClientToolContract', () => {
     });
     expect(
       JSON.stringify(INSPECT_DESIGN_TOOL_DEFINITION.inputSchema)
-    ).not.toMatch(/"(?:path|url|taskId|runId|browserConfig)"/u);
+    ).not.toMatch(/"(?:url|taskId|runId|browserConfig)"/u);
   });
 
   it('maps bounded text and PNG bytes to native MCP content', () => {

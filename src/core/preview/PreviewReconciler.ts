@@ -21,6 +21,7 @@ export class PreviewReconciler {
     this.gateway.clearRoutes();
     const composeCleanupFailures = await this.composeRuntime?.reconcile() ?? new Set<string>();
     const generations = await this.store.getPreviewGenerations();
+    await this.sourcePreparer.cleanupOrphanedGenerations(new Set(generations.map((generation) => generation.id)));
     for (const generation of generations) {
       if (generation.state === 'STOPPED') continue;
       if (composeCleanupFailures.has(generation.taskId)) {

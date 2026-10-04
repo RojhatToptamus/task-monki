@@ -67,7 +67,7 @@ export class PreviewComposeCliAdapter {
   config(command: PreviewComposeCommand, options: { materialized: boolean }): Promise<string> {
     const argv = [
       ...this.baseArgs(command),
-      'config', '--format', 'json',
+      'config', '--format', 'json', '--no-path-resolution',
       ...(options.materialized ? [] : ['--no-interpolate', '--no-env-resolution'])
     ];
     return this.runRaw(argv, command.projectDirectory).then((result) => result.stdout);
@@ -110,6 +110,7 @@ export class PreviewComposeCliAdapter {
       });
     } catch (error) {
       void error;
+      options.signal?.throwIfAborted();
       throw new Error('Docker Compose command failed; command output was withheld from general error surfaces.');
     }
   }

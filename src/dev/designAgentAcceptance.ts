@@ -698,7 +698,7 @@ async function createAndWait(
   }
 ): Promise<{ detail: DesignDetailSnapshot; source: string; result: ScenarioResult }> {
   console.log(`[design-agent] Start ${input.name}.`);
-  const detail = await service.createBlankDesign({
+  const detail = await service.createDesign({
     brief: input.brief,
     creationToken: `${input.name}-${Date.now()}`,
     runtimeId: input.runtimeId,

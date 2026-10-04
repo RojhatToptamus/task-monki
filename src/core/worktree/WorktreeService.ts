@@ -195,7 +195,7 @@ export class WorktreeService {
     };
   }
 
-  async remove(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+  async inspectRemoval(record: WorktreeRecord, repositoryPath: string, options: { preserveIgnored?: boolean } = {}): Promise<WorktreeRecord> {
     this.assertManaged(record);
     await this.ensureOwnedRoot();
     await this.assertOwnedRecordPath(record);
@@ -218,12 +218,24 @@ export class WorktreeService {
     if (verified.status === 'LOCKED') {
       throw new Error('The local worktree is locked and cannot be removed by Task Monki.');
     }
+    if (options.preserveIgnored && verified.status !== 'PRESENT') {
+      throw new Error(verified.error ?? 'The Design worktree ownership could not be verified for removal.');
+    }
+    if (options.preserveIgnored && (await git(record.worktreePath, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).length > 0) {
+      throw new Error('The worktree contains ignored files. Move or remove them before deleting the checkout.');
+    }
     if (await hasUncommittedWork(record.worktreePath)) {
       throw new Error(
         'The local worktree has uncommitted or untracked files. Commit, stash, or clean it before removing the worktree.'
       );
     }
 
+    return verified;
+  }
+
+  async remove(record: WorktreeRecord, repositoryPath: string, options: { preserveIgnored?: boolean } = {}): Promise<WorktreeRecord> {
+    const verified = await this.inspectRemoval(record, repositoryPath, options);
+    if (verified.status === 'REMOVED') return verified;
     await git(repositoryPath, ['worktree', 'remove', record.worktreePath], 60_000);
     return {
       ...verified,

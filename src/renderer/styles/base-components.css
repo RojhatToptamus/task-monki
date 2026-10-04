@@ -529,6 +529,14 @@ details[open] > summary .tm-disclosure__chevron {
   white-space: nowrap;
 }
 
+.tm-workspace-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: var(--t-body);
+}
+
 .tm-status-glyph {
   width: 14px;
   height: 14px;
@@ -765,8 +773,17 @@ details[open] > summary .tm-disclosure__chevron {
   white-space: nowrap;
 }
 
-.segmented__btn:not(:disabled):hover {
+.segmented__btn:not(:disabled):not([aria-pressed='true']):hover {
   background: var(--hover);
+}
+
+.segmented__btn[aria-pressed='true'] {
+  font-weight: 600;
+}
+
+.segmented__btn[aria-pressed='true']:where(:not(:disabled)) {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
 }
 
 .primary-button,

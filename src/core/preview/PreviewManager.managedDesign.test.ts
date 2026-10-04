@@ -11,7 +11,7 @@ import {
   type PreparedPreviewGeneration,
   type PreviewTaskContext
 } from './PreviewManager';
-import { previewCandidateRouteHostname } from './PreviewRouteHostname';
+import { previewRouteHostname, previewCandidateRouteHostname } from './PreviewRouteHostname';
 
 describe('PreviewManager managed Design cutover', () => {
   it('prepares one exact commit with app-owned authority and no approval', async () => {
@@ -31,6 +31,7 @@ describe('PreviewManager managed Design cutover', () => {
       }))
     };
     const store = {
+      async snapshot() { return { repositories: [{ id: context.task.repositoryId, kind: 'DESIGN_MANAGED' }] }; },
       async getLatestPreviewPlan() { return undefined; },
       async savePreviewPlan(plan: unknown) { savedPlans.push(plan); return plan; },
       async getPreviewGenerations() { return []; },
@@ -69,7 +70,7 @@ describe('PreviewManager managed Design cutover', () => {
       freshness: 'REVISION',
       sourceManifestArtifactId: 'manifest-artifact'
     });
-    expect(savedGenerations).toHaveLength(3);
+    expect(savedGenerations.at(-1)).toEqual(prepared.generation);
   });
 
   it('stores a ready candidate before the checkpoint callback and settles after the fence', async () => {
@@ -134,8 +135,8 @@ describe('PreviewManager managed Design cutover', () => {
       proxyUrl: 'http://127.0.0.1:45000'
     });
     expect(fixture.gateway.openBrowserLease).toHaveBeenCalledWith({
-      origin: `${origin}/`,
-      target: { host: '127.0.0.1', port: 41_000 }
+      generationId: candidate.id,
+      routes: { [origin]: { host: '127.0.0.1', port: 41_000 } }
     });
     await fixture.manager.publishManagedDesignCandidateCanvas(candidate.id);
     const progressHostname = previewCandidateRouteHostname(
@@ -178,6 +179,18 @@ describe('PreviewManager managed Design cutover', () => {
     ]);
   });
 
+  it('publishes a verified replacement when the previous generation has already detached its routes', async () => {
+    const fixture = await createFixture({ replaced: true, detachedPrevious: true });
+    const candidate = await fixture.manager.executeManagedDesignCandidate(fixture.prepared, {
+      designId: 'design-1', async onCandidateReady() {}
+    });
+    const settled = await fixture.manager.cutoverManagedDesignCandidate({ generationId: candidate.id,
+      designId: 'design-1', settlement: { kind: 'AGENT_TURN', turnId: 'turn-1', runId: 'run-1' }, fence: fixture.designInput.fence });
+    expect(settled.routingState).toBe('ACTIVE');
+    expect(fixture.fence.commit).toHaveBeenCalledOnce();
+    expect(fixture.store.cutoverInput).toMatchObject({ designSettlement: { commitSha: 'a'.repeat(40) } });
+  });
+
   it('does not route or settle a candidate that exits during the canvas fence', async () => {
     const fixture = await createFixture({ runningResults: [true, true, false] });
 
@@ -212,6 +225,7 @@ describe('PreviewManager managed Design cutover', () => {
 async function createFixture(options: {
   runningResults?: boolean[];
   replaced?: boolean;
+  detachedPrevious?: boolean;
   cutoverFailure?: boolean;
 } = {}) {
   const order: string[] = [];
@@ -219,6 +233,7 @@ async function createFixture(options: {
   const managed = managedOwner();
   const plan = managed.createPlan(context);
   const old = options.replaced ? oldGeneration(plan.id) : undefined;
+  if (old && options.detachedPrevious) old.routes = old.routes.map((route) => ({ ...route, state: 'DETACHED' }));
   const generation: PreviewGenerationRecord = {
     id: 'candidate-1',
     previewKey: 'task-design1',
@@ -325,6 +340,7 @@ async function createFixture(options: {
     replaceRoutes: vi.fn((generationId: string) => {
       order.push(`gateway-replace:${generationId}`);
     }),
+    revokeBrowserLeases: vi.fn(async () => undefined),
     openBrowserLease: vi.fn(async () => ({
       proxyUrl: 'http://127.0.0.1:45000',
       async close() {}
@@ -386,8 +402,8 @@ function oldGeneration(planId: string): PreviewGenerationRecord {
     },
     workspacePath: '/tmp/old', state: 'READY', routingState: 'ACTIVE', freshness: 'REVISION',
     routes: [{
-      id: 'app', hostname: 'app.design-1.preview.localhost',
-      url: 'http://app.design-1.preview.localhost:4000/', gatewayPort: 4000,
+      id: 'app', hostname: previewRouteHostname('design-1', 'app'),
+      url: `http://${previewRouteHostname('design-1', 'app')}:4000/`, gatewayPort: 4000,
       targetHost: '127.0.0.1', targetPort: 4001, state: 'ATTACHED'
     }],
     createdAt: '2026-08-19T00:00:00.000Z', updatedAt: '2026-08-19T00:00:00.000Z'

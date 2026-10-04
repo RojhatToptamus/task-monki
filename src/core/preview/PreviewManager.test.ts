@@ -42,6 +42,7 @@ function previewGatewayStub() {
     },
     async close() {},
     removeOwnedRoutes() {},
+    async revokeBrowserLeases() {},
     replaceRoutes() {}
   };
 }
@@ -72,6 +73,7 @@ describe('PreviewManager lifecycle', () => {
         async listen() { return { port: 31_337, relocated: false }; },
         async close() { closeCalls += 1; },
         removeOwnedRoutes() {},
+    async revokeBrowserLeases() {},
         replaceRoutes() {}
       } as never,
       {} as never,
@@ -420,6 +422,11 @@ routes: { app: { service: web, port: http, primary: true } }
           throw new PreviewComposeResetRequiredError(['Data compatibility changed.']);
         }
         await input.beforeActivation();
+        if (routeOwner) {
+          expect.soft(await store.getPreviewGeneration(routeOwner)).toMatchObject({
+            routingState: 'RETIRED', routes: [expect.objectContaining({ state: 'DETACHED' })]
+          });
+        }
         if (failureMode === 'UNCERTAIN_ACTIVATION') {
           throw new PreviewComposeActivationError(
             true,
@@ -438,6 +445,7 @@ routes: { app: { service: web, port: http, primary: true } }
       async listen() { return { port: 31337, relocated: false }; },
       async close() {},
       removeOwnedRoutes(owner: string) { removedRouteOwners.push(owner); },
+      async revokeBrowserLeases() {},
       replaceRoutes(owner: string) { routeOwner = owner; }
     };
     const manager = new PreviewManager(

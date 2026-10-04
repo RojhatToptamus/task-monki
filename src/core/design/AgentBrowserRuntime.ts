@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { validateDesignEntryPath } from '../../shared/design';
 import type { PreviewGatewayBrowserLease } from '../preview/PreviewGateway';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 
@@ -28,6 +29,7 @@ const AGENT_BROWSER_SHA256: Partial<Record<NodeJS.Architecture, string>> = {
 export type InspectDesignOperation =
   | { operation: 'open_candidate' }
   | { operation: 'observe' }
+  | { operation: 'navigate'; path: string }
   | {
       operation: 'act';
       action:
@@ -91,6 +93,8 @@ export interface DesignBrowserOwner {
     runId: string;
     generationId: string;
     origin: string;
+    entryPath?: string;
+    allowedOrigins?: string[];
     lease: PreviewGatewayBrowserLease;
   }): Promise<DesignBrowserObservation>;
   inspect(
@@ -107,6 +111,10 @@ export function parseInspectDesignOperation(value: unknown): InspectDesignOperat
     throw new Error('inspect_design requires one supported operation.');
   }
   switch (value.operation) {
+    case 'navigate':
+      assertOnlyKeys(value, ['operation', 'path']);
+      validateDesignEntryPath(value.path);
+      return { operation: 'navigate', path: value.path };
     case 'open_candidate':
     case 'observe':
     case 'accessibility':
@@ -334,6 +342,8 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     runId: string;
     generationId: string;
     origin: string;
+    entryPath?: string;
+    allowedOrigins?: string[];
     lease: PreviewGatewayBrowserLease;
   }): Promise<DesignBrowserObservation> {
     this.assertAvailable();
@@ -358,6 +368,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       await writePrivateJson(path.join(root, 'action-policy.json'), actionPolicy());
       const environment = this.sessionEnvironment(marker, root, socketRoot, {
         origin: input.origin,
+        allowedOrigins: input.allowedOrigins,
         proxyUrl: input.lease.proxyUrl
       });
       const session: BrowserSession = {
@@ -375,7 +386,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
         controller.signal.throwIfAborted();
         await this.runCli(
           environment,
-          ['open', input.origin],
+          ['open', new URL(input.entryPath ?? '/', input.origin).href],
           session.controller.signal,
           OPEN_TIMEOUT_MS
         );
@@ -395,6 +406,10 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     return this.withRunOperation(runId, async () => {
       const session = this.requireSession(runId);
       switch (operation.operation) {
+        case 'navigate':
+          validateDesignEntryPath(operation.path);
+          await this.runCli(session.environment, ['open', new URL(operation.path, session.origin).href], session.controller.signal);
+          return { text: formatObservation(await this.observeUnlocked(session)) };
         case 'observe':
           return { text: formatObservation(await this.observeUnlocked(session)) };
         case 'act': {
@@ -615,7 +630,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     marker: BrowserMarker,
     root: string,
     socketRoot: string,
-    network?: { origin: string; proxyUrl: string }
+    network?: { origin: string; proxyUrl: string; allowedOrigins?: string[] }
   ): NodeJS.ProcessEnv {
     const hostname = network ? new URL(network.origin).hostname : undefined;
     return {
@@ -635,7 +650,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
       AGENT_BROWSER_PLUGINS: '[]',
       ...(network
         ? {
-            AGENT_BROWSER_ALLOWED_DOMAINS: hostname,
+            AGENT_BROWSER_ALLOWED_DOMAINS: network.allowedOrigins?.map((origin) => new URL(origin).hostname).join(',') ?? hostname,
             AGENT_BROWSER_PROXY: network.proxyUrl,
             AGENT_BROWSER_PROXY_BYPASS: '<-loopback>'
           }

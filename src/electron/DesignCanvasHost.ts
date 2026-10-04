@@ -16,6 +16,8 @@ export type {
 export interface DesignCanvasResolvedRoute extends DesignCanvasRouteIdentity {
   url: string;
   origin: string;
+  allowedOrigins?: string[];
+  networkLease?: import('../core/preview/PreviewGateway').PreviewGatewayBrowserLease;
 }
 
 export interface DesignCanvasBounds {
@@ -57,6 +59,7 @@ interface CanvasRequestDetails {
 }
 
 interface CanvasSession {
+  setProxy(config: { proxyRules: string; proxyBypassRules: string }): Promise<void>;
   webRequest: {
     onBeforeRequest(
       filter: { urls: string[] },
@@ -182,7 +185,7 @@ interface DesignCanvasSessionState {
   view?: CanvasView;
   attached: boolean;
   active?: DesignCanvasResolvedRoute;
-  lastOrigin?: string;
+  lastOrigins?: string[];
   requestId: number;
   rendererEpoch: number;
   fenceToken?: string;
@@ -265,8 +268,7 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
       this.retainLatestExternalApproval(state);
       await state.session.closeAllConnections();
       this.destroyView(state);
-      const origin = state.lastOrigin;
-      if (origin) await this.clearOrigin(state, origin);
+      for (const origin of state.lastOrigins ?? []) await this.clearOrigin(state, origin);
       if (state.fenceToken !== token) {
         throw new Error('Design canvas cutover was superseded.');
       }
@@ -373,7 +375,7 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
     const work = (async () => {
       this.deactivateCanvas(state, false);
       await state.session.closeAllConnections();
-      if (state.lastOrigin) await this.clearOrigin(state, state.lastOrigin);
+      for (const origin of state.lastOrigins ?? []) await this.clearOrigin(state, origin);
       state.active = undefined;
       state.fenceToken = undefined;
       state.pendingLinks.clear();
@@ -460,10 +462,12 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
   ): Promise<void> {
     validateResolvedRoute(route);
     this.destroyView(state);
-    state.allowedOrigins = routeNetworkOrigins(route.origin);
+    await state.active?.networkLease?.close();
+    if (route.networkLease) await state.session.setProxy({ proxyRules: route.networkLease.proxyUrl, proxyBypassRules: '<-loopback>' });
+    state.allowedOrigins = new Set((route.allowedOrigins ?? [route.origin]).flatMap((origin) => [...routeNetworkOrigins(origin)]));
     state.mode = 'ALLOW_ROUTES';
     state.active = route;
-    state.lastOrigin = route.origin;
+    state.lastOrigins = route.allowedOrigins ?? [route.origin];
     const view = this.options.runtime.createView({
       webPreferences: {
         session: state.session,
@@ -597,9 +601,13 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
     this.assertFence(state, token);
     if (!this.requestedShowFor(state, identity)) return;
     const route = await this.options.resolveRoute(identity);
-    this.assertFence(state, token);
-    if (!this.requestedShowFor(state, identity)) return;
-    await this.activateRoute(state, route);
+    if (state.fenceToken !== token || !this.requestedShowFor(state, identity)) {
+      await route.networkLease?.close();
+      this.assertFence(state, token);
+      return;
+    }
+    try { await this.activateRoute(state, route); }
+    catch (error) { await route.networkLease?.close(); throw error; }
     this.assertFence(state, token);
     const requested = this.requestedShowFor(state, identity);
     if (!requested || !state.view || state.view.webContents.isDestroyed()) {
@@ -665,6 +673,7 @@ export class DesignCanvasHost implements DesignCanvasCutoverFence {
   private denyNetwork(state: DesignCanvasSessionState): void {
     state.mode = 'DENY_ALL';
     state.allowedOrigins.clear();
+    void state.active?.networkLease?.close().catch(() => undefined);
   }
 
   private retainLatestExternalApproval(state: DesignCanvasSessionState): void {
@@ -799,7 +808,6 @@ function validateResolvedRoute(route: DesignCanvasResolvedRoute): void {
     parsed.origin !== route.origin ||
     parsed.username ||
     parsed.password ||
-    parsed.pathname !== '/' ||
     !parsed.hostname.endsWith('.localhost')
   ) {
     throw new Error('Resolved Design canvas route is unsafe.');

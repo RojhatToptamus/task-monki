@@ -34,24 +34,62 @@ function taskRuntime(store: SqliteTaskStore): TaskAgentRuntimeAccess {
 }
 
 describe('SqliteTaskStore attachments', () => {
-  it('upgrades schema 7 without changing initial files and retains a verified pre-upgrade backup', async () => {
+  it.each([
+    { name: 'released schema 6', version: 6, instructions: false, selection: false },
+    { name: 'repository Design schema 7', version: 7, instructions: false, selection: false },
+    { name: 'agent-session schema 7', version: 7, instructions: true, selection: false },
+    { name: 'agent-session schema 8', version: 8, instructions: true, selection: true }
+  ])('upgrades $name without losing files, drafts, instructions, or run selections', async ({ version, instructions, selection }) => {
     const dir = await temporaryDirectory();
     const store = await createStore(dir);
     const { draftId, attachmentId } = await stageText(store, 'initial.txt', 'original context');
     const task = await store.createTask({ title: 'Existing task', prompt: 'Original request',
       repositoryId: (await addTestRepository(store, dir)).id, attachmentDraftId: draftId });
+    const run = await createRun(store, task, dir, 'migration');
+    const pending = await stageText(store, 'pending.txt', 'unsent context');
+    await store.saveTaskAgentDraft(task.id, 'Unsent instruction', pending.draftId);
+    let messageAttachmentId: string | undefined;
+    if (instructions) {
+      const message = selection ? await stageText(store, 'message.txt', 'message context') : undefined;
+      await store.updateTaskInstructions(task.id, (records, attachmentIds) => {
+        messageAttachmentId = attachmentIds?.[0];
+        records.push({
+          id: randomUUID(), taskId: task.id, iterationId: run.iterationId,
+          worktreeId: run.worktreeId, sourceRunId: run.id, sessionId: run.sessionId,
+          order: 1, text: 'Queued instruction', mode: 'QUEUE', status: 'HELD',
+          attachmentIds, createdAt: task.createdAt, updatedAt: task.updatedAt
+        });
+      }, undefined, message?.draftId);
+    }
+    const before = await store.getTaskDetail(task.id);
     const paths = persistenceFixture(store).paths;
     await closeStore(store);
     const legacy = new DatabaseSync(paths.databasePath);
-    legacy.exec("UPDATE tasks SET payload_json = json_remove(payload_json, '$.initialAttachmentIds'); PRAGMA user_version = 7;");
+    if (!instructions) legacy.exec('DROP TABLE task_instructions');
+    if (!selection) legacy.exec("UPDATE tasks SET payload_json = json_remove(payload_json, '$.initialAttachmentIds')");
+    legacy.exec(`PRAGMA user_version = ${version}`);
     legacy.close();
+
     const reloaded = await createStore(dir);
-    expect((await reloaded.getTaskDetail(task.id)).task).toMatchObject({ prompt: task.prompt, initialAttachmentIds: [attachmentId] });
+    const detail = await reloaded.getTaskDetail(task.id);
+    expect(detail.task).toMatchObject({ prompt: task.prompt, initialAttachmentIds: [attachmentId],
+      agentDraft: 'Unsent instruction', agentAttachmentDraftId: pending.draftId });
+    expect(detail.taskInstructions).toEqual(before.taskInstructions);
+    if (selection) expect(messageAttachmentId).toBeTruthy();
+    expect((await reloaded.getRun(run.id))!.attachmentSelection).toEqual(run.attachmentSelection);
     expect(new TextDecoder().decode((await reloaded.readTaskAttachment(attachmentId)).bytes)).toBe('original context');
+    expect(new TextDecoder().decode((await reloaded.readDraftAttachment(pending.draftId, pending.attachmentId)).bytes)).toBe('unsent context');
+    if (messageAttachmentId) {
+      expect(new TextDecoder().decode((await reloaded.readTaskAttachment(messageAttachmentId)).bytes)).toBe('message context');
+    }
     const backups = await fs.readdir(paths.backupsRoot);
     expect(backups).toHaveLength(1);
     const backup = await persistenceFixture(reloaded).backups.verifyBackup(backups[0]!);
-    expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: 7 } });
+    expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: version } });
+    await closeStore(reloaded);
+    const reopened = await createStore(dir);
+    expect((await reopened.getTaskDetail(task.id)).taskInstructions).toEqual(before.taskInstructions);
+    expect(await fs.readdir(paths.backupsRoot)).toEqual(backups);
   });
 
   it('creates and reloads a task-owned immutable attachment', async () => {

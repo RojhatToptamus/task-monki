@@ -127,6 +127,12 @@ describe('AgentBrowserRuntime', () => {
     ).rejects.toThrow('current element reference');
     expect(calls.filter((argv) => argv[1] === 'click')).toHaveLength(1);
 
+    await runtime.inspect(runId, { operation: 'navigate', path: '/products/42?view=grid#details' });
+    expect(calls).toContainEqual(['--json', 'open', 'http://tm-1234567890abcdef1234567890abcdef.localhost:41000/products/42?view=grid#details']);
+    for (const path of ['https://example.com', '//example.com', '/\\example.com', '/bad\npath']) {
+      await expect(runtime.inspect(runId, { operation: 'navigate', path })).rejects.toThrow('within its Preview route');
+    }
+
     const result = await runtime.inspect(runId, {
       operation: 'screenshot',
       ref: '@e2'

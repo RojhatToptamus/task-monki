@@ -199,7 +199,7 @@ Normal task runs use the initial files and the files selected for the current in
 Queued files do not enter an earlier run. Each Design turn uses only its stored reference selection.
 The first Design turn selects the references adopted during creation.
 
-Schema migration 8 records the existing task files as the initial selection.
+Schema migration 9 records the existing task files as the initial selection.
 It preserves the bytes and existing run records. New code requires this explicit selection.
 There is no fallback that sends every task file.
 

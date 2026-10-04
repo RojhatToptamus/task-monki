@@ -121,6 +121,8 @@ export function DesignConversation({
   const saveDraftRef = useRef(onSaveDraft);
   saveDraftRef.current = onSaveDraft;
   const canRefine = project.actions.canRefine && !refineUnavailableReason;
+  const failedCopy = project.repository.kind === 'DESIGN_MANAGED' && project.origin &&
+    project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION';
   const attachments = useTaskAttachments({
     enabled: true,
     blocked: submitting || submissionOutcomeUnknown || !canRefine,
@@ -355,14 +357,14 @@ export function DesignConversation({
         {conversation.length === 0 && pending.length === 0 ? (
           <div className="tm-design-conversation__empty">
             <strong>
-              {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
+              {failedCopy
                 ? 'This copy could not start'
                 : project.origin
-                  ? 'Continue from this ready copy'
+                  ? 'Continue from this version'
                   : 'Your brief will start the conversation'}
             </strong>
             <span>
-              {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
+              {failedCopy
                 ? 'Delete this copy and duplicate the earlier Ready state again.'
                 : project.origin
                   ? 'Describe the next change. This Design has its own conversation and files.'
