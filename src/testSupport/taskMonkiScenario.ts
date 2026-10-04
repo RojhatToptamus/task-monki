@@ -966,7 +966,7 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     prefix: string
   ): Promise<AgentTurn> {
     this.turnCounter += 1;
-    const providerTurnId = `${prefix}-${this.turnCounter}`;
+    const providerTurnId = `${prefix}-${localRunId}`;
     const run = await requireRun(this.runtime, localRunId);
     await this.runtime.updateAgentSession(
       localSessionId,

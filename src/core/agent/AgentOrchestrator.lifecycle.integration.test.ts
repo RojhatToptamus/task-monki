@@ -37,7 +37,7 @@ import { createRuntimeReadiness } from './AgentRuntimeReadiness';
 import { AgentOrchestrator } from './AgentOrchestrator';
 import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
 import type { AgentRuntimeTurnEvent } from './AgentRuntimeCoordinator';
-import { assertModelSupportsAttachments } from './AgentAttachmentDelivery';
+import { assertModelSupportsAttachments, toAgentAttachmentSelectionFromRecords } from './AgentAttachmentDelivery';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
@@ -1905,6 +1905,7 @@ const { task, iteration, worktree } = await createTaskContext(
         prompt: task.prompt,
         settings: input.runSettings,
         status: input.status,
+        attachmentSelection: toAgentAttachmentSelectionFromRecords(await store.getTaskAttachments(task.id)),
         observedSettings: input.runObservedSettings
       });
       await store.recordAgentRunStarted(run);
@@ -2492,6 +2493,7 @@ async function createRuntimeRun(
     serverInstanceId?: string;
     status?: 'QUEUED' | 'STARTING' | 'RUNNING' | 'RECOVERY_REQUIRED';
     observedSettings?: AgentExecutionSettings;
+    attachmentSelection?: import('../../shared/attachments').AgentAttachmentSelection[];
   }
 ) {
   const id = `run-${input.task.id}`;
@@ -2504,6 +2506,7 @@ async function createRuntimeRun(
     mode: input.mode,
     prompt: input.prompt,
     requestedSettings: input.settings,
+    attachmentSelection: input.attachmentSelection,
     operationId: `test-create-run:${id}`
   });
   const status = input.status ?? 'QUEUED';

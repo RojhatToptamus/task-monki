@@ -391,14 +391,17 @@ Ready:
 In Progress:
 
 - Show the active implementation-side run.
-- In Overview, keep the provider plan as the primary progress structure. For a
-  running run, a compact activity tail may summarize recent provider telemetry
-  such as reads, searches, file changes, verification commands, tool calls, and
-  approval waits. This tail is context only; completed, failed, interrupted, and
-  recovery-required runs return to the plan plus a terminal-status footer.
-  The detailed data flow and invariants are documented in
-  `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
-- Allow steering, approval/input responses, and interrupt controls.
+- Overview shows a compact run summary and captured local changes. The Agent tab
+  owns conversation history, activity, current provider plan, structured requests,
+  Stop, and the instruction composer. See `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
+- Queue after run is the default while implementation runs. Send now appears only
+  when the runtime supports active-turn steering. Approval/input requests must be
+  answered before another instruction can be sent.
+- Dispatch one queued instruction after successful completion and local evidence
+  capture. Stop, failure, recovery, restart, or an ownership change holds pending
+  instructions. Held instructions require an explicit Continue action.
+- Persist drafts per task. Clear matching draft text only when its instruction is
+  accepted; keep text when sending fails.
 - A native structured question from Codex, OpenCode, or an ACP form puts the exact active run
   in **Needs input** and shows its choices or free-text fields. Submit one answer
   to that same run and keep the interaction visible as responding until the

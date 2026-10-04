@@ -186,7 +186,15 @@ function InteractionBody({
           confirmation…
         </p>
       ) : null}
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? (
+        <div className="interaction-card__error">
+          <p className="form-error" role="alert">The response could not be sent. Try again.</p>
+          <details className="tm-raw">
+            <summary className="tm-disclosure__label"><DisclosureChevron />Error details</summary>
+            <pre>{error}</pre>
+          </details>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -488,17 +496,39 @@ function PermissionRequest({
   onRespond
 }: InteractionSectionProps) {
   const request = interaction.request as AgentPermissionApprovalRequest;
+  const files = request.permissions.fileSystem;
+  const paths = [
+    ...(files?.read ?? []).map((path) => ({ path, access: 'Read files' })),
+    ...(files?.write ?? []).map((path) => ({ path, access: 'Write files' })),
+    ...(files?.entries ?? []).map((entry) => ({
+      path: isObject(entry.path) && entry.path.type === 'path' && typeof entry.path.path === 'string'
+        ? entry.path.path : JSON.stringify(entry.path),
+      access: entry.access === 'read' ? 'Read files' : entry.access === 'write' ? 'Write files' : 'Deny access'
+    }))
+  ];
   return (
     <>
+      {request.reason ? <p className="interaction-card__reason">{request.reason}</p> : null}
       <dl className="interaction-details">
-        <dt>Reason</dt>
-        <dd>{request.reason ?? 'Agent requested additional runtime permissions.'}</dd>
-        <dt>Working directory</dt>
-        <dd>{request.cwd}</dd>
-        <dt>Requested permissions</dt>
-        <dd>
-          <StructuredData value={request.permissions} />
-        </dd>
+        {paths.map((entry, index) => {
+          const displayPath = entry.path === request.cwd
+            ? 'Worktree'
+            : entry.path.startsWith(`${request.cwd}/`)
+              ? entry.path.slice(request.cwd.length + 1)
+              : entry.path;
+          return (
+            <div className="interaction-permission" key={index}>
+              <dt>{entry.access}</dt>
+              <dd><code title={entry.path}>{displayPath}</code></dd>
+            </div>
+          );
+        })}
+        {request.permissions.network?.enabled !== undefined ? (
+          <>
+            <dt>Network</dt>
+            <dd>{request.permissions.network.enabled ? 'Allow access' : 'No access'}</dd>
+          </>
+        ) : null}
       </dl>
       <div className="interaction-actions">
         {hasAction(interaction, 'GRANT_TURN') ? (
@@ -1073,7 +1103,16 @@ function InteractionTechnicalDetails({
             <dd><code>{commandRequest.cwd}</code></dd>
           </>
         ) : null}
+        {interaction.type === 'PERMISSION_APPROVAL' ? (
+          <>
+            <dt>Working directory</dt>
+            <dd><code>{(interaction.request as AgentPermissionApprovalRequest).cwd}</code></dd>
+          </>
+        ) : null}
       </dl>
+      {interaction.type === 'PERMISSION_APPROVAL' ? (
+        <pre>{JSON.stringify((interaction.request as AgentPermissionApprovalRequest).permissions, null, 2)}</pre>
+      ) : null}
     </details>
   );
 }

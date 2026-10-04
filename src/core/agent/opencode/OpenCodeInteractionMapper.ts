@@ -1,8 +1,12 @@
 import path from 'node:path';
+import os from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentExecutionSettings,
   AgentInteractionDecision,
   AgentInteractionRequestPayload,
+  AgentPermissionApprovalRequest,
+  AgentJsonValue,
   InteractionRequestType
 } from '../../../shared/agent';
 import type {
@@ -135,7 +139,8 @@ export function mapOpenCodePermission(
       }
     };
   }
-  if (['edit', 'write', 'patch', 'apply_patch'].some((name) => action.includes(name))) {
+  if (['edit', 'write', 'patch', 'apply_patch'].some((name) => action.includes(name)) &&
+      resources.every((resource) => !/[?*]/u.test(resource))) {
     const changes = resources.map((resource) => ({ path: resource, kind: action, diff: '' }));
     return {
       type: 'FILE_CHANGE_APPROVAL',
@@ -162,7 +167,7 @@ export function mapOpenCodePermission(
         : {
             fileSystem: {
               entries: resources.map((resource) => ({
-                path: { path: normalizeResourcePath(resource, worktreePath) },
+                path: mapResourcePath(resource, worktreePath),
                 access: readOnly ? 'read' : 'write'
               }))
             }
@@ -217,6 +222,10 @@ export function mapOpenCodeInteractionResponse(
       'OpenCode does not expose a session-scoped permission reply through its public API.'
     );
   }
+  if (decision.interactionType === 'PERMISSION_APPROVAL' && action === 'GRANT_TURN' &&
+      !isDeepStrictEqual(decision.permissions, (request as AgentPermissionApprovalRequest).permissions)) {
+    throw new Error('OpenCode can approve only the complete permission request.');
+  }
   return {
     path: 'permission',
     body: {
@@ -233,8 +242,15 @@ function questionId(requestId: string, index: number): string {
   return `${requestId}:${index}`;
 }
 
-function normalizeResourcePath(resource: string, worktreePath: string): string {
-  return path.isAbsolute(resource) ? resource : path.resolve(worktreePath, resource);
+function mapResourcePath(resource: string, worktreePath: string): AgentJsonValue {
+  // A trailing directory wildcard has the same scope as a directory path grant.
+  // Keep other patterns non-concrete so the shared policy rejects them.
+  const directory = resource.replace(/\/\*{1,2}$/, '');
+  if (/[?*]/u.test(directory) || !directory || directory.includes('\0')) {
+    return { type: 'pattern', pattern: resource };
+  }
+  const expanded = directory.replace(/^(?:~|\$HOME)(?=\/|$)/u, os.homedir());
+  return { type: 'path', path: path.resolve(worktreePath, expanded) };
 }
 
 function stringMetadata(

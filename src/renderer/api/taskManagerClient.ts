@@ -87,6 +87,12 @@ import type {
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   StartReviewRequest,
+  TaskInstruction,
+  QueueTaskInstructionRequest,
+  EditTaskInstructionRequest,
+  SendTaskInstructionRequest,
+  SaveTaskAgentDraftRequest,
+  SaveTaskPromptRequest,
   SteerRunRequest,
   TestExternalToolRequest,
   UpdateAgentNativeSessionRequest,
@@ -347,10 +353,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       }),
     discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
       post<void>(baseUrl, '/api/attachments/drafts/discard', input),
+    getAttachmentDraft: (draftId: string) => get<AttachmentDraftSnapshot>(baseUrl, `/api/attachments/drafts/${encodeURIComponent(draftId)}`),
     readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
       readAttachment(
         baseUrl,
-        `/api/attachments/content?${new URLSearchParams({ attachmentId: input.attachmentId }).toString()}`
+        `/api/attachments/content?${new URLSearchParams({ attachmentId: input.attachmentId, ...(input.draftId ? { draftId: input.draftId } : {}), ...(input.conversationId ? { conversationId: input.conversationId } : {}) }).toString()}`
       ),
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
@@ -468,6 +475,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     inspectWorktreePreparation: (input: InspectWorktreePreparationRequest) =>
       post<WorktreePreparationInspection>(baseUrl, '/api/worktrees/inspect-preparation', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
+    queueTaskInstruction: (input: QueueTaskInstructionRequest) => post<TaskInstruction>(baseUrl, '/api/task-instructions/queue', input),
+    editTaskInstruction: (input: EditTaskInstructionRequest) => post<void>(baseUrl, '/api/task-instructions/edit', input),
+    sendTaskInstruction: (input: SendTaskInstructionRequest) => post<RunRecord>(baseUrl, '/api/task-instructions/send', input),
+    saveTaskPrompt: (input: SaveTaskPromptRequest) => post<void>(baseUrl, '/api/tasks/prompt', input),
+    saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => post<void>(baseUrl, '/api/task-instructions/draft', input),
     steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
     continueRun: (input: ContinueRunRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/continue', input),

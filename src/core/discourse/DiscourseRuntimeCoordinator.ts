@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { toAgentAttachmentSelection } from '../agent/AgentAttachmentDelivery';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentExecutionContext,
@@ -213,6 +214,7 @@ export class DiscourseRuntimeCoordinator {
       });
     }
 
+    const attachments = await this.discourse.verifyAttachments(input.conversationId, contextSnapshot.attachmentIds);
     const owner = {
       kind: 'DISCOURSE' as const,
       conversationId: input.conversationId,
@@ -236,6 +238,7 @@ export class DiscourseRuntimeCoordinator {
         primaryCwd: input.executionContext.primaryCwd,
         readRoots: input.executionContext.readRoots,
         modelSettings: input.executionContext.modelSettings,
+        attachments,
         clientOperationId: `${input.clientOperationId}:continue-context`
       });
       const access = createAgentSessionAccessEpoch({
@@ -266,6 +269,7 @@ export class DiscourseRuntimeCoordinator {
       generationKey: job.generationKey,
       executionContext,
       prompt: input.prompt,
+      attachmentSelection: toAgentAttachmentSelection(attachments),
       priority: priorityForJob(job),
       clientOperationId: input.clientOperationId,
       createdAt: job.createdAt
@@ -825,7 +829,8 @@ export class DiscourseRuntimeCoordinator {
     });
     let startError: unknown;
     try {
-      run = await this.agents.startPreparedTurn(queueEntryId, clientOperationId);
+      const attachments = await this.discourse.verifyAttachments(entry.scope.conversationId, run.attachmentSelection.map(({ attachmentId }) => attachmentId));
+      run = await this.agents.startPreparedTurn(queueEntryId, clientOperationId, attachments);
     } catch (error) {
       startError = error;
       run = requireRuntimeRun((await this.runtime.snapshot()).runs, run.id);

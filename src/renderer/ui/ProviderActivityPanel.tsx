@@ -410,7 +410,7 @@ function PlanHistory({ plans }: { plans: AgentPlanRevisionRecord[] }) {
         </span>
       </header>
       {latest.explanation ? <p>{latest.explanation}</p> : null}
-      <PlanList steps={latest.steps} showCaptions />
+      <PlanList steps={latest.steps} />
       {plans.length > 1 ? (
         <details className="provider-revisions">
           <summary><span className="tm-disclosure__label"><DisclosureChevron />{plans.length - 1} earlier revisions</span></summary>

@@ -5,7 +5,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type FormEvent
+  type FormEvent,
+  type SetStateAction
 } from 'react';
 import type {
   AgentInteractionDecision,
@@ -116,6 +117,7 @@ export interface DesignsWorkspaceProps {
     designId: string,
     attachmentId: string
   ): Promise<AttachmentContent>;
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
   onAddReferences(designId: string, attachmentDraftId: string): Promise<string[]>;
   onRemoveReference(designId: string, referenceId: string): Promise<void>;
   onImportReferenceAsset(designId: string, referenceId: string): Promise<void>;
@@ -171,6 +173,7 @@ export function DesignsWorkspace({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onReadDesignDraftAttachment,
+  onReadAttachment,
   onAddReferences,
   onRemoveReference,
   onImportReferenceAsset,
@@ -211,9 +214,32 @@ export function DesignsWorkspace({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
-  const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
-  const referenceDesignId = useRef<string | undefined>(undefined);
-  const restoredDraftRevision = useRef<number | undefined>(undefined);
+  const [attachmentPreviewOpen, setAttachmentPreviewOpen] = useState(false);
+  const [referenceSelection, setReferenceSelection] = useState(() => ({
+    designId: project?.design.id,
+    draftRevision: draft?.recordRevision,
+    ids: draft?.referenceIds ?? []
+  }));
+  if (
+    referenceSelection.designId !== project?.design.id ||
+    referenceSelection.draftRevision !== draft?.recordRevision
+  ) {
+    if (referenceSelection.designId !== project?.design.id) setFilesOpen(false);
+    setReferenceSelection({
+      designId: project?.design.id,
+      draftRevision: draft?.recordRevision,
+      ids: draft?.referenceIds ?? []
+    });
+  }
+  const selectedReferenceIds = referenceSelection.ids.filter((id) =>
+    project?.references.some((reference) => reference.id === id && reference.state === 'ACTIVE')
+  );
+  const setSelectedReferenceIds = (update: SetStateAction<string[]>) => {
+    setReferenceSelection((current) => ({
+      ...current,
+      ids: typeof update === 'function' ? update(current.ids) : update
+    }));
+  };
   const projectModelDiscoveryRef = useRef<string | undefined>(undefined);
   const visibleDesigns = visibleDesignProjects(designs, historyQuery, historyFilter);
   const activeDesignId = project?.design.id ?? selectedDesignId;
@@ -295,37 +321,6 @@ export function DesignsWorkspace({
     onClose: () => onHistoryCollapsedChange?.(true),
     active: historyModalOpen
   });
-
-  useEffect(() => {
-    if (!project) {
-      setSelectedReferenceIds([]);
-      referenceDesignId.current = undefined;
-      restoredDraftRevision.current = undefined;
-      return;
-    }
-    const activeSet = new Set(project.references
-      .filter((reference) => reference.state === 'ACTIVE')
-      .map((reference) => reference.id));
-    if (referenceDesignId.current !== project.design.id) {
-      referenceDesignId.current = project.design.id;
-      restoredDraftRevision.current = draft?.recordRevision;
-      setSelectedReferenceIds(
-        (draft?.referenceIds ?? []).filter((referenceId) => activeSet.has(referenceId))
-      );
-      setFilesOpen(false);
-      return;
-    }
-    if (draft && restoredDraftRevision.current !== draft.recordRevision) {
-      restoredDraftRevision.current = draft.recordRevision;
-      setSelectedReferenceIds(
-        draft.referenceIds.filter((referenceId) => activeSet.has(referenceId))
-      );
-      return;
-    }
-    setSelectedReferenceIds((current) =>
-      current.filter((referenceId) => activeSet.has(referenceId))
-    );
-  }, [draft, project?.design.id, project?.references]);
 
   useLayoutEffect(() => {
     const workspace = workspaceRef.current;
@@ -583,6 +578,8 @@ export function DesignsWorkspace({
                       onDiscardAttachmentDraft({ draftId })
                     }
                     onReadClipboardImage={onReadClipboardImage}
+                    onReadAttachment={onReadAttachment}
+                    onPreviewOpenChange={setAttachmentPreviewOpen}
                     onReadDraftAttachment={(attachmentId) =>
                       onReadDesignDraftAttachment(project.design.id, attachmentId)
                     }
@@ -633,7 +630,7 @@ export function DesignsWorkspace({
                   <DesignCanvas
                     project={project}
                     desktopAvailable={desktopCanvasAvailable}
-                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen}
+                    occluded={canvasOccluded || deleteOpen || renameOpen || filesOpen || attachmentPreviewOpen}
                     onShowCanvas={onShowCanvas}
                     onHideCanvas={onHideCanvas}
                     onRefresh={onRefreshCanvas}

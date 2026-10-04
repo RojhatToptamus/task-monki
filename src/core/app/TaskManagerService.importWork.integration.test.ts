@@ -254,7 +254,7 @@ describe('Import existing work', () => {
     await s.service.shutdown();
     await s.persistence.close();
     const old = new DatabaseSync(databasePath);
-    old.exec(`UPDATE worktrees SET payload_json = json_remove(payload_json, '$.ownership'); PRAGMA user_version = 1;`);
+    old.exec(`UPDATE worktrees SET payload_json = json_remove(payload_json, '$.ownership'); DROP TABLE task_instructions; PRAGMA user_version = 1;`);
     old.close();
     const upgraded = await openTestPersistence(path.join(s.rootDir, 'profile'));
     try {

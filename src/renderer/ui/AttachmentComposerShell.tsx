@@ -11,7 +11,9 @@ export function AttachmentComposerShell({
   addButtonTitle,
   addButtonLabel = 'Add files',
   onAddButtonClick,
+  onPreviewOpenChange,
   hint,
+  toolbarStart,
   toolbarAction,
   className = '',
   removeDisabled = false,
@@ -23,7 +25,9 @@ export function AttachmentComposerShell({
   addButtonTitle: string;
   addButtonLabel?: string;
   onAddButtonClick?(): void;
+  onPreviewOpenChange?(open: boolean): void;
   hint: ReactNode;
+  toolbarStart?: ReactNode;
   toolbarAction?: ReactNode;
   className?: string;
   removeDisabled?: boolean;
@@ -31,7 +35,7 @@ export function AttachmentComposerShell({
 }) {
   return (
     <div
-      className={`field__prompt-shell ${className} ${
+      className={`tm-composer field__prompt-shell ${className} ${
         attachments.isDragging ? 'field__prompt-shell--dragging' : ''
       }`.trim()}
       onDragEnter={bindDropTarget ? attachments.dragEnter : undefined}
@@ -46,13 +50,15 @@ export function AttachmentComposerShell({
             <AttachmentChip
               key={item.clientId}
               item={item}
+              onPreviewOpenChange={onPreviewOpenChange}
               disabled={removeDisabled || attachments.interactionBlocked}
               onRemove={() => void attachments.remove(item.clientId)}
             />
           ))}
         </ul>
       ) : null}
-      <div className="field__prompt-toolbar">
+      <div className="tm-composer__toolbar">
+        {toolbarStart}
         <input
           ref={attachments.inputRef}
           className="task-attachment-input"

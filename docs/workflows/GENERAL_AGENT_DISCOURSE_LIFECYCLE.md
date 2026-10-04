@@ -43,7 +43,7 @@ The main answer sits on the conversation sheet. User messages use a recessed
 surface, and peer feedback uses a raised aside. Reply links preserve the exact
 target. Model identity and time remain secondary metadata.
 
-Discourse and Designs share `MessageHeader` and `MessageMarkdown`. Domain
+Conversation surfaces share message content styles and `MessageMarkdown`. Domain
 components still own their actions and state. Response progress appears on the
 pending message, with only one Stop control in the composer. Failed or stopped
 plain answers reload partial text from the existing runtime output artifact.
@@ -90,7 +90,9 @@ Explicit reply and selected
 source messages take priority over optional recent history. A job is rejected
 when its required context exceeds the applicable model or prompt budget.
 
-Pinned task and repository references use the existing context owner. Each
+Pinned task and repository references use the existing context owner. The Context
+popup shows sources included with the current message, their read scope, and
+context limits. The conversation settings sidebar shows the access policy. Each
 response saves its resolved source context. Native permission identity belongs
 to each provider session, not to another agent's session.
 

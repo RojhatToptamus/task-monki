@@ -16,7 +16,7 @@ profile.
 
 | Data | Authoritative owner | Physical representation |
 | --- | --- | --- |
-| Tasks, boards, repositories, workflow, worktree records, local evidence, Preview control records, Design metadata and drafts | Task Monki domain stores | Normalized SQLite tables |
+| Tasks, boards, repositories, workflow, worktree records, local evidence, Preview control records, Design metadata, task agent drafts and authored instructions | Task Monki domain stores | Normalized SQLite tables |
 | Provider servers, sessions, runs, items, interactions, queues, usage, telemetry, operation receipts, and recovery records | The Task Monki runtime store owns its records. Providers remain authoritative for external runtime state. | Normalized SQLite tables |
 | Discourse conversations, participants, messages, context, waves, jobs, concerns, summaries, drafts, and tombstones | Task Monki Discourse store | Normalized SQLite tables |
 | Application settings | Task Monki settings store | One revisioned SQLite record |
@@ -47,6 +47,25 @@ The renderer is not an application-data store. Its only `localStorage` record
 is `task-monki.workspace-layout.v1`, which contains collapsible-panel, panel
 width, and Design layout preferences. Tasks, settings, workflow, runtime,
 Discourse, Preview, artifacts, and attachments remain main-process data.
+
+### Task agent instructions
+
+`Task.agentDraft` owns the persisted composer draft. Migration 7 adds
+`task_instructions` for authored instruction text and admission receipts. It
+does not copy runtime turn status or provider messages. Each instruction belongs
+to one task, iteration, worktree, source run, and session. The client message ID
+prevents repeat submission of an accepted instruction.
+
+Queue insertion and matching draft clearing share one transaction. Follow-up
+admission reserves the runtime run ID before calling the existing start path.
+After a crash, that ID determines whether a turn was admitted. Task startup holds
+queued instructions and marks unconfirmed live steering uncertain. It never
+automatically resends a potentially delivered instruction.
+
+The queue allows 20 pending instructions. Text and drafts allow 65,536 characters;
+each task retains at most 1,000 authored instructions. Runtime history keeps its
+existing storage limits. No provider or Git operation runs inside an instruction
+transaction.
 
 ## Profile Layout
 

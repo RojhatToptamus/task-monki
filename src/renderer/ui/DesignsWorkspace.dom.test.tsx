@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useState } from 'react';
-import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { StrictMode, useState } from 'react';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type {
   AgentModel,
   AgentRuntimeState,
@@ -12,6 +12,15 @@ import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import type { DesignProjectDetail } from '../model/designs';
 import { DesignsWorkspace, type DesignsWorkspaceProps } from './DesignsWorkspace';
+
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query.includes('reduced-motion'),
+    addEventListener() {},
+    removeEventListener() {}
+  }));
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -943,30 +952,37 @@ describe('mounted Design workspace', () => {
     await waitFor(() => expect(onAddReferences).toHaveBeenCalledWith('design-1', 'post-create-draft'));
   });
 
-  it('queues another message during active work and exposes Stop', async () => {
+  it('keeps pending messages in the composer queue and cancels only the selected message', async () => {
     const onStageAttachmentBatch = vi.fn<DesignsWorkspaceProps['onStageAttachmentBatch']>(
       async () => attachmentDraft('queued-message-draft')
     );
     const onSubmitRefinement = vi.fn(async () => undefined);
     const onStopTurn = vi.fn(async () => undefined);
-    render(
+    const project = designProject({
+      design: designListItem({ status: 'UPDATING' }),
+      currentRun: { id: 'run-1', status: 'RUNNING' } as DesignProjectDetail['currentRun'],
+      conversation: [
+        {
+          ...designProject().conversation[0]!,
+          turn: { ...designProject().conversation[0]!.turn, runId: 'run-1', outcome: undefined },
+          runStatus: 'RUNNING',
+          assistantMessage: 'Updating the page.'
+        },
+        {
+          turn: {
+            id: 'turn-2', designId: 'design-1', clientMessageId: 'message-2', order: 2,
+            messageSource: 'INLINE_MESSAGE', referenceIds: [],
+            createdAt: '2026-08-20T10:01:00Z', checkpoint: { boundary: 'QUEUED' }
+          },
+          userMessage: 'Add another theme.'
+        }
+      ],
+      actions: { canRefine: true, queuedTurnCount: 1, canStop: true, stopTurnId: 'turn-1', canRestart: false, canRestore: false, canDuplicate: false, canArchive: false, canDelete: false }
+    });
+    const view = render(
       <DesignsWorkspace
         {...workspaceProps({
-          project: designProject({
-            design: designListItem({ status: 'UPDATING' }),
-            currentRun: { id: 'run-1', status: 'RUNNING' } as DesignProjectDetail['currentRun'],
-            actions: {
-              canRefine: true,
-              queuedTurnCount: 1,
-              canStop: true,
-              stopTurnId: 'turn-1',
-              canRestart: false,
-              canRestore: false,
-              canDuplicate: false,
-              canArchive: false,
-              canDelete: false
-            }
-          }),
+          project,
           onStageAttachmentBatch,
           onSubmitRefinement,
           onStopTurn
@@ -974,7 +990,10 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByText('1 queued')).toBeTruthy();
+    const queue = screen.getByRole('list', { name: 'Pending instructions' });
+    expect(within(queue).getByText('Add another theme.')).toBeTruthy();
+    expect(screen.getAllByText('Add another theme.')).toHaveLength(1);
+    expect(screen.queryByText('Queued')).toBeNull();
     const input = conversationReferenceInput(document.body);
     fireEvent.change(input, {
       target: { files: [attachmentFile('queued.txt', 'text/plain', 'Queued direction')] }
@@ -992,11 +1011,38 @@ describe('mounted Design workspace', () => {
       )
     );
 
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Refine this Design' })));
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(onStopTurn).toHaveBeenCalledWith('design-1', 'turn-1');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' }).hasAttribute('disabled')).toBe(false));
+
+    const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
+    fireEvent.change(composer, { target: { value: 'Keep this unsent draft.' } });
+    onStopTurn.mockRejectedValueOnce(new Error('Could not cancel the queued message.'));
+    fireEvent.click(within(queue).getByRole('button', { name: 'Remove instruction 1' }));
+    await screen.findByRole('alert');
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this unsent draft.');
+    expect(within(queue).getByText('Add another theme.')).toBeTruthy();
+    fireEvent.click(within(queue).getByRole('button', { name: 'Remove instruction 1' }));
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+    expect(onStopTurn).toHaveBeenLastCalledWith('design-1', 'turn-2');
+    view.rerender(<DesignsWorkspace {...workspaceProps({
+      project: {
+        ...project,
+        conversation: project.conversation.map((entry) => entry.turn.id === 'turn-2'
+          ? { ...entry, turn: { ...entry.turn, outcome: 'CANCELED' } }
+          : entry),
+        actions: { ...project.actions, queuedTurnCount: 0 }
+      },
+      onStopTurn
+    })} />);
+    expect(screen.queryByRole('list', { name: 'Pending instructions' })).toBeNull();
+    expect(screen.queryByText('Add another theme.')).toBeNull();
+    expect(screen.getByText('Updating the page.')).toBeTruthy();
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this unsent draft.');
   });
 
-  it('restores and persists an unsent draft outside the task transcript', async () => {
+  it('restores draft text and reference selection without clearing files during mount', async () => {
     const onSaveDraft = vi.fn(async (
       designId,
       body,
@@ -1012,18 +1058,21 @@ describe('mounted Design workspace', () => {
       updatedAt: '2026-08-20T10:00:00.000Z'
     }));
     const view = render(
-      <DesignsWorkspace
-        {...workspaceProps({
-          draft: {
-            designId: 'design-1',
-            body: 'Saved unfinished thought',
-            referenceIds: [],
-            recordRevision: 3,
-            updatedAt: '2026-08-20T10:00:00.000Z'
-          },
-          onSaveDraft
-        })}
-      />
+      <StrictMode>
+        <DesignsWorkspace
+          {...workspaceProps({
+            project: projectWithTwoReferences(),
+            draft: {
+              designId: 'design-1',
+              body: 'Saved unfinished thought',
+              referenceIds: ['reference-first'],
+              recordRevision: 3,
+              updatedAt: '2026-08-20T10:00:00.000Z'
+            },
+            onSaveDraft
+          })}
+        />
+      </StrictMode>
     );
     const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
     expect((composer as HTMLTextAreaElement).value).toBe('Saved unfinished thought');
@@ -1035,11 +1084,12 @@ describe('mounted Design workspace', () => {
       expect(onSaveDraft).toHaveBeenCalledWith(
         'design-1',
         'Updated unfinished thought',
-        [],
+        ['reference-first'],
         undefined,
         3
       )
     );
+    expect(onSaveDraft.mock.calls.every((call) => call[2].includes('reference-first'))).toBe(true);
   });
 
   it('restores saved draft files securely and sends the same staged ownership after reopen', async () => {
@@ -1193,12 +1243,10 @@ describe('mounted Design workspace', () => {
     const onDeleteDesign = vi.fn(() => new Promise<void>(() => undefined));
     render(<DesignsWorkspace {...workspaceProps({ onDeleteDesign })} />);
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Design options for Quiet portfolio' })
-    );
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Design options for Quiet portfolio' }), { key: 'ArrowDown' });
     expect(
-      (screen.getByRole('menuitem', { name: 'Open in Finder' }) as HTMLButtonElement).disabled
-    ).toBe(true);
+      screen.getByRole('menuitem', { name: 'Open in Finder' }).getAttribute('aria-disabled')
+    ).toBe('true');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }));
     expect(screen.getByRole('dialog', { name: /Delete “Quiet portfolio”/ })).toBeTruthy();
     const confirm = screen.getByRole('button', { name: 'Delete Design' });
@@ -1282,12 +1330,12 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Ready state 1 options' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Restore this version' }));
     await waitFor(() =>
       expect(onRestoreRevision).toHaveBeenCalledWith('design-1', 'revision-1')
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Ready state 1 options' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Ready state 1 options' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate from here' }));
     await waitFor(() =>
       expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-1')
@@ -1296,17 +1344,17 @@ describe('mounted Design workspace', () => {
     const projectMenu = screen.getByRole('button', {
       name: 'Design options for Quiet portfolio'
     });
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Finder' }));
     await waitFor(() =>
       expect(onOpenDesignLocation).toHaveBeenCalledWith('design-1', 'worktree-1')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Duplicate current' }));
     await waitFor(() =>
       expect(onDuplicateDesign).toHaveBeenCalledWith('design-1', 'revision-2')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
     const name = screen.getByRole('textbox', { name: 'Name' });
     fireEvent.change(name, { target: { value: 'Calm portfolio' } });
@@ -1314,7 +1362,7 @@ describe('mounted Design workspace', () => {
     await waitFor(() =>
       expect(onRenameDesign).toHaveBeenCalledWith('design-1', 'Calm portfolio')
     );
-    fireEvent.click(projectMenu);
+    fireEvent.keyDown(projectMenu, { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
     await waitFor(() => expect(onArchiveDesign).toHaveBeenCalledWith('design-1'));
   });
@@ -1416,6 +1464,39 @@ describe('mounted Design workspace', () => {
 
     view.unmount();
     boundsSpy.mockRestore();
+  });
+
+  it('hides the native canvas while a reference preview is open and restores it on Escape', async () => {
+    const boundsSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 1_600, height: 600, top: 0, left: 0,
+      right: 1_600, bottom: 600, toJSON: () => ({})
+    });
+    onTestFinished(() => boundsSpy.mockRestore());
+    const onShowCanvas = vi.fn();
+    const onHideCanvas = vi.fn();
+    const project = projectWithTwoReferences();
+    render(<DesignsWorkspace {...workspaceProps({
+      project, onShowCanvas, onHideCanvas,
+      draft: { designId: project.design.id, body: '', referenceIds: ['reference-first'],
+        recordRevision: 1, updatedAt: '2026-08-20T10:00:00.000Z' },
+      onReadAttachment: async (attachmentId) => ({ attachmentId, displayName: 'first-direction.txt',
+        kind: 'text', mediaType: 'text/plain', byteCount: 16,
+        bytes: new TextEncoder().encode('First direction.').buffer })
+    })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Split view' }));
+    expect(onShowCanvas).toHaveBeenCalled();
+    onHideCanvas.mockClear();
+    const chip = screen.getByRole('button', { name: 'first-direction.txt' });
+    chip.focus();
+    fireEvent.click(chip);
+    const preview = await screen.findByRole('dialog', { name: 'first-direction.txt' });
+    expect(await within(preview).findByText('First direction.')).toBeTruthy();
+    expect(onHideCanvas).toHaveBeenCalled();
+    onShowCanvas.mockClear();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(onShowCanvas).toHaveBeenCalled();
+    expect(document.activeElement).toBe(chip);
   });
 
   it('preserves the native preview while follow-ups queue, stop, or finish without a replacement', () => {

@@ -352,6 +352,7 @@ export async function recoverPendingDiscourseCreateForReplacement(input: {
 /** Stable UI retry identity; unchanged failed sends reuse one durable client message id. */
 export function discoursePendingSendFingerprint(input: {
   body: string;
+  attachmentRevision?: number;
   replyToMessageId?: string;
   supersedesMessageId?: string;
   sourceMessageIds: readonly string[];
@@ -361,6 +362,7 @@ export function discoursePendingSendFingerprint(input: {
 }): string {
   return JSON.stringify({
     body: input.body,
+    attachmentRevision: input.attachmentRevision ?? 0,
     replyToMessageId: input.replyToMessageId ?? null,
     supersedesMessageId: input.supersedesMessageId ?? null,
     sourceMessageIds: input.sourceMessageIds,

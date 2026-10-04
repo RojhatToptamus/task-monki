@@ -1,4 +1,4 @@
-import type { RunRecord, WorktreeRecord } from '../../shared/contracts';
+import type { RunRecord } from '../../shared/contracts';
 
 const TERMINAL_OR_RECOVERY = new Set<RunRecord['status']>([
   'COMPLETED',
@@ -25,22 +25,6 @@ export interface PostRunActionState {
   continuationKind: 'follow-up' | 'recovery' | 'none';
 }
 
-export type AgentComposerMode = 'STEER' | 'CONTINUE' | 'RETRY_SAME' | 'RETRY_FORK';
-
-export interface AgentComposerCopy {
-  title: string;
-  fieldLabel: string;
-  helperText?: string;
-  placeholder: string;
-  submitLabel: string;
-}
-
-export function describeForkAlternativeBoundary(
-  worktree: Pick<WorktreeRecord, 'baseRef' | 'baseSha'>
-): string {
-  return `The new task starts from the source task's recorded base ${worktree.baseRef ?? 'Detached HEAD'} @ ${worktree.baseSha}. Commits and local changes from the current attempt are not included. Checkout uses your local Git configuration; hooks or content filters may run local commands.`;
-}
-
 export function getPostRunActionState(
   run: Pick<RunRecord, 'status'>,
   requiresRecovery = false
@@ -62,52 +46,4 @@ export function getPostRunActionState(
     continuationLabel: canFollowUp ? 'Follow up' : 'Continue work',
     continuationKind: canFollowUp ? 'follow-up' : canContinue ? 'recovery' : 'none'
   };
-}
-
-export function getAgentComposerCopy(
-  mode: AgentComposerMode,
-  continuationKind: PostRunActionState['continuationKind']
-): AgentComposerCopy {
-  switch (mode) {
-    case 'STEER':
-      return {
-        title: 'Add instruction',
-        fieldLabel: 'Instruction for the active turn',
-        placeholder: 'Example: Focus on the failing tests before changing more files.',
-        submitLabel: 'Send instruction'
-      };
-    case 'CONTINUE':
-      if (continuationKind === 'follow-up') {
-        return {
-          title: 'Follow up',
-          fieldLabel: 'Follow-up instruction',
-          placeholder: 'Add context or constraints for the next turn.',
-          submitLabel: 'Start follow-up'
-        };
-      }
-      return {
-        title: 'Continue work',
-        fieldLabel: 'Optional continuation guidance',
-        helperText: 'Resumes unfinished work from the current worktree and provider context.',
-        placeholder: 'Add context or guidance for continuing the unfinished work.',
-        submitLabel: 'Continue work'
-      };
-    case 'RETRY_SAME':
-      return {
-        title: 'Retry implementation',
-        fieldLabel: 'Optional retry guidance',
-        helperText:
-          'Reattempts the original goal from the current verified state; it does not reset the worktree.',
-        placeholder: 'Add guidance for this attempt at the original implementation goal.',
-        submitLabel: 'Retry implementation'
-      };
-    case 'RETRY_FORK':
-      return {
-        title: 'Fork alternative',
-        fieldLabel: 'Alternative instruction',
-        helperText: 'Creates a new task and isolated worktree.',
-        placeholder: 'Describe the independent alternative approach.',
-        submitLabel: 'Start alternative'
-      };
-  }
 }

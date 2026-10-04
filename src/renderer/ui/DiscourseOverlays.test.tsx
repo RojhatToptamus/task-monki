@@ -23,10 +23,9 @@ describe('Discourse context preview', () => {
     } satisfies DiscourseContextPreview;
     const html = renderToStaticMarkup(<ContextPreview preview={preview} onClose={vi.fn()} />);
 
-    expect(html).toContain('Available until');
+    expect(html).toContain('Your message and recent conversation only.');
     expect(html).toContain('aria-modal="false"');
     expect(html).toContain('aria-label="Close context preview"');
     expect(html).not.toContain('private-internal-fingerprint');
-    expect(html).not.toContain('Provisional context manifest');
   });
 });

@@ -97,6 +97,31 @@ describe('OpenCodeAdapter', () => {
     }
   });
 
+  it('re-attests changed provider settings before a second turn in the same session', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    try {
+      const start = async (mode: 'IMPLEMENTATION' | 'FOLLOW_UP') => {
+        const run = await createRun(fixture, session);
+        const turn = await fixture.adapter.startTurn({
+          localRunId: run.id, session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+          mode, prompt: fixture.task.prompt, authoritativeGoal: fixture.task.prompt, settings: SETTINGS
+        });
+        return { run, turn };
+      };
+      const first = await start('IMPLEMENTATION');
+      fixture.harness.settleAbort = true;
+      await fixture.adapter.interruptTurn({ session: { localSessionId: session.id, providerSessionId: session.providerSessionId }, providerTurnId: first.turn.providerTurnId! });
+      await waitForCondition(async () => (await fixture.runtime.getRun(first.run.id))?.status === 'INTERRUPTED');
+      const providerSession = fixture.harness.sessions.get(session.providerSessionId!)!;
+      providerSession.model = { providerID: 'anthropic', modelID: 'claude-observed', variant: 'high' };
+      const second = await start('FOLLOW_UP');
+      expect(second.turn.providerTurnId).not.toBe(first.turn.providerTurnId);
+      expect(fixture.harness.promptBodies).toHaveLength(2);
+    } finally { await fixture.adapter.shutdown(); }
+  });
+
   it('runs Design in pure mode with one registered MCP bridge and bounded turn grants', async () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
@@ -3037,6 +3062,73 @@ describe('OpenCodeAdapter', () => {
     });
     expect((await fixture.runtime.getRun(run.id))?.status).toBe('RUNNING');
     await fixture.adapter.shutdown();
+  });
+
+  it('delivers only policy-permitted filesystem approvals for OpenCode path patterns', async () => {
+    const fixture = await createFixture();
+    const { adapter, harness, runtime } = fixture;
+    await adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    const turn = await adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+      mode: 'IMPLEMENTATION', prompt: fixture.task.prompt, authoritativeGoal: fixture.task.prompt, settings: SETTINGS
+    });
+    const root = fixture.worktree.worktreePath;
+    const outside = path.join(path.dirname(root), 'outside');
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    const interactions = new AgentInteractionService(runtime, new AppEventBus(), () => adapter);
+    const cases = [
+      { pattern: `${root}/*`, allowed: true },
+      { pattern: 'src/**', allowed: true },
+      { pattern: 'src/app.ts', allowed: true },
+      { pattern: `${outside}/*`, allowed: false },
+      { pattern: '../outside/*', allowed: false },
+      { pattern: '.git/*', allowed: false },
+      { pattern: 'linked/*', allowed: false },
+      { pattern: '../work*/*', allowed: false },
+      { pattern: 'src/?.ts', allowed: false },
+      { pattern: '../work*/*', allowed: false, permission: 'edit' },
+      { pattern: 'src/**', allowed: true, permission: 'edit' }
+    ];
+    for (const [index, example] of cases.entries()) {
+      const id = `per_path_${index}`;
+      await harness.emit({ type: 'permission.asked', properties: {
+        id, sessionID: session.providerSessionId, permission: example.permission ?? 'external_directory',
+        patterns: [example.pattern], tool: { messageID: turn.providerTurnId }
+      } });
+      const interaction = (await runtime.snapshot()).interactionRequests.find((item) => item.providerRequestId === id)!;
+      expect(interaction.allowedActions.includes('GRANT_TURN'), example.pattern).toBe(example.allowed);
+      expect(interaction.allowedActions).not.toContain('GRANT_SESSION');
+      if (index === 0) {
+        await harness.emit({ type: 'message.updated', properties: { info: {
+          id: 'msg_approval_progress', sessionID: session.providerSessionId,
+          role: 'assistant', parentID: turn.providerTurnId, time: { created: Date.now() }
+        } } });
+        await harness.emit({ type: 'message.part.updated', properties: { part: {
+          id: 'prt_approval_progress', sessionID: session.providerSessionId,
+          messageID: 'msg_approval_progress', type: 'text', text: 'I will write the file.',
+          time: { start: Date.now() - 10, end: Date.now() }
+        } } });
+        expect((await runtime.getRun(run.id))?.status).toBe('AWAITING_APPROVAL');
+      }
+      if (!example.allowed) {
+        await expect(interactions.respond({ taskId: run.taskId, runId: run.id, interactionRequestId: interaction.id,
+          decision: { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: {} }
+        })).rejects.toThrow('not allowed');
+      }
+      const request = interaction.request as import('../../../shared/agent').AgentPermissionApprovalRequest;
+      const resolved = await interactions.respond({ taskId: run.taskId, runId: run.id, interactionRequestId: interaction.id,
+        decision: example.allowed
+          ? { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: request.permissions }
+          : { interactionType: 'PERMISSION_APPROVAL', action: 'DECLINE' }
+      });
+      expect(resolved.status).toBe(example.allowed ? 'RESOLVED' : 'DECLINED');
+      expect(harness.permissionReplies.at(-1)).toEqual({ reply: example.allowed ? 'once' : 'reject' });
+    }
+    await adapter.shutdown();
   });
 
   it('owns one runtime per session and durably maps turns, interactions, output, and shutdown', async () => {

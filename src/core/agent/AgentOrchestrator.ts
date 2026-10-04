@@ -185,6 +185,7 @@ function taskExecutionContext(input: {
   };
 }
 export interface StartOrchestratedTurn {
+  runId?: string;
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
@@ -1699,7 +1700,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const taskAttachments = await this.store.getTurnAttachments({
       taskId: input.task.id,
       mode: input.mode,
-      generationKey: input.generationKey
+      generationKey: input.generationKey,
+      runId: input.runId
     });
     const taskRuntimeSnapshot = await this.taskRuntime.snapshot();
     let session: AgentSessionRecord | undefined;
@@ -1812,7 +1814,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (session.runtimeId !== runtimeId) {
       throw new Error('Selected agent session runtime changed unexpectedly.');
     }
-    const runId = randomUUID();
+    const runId = input.runId ?? randomUUID();
     const run = await this.taskRuntime.createTaskRun({
       id: runId,
       taskId: input.task.id,
@@ -1910,7 +1912,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       'REVIEW'
     );
     if (!reviewSupport.supported) throw new Error(reviewSupport.reason);
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const selectedIds = input.sourceRun?.attachmentSelection.map((file) => file.attachmentId) ?? input.task.initialAttachmentIds;
+    if (!selectedIds) throw new Error('Review attachment selection is missing.');
+    const taskAttachments = (await this.store.getTaskAttachments(input.task.id)).filter((file) => selectedIds.includes(file.id));
     const settings = await this.validateSettings(
       adapter,
       { ...input.settings, runtimeId: reviewRuntimeId },
@@ -1918,7 +1922,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     );
     await this.assertCapacity();
     const preflightAttachments = toAgentTurnAttachments(
-      await this.store.verifyTaskAttachments(input.task.id)
+      await this.store.verifyTaskAttachments(input.task.id, selectedIds)
     );
     const reviewSessionId = randomUUID();
     const reviewSessionOperationId =
@@ -2020,7 +2024,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
   }
 
-  async steerRun(runId: string, instruction: string): Promise<void> {
+  async steerRun(runId: string, instruction: string, clientMessageId: string = randomUUID()): Promise<void> {
     this.assertProviderStartupAvailable();
     const prompt = instruction.trim();
     if (!prompt) {
@@ -2056,7 +2060,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         },
         providerTurnId: run.providerTurnId,
         prompt,
-        clientMessageId: randomUUID()
+        clientMessageId
       });
     } catch (error) {
       if (error instanceof AgentMutationAmbiguousError) {

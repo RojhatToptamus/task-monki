@@ -1,10 +1,12 @@
 import { validateAgentProfile, type CustomAgentProfile } from '../../shared/agentProfiles';
+import { ATTACHMENT_MAX_COUNT, ATTACHMENT_MAX_TOTAL_BYTES } from '../../shared/attachments';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  TaskInstruction,
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
   AgentItemRecord,
@@ -113,6 +115,7 @@ import {
 } from './sqlite/TaskStateMapper';
 import {
   SqliteTaskAttachmentStore,
+  deleteUnownedDraftAttachments,
   type PreparedSqliteAttachmentAppend,
   type PreparedSqliteAttachmentDraft
 } from './sqlite/SqliteTaskAttachmentStore';
@@ -762,7 +765,12 @@ export class SqliteTaskStore {
     validateLoadedTaskState(this.state);
     await this.attachmentFiles.reconcile(
       this.state.attachments,
-      this.retainedAttachmentDraftIds
+      new Set([
+        ...this.retainedAttachmentDraftIds,
+        ...this.state.tasks.flatMap((task) =>
+          task.agentAttachmentDraftId ? [task.agentAttachmentDraftId] : []
+        )
+      ])
     );
     await this.stateMapper.retryPendingArtifactGarbageCollection();
     await this.reconcileArtifacts();
@@ -1079,6 +1087,8 @@ export class SqliteTaskStore {
       repository: state.repositories.find(
         (repository) => repository.id === task.repositoryId
       ),
+      taskInstructions: taskRecords(state.taskInstructions),
+      agentAttachmentDraft: task.agentAttachmentDraftId ? await this.attachmentFiles.listDraft(task.agentAttachmentDraftId) : undefined,
       iterations: taskRecords(state.iterations),
       worktrees: taskRecords(state.worktrees),
       gitSnapshots: taskRecords(state.gitSnapshots),
@@ -1330,11 +1340,18 @@ export class SqliteTaskStore {
     taskId: string;
     mode: AgentRunMode;
     generationKey?: string;
+    runId?: string;
   }): Promise<TaskAttachmentRecord[]> {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === input.taskId);
     if (!task) throw new Error('Task not found.');
-    if (input.mode !== 'DESIGN') return this.getTaskAttachments(input.taskId);
+    if (input.mode !== 'DESIGN') {
+      const records = await this.getTaskAttachments(input.taskId);
+      const message = input.runId ? this.state.taskInstructions.find((item) => item.runId === input.runId && item.taskId === task.id) : undefined;
+      if (!task.initialAttachmentIds) throw new Error('Task attachment selection is missing.');
+      const ids = new Set([...task.initialAttachmentIds, ...(message?.attachmentIds ?? [])]);
+      return records.filter((file) => ids.has(file.id));
+    }
     if (task.kind !== 'DESIGN' || !input.generationKey) {
       throw new Error('DESIGN attachments require a DesignTurn generation key.');
     }
@@ -1342,9 +1359,10 @@ export class SqliteTaskStore {
     return clone(this.attachmentRecordsForDesignTurn(turn));
   }
 
-  verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
+  verifyTaskAttachments(taskId: string, attachmentIds?: readonly string[]): Promise<VerifiedTaskAttachment[]> {
     return this.withOwnedIo(async () => {
-      const records = await this.getTaskAttachments(taskId);
+      const records = (await this.getTaskAttachments(taskId)).filter((file) => !attachmentIds || attachmentIds.includes(file.id));
+      if (attachmentIds && records.length !== new Set(attachmentIds).size) throw new Error('A selected task attachment is missing.');
       return records.length === 0 ? [] : this.attachmentFiles.verifyTask(taskId, records);
     });
   }
@@ -1365,41 +1383,9 @@ export class SqliteTaskStore {
           ? this.attachmentRecordsForDesignTurn(
               this.requireDesignTurn(taskId, run.generationKey ?? '')
             )
-          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
-      const attachments =
-        records.length === 0
-          ? []
-          : run.mode === 'DESIGN'
-            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
-            : await this.attachmentFiles.verifyTask(taskId, records);
-      assertAttachmentsOutsideWorktree(attachments, worktreePath);
-      return attachments;
-    });
-  }
-
-  /** Revalidates task-owned files immediately before provider submission. */
-  verifyRunAttachments(
-    runId: string,
-    taskId: string
-  ): Promise<VerifiedTaskAttachment[]> {
-    return this.withOwnedIo(async () => {
-      const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-      const run = this.state.runs.find(
-        (candidate) => candidate.id === runId && candidate.taskId === taskId
-      );
-      if (!run) throw new Error('Run attachments do not belong to the selected task and run.');
-      const records =
-        run.mode === 'DESIGN'
-          ? this.attachmentRecordsForDesignTurn(
-              this.requireDesignTurn(taskId, run.generationKey ?? '')
-            )
-          : this.state.attachments.filter((attachment) => attachment.taskId === taskId);
-      const attachments =
-        records.length === 0
-          ? []
-          : run.mode === 'DESIGN'
-            ? await this.attachmentFiles.verifyTaskSelection(taskId, records)
-            : await this.attachmentFiles.verifyTask(taskId, records);
+          : this.state.attachments.filter((attachment) => attachment.taskId === taskId && run.attachmentSelection.some((selected) => selected.attachmentId === attachment.id));
+      if (records.length !== run.attachmentSelection.length) throw new Error('A selected run attachment is missing.');
+      const attachments = await this.attachmentFiles.verifyTaskSelection(taskId, records);
       assertAttachmentsOutsideWorktree(attachments, worktreePath);
       return attachments;
     });
@@ -2906,6 +2892,106 @@ export class SqliteTaskStore {
     });
   }
 
+  async saveTaskPrompt(input: import('../../shared/contracts').SaveTaskPromptRequest): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const task = this.state.tasks.find((record) => record.id === input.taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      await this.refreshAgentRuntimeProjectionInternal();
+      if (this.state.runs.some((run) => run.taskId === task.id)) {
+        throw new Error('This task has already run. Send a follow-up instead.');
+      }
+      if (typeof input.prompt !== 'string' || input.prompt.length > 65_536 || (!input.draftOnly && !input.prompt.trim())) {
+        throw new Error('Enter a prompt of at most 65,536 characters.');
+      }
+      await this.withMessageAttachments(task.id, input.draftOnly ? undefined : input.attachmentDraftId, (addedIds) => {
+        const selectedIds = input.attachmentIds ?? task.initialAttachmentIds;
+        if (!selectedIds || selectedIds.some((id) => !this.state.attachments.some((file) => file.taskId === task.id && file.id === id))) {
+          throw new Error('An initial prompt attachment does not belong to this task.');
+        }
+        this.assertMessageAttachmentLimits([...selectedIds, ...addedIds]);
+        this.state = { ...this.state, tasks: this.state.tasks.map((record) => record.id !== task.id ? record : {
+          ...record,
+          ...(input.draftOnly ? { promptDraft: input.prompt } : {
+            prompt: input.prompt.trim(), promptDraft: undefined, initialAttachmentIds: [...new Set([...selectedIds, ...addedIds])]
+          }),
+          updatedAt: new Date().toISOString()
+        }) };
+      });
+    });
+  }
+
+  async saveTaskAgentDraft(taskId: string, text?: string, attachmentDraftId?: string | null): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (text !== undefined && (typeof text !== 'string' || text.length > 65_536)) throw new Error('Instruction is too long.');
+      if (attachmentDraftId) await this.attachmentFiles.listDraft(attachmentDraftId);
+      const task = this.state.tasks.find((record) => record.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      this.state = { ...this.state, tasks: this.state.tasks.map((record) =>
+        record.id === taskId ? { ...record, ...(text !== undefined ? { agentDraft: text } : {}), ...(attachmentDraftId !== undefined ? { agentAttachmentDraftId: attachmentDraftId ?? undefined } : {}) } : record) };
+      await this.persistSnapshot();
+    });
+  }
+
+  async updateTaskInstructions<T>(taskId: string, update: (records: TaskInstruction[], addedIds: string[]) => T,
+    clearDraft?: string, attachmentDraftId?: string): Promise<T> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const task = this.state.tasks.find((task) => task.id === taskId && task.kind === 'NORMAL');
+      if (!task) throw new Error('Task not found.');
+      return this.withMessageAttachments(taskId, attachmentDraftId, (addedIds) => {
+        const records = clone(this.state.taskInstructions.filter((record) => record.taskId === taskId));
+        const result = update(records, addedIds);
+        const availableIds = new Set(this.state.attachments.filter((file) => file.taskId === taskId).map((file) => file.id));
+        for (const record of records) {
+          if (record.attachmentIds?.some((id) => !availableIds.has(id))) throw new Error('A message attachment does not belong to this task.');
+          this.assertMessageAttachmentLimits(record.attachmentIds ?? []);
+        }
+        this.state = { ...this.state,
+          taskInstructions: [...this.state.taskInstructions.filter((record) => record.taskId !== taskId), ...records],
+          tasks: this.state.tasks.map((record) => record.id !== taskId ? record : {
+            ...record,
+            ...(clearDraft !== undefined && record.agentDraft?.trim() === clearDraft ? { agentDraft: '' } : {}),
+            ...(attachmentDraftId && record.agentAttachmentDraftId === attachmentDraftId ? { agentAttachmentDraftId: undefined } : {})
+          })
+        };
+        return clone(result);
+      });
+    });
+  }
+
+  private async withMessageAttachments<T>(taskId: string, draftId: string | undefined, update: (addedIds: string[]) => T): Promise<T> {
+    const previousState = this.state;
+    let prepared: PreparedSqliteAttachmentAppend | undefined;
+    try {
+      if (draftId) {
+        prepared = await this.attachmentFiles.prepareDraftForExistingTask(draftId, taskId, this.state.attachments.filter((file) => file.taskId === taskId), 'MESSAGE');
+        this.state = { ...this.state, attachments: [...this.state.attachments, ...prepared.records], tasks: this.state.tasks.map((task) =>
+          task.id === taskId && task.agentAttachmentDraftId === draftId ? { ...task, agentAttachmentDraftId: undefined } : task) };
+      }
+      const result = update(prepared?.records.map((file) => file.id) ?? []);
+      await this.persistSnapshot();
+      if (prepared) await this.attachmentFiles.finalizeDraftForExistingTask(prepared).catch(() => undefined);
+      return result;
+    } catch (error) {
+      this.state = previousState;
+      if (prepared) {
+        try { await this.attachmentFiles.rollbackDraftForExistingTask(prepared); }
+        catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Message adoption failed and prepared files could not be removed.'); }
+      }
+      throw error;
+    }
+  }
+
+  private assertMessageAttachmentLimits(ids: string[]): void {
+    const selected = new Set(ids);
+    const byteCount = this.state.attachments.reduce((total, file) => total + (selected.has(file.id) ? file.byteCount : 0), 0);
+    if (selected.size !== ids.length || ids.length > ATTACHMENT_MAX_COUNT || byteCount > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new Error('Select at most 10 distinct files, totaling no more than 20 MB per message.');
+    }
+  }
+
   async renameDesign(designId: string, titleInput: string): Promise<Task> {
     return this.serializeMutation(async () => {
       await this.init();
@@ -3022,7 +3108,8 @@ export class SqliteTaskStore {
           prepared = await this.attachmentFiles.prepareDraftForExistingTask(
             input.attachmentDraftId,
             design.id,
-            existingRecords
+            existingRecords,
+            'TASK'
           );
         }
         const addedReferences = (prepared?.records ?? []).map<DesignReference>(
@@ -3136,7 +3223,8 @@ export class SqliteTaskStore {
         prepared = await this.attachmentFiles.prepareDraftForExistingTask(
           input.attachmentDraftId,
           design.id,
-          existingRecords
+          existingRecords,
+          'TASK'
         );
         const now = new Date().toISOString();
         const references = prepared.records.map<DesignReference>((attachment) => ({
@@ -3739,6 +3827,7 @@ export class SqliteTaskStore {
       tasks: this.state.tasks
         .filter((candidate) => candidate.id !== taskId)
         .map((candidate) => removeTaskLink(candidate, taskId, now)),
+      taskInstructions: this.state.taskInstructions.filter((record) => record.taskId !== taskId),
       designTurns: this.state.designTurns.filter((turn) => turn.designId !== taskId),
       designReferences: this.state.designReferences.filter(
         (reference) => reference.designId !== taskId
@@ -3844,7 +3933,16 @@ export class SqliteTaskStore {
           (attachment) => attachment.taskId !== taskId
         )
       };
-      await this.persistSnapshot();
+      await this.database.write(async (transaction) => {
+        await this.persistSnapshot();
+        const attachmentDraftId = task.agentAttachmentDraftId;
+        if (attachmentDraftId) {
+          const storageKeys = deleteUnownedDraftAttachments(transaction, [attachmentDraftId]);
+          transaction.afterCommitDeferred(async () => {
+            await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
+          });
+        }
+      });
     } catch (error) {
       this.state = previousState;
       throw error;
@@ -3947,7 +4045,7 @@ export class SqliteTaskStore {
         attachmentRecords = await this.attachmentFiles.copyTaskAttachments(
           fork.sourceTaskId,
           task.id,
-          this.state.attachments.filter((attachment) => attachment.taskId === fork.sourceTaskId)
+          this.state.attachments.filter((attachment) => attachment.taskId === fork.sourceTaskId && sourceRun!.attachmentSelection.some((selected) => selected.attachmentId === attachment.id))
         );
       } else if (input.attachmentDraftId) {
         preparedDraft = await this.attachmentFiles.prepareDraftForTask(
@@ -3957,6 +4055,7 @@ export class SqliteTaskStore {
         attachmentRecords = preparedDraft.records;
       }
 
+      task.initialAttachmentIds = attachmentRecords.map((file) => file.id);
       this.state = {
         ...this.state,
         tasks: [
@@ -5749,6 +5848,7 @@ function withoutTaskRuntimeProjection(state: StoreState): PersistedTaskState {
     repositories: state.repositories,
     boards: state.boards,
     tasks: state.tasks,
+    taskInstructions: state.taskInstructions,
     designTurns: state.designTurns,
     designReferences: state.designReferences,
     designRevisions: state.designRevisions,
@@ -7257,6 +7357,11 @@ function validatePersistedAttachments(state: StoreState): void {
   for (const [taskId, attachments] of byTask) {
     try {
       validateTaskAttachmentRecords(attachments, taskId);
+      if (state.tasks.find((task) => task.id === taskId)?.kind === 'DESIGN' &&
+          (attachments.length > ATTACHMENT_MAX_COUNT ||
+           attachments.reduce((total, file) => total + file.byteCount, 0) > ATTACHMENT_MAX_TOTAL_BYTES)) {
+        throw new Error('Design reference collection exceeds its limits.');
+      }
     } catch {
       throw new Error(
         `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: attachments contains an invalid record.`
@@ -7335,12 +7440,13 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
     .filter((turn) => turn.designId === task.id)
     .sort((left, right) => left.order - right.order);
   const latestTurn = turns.at(-1);
+  const currentTurn = turns.find((turn) => turn.outcome === undefined) ?? latestTurn;
   const latestRevision = state.designRevisions
     .filter((revision) => revision.designId === task.id)
     .sort((left, right) => left.ordinal - right.ordinal)
     .at(-1);
-  const run = latestTurn?.runId
-    ? state.runs.find((candidate) => candidate.id === latestTurn.runId)
+  const run = currentTurn?.runId
+    ? state.runs.find((candidate) => candidate.id === currentTurn.runId)
     : undefined;
   const needsInput = state.interactionRequests.some(
     (interaction) =>
@@ -7377,12 +7483,12 @@ function projectDesignListItem(state: StoreState, task: Task): DesignListItem {
       ? 'NEEDS_ATTENTION'
       : needsInput
         ? 'NEEDS_INPUT'
-        : latestTurn?.outcome === 'FAILED' ||
-        latestTurn?.outcome === 'NEEDS_ATTENTION' ||
-        (latestTurn?.outcome === 'CANCELED' && !latestRevision) ||
+        : currentTurn?.outcome === 'FAILED' ||
+        currentTurn?.outcome === 'NEEDS_ATTENTION' ||
+        (currentTurn?.outcome === 'CANCELED' && !latestRevision) ||
         previewNeedsRestart
       ? 'NEEDS_ATTENTION'
-      : sourceAction || (latestTurn && latestTurn.outcome === undefined) || activeRun
+      : sourceAction || (currentTurn && currentTurn.outcome === undefined) || activeRun
         ? latestRevision
           ? 'UPDATING'
           : 'STARTING'

@@ -64,7 +64,7 @@ export function DiscourseResponseGroup({ aggregate, wave, streamDrafts, models, 
   return <li className={`tm-discourse-message tm-discourse-message--pending ${job?.assignment.assignmentRole === 'REVIEWER' ? 'tm-discourse-message--peer' : ''}`} aria-label="Agent response status">
     <article>
       {status ? <>
-        <MessageHeader author={author} model={settled ? job?.assignment.model : undefined}
+        <MessageHeader author={author}
           time={settled ? job?.finishedAt : undefined} status={!settled ? status : undefined} tone={tone} />
         {output ? <div className="tm-discourse-message__content"><MessageMarkdown text={output} /></div> : null}
         {settled || reconfirm || recovery ? <div className="tm-discourse-message-notice" role="status">

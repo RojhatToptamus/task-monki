@@ -4,6 +4,7 @@ import {
   formatAgentNetworkAccess,
   formatAgentPermissionMode,
   inferAgentPermissionMode,
+  matchingExecutionPolicyPreset,
   settingsForExecutionPolicyPreset
 } from './agentPermissions';
 import type { AgentExecutionPolicyPreset } from '../../shared/contracts';
@@ -147,6 +148,36 @@ describe('agent permission settings', () => {
         approvalsReviewer: 'user'
       })
     ).toBe('Auto-accept edits');
+  });
+
+  it('selects the runtime preset that owns the current sandbox and approval policy', () => {
+    const restricted = preset({
+      id: 'restricted',
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      networkAccess: 'DISABLED'
+    });
+    const ask = preset({
+      id: 'ask',
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      networkAccess: 'OPTIONAL'
+    });
+    expect(matchingExecutionPolicyPreset([restricted, ask], {
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    })?.id).toBe('ask');
+    expect(matchingExecutionPolicyPreset([restricted, ask], {
+      sandbox: 'WORKSPACE_WRITE', approvalPolicy: 'never', approvalsReviewer: 'user', networkAccess: true
+    })).toBeUndefined();
+    expect(matchingExecutionPolicyPreset([restricted, ask], {
+      sandbox: 'READ_ONLY',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    })).toBeUndefined();
   });
 });
 

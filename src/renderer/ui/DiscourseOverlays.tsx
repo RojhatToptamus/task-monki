@@ -69,70 +69,48 @@ export function ContextPreview({
       aria-modal="false"
       aria-labelledby="discourse-preview-title"
     >
-      <div className="tm-discourse-preview">
-        <header>
-          <div>
-            <h2 id="discourse-preview-title">What agents will see</h2>
-            <p>Available until {formatMessageTime(preview.expiresAt)}</p>
-          </div>
-          <button
-            type="button"
-            className="tm-iconbtn"
-            aria-label="Close context preview"
-            title="Close context preview"
-            onClick={() => {
-              returnFocusOnCloseRef.current = true;
-              onClose();
-            }}
-          >
-            <DiscourseCloseIcon />
-          </button>
-        </header>
-        <section>
-          <h3>Selected context</h3>
-          {preview.references.length === 0 ? (
-            <p>No task or repository context. Only the message and bounded conversation history would be included.</p>
-          ) : (
-            <ul>
-              {preview.references.map((reference) => (
-                <li key={`${reference.entityKind}:${reference.entityId}`}>
-                  <span className={`tm-discourse-context-kind tm-discourse-context-kind--${reference.entityKind.toLowerCase()}`}>
-                    {reference.entityKind === 'TASK'
-                      ? <DiscourseTaskIcon />
-                      : <DiscourseRepositoryIcon />}
-                  </span>
-                  <span>
-                    <strong>{reference.labelSnapshot}</strong>
-                    <small>
-                      {reference.scope === 'PINNED' ? 'Pinned' : 'This message'} ·{' '}
-                      {accessModeLabel(reference.accessMode)}
-                      {reference.entityKind === 'TASK' ? ' · Task description and recorded status' : ''}
-                      {reference.readScope === 'TASK_WORKTREE' ? ' · Task worktree' : reference.readScope === 'REPOSITORY' ? ' · Repository checkout' : ''}
-                    </small>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-        <section>
-          <h3>Requested access</h3>
-          <dl className="tm-discourse-preview__policy">
-            <div><dt>Repository roots</dt><dd>{preview.filesystemRootCount} read-only</dd></div>
-            <div><dt>Writes and network</dt><dd>Not permitted</dd></div>
-            <div><dt>Task Monki tools & apps</dt><dd>Not attached</dd></div>
-          </dl>
-          <p>Repository files are live, not copied into the prompt. Runtime controls enforce the requested policy where supported. Recorded status and agent claims are not fresh test or review results.</p>
-        </section>
-        {preview.exclusions.length > 0 ? (
-          <section className="tm-discourse-preview__exclusions">
-            <h3>Exclusions</h3>
-            <ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
-          </section>
-        ) : null}
-      </div>
+      <header className="tm-discourse-preview__head">
+        <h2 id="discourse-preview-title">Message context</h2>
+        <button type="button" className="tm-iconbtn" aria-label="Close context preview" title="Close context preview"
+          onClick={() => { returnFocusOnCloseRef.current = true; onClose(); }}>
+          <DiscourseCloseIcon />
+        </button>
+      </header>
+      <p className="tm-discourse-preview__summary">{preview.references.length
+        ? 'Your message, recent conversation, and these sources:'
+        : 'Your message and recent conversation only.'}</p>
+      {preview.references.length > 0 ? <ul className="tm-discourse-context-list" aria-label="Included sources">
+        {preview.references.map((reference) => <ContextReference key={`${reference.entityKind}:${reference.entityId}`}
+          kind={reference.entityKind} label={reference.labelSnapshot}
+          description={[
+            reference.scope === 'PINNED' ? 'Pinned' : 'This message',
+            reference.entityKind === 'TASK' ? 'Task description and recorded status' : undefined,
+            reference.accessMode === 'FILESYSTEM_READ'
+              ? reference.readScope === 'TASK_WORKTREE' ? 'Read-only worktree' : 'Read-only repository'
+              : accessModeLabel(reference.accessMode)
+          ].filter(Boolean).join(' · ')} />)}
+      </ul> : null}
+      {preview.exclusions.length > 0 ? <details className="tm-discourse-preview__exclusions">
+        <summary>Context limits</summary>
+        <ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
+      </details> : null}
     </aside>
   );
+}
+
+export function ContextReference({ kind, label, description, children }: {
+  kind: 'TASK' | 'REPOSITORY';
+  label: string;
+  description: string;
+  children?: ReactNode;
+}) {
+  return <li>
+    <span className={`tm-discourse-context-kind tm-discourse-context-kind--${kind.toLowerCase()}`} aria-hidden="true">
+      {kind === 'TASK' ? <DiscourseTaskIcon /> : <DiscourseRepositoryIcon />}
+    </span>
+    <span><strong title={label}>{label}</strong><small>{description}</small></span>
+    {children}
+  </li>;
 }
 
 export function InspectorSection({
@@ -188,13 +166,4 @@ function accessModeLabel(value: string): string {
     : value === 'METADATA_ONLY'
       ? 'Metadata only'
       : 'Unavailable';
-}
-
-function formatMessageTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(new Date(value));
 }

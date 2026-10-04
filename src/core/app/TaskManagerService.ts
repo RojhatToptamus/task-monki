@@ -5,6 +5,13 @@ import {
   type SaveAgentProfileRequest
 } from '../../shared/agentProfiles';
 import type {
+  TaskInstruction,
+  InstructionAttachments,
+  QueueTaskInstructionRequest,
+  EditTaskInstructionRequest,
+  SendTaskInstructionRequest,
+  SaveTaskAgentDraftRequest,
+  SaveTaskPromptRequest,
   Board,
   BoardSnapshot,
   AcceptPreviewRecipeDraftRequest,
@@ -121,6 +128,8 @@ import type {
   StageTaskAttachmentBatchRequest
 } from '../../shared/contracts';
 import {
+  TASK_INSTRUCTION_MAX_LENGTH,
+  TASK_INSTRUCTION_QUEUE_LIMIT,
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_TOTAL_BYTES,
   DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
@@ -185,7 +194,7 @@ import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
+import { AgentMutationAmbiguousError, type AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
 import type {
   AgentRuntimeStore,
@@ -586,17 +595,19 @@ export class TaskManagerService {
     if (this.designDrafts) {
       await this.designDrafts.init();
       designDrafts = await this.designDrafts.list();
-      this.store.retainAttachmentDrafts(
-        designDrafts.flatMap((draft) =>
-          draft.attachmentDraftId ? [draft.attachmentDraftId] : []
-        )
-      );
     }
+    const discourseDrafts = await this.discourseHost?.service.listDrafts() ?? [];
+    const attachmentDraftIds = [...designDrafts, ...discourseDrafts].flatMap((draft) =>
+      draft.attachmentDraftId ? [draft.attachmentDraftId] : []
+    );
+    if (attachmentDraftIds.length > 0) this.store.retainAttachmentDrafts(attachmentDraftIds);
     await this.agentRuntimeStore.init();
     this.assertInitializing();
     await this.designToolBridge?.recover();
     this.assertInitializing();
     await this.store.init();
+    this.assertInitializing();
+    await this.recoverTaskInstructions();
     this.assertInitializing();
     await this.reconcileOrphanedTaskRuntime();
     this.assertInitializing();
@@ -1517,7 +1528,15 @@ export class TaskManagerService {
   }
 
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent> {
-    return this.store.readTaskAttachment(input.attachmentId);
+    if (input.conversationId) {
+      if (input.draftId) throw new Error('Invalid conversation attachment request.');
+      return this.requireDiscourseService().readAttachment(input.conversationId, input.attachmentId);
+    }
+    return input.draftId ? this.store.readDraftAttachment(input.draftId, input.attachmentId) : this.store.readTaskAttachment(input.attachmentId);
+  }
+
+  getAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
+    return this.store.listAttachmentDraft(draftId);
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
@@ -2676,10 +2695,278 @@ export class TaskManagerService {
     });
   }
 
+  async saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void> {
+    return this.withTaskAction(input.taskId, 'Save task prompt', async () => {
+      await this.store.saveTaskPrompt(input);
+      this.emitInstructionUpdate(input.taskId);
+    });
+  }
+
+  async saveTaskAgentDraft(input: SaveTaskAgentDraftRequest): Promise<void> {
+    return this.withControlAction(() => this.store.saveTaskAgentDraft(input.taskId, input.text, input.attachmentDraftId));
+  }
+
+  async queueTaskInstruction(input: QueueTaskInstructionRequest): Promise<TaskInstruction> {
+    return this.withTaskAction(input.taskId, 'Queue instruction', async () => {
+      const existing = await this.existingInstruction(input.id, input.taskId, input.instruction, 'QUEUE', input);
+      if (existing) return existing;
+      const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+      if (run.status !== 'RUNNING') {
+        throw new Error('The run changed. Review the current action before sending.');
+      }
+      const instruction = await this.addInstruction(input.id, task, run, input.instruction, 'QUEUE', 'QUEUED', input);
+      this.emitInstructionUpdate(task.id);
+      return instruction;
+    });
+  }
+
+  async editTaskInstruction(input: EditTaskInstructionRequest): Promise<void> {
+    return this.withTaskAction(input.taskId, 'Edit queued instruction', async () => {
+      const text = input.instruction === undefined ? undefined : this.instructionText(input.instruction);
+      const detail = await this.store.getTaskDetail(input.taskId);
+      const instruction = detail.taskInstructions.find((record) => record.id === input.id);
+      if (!instruction || !await this.isPendingInstruction(instruction)) {
+        throw new Error('This instruction has already been claimed or removed.');
+      }
+      if (text !== undefined) {
+        await this.validateInstructionAttachments(detail.task,
+          detail.runs.find((run) => run.id === instruction.sourceRunId), {
+            attachmentDraftId: input.attachmentDraftId,
+            attachmentIds: input.attachmentIds ?? instruction.attachmentIds
+          });
+      }
+      await this.store.updateTaskInstructions(input.taskId, (records, addedIds) => {
+        const index = records.findIndex((record) => record.id === input.id);
+        const instruction = records[index];
+        if (!instruction || !['QUEUED', 'HELD', 'FAILED'].includes(instruction.status)) {
+          throw new Error('This instruction has already been claimed or removed.');
+        }
+        if (text === undefined) records.splice(index, 1);
+        else records[index] = { ...instruction, text, attachmentIds: [...(input.attachmentIds ?? instruction.attachmentIds ?? []), ...addedIds], attachmentDraftId: input.attachmentDraftId ?? instruction.attachmentDraftId, updatedAt: new Date().toISOString() };
+      }, undefined, input.attachmentDraftId);
+      this.emitInstructionUpdate(input.taskId);
+    });
+  }
+
+  async sendTaskInstruction(input: SendTaskInstructionRequest): Promise<RunRecord> {
+    return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(async () => {
+      const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
+      if (!record) throw new Error('Instruction not found.');
+      if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
+      const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+      assertContinuable(run);
+      if (record.iterationId !== task.currentIterationId || record.worktreeId !== task.currentWorktreeId) {
+        throw new Error('This instruction belongs to an earlier worktree. Remove it and write a new instruction.');
+      }
+      await this.holdTaskQueue(task.id, 'Send each remaining instruction when you are ready.');
+      const claimed = await this.claimInstruction(record, run, false);
+      return this.deliverInstruction(claimed, () => claimed.mode === 'RETRY'
+        ? this.retryRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text, strategy: 'SAME_SESSION' }, claimed.runId)
+        : this.continueRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text }, claimed.runId));
+    }));
+  }
+
+  private async isPendingInstruction(record: TaskInstruction): Promise<boolean> {
+    return ['QUEUED', 'HELD'].includes(record.status) ||
+      (record.status === 'FAILED' && record.mode !== 'STEER' && record.runId !== undefined && !await this.store.getRun(record.runId));
+  }
+
+  private async validateInstructionAttachments(task: Task, run: RunRecord | undefined, files: InstructionAttachments,
+    settings?: AgentExecutionSettings): Promise<void> {
+    const records = await this.store.getTaskAttachments(task.id);
+    const selectedIds = new Set([...(task.initialAttachmentIds ?? []), ...(files.attachmentIds ?? [])]);
+    const selected = records.filter((file) => selectedIds.has(file.id));
+    if (selected.length !== selectedIds.size) throw new Error('A selected attachment does not belong to this task.');
+    const draft = files.attachmentDraftId ? await this.store.listAttachmentDraft(files.attachmentDraftId) : undefined;
+    const attachments = [...selected, ...(draft?.attachments ?? [])];
+    if (attachments.length > ATTACHMENT_MAX_COUNT || attachments.reduce((sum, file) => sum + file.byteCount, 0) > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new Error('The message and initial prompt can include at most 10 files, totaling no more than 20 MB.');
+    }
+    if (attachments.length === 0) return;
+    await prepareTaskCreationSettings(this.runtimeRegistry.require(task.runtimeId),
+      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments);
+  }
+
+  private instructionText(text: string): string {
+    if (typeof text !== 'string' || !text.trim() || text.length > TASK_INSTRUCTION_MAX_LENGTH) {
+      throw new Error(`Write an instruction of at most ${TASK_INSTRUCTION_MAX_LENGTH.toLocaleString()} characters.`);
+    }
+    return text.trim();
+  }
+
+  private async requireInstructionTarget(taskId: string, runId: string) {
+    const task = await this.requireNormalTask(taskId, 'Agent instruction');
+    const run = await this.requireRunForTask(runId, taskId);
+    if (!isImplementationRunMode(run.mode) || task.currentRunId !== run.id ||
+        task.currentIterationId !== run.iterationId || task.currentWorktreeId !== run.worktreeId ||
+        ['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)) {
+      throw new Error('The task changed. Open its current implementation before sending.');
+    }
+    return { task, run };
+  }
+
+  private async existingInstruction(id: string, taskId: string, text: string, mode: TaskInstruction['mode'], files?: import('../../shared/contracts').InstructionAttachments) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(id)) {
+      throw new Error('A valid instruction ID is required.');
+    }
+    const record = (await this.store.getTaskDetail(taskId)).taskInstructions.find((item) => item.id === id);
+    if (record && (record.text !== this.instructionText(text) || record.mode !== mode || record.attachmentDraftId !== files?.attachmentDraftId)) {
+      throw new Error('This instruction ID has already been used for different content.');
+    }
+    return record;
+  }
+
+  private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
+    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings): Promise<TaskInstruction> {
+    const trimmed = this.instructionText(text);
+    if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
+    return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
+      if (records.some((item) => item.id === id)) throw new Error('Instruction already exists.');
+      if (status === 'QUEUED' && records.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).length >= TASK_INSTRUCTION_QUEUE_LIMIT) {
+        throw new Error(`Keep at most ${TASK_INSTRUCTION_QUEUE_LIMIT} pending instructions.`);
+      }
+      if (records.length >= 1000) throw new Error('This task has reached its instruction history limit. Start a new task.');
+      const now = new Date().toISOString();
+      const record: TaskInstruction = {
+        id, taskId: task.id, iterationId: run.iterationId, worktreeId: run.worktreeId,
+        sourceRunId: run.id, sessionId: run.sessionId,
+        order: Math.max(0, ...records.map((item) => item.order)) + 1,
+        attachmentDraftId: files?.attachmentDraftId, attachmentIds: [...(files?.attachmentIds ?? []), ...addedIds],
+        text: trimmed, mode, status, createdAt: now, updatedAt: now,
+        ...(status === 'SENDING' ? { runId: mode === 'STEER' ? run.id : randomUUID() } : {})
+      };
+      records.push(record);
+      return record;
+    }, status === 'QUEUED' ? trimmed : undefined, files?.attachmentDraftId);
+  }
+
+  private async claimInstruction(record: TaskInstruction, source: RunRecord, automatic: boolean): Promise<TaskInstruction> {
+    return this.store.updateTaskInstructions(record.taskId, (records) => {
+      const pending = records.find((item) => item.id === record.id);
+      if (!pending || !(automatic ? pending.status === 'QUEUED' : ['QUEUED', 'HELD', 'FAILED'].includes(pending.status))) {
+        throw new Error('Instruction is no longer waiting to send.');
+      }
+      const runId = pending.status === 'FAILED' ? pending.runId! : randomUUID();
+      Object.assign(pending, { status: 'SENDING', sourceRunId: source.id, runId,
+        detail: undefined, updatedAt: new Date().toISOString() });
+      // Advance only the same FIFO chain. Other queues stay held under their original owner.
+      if (automatic) for (const next of records) {
+        if (next.status === 'QUEUED' && next.sourceRunId === source.id && next.sessionId === source.sessionId) {
+          next.sourceRunId = runId;
+          next.updatedAt = pending.updatedAt;
+        }
+      }
+      return pending;
+    });
+  }
+
+  private async instructionRun(record: TaskInstruction): Promise<RunRecord> {
+    const run = record.runId ? await this.store.getRun(record.runId) : undefined;
+    if (!run) throw new Error(record.detail ?? 'This instruction was not admitted. Write a new instruction to try again.');
+    return run;
+  }
+
+  private async deliverInstruction(record: TaskInstruction, deliver: () => Promise<RunRecord>): Promise<RunRecord> {
+    try {
+      const run = await deliver();
+      await this.setInstructionReceipt(record, 'SUBMITTED', undefined, run.id);
+      if (run.id !== record.runId || run.sessionId !== record.sessionId) {
+        await this.holdTaskQueue(record.taskId, 'The session changed. Review the remaining instructions.');
+      }
+      return run;
+    } catch (error) {
+      const admitted = record.runId ? await this.store.getRun(record.runId) : undefined;
+      await this.setInstructionReceipt(record, admitted ? 'SUBMITTED' : 'FAILED', (error instanceof Error ? error.message : String(error)), record.runId, false);
+      await this.holdTaskQueue(record.taskId, 'The instruction could not start. Review the remaining instructions.');
+      throw error;
+    }
+  }
+
+  private async setInstructionReceipt(record: TaskInstruction, status: TaskInstruction['status'], detail?: string, runId = record.runId, clearDraft = true) {
+    await this.store.updateTaskInstructions(record.taskId, (records) => {
+      const current = records.find((item) => item.id === record.id);
+      if (!current) throw new Error('Instruction receipt is missing.');
+      Object.assign(current, { status, detail, runId, updatedAt: new Date().toISOString() });
+    }, clearDraft && status === 'SUBMITTED' && record.mode !== 'QUEUE' ? record.text : undefined);
+    this.emitInstructionUpdate(record.taskId);
+  }
+
+  private async holdTaskQueue(taskId: string, detail: string): Promise<void> {
+    const pending = (await this.store.getTaskDetail(taskId)).taskInstructions.some((item) => item.status === 'QUEUED');
+    if (!pending) return;
+    await this.store.updateTaskInstructions(taskId, (records) => {
+      for (const record of records) if (record.status === 'QUEUED') {
+        Object.assign(record, { status: 'HELD', detail, updatedAt: new Date().toISOString() });
+      }
+    });
+    this.emitInstructionUpdate(taskId);
+  }
+
+  private emitInstructionUpdate(taskId: string): void {
+    this.events.emit({ type: 'task.updated', taskId, payload: { instructionsChanged: true }, at: new Date().toISOString() });
+  }
+
+  private async recoverTaskInstructions(): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const taskIds = new Set(snapshot.taskInstructions.filter((item) => ['QUEUED', 'SENDING'].includes(item.status)).map((item) => item.taskId));
+    for (const taskId of taskIds) {
+      await this.store.updateTaskInstructions(taskId, (records) => {
+        for (const record of records) {
+          if (record.status === 'QUEUED') {
+            Object.assign(record, { status: 'HELD', detail: 'Task Monki restarted. Send this instruction when you are ready.' });
+          } else if (record.status === 'SENDING') {
+            const admitted = snapshot.runs.some((run) => run.id === record.runId);
+            Object.assign(record, record.mode === 'STEER'
+              ? { status: 'UNCERTAIN', detail: 'Delivery was not confirmed before restart. Check the conversation before sending again.' }
+              : { status: admitted ? 'SUBMITTED' : 'FAILED', detail: admitted ? undefined : 'Task Monki restarted before the instruction was admitted.' });
+          }
+        }
+      });
+    }
+  }
+
+  private async dispatchTaskQueue(runId: string): Promise<void> {
+    const run = await this.store.getRun(runId);
+    if (!run || !isImplementationRunMode(run.mode)) return;
+    const waiting = (await this.store.getTaskDetail(run.taskId)).taskInstructions.some((item) => item.status === 'QUEUED' && item.sourceRunId === runId);
+    if (!waiting) return;
+    try {
+      await this.withRuntimeOperation(async () => {
+        while (this.taskActionLocks.has(run.taskId)) {
+          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
+        }
+        await this.withTaskAction(run.taskId, 'Queued instruction', async () => {
+          await this.ensurePostRunEvidence(runId);
+          const detail = await this.store.getTaskDetail(run.taskId);
+          const next = detail.taskInstructions.filter((item) => item.status === 'QUEUED' && item.sourceRunId === runId).sort((a, b) => a.order - b.order)[0];
+          if (!next) return;
+          const current = detail.runs.find((item) => item.id === runId);
+          if (!current || current.status !== 'COMPLETED' || !current.afterGitSnapshotId ||
+              current.recoveryState === 'REQUIRES_USER_ACTION' || next.sourceRunId !== runId ||
+              next.sessionId !== current.sessionId || next.iterationId !== detail.task.currentIterationId ||
+              next.worktreeId !== detail.task.currentWorktreeId || detail.task.currentRunId !== runId ||
+              getImplementationRetryReason(detail.task) || !['IN_PROGRESS', 'REVIEW'].includes(detail.task.workflowPhase) ||
+              detail.runs.some((item) => ACTIVE_AGENT_RUN_STATUSES.has(item.status)) ||
+              detail.interactionRequests.some((item) => ['PENDING', 'RESPONDING'].includes(item.status))) {
+            await this.holdTaskQueue(run.taskId, 'The run needs attention. Send each instruction when you are ready.');
+            return;
+          }
+          const claimed = await this.claimInstruction(next, current, true);
+          await this.deliverInstruction(claimed, () => this.continueRunUnlocked({
+            taskId: run.taskId, runId, instruction: claimed.text
+          }, claimed.runId));
+        });
+      });
+    } catch (error) {
+      await this.holdTaskQueue(run.taskId, (error instanceof Error ? error.message : String(error))).catch(() => undefined);
+    }
+  }
+
   async cancelRun(input: CancelRunRequest): Promise<void> {
     return this.withRuntimeOperation(async () => {
       const run = await this.store.getRun(input.runId);
       if (!run) return;
+      await this.holdTaskQueue(run.taskId, 'Stopped. Send each instruction when you are ready.');
       const cancelCurrentRun = async () => {
         const current = await this.store.getRun(input.runId);
         if (!current || current.taskId !== run.taskId) return;
@@ -2700,124 +2987,169 @@ export class TaskManagerService {
   }
 
   async steerRun(input: SteerRunRequest): Promise<void> {
-    return this.withTaskAction(input.taskId, 'Agent steering', () =>
-      this.withRuntimeOperation(async () => {
-        await this.requireNormalTask(input.taskId, 'Agent steering');
-        const run = await this.requireRunForTask(input.runId, input.taskId);
-        const snapshot = await this.store.snapshot();
-        const worktree = snapshot.worktrees.find(
-          (candidate) => candidate.id === run.worktreeId
-        );
-        return this.agents.steerRun(
-          run.id,
-          buildSteerInstruction({
-            instruction: input.instruction,
-            worktreePath: worktree?.worktreePath
-          })
-        );
-      })
-    );
+    if (input.attachmentDraftId || input.attachmentIds?.length) throw new Error('Files cannot be added to an active response. Queue this message instead.');
+    return this.withTaskAction(input.taskId, 'Agent steering', () => this.withRuntimeOperation(async () => {
+      const id = input.clientMessageId ?? randomUUID();
+      const existing = await this.existingInstruction(id, input.taskId, input.instruction, 'STEER');
+      if (existing) {
+        if (existing.status === 'SUBMITTED') return;
+        throw new Error(existing.detail ?? 'Delivery is not confirmed. Check the current run before sending again.');
+      }
+      const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+      if (run.status !== 'RUNNING') throw new Error('Only a running implementation can accept a live instruction.');
+      const snapshot = await this.store.snapshot();
+      const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
+      const record = await this.addInstruction(id, task, run, input.instruction, 'STEER', 'SENDING');
+      try {
+        await this.agents.steerRun(run.id, buildSteerInstruction({
+          instruction: record.text, worktreePath: worktree?.worktreePath
+        }), id);
+      } catch (error) {
+        await this.setInstructionReceipt(record, error instanceof AgentMutationAmbiguousError ? 'UNCERTAIN' : 'FAILED',
+          error instanceof Error ? error.message : String(error));
+        if (error instanceof AgentMutationAmbiguousError) await this.holdTaskQueue(task.id, 'Instruction delivery needs attention.');
+        throw error;
+      }
+      await this.setInstructionReceipt(record, 'SUBMITTED');
+    }));
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent follow-up', () =>
-      this.withRuntimeOperation(async () => {
-        await this.assertAgentRuntimeAvailable();
-        await this.awaitPostRunEvidence(input.runId);
-        const { task, run, iteration, worktree } = await this.requireContinuationContext(
-          input.taskId,
-          input.runId
-        );
-        this.assertNormalTask(task, 'Agent follow-up');
-        this.assertRuntimeEnabled(task.runtimeId);
-        const snapshot = await this.store.snapshot();
-        assertContinuable(run);
-        this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
-          exceptRunId: run.id
-        });
-        const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
-        const settings = followUpSettings(task, run, input.settings, false);
-        const prompt = buildContinuationPrompt({
-          task,
-          worktree,
-          run,
-          gitSnapshot,
-          instruction: input.instruction,
-          previousPrompt: worktree.ownership === 'EXTERNAL'
-            ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
-        });
-        assertCompleteRunPrompt(prompt);
-        await this.agents.resolveRecoveryRunForReplacement(run.id);
-        return this.agents.startTurn({
-          task,
-          iteration,
-          worktree,
-          sessionId: run.sessionId,
-          mode: 'FOLLOW_UP',
-          prompt,
-          settings,
-          generationKey: gitSnapshot.dirtyFingerprint,
-          beforeGitSnapshotId: gitSnapshot.id,
-          continuedFromRunId: run.id
-        });
-      })
+    return this.withTaskAction(input.taskId, 'Agent follow-up', () => this.withRuntimeOperation(async () => {
+      return this.submitAuthoredTurn(input, 'FOLLOW_UP', (runId) => this.continueRunUnlocked(input, runId));
+    }));
+  }
+
+  private async continueRunUnlocked(input: ContinueRunRequest, reservedRunId?: string): Promise<RunRecord> {
+    await this.assertAgentRuntimeAvailable();
+    await this.awaitPostRunEvidence(input.runId);
+    const { task, run, iteration, worktree } = await this.requireContinuationContext(
+      input.taskId,
+      input.runId
     );
+    this.assertNormalTask(task, 'Agent follow-up');
+    this.assertRuntimeEnabled(task.runtimeId);
+    const snapshot = await this.store.snapshot();
+    assertContinuable(run);
+    this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
+      exceptRunId: run.id
+    });
+    const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+    const settings = followUpSettings(task, run, input.settings, false);
+    const prompt = buildContinuationPrompt({
+      task,
+      worktree,
+      run,
+      gitSnapshot,
+      instruction: input.instruction,
+      previousPrompt: worktree.ownership === 'EXTERNAL'
+        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+    });
+    assertCompleteRunPrompt(prompt);
+    await this.agents.resolveRecoveryRunForReplacement(run.id);
+    return this.agents.startTurn({
+      runId: reservedRunId,
+      task,
+      iteration,
+      worktree,
+      sessionId: run.sessionId,
+      mode: 'FOLLOW_UP',
+      prompt,
+      settings,
+      generationKey: gitSnapshot.dirtyFingerprint,
+      beforeGitSnapshotId: gitSnapshot.id,
+      continuedFromRunId: run.id
+    });
   }
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent retry', () =>
-      this.withRuntimeOperation(async () => {
-        await this.assertAgentRuntimeAvailable();
-        await this.awaitPostRunEvidence(input.runId);
-        const { task, run, iteration, worktree } = await this.requireContinuationContext(
-          input.taskId,
-          input.runId
-        );
-        this.assertNormalTask(task, 'Agent retry');
-        this.assertRuntimeEnabled(task.runtimeId);
-        const snapshot = await this.store.snapshot();
-        this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
-          exceptRunId: run.id
-        });
-        if (input.strategy === 'FORK') {
-          assertForkable(run);
-          await this.agents.resolveRecoveryRunForReplacement(run.id);
-          return this.startForkedAlternative({
-            sourceTaskId: task.id,
-            sourceRun: run,
-            sourceWorktree: worktree,
-            instruction: input.instruction,
-            settings: input.settings
-          });
-        }
-        assertRetryable(run, Boolean(getImplementationRetryReason(task)));
-        const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
-        const settings = followUpSettings(task, run, input.settings, false);
-        const prompt = buildRetryPrompt({
-          task,
-          worktree,
-          run,
-          gitSnapshot,
-          instruction: input.instruction,
-          previousPrompt: worktree.ownership === 'EXTERNAL'
-            ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
-        });
-        assertCompleteRunPrompt(prompt);
-        await this.agents.resolveRecoveryRunForReplacement(run.id);
-        return this.agents.startTurn({
-          task,
-          iteration,
-          worktree,
-          sessionId: run.sessionId,
-          mode: 'RETRY',
-          prompt,
-          settings,
-          generationKey: gitSnapshot.dirtyFingerprint,
-          beforeGitSnapshotId: gitSnapshot.id,
-          retryOfRunId: run.id
-        });
-      })
+    if (input.strategy === 'FORK' && (input.attachmentDraftId || input.attachmentIds?.length)) throw new Error('Send these files in a follow-up before forking.');
+    return this.withTaskAction(input.taskId, 'Agent retry', () => this.withRuntimeOperation(async () => {
+      if (input.strategy === 'FORK') {
+        await this.holdTaskQueue(input.taskId, 'An alternative was started. Review the remaining instructions.');
+        return this.retryRunUnlocked(input);
+      }
+      return this.submitAuthoredTurn(input, 'RETRY', (runId) => this.retryRunUnlocked(input, runId));
+    }));
+  }
+
+  private async retryRunUnlocked(input: RetryRunRequest, reservedRunId?: string): Promise<RunRecord> {
+    await this.assertAgentRuntimeAvailable();
+    await this.awaitPostRunEvidence(input.runId);
+    const { task, run, iteration, worktree } = await this.requireContinuationContext(
+      input.taskId,
+      input.runId
     );
+    this.assertNormalTask(task, 'Agent retry');
+    this.assertRuntimeEnabled(task.runtimeId);
+    const snapshot = await this.store.snapshot();
+    this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
+      exceptRunId: run.id
+    });
+    if (input.strategy === 'FORK') {
+      assertForkable(run);
+      await this.agents.resolveRecoveryRunForReplacement(run.id);
+      return this.startForkedAlternative({
+        sourceTaskId: task.id,
+        sourceRun: run,
+        sourceWorktree: worktree,
+        instruction: input.instruction,
+        settings: input.settings
+      });
+    }
+    assertRetryable(run, Boolean(getImplementationRetryReason(task)));
+    const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+    const settings = followUpSettings(task, run, input.settings, false);
+    const prompt = buildRetryPrompt({
+      task,
+      worktree,
+      run,
+      gitSnapshot,
+      instruction: input.instruction,
+      previousPrompt: worktree.ownership === 'EXTERNAL'
+        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+    });
+    assertCompleteRunPrompt(prompt);
+    await this.agents.resolveRecoveryRunForReplacement(run.id);
+    return this.agents.startTurn({
+      runId: reservedRunId,
+      task,
+      iteration,
+      worktree,
+      sessionId: run.sessionId,
+      mode: 'RETRY',
+      prompt,
+      settings,
+      generationKey: gitSnapshot.dirtyFingerprint,
+      beforeGitSnapshotId: gitSnapshot.id,
+      retryOfRunId: run.id
+    });
+  }
+
+  private async submitAuthoredTurn(input: ContinueRunRequest, mode: 'FOLLOW_UP' | 'RETRY',
+    start: (reservedRunId?: string) => Promise<RunRecord>): Promise<RunRecord> {
+    const id = input.clientMessageId ?? randomUUID();
+    if ((input.attachmentDraftId || input.attachmentIds?.length) && !input.instruction?.trim()) throw new Error('Write a message to send with these files.');
+    const existing = input.instruction?.trim()
+      ? await this.existingInstruction(id, input.taskId, input.instruction, mode, input)
+      : undefined;
+    if (existing && (existing.status !== 'FAILED' || (existing.runId && await this.store.getRun(existing.runId)))) {
+      return this.instructionRun(existing);
+    }
+    const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+    if (existing && (!existing.runId || existing.sourceRunId !== run.id || existing.sessionId !== run.sessionId ||
+        existing.iterationId !== task.currentIterationId || existing.worktreeId !== task.currentWorktreeId)) {
+      throw new Error('This instruction belongs to an earlier session. Write a new instruction.');
+    }
+    await this.holdTaskQueue(task.id, 'A new turn was requested. Send each remaining instruction when you are ready.');
+    if (!input.instruction?.trim()) return start();
+    // A failed admission has no provider turn to replay; reuse its owned files and reserved run ID.
+    const record = existing ? await this.store.updateTaskInstructions(task.id, (records) => {
+      const current = records.find((item) => item.id === existing.id)!;
+      Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
+      return current;
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings);
+    return this.deliverInstruction(record, () => start(record.runId));
   }
 
   private async startForkedAlternative(input: {
@@ -2838,7 +3170,8 @@ export class TaskManagerService {
     };
     const adapter = this.runtimeRegistry.require(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
-    const sourceAttachments = await this.store.getTaskAttachments(sourceTask.id);
+    const sourceAttachments = (await this.store.getTaskAttachments(sourceTask.id)).filter((attachment) =>
+      input.sourceRun.attachmentSelection.some((selected) => selected.attachmentId === attachment.id));
     const resolvedAlternativeSettings = await prepareTaskCreationSettings(
       adapter,
       alternativeSettings,
@@ -3137,6 +3470,7 @@ export class TaskManagerService {
                   configuredReviewSettings
                 ]
               });
+        await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
         return this.agents.startReview({
           task,
           iteration,
@@ -4030,6 +4364,7 @@ export class TaskManagerService {
         throw new Error(blockedReason);
       }
 
+      await this.holdTaskQueue(task.id, 'The task moved to another phase. Review the remaining instructions.');
       return this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
     });
   }
@@ -4310,6 +4645,7 @@ export class TaskManagerService {
       }
     })().catch(() => undefined);
     this.postRunEvidenceTasks.set(runId, pending);
+    void pending.then(() => this.dispatchTaskQueue(runId)).catch(() => undefined);
   }
 
   private async awaitPostRunEvidence(runId: string): Promise<void> {

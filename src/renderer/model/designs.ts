@@ -468,7 +468,8 @@ export function designDetailedActivityRows(
   if (!project.currentRun) return [];
   const projection = buildRunActivityProjection({
     run: project.currentRun,
-    items: project.items.filter((item) => item.runId === project.currentRun?.id)
+    items: project.items.filter((item) => item.runId === project.currentRun?.id && item.type !== 'AGENT_MESSAGE'),
+    cwd: project.currentWorktree?.worktreePath
   });
   return buildOverviewRunActivityRows(projection.rows);
 }

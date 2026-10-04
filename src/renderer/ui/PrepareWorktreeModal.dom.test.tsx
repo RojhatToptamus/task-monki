@@ -32,6 +32,25 @@ describe('Worktree preparation confirmation', () => {
     expect(onConfirm).toHaveBeenCalledOnce();
   });
 
+  it('returns focus to the trigger captured before asynchronous inspection blurred it', async () => {
+    const triggerView = render(<button type="button">Set up worktree</button>);
+    const trigger = screen.getByRole('button', { name: 'Set up worktree' });
+    trigger.focus();
+    trigger.blur();
+    const onCancel = vi.fn();
+    const view = render(<PrepareWorktreeModal
+      inspection={inspection} taskTitle="Backend changes" selectedBaseRef="refs/heads/main"
+      busy={false} onConfirm={vi.fn()} onSelectBase={vi.fn()} onCancel={onCancel}
+      fallbackReturnFocusRef={createRef<HTMLElement>()} returnFocus={trigger}
+    />);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox')));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onCancel).toHaveBeenCalledOnce();
+    view.unmount();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    triggerView.unmount();
+  });
+
   it('blocks dismissal and repeated submission during preparation, then permits retry with the failure visible', () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();

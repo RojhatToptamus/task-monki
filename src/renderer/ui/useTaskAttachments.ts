@@ -31,16 +31,18 @@ import {
   prepareImageAttachment
 } from '../model/taskAttachmentDraft';
 
-interface UseTaskAttachmentsOptions {
+export interface UseTaskAttachmentsOptions {
   enabled: boolean;
   blocked: boolean;
   model?: AgentModel;
+  validateModel?: boolean;
   onStageBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscard(draftId: string): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   initialDraft?: AttachmentDraftSnapshot;
   onReadDraftAttachment?(attachmentId: string): Promise<AttachmentContent>;
   preserveDraftOnClose?: boolean;
+  onPersistDraft?(draftId: string | undefined): Promise<void>;
 }
 
 export interface TaskAttachmentController {
@@ -55,6 +57,8 @@ export interface TaskAttachmentController {
   contentRevision: number;
   overflowError?: string;
   modelError?: string;
+  draftError?: string;
+  flushDraft(): Promise<string | undefined>;
   interactionBlocked: boolean;
   inputRef: RefObject<HTMLInputElement | null>;
   closedRef: MutableRefObject<boolean>;
@@ -68,7 +72,7 @@ export interface TaskAttachmentController {
   prepareForCreate(): Promise<string | undefined>;
   acknowledgeDraftSave(draftId: string | undefined): Promise<void>;
   markCreateFailed(preserveDraft: boolean): Promise<void>;
-  finishAdoption(): Promise<void>;
+  finishAdoption(selection?: { draftId?: string; clientIds: string[] }): Promise<void>;
   close(): void;
 }
 
@@ -76,6 +80,10 @@ export interface TaskAttachmentController {
 export function useTaskAttachments(
   options: UseTaskAttachmentsOptions
 ): TaskAttachmentController {
+  const [draftError, setDraftError] = useState<string>();
+  const persistTail = useRef<Promise<unknown>>(Promise.resolve());
+  const persistRef = useRef(options.onPersistDraft);
+  persistRef.current = options.onPersistDraft;
   const [items, setItems] = useState<AttachmentComposerItem[]>([]);
   const [overflowError, setOverflowError] = useState<string>();
   const [isDragging, setIsDragging] = useState(false);
@@ -345,7 +353,7 @@ export function useTaskAttachments(
   }, [addFiles, interactionBlocked]);
 
   const activeItems = active(items);
-  const modelError = imageAttachmentModelError(
+  const modelError = options.validateModel === false ? undefined : imageAttachmentModelError(
     activeItems.some((item) => item.kind === 'image'),
     options.model
   );
@@ -361,7 +369,7 @@ export function useTaskAttachments(
       return draftIdRef.current;
     }
     const current = active(itemsRef.current);
-    const imageError = imageAttachmentModelError(
+    const imageError = options.validateModel === false ? undefined : imageAttachmentModelError(
       current.some((item) => item.kind === 'image'),
       options.model
     );
@@ -372,6 +380,7 @@ export function useTaskAttachments(
       return undefined;
     }
 
+    const revision = contentRevisionRef.current;
     submittingRef.current = true;
     try {
       const attachments = [];
@@ -389,12 +398,12 @@ export function useTaskAttachments(
       const draft = await options.onStageBatch({ attachments });
       draftIdRef.current = draft.id;
       knownDraftIdsRef.current.add(draft.id);
-      preparedRevisionRef.current = contentRevisionRef.current;
+      preparedRevisionRef.current = revision;
       return draft.id;
     } finally {
       submittingRef.current = false;
     }
-  }, [options.model, options.onStageBatch]);
+  }, [options.model, options.validateModel, options.onStageBatch]);
 
   const acknowledgeDraftSave = useCallback(async (draftId: string | undefined) => {
     draftIdRef.current = draftId;
@@ -403,6 +412,36 @@ export function useTaskAttachments(
     if (draftId) restoredDraftIdRef.current = draftId;
     await discardDraftsExcept(draftId);
   }, [discardDraftsExcept]);
+
+  const flushDraft = useCallback((): Promise<string | undefined> => {
+    const operation = persistTail.current.catch(() => undefined).then(async () => {
+      let draftId: string | undefined;
+      do {
+        const revision = contentRevisionRef.current;
+        draftId = await prepareForCreate();
+        if (!persistRef.current) return draftId;
+        if (durableRevisionRef.current === revision && durableDraftIdRef.current === draftId) {
+          if (!closedRef.current) setDraftError(undefined);
+          return draftId;
+        }
+        await persistRef.current(draftId);
+        await acknowledgeDraftSave(draftId);
+        durableRevisionRef.current = revision;
+      } while (durableRevisionRef.current !== contentRevisionRef.current);
+      if (!closedRef.current) setDraftError(undefined);
+      return draftId;
+    });
+    persistTail.current = operation;
+    void operation.catch((error: unknown) => {
+      if (!closedRef.current) setDraftError(error instanceof Error ? error.message : 'Files could not be saved. Try again.');
+    });
+    return operation;
+  }, [acknowledgeDraftSave, prepareForCreate]);
+
+  const persistEnabled = Boolean(options.onPersistDraft);
+  useEffect(() => {
+    if (persistEnabled && contentRevision > 0) void flushDraft().catch(() => undefined);
+  }, [contentRevision, flushDraft, persistEnabled]);
 
   const markCreateFailed = useCallback(async (preserveDraft: boolean) => {
     if (preserveDraft) return;
@@ -415,26 +454,31 @@ export function useTaskAttachments(
     preparedRevisionRef.current = durableRevisionRef.current;
   }, []);
 
-  const finishAdoption = useCallback(async () => {
-    const adoptedDraftId = draftIdRef.current;
-    const obsoleteDraftIds = [...knownDraftIdsRef.current].filter(
-      (draftId) => draftId !== adoptedDraftId
-    );
-    draftIdRef.current = undefined;
-    durableDraftIdRef.current = undefined;
-    knownDraftIdsRef.current.clear();
-    preparedRevisionRef.current = -1;
-    durableRevisionRef.current = -1;
-    for (const item of itemsRef.current) releasePreview(item);
-    itemsRef.current = [];
-    setItems([]);
-    contentRevisionRef.current += 1;
-    setContentRevision(contentRevisionRef.current);
-    setOverflowError(undefined);
-    await Promise.all(
-      obsoleteDraftIds.map((draftId) => discardRef.current(draftId).catch(() => undefined))
-    );
-  }, [releasePreview]);
+  const finishAdoption = useCallback((selection?: { draftId?: string; clientIds: string[] }) => {
+    const operation = persistTail.current.catch(() => undefined).then(async () => {
+      if (selection && !itemsRef.current.some((item) => selection.clientIds.includes(item.clientId))) return;
+      const adoptedDraftId = selection ? selection.draftId : draftIdRef.current;
+      const obsoleteDraftIds = [...knownDraftIdsRef.current].filter((draftId) => draftId !== adoptedDraftId);
+      const retained = selection ? itemsRef.current.filter((item) => !selection.clientIds.includes(item.clientId)) : [];
+      for (const item of itemsRef.current) if (!retained.includes(item)) releasePreview(item);
+      draftIdRef.current = undefined;
+      durableDraftIdRef.current = undefined;
+      knownDraftIdsRef.current = new Set(selection ? obsoleteDraftIds : []);
+      contentRevisionRef.current += 1;
+      preparedRevisionRef.current = selection ? -1 : contentRevisionRef.current;
+      durableRevisionRef.current = selection ? -1 : contentRevisionRef.current;
+      itemsRef.current = retained;
+      if (!closedRef.current) {
+        setItems(retained);
+        setContentRevision(contentRevisionRef.current);
+        setOverflowError(undefined);
+        setDraftError(undefined);
+      }
+      if (!selection) await Promise.all(obsoleteDraftIds.map((draftId) => discardRef.current(draftId).catch(() => undefined)));
+    });
+    persistTail.current = operation;
+    return selection ? operation.then(async () => { await flushDraft(); }) : operation;
+  }, [flushDraft, releasePreview]);
 
   return {
     items,
@@ -449,6 +493,8 @@ export function useTaskAttachments(
     contentRevision,
     overflowError,
     modelError,
+    draftError,
+    flushDraft,
     interactionBlocked,
     inputRef,
     closedRef,

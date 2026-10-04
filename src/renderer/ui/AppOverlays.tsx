@@ -377,7 +377,8 @@ export function PrepareWorktreeModal({
   onSelectBase,
   onCancel,
   onConfirm,
-  fallbackReturnFocusRef
+  fallbackReturnFocusRef,
+  returnFocus
 }: {
   inspection: WorktreePreparationCreateInspection;
   taskTitle: string;
@@ -388,6 +389,7 @@ export function PrepareWorktreeModal({
   onCancel(): void;
   onConfirm(): void;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  returnFocus?: HTMLElement | null;
 }) {
   const panelRef = useRef<HTMLFormElement>(null);
   const selectRef = useRef<HTMLSelectElement>(null);
@@ -398,6 +400,7 @@ export function PrepareWorktreeModal({
     dialogRef: panelRef,
     initialFocusRef: selectRef,
     fallbackReturnFocusRef,
+    returnFocus,
     busy,
     onClose: onCancel
   });
@@ -422,8 +425,10 @@ export function PrepareWorktreeModal({
         tabIndex={-1}
         onSubmit={submit}
       >
-        <h3 id="prepare-worktree-title">Prepare worktree</h3>
-        <p>{taskTitle} · {inspection.repositoryName}</p>
+        <header className="tm-prepare-worktree__header">
+          <h3 id="prepare-worktree-title">Prepare worktree</h3>
+          <p>{taskTitle} · {inspection.repositoryName}</p>
+        </header>
 
         <label className="field tm-prepare-worktree__base">
           <span>Base branch</span>
@@ -441,6 +446,8 @@ export function PrepareWorktreeModal({
           </select>
         </label>
 
+        <p>Creates an isolated checkout from the selected branch. Local changes stay in the source checkout.</p>
+
         <details className="tm-raw">
           <summary className="tm-disclosure__label"><DisclosureChevron />Git details</summary>
           <div className="tm-prepare-worktree__commit">
@@ -448,11 +455,6 @@ export function PrepareWorktreeModal({
             <code>{selectedBase?.sha ?? 'Unavailable'}</code>
           </div>
         </details>
-
-        <p>
-          Starts from committed files. Uncommitted, untracked, ignored, and submodule
-          changes stay in the source checkout.
-        </p>
 
         {error ? (
           <div className="tm-error tm-prepare-worktree__error" role="alert">
@@ -484,7 +486,8 @@ export function RecoverWorktreeModal({
   error,
   onCancel,
   onConfirm,
-  fallbackReturnFocusRef
+  fallbackReturnFocusRef,
+  returnFocus
 }: {
   inspection: WorktreePreparationRecoveryInspection;
   taskTitle: string;
@@ -493,6 +496,7 @@ export function RecoverWorktreeModal({
   onCancel(): void;
   onConfirm(): void;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  returnFocus?: HTMLElement | null;
 }) {
   const panelRef = useRef<HTMLFormElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
@@ -502,6 +506,7 @@ export function RecoverWorktreeModal({
     dialogRef: panelRef,
     initialFocusRef: confirmRef,
     fallbackReturnFocusRef,
+    returnFocus,
     busy,
     onClose: onCancel
   });

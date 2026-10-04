@@ -1,16 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
 import { MoreHorizontal } from 'lucide-react';
-import {
-  focusMenuItem,
-  handleMenuBlur,
-  handleMenuKeyDown,
-  menuTriggerFocusTarget,
-  type MenuFocusTarget
-} from './menuKeyboard';
+import { ActionMenu } from './ActionMenu';
 
 interface DesignMenuItem {
   label: string;
   disabled?: boolean;
+  disabledReason?: string;
   danger?: boolean;
   action(): void;
 }
@@ -75,6 +69,7 @@ export function DesignReadyMenu({
         {
           label: 'Restore this version',
           disabled: isCurrent || !canRestore,
+          disabledReason: isCurrent ? 'Already the current version.' : undefined,
           action: onRestore
         },
         {
@@ -87,105 +82,10 @@ export function DesignReadyMenu({
   );
 }
 
-function DesignMenu({
-  label,
-  items,
-  compact = false
-}: {
-  label: string;
-  items: readonly DesignMenuItem[];
-  compact?: boolean;
+function DesignMenu({ label, items, compact = false }: {
+  label: string; items: readonly DesignMenuItem[]; compact?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const initialFocusRef = useRef<MenuFocusTarget>('first');
-
-  useEffect(() => {
-    if (!open) return;
-    const frame = window.requestAnimationFrame(() =>
-      focusMenuItem(menuRef.current, initialFocusRef.current)
-    );
-    const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    window.addEventListener('pointerdown', closeOutside);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('pointerdown', closeOutside);
-    };
-  }, [open]);
-
-  return (
-    <div
-      ref={rootRef}
-      className={`tm-taskmenu ${compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'}`}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        className="tm-taskmenu__trigger"
-        aria-label={label}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title="More options"
-        onKeyDown={(event) => {
-          const target = menuTriggerFocusTarget(event.key);
-          if (!target) return;
-          event.preventDefault();
-          initialFocusRef.current = target;
-          if (open) focusMenuItem(menuRef.current, target);
-          else setOpen(true);
-        }}
-        onClick={() => {
-          initialFocusRef.current = 'first';
-          setOpen((current) => !current);
-        }}
-      >
-        <KebabIcon />
-      </button>
-      {open ? (
-        <div
-          ref={menuRef}
-          className="tm-taskmenu__menu"
-          role="menu"
-          tabIndex={-1}
-          aria-label={label}
-          onKeyDown={(event) =>
-            handleMenuKeyDown(event, {
-              onClose: () => setOpen(false),
-              returnFocus: triggerRef.current
-            })
-          }
-          onBlur={(event) => {
-            if (event.relatedTarget !== triggerRef.current) {
-              handleMenuBlur(event, () => setOpen(false));
-            }
-          }}
-        >
-          {items.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              className={`tm-taskmenu__item ${item.danger ? 'tm-taskmenu__item--danger' : ''}`}
-              disabled={item.disabled}
-              onClick={() => {
-                setOpen(false);
-                item.action();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function KebabIcon() {
-  return <MoreHorizontal aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <ActionMenu className={compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'} label={label}
+    trigger={<MoreHorizontal aria-hidden="true" size={16} strokeWidth={1.5} />}
+    items={items.map(({ action, ...item }) => ({ ...item, onSelect: action }))} />;
 }

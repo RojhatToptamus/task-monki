@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AgentModel,
   AgentInteractionDecision,
   AttachmentContent,
+  AttachmentDescriptor,
   AttachmentDraftSnapshot,
   ClipboardAttachmentImage,
   DesignConversationEntry,
@@ -14,13 +15,14 @@ import {
   designActivityRows,
   designDetailedActivityRows,
   designTurnView,
-  formatDesignUpdatedAt,
   type DesignProjectDetail
 } from '../model/designs';
+import { ActivityRows, ActivitySteps } from './ActivitySteps';
+import { Conversation, useConversationScroll } from './Conversation';
+import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
-import { MessageHeader } from './MessageHeader';
+import { MessageQueue } from './MessageQueue';
 import { InteractionPanel } from './InteractionPanel';
-import { RunActivityTimeline } from './RunActivityTimeline';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments } from './useTaskAttachments';
@@ -28,7 +30,8 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
-import { UiArrowRightIcon } from './UiIcons';
+import { ArrowUp, CornerDownRight, RotateCcw, Square } from 'lucide-react';
+import { StatusGlyph } from './StatusBadge';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -46,6 +49,8 @@ export interface DesignConversationProps {
   onDiscardAttachmentDraft(draftId: string): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onReadDraftAttachment(attachmentId: string): Promise<AttachmentContent>;
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
+  onPreviewOpenChange?(open: boolean): void;
   onStop(turnId: string): Promise<void>;
   onLoadEarlier(): Promise<void>;
   onSaveDraft(
@@ -76,6 +81,8 @@ export function DesignConversation({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onReadDraftAttachment,
+  onReadAttachment,
+  onPreviewOpenChange,
   onStop,
   onLoadEarlier,
   onSaveDraft,
@@ -89,10 +96,13 @@ export function DesignConversation({
   const [submitting, setSubmitting] = useState(false);
   const [submissionOutcomeUnknown, setSubmissionOutcomeUnknown] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [removingQueuedTurn, setRemovingQueuedTurn] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState<string | undefined>();
   const submittingRef = useRef(false);
+  const focusAfterSubmit = useRef(false);
   const draftRevisionRef = useRef(draft?.recordRevision ?? 0);
   const savedDraftSignatureRef = useRef(
     draftSignature(
@@ -126,6 +136,14 @@ export function DesignConversation({
   attachmentsRef.current = attachments;
   const activityRows = designActivityRows(project);
   const detailedActivityRows = designDetailedActivityRows(project);
+  const scroller = useConversationScroll({ startAtBottom: true });
+  const prepend = useRef<{ height: number; top: number } | undefined>(undefined);
+  const pending = project.conversation.filter((entry) => !entry.turn.runId && entry.turn.outcome === undefined);
+  const conversation = project.conversation.filter((entry) => entry.turn.runId || (entry.turn.outcome !== undefined && entry.turn.outcome !== 'CANCELED'));
+  const referenceNames = (ids: string[]) => ids.map((id) => {
+    const reference = project.references.find((candidate) => candidate.id === id);
+    return project.attachments.find((attachment) => attachment.id === reference?.attachmentId)?.displayName ?? 'Unavailable reference';
+  });
   const canSubmit =
     canRefine &&
     message.trim().length > 0 &&
@@ -272,9 +290,17 @@ export function DesignConversation({
       );
     } finally {
       submittingRef.current = false;
+      focusAfterSubmit.current = true;
       setSubmitting(false);
     }
   };
+
+  useLayoutEffect(() => {
+    if (!submitting && focusAfterSubmit.current) {
+      focusAfterSubmit.current = false;
+      composerRef.current?.focus();
+    }
+  }, [submitting]);
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
@@ -282,8 +308,17 @@ export function DesignConversation({
     void submit();
   };
 
+  useLayoutEffect(() => {
+    const viewport = scroller.scrollRef.current;
+    if (prepend.current && viewport) {
+      viewport.scrollTop = prepend.current.top + viewport.scrollHeight - prepend.current.height;
+      prepend.current = undefined;
+    }
+  }, [project.conversation.length]);
+
   return (
     <section className="tm-design-conversation" aria-label="Design conversation">
+      <Conversation instance={scroller} label="Design conversation" className="tm-design-conversation__log">
       <div className="tm-design-conversation__transcript" aria-live="polite">
         {project.origin && project.conversation.length === 0 ? (
           <p className="tm-design-conversation__origin">
@@ -299,6 +334,8 @@ export function DesignConversation({
             className="tm-design-conversation__earlier"
             disabled={loadingEarlier}
             onClick={() => {
+              const viewport = scroller.scrollRef.current;
+              if (viewport) prepend.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
               setLoadingEarlier(true);
               setError(undefined);
               void onLoadEarlier()
@@ -315,7 +352,7 @@ export function DesignConversation({
             {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
           </button>
         ) : null}
-        {project.conversation.length === 0 ? (
+        {conversation.length === 0 && pending.length === 0 ? (
           <div className="tm-design-conversation__empty">
             <strong>
               {project.origin && project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION'
@@ -333,7 +370,7 @@ export function DesignConversation({
             </span>
           </div>
         ) : (
-          project.conversation.map((entry) => (
+          conversation.map((entry) => (
             <DesignTurnMessages
               key={entry.turn.id}
               entry={entry}
@@ -350,29 +387,24 @@ export function DesignConversation({
                   setError(caught instanceof Error ? caught.message : 'Could not duplicate this version.')
                 )
               }
-              references={entry.turn.referenceIds.map((referenceId) => {
-                const reference = project.references.find(
-                  (candidate) => candidate.id === referenceId
-                );
-                const attachment = reference
-                  ? project.attachments.find(
-                      (candidate) => candidate.id === reference.attachmentId
-                    )
-                  : undefined;
-                return attachment?.displayName ?? 'Unavailable reference';
+              references={entry.turn.referenceIds.map((id) => {
+                const reference = project.references.find((candidate) => candidate.id === id);
+                return project.attachments.find((attachment) => attachment.id === reference?.attachmentId);
               })}
+              onReadAttachment={onReadAttachment}
+              onPreviewOpenChange={onPreviewOpenChange}
             />
           ))
         )}
 
         {activityRows.length > 0 ? (
-          <RunActivityTimeline rows={activityRows} />
+          <ActivitySteps steps={activityRows.map((row) => ({ key: row.key, at: row.at, kind: 'tool' as const, row }))} />
         ) : null}
 
         {detailedActivityRows.length > 0 ? (
           <details className="tm-design-technical-details">
             <summary><DisclosureChevron /><span>Technical details</span></summary>
-            <RunActivityTimeline rows={detailedActivityRows} live={false} />
+            <ActivityRows rows={detailedActivityRows} />
           </details>
         ) : null}
 
@@ -383,6 +415,7 @@ export function DesignConversation({
           onRespond={onRespond}
         />
       </div>
+      </Conversation>
 
       <form
         className="tm-design-composer"
@@ -393,13 +426,43 @@ export function DesignConversation({
       >
         <AttachmentComposerShell
           attachments={attachments}
+          onPreviewOpenChange={onPreviewOpenChange}
           attachmentLabel="Files for this Design message"
           className="tm-design-composer__shell"
           removeDisabled={submitting || submissionOutcomeUnknown}
           addButtonTitle="Add read-only references to this Design message."
           addButtonLabel="Reference"
           onAddButtonClick={onOpenReferences}
-          hint={
+          toolbarAction={
+            <>
+              {project.actions.canStop && project.actions.stopTurnId ? (
+                <button
+                  type="button"
+                  className="ghost-button tm-composer-action"
+                  aria-label={stopping ? 'Stopping' : 'Stop'} title="Stop response"
+                  disabled={stopping}
+                  onClick={() => {
+                    setStopping(true);
+                    setError(undefined);
+                    void onStop(project.actions.stopTurnId!)
+                      .catch((caught) => {
+                        setError(caught instanceof Error ? caught.message : 'Could not stop work.');
+                      })
+                      .finally(() => setStopping(false));
+                  }}
+                >
+                  {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
+                </button>
+              ) : null}
+              <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
+                aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
+                title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
+                {submitting ? <StatusGlyph kind="working" /> : submissionOutcomeUnknown ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
+                  : activeWork ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+              </button>
+            </>
+          }
+          hint={<span id="design-refinement-help">{
             attachments.isRestoringDraft
               ? 'Loading draft files…'
               : attachments.isReadingClipboardImage
@@ -408,17 +471,28 @@ export function DesignConversation({
                   ? `${attachments.activeItems.length} ${
                       attachments.activeItems.length === 1 ? 'new file' : 'new files'
                     } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : 'Paste or drop files'
-          }
+                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : '⌘ Enter')
+          }</span>}
         >
+          <MessageQueue items={pending.map((entry) => ({ id: entry.turn.id, text: entry.userMessage,
+            detail: referenceNames(entry.turn.referenceIds).join(', ') || undefined }))}
+            disabled={removingQueuedTurn || submitting || submissionOutcomeUnknown || stopping}
+            onRemove={(id) => {
+              setRemovingQueuedTurn(true); setError(undefined);
+              void onStop(id)
+                .then(() => composerRef.current?.focus())
+                .catch((caught) => setError(caught instanceof Error ? caught.message : 'Could not remove the queued message.'))
+                .finally(() => setRemovingQueuedTurn(false));
+            }} />
           <label className="tm-visually-hidden" htmlFor="design-refinement-message">
             Refine this Design
           </label>
           <textarea
+            ref={composerRef}
             id="design-refinement-message"
             value={message}
             rows={3}
-            placeholder="Describe the next change…"
+            placeholder={activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
             disabled={
               !canRefine ||
               submitting ||
@@ -442,6 +516,8 @@ export function DesignConversation({
                   key={referenceId}
                   attachment={attachment}
                   label="Reference"
+                  onPreviewOpenChange={onPreviewOpenChange}
+                  onRead={onReadAttachment ? () => onReadAttachment(attachment.id) : undefined}
                   disabled={submitting || submissionOutcomeUnknown}
                   onRemove={() =>
                     onSelectionChange(
@@ -458,48 +534,6 @@ export function DesignConversation({
             {attachments.overflowError ?? attachments.modelError}
           </p>
         ) : null}
-        <div className="tm-design-composer__footer">
-          <span id="design-refinement-help">
-            {disabledReason ??
-              (draftStatus === 'saving'
-                ? 'Saving draft…'
-                : draftStatus === 'saved'
-                  ? 'Draft saved'
-                  : draftStatus === 'error'
-                    ? 'Draft not saved'
-                    : project.actions.queuedTurnCount > 0
-                      ? `${project.actions.queuedTurnCount} queued`
-                      : 'Press ⌘ Enter to send')}
-          </span>
-          {project.actions.canStop && project.actions.stopTurnId ? (
-            <button
-              type="button"
-              className="outline-button"
-              disabled={stopping}
-              onClick={() => {
-                setStopping(true);
-                setError(undefined);
-                void onStop(project.actions.stopTurnId!)
-                  .catch((caught) => {
-                    setError(caught instanceof Error ? caught.message : 'Could not stop work.');
-                  })
-                  .finally(() => setStopping(false));
-              }}
-            >
-              {stopping ? 'Stopping…' : 'Stop'}
-            </button>
-          ) : null}
-          <button type="submit" className="primary-button" disabled={!canSubmit}>
-            {submitting
-              ? 'Sending…'
-              : submissionOutcomeUnknown
-                ? 'Retry'
-                : activeWork
-                  ? 'Queue'
-                  : 'Send'}
-            <UiArrowRightIcon />
-          </button>
-        </div>
         {error ? <p className="tm-design-composer__error" role="alert">{error}</p> : null}
       </form>
     </section>
@@ -509,6 +543,8 @@ export function DesignConversation({
 function DesignTurnMessages({
   entry,
   references,
+  onReadAttachment,
+  onPreviewOpenChange,
   latestRevisionId,
   canRestore,
   canDuplicate,
@@ -516,7 +552,9 @@ function DesignTurnMessages({
   onDuplicate
 }: {
   entry: DesignConversationEntry;
-  references: string[];
+  references: (AttachmentDescriptor | undefined)[];
+  onReadAttachment?(attachmentId: string): Promise<AttachmentContent>;
+  onPreviewOpenChange?(open: boolean): void;
   latestRevisionId?: string;
   canRestore: boolean;
   canDuplicate: boolean;
@@ -526,51 +564,43 @@ function DesignTurnMessages({
   const view = designTurnView(entry);
   return (
     <article className="tm-design-turn">
-      <div className="tm-design-message tm-design-message--user">
-        <p>{entry.userMessage}</p>
-        <footer>
-          {references.length > 0 ? (
-            <small className="tm-design-message__references">
-              {references.join(', ')}
-            </small>
-          ) : null}
-          <time dateTime={entry.turn.createdAt}>
-            {formatDesignUpdatedAt(entry.turn.createdAt)}
-          </time>
-        </footer>
-      </div>
+      <Message from="user" label="Your message">
+        <MessageContent><p>{entry.userMessage}</p></MessageContent>
+        {references.length > 0 ? <ul className="task-attachments" aria-label="Message references">
+          {references.map((attachment, index) => attachment ? <StoredAttachmentChip
+            key={attachment.id} attachment={attachment}
+            onRead={onReadAttachment ? () => onReadAttachment(attachment.id) : undefined}
+            onPreviewOpenChange={onPreviewOpenChange}
+          /> : <li key={index}>Unavailable reference</li>)}
+        </ul> : null}
+        <MessageMeta>
+          <MessageTime value={entry.turn.createdAt} />
+        </MessageMeta>
+      </Message>
 
-      <div className={`tm-design-message tm-design-message--agent tm-design-message--${view.status.toLowerCase()}`}>
-        <MessageHeader author="Design agent">
-          <div className="tm-design-message__ready-actions">
-            <span className="tm-design-message__turn-status" data-tone={view.tone}>
-              {entry.readyRevision
-                ? `Ready state ${entry.readyRevision.ordinal}`
-                : view.statusLabel}
-            </span>
-            {entry.readyRevision ? (
-              <DesignReadyMenu
-                ordinal={entry.readyRevision.ordinal}
-                isCurrent={entry.readyRevision.id === latestRevisionId}
-                canRestore={canRestore}
-                canDuplicate={canDuplicate}
-                onRestore={() => onRestore(entry.readyRevision!.id)}
-                onDuplicate={() => onDuplicate(entry.readyRevision!.id)}
-              />
-            ) : null}
-          </div>
-        </MessageHeader>
+      <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
         {entry.assistantMessage ? (
-          <MessageMarkdown text={entry.assistantMessage} />
-        ) : (
-          <p className="tm-design-message__pending">
-            {view.detail ?? view.statusLabel}
-          </p>
-        )}
-        {view.detail && entry.assistantMessage ? (
+          <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
+        ) : null}
+        {view.detail ? (
           <p className="tm-design-message__detail">{view.detail}</p>
         ) : null}
-      </div>
+        <MessageMeta className="tm-design-message__ready-actions">
+          <span className="tm-design-message__turn-status" data-tone={view.tone}>
+            {entry.readyRevision ? `Ready state ${entry.readyRevision.ordinal}` : view.statusLabel}
+          </span>
+          {entry.readyRevision ? (
+            <DesignReadyMenu
+              ordinal={entry.readyRevision.ordinal}
+              isCurrent={entry.readyRevision.id === latestRevisionId}
+              canRestore={canRestore}
+              canDuplicate={canDuplicate}
+              onRestore={() => onRestore(entry.readyRevision!.id)}
+              onDuplicate={() => onDuplicate(entry.readyRevision!.id)}
+            />
+          ) : null}
+        </MessageMeta>
+      </Message>
     </article>
   );
 }

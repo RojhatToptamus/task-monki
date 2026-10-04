@@ -425,14 +425,8 @@
 }
 
 .field__prompt-shell {
-  position: relative;
   display: flex;
-  box-shadow: inset 0 0 0 1px var(--field-edge);
   flex-direction: column;
-  overflow: hidden;
-  border: 0;
-  border-radius: var(--r-md);
-  background: var(--field);
   transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 
@@ -471,15 +465,6 @@
 /* No hover fill on a text surface: at rest it already reads as a field, and
    the caret is the confirmation that matters. */
 
-.field__prompt-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  padding: 6px 8px;
-  border-top: 1px solid var(--hair);
-}
-
 .task-attachment-input {
   display: none;
 }
@@ -494,7 +479,7 @@
   font-size: var(--t-meta);
 }
 
-.field__prompt-toolbar .tm-profile-picker select {
+.tm-composer__toolbar .tm-profile-picker select {
   width: auto;
   max-width: 180px;
   min-width: 0;
@@ -511,11 +496,11 @@
   text-overflow: ellipsis;
 }
 
-.field__prompt-toolbar .tm-profile-picker select:not(:disabled):hover {
+.tm-composer__toolbar .tm-profile-picker select:not(:disabled):hover {
   background: var(--hover);
 }
 
-.field__prompt-toolbar .tm-profile-picker select:disabled {
+.tm-composer__toolbar .tm-profile-picker select:disabled {
   color: var(--text-disabled);
   cursor: default;
 }
@@ -561,16 +546,22 @@
 }
 
 .task-attachments {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
   margin: 0;
-  padding: 0 9px 9px;
+  padding: 0;
   list-style: none;
 }
 
+.tm-composer > .task-attachments { padding: 8px 12px 12px; }
+
 .task-attachment {
   display: flex;
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: min(280px, 100%);
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -611,10 +602,13 @@
 }
 
 .task-attachment__name {
+  display: block;
+  min-width: 0;
   overflow: hidden;
+  user-select: text;
   color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1209,10 +1203,6 @@
     grid-template-columns: 1fr;
   }
 
-  .task-attachments {
-    grid-template-columns: 1fr;
-  }
-
   .slideover__footer {
     align-items: stretch;
     flex-direction: column;
@@ -1291,3 +1281,20 @@
     grid-template-columns: 1fr;
   }
 }
+.task-attachment__open {
+  padding: 0;
+  border: 0;
+  background: none;
+  line-height: 1.5;
+  text-align: start;
+  cursor: pointer;
+}
+
+.task-attachment__open:hover { text-decoration: underline; }
+.task-attachment-preview { width: min(800px, calc(100vw - 32px)); }
+.task-attachment-preview__header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.task-attachment-preview__header h3 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.task-attachment-preview__header button { flex: 0 0 auto; }
+.task-attachment-preview__content { max-height: 65vh; overflow: auto; }
+.task-attachment-preview__image { display: block; max-width: 100%; max-height: 65vh; margin: auto; object-fit: contain; }
+.task-attachment-preview__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--t-help); }
