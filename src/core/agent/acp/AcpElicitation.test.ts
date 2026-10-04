@@ -80,6 +80,15 @@ describe('ACP form elicitation mapping', () => {
     });
   });
 
+  it('delivers selected choices and custom text together through the ACP answer fields', () => {
+    expect(mapAcpElicitationResponse('USER_INPUT', { questions: [{
+      id: 'question_0', header: 'Services', question: 'Which services?', isOther: true, isSecret: false, allowsMultiple: true,
+      options: [{ label: 'Pickup', description: '' }, { label: 'Delivery', description: '' }]
+    }] }, { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { question_0: ['Pickup', 'Prescription enquiry'] } })).toEqual({
+      action: 'accept', content: { question_0: ['Pickup'], question_0_custom: 'Prescription enquiry' }
+    });
+  });
+
   it('keeps unrelated ACP forms on the existing generic elicitation path', () => {
     const mapped = mapAcpFormElicitation({
       sessionId: 'session-1',

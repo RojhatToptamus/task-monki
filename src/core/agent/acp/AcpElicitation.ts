@@ -52,14 +52,13 @@ export function mapAcpElicitationResponse(
   for (const question of (request as AgentUserInputRequest).questions) {
     const answers = decision.answers[question.id] ?? [];
     const optionLabels = new Set(question.options?.map((option) => option.label) ?? []);
+    const selected = answers.filter((answer) => optionLabels.has(answer));
     const custom = answers.filter((answer) => !optionLabels.has(answer));
     if (custom.length > 0) {
       content[`${question.id}_custom`] = custom.join(', ');
-    } else if (question.allowsMultiple) {
-      content[question.id] = answers;
-    } else {
-      content[question.id] = answers[0] ?? '';
     }
+    if (question.allowsMultiple) content[question.id] = selected;
+    else if (selected.length) content[question.id] = selected[0];
   }
   return { action: 'accept', content };
 }

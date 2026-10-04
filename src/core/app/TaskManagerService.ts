@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { readTaskUserContext } from '../prompt/TaskUserContext';
 import { validateDesignPreviewTarget, type InspectDesignRepositoryRequest, type UpdateDesignPreviewTargetRequest } from '../../shared/design';
 import {
   resolveAgentProfile,
@@ -2850,7 +2851,10 @@ export class TaskManagerService {
     if (worktree.ownership === 'EXTERNAL' && !readOnlyMode && !input.instruction?.trim()) {
       throw new Error('Enter an instruction before starting coding work in this checkout.');
     }
-    const prompt = buildInitialRunPrompt({ task, worktree, settings, readOnlyMode, instruction: input.instruction });
+    const prompt = buildInitialRunPrompt({
+      task, worktree, settings, readOnlyMode, instruction: input.instruction,
+      userContext: await readTaskUserContext(this.store, task.id)
+    });
     assertCompleteRunPrompt(prompt);
 
     return this.agents.startTurn({
@@ -3207,6 +3211,7 @@ export class TaskManagerService {
     const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
     const settings = followUpSettings(task, run, input.settings, false);
     const prompt = buildContinuationPrompt({
+      userContext: await readTaskUserContext(this.store, task.id),
       task,
       worktree,
       run,
@@ -3271,6 +3276,7 @@ export class TaskManagerService {
     const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
     const settings = followUpSettings(task, run, input.settings, false);
     const prompt = buildRetryPrompt({
+      userContext: await readTaskUserContext(this.store, task.id),
       task,
       worktree,
       run,
@@ -3348,6 +3354,7 @@ export class TaskManagerService {
       sourceAttachments
     );
     const alternativePrompt = buildForkAlternativeTaskPrompt({
+      userContext: await readTaskUserContext(this.store, sourceTask.id, { throughRunId: input.sourceRun.id }),
       task: sourceTask,
       run: input.sourceRun,
       worktree: input.sourceWorktree,

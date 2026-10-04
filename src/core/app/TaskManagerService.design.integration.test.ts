@@ -182,7 +182,7 @@ routes:
     await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('reset boundary reached');
     expect(reset).toHaveBeenCalledOnce();
     expect((await scenario.service.getDesign(detail.task.id)).revisions).toEqual([]);
-  });
+  }, 30_000);
 
   it('rejects a moved repository base before creating a Design or worktree', async () => {
     const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });

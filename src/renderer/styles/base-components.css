@@ -1212,6 +1212,18 @@ details[open] > summary .tm-disclosure__chevron {
   white-space: nowrap;
 }
 
+.interaction-card--question { padding: 12px; border-radius: var(--r); }
+.interaction-card--question .interaction-card__header h3 { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: 500; }
+.interaction-card--question .interaction-form { gap: 20px; margin-top: 12px; }
+.interaction-card--question .interaction-actions { justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 10px; }
+.interaction-card--question .interaction-actions button { height: var(--h-toolbar); font-size: var(--t-help); }
+.interaction-answer { min-width: 0; padding: 14px; border-radius: var(--r); background: var(--well); font-size: var(--t-body); line-height: 1.5; overflow-wrap: anywhere; }
+.interaction-answer dl { display: grid; gap: 14px; margin: 0; }
+.interaction-answer dl > div + div { padding-top: 14px; border-top: 1px solid var(--hair); }
+.interaction-answer dt { color: var(--muted); }
+.interaction-answer dd { margin: 5px 0 0; color: var(--text); white-space: pre-wrap; }
+.interaction-answer__status { margin: 10px 0 0; color: var(--muted); font-size: var(--t-label); }
+
 .interaction-card__warning {
   display: flex;
   align-items: flex-start;
@@ -1410,97 +1422,72 @@ details[open] > summary .tm-disclosure__chevron {
   border: 0;
 }
 
-.interaction-question legend {
-  padding: 0;
-  font-size: 12px;
+.interaction-question legend,
+.interaction-question > span {
+  padding: 0 0 6px;
+  color: var(--text);
+  font-size: var(--t-label);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
   font-weight: 600;
 }
 
 .interaction-question__prompt {
-  margin: 4px 0 9px;
+  margin: 0 0 6px;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--t-help);
+  line-height: 1.5;
 }
 
-.interaction-choice-list {
-  display: grid;
-  gap: 7px;
-}
-
+.interaction-choice-list { display: grid; gap: 4px; }
 .interaction-choice {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 9px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--field);
-  color: var(--text-soft);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.interaction-choice > input,
-.interaction-choice > label > input {
-  flex: 0 0 auto;
-  margin: 2px 0 0;
-  accent-color: var(--accent);
-}
-
-.interaction-choice > span {
-  display: grid;
-  gap: 2px;
-}
-
-.interaction-choice strong {
+  min-height: var(--h-toolbar);
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
   color: var(--text);
-  font-weight: 600;
-}
-
-.interaction-choice small {
-  line-height: 1.35;
-}
-
-.interaction-choice--other {
-  display: grid;
-  cursor: default;
-}
-
-.interaction-choice--other > label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  font-size: var(--t-body);
+  line-height: 1.5;
   cursor: pointer;
 }
-
-.interaction-choice--other > input {
+.interaction-choice > span { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.interaction-choice strong { font-weight: 400; }
+.interaction-choice small { color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
+.interaction-choice__check { flex: 0 0 16px; margin-top: 2px; visibility: hidden; }
+.interaction-choice:has(input:checked) { background: var(--sel); }
+.interaction-choice:has(input:checked) .interaction-choice__check { visibility: visible; }
+.interaction-choice:has(input:not(:disabled)):hover { background: var(--hover); }
+.interaction-choice:has(input:checked:not(:disabled)):hover { background: var(--sel); }
+.interaction-choice:has(input:focus-visible) { outline: 0; box-shadow: 0 0 0 3px var(--focus-ring); }
+.interaction-choice:has(input:disabled) { color: var(--text-disabled); cursor: default; }
+.interaction-choice:has(input:disabled) small { color: var(--text-disabled); }
+.interaction-choice-custom { display: grid; gap: 6px; }
+.interaction-question textarea.interaction-question__input {
+  display: block;
   width: 100%;
-  height: 34px;
-  padding: 0 10px;
+  min-height: var(--h-control);
+  max-height: 200px;
+  padding: 8px 10px;
+  resize: none;
+  field-sizing: content;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
+  font: var(--t-body)/1.5 var(--font-ui);
 }
-
-.interaction-choice:hover {
-  background: var(--field-hover);
-}
-
-.interaction-choice--other > input:focus {
-  outline: 0;
+.interaction-question textarea.interaction-question__input:focus {
   background: var(--field-focus);
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
-
-.app-shell[data-input-modality='keyboard'] .interaction-choice--other > input:focus {
-  outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+.app-shell[data-input-modality='keyboard'] .interaction-question textarea.interaction-question__input:focus {
+  box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring);
 }
+.interaction-question textarea.interaction-question__input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
 
 .interaction-checkbox {
   display: flex;
@@ -1594,3 +1581,8 @@ details[open] > summary .tm-disclosure__chevron {
 .interaction-card__error { margin-top: 12px; }
 .interaction-card__error .form-error { margin: 0 0 4px; }
 .interaction-card__error pre, .interaction-technical > pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-meta); }
+
+.tm-composer.tm-composer--paused { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.tm-composer.tm-composer--paused textarea { min-height: calc(var(--h-toolbar) + 12px); height: calc(var(--h-toolbar) + 12px); max-height: calc(var(--h-toolbar) + 12px); padding: 10px 12px; overflow: hidden; resize: none; color: var(--text-disabled); }
+.tm-composer--paused .tm-composer__toolbar { border-top: 0; padding: 6px; }
+.tm-composer--paused > :not(textarea):not(.tm-composer__toolbar):not(label) { grid-column: 1 / -1; }

@@ -1,3 +1,4 @@
+import { readTaskUserContext } from '../prompt/TaskUserContext';
 import type {
   AgentExecutionSettings,
   DesignDetailSnapshot,
@@ -554,7 +555,8 @@ export class DesignUpdateCoordinator {
         this.emitUpdated(designId, { reason: 'setup-required' });
         return;
       }
-      const prompt = promptForTurn(detail, turn, context, before.headSha);
+      const userContext = await readTaskUserContext(this.options.store, designId, { beforeDesignTurnOrder: turn.order });
+      const prompt = promptForTurn(detail, turn, context, before.headSha, userContext);
       run = await this.options.agents.startTurn({
         task: context.task,
         iteration: context.iteration,
@@ -1216,7 +1218,8 @@ function promptForTurn(
   detail: DesignDetailSnapshot,
   turn: DesignTurn,
   context: PreviewTaskContext,
-  currentCommitSha: string
+  currentCommitSha: string,
+  userContext: string
 ): string {
   const referenceContext = turn.referenceIds.map((referenceId) => {
     const reference = detail.references.find(
@@ -1239,6 +1242,7 @@ function promptForTurn(
       task: context.task,
       worktree: context.worktree,
       initialCommitSha: currentCommitSha,
+      userContext,
       referenceContext
     });
   }
@@ -1250,13 +1254,13 @@ function promptForTurn(
     worktree: context.worktree,
     message: entry.userMessage,
     latestReadyCommitSha,
+    userContext,
     referenceContext,
     recentConversation: detail.conversation
       .filter((candidate) => candidate.turn.order < turn.order)
       .slice(-6)
       .map((candidate) =>
         [
-          `User: ${candidate.userMessage}`,
           candidate.assistantMessage
             ? `Design agent: ${candidate.assistantMessage}`
             : undefined,

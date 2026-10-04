@@ -255,6 +255,45 @@ describe('DesignUpdateCoordinator', () => {
     });
   });
 
+  it('retains product answers beyond recent Design conversation and excludes future queued requests', async () => {
+    const harness = await createHarness();
+    harness.coordinator.open();
+    await harness.coordinator.dispatch(harness.designId);
+    const run = requireCurrentRun(await harness.store.getDesignDetail(harness.designId));
+    const runtime = harness.scriptedRuntime;
+    const server = await runtime.runtimeStore.createAgentServer({ runtimeId: run.runtimeId, runtimeKind: 'APP_SERVER', transport: 'STDIO', executable: 'scenario', argv: [] });
+    await runtime.transitionRun(run.id, { status: 'RUNNING', serverInstanceId: server.id }, 'design-answer-running');
+    await runtime.taskRuntime.updateAgentSession(run.sessionId, { status: 'ACTIVE' }, 'design-answer-session');
+    const raw = await runtime.runtimeStore.appendProtocolMessage(server.id, 'INBOUND', '{"id":1}');
+    const question = await runtime.taskRuntime.createInteractionRequest({
+      runtimeId: run.runtimeId, serverInstanceId: server.id, providerRequestId: 1,
+      taskId: run.taskId, iterationId: run.iterationId, runId: run.id, sessionId: run.sessionId,
+      type: 'USER_INPUT', request: { questions: [{ id: 'audience', header: 'Audience', question: 'Who uses this?', isOther: true, isSecret: false }] },
+      allowedActions: ['ANSWER'], policyWarnings: [], requestRawMessage: raw
+    }, 'design-audience-question');
+    await runtime.taskRuntime.transitionInteractionRequest(question.id, 'PENDING', {
+      status: 'RESPONDING', respondedAt: new Date().toISOString(),
+      decision: { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { audience: ['Staff inventory, never a storefront.'] } }
+    }, 'design-audience-answer');
+    await runtime.taskRuntime.transitionInteractionRequest(question.id, 'RESPONDING', { status: 'RESOLVED' }, 'design-audience-confirmed');
+    await runtime.transitionRun(run.id, { status: 'RUNNING' }, 'design-answer-resumed');
+    await settleCurrentTurnReady(harness, 'c'.repeat(40));
+    for (let index = 0; index < 7; index += 1) {
+      await harness.store.createInlineDesignTurn({ designId: harness.designId, clientMessageId: randomUUID(), message: index === 0 ? 'Use German labels and preserve keyboard access.' : `Refine section ${index}.`, referenceIds: [] });
+      await settleCurrentTurnReady(harness, (index % 2 ? 'c' : 'd').repeat(40));
+    }
+    await harness.store.createInlineDesignTurn({ designId: harness.designId, clientMessageId: randomUUID(), message: 'Improve the empty state.', referenceIds: [] });
+    await harness.store.createInlineDesignTurn({ designId: harness.designId, clientMessageId: randomUUID(), message: 'FUTURE: add delivery tracking.', referenceIds: [] });
+    await harness.coordinator.dispatch(harness.designId);
+    const prompt = harness.startTurn.mock.calls.at(-1)![0].prompt;
+    expect(prompt).toContain('Staff inventory, never a storefront.');
+    expect(prompt).toContain('Use German labels and preserve keyboard access.');
+    expect(prompt).toContain('Improve the empty state.');
+    expect(prompt).not.toContain('FUTURE:');
+    const firstEntry = (await harness.store.listDesignConversation({ designId: harness.designId })).entries[0];
+    expect(firstEntry.userInputInteractions).toEqual([expect.objectContaining({ id: question.id, decision: { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { audience: ['Staff inventory, never a storefront.'] } } })]);
+  });
+
   it('retries transient browser cleanup before settling a completed turn', async () => {
     const harness = await createHarness();
     const run = await startAndCompleteCurrentTurn(harness);

@@ -551,7 +551,10 @@ run/session leave `AWAITING_USER_INPUT` only when no sibling interaction for
 the same server ownership remains. Turn completion and interruption retain
 their normal terminal authority.
 
-Ordinary assistant prose is never parsed into an actionable question.
+Interactive threads disable `features.send_message_to_user_async` and request
+synchronous `request_user_input`. Asynchronous question messages do not expose
+the native request/response acknowledgement contract used by this UI. Ordinary
+assistant prose is never parsed into an actionable question.
 
 ## Recovery rules
 

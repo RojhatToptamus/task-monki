@@ -291,16 +291,14 @@ export function designTurnView(entry: DesignConversationEntry): DesignTurnView {
       entry.runStatus
     )
   ) {
+    const waiting = entry.runStatus === 'AWAITING_APPROVAL' || entry.runStatus === 'AWAITING_USER_INPUT';
+    const confirming = entry.runStatus === 'AWAITING_USER_INPUT' &&
+      entry.userInputInteractions?.some((interaction) => interaction.status === 'RESPONDING') &&
+      !entry.userInputInteractions.some((interaction) => interaction.status === 'PENDING');
     return {
       status: 'RUNNING',
-      statusLabel:
-        entry.runStatus === 'AWAITING_APPROVAL' || entry.runStatus === 'AWAITING_USER_INPUT'
-          ? 'Waiting for you'
-          : 'Working',
-      tone:
-        entry.runStatus === 'AWAITING_APPROVAL' || entry.runStatus === 'AWAITING_USER_INPUT'
-          ? 'waiting'
-          : 'working'
+      statusLabel: confirming ? 'Waiting for confirmation' : waiting ? 'Waiting for you' : 'Working',
+      tone: waiting ? 'waiting' : 'working'
     };
   }
   if (entry.runStatus === 'INTERRUPTING' || entry.runStatus === 'INTERRUPTED') {
@@ -474,9 +472,15 @@ export function designDetailedActivityRows(
   project: DesignProjectDetail
 ): OverviewActivityRow[] {
   if (!project.currentRun) return [];
+  const questionItemIds = new Set([
+    ...project.interactions,
+    ...project.conversation.flatMap((entry) => entry.userInputInteractions ?? [])
+  ].filter((interaction) => interaction.type === 'USER_INPUT' && interaction.runId === project.currentRun?.id)
+    .flatMap((interaction) => interaction.providerItemId ? [interaction.providerItemId] : []));
   const projection = buildRunActivityProjection({
     run: project.currentRun,
-    items: project.items.filter((item) => item.runId === project.currentRun?.id && item.type !== 'AGENT_MESSAGE'),
+    items: project.items.filter((item) => item.runId === project.currentRun?.id && item.type !== 'AGENT_MESSAGE' &&
+      !questionItemIds.has(item.providerItemId)),
     cwd: project.currentWorktree?.worktreePath
   });
   return buildOverviewRunActivityRows(projection.rows);

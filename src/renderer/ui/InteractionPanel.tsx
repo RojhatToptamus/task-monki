@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check } from 'lucide-react';
 import type {
   AgentCommandApprovalRequest,
   AgentFileChangeApprovalRequest,
@@ -14,6 +15,7 @@ import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
+import { UserInputSummary } from './UserInputSummary';
 
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
@@ -51,15 +53,16 @@ export function InteractionPanel({
   }
 
   const commandApproval = active.type === 'COMMAND_APPROVAL';
+  const userInput = active.type === 'USER_INPUT';
 
   return (
     <section
-      className={`interaction-card ${commandApproval ? 'interaction-card--command' : ''}`}
+      className={`interaction-card ${commandApproval ? 'interaction-card--command' : userInput ? 'interaction-card--question' : ''}`}
       id="action-required"
-      aria-live="polite"
+      aria-live={userInput ? undefined : 'polite'}
     >
       <header className="interaction-card__header">
-        {commandApproval ? (
+        {userInput ? <h3>Question{(active.request as AgentUserInputRequest).questions.length > 1 ? 's' : ''}</h3> : commandApproval ? (
           <h3>
             <StatusGlyph kind="waiting" />
             {interactionTitle(active)}
@@ -73,7 +76,7 @@ export function InteractionPanel({
             <h3>{interactionTitle(active)}</h3>
           </div>
         )}
-        {commandApproval ? (
+        {userInput ? null : commandApproval ? (
           activeCount > 1 ? (
             <span className="interaction-card__waiting">{activeCount} pending</span>
           ) : null
@@ -129,7 +132,7 @@ function InteractionBody({
 
   return (
     <>
-      {interaction.type === 'COMMAND_APPROVAL'
+      {interaction.type === 'COMMAND_APPROVAL' || (interaction.type === 'USER_INPUT' && hasAction(interaction, 'ANSWER'))
         ? null
         : interaction.policyWarnings.map((warning) => (
             <p className="interaction-card__warning" key={warning}>
@@ -163,26 +166,28 @@ function InteractionBody({
           onRespond={respond}
         />
       ) : interaction.type === 'USER_INPUT' ? (
+        interaction.status === 'RESPONDING' && interaction.decision ? <UserInputSummary interaction={interaction} /> :
         <UserInputRequest
           interaction={interaction}
           disabled={disabled}
           formValues={formValues}
           setFormValues={setFormValues}
           offerAgentDecision={offerAgentDecision}
+          submitting={submitting}
           onRespond={respond}
         />
       ) : (
         <p className="muted">This dynamic client tool was rejected automatically.</p>
       )}
-      {interaction.type === 'COMMAND_APPROVAL' ? null : (
+      {interaction.type === 'COMMAND_APPROVAL' || interaction.type === 'USER_INPUT' ? null : (
         <InteractionTechnicalDetails
           interaction={interaction}
           sourceSession={sourceSession}
         />
       )}
-      {interaction.status === 'RESPONDING' ? (
+      {interaction.status === 'RESPONDING' && interaction.type !== 'USER_INPUT' ? (
         <p className="muted">
-          {interaction.type === 'USER_INPUT' ? 'Answer' : 'Decision'} sent. Waiting for provider
+          Decision sent. Waiting for provider
           confirmation…
         </p>
       ) : null}
@@ -653,23 +658,23 @@ function UserInputRequest({
   formValues,
   setFormValues,
   offerAgentDecision,
+  submitting,
   onRespond
-}: InteractionSectionProps & FormStateProps & { offerAgentDecision: boolean }) {
+}: InteractionSectionProps & FormStateProps & { offerAgentDecision: boolean; submitting: boolean }) {
   const request = interaction.request as AgentUserInputRequest;
   const answers = Object.fromEntries(
     request.questions.map((question) => [
       question.id,
-      userInputAnswers(question, formValues[question.id])
+      userInputAnswers(question, formValues[question.id]).filter((answer) => answer.trim())
     ])
   );
   const canSubmit = Object.values(answers).every(
     (values) => values.length > 0 && values.every((value) => value.trim())
   );
-  const canDelegate =
-    offerAgentDecision &&
-    request.questions.every(
-      (question) => question.isOther && Boolean(question.options?.length)
-    );
+  const unanswered = request.questions.filter((question) => !answers[question.id]?.some((answer) => answer.trim()));
+  const canDelegate = offerAgentDecision && unanswered.length > 0 && unanswered.every(
+    (question) => question.isOther && Boolean(question.options?.length)
+  );
   return (
     <>
       <div className="interaction-form">
@@ -690,20 +695,10 @@ function UserInputRequest({
       </div>
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
-          <ActionButton
-            label="Submit answers"
-            disabled={disabled || !canSubmit}
-            onClick={() =>
-              onRespond({
-                interactionType: 'USER_INPUT',
-                action: 'ANSWER',
-                answers
-              })
-            }
-          />
           {canDelegate ? (
             <ActionButton
-              label="Decide for me"
+              label={unanswered.length < request.questions.length ? 'Decide the rest' : 'Decide for me'}
+              busy={submitting}
               variant="secondary"
               disabled={disabled}
               onClick={() =>
@@ -713,13 +708,25 @@ function UserInputRequest({
                   answers: Object.fromEntries(
                     request.questions.map((question) => [
                       question.id,
-                      ['Decide for me']
+                      unanswered.includes(question) ? ['Decide for me'] : answers[question.id]
                     ])
                   )
                 })
               }
             />
           ) : null}
+          <ActionButton
+            label={submitting ? 'Sending…' : 'Submit answers'}
+            busy={submitting}
+            disabled={disabled || !canSubmit}
+            onClick={() =>
+              onRespond({
+                interactionType: 'USER_INPUT',
+                action: 'ANSWER',
+                answers
+              })
+            }
+          />
         </div>
       ) : null}
     </>
@@ -739,10 +746,11 @@ function UserInputQuestion({
 }) {
   if (!question.options?.length) {
     return (
-      <label className="field">
-        <span>{question.header}</span>
-        <small>{question.question}</small>
-        <input
+      <label className="field interaction-question">
+        <span>{question.question}</span>
+        <textarea
+          className="interaction-question__input"
+          rows={1}
           disabled={disabled}
           value={typeof value === 'string' ? value : ''}
           onChange={(event) => onChange(event.target.value)}
@@ -777,12 +785,13 @@ function UserInputQuestion({
 
   return (
     <fieldset className="interaction-question">
-      <legend>{question.header}</legend>
-      <p className="interaction-question__prompt">{question.question}</p>
+      <legend>{question.question}</legend>
+      {question.allowsMultiple ? <p className="interaction-question__prompt">Choose all that apply.</p> : null}
       <div className="interaction-choice-list">
         {question.options.map((option, index) => (
           <label className="interaction-choice" key={`${index}:${option.label}`}>
             <input
+              className="tm-visually-hidden"
               type={inputType}
               name={question.id}
               disabled={disabled}
@@ -793,34 +802,32 @@ function UserInputQuestion({
               <strong>{option.label}</strong>
               {option.description ? <small>{option.description}</small> : null}
             </span>
+            <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
           </label>
         ))}
         {question.isOther ? (
-          <div className="interaction-choice interaction-choice--other">
-            <label>
+          <div className="interaction-choice-custom">
+            <label className="interaction-choice">
               <input
+                className="tm-visually-hidden"
                 type={inputType}
                 name={question.id}
                 disabled={disabled}
                 checked={choice.customSelected}
                 onChange={(event) => chooseCustom(event.target.checked)}
               />
-              <strong>Other</strong>
+              <span><strong>Other…</strong></span>
+              <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
             </label>
-            <input
+            {choice.customSelected ? <textarea
+              className="interaction-question__input"
+              rows={1}
+              placeholder="Your answer…"
               aria-label={`${question.header} other answer`}
               disabled={disabled}
               value={choice.custom}
-              onFocus={() => chooseCustom(true)}
-              onChange={(event) =>
-                onChange({
-                  ...choice,
-                  selected: question.allowsMultiple ? choice.selected : [],
-                  customSelected: true,
-                  custom: event.target.value
-                })
-              }
-            />
+              onChange={(event) => onChange({ ...choice, custom: event.target.value })}
+            /> : null}
           </div>
         ) : null}
       </div>
@@ -1044,19 +1051,23 @@ function ActionButton({
   label,
   variant = 'primary',
   disabled,
+  busy = false,
   onClick
 }: {
   label: string;
   variant?: 'primary' | 'secondary';
   disabled: boolean;
+  busy?: boolean;
   onClick(): Promise<void>;
 }) {
   return (
     <button
       type="button"
       className={variant === 'primary' ? 'primary-button' : 'outline-button'}
-      disabled={disabled}
-      onClick={() => void onClick()}
+      disabled={disabled && !busy}
+      aria-disabled={disabled || undefined}
+      aria-busy={busy || undefined}
+      onClick={() => { if (!disabled) void onClick(); }}
     >
       {label}
     </button>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { UserInputSummary } from './UserInputSummary';
 import type {
   AgentModel,
   AgentInteractionDecision,
@@ -120,12 +121,15 @@ export function DesignConversation({
   const suppressDraftSaveRef = useRef(false);
   const saveDraftRef = useRef(onSaveDraft);
   saveDraftRef.current = onSaveDraft;
+  const questionPending = project.interactions.some((item) => item.type === 'USER_INPUT' && ['PENDING', 'RESPONDING'].includes(item.status));
+  const questionPrompt = project.interactions.some((item) => item.type === 'USER_INPUT' && item.status === 'PENDING')
+    ? 'Answer above to continue' : 'Waiting for confirmation…';
   const canRefine = project.actions.canRefine && !refineUnavailableReason;
   const failedCopy = project.repository.kind === 'DESIGN_MANAGED' && project.origin &&
     project.revisions.length === 0 && project.design.status === 'NEEDS_ATTENTION';
   const attachments = useTaskAttachments({
     enabled: true,
-    blocked: submitting || submissionOutcomeUnknown || !canRefine,
+    blocked: submitting || submissionOutcomeUnknown || !canRefine || questionPending,
     model,
     onStageBatch: onStageAttachmentBatch,
     onDiscard: onDiscardAttachmentDraft,
@@ -148,12 +152,13 @@ export function DesignConversation({
   });
   const canSubmit =
     canRefine &&
+    !questionPending &&
     message.trim().length > 0 &&
     !submitting &&
     !attachments.busy &&
     !attachments.hasErrors &&
     !attachments.modelError;
-  const disabledReason = refineUnavailableReason ??
+  const disabledReason = questionPending ? questionPrompt : refineUnavailableReason ??
     (project.actions.canRefine ? undefined : project.actions.refineDisabledReason);
   const activeWork = Boolean(
     project.currentRun &&
@@ -243,7 +248,7 @@ export function DesignConversation({
 
   const submit = async () => {
     const nextMessage = message.trim();
-    if (!nextMessage || !canRefine || submittingRef.current) return;
+    if (!nextMessage || !canRefine || questionPending || submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -414,7 +419,10 @@ export function DesignConversation({
           interactions={[...project.interactions]}
           sessions={[...project.sessions]}
           offerAgentDecision
-          onRespond={onRespond}
+          onRespond={async (interaction, decision) => {
+            await onRespond(interaction, decision);
+            if (interaction.type === 'USER_INPUT') composerRef.current?.focus();
+          }}
         />
       </div>
       </Conversation>
@@ -428,6 +436,7 @@ export function DesignConversation({
       >
         <AttachmentComposerShell
           attachments={attachments}
+          compact={questionPending}
           onPreviewOpenChange={onPreviewOpenChange}
           attachmentLabel="Files for this Design message"
           className="tm-design-composer__shell"
@@ -456,12 +465,12 @@ export function DesignConversation({
                   {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               ) : null}
-              <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
+              {!questionPending ? <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
                 aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
                 title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
                 {submitting ? <StatusGlyph kind="working" /> : submissionOutcomeUnknown ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
                   : activeWork ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
-              </button>
+              </button> : null}
             </>
           }
           hint={<span id="design-refinement-help">{
@@ -494,7 +503,9 @@ export function DesignConversation({
             id="design-refinement-message"
             value={message}
             rows={3}
-            placeholder={activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
+            readOnly={questionPending}
+            aria-disabled={questionPending || undefined}
+            placeholder={questionPending ? questionPrompt : activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
             disabled={
               !canRefine ||
               submitting ||
@@ -580,6 +591,8 @@ function DesignTurnMessages({
         </MessageMeta>
       </Message>
 
+      {entry.userInputInteractions?.filter((interaction) => !['PENDING', 'RESPONDING'].includes(interaction.status))
+        .map((interaction) => <UserInputSummary key={interaction.id} interaction={interaction} />)}
       <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>

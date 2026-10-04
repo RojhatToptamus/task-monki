@@ -31,14 +31,17 @@ Use this workflow for each turn:
 6. For changed source, open the exact candidate with inspect_design and run the relevant rendered checks.
 7. Fix applicable problems, open and verify a fresh candidate, then report the result and known limits briefly.
 
-Start a clear first brief without setup questions when you can infer a useful direction.
-Use the available context and your design judgment. Do not ask the user to make a reasonable design decision that you can make yourself.
-Ask one combined question round only when the answer is necessary to avoid a materially wrong audience, scope, product meaning, or main direction.
-Use the provider's structured question tool for that round. Never ask a blocking question as ordinary transcript text. If no structured question tool is available, make a reasonable decision and continue.
-When choices help, provide two to four clear options with short descriptions. Task Monki supplies custom input and a Decide for me action; do not add those as options.
-After the answer, continue the same turn.
-Do not ask about minor colors, spacing, labels, copy details, or other safe choices.
-Do not repeat discovery after the user gives a clear direction.
+Start a detailed brief or focused refinement without a discovery ceremony. Inspect first and infer repository facts rather than asking for them.
+Ask only for material unresolved product intent: audience, main job, scope, or a direction where plausible interpretations would produce different products.
+When a vague request could serve different audiences or main jobs, establish the product purpose before building.
+Group independent questions that are relevant now. Ask a dependent question only after an earlier answer makes it relevant, and only if the answer still materially changes the result.
+Use the provider's structured question tool and continue the same turn after the answer. Never emulate a blocking form in ordinary transcript text.
+If no structured question tool is available, proceed with a safe reversible assumption and state it briefly. If a material product decision cannot safely be inferred, report that blocker for a user follow-up instead of building an arbitrary product.
+When choices help, provide two to four clear options with short descriptions. Allow custom input when supported. Task Monki supplies custom input and a Decide for me action; do not add those as options.
+Treat "Decide for me" as permission to choose only that unresolved safe product or design choice. Preserve the user's other answers and all existing constraints. It does not authorize external side effects or expand scope.
+Do not ask about minor colors, spacing, labels, copy details, or equivalent safe choices. Make those decisions and get to a useful preview.
+Do not repeat answered questions or run discovery again after the user gives a clear direction.
+A later explicit correction replaces only the earlier decision it conflicts with. Preserve unrelated earlier requirements and use the answers in the actual implementation.
 
 For a small refinement, preserve the current aesthetic direction and unrelated work.
 Change only the requested area and run only the checks that apply to that change.
@@ -185,6 +188,16 @@ export const TASK_MONKI_ENGINEERING_QUALITY_CONTRACT = `Task Monki engineering q
 - Do not claim tests, builds, checks, commits, pushes, reviews, or delivery succeeded unless you actually performed or observed them.
 - Unless the goal requires an exact response, summarize what changed, why it fixes the underlying issue, and what was verified.`;
 
+const TASK_MONKI_CLARIFICATION_POLICY = `Clarification policy:
+- Start a clear, small task directly. A plan or questionnaire is not a prerequisite.
+- Before asking, inspect the request, earlier user answers, repository instructions, relevant code and tests proportionately. Infer repository facts, stack, conventions, and build commands from that evidence.
+- Ask only when an unresolved answer materially changes scope, expected behavior, acceptance, or a costly or irreversible action. Do not ask the user to choose equivalent implementation details or confirm a requirement they already gave.
+- Ask the smallest useful set of currently relevant questions through the provider's structured question tool, then continue the same turn. Group independent questions; defer dependent questions until an earlier answer makes them relevant. Do not use a fixed question count or discovery ceremony.
+- If the native question tool is unavailable, state a material blocker for a user follow-up. For a safe reversible choice, make a reasonable assumption, mention it briefly only when it affects the result, and proceed.
+- Apply answers to execution. Delegation covers only unresolved safe choices within the requested scope, never approval for external side effects.`;
+
+const USER_DECISION_CONTEXT_RULE = 'Apply user instructions and answers to the original goal. A later explicit correction supersedes only the earlier decision it conflicts with; preserve all unrelated requirements. Provider summaries and inferred assumptions do not override user decisions. Unconfirmed prior delivery is not proof of execution: use the retained intent for this attempt without resending an old interaction response.';
+
 const RUN_CONTEXT_EXCERPT_LIMIT = 900;
 
 export function buildInitialRunPrompt(input: {
@@ -193,6 +206,7 @@ export function buildInitialRunPrompt(input: {
   settings: AgentExecutionSettings;
   readOnlyMode: boolean;
   instruction?: string;
+  userContext?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
@@ -213,9 +227,12 @@ export function buildInitialRunPrompt(input: {
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
+    TASK_MONKI_CLARIFICATION_POLICY,
     '',
     buildAgentProfileGuidance(input.task.agentProfile),
     '',
+    USER_DECISION_CONTEXT_RULE,
+    input.userContext ?? '',
     input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
       ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
       : `Authoritative Task Monki goal:\n${input.task.prompt}`
@@ -227,6 +244,7 @@ export function buildInitialDesignPrompt(input: {
   worktree: WorktreeRecord;
   initialCommitSha: string;
   referenceContext?: readonly string[];
+  userContext?: string;
 }): string {
   return buildDesignPrompt({
     task: input.task,
@@ -234,6 +252,7 @@ export function buildInitialDesignPrompt(input: {
     currentRequest: input.task.prompt,
     latestReadyCommitSha: input.initialCommitSha,
     referenceContext: input.referenceContext,
+    userContext: input.userContext,
     requestLabel: 'Initial design brief'
   });
 }
@@ -246,6 +265,7 @@ export function buildDesignTurnPrompt(input: {
   recentConversation?: readonly string[];
   readyStateContext?: readonly string[];
   referenceContext?: readonly string[];
+  userContext?: string;
 }): string {
   return buildDesignPrompt({
     task: input.task,
@@ -255,6 +275,7 @@ export function buildDesignTurnPrompt(input: {
     recentConversation: input.recentConversation,
     readyStateContext: input.readyStateContext,
     referenceContext: input.referenceContext,
+    userContext: input.userContext,
     requestLabel: 'Current refinement request'
   });
 }
@@ -267,6 +288,7 @@ function buildDesignPrompt(input: {
   recentConversation?: readonly string[];
   readyStateContext?: readonly string[];
   referenceContext?: readonly string[];
+  userContext?: string;
   requestLabel: string;
 }): string {
   const recentConversation = input.recentConversation
@@ -295,6 +317,8 @@ function buildDesignPrompt(input: {
     buildAgentProfileGuidance(input.task.agentProfile),
     '',
     `Original design brief:\n${input.task.prompt}`,
+    USER_DECISION_CONTEXT_RULE,
+    input.userContext,
     '',
     `Latest ready source commit: ${input.latestReadyCommitSha}`,
     referenceContext?.length ? '' : undefined,
@@ -327,6 +351,7 @@ export function buildContinuationPrompt(input: {
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
   previousPrompt?: string;
+  userContext?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -345,6 +370,7 @@ export function buildRetryPrompt(input: {
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
   previousPrompt?: string;
+  userContext?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -366,6 +392,7 @@ function buildExistingWorktreePrompt(
     gitSnapshot: GitSnapshotRecord;
     instruction?: string;
     previousPrompt?: string;
+    userContext?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -395,10 +422,13 @@ function buildExistingWorktreePrompt(
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
+    TASK_MONKI_CLARIFICATION_POLICY,
     '',
     buildAgentProfileGuidance(input.task.agentProfile),
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    USER_DECISION_CONTEXT_RULE,
+    input.userContext,
     input.previousPrompt ? `Previous requested work (historical context; use the current checkout and execution boundary above):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
@@ -413,6 +443,7 @@ export function buildForkAlternativeTaskPrompt(input: {
   worktree: WorktreeRecord;
   instruction?: string;
   previousPrompt?: string;
+  userContext?: string;
 }): string {
   const instruction = input.instruction?.trim();
   return [
@@ -426,6 +457,8 @@ export function buildForkAlternativeTaskPrompt(input: {
     'Do not assume files changed by the source attempt are present.',
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    USER_DECISION_CONTEXT_RULE,
+    input.userContext,
     input.previousPrompt ? `Previous requested work (historical context; use this new isolated worktree):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
     instruction ? `Alternative direction:\n${instruction}` : undefined
@@ -444,6 +477,7 @@ export function buildSteerInstruction(input: {
     instruction,
     '',
     'Preserve the authoritative task goal, current checkout boundary, and existing Task Monki constraints.',
+    USER_DECISION_CONTEXT_RULE,
     input.worktreePath ? `Current task worktree: ${input.worktreePath}` : undefined,
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.'
   ]
@@ -455,6 +489,7 @@ export function buildAgentReviewPrompt(input: {
   task: Task;
   worktree: WorktreeRecord;
   target: import('./agent').AgentReviewTarget;
+  userContext?: string;
 }): string {
   const target = (() => {
     switch (input.target.type) {
@@ -472,6 +507,8 @@ export function buildAgentReviewPrompt(input: {
     AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
     '',
     `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    USER_DECISION_CONTEXT_RULE,
+    input.userContext,
     '',
     target,
     `Repository root: ${input.worktree.worktreePath}`,

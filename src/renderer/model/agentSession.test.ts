@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TaskInstruction } from '../../shared/contracts';
+import type { TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
 import { conversationPreview, earlierHistory, sessionEntries, sessionTurn, stepsSummary, type SessionEntry, type SessionTurn } from './agentSession';
 
@@ -17,6 +17,27 @@ describe('agent session history', () => {
       makeAgentItemRecord({ type: 'USER_MESSAGE', payload: { text: 'Generated execution wrapper' } }),
       makeAgentItemRecord({ id: 'answer', type: 'AGENT_MESSAGE', payload: { text: 'Work complete.' } })
     ], []))).toBe('Work complete.');
+  });
+
+  it('shows an answered interaction once, hides its linked provider echo, and keeps unrelated narrative', () => {
+    const run = makeRunRecord({ status: 'COMPLETED' });
+    const question: InteractionRequestRecord = {
+      id: 'question', runtimeId: run.runtimeId, taskId: run.taskId, iterationId: run.iterationId, runId: run.id, sessionId: run.sessionId,
+      serverInstanceId: 'server', providerRequestId: 1, providerItemId: 'question-tool', type: 'USER_INPUT', status: 'RESOLVED',
+      request: { questions: [{ id: 'scope', header: 'Scope', question: 'Which warehouse?', isOther: true, isSecret: false }] },
+      decision: { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { scope: ['Vienna'] } },
+      allowedActions: ['ANSWER'], policyWarnings: [], requestedAt: run.startedAt, respondedAt: run.startedAt,
+      requestRawMessage: { serverInstanceId: 'server', sequence: 1, direction: 'INBOUND', recordedAt: run.startedAt, byteOffset: 0, byteLength: 1, sha256: 'hash' }
+    };
+    const entries = sessionEntries(run, [
+      makeAgentItemRecord({ providerItemId: 'question-tool', type: 'DYNAMIC_TOOL_CALL', payload: { tool: 'request_user_input' } }),
+      makeAgentItemRecord({ id: 'echo', providerItemId: 'echo', type: 'USER_MESSAGE', payload: { text: 'Vienna' } }),
+      makeAgentItemRecord({ id: 'narrative', providerItemId: 'narrative', type: 'AGENT_MESSAGE', payload: { text: 'Vienna has no matching stock yet.' } })
+    ], [], undefined, [], [question]);
+    expect(entries.map((entry) => entry.kind)).toEqual(['interaction', 'message']);
+    expect(entries[1]).toMatchObject({ text: 'Vienna has no matching stock yet.' });
+    expect(entries[0]).toMatchObject({ interaction: { decision: { answers: { scope: ['Vienna'] } } } });
+    expect(sessionEntries(run, [], [], undefined, [], [{ ...question, status: 'RESPONDING' }])).toEqual([]);
   });
 
   it('stops live activity after interruption while retaining the provider record unchanged', () => {

@@ -365,6 +365,7 @@ export interface DesignConversationEntry {
   turn: DesignTurn;
   userMessage: string;
   assistantMessage?: string;
+  userInputInteractions?: import('./agent').InteractionRequestRecord[];
   runStatus?: import('./agent').AgentRunStatus;
   readyRevision?: DesignRevision;
 }

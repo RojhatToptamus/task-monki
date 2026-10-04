@@ -861,8 +861,8 @@ async function waitAndInspect(
       if (!input.answerQuestions) {
         throw new Error(`${input.name} asked an unexpected setup question.`);
       }
-      if (answered.size > 0) {
-        throw new Error(`${input.name} asked more than one question round.`);
+      if (answered.size >= input.expectedQuestionRounds) {
+        throw new Error(`${input.name} exceeded its expected question rounds.`);
       }
       const questions = userInputQuestions(interaction);
       await service.respondToInteraction({

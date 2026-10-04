@@ -326,6 +326,12 @@ describe('Task Monki development seed data', () => {
             ]
           },
           {
+            id: 'seed_checks',
+            allowsMultiple: true,
+            isOther: true,
+            options: [{ label: 'Focused tests' }, { label: 'Desktop walkthrough' }]
+          },
+          {
             id: 'seed_detail'
           }
         ]
