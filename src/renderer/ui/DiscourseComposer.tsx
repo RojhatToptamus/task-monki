@@ -6,13 +6,14 @@ import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments, type TaskAttachmentController } from './useTaskAttachments';
 
 /** Mounted per conversation so pending file reads cannot cross composer scopes. */
-export function DiscourseComposer({ draftId, blocked, model, validateModel, onPersistDraft, children, actions }: {
+export function DiscourseComposer({ draftId, blocked, model, validateModel, onPersistDraft, children, mode, actions }: {
   draftId?: string;
   blocked: boolean;
   model?: AgentModel;
   validateModel: boolean;
   onPersistDraft(draftId: string | undefined): Promise<void>;
   children(files: TaskAttachmentController): ReactNode;
+  mode: ReactNode;
   actions(files: TaskAttachmentController): ReactNode;
 }) {
   const [restoringId] = useState(draftId);
@@ -43,7 +44,7 @@ export function DiscourseComposer({ draftId, blocked, model, validateModel, onPe
   });
   const error = loadError ?? files.draftError ?? files.modelError ?? files.overflowError;
   return <AttachmentComposerShell attachments={files} className="tm-discourse-composer"
-    attachmentLabel="Message files" addButtonTitle="Attach files" hint="" toolbarAction={actions(files)}>
+    attachmentLabel="Message files" addButtonTitle="Attach files" hint="" toolbarStart={mode} toolbarAction={actions(files)}>
     {children(files)}
     {error ? <p className="tm-error" role="alert">{error}</p> : null}
   </AttachmentComposerShell>;

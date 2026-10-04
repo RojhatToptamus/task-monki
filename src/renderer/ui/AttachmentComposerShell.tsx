@@ -13,6 +13,7 @@ export function AttachmentComposerShell({
   onAddButtonClick,
   onPreviewOpenChange,
   hint,
+  toolbarStart,
   toolbarAction,
   className = '',
   removeDisabled = false,
@@ -26,6 +27,7 @@ export function AttachmentComposerShell({
   onAddButtonClick?(): void;
   onPreviewOpenChange?(open: boolean): void;
   hint: ReactNode;
+  toolbarStart?: ReactNode;
   toolbarAction?: ReactNode;
   className?: string;
   removeDisabled?: boolean;
@@ -56,6 +58,7 @@ export function AttachmentComposerShell({
         </ul>
       ) : null}
       <div className="tm-composer__toolbar">
+        {toolbarStart}
         <input
           ref={attachments.inputRef}
           className="task-attachment-input"

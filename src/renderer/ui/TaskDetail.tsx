@@ -1244,11 +1244,11 @@ export function TaskDetail(props: TaskDetailProps) {
                     <span className="tm-agent-overview__state">{implementationRetryRequired ? 'Needs retry' : progressRun ? humanizeEnum(progressRun.status) : 'Not started'}<span aria-hidden="true">→</span></span>
                   </button>
                   {runFailure ? <p className="tm-agent-overview__failure">{runFailure.detail}</p> : null}
-                  {primaryAction ? <button type="button" className="outline-button"
+                  {primaryAction ? <div className="tm-panel__actions"><button type="button" className="outline-button"
                     disabled={primaryAction.disabled || reviewActionsPaused || props.repository?.status !== 'AVAILABLE'}
                     onClick={importedBeforeFirstRun ? primaryAction.onClick : () => setTab('agent')}>
                     {importedBeforeFirstRun ? primaryAction.label : worktree ? 'Set up agent' : 'Set up worktree'}
-                  </button> : null}
+                  </button></div> : null}
                   {progressRun ? <CompletedChangeSummaryPanel compact run={progressRun}
                     capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
                     onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}

@@ -85,7 +85,7 @@ export function AgentSession(props: AgentSessionProps) {
   const [editing, setEditing] = useState<{ id: string; text: string; attachmentIds: string[] }>();
   const currentError = editing || error?.runId === run?.id ? error?.text : undefined;
   const inFlight = useRef(false);
-  const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string; attachmentDraftId?: string } | undefined>(undefined);
+  const messageId = useRef<{ text: string; mode: SendMode; runId: string; id: string; attachmentDraftId?: string; attachmentClientIds: string[] } | undefined>(undefined);
   const attention = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const files = useTaskAttachments({ ...props.attachmentOptions, enabled: Boolean(run) && props.attachmentOptions.enabled,
@@ -97,7 +97,9 @@ export function AgentSession(props: AgentSessionProps) {
   const hasFiles = files.activeItems.length > 0;
 
   const turns = useSessionTurns(task.prompt, props.runs, props.items, props.instructions, props.plans, props.worktreePath);
-  const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).sort((a, b) => a.order - b.order);
+  const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)
+    || (item.status === 'FAILED' && item.mode !== 'STEER' && item.runId && !props.runs.some((turn) => turn.id === item.runId)))
+    .sort((a, b) => a.order - b.order);
   const attentionPending = props.interactions.some((item) => ['PENDING', 'RESPONDING'].includes(item.status));
   const activeReview = props.runs.find((item) => item.mode === 'REVIEW' && isActiveRunStatus(item.status));
   const displayedRun = activeReview ?? run;
@@ -137,7 +139,7 @@ export function AgentSession(props: AgentSessionProps) {
   const liveWorkVisible = lastLiveEntry?.kind === 'steps' && lastLiveEntry.steps.some((step) =>
     step.kind === 'reasoning' ? step.active : step.row.status === 'active');
   const unattached = props.instructions.filter((item) => item.mode !== 'STEER' && !props.runs.some((turn) => turn.id === item.runId)
-    && ['SENDING', 'FAILED', 'UNCERTAIN'].includes(item.status));
+    && (['SENDING', 'UNCERTAIN'].includes(item.status) || (item.status === 'FAILED' && !item.runId)));
   const position = useRef({ firstTurnKey: visibleTurns[0]?.key, clip: historyWindow.clip });
   position.current = { firstTurnKey: visibleTurns[0]?.key, clip: historyWindow.clip };
 
@@ -175,6 +177,21 @@ export function AgentSession(props: AgentSessionProps) {
     if (props.attentionRequested) focusAttention();
   }, [props.attentionRequested]);
 
+  // A failed response can arrive after the instruction has taken ownership of its files.
+  useEffect(() => {
+    const submitted = messageId.current;
+    if (busy || !submitted || submitted.mode === 'STEER') return;
+    const receipt = props.instructions.find((item) => item.id === submitted.id);
+    if (!receipt || receipt.attachmentDraftId !== submitted.attachmentDraftId) return;
+    messageId.current = undefined;
+    if (draft === submitted.text) props.onDraftChange('');
+    void files.finishAdoption({ draftId: submitted.attachmentDraftId, clientIds: submitted.attachmentClientIds })
+      .then(() => props.onFlushDraft())
+      .catch((caught) => {
+        if (!files.closedRef.current) setError({ runId: run?.id, text: caught instanceof Error ? caught.message : String(caught) });
+      });
+  }, [busy, props.instructions, draft, props.onDraftChange, props.onFlushDraft, files.finishAdoption, files.closedRef, run?.id]);
+
   async function act(action: () => Promise<void>, kind: 'submit' | 'other' = 'other') {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -192,7 +209,7 @@ export function AgentSession(props: AgentSessionProps) {
       await props.onFlushDraft();
       const attachmentDraftId = await files.flushDraft();
       if (messageId.current?.attachmentDraftId !== attachmentDraftId || messageId.current?.text !== text || messageId.current.mode !== selectedMode || messageId.current.runId !== sentRun) {
-        messageId.current = { text, mode: selectedMode, runId: sentRun, id: crypto.randomUUID(), attachmentDraftId };
+        messageId.current = { text, mode: selectedMode, runId: sentRun, id: crypto.randomUUID(), attachmentDraftId, attachmentClientIds: files.activeItems.map((item) => item.clientId) };
       }
       const id = messageId.current.id;
       const selection = attachmentDraftId ? { attachmentDraftId } : undefined;
@@ -291,7 +308,7 @@ export function AgentSession(props: AgentSessionProps) {
             </>}
           </>}>
         <MessageQueue items={pending.map((item) => ({ id: item.id, text: item.text,
-          detail: item.attachmentIds?.map((id) => props.attachments.find((file) => file.id === id)?.displayName).filter(Boolean).join(', '), held: item.status === 'HELD' }))}
+          detail: item.attachmentIds?.map((id) => props.attachments.find((file) => file.id === id)?.displayName).filter(Boolean).join(', '), held: item.status !== 'QUEUED' }))}
           editingId={editing?.id} disabled={busy || Boolean(editing)} continueDisabledReason={blocked}
           onContinue={!active ? (id) => void act(async () => {
             await props.onSendQueue(id, run.id); if (editing?.id === id) cancelEdit(); composer.current?.focus();

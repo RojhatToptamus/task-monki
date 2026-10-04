@@ -6,6 +6,7 @@ import {
 } from '../../shared/agentProfiles';
 import type {
   TaskInstruction,
+  InstructionAttachments,
   QueueTaskInstructionRequest,
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
@@ -2696,10 +2697,6 @@ export class TaskManagerService {
 
   async saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void> {
     return this.withTaskAction(input.taskId, 'Save task prompt', async () => {
-      if (!input.draftOnly && input.attachmentDraftId) {
-        const task = await this.requireTask(input.taskId);
-        await this.validateInstructionAttachments(task, undefined, input.attachmentDraftId);
-      }
       await this.store.saveTaskPrompt(input);
       this.emitInstructionUpdate(input.taskId);
     });
@@ -2726,11 +2723,22 @@ export class TaskManagerService {
   async editTaskInstruction(input: EditTaskInstructionRequest): Promise<void> {
     return this.withTaskAction(input.taskId, 'Edit queued instruction', async () => {
       const text = input.instruction === undefined ? undefined : this.instructionText(input.instruction);
-      if (input.attachmentDraftId) await this.validateInstructionAttachments(await this.requireNormalTask(input.taskId, 'Edit message'), undefined, input.attachmentDraftId);
+      const detail = await this.store.getTaskDetail(input.taskId);
+      const instruction = detail.taskInstructions.find((record) => record.id === input.id);
+      if (!instruction || !await this.isPendingInstruction(instruction)) {
+        throw new Error('This instruction has already been claimed or removed.');
+      }
+      if (text !== undefined) {
+        await this.validateInstructionAttachments(detail.task,
+          detail.runs.find((run) => run.id === instruction.sourceRunId), {
+            attachmentDraftId: input.attachmentDraftId,
+            attachmentIds: input.attachmentIds ?? instruction.attachmentIds
+          });
+      }
       await this.store.updateTaskInstructions(input.taskId, (records, addedIds) => {
         const index = records.findIndex((record) => record.id === input.id);
         const instruction = records[index];
-        if (!instruction || !['QUEUED', 'HELD'].includes(instruction.status)) {
+        if (!instruction || !['QUEUED', 'HELD', 'FAILED'].includes(instruction.status)) {
           throw new Error('This instruction has already been claimed or removed.');
         }
         if (text === undefined) records.splice(index, 1);
@@ -2744,7 +2752,7 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(async () => {
       const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
       if (!record) throw new Error('Instruction not found.');
-      if (record.runId && !['QUEUED', 'HELD'].includes(record.status)) return this.instructionRun(record);
+      if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
       const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
       assertContinuable(run);
       if (record.iterationId !== task.currentIterationId || record.worktreeId !== task.currentWorktreeId) {
@@ -2752,16 +2760,31 @@ export class TaskManagerService {
       }
       await this.holdTaskQueue(task.id, 'Send each remaining instruction when you are ready.');
       const claimed = await this.claimInstruction(record, run, false);
-      return this.deliverInstruction(claimed, () => this.continueRunUnlocked({
-        taskId: task.id, runId: run.id, instruction: claimed.text
-      }, claimed.runId));
+      return this.deliverInstruction(claimed, () => claimed.mode === 'RETRY'
+        ? this.retryRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text, strategy: 'SAME_SESSION' }, claimed.runId)
+        : this.continueRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text }, claimed.runId));
     }));
   }
 
-  private async validateInstructionAttachments(task: Task, run: RunRecord | undefined, draftId: string): Promise<void> {
-    const draft = await this.store.listAttachmentDraft(draftId);
+  private async isPendingInstruction(record: TaskInstruction): Promise<boolean> {
+    return ['QUEUED', 'HELD'].includes(record.status) ||
+      (record.status === 'FAILED' && record.mode !== 'STEER' && record.runId !== undefined && !await this.store.getRun(record.runId));
+  }
+
+  private async validateInstructionAttachments(task: Task, run: RunRecord | undefined, files: InstructionAttachments,
+    settings?: AgentExecutionSettings): Promise<void> {
+    const records = await this.store.getTaskAttachments(task.id);
+    const selectedIds = new Set([...(task.initialAttachmentIds ?? []), ...(files.attachmentIds ?? [])]);
+    const selected = records.filter((file) => selectedIds.has(file.id));
+    if (selected.length !== selectedIds.size) throw new Error('A selected attachment does not belong to this task.');
+    const draft = files.attachmentDraftId ? await this.store.listAttachmentDraft(files.attachmentDraftId) : undefined;
+    const attachments = [...selected, ...(draft?.attachments ?? [])];
+    if (attachments.length > ATTACHMENT_MAX_COUNT || attachments.reduce((sum, file) => sum + file.byteCount, 0) > ATTACHMENT_MAX_TOTAL_BYTES) {
+      throw new Error('The message and initial prompt can include at most 10 files, totaling no more than 20 MB.');
+    }
+    if (attachments.length === 0) return;
     await prepareTaskCreationSettings(this.runtimeRegistry.require(task.runtimeId),
-      { ...task.agentSettings, ...run?.requestedSettings, runtimeId: task.runtimeId }, draft.attachments);
+      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments);
   }
 
   private instructionText(text: string): string {
@@ -2794,9 +2817,9 @@ export class TaskManagerService {
   }
 
   private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
-    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: import('../../shared/contracts').InstructionAttachments): Promise<TaskInstruction> {
+    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings): Promise<TaskInstruction> {
     const trimmed = this.instructionText(text);
-    if (files?.attachmentDraftId) await this.validateInstructionAttachments(task, run, files.attachmentDraftId);
+    if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
       if (records.some((item) => item.id === id)) throw new Error('Instruction already exists.');
       if (status === 'QUEUED' && records.filter((item) => ['QUEUED', 'HELD'].includes(item.status)).length >= TASK_INSTRUCTION_QUEUE_LIMIT) {
@@ -2820,10 +2843,10 @@ export class TaskManagerService {
   private async claimInstruction(record: TaskInstruction, source: RunRecord, automatic: boolean): Promise<TaskInstruction> {
     return this.store.updateTaskInstructions(record.taskId, (records) => {
       const pending = records.find((item) => item.id === record.id);
-      if (!pending || !(automatic ? pending.status === 'QUEUED' : ['QUEUED', 'HELD'].includes(pending.status))) {
+      if (!pending || !(automatic ? pending.status === 'QUEUED' : ['QUEUED', 'HELD', 'FAILED'].includes(pending.status))) {
         throw new Error('Instruction is no longer waiting to send.');
       }
-      const runId = randomUUID();
+      const runId = pending.status === 'FAILED' ? pending.runId! : randomUUID();
       Object.assign(pending, { status: 'SENDING', sourceRunId: source.id, runId,
         detail: undefined, updatedAt: new Date().toISOString() });
       // Advance only the same FIFO chain. Other queues stay held under their original owner.
@@ -3107,14 +3130,25 @@ export class TaskManagerService {
     start: (reservedRunId?: string) => Promise<RunRecord>): Promise<RunRecord> {
     const id = input.clientMessageId ?? randomUUID();
     if ((input.attachmentDraftId || input.attachmentIds?.length) && !input.instruction?.trim()) throw new Error('Write a message to send with these files.');
-    if (input.instruction?.trim()) {
-      const existing = await this.existingInstruction(id, input.taskId, input.instruction, mode, input);
-      if (existing) return this.instructionRun(existing);
+    const existing = input.instruction?.trim()
+      ? await this.existingInstruction(id, input.taskId, input.instruction, mode, input)
+      : undefined;
+    if (existing && (existing.status !== 'FAILED' || (existing.runId && await this.store.getRun(existing.runId)))) {
+      return this.instructionRun(existing);
     }
     const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+    if (existing && (!existing.runId || existing.sourceRunId !== run.id || existing.sessionId !== run.sessionId ||
+        existing.iterationId !== task.currentIterationId || existing.worktreeId !== task.currentWorktreeId)) {
+      throw new Error('This instruction belongs to an earlier session. Write a new instruction.');
+    }
     await this.holdTaskQueue(task.id, 'A new turn was requested. Send each remaining instruction when you are ready.');
     if (!input.instruction?.trim()) return start();
-    const record = await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input);
+    // A failed admission has no provider turn to replay; reuse its owned files and reserved run ID.
+    const record = existing ? await this.store.updateTaskInstructions(task.id, (records) => {
+      const current = records.find((item) => item.id === existing.id)!;
+      Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
+      return current;
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings);
     return this.deliverInstruction(record, () => start(record.runId));
   }
 

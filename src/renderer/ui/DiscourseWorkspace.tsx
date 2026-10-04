@@ -1395,6 +1395,7 @@ export function DiscourseWorkspace({
             sendIdentity.clientMessageId
           )) {
             console.error('Discourse delivery failed after the message was persisted.', error);
+            await files.finishAdoption();
             const savedDraft = draftScope ? draftAutosave.draftFor(draftScope) : undefined;
             if (savedDraft) {
               await taskManagerApi.deleteDiscourseDraft({
@@ -2130,13 +2131,12 @@ export function DiscourseWorkspace({
               if (!attachmentPersistence) return Promise.reject(new Error('The message draft is not ready.'));
               return persistDraft({ ...attachmentPersistence, attachmentDraftId: attachmentDraftId ?? null, required: true });
             }}
-            actions={(files) => (
-            <div className="tm-discourse-composer__actions">
-              <DiscourseModeMenu
+            mode={<DiscourseModeMenu
                 value={responsePolicy}
                 disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                 onChange={changeResponsePolicy}
-              />
+              />}
+            actions={(files) => (
               <div className="tm-discourse-composer__buttons">
                 <button
                   ref={previewButtonRef}
@@ -2169,7 +2169,6 @@ export function DiscourseWorkspace({
                   {sending || (activeWave && ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status)) ? <StatusGlyph kind="working" /> : activeWave ? <Square size={14} strokeWidth={1.5} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
                 </button>
               </div>
-            </div>
             )}
           >
             {(files) => <>

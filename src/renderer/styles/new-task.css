@@ -427,7 +427,6 @@
 .field__prompt-shell {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
   transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 
@@ -547,16 +546,22 @@
 }
 
 .task-attachments {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
   margin: 0;
-  padding: 0 9px 9px;
+  padding: 0;
   list-style: none;
 }
 
+.tm-composer > .task-attachments { padding: 8px 12px 12px; }
+
 .task-attachment {
   display: flex;
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: min(280px, 100%);
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -597,10 +602,13 @@
 }
 
 .task-attachment__name {
+  display: block;
+  min-width: 0;
   overflow: hidden;
+  user-select: text;
   color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1195,10 +1203,6 @@
     grid-template-columns: 1fr;
   }
 
-  .task-attachments {
-    grid-template-columns: 1fr;
-  }
-
   .slideover__footer {
     align-items: stretch;
     flex-direction: column;
@@ -1281,8 +1285,7 @@
   padding: 0;
   border: 0;
   background: none;
-  color: inherit;
-  font: inherit;
+  line-height: 1.5;
   text-align: start;
   cursor: pointer;
 }

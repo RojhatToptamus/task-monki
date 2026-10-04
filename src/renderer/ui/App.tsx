@@ -205,17 +205,6 @@ function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
 }
 
-function isHorizontalCanvasControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    Boolean(
-      target.closest(
-        '.tm-titlebar, button, input, textarea, select, a, summary, [role="button"], [role="separator"]'
-      )
-    )
-  );
-}
-
 export function App() {
   const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);
@@ -304,6 +293,7 @@ export function App() {
   }>();
   const [worktreePreparation, setWorktreePreparation] = useState<{
     inspection: WorktreePreparationInspection;
+    returnFocus: HTMLElement | null;
     selectedBaseRef?: string;
     busy: boolean;
     error?: string;
@@ -485,7 +475,8 @@ export function App() {
         isNewTaskClosing ||
         event.pointerType !== 'mouse' ||
         event.button !== 0 ||
-        isHorizontalCanvasControl(event.target)
+        !(event.target instanceof HTMLElement) ||
+        !event.target.matches('.tm-body, .tm-canvas, .tm-canvas__workspace, .tm-canvas__content')
       ) {
         return;
       }
@@ -1063,7 +1054,6 @@ export function App() {
       } catch (caught) {
         const message =
           caught instanceof Error ? caught.message : 'Could not submit the response.';
-        notify(message, 'error');
         throw caught instanceof Error ? caught : new Error(message);
       }
     },
@@ -2060,6 +2050,7 @@ export function App() {
 
   const prepareWorktree = async (taskId: string) => {
     if (worktreePreparationActionRef.current) return;
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const generation = ++worktreePreparationGenerationRef.current;
     worktreePreparationActionRef.current = { taskId, generation };
     setWorktreePreparationActionTaskId(taskId);
@@ -2075,6 +2066,7 @@ export function App() {
         : undefined;
       setWorktreePreparation({
         inspection,
+        returnFocus,
         selectedBaseRef: selectedBase?.refName,
         busy: false
       });
@@ -2135,6 +2127,7 @@ export function App() {
         refreshed.bases[0];
       setWorktreePreparation({
         inspection: refreshed,
+        returnFocus: pending.returnFocus,
         selectedBaseRef: nextSelection?.refName,
         busy: false,
         error:
@@ -2619,19 +2612,14 @@ export function App() {
     decision: AgentInteractionDecision
   ) => {
     setError(undefined);
-    try {
-      await taskManagerApi.respondToInteraction({
-        taskId: interaction.taskId,
-        runId: interaction.runId,
-        interactionRequestId: interaction.id,
-        decision
-      });
-      notify('Provider request answered.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to submit approval decision.');
-      throw caught;
-    }
+    await taskManagerApi.respondToInteraction({
+      taskId: interaction.taskId,
+      runId: interaction.runId,
+      interactionRequestId: interaction.id,
+      decision
+    });
+    notify('Provider request answered.', 'success');
+    await refresh();
   };
 
   const selectRepository = useCallback(
@@ -3558,6 +3546,7 @@ export function App() {
       {worktreePreparation?.inspection.mode === 'CREATE' ? (
         <PrepareWorktreeModal
           inspection={worktreePreparation.inspection}
+          returnFocus={worktreePreparation.returnFocus}
           taskTitle={
             snapshot.tasks.find(
               (task) => task.id === worktreePreparation.inspection.taskId
@@ -3585,6 +3574,7 @@ export function App() {
       {worktreePreparation?.inspection.mode === 'RECOVER' ? (
         <RecoverWorktreeModal
           inspection={worktreePreparation.inspection}
+          returnFocus={worktreePreparation.returnFocus}
           taskTitle={
             snapshot.tasks.find((task) => task.id === worktreePreparation.inspection.taskId)
               ?.title ?? 'Selected task'

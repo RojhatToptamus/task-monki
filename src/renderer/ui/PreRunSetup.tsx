@@ -60,7 +60,8 @@ export function PreRunSetup({
   const [saveError, setSaveError] = useState<string>();
   const writes = useRef<Promise<void>>(Promise.resolve());
   const pendingText = useRef<string | undefined>(undefined);
-  const files = useTaskAttachments({ ...attachmentOptions, blocked: saving, preserveDraftOnClose: true });
+  const selectedModel = selectModel(models, settings.model, runtimeId, settings.modelProvider);
+  const files = useTaskAttachments({ ...attachmentOptions, model: selectedModel, blocked: saving, preserveDraftOnClose: true });
   const dirty = text.trim() !== saved || !text.trim() || files.items.length > 0;
   const changePrompt = (value: string) => {
     setText(value);
@@ -95,7 +96,6 @@ export function PreRunSetup({
   const networkLocked = preset?.networkAccess === 'DISABLED' || preset?.networkAccess === 'REQUIRED';
   const networkOn = preset?.networkAccess === 'REQUIRED' || (preset?.networkAccess !== 'DISABLED' && settings.networkAccess === true);
   const networkLabelId = useId();
-  const selectedModel = selectModel(models, settings.model, runtimeId, settings.modelProvider);
 
   return <section className="tm-prerun" aria-label="Start this task">
     <form onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}>

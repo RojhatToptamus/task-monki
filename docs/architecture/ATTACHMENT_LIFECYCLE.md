@@ -37,7 +37,7 @@ native-decoder-normalized image bytes before core admission.
 
 Limits are:
 
-- 10 files and 20 MiB per message selection, or per Design reference collection;
+- 10 files and 20 MiB per delivered selection, including the initial task files, or per Design reference collection;
 - 10 MiB per image and 2 MiB per text file;
 - 16 megapixels per selected image and 12 megapixels per native clipboard image;
 - 32 staging batches and 100 MiB of staged bytes;
@@ -121,18 +121,22 @@ the private staging data and does not publish partial message state.
 The Agent composer stores unsent text and a staging id on the task.
 Saving an initial prompt adopts new files with the prompt in one transaction.
 Preparation and execution require an explicit save of pending prompt changes.
-The first run makes the initial prompt read-only.
+The first run makes the initial prompt read-only. File saves validate ownership and
+limits locally; execution validates the selected model’s input capabilities.
 
 Queued instructions and follow-ups store their selected attachment ids.
 A queue edit retains existing files unless the user removes them from that message.
-New files and the instruction publish together. Failed publication retains the staged files for retry.
+New files and the instruction publish together. Failed publication retains staged files.
+After publication, the instruction owns its files even if runtime admission fails.
+An explicit retry reuses that instruction only when no runtime turn was admitted.
 Live steering does not support files. A message with files uses the queue instead.
 
 Discourse drafts use the same staging store and shared composer controls.
 Accepting a message transfers its managed-file ownership and publishes its descriptors in one transaction.
 Discourse responses receive files from the latest user message in their bounded transcript.
 Older message files remain available for preview but are not automatically sent again.
-Deleting a conversation removes only its owned files after the database transaction commits.
+Deleting a conversation or draft releases its files only when no saved draft still
+uses them. Database references are removed together; byte cleanup runs after commit.
 
 ## Storage
 

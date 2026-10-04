@@ -1571,3 +1571,9 @@ details[open] > summary .tm-disclosure__chevron {
 /* One icon action language for Agent, Design and Discourse composers. */
 .tm-composer-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--h-toolbar); min-width: var(--h-toolbar); height: var(--h-toolbar); padding: 0; border-radius: var(--r-sm); }
 .tm-composer-action svg { width: 16px; height: 16px; }
+
+.interaction-permission { display: contents; }
+.interaction-card__reason { margin: 0 0 12px; color: var(--text-soft); font-size: var(--t-body); line-height: 1.5; }
+.interaction-card__error { margin-top: 12px; }
+.interaction-card__error .form-error { margin: 0 0 4px; }
+.interaction-card__error pre, .interaction-technical > pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-meta); }

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useState } from 'react';
+import { StrictMode, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type {
   AgentModel,
@@ -1042,7 +1042,7 @@ describe('mounted Design workspace', () => {
     expect((composer as HTMLTextAreaElement).value).toBe('Keep this unsent draft.');
   });
 
-  it('restores and persists an unsent draft outside the task transcript', async () => {
+  it('restores draft text and reference selection without clearing files during mount', async () => {
     const onSaveDraft = vi.fn(async (
       designId,
       body,
@@ -1058,18 +1058,21 @@ describe('mounted Design workspace', () => {
       updatedAt: '2026-08-20T10:00:00.000Z'
     }));
     const view = render(
-      <DesignsWorkspace
-        {...workspaceProps({
-          draft: {
-            designId: 'design-1',
-            body: 'Saved unfinished thought',
-            referenceIds: [],
-            recordRevision: 3,
-            updatedAt: '2026-08-20T10:00:00.000Z'
-          },
-          onSaveDraft
-        })}
-      />
+      <StrictMode>
+        <DesignsWorkspace
+          {...workspaceProps({
+            project: projectWithTwoReferences(),
+            draft: {
+              designId: 'design-1',
+              body: 'Saved unfinished thought',
+              referenceIds: ['reference-first'],
+              recordRevision: 3,
+              updatedAt: '2026-08-20T10:00:00.000Z'
+            },
+            onSaveDraft
+          })}
+        />
+      </StrictMode>
     );
     const composer = screen.getByRole('textbox', { name: 'Refine this Design' });
     expect((composer as HTMLTextAreaElement).value).toBe('Saved unfinished thought');
@@ -1081,11 +1084,12 @@ describe('mounted Design workspace', () => {
       expect(onSaveDraft).toHaveBeenCalledWith(
         'design-1',
         'Updated unfinished thought',
-        [],
+        ['reference-first'],
         undefined,
         3
       )
     );
+    expect(onSaveDraft.mock.calls.every((call) => call[2].includes('reference-first'))).toBe(true);
   });
 
   it('restores saved draft files securely and sends the same staged ownership after reopen', async () => {

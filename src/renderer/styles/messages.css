@@ -80,9 +80,9 @@
   min-height: 20px;
   margin-bottom: 8px;
 }
-.tm-message-header > strong { font-size: var(--t-label); font-weight: 600; color: var(--text); }
+.tm-message-header__author { color: var(--muted); font-size: var(--t-help); }
 .tm-message-header__meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin-left: auto; }
-.tm-message-header__model, .tm-message-header__meta time {
+.tm-message-header__meta time {
   color: var(--muted); font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums;
 }
 .tm-message-header__meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -99,7 +99,7 @@
 
 /* Conversation log — one scrolling body; the jump back sits centred above the composer. */
 .tm-conversation { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
-.tm-conversation__viewport { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable both-edges; }
+.tm-conversation__viewport { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable; }
 .tm-conversation__content { min-width: 0; }
 .tm-conversation__header { position: sticky; top: 0; z-index: 2; background: var(--surface); transition: transform var(--motion-fast) ease; }
 .tm-conversation__header[data-visible='false'] { transform: translateY(-100%); }
@@ -114,6 +114,9 @@
 /* Message anatomy — the user's words in a right-aligned bubble, agent prose on the sheet. */
 .tm-message { display: flex; flex-direction: column; min-width: 0; }
 .tm-message--user { align-items: flex-end; }
+.tm-message--user > .task-attachments { justify-content: flex-end; max-width: min(80%, 560px); margin-top: 8px; }
+.tm-message-content .task-attachments { margin-top: 8px; }
+.tm-message-content, .tm-message-markdown, .task-attachment-preview__content { user-select: text; }
 .tm-message__meta { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-top: 4px; color: var(--muted); font-size: var(--t-meta); }
 .tm-message__meta time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .tm-message__action { display: inline-flex; align-items: center; gap: 6px; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }

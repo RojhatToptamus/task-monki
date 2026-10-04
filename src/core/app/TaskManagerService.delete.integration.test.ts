@@ -1,5 +1,6 @@
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,6 +27,32 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService task deletion', () => {
+  it('releases a deleted task draft only after its last owner is gone', async () => {
+    const scenario = await createTaskMonkiScenario({ name: 'task-delete-attachment-draft' });
+    const first = await scenario.createTask();
+    const second = await scenario.createTask();
+    const draft = await scenario.service.stageTaskAttachmentBatch({ attachments: [{
+      clientToken: randomUUID(), displayName: 'draft.txt', bytes: new TextEncoder().encode('Retained draft bytes').buffer
+    }] });
+    for (const task of [first, second]) {
+      await scenario.service.saveTaskAgentDraft({ taskId: task.id, attachmentDraftId: draft.id });
+    }
+    await scenario.service.deleteTask({ taskId: first.id });
+    expect((await scenario.store.listAttachmentDraft(draft.id)).attachments).toHaveLength(1);
+    await scenario.persistence.database.write((transaction) => transaction.run(`
+      CREATE TRIGGER reject_draft_deletion BEFORE DELETE ON attachment_drafts
+      BEGIN SELECT RAISE(ABORT, 'Draft deletion failed'); END
+    `));
+    await expect(scenario.service.deleteTask({ taskId: second.id })).rejects.toThrow('Draft deletion failed');
+    expect(await scenario.store.getTask(second.id)).toBeDefined();
+    expect(await scenario.persistence.database.read((reader) => reader.get('SELECT id FROM tasks WHERE id = ?', [second.id]))).toBeDefined();
+    expect((await scenario.store.listAttachmentDraft(draft.id)).attachments).toHaveLength(1);
+    await scenario.persistence.database.write((transaction) => transaction.run('DROP TRIGGER reject_draft_deletion'));
+    vi.spyOn(scenario.persistence.managedFiles, 'deleteAfterReferenceCommit').mockRejectedValueOnce(new Error('File is busy'));
+    await scenario.service.deleteTask({ taskId: second.id });
+    await expect(scenario.store.listAttachmentDraft(draft.id)).rejects.toMatchObject({ code: 'ATTACHMENT_DRAFT_NOT_FOUND' });
+  });
+
   it('serializes deletion against a concurrent run start before materialization', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-manager-delete-start-race'

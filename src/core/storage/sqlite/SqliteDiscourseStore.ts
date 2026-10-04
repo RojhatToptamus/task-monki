@@ -1,7 +1,7 @@
 import crypto, { randomUUID } from 'node:crypto';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_MAX_TOTAL_BYTES, type AttachmentContent, type AttachmentDescriptor } from '../../../shared/attachments';
 import { toAgentTurnAttachments, type AgentTurnAttachment } from '../../agent/AgentAttachmentDelivery';
-import { adoptDiscourseAttachmentDraft, loadDraftFromReader } from './SqliteTaskAttachmentStore';
+import { adoptDiscourseAttachmentDraft, deleteUnownedDraftAttachments, loadDraftFromReader } from './SqliteTaskAttachmentStore';
 import { ManagedFileStore } from './ManagedFileStore';
 import {
   DISCOURSE_LIMITS,
@@ -1652,9 +1652,19 @@ export class SqliteDiscourseStore implements DiscourseStore {
       );
       transaction.run(`DELETE FROM managed_files WHERE domain = 'DISCOURSE' AND role = 'ATTACHMENT'
         AND owner_id IN (SELECT id FROM discourse_messages WHERE conversation_id = ?)`, [input.conversationId]);
+      const drafts = transaction.all<{ id: string }>(
+        `SELECT a.id FROM attachment_drafts a JOIN discourse_drafts d
+           ON a.id = json_extract(d.payload_json, '$.attachmentDraftId')
+          WHERE d.conversation_id = ?`,
+        [input.conversationId]
+      );
       transaction.run('DELETE FROM discourse_conversations WHERE id = ?', [input.conversationId]);
+      const storageKeys = [
+        ...files.map((file) => file.storageKey),
+        ...deleteUnownedDraftAttachments(transaction, drafts.map(({ id }) => id))
+      ];
       transaction.afterCommitDeferred(async () => {
-        for (const file of files) await this.managedFiles.deleteAfterReferenceCommit(file.storageKey);
+        await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
       });
       return clone(tombstone);
     });
@@ -1809,6 +1819,12 @@ export class SqliteDiscourseStore implements DiscourseStore {
         throw new Error('Discourse draft changed before it could be deleted.');
       }
       transaction.run('DELETE FROM discourse_drafts WHERE id = ?', [input.draftId]);
+      const storageKeys = deleteUnownedDraftAttachments(
+        transaction, existing.attachmentDraftId ? [existing.attachmentDraftId] : []
+      );
+      transaction.afterCommitDeferred(async () => {
+        await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
+      });
     });
   }
 

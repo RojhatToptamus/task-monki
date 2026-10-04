@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeAgentItemRecord, makeRawMessage, makeRunRecord, makeTaskRecord } from '../../testSupport/rendererRecords';
 import { AgentSession, type AgentSessionProps } from './AgentSession';
+import type { TaskInstruction } from '../../shared/contracts';
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -49,6 +50,80 @@ describe('Agent session interactions', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove notes.txt' })).toBeNull());
     expect(input.onQueue).toHaveBeenLastCalledWith('run-1', input.draft, expect.any(String), { attachmentDraftId: 'draft-files' });
     expect(input.attachmentOptions.onStageBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers a failed unadmitted message after remount using its stored ID and files without sending the current draft', async () => {
+    const run = makeRunRecord({ status: 'COMPLETED' });
+    const failed: TaskInstruction = { id: 'failed-message', taskId: 'task-1', iterationId: 'iteration-1',
+      worktreeId: 'worktree-1', sessionId: 'session-1', sourceRunId: run.id, runId: 'unadmitted-run', order: 1,
+      text: 'Check the attached notes.', mode: 'FOLLOW_UP', status: 'FAILED', attachmentIds: ['notes'],
+      createdAt: run.startedAt, updatedAt: run.startedAt };
+    const input = props({ run, runs: [run], instructions: [failed], draft: 'A separate unsent draft.',
+      attachments: [{ id: 'notes', taskId: 'task-1', ordinal: 0, displayName: 'notes.txt', kind: 'text',
+        mediaType: 'text/plain', byteCount: 5, sha256: 'hash', createdAt: run.startedAt }],
+      onEditQueue: vi.fn().mockResolvedValue(undefined), onSendQueue: vi.fn().mockResolvedValue(undefined) });
+    const first = render(<AgentSession {...input} />);
+    first.unmount();
+    render(<AgentSession {...input} />);
+    const queue = screen.getByRole('list', { name: 'Pending instructions' });
+    expect(queue.textContent).toContain(failed.text);
+    expect(screen.getAllByText(failed.text)).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit instruction 1' }));
+    expect(screen.getByRole('button', { name: 'Remove notes.txt from this message' })).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Edit queued instruction' }), { target: { value: 'Read the notes first.' } });
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Edit queued instruction' }), { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(input.onEditQueue).toHaveBeenCalledWith(failed.id, 'Read the notes first.', { attachmentIds: ['notes'], attachmentDraftId: undefined }));
+    await screen.findByRole('textbox', { name: 'Instruction' });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue instruction 1' }));
+    await waitFor(() => expect(input.onSendQueue).toHaveBeenCalledWith(failed.id, run.id));
+    expect(screen.getByRole('textbox', { name: 'Instruction' })).toHaveProperty('value', input.draft);
+    expect(input.onContinue).not.toHaveBeenCalled();
+    expect(input.onDraftChange).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove instruction 1' })).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove instruction 1' }));
+    await waitFor(() => expect(input.onEditQueue).toHaveBeenLastCalledWith(failed.id));
+  });
+
+  it.each([false, true])('reconciles adopted files from a late failed receipt while preserving a newer draft (%s)', async (newerDraft) => {
+    const run = makeRunRecord({ status: 'COMPLETED' });
+    let staged = 0;
+    const input = props({ run, runs: [run], onContinue: vi.fn().mockRejectedValue(new Error('Provider unavailable')),
+      attachmentOptions: { enabled: true, onDiscard: vi.fn(), onPersistDraft: vi.fn().mockResolvedValue(undefined),
+        onStageBatch: vi.fn(async () => ({ id: `draft-${++staged}`, attachments: [], createdAt: '', updatedAt: '' })) } });
+    function Editor({ instructions }: { instructions: TaskInstruction[] }) {
+      const [draft, setDraft] = useState(input.draft);
+      return <AgentSession {...input} instructions={instructions} draft={draft} onDraftChange={setDraft} />;
+    }
+    const view = render(<Editor instructions={[]} />);
+    const paste = (name: string) => {
+      const file = new File(['notes'], name, { type: 'text/plain' });
+      Object.defineProperty(file, 'arrayBuffer', { value: async () => new TextEncoder().encode('notes').buffer });
+      fireEvent.paste(screen.getByRole('textbox', { name: 'Instruction' }), {
+        clipboardData: { getData: () => '', items: [{ kind: 'file', getAsFile: () => file }] }
+      });
+    };
+    paste('sent.txt');
+    await waitFor(() => expect(input.attachmentOptions.onPersistDraft).toHaveBeenCalledWith('draft-1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByText('Provider unavailable');
+    const [, text, id, selection] = vi.mocked(input.onContinue).mock.calls[0]!;
+    if (newerDraft) {
+      fireEvent.change(screen.getByRole('textbox', { name: 'Instruction' }), { target: { value: 'A newer draft.' } });
+      paste('new.txt');
+      await waitFor(() => expect(input.attachmentOptions.onStageBatch).toHaveBeenCalledTimes(2));
+    }
+    const failed: TaskInstruction = { id: id!, taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1',
+      sessionId: 'session-1', sourceRunId: run.id, runId: 'unadmitted-run', order: 1, text: text!, mode: 'FOLLOW_UP', status: 'FAILED',
+      attachmentDraftId: selection!.attachmentDraftId, attachmentIds: ['sent'], createdAt: run.startedAt, updatedAt: run.startedAt };
+    view.rerender(<Editor instructions={[failed]} />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove sent.txt' })).toBeNull());
+    expect(screen.getByRole('textbox', { name: 'Instruction' })).toHaveProperty('value', newerDraft ? 'A newer draft.' : '');
+    expect(input.onContinue).toHaveBeenCalledTimes(1);
+    if (newerDraft) {
+      expect(screen.getByRole('button', { name: 'Remove new.txt' })).toBeTruthy();
+      await waitFor(() => expect(input.attachmentOptions.onStageBatch).toHaveBeenCalledTimes(3));
+      expect(vi.mocked(input.attachmentOptions.onStageBatch).mock.calls[2]![0].attachments.map((file) => file.displayName)).toEqual(['new.txt']);
+    }
   });
 
   it('queues by default, gates steering by capability, and preserves a draft after rejected delivery', async () => {

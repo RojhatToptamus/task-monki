@@ -138,7 +138,10 @@ Stable client message IDs prevent repeated UI/API delivery. A claimed follow-up
 reserves a runtime run ID before the existing start path admits it. Restart
 correlates that ID with the runtime store. Ambiguous steering remains uncertain,
 and ambiguous turn submission remains under runtime recovery. Neither is
-automatically resent. Matching draft clearing shares the admission transaction.
+automatically resent. An explicit retry can reuse a failed instruction’s files and
+reserved ID only when the runtime store confirms that no run was admitted and the
+original task, worktree, and session still match. Matching draft clearing shares
+the admission transaction.
 
 SQLite migration 7 adds the task instruction table. Old tasks have an empty
 queue and optional empty draft. Existing runtime and prompt artifacts remain

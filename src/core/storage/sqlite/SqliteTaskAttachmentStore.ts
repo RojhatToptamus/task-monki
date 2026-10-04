@@ -243,17 +243,8 @@ export class SqliteTaskAttachmentStore {
   discardDraft(draftId: string): Promise<void> {
     return this.enqueue(async () => {
       await this.database.write((transaction) => {
-        const draft = loadDraftFromReader(transaction, draftId);
-        transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draftId]);
-        transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draftId]);
-        for (const { record } of draft.references) {
-          transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
-        }
-        transaction.afterCommitDeferred(() =>
-          this.deleteManagedFiles(
-            draft.references.map(({ reference }) => reference.storageKey)
-          )
-        );
+        const storageKeys = deleteAttachmentDraftRecords(transaction, draftId);
+        transaction.afterCommitDeferred(() => this.deleteManagedFiles(storageKeys));
       });
     });
   }
@@ -437,16 +428,8 @@ export class SqliteTaskAttachmentStore {
 
   private async discardDraftDirect(draft: DraftWithReferences): Promise<void> {
     await this.database.write((transaction) => {
-      transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draft.snapshot.id]);
-      transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draft.snapshot.id]);
-      for (const { record } of draft.references) {
-        transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
-      }
-      transaction.afterCommitDeferred(() =>
-        this.deleteManagedFiles(
-          draft.references.map(({ reference }) => reference.storageKey)
-        )
-      );
+      const storageKeys = deleteAttachmentDraftRecords(transaction, draft.snapshot.id);
+      transaction.afterCommitDeferred(() => this.deleteManagedFiles(storageKeys));
     });
   }
 
@@ -588,6 +571,30 @@ export function loadDraftFromReader(reader: SqlReader, draftId: string): DraftWi
     },
     references
   };
+}
+
+export function deleteUnownedDraftAttachments(transaction: AppDatabaseTransaction, draftIds: readonly string[]): string[] {
+  return draftIds.flatMap((draftId) => {
+    const unowned = transaction.get<{ id: string }>(
+      `SELECT id FROM attachment_drafts WHERE id = ?
+         AND NOT EXISTS (SELECT 1 FROM discourse_drafts WHERE json_extract(payload_json, '$.attachmentDraftId') = ?)
+         AND NOT EXISTS (SELECT 1 FROM design_drafts WHERE attachment_draft_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM tasks WHERE json_extract(payload_json, '$.agentAttachmentDraftId') = ?)`,
+      [draftId, draftId, draftId, draftId]
+    );
+    return unowned ? deleteAttachmentDraftRecords(transaction, draftId) : [];
+  });
+}
+
+/** Removes references before the caller deletes their bytes after commit. */
+function deleteAttachmentDraftRecords(transaction: AppDatabaseTransaction, draftId: string): string[] {
+  const draft = loadDraftFromReader(transaction, draftId);
+  transaction.run('DELETE FROM staged_attachments WHERE draft_id = ?', [draftId]);
+  transaction.run('DELETE FROM attachment_drafts WHERE id = ?', [draftId]);
+  for (const { record } of draft.references) {
+    transaction.run('DELETE FROM managed_files WHERE id = ?', [stagedManagedFileId(record.id)]);
+  }
+  return draft.references.map(({ reference }) => reference.storageKey);
 }
 
 /** Transfers immutable staged bytes in the same transaction that admits their message. */

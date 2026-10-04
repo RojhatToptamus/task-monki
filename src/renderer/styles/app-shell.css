@@ -476,10 +476,10 @@ button.tm-software-update:hover {
 .tm-nav__repo {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 8px;
   width: 100%;
   text-align: left;
-  height: 34px;
+  min-height: 48px;
   flex: 0 0 auto;
   padding: 0 10px;
   border-radius: 8px;
@@ -516,15 +516,13 @@ button.tm-software-update:hover {
 }
 
 .tm-nav__repo-label {
-  font-size: 8.5px;
+  font-size: var(--t-meta);
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.035em;
   white-space: nowrap;
 }
 
 .tm-nav__repo-name {
-  font-size: 12px;
+  font-size: var(--t-help);
   color: var(--text);
   font-family: var(--font-mono);
   white-space: nowrap;

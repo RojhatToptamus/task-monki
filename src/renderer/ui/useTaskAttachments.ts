@@ -72,7 +72,7 @@ export interface TaskAttachmentController {
   prepareForCreate(): Promise<string | undefined>;
   acknowledgeDraftSave(draftId: string | undefined): Promise<void>;
   markCreateFailed(preserveDraft: boolean): Promise<void>;
-  finishAdoption(): Promise<void>;
+  finishAdoption(selection?: { draftId?: string; clientIds: string[] }): Promise<void>;
   close(): void;
 }
 
@@ -454,27 +454,31 @@ export function useTaskAttachments(
     preparedRevisionRef.current = durableRevisionRef.current;
   }, []);
 
-  const finishAdoption = useCallback(async () => {
-    const adoptedDraftId = draftIdRef.current;
-    const obsoleteDraftIds = [...knownDraftIdsRef.current].filter(
-      (draftId) => draftId !== adoptedDraftId
-    );
-    draftIdRef.current = undefined;
-    durableDraftIdRef.current = undefined;
-    knownDraftIdsRef.current.clear();
-    preparedRevisionRef.current = contentRevisionRef.current + 1;
-    durableRevisionRef.current = contentRevisionRef.current + 1;
-    for (const item of itemsRef.current) releasePreview(item);
-    itemsRef.current = [];
-    setItems([]);
-    contentRevisionRef.current += 1;
-    setContentRevision(contentRevisionRef.current);
-    setOverflowError(undefined);
-    setDraftError(undefined);
-    await Promise.all(
-      obsoleteDraftIds.map((draftId) => discardRef.current(draftId).catch(() => undefined))
-    );
-  }, [releasePreview]);
+  const finishAdoption = useCallback((selection?: { draftId?: string; clientIds: string[] }) => {
+    const operation = persistTail.current.catch(() => undefined).then(async () => {
+      if (selection && !itemsRef.current.some((item) => selection.clientIds.includes(item.clientId))) return;
+      const adoptedDraftId = selection ? selection.draftId : draftIdRef.current;
+      const obsoleteDraftIds = [...knownDraftIdsRef.current].filter((draftId) => draftId !== adoptedDraftId);
+      const retained = selection ? itemsRef.current.filter((item) => !selection.clientIds.includes(item.clientId)) : [];
+      for (const item of itemsRef.current) if (!retained.includes(item)) releasePreview(item);
+      draftIdRef.current = undefined;
+      durableDraftIdRef.current = undefined;
+      knownDraftIdsRef.current = new Set(selection ? obsoleteDraftIds : []);
+      contentRevisionRef.current += 1;
+      preparedRevisionRef.current = selection ? -1 : contentRevisionRef.current;
+      durableRevisionRef.current = selection ? -1 : contentRevisionRef.current;
+      itemsRef.current = retained;
+      if (!closedRef.current) {
+        setItems(retained);
+        setContentRevision(contentRevisionRef.current);
+        setOverflowError(undefined);
+        setDraftError(undefined);
+      }
+      if (!selection) await Promise.all(obsoleteDraftIds.map((draftId) => discardRef.current(draftId).catch(() => undefined)));
+    });
+    persistTail.current = operation;
+    return selection ? operation.then(async () => { await flushDraft(); }) : operation;
+  }, [flushDraft, releasePreview]);
 
   return {
     items,

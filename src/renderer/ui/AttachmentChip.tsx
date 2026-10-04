@@ -128,7 +128,11 @@ function AttachmentPreview({ name, read, disabled, onOpenChange }: {
     }
   };
   return <>
-    <button type="button" className="task-attachment__name task-attachment__open" title={`Preview ${name}`} disabled={disabled} onClick={() => void open()}>{name}</button>
+    <button type="button" className="task-attachment__name task-attachment__open" title={`Preview ${name}`} disabled={disabled} onClick={(event) => {
+      const selection = window.getSelection();
+      if (event.detail && selection?.toString() && event.currentTarget.contains(selection.anchorNode)) return;
+      void open();
+    }}>{name}</button>
     {preview ? <AttachmentPreviewDialog name={name} onClose={close} onOpenChange={onOpenChange}>
       {preview.loading ? <p role="status">Loading preview…</p> : null}
       {preview.error ? <p role="alert" className="tm-error">{preview.error}</p> : null}

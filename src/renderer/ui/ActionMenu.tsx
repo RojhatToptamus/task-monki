@@ -13,9 +13,10 @@ export interface ActionMenuItem {
 }
 
 /** shadcn's Radix menu foundation, styled with Task Monki's shared tokens. */
-export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', disabled, label, trigger, items }: {
+export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', disabled, label, trigger, items }: {
   className?: string;
   selection?: 'single' | 'multiple';
+  align?: 'start' | 'end';
   disabled?: boolean;
   label: string;
   trigger: ReactNode;
@@ -48,7 +49,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
       <DropdownMenu.Trigger asChild><button type="button" className={`tm-action-menu__trigger ${className}__trigger`} title={label} aria-label={label} disabled={disabled}>{trigger}</button></DropdownMenu.Trigger>
     </div>
     <DropdownMenu.Portal>
-      <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} side="top" align="end" sideOffset={6} collisionPadding={8}>
+      <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} side="top" align={align} sideOffset={6} collisionPadding={8}>
         {selection === 'single' ? <DropdownMenu.RadioGroup value={selected}>{items.map(renderItem)}</DropdownMenu.RadioGroup> : items.map(renderItem)}
       </DropdownMenu.Content>
     </DropdownMenu.Portal>

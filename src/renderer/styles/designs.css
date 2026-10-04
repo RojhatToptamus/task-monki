@@ -602,10 +602,6 @@
   transform: rotate(90deg);
 }
 
-.tm-design-technical-details > .tm-run-activity {
-  margin-top: 8px;
-}
-
 .tm-design-composer {
   flex: 0 0 auto;
   margin: 0;
@@ -648,8 +644,7 @@
 }
 
 .tm-design-composer__shell .task-attachments {
-  grid-template-columns: 1fr;
-  padding-top: 2px;
+  padding-top: 8px;
 }
 
 .tm-design-composer > .task-attachment-message {
@@ -801,7 +796,6 @@
 }
 
 .tm-design-files .task-attachments {
-  grid-template-columns: 1fr;
   margin: 8px 0 0;
   padding: 0;
 }

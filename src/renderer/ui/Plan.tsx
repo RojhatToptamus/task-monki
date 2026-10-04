@@ -9,8 +9,6 @@ export type PlanStepStatus = AgentPlanStep['status'];
 export interface PlanListStep {
   step: string;
   status: PlanStepStatus;
-  /** Marks a temporary provider-plan placeholder without changing workflow truth. */
-  pending?: boolean;
 }
 
 /**
@@ -107,9 +105,6 @@ function planStepStatusLabel(step: PlanListStep, marker?: PlanStepMarker): strin
   }
   if (marker === 'stopped') {
     return 'Stopped here';
-  }
-  if (step.pending && step.status === 'IN_PROGRESS') {
-    return 'Waiting';
   }
   switch (step.status) {
     case 'COMPLETED':

@@ -224,6 +224,38 @@ describe('Agent pre-run setup', () => {
     expect(props.onPrepareWorktree).toHaveBeenCalled();
   });
 
+  it('validates prompt image drafts against the model selected before the first run', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    const runtime = readyRuntime();
+    const textModel = runtime.models[0]!;
+    const imageModel: AgentModel = { ...textModel, id: 'codex:image-model', model: 'image-model',
+      displayName: 'Image model', inputModalities: ['text', 'image'] };
+    runtime.models.push(imageModel);
+    props.task = makeTaskRecord({ prompt: 'Describe the reference.', agentSettings: { model: textModel.model }, workflowPhase: 'READY' });
+    props.worktree = undefined;
+    Object.assign(props, runtime);
+    props.attachmentOptions = {
+      ...props.attachmentOptions, model: textModel,
+      initialDraft: { id: 'image-draft', createdAt: TEST_NOW, updatedAt: TEST_NOW,
+        attachments: [{ id: 'image-file', draftId: 'image-draft', ordinal: 0, displayName: 'reference.png',
+          kind: 'image', mediaType: 'image/png', byteCount: 3, sha256: 'a'.repeat(64), createdAt: TEST_NOW }] },
+      onReadDraftAttachment: vi.fn().mockResolvedValue({ attachmentId: 'image-file', displayName: 'reference.png',
+        kind: 'image', mediaType: 'image/png', byteCount: 3, bytes: new Uint8Array([1, 2, 3]).buffer })
+    };
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    await screen.findByRole('button', { name: 'reference.png' });
+    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Model: Codex · Test model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Image model via Codex' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    await waitFor(() => expect(props.onSavePrompt).toHaveBeenCalledWith('Describe the reference.', false, { attachmentDraftId: 'image-draft' }));
+    expect(props.attachmentOptions.onStageBatch).not.toHaveBeenCalled();
+  });
+
   function readyRuntime(): { models: AgentModel[]; runtimes: AgentRuntimeState[] } {
     const model: AgentModel = {
       id: 'codex:test-model',

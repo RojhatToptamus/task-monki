@@ -115,6 +115,7 @@ import {
 } from './sqlite/TaskStateMapper';
 import {
   SqliteTaskAttachmentStore,
+  deleteUnownedDraftAttachments,
   type PreparedSqliteAttachmentAppend,
   type PreparedSqliteAttachmentDraft
 } from './sqlite/SqliteTaskAttachmentStore';
@@ -3932,7 +3933,16 @@ export class SqliteTaskStore {
           (attachment) => attachment.taskId !== taskId
         )
       };
-      await this.persistSnapshot();
+      await this.database.write(async (transaction) => {
+        await this.persistSnapshot();
+        const attachmentDraftId = task.agentAttachmentDraftId;
+        if (attachmentDraftId) {
+          const storageKeys = deleteUnownedDraftAttachments(transaction, [attachmentDraftId]);
+          transaction.afterCommitDeferred(async () => {
+            await Promise.allSettled(storageKeys.map((storageKey) => this.managedFiles.deleteAfterReferenceCommit(storageKey)));
+          });
+        }
+      });
     } catch (error) {
       this.state = previousState;
       throw error;
@@ -7347,6 +7357,11 @@ function validatePersistedAttachments(state: StoreState): void {
   for (const [taskId, attachments] of byTask) {
     try {
       validateTaskAttachmentRecords(attachments, taskId);
+      if (state.tasks.find((task) => task.id === taskId)?.kind === 'DESIGN' &&
+          (attachments.length > ATTACHMENT_MAX_COUNT ||
+           attachments.reduce((total, file) => total + file.byteCount, 0) > ATTACHMENT_MAX_TOTAL_BYTES)) {
+        throw new Error('Design reference collection exceeds its limits.');
+      }
     } catch {
       throw new Error(
         `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: attachments contains an invalid record.`

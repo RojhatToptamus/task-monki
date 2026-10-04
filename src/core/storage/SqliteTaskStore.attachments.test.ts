@@ -106,6 +106,45 @@ describe('SqliteTaskStore attachments', () => {
     expect(new TextDecoder().decode((await reloaded.readDraftAttachment(draftId, attachmentId)).bytes)).toBe('Unsent context');
   });
 
+  it('reloads message attachments whose accumulated count and bytes exceed one message', async () => {
+    const dir = await temporaryDirectory();
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Several file messages',
+      prompt: 'Review each selected batch.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const run = await createRun(store, task, dir, 'message-files');
+    const content = 'x'.repeat(2 * 1024 * 1024);
+    for (let order = 1; order <= 2; order += 1) {
+      const draft = await store.createAttachmentDraft();
+      for (let index = 0; index < 6; index += 1) {
+        await store.stageTaskAttachment({
+          draftId: draft.id,
+          displayName: `batch-${order}-${index}.txt`,
+          bytes: bytes(content)
+        });
+      }
+      await store.updateTaskInstructions(task.id, (records, attachmentIds) => {
+        const now = new Date().toISOString();
+        records.push({
+          id: randomUUID(), taskId: task.id, iterationId: run.iterationId,
+          worktreeId: run.worktreeId, sourceRunId: run.id, sessionId: run.sessionId,
+          order, text: `Read batch ${order}.`, mode: 'QUEUE', status: 'HELD',
+          attachmentIds, createdAt: now, updatedAt: now
+        });
+      }, undefined, draft.id);
+    }
+    await closeStore(store);
+
+    const reloaded = await createStore(dir);
+    const detail = await reloaded.getTaskDetail(task.id);
+    expect(detail.attachments).toHaveLength(12);
+    expect(detail.taskInstructions.map((message) => message.attachmentIds?.length)).toEqual([6, 6]);
+    expect(new TextDecoder().decode((await reloaded.readTaskAttachment(detail.attachments[11]!.id)).bytes)).toBe(content);
+    expect((await reloaded.getRun(run.id))!.attachmentSelection).toEqual([]);
+  });
+
   it('keeps task creation idempotent and rejects token reuse for changed input', async () => {
     const dir = await temporaryDirectory();
     const store = await createStore(dir);

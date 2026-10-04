@@ -1,6 +1,4 @@
 import {
-  ATTACHMENT_MAX_COUNT,
-  ATTACHMENT_MAX_TOTAL_BYTES,
   type AttachmentDraftSnapshot,
   type AttachmentKind,
   type StagedAttachmentRecord,
@@ -57,13 +55,12 @@ export function validateTaskAttachmentRecords(
   records: readonly TaskAttachmentRecord[],
   taskId: string
 ): void {
-  if (!SAFE_ID.test(taskId) || records.length > ATTACHMENT_MAX_COUNT) {
+  if (!SAFE_ID.test(taskId)) {
     throw attachmentIntegrityError();
   }
 
   const ids = new Set<string>();
   const ordinals = new Set<number>();
-  let totalBytes = 0;
   for (const record of records) {
     if (
       record.taskId !== taskId ||
@@ -71,7 +68,6 @@ export function validateTaskAttachmentRecords(
       ids.has(record.id) ||
       !Number.isSafeInteger(record.ordinal) ||
       record.ordinal < 0 ||
-      record.ordinal >= ATTACHMENT_MAX_COUNT ||
       ordinals.has(record.ordinal) ||
       !record.displayName ||
       /[\u0000-\u001f\u007f]/u.test(record.displayName) ||
@@ -86,13 +82,9 @@ export function validateTaskAttachmentRecords(
     }
     ids.add(record.id);
     ordinals.add(record.ordinal);
-    totalBytes += record.byteCount;
   }
 
-  if (
-    totalBytes > ATTACHMENT_MAX_TOTAL_BYTES ||
-    [...ordinals].some((ordinal) => ordinal >= records.length)
-  ) {
+  if ([...ordinals].some((ordinal) => ordinal >= records.length)) {
     throw attachmentIntegrityError();
   }
 }
