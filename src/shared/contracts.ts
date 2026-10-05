@@ -1354,6 +1354,12 @@ export interface OpenTargetDetectedApp {
 
 export type OpenTargetRef =
   | {
+      type: 'previewSource';
+      taskId: string;
+      attemptId: string;
+      sourceIndex: number;
+    }
+  | {
       type: 'repository';
       repositoryId: string;
     }

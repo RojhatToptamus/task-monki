@@ -656,6 +656,9 @@ function testContext(input: { repositoryPath?: string; worktreePath?: string } =
     },
     async getWorktree(id: string) {
       return worktree.id === id ? worktree : undefined;
+    },
+    async getPreviewSource(): Promise<string> {
+      throw new Error('The preview source is unavailable.');
     }
   };
 }

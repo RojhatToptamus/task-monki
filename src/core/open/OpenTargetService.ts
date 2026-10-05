@@ -44,6 +44,7 @@ interface DetectedOpenApp {
 interface OpenTargetContext {
   getRepository(repositoryId: string): Promise<Repository | undefined>;
   getWorktree(worktreeId: string): Promise<WorktreeRecord | undefined>;
+  getPreviewSource(target: Extract<OpenTargetRef, { type: 'previewSource' }>): Promise<string>;
 }
 
 interface ResolvedOpenTarget {
@@ -146,6 +147,14 @@ export class OpenTargetService {
     context: OpenTargetContext
   ): Promise<ResolvedOpenTarget> {
     switch (target.type) {
+      case 'previewSource': {
+        const source = this.normalizeLocalPath(await context.getPreviewSource(target));
+        const resolved = await this.classifyPath(target, source, source);
+        if (resolved.exists && resolved.kind !== 'directory') {
+          throw new Error('The preview source is no longer a folder.');
+        }
+        return resolved;
+      }
       case 'repository':
         return await this.resolveRepositoryTarget(target.repositoryId, target, context);
       case 'worktree':

@@ -54,12 +54,19 @@ export function OpenTargetContextMenu({
         returnFocusRef.current?.focus();
       }
     };
+    const onScroll = (event: Event) => {
+      if (!rootRef.current?.contains(event.target as Node)) onClose();
+    };
     window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onClose);
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onClose);
     };
   }, [onClose]);
 
@@ -85,7 +92,10 @@ export function OpenTargetContextMenu({
       }
       onBlur={(event) => handleMenuBlur(event, onClose)}
     >
-      <OpenTargetMenuItems target={target} onActionComplete={onClose} autoFocusFirst />
+      <OpenTargetMenuItems target={target} onActionComplete={() => {
+        onClose();
+        returnFocusRef.current?.focus({ preventScroll: true });
+      }} autoFocusFirst />
     </div>
   );
 }

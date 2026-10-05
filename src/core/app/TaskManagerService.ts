@@ -105,6 +105,7 @@ import type {
   InspectOpenTargetRequest,
   InteractionRequestRecord,
   OpenTargetInspection,
+  OpenTargetRef,
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
   OpenPreviewRequest,
@@ -1108,7 +1109,7 @@ export class TaskManagerService {
   }
 
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
-    return this.openTargets.inspect(input, this.store);
+    return this.openTargets.inspect(input, this.openTargetContext());
   }
 
   async executeOpenTargetAction(
@@ -1120,7 +1121,25 @@ export class TaskManagerService {
   private async executeOpenTargetActionInternal(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
-    return this.openTargets.execute(input, this.store);
+    return this.openTargets.execute(input, this.openTargetContext());
+  }
+
+  private openTargetContext() {
+    return {
+      getRepository: (id: string) => this.store.getRepository(id),
+      getWorktree: (id: string) => this.store.getWorktree(id),
+      getPreviewSource: async (target: Extract<OpenTargetRef, { type: 'previewSource' }>) => {
+        const worktree = await this.applicationWorktree(target.taskId);
+        const status = await this.applications.owner().get(this.applications.name(worktree));
+        const attempt = [status.active, status.candidate, status.latest, ...(status.history ?? [])]
+          .find(candidate => candidate?.id === target.attemptId);
+        if (!attempt) throw new Error('The preview attempt does not belong to this task.');
+        const source = Number.isInteger(target.sourceIndex) && target.sourceIndex >= 0
+          ? attempt.sources[target.sourceIndex] : undefined;
+        if (!source) throw new Error('The preview source is unavailable.');
+        return source;
+      }
+    };
   }
 
   async addRepository(repositoryPath: string): Promise<Repository> {

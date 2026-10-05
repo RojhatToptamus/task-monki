@@ -48,6 +48,9 @@ the runtime exposes the new application.
 **Activity** shows services, setup jobs, and their actual state. A row's **Logs**
 action selects that exact attempt and service. An update failure can coexist
 with a serving application; **Open app** continues to open that application.
+Expand **Source folders** to see each folder and its location. **Open folder**
+opens it in the file manager. The folder menu offers installed editors, including
+VS Code, and **Copy path** for the full location.
 
 **Logs** has attempt and source filters, search, pause-follow, refresh, and
 clear-view controls. Pause-follow stops scrolling, not collection. Logs are

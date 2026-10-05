@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import {
@@ -10,11 +10,12 @@ import {
 } from '../../testSupport/taskMonkiScenario';
 import { AppEventBus } from '../runner/AppEventBus';
 import { TaskManagerService } from './TaskManagerService';
+import { createNodeOpenTargetHost } from '../open/OpenTargetService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
 afterEach(() => scenarios.dispose());
 
-it('reconnects an additional source after restart while retaining access to the task worktree', async () => {
+it('retains source ownership across restart, replacement, and desktop opening', async () => {
   const scenario = await scenarios.create({ previewEnabled: true });
   const task = await scenario.createTask({ title: 'Reconnect application source' });
   const worktree = await prepareTestWorktree(scenario.service, task.id);
@@ -47,8 +48,19 @@ it('reconnects an additional source after restart while retaining access to the 
 
   const persistence = await openTestPersistence(path.join(scenario.rootDir, 'profile'));
   const runtime = createScriptedAgentRuntimeFixture(persistence);
+  const toolDirectory = path.join(scenario.rootDir, 'test-bin');
+  const editor = path.join(toolDirectory, process.platform === 'win32' ? 'code.EXE' : 'code');
+  const openDefault = vi.fn(async (_directory: string) => {});
+  const launchExecutable = vi.fn(async (_executable: string, _argv: string[], _cwd?: string) => {});
   const reopened = new TaskManagerService(persistence.tasks, scenario.repositoryPath, new AppEventBus(), {
     ...runtime.serviceOptions,
+    openTargetHost: {
+      ...createNodeOpenTargetHost(),
+      env: { PATH: toolDirectory },
+      access: async file => file === editor,
+      openDefault,
+      launchExecutable
+    },
     previewEnabled: true,
     previewRoot: path.join(scenario.rootDir, 'preview-runtime'),
     worktreeRoot: path.join(scenario.rootDir, 'worktrees')
@@ -89,6 +101,67 @@ it('reconnects an additional source after restart while retaining access to the 
       }).on('error', reject);
     });
     expect(connected).toContain('connected source');
+
+    const sourceIndex = ready.active!.sources.indexOf(await fs.realpath(extra));
+    expect(sourceIndex).toBeGreaterThanOrEqual(0);
+    const target = { type: 'previewSource' as const, taskId: task.id, attemptId: candidateId, sourceIndex };
+    await expect(reopened.executeOpenTargetAction({ target, action: 'open', appId: 'default' }))
+      .resolves.toEqual({ ok: true });
+    expect(openDefault).toHaveBeenLastCalledWith(await fs.realpath(extra));
+    await expect(reopened.inspectOpenTarget({ target })).resolves.toMatchObject({ canOpen: true, preferredAppId: 'vscode' });
+    await expect(reopened.executeOpenTargetAction({ target, action: 'open', appId: 'vscode' }))
+      .resolves.toEqual({ ok: true });
+    expect(launchExecutable).toHaveBeenLastCalledWith(editor, [await fs.realpath(extra)], await fs.realpath(extra));
+
+    await reopened.startApplicationPreview({ taskId: task.id, source: 'file' });
+    await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: task.id })).approval).toBeTruthy();
+    const replacement = await reopened.getApplicationPreview({ taskId: task.id });
+    await reopened.approveApplicationPreview({ taskId: task.id, attemptId: replacement.approval!.attemptId });
+    await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: task.id })).status?.active?.id)
+      .toBe(replacement.approval!.attemptId);
+    const replaced = (await reopened.getApplicationPreview({ taskId: task.id })).status!;
+    expect(replaced.active!.sources).not.toContain(await fs.realpath(extra));
+    const historical = replaced.history!.find(attempt => attempt.id === candidateId)!;
+    expect(historical.state).toBe('stopped');
+    await expect(reopened.executeOpenTargetAction({
+      target: { ...target, attemptId: historical.id }, action: 'open', appId: 'default'
+    })).resolves.toEqual({ ok: true });
+    expect(openDefault).toHaveBeenLastCalledWith(await fs.realpath(extra));
+
+    const otherWorktree = await prepareTestWorktree(reopened, unstartedTask.id);
+    await fs.writeFile(path.join(otherWorktree.worktreePath, 'index.html'), 'other task');
+    await reopened.createApplicationPreviewConfiguration({ taskId: unstartedTask.id, type: 'static', directory: '.' });
+    await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeTruthy();
+    const other = await reopened.getApplicationPreview({ taskId: unstartedTask.id });
+    await reopened.approveApplicationPreview({ taskId: unstartedTask.id, attemptId: other.approval!.attemptId });
+    await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: unstartedTask.id })).status?.active?.state).toBe('ready');
+    openDefault.mockClear();
+    launchExecutable.mockClear();
+    for (const invalid of [
+      { ...target, taskId: unstartedTask.id },
+      { ...target, attemptId: 'unrecorded-attempt' },
+      { ...target, sourceIndex: -1 },
+      { ...target, sourceIndex: 0.5 },
+      { ...target, sourceIndex: ready.active!.sources.length }
+    ]) {
+      await expect(reopened.inspectOpenTarget({ target: invalid })).rejects.toThrow(/does not belong|source is unavailable/);
+      await expect(reopened.executeOpenTargetAction({ target: invalid, action: 'open', appId: 'default' }))
+        .resolves.toMatchObject({ ok: false, message: expect.stringMatching(/does not belong|source is unavailable/) });
+    }
+    expect(openDefault).not.toHaveBeenCalled();
+    expect(launchExecutable).not.toHaveBeenCalled();
+
+    await fs.rm(extra, { recursive: true });
+    await expect(reopened.inspectOpenTarget({ target })).resolves.toMatchObject({
+      target: { kind: 'missing' }, canOpen: false
+    });
+    await expect(reopened.executeOpenTargetAction({ target, action: 'open', appId: 'default' }))
+      .resolves.toMatchObject({ ok: false, message: 'Path is missing.' });
+    await fs.writeFile(extra, 'not a source directory');
+    await expect(reopened.inspectOpenTarget({ target })).rejects.toThrow('no longer a folder');
+    await expect(reopened.executeOpenTargetAction({ target, action: 'copyFileContents' }))
+      .resolves.toMatchObject({ ok: false, message: 'The preview source is no longer a folder.' });
+    expect(openDefault).not.toHaveBeenCalled();
   } finally {
     await reopened.shutdown();
     await persistence.close();

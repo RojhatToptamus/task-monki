@@ -514,7 +514,16 @@
 .tm-application-preview__url { color: var(--muted); font-size: var(--t-meta); }
 .tm-application-preview__sources { color: var(--muted); font-size: var(--t-help); }
 .tm-application-preview__sources summary { width: fit-content; cursor: pointer; padding-block: 4px; }
-.tm-application-preview__sources code { display: block; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-application-preview__sources > code { display: block; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-preview-source-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.tm-preview-source { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+.tm-preview-source + .tm-preview-source { border-top: 1px solid var(--hair); }
+.tm-preview-source > svg { flex: 0 0 auto; }
+.tm-preview-source__location { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.tm-preview-source__location strong { color: var(--text); font-size: var(--t-help); font-weight: 500; }
+.tm-preview-source__location :is(strong, code) { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-source__location code { font-size: var(--t-meta); user-select: text; }
+.tm-preview-source__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .tm-application-preview__table-wrap { max-width: 100%; overflow: hidden; box-shadow: inset 0 0 0 1px var(--hair); border-radius: var(--r-sm); }
 .tm-application-preview__table { width: 100%; border-collapse: collapse; font-size: var(--t-help); text-align: left; }
 .tm-application-preview__table th, .tm-application-preview__table td { padding: 8px 12px; border-bottom: 1px solid var(--hair); vertical-align: middle; }

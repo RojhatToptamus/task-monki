@@ -1,8 +1,10 @@
+import { ApplicationSourceFolders } from './ApplicationSourceFolders';
 import { DisclosureChevron } from '../DisclosureChevron';
 import type { AttemptSummary, PreviewStatus } from 'previewhost';
 import { label, ServiceName, serviceTypeLabel } from './previewPresentation';
 
 export function ApplicationActivity({
+  taskId,
   status,
   busy,
   onLogs,
@@ -10,6 +12,7 @@ export function ApplicationActivity({
   onOpenSecrets,
   onConfigure
 }: {
+  taskId: string;
   status?: PreviewStatus;
   busy: boolean;
   onLogs(attemptId: string, source?: string): void;
@@ -181,17 +184,7 @@ export function ApplicationActivity({
               </table>
             </div>
             {attempt.sources?.length ? (
-              <details className="tm-application-preview__sources">
-                <summary>
-                  <DisclosureChevron />
-                  Source folders
-                </summary>
-                {attempt.sources.map((source) => (
-                  <code key={source} title={source}>
-                    {source}
-                  </code>
-                ))}
-              </details>
+              <ApplicationSourceFolders taskId={taskId} attemptId={attempt.id} sources={attempt.sources} />
             ) : null}
           </section>
         );

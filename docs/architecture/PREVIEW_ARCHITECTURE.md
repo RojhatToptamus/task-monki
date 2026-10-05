@@ -17,6 +17,9 @@ The Previews sidebar page joins the runtime inventory with Task Monki's tasks,
 repositories, and worktrees. It keeps only navigation state in the renderer.
 Opening an application rechecks task/worktree ownership and the serving attempt;
 Design openings also preserve the selected Design route.
+Source-folder actions resolve the task, attempt, and source index through Previewhost
+before using the existing desktop opener. They accept no renderer-supplied path
+and grant no runtime source access. Removed captures remain unavailable.
 
 Previewhost stores its runtime records, data records, and encrypted keystore
 under the profile's `preview-runtime` directory. Normal previews use live source

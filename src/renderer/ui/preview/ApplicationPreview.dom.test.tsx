@@ -17,12 +17,15 @@ import type {
 } from '../../../shared/applicationPreview';
 import { ApplicationConfiguration } from './ApplicationConfiguration';
 import { ApplicationActivity } from './ApplicationActivity';
+import { ApplicationSourceFolders } from './ApplicationSourceFolders';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
 
 const api = vi.hoisted(() => ({
   getApplicationPreview: vi.fn(),
+  inspectOpenTarget: vi.fn(),
+  executeOpenTargetAction: vi.fn(),
   startApplicationPreview: vi.fn(),
   approveApplicationPreview: vi.fn(),
   inspectApplicationPreviewConfiguration: vi.fn(),
@@ -113,6 +116,7 @@ it('shows current retained data after restart and deletion without duplicating s
     }
   };
   const props = {
+    taskId: 'task',
     busy: false,
     onLogs: vi.fn(),
     onRerun: vi.fn(),
@@ -371,4 +375,54 @@ it('returns focus after unlocking and clears secret input before transport settl
   expect(canceled.value).toBe('');
   view.unmount();
   delete window.previewSecrets;
+});
+
+
+it('opens the selected source through desktop actions and keeps a failed open retryable', async () => {
+  api.executeOpenTargetAction.mockResolvedValueOnce({ ok: false, message: 'Path is missing.' })
+    .mockResolvedValue({ ok: true });
+  api.inspectOpenTarget.mockResolvedValue({
+    target: { type: 'previewSource', kind: 'directory' },
+    apps: [{ id: 'vscode', label: 'VS Code' }, { id: 'default', label: 'Default app' }],
+    preferredAppId: 'vscode', revealLabel: 'Reveal in Finder',
+    canOpen: true, canReveal: true, canOpenTerminal: false, canCopyFileContents: false
+  });
+  render(<ApplicationSourceFolders taskId="task" attemptId="attempt" sources={['/project/frontend', '/other/repository/backend']} />);
+  fireEvent.click(screen.getByText('Source folders'));
+  const target = { type: 'previewSource', taskId: 'task', attemptId: 'attempt', sourceIndex: 1 };
+  fireEvent.click(screen.getByRole('button', { name: 'Open folder backend' }));
+  expect((await screen.findByRole('alert')).textContent).toBe('Path is missing.');
+  expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'default' });
+  fireEvent.click(screen.getByRole('button', { name: 'Open folder backend' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: 'Folder actions for backend' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Open in VS Code' }));
+  await waitFor(() => expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'vscode' }));
+  expect(api.inspectOpenTarget).toHaveBeenCalledWith({ target });
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  try {
+    api.executeOpenTargetAction.mockResolvedValue({ ok: true, clipboardText: '/other/repository/backend' });
+    const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Copy path' }));
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    expect(writeText).toHaveBeenCalledWith('/other/repository/backend');
+    expect(document.activeElement).toBe(trigger);
+  } finally {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  }
+  const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
+  fireEvent.click(trigger);
+  await screen.findByRole('menuitem', { name: 'Copy path' });
+  fireEvent.scroll(screen.getByRole('menu'));
+  expect(screen.getByRole('menu')).toBeTruthy();
+  fireEvent.scroll(screen.getByRole('list'));
+  expect(screen.queryByRole('menu')).toBeNull();
+  fireEvent.click(trigger);
+  await screen.findByRole('menuitem', { name: 'Copy path' });
+  fireEvent.resize(window);
+  expect(screen.queryByRole('menu')).toBeNull();
 });

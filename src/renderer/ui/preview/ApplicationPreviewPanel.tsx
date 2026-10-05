@@ -342,6 +342,7 @@ export function ApplicationPreviewPanel({
         hidden={section !== 'Activity'}
       >
         <ApplicationActivity
+          taskId={taskId}
           status={status}
           busy={busy}
           onLogs={showLogs}
