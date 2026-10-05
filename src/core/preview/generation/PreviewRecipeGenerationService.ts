@@ -4,21 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  type PreviewAttachmentPlan,
-  type PreviewEnvironmentValue,
-  type PreviewExecutionPlan,
   type PreviewRecipeGenerationDraft,
   type PreviewRecipeGenerationReport,
   type PreviewRecipeGenerationSnapshot,
   type PreviewPublicEnvironmentDecision,
   type PreviewRecipeValidation
 } from '../../../shared/contracts';
-import {
-  MAX_PREVIEW_RECIPE_BYTES,
-  PREVIEW_RECIPE_PATH,
-  parsePreviewRecipe
-} from '../PreviewRecipeLoader';
-import { activePreviewAttachmentIds } from '../PreviewExecutionAuthority';
+import { parseDocument } from 'yaml';
+import { parsePreviewSpec, type PreviewSpec } from 'previewhost';
 import {
   buildPreviewRecipeGenerationInstruction,
   PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION
@@ -32,6 +25,10 @@ import type {
   PreviewPublicEnvironmentCandidate,
   PreviewPublicEnvironmentEvidence
 } from './PreviewPublicEnvironmentEvidence';
+
+export const PREVIEW_RECIPE_PATH = 'preview.yaml';
+const MAX_PREVIEW_RECIPE_BYTES = 65_536;
+type Configuration = ReturnType<typeof parsePreviewSpec>;
 
 const MAX_REPORT_ITEMS = 40;
 const MAX_REPORT_TEXT_BYTES = 1_200;
@@ -537,9 +534,9 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
       issues: [{ code: 'RECIPE_TOO_LARGE', message: 'The Preview recipe exceeds 64 KiB.' }]
     };
   }
-  let plan: PreviewExecutionPlan;
+  let plan: Configuration;
   try {
-    plan = parsePreviewRecipe(yaml).executionPlan;
+    plan = parseConfiguration(yaml);
   } catch {
     return {
       status: 'INVALID',
@@ -573,26 +570,16 @@ function validateAgentGeneratedPreviewRecipeDraft(
 ): PreviewRecipeValidation {
   const validation = validateGeneratedPreviewRecipeDraft(yaml, capabilities);
   if (validation.status !== 'VALID') return validation;
-  const plan = parsePreviewRecipe(yaml).executionPlan;
-  const activeAttachmentIds = new Set(activePreviewAttachmentIds(plan));
-  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
-  const activeJobIds = new Set([
-    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
-    ...(scenario?.jobs ?? [])
-  ]);
-  const activeNodes = [
-    ...plan.jobs.filter((job) => activeJobIds.has(job.id)),
-    ...plan.services,
-    ...plan.workers
-  ];
+  const plan = parseConfiguration(yaml);
+  const activeNodes = commandNodes(plan);
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   for (const decision of decisions) {
     const candidate = candidateById.get(decision.candidateId);
     if (!candidate) return invalidPublicEnvironmentDecision();
-    const recipientValues = activeNodes.flatMap((node): PreviewEnvironmentValue[] => {
+    const recipientValues = activeNodes.flatMap((node) => {
       const environments = [node.env];
-      if ('ready' in node && node.ready.type === 'argv') environments.push(node.ready.env ?? {});
-      if ('liveness' in node && node.liveness?.probe.type === 'argv') {
+      if ('ready' in node && node.ready?.type === 'command') environments.push(node.ready.env ?? {});
+      if ('liveness' in node && node.liveness?.probe.type === 'command') {
         environments.push(node.liveness.probe.env ?? {});
       }
       return environments.flatMap((environment) =>
@@ -600,19 +587,15 @@ function validateAgentGeneratedPreviewRecipeDraft(
       );
     });
     if (decision.decision === 'HTTP_ATTACHMENT') {
-      const attachment = plan.attachments?.find(
-        (candidate) => candidate.id === decision.attachmentId
-      );
+      const attachment = plan.type === 'environment' && decision.attachmentId ? plan.services[decision.attachmentId] : undefined;
       if (
         !decision.attachmentId || recipientValues.length === 0 ||
         recipientValues.some(
           (value) =>
-            typeof value === 'string' || value.type !== 'attached-http-origin' ||
-            value.attachment !== decision.attachmentId
+            typeof value === 'string' || !('service' in value && value.service === decision.attachmentId || 'browserUrl' in value && value.browserUrl === decision.attachmentId)
         ) ||
-        !activeAttachmentIds.has(decision.attachmentId) ||
-        attachment?.type !== 'http' ||
-        !publicTargetMatchesPolicy(attachment.target, candidate)
+        attachment?.type !== 'attach' ||
+        !publicTargetMatchesPolicy(attachment.url, candidate)
       ) return invalidPublicEnvironmentDecision();
     } else if (decision.decision === 'SOURCE_DEFAULT') {
       if (!candidate.sourceDefault || recipientValues.length > 0) {
@@ -625,19 +608,13 @@ function validateAgentGeneratedPreviewRecipeDraft(
   return validation;
 }
 
-function publicTargetMatchesPolicy(
-  target: PreviewAttachmentPlan['target'],
-  candidate: PreviewPublicEnvironmentCandidate
-): boolean {
-  if (target.type === 'local') return true;
-  if (
-    candidate.targetPolicy.kind !== 'LITERAL_ALLOWED' ||
-    target.type !== 'endpoint' ||
-    !('scheme' in target)
-  ) return false;
+function publicTargetMatchesPolicy(url: string | undefined, candidate: PreviewPublicEnvironmentCandidate): boolean {
+  if (!url) return true; // The owner must select a dependency before execution.
+  if (candidate.targetPolicy.kind !== 'LITERAL_ALLOWED') return false;
   const evidenced = candidate.targetPolicy.publicHttpTarget;
-  return target.scheme === evidenced.scheme && target.host === evidenced.host &&
-    target.port === evidenced.port && target.basePath === evidenced.basePath;
+  const target = new URL(url);
+  return target.protocol === `${evidenced.scheme}:` && target.hostname === evidenced.host &&
+    Number(target.port || (target.protocol === 'https:' ? 443 : 80)) === evidenced.port && target.pathname === evidenced.basePath;
 }
 
 function invalidPublicEnvironmentDecision(): PreviewRecipeValidation {
@@ -656,8 +633,8 @@ function validateGeneratedPreviewRecipeDraft(
 ): PreviewRecipeValidation {
   const validation = validatePreviewRecipeDraft(yaml);
   if (validation.status !== 'VALID') return validation;
-  const plan = parsePreviewRecipe(yaml).executionPlan;
-  const longNodes = [...plan.services, ...plan.workers];
+  const plan = parseConfiguration(yaml);
+  const longNodes = commandNodes(plan).filter(node => node.type !== 'job');
   const commands = longNodes.map((node) => node.command);
   if (generatedCommands(plan).some(isImplicitPackageAcquisition)) {
     return dependencyPreparationRequired(
@@ -712,8 +689,8 @@ function validateGeneratedPreviewRecipeDraft(
     }
     const preparation = capability.dependencyPreparation;
     if (!preparation || compatibleNodes.length === 0) continue;
-    const installJobs = plan.jobs.filter((job) =>
-      job.role === 'generic' &&
+    const installJobs = commandNodes(plan).filter((job) =>
+      job.type === 'job' &&
       job.cwd === preparation.cwd &&
       equalCommand(job.command, preparation.installCommand)
     );
@@ -723,14 +700,14 @@ function validateGeneratedPreviewRecipeDraft(
       );
     }
     const installJob = installJobs[0];
-    if (Object.keys(installJob.needs).length > 0 || Object.keys(installJob.env).length > 0) {
+    if (('dependsOn' in installJob && (installJob.dependsOn?.length ?? 0) > 0) || Object.keys(installJob.env).length > 0) {
       return dependencyPreparationRequired(
         'The trusted lockfile installation job must not invent prerequisites or environment overrides.'
       );
     }
     if (
       compatibleNodes.some((node) =>
-        node.cwd !== preparation.cwd || node.needs[installJob.id] !== 'succeeded'
+        node.cwd !== preparation.cwd || (!('dependsOn' in node) || !node.dependsOn?.includes(installJob.id))
       )
     ) {
       return dependencyPreparationRequired(
@@ -746,12 +723,24 @@ function validateGeneratedPreviewRecipeDraft(
   return validation;
 }
 
-function generatedCommands(plan: PreviewExecutionPlan): string[][] {
-  const nodes = [...plan.jobs, ...plan.services, ...plan.workers];
-  const commands = nodes.map((node) => node.command);
-  for (const node of [...plan.services, ...plan.workers]) {
-    if (node.ready.type === 'argv') commands.push(node.ready.command);
-    if (node.liveness?.probe.type === 'argv') commands.push(node.liveness.probe.command);
+function parseConfiguration(yaml: string): Configuration {
+  const document = parseDocument(yaml, { schema: 'core', uniqueKeys: true, strict: true });
+  if (document.errors.length) throw new Error('Invalid YAML.');
+  return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }) as PreviewSpec);
+}
+
+function commandNodes(spec: Configuration) {
+  if (spec.type === 'command') return [{ id: 'app', ...spec }];
+  if (spec.type !== 'environment') return [];
+  return Object.entries(spec.services).flatMap(([id, service]) => service.type === 'command' || service.type === 'worker' || service.type === 'job' ? [{ id, ...service }] : []);
+}
+
+function generatedCommands(plan: Configuration): string[][] {
+  const commands: string[][] = [];
+  for (const node of commandNodes(plan)) {
+    commands.push(node.command);
+    if ('ready' in node && node.ready?.type === 'command') commands.push(node.ready.command);
+    if ('liveness' in node && node.liveness?.probe.type === 'command') commands.push(node.liveness.probe.command);
   }
   return commands;
 }
@@ -803,12 +792,12 @@ function dependencyPreparationRequired(message: string): PreviewRecipeValidation
   };
 }
 
-function containsSecretLiteral(plan: PreviewExecutionPlan): boolean {
-  for (const node of [...plan.jobs, ...plan.services, ...plan.workers]) {
+function containsSecretLiteral(plan: Configuration): boolean {
+  for (const node of commandNodes(plan)) {
     const environments = [node.env];
     if ('ready' in node) {
-      if (node.ready.type === 'argv') environments.push(node.ready.env ?? {});
-      if (node.liveness?.probe.type === 'argv') {
+      if (node.ready?.type === 'command') environments.push(node.ready.env ?? {});
+      if (node.liveness?.probe.type === 'command') {
         environments.push(node.liveness.probe.env ?? {});
       }
     }
@@ -1137,21 +1126,7 @@ async function hashFile(filePath: string, expectedBytes: number): Promise<string
 
 async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promise<void> {
   const root = await fs.realpath(path.resolve(worktreePath));
-  const recipeDirectory = path.join(root, '.taskmonki');
-  try {
-    const directoryStat = await fs.lstat(recipeDirectory);
-    if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
-      throw new Error('.taskmonki must be a regular directory inside the task worktree.');
-    }
-    const realDirectory = await fs.realpath(recipeDirectory);
-    if (path.dirname(realDirectory) !== root) {
-      throw new Error('.taskmonki must remain inside the task worktree.');
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    await fs.mkdir(recipeDirectory, { mode: 0o700 });
-  }
-
+  await assertPreviewRecipeMissing(root);
   const recipePath = path.join(root, PREVIEW_RECIPE_PATH);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   let created = false;
@@ -1181,13 +1156,9 @@ async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promis
 }
 
 async function assertPreviewRecipeMissing(worktreePath: string): Promise<void> {
-  try {
-    await fs.lstat(path.join(worktreePath, PREVIEW_RECIPE_PATH));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
+  for (const name of ['preview.yaml', 'preview.yml']) {
+    try { await fs.lstat(path.join(worktreePath, name)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    throw new PreviewRecipeAlreadyExistsError('A Preview recipe already exists. Check it instead of generating a replacement.');
   }
-  throw new PreviewRecipeAlreadyExistsError(
-    'A Preview recipe already exists. Check it instead of generating a replacement.'
-  );
 }

@@ -11,11 +11,9 @@ import type {
   AgentGoalSnapshotRecord,
   AgentItemRecord,
   AgentProtocolMessageReference,
-  AgentPlanRevisionRecord,
   AgentRunMode,
   AgentServerInstance,
   AgentSessionRecord,
-  AgentUsageSnapshotRecord,
   ArtifactKind,
   ArtifactRecord,
   Board,
@@ -47,17 +45,7 @@ import type {
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
-  PreviewApprovalRecord,
-  PreviewComposeProjectRecord,
   PreviewGenerationRecord,
-  PreviewGenerationAttachmentRecord,
-  PreviewLocalAttachmentBindingRecord,
-  PreviewManagedEnvironmentRecord,
-  PreviewManagedResourceRecord,
-  PreviewNodeAttemptRecord,
-  PreviewNativeResourceRecord,
-  PreviewPlanRecord,
-  PreviewResourceRecord,
   ReviewRollupRecord,
   Repository,
   RepositoryPreflight,
@@ -299,9 +287,6 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
-  'preview-source-manifest': 8 * 1024 * 1024,
-  'preview-stdout': 256 * 1024,
-  'preview-stderr': 256 * 1024
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -1118,20 +1103,10 @@ export class SqliteTaskStore {
       agentSettingsObservations,
       agentSubagentObservations,
       interactionRequests,
-      previewPlans: taskRecords(state.previewPlans),
-      previewApprovals: taskRecords(state.previewApprovals),
-      previewComposeProjects: taskRecords(state.previewComposeProjects),
       previewGenerations: taskRecords(state.previewGenerations),
-      previewManagedEnvironments: taskRecords(state.previewManagedEnvironments),
-      previewManagedResources: taskRecords(state.previewManagedResources),
-      previewGenerationAttachments: taskRecords(state.previewGenerationAttachments),
-      previewLocalBindings: taskRecords(state.previewLocalBindings),
-      previewNodeAttempts: taskRecords(state.previewNodeAttempts),
-      previewResources: taskRecords(state.previewResources),
       events,
       artifacts: taskRecords(state.artifacts),
       attachments: taskRecords(state.attachments),
-      previewTaskRoutes: selectPreviewTaskRouteOptions(state, taskId),
       textExcerpts: []
     });
   }
@@ -1488,37 +1463,6 @@ export class SqliteTaskStore {
     return this.state.tasks.map((task) => task.id);
   }
 
-  async getPreviewPlan(planId: string): Promise<PreviewPlanRecord | undefined> {
-    await this.init();
-    return clone(this.state.previewPlans.find((plan) => plan.id === planId));
-  }
-
-  async getLatestPreviewPlan(taskId: string): Promise<PreviewPlanRecord | undefined> {
-    await this.init();
-    return clone(
-      this.state.previewPlans
-        .filter((plan) => plan.taskId === taskId)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-    );
-  }
-
-  async getMatchingPreviewApproval(
-    taskId: string,
-    executionDigest: string
-  ): Promise<PreviewApprovalRecord | undefined> {
-    await this.init();
-    return clone(
-      this.state.previewApprovals
-        .filter(
-          (approval) =>
-            approval.taskId === taskId &&
-            approval.executionDigest === executionDigest &&
-            !approval.invalidatedAt
-        )
-        .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))[0]
-    );
-  }
-
   async getPreviewGeneration(generationId: string): Promise<PreviewGenerationRecord | undefined> {
     await this.init();
     return clone(
@@ -1533,191 +1477,6 @@ export class SqliteTaskStore {
         (generation) => !taskId || generation.taskId === taskId
       )
     );
-  }
-
-  async getPreviewManagedEnvironment(taskId: string): Promise<PreviewManagedEnvironmentRecord | undefined> {
-    await this.init();
-    return clone(this.state.previewManagedEnvironments.find((environment) => environment.taskId === taskId));
-  }
-
-  async getPreviewComposeProject(taskId: string): Promise<PreviewComposeProjectRecord | undefined> {
-    await this.init();
-    return clone(this.state.previewComposeProjects.find((project) => project.taskId === taskId));
-  }
-
-  async getPreviewComposeProjects(): Promise<PreviewComposeProjectRecord[]> {
-    await this.init();
-    return clone(this.state.previewComposeProjects);
-  }
-
-  async getPreviewManagedEnvironments(): Promise<PreviewManagedEnvironmentRecord[]> {
-    await this.init();
-    return clone(this.state.previewManagedEnvironments);
-  }
-
-  async getPreviewManagedResource(resourceId: string): Promise<PreviewManagedResourceRecord | undefined> {
-    await this.init();
-    return clone(this.state.previewManagedResources.find((resource) => resource.id === resourceId));
-  }
-
-  async getPreviewManagedResources(taskId?: string): Promise<PreviewManagedResourceRecord[]> {
-    await this.init();
-    return clone(this.state.previewManagedResources.filter((resource) => !taskId || resource.taskId === taskId));
-  }
-
-  async getPreviewGenerationAttachments(generationId?: string): Promise<PreviewGenerationAttachmentRecord[]> {
-    await this.init();
-    return clone(this.state.previewGenerationAttachments.filter((attachment) => !generationId || attachment.generationId === generationId));
-  }
-
-  async getPreviewNodeAttempts(generationId: string): Promise<PreviewNodeAttemptRecord[]> {
-    await this.init();
-    return clone(
-      this.state.previewNodeAttempts.filter((attempt) => attempt.generationId === generationId)
-    );
-  }
-
-  async isPreviewLogArtifactOwned(taskId: string, artifactId: string): Promise<boolean> {
-    await this.init();
-    return this.state.previewNodeAttempts.some(
-      (attempt) =>
-        attempt.taskId === taskId &&
-        (attempt.stdoutArtifactId === artifactId || attempt.stderrArtifactId === artifactId)
-    );
-  }
-
-  async getPreviewResources(generationId?: string): Promise<PreviewResourceRecord[]> {
-    await this.init();
-    return clone(
-      this.state.previewResources.filter(
-        (resource) => !generationId || resource.generationId === generationId
-      )
-    );
-  }
-
-  async getPreviewLocalBindings(taskId?: string): Promise<PreviewLocalAttachmentBindingRecord[]> {
-    await this.init();
-    return clone(
-      this.state.previewLocalBindings.filter((binding) => !taskId || binding.taskId === taskId)
-    );
-  }
-
-  async getPreviewLocalBinding(
-    taskId: string,
-    attachmentId: string
-  ): Promise<PreviewLocalAttachmentBindingRecord | undefined> {
-    await this.init();
-    return clone(
-      this.state.previewLocalBindings.find(
-        (binding) => binding.taskId === taskId && binding.attachmentId === attachmentId
-      )
-    );
-  }
-
-  async savePreviewLocalBinding(
-    binding: PreviewLocalAttachmentBindingRecord
-  ): Promise<PreviewLocalAttachmentBindingRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      if (!this.state.tasks.some((task) => task.id === binding.taskId)) {
-        throw new Error('Preview local binding references a missing task.');
-      }
-      const conflicting = this.state.previewLocalBindings.find(
-        (candidate) =>
-          candidate.taskId === binding.taskId &&
-          candidate.attachmentId === binding.attachmentId &&
-          candidate.id !== binding.id
-      );
-      if (conflicting) throw new Error('Preview attachment already has a local binding.');
-      this.state = {
-        ...this.state,
-        previewLocalBindings: [
-          binding,
-          ...this.state.previewLocalBindings.filter((candidate) => candidate.id !== binding.id)
-        ]
-      };
-      await this.persistSnapshot();
-      return clone(binding);
-    });
-  }
-
-  async deletePreviewLocalBinding(taskId: string, attachmentId: string): Promise<void> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      this.state = {
-        ...this.state,
-        previewLocalBindings: this.state.previewLocalBindings.filter(
-          (binding) => binding.taskId !== taskId || binding.attachmentId !== attachmentId
-        )
-      };
-      await this.persistSnapshot();
-    });
-  }
-
-  async savePreviewPlan(plan: PreviewPlanRecord): Promise<PreviewPlanRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      this.assertPreviewPlanReferences(plan);
-      const now = new Date().toISOString();
-      this.state = {
-        ...this.state,
-        previewPlans: [
-          plan,
-          ...this.state.previewPlans.filter((candidate) => candidate.id !== plan.id)
-        ],
-        previewApprovals: this.state.previewApprovals.map((approval) =>
-          approval.taskId === plan.taskId &&
-          approval.executionDigest !== plan.executionDigest &&
-          !approval.invalidatedAt
-            ? {
-                ...approval,
-                invalidatedAt: now,
-                invalidatedReason: 'Preview execution plan changed.'
-              }
-            : approval
-        )
-      };
-      await this.appendEventInternal(
-        createDomainEvent({
-          type: 'PREVIEW_PLAN_RESOLVED',
-          taskId: plan.taskId,
-          iterationId: plan.iterationId,
-          worktreeId: plan.worktreeId,
-          previewPlanId: plan.id,
-          source: 'preview',
-          payload: { executionDigest: plan.executionDigest }
-        }),
-        false
-      );
-      await this.persistSnapshot();
-      return clone(plan);
-    });
-  }
-
-  async savePreviewApproval(approval: PreviewApprovalRecord): Promise<PreviewApprovalRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      this.assertPreviewApprovalReferences(approval);
-      this.state = {
-        ...this.state,
-        previewApprovals: [
-          approval,
-          ...this.state.previewApprovals.filter((candidate) => candidate.id !== approval.id)
-        ]
-      };
-      await this.appendEventInternal(
-        createDomainEvent({
-          type: 'PREVIEW_PLAN_APPROVED',
-          taskId: approval.taskId,
-          previewPlanId: approval.planId,
-          source: 'preview',
-          payload: { executionDigest: approval.executionDigest, scope: approval.scope }
-        }),
-        false
-      );
-      await this.persistSnapshot();
-      return clone(approval);
-    });
   }
 
   async savePreviewGeneration(
@@ -1742,137 +1501,14 @@ export class SqliteTaskStore {
           taskId: generation.taskId,
           iterationId: generation.iterationId,
           worktreeId: generation.worktreeId,
-          previewPlanId: generation.planId,
           previewGenerationId: generation.id,
           source: 'preview',
-          payload: { state: generation.state, freshness: generation.freshness }
+          payload: { state: generation.state }
         }),
         false
       );
       await this.persistSnapshot();
       return clone(generation);
-    });
-  }
-
-  async savePreviewManagedEnvironment(
-    environment: PreviewManagedEnvironmentRecord
-  ): Promise<PreviewManagedEnvironmentRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      if (!this.state.tasks.some((task) => task.id === environment.taskId)) {
-        throw new Error('Preview managed environment references a missing task.');
-      }
-      const hasOtherLiveEnvironment = this.state.previewManagedEnvironments.some(
-        (candidate) =>
-          candidate.taskId === environment.taskId &&
-          candidate.id !== environment.id &&
-          candidate.state !== 'STOPPED'
-      );
-      if (environment.state !== 'STOPPED' && hasOtherLiveEnvironment) {
-        throw new Error('A task preview may have only one managed environment.');
-      }
-      this.state = {
-        ...this.state,
-        previewManagedEnvironments: [
-          environment,
-          ...this.state.previewManagedEnvironments.filter((candidate) => candidate.id !== environment.id)
-        ]
-      };
-      await this.persistSnapshot();
-      return clone(environment);
-    });
-  }
-
-  async savePreviewComposeProject(
-    project: PreviewComposeProjectRecord
-  ): Promise<PreviewComposeProjectRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      if (!this.state.tasks.some((task) => task.id === project.taskId)) {
-        throw new Error('Preview Compose project references a missing task.');
-      }
-      const conflicting = this.state.previewComposeProjects.find(
-        (candidate) => candidate.taskId === project.taskId && candidate.id !== project.id
-      );
-      if (conflicting && conflicting.state !== 'STOPPED') {
-        throw new Error('A task preview may have only one Compose project record.');
-      }
-      this.state = {
-        ...this.state,
-        previewComposeProjects: [
-          project,
-          ...this.state.previewComposeProjects.filter((candidate) => candidate.taskId !== project.taskId)
-        ]
-      };
-      await this.persistSnapshot();
-      return clone(project);
-    });
-  }
-
-  async savePreviewManagedResource(
-    resource: PreviewManagedResourceRecord
-  ): Promise<PreviewManagedResourceRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      const environment = this.state.previewManagedEnvironments.find(
-        (candidate) => candidate.id === resource.environmentId && candidate.taskId === resource.taskId
-      );
-      if (!environment) throw new Error('Preview managed resource references a missing environment.');
-      const duplicate = this.state.previewManagedResources.find(
-        (candidate) =>
-          candidate.environmentId === resource.environmentId &&
-          candidate.logicalResourceId === resource.logicalResourceId &&
-          candidate.id !== resource.id &&
-          candidate.state !== 'STOPPED'
-      );
-      if (resource.state !== 'STOPPED' && duplicate) {
-        throw new Error(`Managed resource ${resource.logicalResourceId} already exists.`);
-      }
-      this.state = {
-        ...this.state,
-        previewManagedResources: [
-          resource,
-          ...this.state.previewManagedResources.filter((candidate) => candidate.id !== resource.id)
-        ]
-      };
-      await this.persistSnapshot();
-      return clone(resource);
-    });
-  }
-
-  async savePreviewGenerationAttachments(
-    attachments: PreviewGenerationAttachmentRecord[]
-  ): Promise<PreviewGenerationAttachmentRecord[]> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      for (const attachment of attachments) {
-        const generation = this.state.previewGenerations.find(
-          (candidate) => candidate.id === attachment.generationId && candidate.taskId === attachment.taskId
-        );
-        const resource = this.state.previewManagedResources.find(
-          (candidate) =>
-            candidate.id === attachment.managedResourceId &&
-            candidate.taskId === attachment.taskId &&
-            candidate.logicalResourceId === attachment.logicalResourceId &&
-            candidate.binding?.id === attachment.bindingId
-        );
-        if (!generation || !resource) {
-          throw new Error('Preview generation attachment references missing authority.');
-        }
-      }
-      const ids = new Set(attachments.map((attachment) => attachment.id));
-      const generationIds = new Set(attachments.map((attachment) => attachment.generationId));
-      this.state = {
-        ...this.state,
-        previewGenerationAttachments: [
-          ...attachments,
-          ...this.state.previewGenerationAttachments.filter(
-            (candidate) => !ids.has(candidate.id) && !generationIds.has(candidate.generationId)
-          )
-        ]
-      };
-      await this.persistSnapshot();
-      return clone(attachments);
     });
   }
 
@@ -2027,8 +1663,7 @@ export class SqliteTaskStore {
         }
         candidate = {
           ...candidate,
-          source: { ...candidate.source, designRevisionId: revision.id },
-          freshness: 'REVISION'
+          source: { ...candidate.source, designRevisionId: revision.id }
         };
       } else if (
         input.candidate.source.type === 'EXACT_COMMIT' &&
@@ -2076,12 +1711,10 @@ export class SqliteTaskStore {
             taskId: generation.taskId,
             iterationId: generation.iterationId,
             worktreeId: generation.worktreeId,
-            previewPlanId: generation.planId,
             previewGenerationId: generation.id,
             source: 'preview',
             payload: {
               state: generation.state,
-              freshness: generation.freshness,
               routingState: generation.routingState
             }
           }),
@@ -2090,152 +1723,6 @@ export class SqliteTaskStore {
       }
       await this.persistSnapshot();
       return clone({ candidate, replaced: input.replaced, revision });
-    });
-  }
-
-  async prunePreviewHistory(taskId: string, maxTerminalGenerations = 20): Promise<number> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      if (!Number.isInteger(maxTerminalGenerations) || maxTerminalGenerations < 1 || maxTerminalGenerations > 100) {
-        throw new Error('Preview history retention must be between 1 and 100 generations.');
-      }
-      const terminal = this.state.previewGenerations
-        .filter((generation) => generation.taskId === taskId && ['STOPPED', 'FAILED'].includes(generation.state))
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      const removedIds = new Set(terminal.slice(maxTerminalGenerations).map((generation) => generation.id));
-      if (removedIds.size === 0) return 0;
-      const removedAttempts = this.state.previewNodeAttempts.filter((attempt) => removedIds.has(attempt.generationId));
-      const removedGenerations = this.state.previewGenerations.filter((generation) => removedIds.has(generation.id));
-      const artifactIds = new Set([
-        ...removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId]),
-        ...removedGenerations.flatMap((generation) => generation.sourceManifestArtifactId ? [generation.sourceManifestArtifactId] : [])
-      ]);
-      this.state = {
-        ...this.state,
-        previewGenerations: this.state.previewGenerations.filter((generation) => !removedIds.has(generation.id)),
-        previewNodeAttempts: this.state.previewNodeAttempts.filter((attempt) => !removedIds.has(attempt.generationId)),
-        previewResources: this.state.previewResources.filter((resource) => !removedIds.has(resource.generationId)),
-        previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
-          (attachment) => !removedIds.has(attachment.generationId)
-        ),
-        events: this.state.events.filter((event) => !event.previewGenerationId || !removedIds.has(event.previewGenerationId)),
-        artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
-      };
-      await this.persistSnapshot();
-      return removedIds.size;
-    });
-  }
-
-  async prunePreviewProbeHistory(
-    generationId: string,
-    nodeId: string,
-    maxAttempts = 20
-  ): Promise<number> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 100) {
-        throw new Error('Preview probe retention must be between 1 and 100 attempts.');
-      }
-      const terminalAttempts = this.state.previewNodeAttempts
-        .filter(
-          (attempt) =>
-            attempt.generationId === generationId &&
-            attempt.nodeId === nodeId &&
-            attempt.kind === 'PROBE' &&
-            ['SUCCEEDED', 'FAILED', 'STOPPED'].includes(attempt.state)
-        )
-        .sort((a, b) => b.attempt - a.attempt);
-      const removedAttempts = terminalAttempts.slice(maxAttempts);
-      if (removedAttempts.length === 0) return 0;
-      const removedAttemptIds = new Set(removedAttempts.map((attempt) => attempt.id));
-      const artifactIds = new Set(
-        removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId])
-      );
-      const terminalResources = this.state.previewResources
-        .filter(
-          (resource) =>
-            resource.generationId === generationId &&
-            resource.logicalNodeId === nodeId &&
-            ['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
-        )
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      const removedResourceIds = new Set(
-        terminalResources.slice(maxAttempts).map((resource) => resource.id)
-      );
-      this.state = {
-        ...this.state,
-        previewNodeAttempts: this.state.previewNodeAttempts.filter(
-          (attempt) => !removedAttemptIds.has(attempt.id)
-        ),
-        previewResources: this.state.previewResources.filter(
-          (resource) => !removedResourceIds.has(resource.id)
-        ),
-        events: this.state.events.filter(
-          (event) => {
-            if (event.previewGenerationId !== generationId || !event.payload) return true;
-            const payload = event.payload as { nodeId?: unknown; resourceId?: unknown };
-            return payload.nodeId !== nodeId &&
-              (typeof payload.resourceId !== 'string' || !removedResourceIds.has(payload.resourceId));
-          }
-        ),
-        artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
-      };
-      await this.persistSnapshot();
-      return removedAttempts.length;
-    });
-  }
-
-  async savePreviewNodeAttempt(
-    attempt: PreviewNodeAttemptRecord
-  ): Promise<PreviewNodeAttemptRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      this.assertPreviewChildReferences(attempt.taskId, attempt.generationId, 'attempt');
-      this.state = {
-        ...this.state,
-        previewNodeAttempts: [
-          attempt,
-          ...this.state.previewNodeAttempts.filter((candidate) => candidate.id !== attempt.id)
-        ]
-      };
-      await this.appendEventInternal(
-        createDomainEvent({
-          type: 'PREVIEW_NODE_UPDATED',
-          taskId: attempt.taskId,
-          previewGenerationId: attempt.generationId,
-          source: 'preview',
-          payload: { nodeId: attempt.nodeId, state: attempt.state }
-        }),
-        false
-      );
-      await this.persistSnapshot();
-      return clone(attempt);
-    });
-  }
-
-  async savePreviewResource(resource: PreviewNativeResourceRecord): Promise<PreviewNativeResourceRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      this.assertPreviewChildReferences(resource.taskId, resource.generationId, 'resource');
-      this.state = {
-        ...this.state,
-        previewResources: [
-          resource,
-          ...this.state.previewResources.filter((candidate) => candidate.id !== resource.id)
-        ]
-      };
-      await this.appendEventInternal(
-        createDomainEvent({
-          type: 'PREVIEW_RESOURCE_UPDATED',
-          taskId: resource.taskId,
-          previewGenerationId: resource.generationId,
-          source: 'preview',
-          payload: { resourceId: resource.id, state: resource.state }
-        }),
-        false
-      );
-      await this.persistSnapshot();
-      return clone(resource);
     });
   }
 
@@ -3788,31 +3275,6 @@ export class SqliteTaskStore {
         throw new Error('Delete the unfinished Design copy before deleting its source.');
       }
     }
-    const activePreviewResource = this.state.previewResources.find(
-      (resource) =>
-        resource.taskId === taskId &&
-        !['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
-    );
-    if (activePreviewResource) {
-      throw new Error(
-        `Task has an active or unverified preview resource: ${activePreviewResource.id}. Stop or reconcile it before deletion.`
-      );
-    }
-    const activeManagedEnvironment = this.state.previewManagedEnvironments.find(
-      (environment) => environment.taskId === taskId && environment.state !== 'STOPPED'
-    );
-    const activeManagedResource = this.state.previewManagedResources.find(
-      (resource) => resource.taskId === taskId && resource.state !== 'STOPPED'
-    );
-    if (activeManagedEnvironment || activeManagedResource) {
-      throw new Error('Task has an active or unverified managed preview environment. Stop or reconcile it before deletion.');
-    }
-    const activeComposeProject = this.state.previewComposeProjects.find(
-      (project) => project.taskId === taskId && project.state !== 'STOPPED'
-    );
-    if (activeComposeProject) {
-      throw new Error('Task has an active or unverified Compose preview project. Stop or reconcile it before deletion.');
-    }
     const nonterminalPreviewGeneration = this.state.previewGenerations.find(
       (generation) =>
         generation.taskId === taskId && !['STOPPED', 'FAILED'].includes(generation.state)
@@ -3942,32 +3404,7 @@ export class SqliteTaskStore {
           !runIds.has(request.runId) &&
           !sessionIds.has(request.sessionId)
       ),
-      previewPlans: this.state.previewPlans.filter((record) => record.taskId !== taskId),
-      previewApprovals: this.state.previewApprovals.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewComposeProjects: this.state.previewComposeProjects.filter(
-        (record) => record.taskId !== taskId
-      ),
       previewGenerations: this.state.previewGenerations.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewManagedEnvironments: this.state.previewManagedEnvironments.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewManagedResources: this.state.previewManagedResources.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewLocalBindings: this.state.previewLocalBindings.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewNodeAttempts: this.state.previewNodeAttempts.filter(
-        (record) => record.taskId !== taskId
-      ),
-      previewResources: this.state.previewResources.filter(
         (record) => record.taskId !== taskId
       ),
       events: this.state.events.filter(
@@ -4430,130 +3867,26 @@ export class SqliteTaskStore {
     }
   }
 
-  private assertPreviewPlanReferences(plan: PreviewPlanRecord): void {
-    const task = this.state.tasks.find((candidate) => candidate.id === plan.taskId);
-    const iteration = this.state.iterations.find(
-      (candidate) => candidate.id === plan.iterationId && candidate.taskId === plan.taskId
-    );
-    const worktree = this.state.worktrees.find(
-      (candidate) =>
-        candidate.id === plan.worktreeId &&
-        candidate.taskId === plan.taskId &&
-        candidate.iterationId === plan.iterationId
-    );
-    if (!task || !iteration || !worktree) {
-      throw new Error('Preview plan references a missing or mismatched task context.');
-    }
-  }
-
-  private assertPreviewApprovalReferences(approval: PreviewApprovalRecord): void {
-    const plan = this.state.previewPlans.find(
-      (candidate) =>
-        candidate.id === approval.planId &&
-        candidate.taskId === approval.taskId &&
-        candidate.executionDigest === approval.executionDigest
-    );
-    if (!plan || !this.state.tasks.some((task) => task.id === approval.taskId)) {
-      throw new Error('Preview approval references a missing or mismatched plan.');
-    }
-  }
-
   private assertPreviewGenerationReferences(generation: PreviewGenerationRecord): void {
     const existing = this.state.previewGenerations.find(
       (candidate) => candidate.id === generation.id
     );
-    const authority = generation.executionAuthority;
-    const executionDigest = authority.executionDigest;
-    const plan = this.state.previewPlans.find(
-      (candidate) =>
-        candidate.id === generation.planId &&
-        candidate.taskId === generation.taskId &&
-        candidate.iterationId === generation.iterationId &&
-        candidate.worktreeId === generation.worktreeId &&
-        candidate.executionDigest === executionDigest
-    );
     const task = this.state.tasks.find((candidate) => candidate.id === generation.taskId);
-    const approval =
-      authority.type === 'USER_APPROVAL'
-        ? this.state.previewApprovals.find(
-            (candidate) =>
-              candidate.id === authority.approvalId &&
-              candidate.taskId === generation.taskId &&
-              candidate.executionDigest === executionDigest &&
-              candidate.scope === 'TASK' &&
-              (!candidate.invalidatedAt || Boolean(existing))
-          )
-        : undefined;
-    const authorityValid =
-      authority.type === 'USER_APPROVAL'
-        ? Boolean(approval) && plan?.planSource.type === 'REPOSITORY_RECIPE'
-        : authority.adapterVersion === 1 &&
-          plan?.planSource.type === 'MANAGED_DESIGN_STATIC' &&
-          task?.kind === 'DESIGN';
-    const sourceValid = (() => {
-      const source = generation.source;
-      if (source.type === 'WORKTREE_SNAPSHOT') {
-        const snapshot = this.state.gitSnapshots.find(
-          (candidate) =>
-            candidate.id === source.gitSnapshotId &&
-            candidate.taskId === generation.taskId &&
-            candidate.iterationId === generation.iterationId &&
-            candidate.worktreeId === generation.worktreeId
-        );
-        return Boolean(
-          snapshot &&
-            snapshot.headSha === source.headSha &&
-            snapshot.dirtyFingerprint === source.dirtyFingerprint &&
-            plan?.planSource.type === 'REPOSITORY_RECIPE'
-        );
-      }
-      const repository = this.state.repositories.find(
-        (candidate) => candidate.id === source.repositoryId
-      );
-      const revision = source.designRevisionId
-        ? this.state.designRevisions.find(
-            (candidate) => candidate.id === source.designRevisionId
-          )
-        : undefined;
-      return Boolean(
-        task?.kind === 'DESIGN' &&
-          repository?.id === task.repositoryId &&
-          ((repository.kind === 'DESIGN_MANAGED' && plan?.planSource.type === 'MANAGED_DESIGN_STATIC') ||
-            (repository.kind === 'USER_REGISTERED' && plan?.planSource.type === 'REPOSITORY_RECIPE' && authority.type === 'USER_APPROVAL')) &&
-          (!source.designRevisionId ||
-            (revision?.designId === task.id &&
-              revision.commitSha === source.commitSha))
-      );
-    })();
-    const authorityChanged =
-      existing &&
-      (existing.taskId !== generation.taskId ||
-        existing.iterationId !== generation.iterationId ||
-        existing.worktreeId !== generation.worktreeId ||
-        existing.planId !== generation.planId ||
-        !sameJsonValue(existing.executionAuthority, generation.executionAuthority) ||
-        !sameJsonValue(existing.source, generation.source));
-    if (
-      !plan ||
-      !authorityValid ||
-      !sourceValid ||
-      authorityChanged ||
-      !task
-    ) {
-      throw new Error('Preview generation references missing or mismatched task authority.');
-    }
-  }
-
-  private assertPreviewChildReferences(
-    taskId: string,
-    generationId: string,
-    kind: 'attempt' | 'resource'
-  ): void {
-    const generation = this.state.previewGenerations.find(
-      (candidate) => candidate.id === generationId && candidate.taskId === taskId
-    );
-    if (!generation || !this.state.tasks.some((task) => task.id === taskId)) {
-      throw new Error(`Preview ${kind} references a missing or mismatched generation.`);
+    const source = generation.source;
+    const revision = source.designRevisionId
+      ? this.state.designRevisions.find((candidate) => candidate.id === source.designRevisionId)
+      : undefined;
+    const contextMatches = task?.kind === 'DESIGN' && source.repositoryId === task.repositoryId &&
+      this.state.worktrees.some(worktree => worktree.id === generation.worktreeId && worktree.taskId === task.id && worktree.iterationId === generation.iterationId && worktree.repositoryId === task.repositoryId) &&
+      this.state.iterations.some(iteration => iteration.id === generation.iterationId && iteration.taskId === task.id) &&
+      (!source.designRevisionId || revision?.designId === task.id && revision.commitSha === source.commitSha);
+    const ownershipChanged = existing && (
+      existing.taskId !== generation.taskId || existing.iterationId !== generation.iterationId ||
+      existing.worktreeId !== generation.worktreeId ||
+      existing.runtimeAttemptId !== undefined && existing.runtimeAttemptId !== generation.runtimeAttemptId ||
+      !sameJsonValue(existing.source, generation.source));
+    if (!contextMatches || ownershipChanged) {
+      throw new Error('Design preview references missing or mismatched task authority.');
     }
   }
 
@@ -5501,113 +4834,6 @@ export class SqliteTaskStore {
     }
   }
 
-  async createPreviewArtifact(
-    taskId: string,
-    kind: 'preview-stdout' | 'preview-stderr'
-  ): Promise<ArtifactRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      const artifact = await this.createArtifactRecord(taskId, kind);
-      const capturePath = await this.artifactFiles.createCapture(artifact.id);
-      this.state = {
-        ...this.state,
-        artifacts: [artifact, ...this.state.artifacts]
-      };
-      try {
-        await this.persistSnapshot();
-      } catch (error) {
-        await this.cleanupUnpublishedArtifacts([artifact]);
-        await this.artifactFiles.deleteCapture(artifact.id).catch(() => undefined);
-        throw error;
-      }
-      return clone({ ...artifact, path: capturePath });
-    });
-  }
-
-  async appendBoundedArtifact(
-    artifactId: string,
-    chunk: string | Buffer,
-    maxBytes = 256 * 1024
-  ): Promise<{ byteCount: number; truncated: boolean }> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-      if (!artifact) {
-        throw new Error(`Artifact not found: ${artifactId}`);
-      }
-      if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
-        throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
-      }
-      const limit = Math.min(maxBytes, ARTIFACT_BYTE_LIMITS[artifact.kind]);
-      if (!Number.isSafeInteger(limit) || limit < 0) {
-        throw new Error('Artifact byte limit must be a non-negative safe integer.');
-      }
-      if (artifact.byteCount >= limit) {
-        return { byteCount: artifact.byteCount, truncated: true };
-      }
-
-      const marker = Buffer.from('\n[Task Monki preview log truncated]\n', 'utf8');
-      const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
-      const remaining = limit - artifact.byteCount;
-      const truncated = input.byteLength > remaining;
-      const output = truncated
-        ? Buffer.concat([
-            input.subarray(0, Math.max(0, remaining - marker.byteLength)),
-            marker.subarray(0, Math.min(marker.byteLength, remaining))
-          ])
-        : input;
-      const current = await this.artifactFiles.read(artifact, limit);
-      const contents = output.byteLength > 0 ? Buffer.concat([current, output]) : current;
-      const updated = await this.publishArtifactRevision(artifact, contents);
-      this.state = {
-        ...this.state,
-        artifacts: this.state.artifacts.map((candidate) =>
-          candidate.id === artifactId ? updated : candidate
-        )
-      };
-      try {
-        await this.persistSnapshot();
-      } catch (error) {
-        await this.cleanupUnpublishedArtifacts([updated]);
-        throw error;
-      }
-      return { byteCount: updated.byteCount, truncated };
-    });
-  }
-
-  async syncArtifactByteCount(artifactId: string): Promise<ArtifactRecord> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-      if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
-      if (TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)) {
-        throw new Error('Agent runtime artifacts can only be changed by the runtime store.');
-      }
-      const captured = await this.artifactFiles.readCapture(
-        artifact.id,
-        ARTIFACT_BYTE_LIMITS[artifact.kind]
-      );
-      const contents = captured ?? await this.artifactFiles.read(
-        artifact,
-        ARTIFACT_BYTE_LIMITS[artifact.kind]
-      );
-      const updated = await this.publishArtifactRevision(artifact, contents);
-      this.state = {
-        ...this.state,
-        artifacts: this.state.artifacts.map((candidate) =>
-          candidate.id === artifactId ? updated : candidate
-        )
-      };
-      try {
-        await this.persistSnapshot();
-      } catch (error) {
-        await this.cleanupUnpublishedArtifacts([updated]);
-        throw error;
-      }
-      return clone(updated);
-    });
-  }
-
   async writeTextArtifact(taskId: string, kind: ArtifactKind, content: string): Promise<ArtifactRecord> {
     return this.serializeMutation(() =>
       this.writeTextArtifactInternal(taskId, kind, content)
@@ -5678,40 +4904,6 @@ export class SqliteTaskStore {
     await Promise.allSettled(
       unpublished.map((artifact) => this.artifactFiles.deleteRevision(artifact))
     );
-  }
-
-  readArtifactRange(
-    artifactId: string,
-    offset: number,
-    maxBytes: number
-  ): Promise<{ chunk: string; nextOffset: number; endOfFile: boolean }> {
-    return this.serializeMutation(async () => {
-      if (!Number.isInteger(offset) || offset < 0) {
-        throw new Error('Artifact offset must be a nonnegative integer.');
-      }
-      if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 64 * 1024) {
-        throw new Error('Artifact range must contain 4-65536 bytes.');
-      }
-      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-      if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
-      const contents = await this.artifactFiles.read(
-        artifact,
-        ARTIFACT_BYTE_LIMITS[artifact.kind]
-      );
-      if (offset >= contents.byteLength) {
-        return { chunk: '', nextOffset: contents.byteLength, endOfFile: true };
-      }
-      const buffer = contents.subarray(offset, Math.min(contents.byteLength, offset + maxBytes));
-      const safeBytes = utf8SafePrefixLength(
-        buffer,
-        offset + buffer.byteLength >= contents.byteLength
-      );
-      return {
-        chunk: buffer.subarray(0, safeBytes).toString('utf8'),
-        nextOffset: offset + safeBytes,
-        endOfFile: offset + safeBytes >= contents.byteLength
-      };
-    });
   }
 
   async getArtifactPath(artifactId: string): Promise<string> {
@@ -5912,16 +5104,7 @@ function withoutTaskRuntimeProjection(state: StoreState): PersistedTaskState {
     ciRollups: state.ciRollups,
     reviewRollups: state.reviewRollups,
     mergeSnapshots: state.mergeSnapshots,
-    previewPlans: state.previewPlans,
-    previewApprovals: state.previewApprovals,
-    previewComposeProjects: state.previewComposeProjects,
     previewGenerations: state.previewGenerations,
-    previewManagedEnvironments: state.previewManagedEnvironments,
-    previewManagedResources: state.previewManagedResources,
-    previewGenerationAttachments: state.previewGenerationAttachments,
-    previewLocalBindings: state.previewLocalBindings,
-    previewNodeAttempts: state.previewNodeAttempts,
-    previewResources: state.previewResources,
     events: state.events,
     artifacts: state.artifacts.filter(
       (artifact) => !TASK_RUNTIME_ARTIFACT_KINDS.has(artifact.kind)
@@ -8122,48 +7305,6 @@ function projectBoardTask(task: Task): BoardTaskSummary {
       }
     }
   };
-}
-
-function selectPreviewTaskRouteOptions(
-  state: StoreState,
-  consumerTaskId: string
-): TaskDetailSnapshot['previewTaskRoutes'] {
-  const options: TaskDetailSnapshot['previewTaskRoutes'] = [];
-  for (const task of state.tasks) {
-    if (task.id === consumerTaskId) continue;
-    const plan = state.previewPlans
-      .filter(
-        (candidate) =>
-          candidate.taskId === task.id &&
-          candidate.iterationId === task.currentIterationId
-      )
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-    if (!plan) continue;
-    const activeGeneration = state.previewGenerations.find(
-      (candidate) =>
-        candidate.taskId === task.id &&
-        candidate.iterationId === task.currentIterationId &&
-        candidate.routingState === 'ACTIVE' &&
-        candidate.state === 'READY'
-    );
-    for (const route of plan.executionPlan.routes) {
-      options.push({
-        taskId: task.id,
-        taskTitle: task.title,
-        routeId: route.id,
-        available: Boolean(
-          activeGeneration?.routes.some(
-            (candidate) => candidate.id === route.id && candidate.state === 'ATTACHED'
-          )
-        )
-      });
-    }
-  }
-  return options.sort(
-    (left, right) =>
-      left.taskTitle.localeCompare(right.taskTitle) ||
-      left.routeId.localeCompare(right.routeId)
-  );
 }
 
 function exactArrayBuffer(value: Uint8Array): ArrayBuffer {

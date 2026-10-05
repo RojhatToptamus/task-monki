@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validateDesignEntryPath } from '../../shared/design';
-import type { PreviewGatewayBrowserLease } from '../preview/PreviewGateway';
+import type { DesignBrowserLease } from './DesignBrowserProxy';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 
 const MARKER_FILE = '.task-monki-design-browser.json';
@@ -95,7 +95,7 @@ export interface DesignBrowserOwner {
     origin: string;
     entryPath?: string;
     allowedOrigins?: string[];
-    lease: PreviewGatewayBrowserLease;
+    lease: Pick<DesignBrowserLease, 'proxyUrl' | 'close'>;
   }): Promise<DesignBrowserObservation>;
   inspect(
     runId: string,
@@ -175,7 +175,7 @@ interface BrowserSession {
   root: string;
   socketRoot: string;
   environment: NodeJS.ProcessEnv;
-  lease: PreviewGatewayBrowserLease;
+  lease: Pick<DesignBrowserLease, 'proxyUrl' | 'close'>;
   refs: Set<string>;
   controller: AbortController;
 }
@@ -344,7 +344,7 @@ export class AgentBrowserRuntime implements DesignBrowserOwner {
     origin: string;
     entryPath?: string;
     allowedOrigins?: string[];
-    lease: PreviewGatewayBrowserLease;
+    lease: Pick<DesignBrowserLease, 'proxyUrl' | 'close'>;
   }): Promise<DesignBrowserObservation> {
     this.assertAvailable();
     const controller = new AbortController();

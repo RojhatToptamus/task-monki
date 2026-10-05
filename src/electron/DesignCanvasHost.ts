@@ -17,7 +17,7 @@ export interface DesignCanvasResolvedRoute extends DesignCanvasRouteIdentity {
   url: string;
   origin: string;
   allowedOrigins?: string[];
-  networkLease?: import('../core/preview/PreviewGateway').PreviewGatewayBrowserLease;
+  networkLease?: Pick<import('../core/design/DesignBrowserProxy').DesignBrowserLease, 'proxyUrl' | 'close'>;
 }
 
 export interface DesignCanvasBounds {
@@ -808,7 +808,7 @@ function validateResolvedRoute(route: DesignCanvasResolvedRoute): void {
     parsed.origin !== route.origin ||
     parsed.username ||
     parsed.password ||
-    !parsed.hostname.endsWith('.localhost')
+    !(parsed.hostname === '127.0.0.1' || parsed.hostname.endsWith('.localhost'))
   ) {
     throw new Error('Resolved Design canvas route is unsafe.');
   }

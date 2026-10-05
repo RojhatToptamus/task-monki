@@ -98,7 +98,7 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0']);
 const MAX_PACKAGE_LOCK_BYTES = 16 * 1024 * 1024;
 const NPM_INSTALL_COMMAND = ['npm', 'ci', '--no-audit', '--no-fund'];
 const NPM_INSTALL_COMMENT_LINES = [
-  '# Installs exactly from package-lock.json inside this captured Preview generation.',
+  '# Installs exactly from package-lock.json in this live worktree.',
   '# npm may run repository and dependency lifecycle scripts.'
 ];
 const NPM_INSTALL_LIFECYCLE_SCRIPTS = [
@@ -325,20 +325,20 @@ function previewCommandComment(conflicts: PreviewFrameworkConflict[]): string[] 
   if (port && https) {
     return [
       `# The repository's existing development script pins port ${port} and enables`,
-      '# HTTPS. This Preview command intentionally uses standard HTTP and Task',
-      "# Monki's dynamically allocated port."
+      '# HTTPS. This Preview command intentionally uses standard HTTP and',
+      "# Previewhost's dynamically allocated port."
     ];
   }
   if (port) {
     return [
       `# The repository's existing development script pins port ${port}. This`,
-      "# Preview command intentionally uses Task Monki's dynamically allocated port."
+      "# Preview command intentionally uses Previewhost's dynamically allocated port."
     ];
   }
   if (https) {
     return [
       '# The repository\'s existing development script enables HTTPS. This Preview',
-      "# command intentionally uses standard HTTP and Task Monki's allocated port."
+      "# command intentionally uses standard HTTP and Monki's allocated port."
     ];
   }
   return [

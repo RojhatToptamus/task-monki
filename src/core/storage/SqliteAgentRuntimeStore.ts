@@ -6097,7 +6097,6 @@ function domainEventFingerprint(event: DomainEvent): string {
     agentItemId: event.agentItemId,
     interactionRequestId: event.interactionRequestId,
     worktreeId: event.worktreeId,
-    previewPlanId: event.previewPlanId,
     previewGenerationId: event.previewGenerationId,
     source: event.source,
     payload: event.payload

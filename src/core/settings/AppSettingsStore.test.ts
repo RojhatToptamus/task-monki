@@ -301,15 +301,6 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('stores only valid preview gateway ports', async () => {
-    const store = new MemoryAppSettingsStore();
-    await expect(store.update({ previewGateway: { port: 41_234 } })).resolves.toMatchObject({
-      previewGateway: { port: 41_234 }
-    });
-    await expect(store.update({ previewGateway: { port: 9_999 } })).rejects.toThrow(
-      'Preview gateway port must be null or an integer from 10000 to 65535.'
-    );
-  });
 });
 
 async function createDatabase(): Promise<{ database: AppDatabase; databasePath: string }> {

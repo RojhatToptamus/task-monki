@@ -214,30 +214,6 @@ describe('Task persistence', () => {
     await fixture.database.close();
   });
 
-  it('snapshots externally-written preview captures into immutable managed revisions', async () => {
-    const fixture = await createFixture('task-monki-sqlite-task-preview-capture-');
-    const repository = await addRepository(fixture.store, fixture.root);
-    const task = await fixture.store.createTask({
-      title: 'Preview output',
-      prompt: 'Reconcile external process output.',
-      repositoryId: repository.id
-    });
-    const capture = await fixture.store.createPreviewArtifact(task.id, 'preview-stdout');
-    const initialManagedPath = await fixture.store.getArtifactPath(capture.id);
-    expect(capture.path).not.toBe(initialManagedPath);
-
-    await fs.appendFile(capture.path, 'external output');
-    const reconciled = await fixture.store.syncArtifactByteCount(capture.id);
-
-    expect(reconciled.path).not.toBe(initialManagedPath);
-    expect(reconciled.byteCount).toBe(Buffer.byteLength('external output'));
-    await expect(fixture.store.readArtifact(capture.id)).resolves.toBe('external output');
-    await expect(fs.access(initialManagedPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(capture.path)).resolves.toBeUndefined();
-    await fixture.store.close();
-    await fixture.database.close();
-  });
-
   it('keeps the committed artifact revision and removes the replacement when a shared transaction rolls back', async () => {
     const fixture = await createFixture('task-monki-sqlite-task-artifact-rollback-');
     const repository = await addRepository(fixture.store, fixture.root);

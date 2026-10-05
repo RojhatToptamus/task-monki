@@ -2,10 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { TaskAgentRuntimeAccess } from '../../agent/AgentRuntimeStore';
 import { SqliteDesignDraftStore } from '../../design/DesignDraftStore';
-import {
-  PreviewPrivateVault,
-  type PreviewSecretProtector
-} from '../../preview/private/PreviewPrivateVault';
 import { AppSettingsStore } from '../../settings/AppSettingsStore';
 import { ensurePrivateDirectory } from '../../filesystem/secureFilesystem';
 import {
@@ -57,7 +53,6 @@ export interface ApplicationPersistencePaths {
 export interface OpenApplicationPersistenceOptions {
   profileRoot: string;
   appVersion: string;
-  previewSecretProtector?: PreviewSecretProtector;
   /** Isolated tests only. Production and recovery must share the profile lease. */
   acquireLease?: boolean;
 }
@@ -76,7 +71,6 @@ export class ApplicationPersistence {
   readonly discourse: SqliteDiscourseStore;
   readonly settings: AppSettingsStore;
   readonly designDrafts: SqliteDesignDraftStore;
-  readonly previewPrivateVault?: PreviewPrivateVault;
   readonly backups: BackupRestoreService;
 
   private closeWork?: Promise<void>;
@@ -93,7 +87,6 @@ export class ApplicationPersistence {
       discourse: SqliteDiscourseStore;
       settings: AppSettingsStore;
       designDrafts: SqliteDesignDraftStore;
-      previewPrivateVault?: PreviewPrivateVault;
       backups: BackupRestoreService;
     }
   ) {
@@ -105,7 +98,6 @@ export class ApplicationPersistence {
     this.discourse = resources.discourse;
     this.settings = resources.settings;
     this.designDrafts = resources.designDrafts;
-    this.previewPrivateVault = resources.previewPrivateVault;
     this.backups = resources.backups;
   }
 
@@ -163,9 +155,6 @@ export class ApplicationPersistence {
       const discourse = new SqliteDiscourseStore(database, managedFiles);
       const settings = new AppSettingsStore(database);
       const designDrafts = new SqliteDesignDraftStore(database);
-      const previewPrivateVault = options.previewSecretProtector
-        ? new PreviewPrivateVault(database, managedFiles, options.previewSecretProtector)
-        : undefined;
       const backups = createLiveBackupService(
         paths,
         options.appVersion,
@@ -183,7 +172,6 @@ export class ApplicationPersistence {
         discourse,
         settings,
         designDrafts,
-        previewPrivateVault,
         backups
       });
       try {
@@ -195,7 +183,6 @@ export class ApplicationPersistence {
         ]);
       } catch (error) {
         await Promise.allSettled([
-          previewPrivateVault?.shutdown(),
           discourse.close(),
           agentRuntime.close(),
           tasks.close()
@@ -238,7 +225,6 @@ export class ApplicationPersistence {
       resourceErrors.push(error);
     }
     const results = await Promise.allSettled([
-      this.previewPrivateVault?.shutdown(),
       this.discourse.close(),
       this.agentRuntime.close(),
       this.tasks.close()

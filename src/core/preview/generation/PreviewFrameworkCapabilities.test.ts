@@ -52,14 +52,14 @@ describe('Preview framework capabilities', () => {
         installCommandMayRunLifecycleScripts: true,
         repositoryLifecycleScripts: [],
         yamlCommentLines: [
-          '# Installs exactly from package-lock.json inside this captured Preview generation.',
+          '# Installs exactly from package-lock.json in this live worktree.',
           '# npm may run repository and dependency lifecycle scripts.'
         ]
       },
       yamlCommentLines: [
         "# The repository's existing development script pins port 8000 and enables",
-        '# HTTPS. This Preview command intentionally uses standard HTTP and Task',
-        "# Monki's dynamically allocated port."
+        '# HTTPS. This Preview command intentionally uses standard HTTP and',
+        "# Previewhost's dynamically allocated port."
       ]
     });
   });

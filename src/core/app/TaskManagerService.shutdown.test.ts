@@ -21,7 +21,7 @@ describe('TaskManagerService shutdown coordination', () => {
       promptRefiner: { beginShutdown(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       designToolBridge: { shutdown(): Promise<void> };
-      previews: { shutdown(): Promise<void> };
+      applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'READY';
@@ -44,8 +44,8 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push('design-tool-shutdown');
       }
     };
-    internals.previews = {
-      async shutdown() {
+    internals.applications = {
+      async close() {
         events.push('preview-started');
         markPreviewStarted();
         await previewGate;
@@ -89,7 +89,7 @@ describe('TaskManagerService shutdown coordination', () => {
       store: { init(): Promise<void>; close(): Promise<void> };
       appSettingsStore: { get(): Promise<never> };
       agents: { shutdown(): Promise<void> };
-      previews: { shutdown(): Promise<void> };
+      applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'NEW';
@@ -115,8 +115,8 @@ describe('TaskManagerService shutdown coordination', () => {
         calls.push('agent-shutdown');
       }
     };
-    internals.previews = {
-      async shutdown() {
+    internals.applications = {
+      async close() {
         calls.push('preview-shutdown');
       }
     };
@@ -153,7 +153,7 @@ describe('TaskManagerService shutdown coordination', () => {
       previewEnabled: boolean;
       store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
-      previews: { shutdown(): Promise<void> };
+      applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
       withTaskAction<T>(
         taskId: string,
@@ -167,7 +167,7 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.previewEnabled = true;
     internals.store = { close: () => Promise.resolve() };
     internals.agents = { shutdown: () => Promise.resolve() };
-    internals.previews = { shutdown: () => Promise.resolve() };
+    internals.applications = { close: () => Promise.resolve() };
     internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
 
     const action = internals.withTaskAction('task-1', 'Preview startup', async () => {
@@ -228,7 +228,7 @@ describe('TaskManagerService shutdown coordination', () => {
         shutdown(): Promise<void>;
         getRuntimeCatalog(): Promise<unknown>;
       };
-      previews: { shutdown(): Promise<void> };
+      applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
       events: { emit(event: unknown): void };
     };
@@ -282,8 +282,8 @@ describe('TaskManagerService shutdown coordination', () => {
         return {};
       }
     };
-    internals.previews = {
-      async shutdown() {
+    internals.applications = {
+      async close() {
         events.push(`preview-shutdown-${shutdownCount}`);
       }
     };
@@ -357,7 +357,7 @@ describe('TaskManagerService shutdown coordination', () => {
       agentRuntimeStore: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       designToolBridge: { shutdown(): Promise<void> };
-      previews: { shutdown(): Promise<void> };
+      applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'READY';
@@ -399,8 +399,8 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push('design-tool-shutdown');
       }
     };
-    internals.previews = {
-      async shutdown() {
+    internals.applications = {
+      async close() {
         events.push('preview-shutdown');
       }
     };
@@ -426,6 +426,7 @@ describe('TaskManagerService shutdown coordination', () => {
 function initializeRuntimeLifecycle(service: TaskManagerService): void {
   Object.assign(service as unknown as Record<string, unknown>, {
     runtimeOperations: new RuntimeOperationGate(),
+    designPreviews: { shutdown: () => Promise.resolve() },
     agentRuntimeStore: {
       init: () => Promise.resolve(),
       snapshot: () => Promise.resolve({ sessions: [], runs: [] }),

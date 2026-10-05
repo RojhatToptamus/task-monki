@@ -27,7 +27,6 @@ import type {
   AgentGoalSnapshotRecord,
   AgentItemRecord,
   AgentPlanRevisionRecord,
-  AgentRetryStrategy,
   AgentSessionRecord,
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
@@ -41,19 +40,8 @@ import type {
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   Repository,
-  PreviewApprovalRecord,
-  PreviewComposeProjectRecord,
-  PreviewGenerationRecord,
-  PreviewGenerationAttachmentRecord,
-  PreviewLocalAttachmentBindingRecord,
-  PreviewManagedResourceRecord,
-  PreviewNodeAttemptRecord,
-  PreviewPlanRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
-  PreviewResolvedAttachmentTarget,
-  ResolvePreviewResult,
-  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -140,10 +128,8 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationPreview, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
-import { describeGitSnapshot } from './gitSnapshotCopy';
-import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
-import type { PreviewExecutionReadiness } from '../../shared/preview';
-import type { PreviewTaskRouteOption } from '../../shared/preview';
+import { ApplicationPreviewSetup } from './preview/ApplicationPreviewSetup';
+import { ApplicationPreviewOverview,ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
 import {
   isReviewPhase,
   shouldShowMoveToReviewHeaderAction,
@@ -205,18 +191,6 @@ interface TaskDetailProps {
   textExcerpts?: ClientTextExcerpt[];
   attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
-  previewPlans: PreviewPlanRecord[];
-  previewApprovals: PreviewApprovalRecord[];
-  previewGenerations: PreviewGenerationRecord[];
-  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
-  previewManagedResources: PreviewManagedResourceRecord[];
-  previewNodeAttempts: PreviewNodeAttemptRecord[];
-  previewComposeProjects: PreviewComposeProjectRecord[];
-  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
-  previewTaskRoutes: PreviewTaskRouteOption[];
-  previewRuntimeResources: PreviewResourceRecord[];
-  previewExecutionReadiness?: PreviewExecutionReadiness;
-  previewResolution?: ResolvePreviewResult;
   previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
@@ -242,13 +216,6 @@ interface TaskDetailProps {
   onCreateDeliveryCommit(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
-  onResolvePreview(taskId: string, scenarioId?: string): Promise<void>;
-  onSetPreviewLocalBinding(
-    taskId: string,
-    attachmentId: string,
-    target: PreviewResolvedAttachmentTarget,
-    scenarioId: string
-  ): Promise<void>;
   onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onGeneratePreviewRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onValidatePreviewRecipeDraft(
@@ -263,18 +230,13 @@ interface TaskDetailProps {
   ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
   onDiscardPreviewRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onWritePreviewRecipeManually(taskId: string, worktreeId: string): Promise<void>;
-  onApprovePreview(taskId: string, planId: string, executionDigest: string): Promise<void>;
-  onStartPreview(taskId: string, scenarioId?: string): Promise<void>;
-  onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
-  onStopPreview(taskId: string, generationId: string): Promise<void>;
-  onResetPreviewData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
-  onRetryPreviewSetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
-  onReadPreviewLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<import('../../shared/contracts').ReadPreviewLogResult>;
   onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   onModalOpenChange(open: boolean): void;
+  onOpenPreviewSecrets?(references: string[]): void;
+  initialTab?: DetailTab;
 }
 
 interface HeadAction {
@@ -324,7 +286,7 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const captureRunIds = useMemo(() => conversationCaptureRunIds(props.runs, gitSnapshots), [props.runs, gitSnapshots]);
-  const [tab, setTab] = useState<DetailTab>('overview');
+  const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   const [reviewRequest, setReviewRequest] = useState<{
@@ -352,7 +314,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionInFlightRef = useRef(false);
   const deliveryActionInFlightRef = useRef(false);
   const detailRootRef = useRef<HTMLElement>(null);
-  const previewModalRootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const debugActivityRef = useRef<HTMLElement>(null);
   const focusActivityHistoryRef = useRef(false);
@@ -990,42 +951,6 @@ export function TaskDetail(props: TaskDetailProps) {
     : 'tm-detail__masthead';
   const showPrStatus = shouldShowPrStatusOnOverview(prStatus) &&
     !(implementationRetryRequired && prStatus.kind === 'NO_PR');
-  const previewPanelProps = {
-    task,
-    worktree,
-    plans: props.previewPlans,
-    approvals: props.previewApprovals,
-    generations: props.previewGenerations,
-    generationAttachments: props.previewGenerationAttachments,
-    managedResources: props.previewManagedResources,
-    attempts: props.previewNodeAttempts,
-    composeProjects: props.previewComposeProjects,
-    localBindings: props.previewLocalBindings,
-    taskRouteOptions: props.previewTaskRoutes,
-    runtimeResources: props.previewRuntimeResources,
-    executionReadiness: props.previewExecutionReadiness,
-    resolution: props.previewResolution,
-    recipeGeneration: props.previewRecipeGeneration,
-    recipeGenerationDisabledReason: props.previewRecipeGenerationDisabledReason,
-    onResolve: props.onResolvePreview,
-    onSetLocalBinding: props.onSetPreviewLocalBinding,
-    onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
-    onGenerateRecipe: props.onGeneratePreviewRecipe,
-    onValidateRecipeDraft: props.onValidatePreviewRecipeDraft,
-    onAcceptRecipeDraft: props.onAcceptPreviewRecipeDraft,
-    onDiscardRecipeDraft: props.onDiscardPreviewRecipeDraft,
-    onWriteRecipeManually: props.onWritePreviewRecipeManually,
-    onApprove: props.onApprovePreview,
-    onStart: props.onStartPreview,
-    onOpen: props.onOpenPreview,
-    onStop: props.onStopPreview,
-    onResetData: props.onResetPreviewData,
-    onRetrySetup: props.onRetryPreviewSetup,
-    onReadLog: props.onReadPreviewLog,
-    fallbackReturnFocusRef: detailRootRef,
-    modalRootRef: previewModalRootRef,
-    onModalOpenChange: setPreviewModalOpen
-  };
   const requestCard = (<RequestCard
     prompt={task.prompt}
     attachments={props.attachments}
@@ -1308,11 +1233,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 />
               ) : null}
 
-              <PreviewOverviewCard
-                key={task.id}
-                {...previewPanelProps}
-                onShowDetails={() => setTab('preview')}
-              />
+              <ApplicationPreviewOverview key={task.id} taskId={task.id} onOpen={() => setTab('preview')} />
 
               <TaskActivityPanel
                 view={overviewActivity}
@@ -1369,7 +1290,11 @@ export function TaskDetail(props: TaskDetailProps) {
         /> : null}
 
         {tab === 'preview' ? (
-          <PreviewWorkspace key={task.id} {...previewPanelProps} />
+          <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onOpenSecrets={props.onOpenPreviewSecrets} onModalOpenChange={setPreviewModalOpen}
+            setup={worktree ? <ApplicationPreviewSetup taskId={task.id} worktreeId={worktree.id} state={props.previewRecipeGeneration}
+              disabledReason={props.previewRecipeGenerationDisabledReason} fallbackReturnFocusRef={detailRootRef} onModalOpenChange={setPreviewModalOpen}
+              get={props.onGetPreviewRecipeGeneration} generate={props.onGeneratePreviewRecipe} validate={props.onValidatePreviewRecipeDraft}
+              accept={props.onAcceptPreviewRecipeDraft} discard={props.onDiscardPreviewRecipeDraft} writeManually={props.onWritePreviewRecipeManually} /> : undefined} />
         ) : null}
 
         {tab === 'evidence' ? (
@@ -1445,7 +1370,6 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
       </div>
 
-      <div ref={previewModalRootRef} />
 
       {existingWorkModal && worktree && props.onListExistingWorktrees ? (
         <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}

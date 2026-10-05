@@ -1,3 +1,4 @@
+import { restoreLegacyPreviewSchema } from '../../../testSupport/legacyPreviewSchema';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -92,6 +93,7 @@ describe('SqliteDiscourseStore', () => {
     await fixture.store.close();
     await fixture.database.close();
     const previous = new DatabaseSync(fixture.databasePath);
+    restoreLegacyPreviewSchema(previous);
     previous.exec('DROP TABLE task_instructions; PRAGMA user_version = 4');
     previous.close();
     const backupPath = `${fixture.databasePath}.before-chat`;

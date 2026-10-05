@@ -1,3 +1,4 @@
+import { restoreLegacyPreviewSchema } from '../../testSupport/legacyPreviewSchema';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs/promises';
@@ -65,6 +66,7 @@ describe('SqliteTaskStore attachments', () => {
     const paths = persistenceFixture(store).paths;
     await closeStore(store);
     const legacy = new DatabaseSync(paths.databasePath);
+    restoreLegacyPreviewSchema(legacy);
     if (!instructions) legacy.exec('DROP TABLE task_instructions');
     if (!selection) legacy.exec("UPDATE tasks SET payload_json = json_remove(payload_json, '$.initialAttachmentIds')");
     legacy.exec(`PRAGMA user_version = ${version}`);

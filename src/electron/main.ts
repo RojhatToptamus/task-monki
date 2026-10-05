@@ -6,7 +6,6 @@ import {
   dialog,
   ipcMain,
   powerMonitor,
-  safeStorage,
   session,
   shell,
   WebContentsView,
@@ -39,11 +38,9 @@ import type {
   DeleteTaskRequest,
   DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
-  DeletePreviewLocalAttachmentBindingRequest,
   DiscardPreviewRecipeDraftRequest,
   GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
-  ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
   ImportDesignReferenceAssetRequest,
@@ -54,24 +51,18 @@ import type {
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
-  ReadPreviewLogRequest,
   ReadDesignDraftAttachmentRequest,
-  ResetPreviewDataRequest,
-  RetryPreviewSetupRequest,
   RestartDesignPreviewRequest,
   RestoreDesignRevisionRequest,
   DuplicateDesignRequest,
   RenameDesignRequest,
   ArchiveDesignRequest,
   ListDesignConversationRequest,
-  ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
   RemoveDesignReferenceRequest,
   ReconnectRepositoryRequest,
   StartRunRequest,
-  StartPreviewRequest,
-  SetPreviewLocalAttachmentBindingRequest,
   StartReviewRequest,
   QueueTaskInstructionRequest,
   EditTaskInstructionRequest,
@@ -86,7 +77,6 @@ import type {
   TransitionTaskRequest,
   UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest,
-  StopPreviewRequest,
   SaveDesignDraftRequest,
   SubmitDesignTurnRequest,
   UpdateBoardRequest,
@@ -137,14 +127,9 @@ import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './window
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { SoftwareUpdateController } from './SoftwareUpdateController';
 import {
-  resolveManagedDesignStaticServerPath,
-  resolveNativePreviewLauncherPath
-} from '../core/preview/runtime/launcherPath';
-import {
   configureOwnedProcessLauncher,
   resolveOwnedProcessLauncherPath
 } from '../core/process/ownedProcess';
-import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
 import { resolveDesignToolMcpServerPath } from '../core/design/DesignClientToolBridge';
 import {
@@ -176,7 +161,6 @@ import type {
   RefreshDesignCanvasRequest,
   ShowDesignCanvasRequest
 } from '../shared/designCanvas';
-const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
@@ -194,22 +178,7 @@ let rendererTrustPolicy: RendererTrustPolicy | undefined;
 const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
-const safeStorageVerificationName =
-  process.env.TASK_MONKI_SAFE_STORAGE_VERIFICATION_NAME;
-if (safeStorageVerificationName) {
-  const isPackagedVerification =
-    app.isPackaged &&
-    process.argv.some((argument) =>
-      argument.startsWith('--remote-debugging-port=')
-    ) &&
-    /^task-monki-safe-storage-verifier-[0-9a-f-]{36}$/u.test(
-      safeStorageVerificationName
-    );
-  if (!isPackagedVerification) {
-    throw new Error('Invalid packaged safeStorage verification identity.');
-  }
-  app.setName(safeStorageVerificationName);
-}
+
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
@@ -435,7 +404,7 @@ function installIpcHandlers(): void {
   });
   handleTrustedIpc('repository:chooseFolder', async () => {
     const options: OpenDialogOptions = {
-      title: 'Add repository',
+      title: 'Choose folder',
       properties: ['openDirectory']
     };
     const result = mainWindow
@@ -849,9 +818,31 @@ function installIpcHandlers(): void {
     return service.refreshGitHub(input);
   });
 
-  handleTrustedIpc('preview:resolve', async (_, input: ResolvePreviewRequest) =>
-    service.resolvePreview(input)
-  );
+  handleTrustedIpc('application:listApplicationPreviews', () => service.listApplicationPreviews());
+  handleTrustedIpc('application:getApplicationPreview', (_, input: Parameters<TaskManagerService['getApplicationPreview']>[0]) => service.getApplicationPreview(input));
+  handleTrustedIpc('application:connectApplicationPreviewDependency', (_, input: Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]) => service.connectApplicationPreviewDependency(input));
+  handleTrustedIpc('application:connectApplicationPreviewSource', (_, input: Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]) => service.connectApplicationPreviewSource(input));
+  handleTrustedIpc('application:createApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]) => service.createApplicationPreviewConfiguration(input));
+  handleTrustedIpc('application:startApplicationPreview', (_, input: Parameters<TaskManagerService['startApplicationPreview']>[0]) => service.startApplicationPreview(input));
+  handleTrustedIpc('application:approveApplicationPreview', (_, input: Parameters<TaskManagerService['approveApplicationPreview']>[0]) => service.approveApplicationPreview(input));
+  handleTrustedIpc('application:stopApplicationPreview', (_, input: Parameters<TaskManagerService['stopApplicationPreview']>[0]) => service.stopApplicationPreview(input));
+  handleTrustedIpc('application:cancelApplicationPreview', (_, input: Parameters<TaskManagerService['cancelApplicationPreview']>[0]) => service.cancelApplicationPreview(input));
+  handleTrustedIpc('application:openApplicationPreview', (_, input: Parameters<TaskManagerService['openApplicationPreview']>[0]) => service.openApplicationPreview(input));
+  handleTrustedIpc('application:readApplicationPreviewLogs', (_, input: Parameters<TaskManagerService['readApplicationPreviewLogs']>[0]) => service.readApplicationPreviewLogs(input));
+  handleTrustedIpc('application:inspectApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['inspectApplicationPreviewConfiguration']>[0]) => service.inspectApplicationPreviewConfiguration(input));
+  handleTrustedIpc('application:applyApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['applyApplicationPreviewConfiguration']>[0]) => service.applyApplicationPreviewConfiguration(input));
+  handleTrustedIpc('application:saveApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['saveApplicationPreviewConfiguration']>[0]) => service.saveApplicationPreviewConfiguration(input));
+  handleTrustedIpc('application:rerunApplicationPreviewJob', (_, input: Parameters<TaskManagerService['rerunApplicationPreviewJob']>[0]) => service.rerunApplicationPreviewJob(input));
+  handleTrustedIpc('application:deleteApplicationPreviewData', (_, input: Parameters<TaskManagerService['deleteApplicationPreviewData']>[0]) => service.deleteApplicationPreviewData(input));
+  handleTrustedIpc('secrets:list', (_, input: Parameters<typeof service.previewSecrets.list>[0]) => service.previewSecrets.list(input));
+  handleTrustedIpc('secrets:unlock', (_, input: Parameters<typeof service.previewSecrets.unlock>[0]) => service.previewSecrets.unlock(input));
+  handleTrustedIpc('secrets:create', (_, input: Parameters<typeof service.previewSecrets.create>[0]) => service.previewSecrets.create(input));
+  handleTrustedIpc('secrets:update', (_, input: Parameters<typeof service.previewSecrets.update>[0]) => service.previewSecrets.update(input));
+  handleTrustedIpc('secrets:remove', (_, input: Parameters<typeof service.previewSecrets.remove>[0]) => service.previewSecrets.remove(input));
+  handleTrustedIpc('secrets:status', () => service.previewSecrets.status());
+  handleTrustedIpc('secrets:lock', () => service.previewSecrets.lock());
+  handleTrustedIpc('secrets:remember', () => service.previewSecrets.remember());
+  handleTrustedIpc('secrets:forget', () => service.previewSecrets.forget());
   handleTrustedIpc(
     'preview:recipe-generation:get',
     async (_, input: GetPreviewRecipeGenerationRequest) =>
@@ -876,80 +867,7 @@ function installIpcHandlers(): void {
     async (_, input: DiscardPreviewRecipeDraftRequest) =>
       service.discardPreviewRecipeDraft(input)
   );
-  handleTrustedIpc('preview:approve', async (_, input: ApprovePreviewPlanRequest) =>
-    service.approvePreviewPlan(input)
-  );
-  handleTrustedIpc('preview:start', async (_, input: StartPreviewRequest) =>
-    service.startPreview(input)
-  );
-  handleTrustedIpc('preview:stop', async (_, input: StopPreviewRequest) =>
-    service.stopPreview(input)
-  );
-  handleTrustedIpc('preview:open', async (_, input: OpenPreviewRequest) =>
-    service.openPreview(input)
-  );
-  handleTrustedIpc('preview:log:read', async (_, input: ReadPreviewLogRequest) =>
-    service.readPreviewLog(input)
-  );
-  handleTrustedIpc('preview:resetData', async (_, input: ResetPreviewDataRequest) =>
-    service.resetPreviewData(input)
-  );
-  handleTrustedIpc('preview:retrySetup', async (_, input: RetryPreviewSetupRequest) =>
-    service.retryPreviewSetup(input)
-  );
-  handleTrustedIpc('preview:binding:set', async (_, input: SetPreviewLocalAttachmentBindingRequest) =>
-    service.setPreviewLocalAttachmentBinding(input)
-  );
-  handleTrustedIpc('preview:binding:delete', async (_, input: DeletePreviewLocalAttachmentBindingRequest) =>
-    service.deletePreviewLocalAttachmentBinding(input)
-  );
-  handleTrustedIpc('preview:private:set', async (_, input: { taskId: string; inputId: string; value: string }) =>
-    service.setPreviewPrivateInput(input)
-  );
-  handleTrustedIpc('preview:private:delete', async (_, input: { taskId: string; inputId: string }) =>
-    service.deletePreviewPrivateInput(input)
-  );
-  handleTrustedIpc('preview:private:retryCleanup', async () => service.retryPreviewPrivateVaultCleanup());
-  handleTrustedIpc('preview:private:import', async (_, input: { taskId: string; inputId: string; key: string }) => {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.key)) return { status: 'FAILED', code: 'INVALID_KEY' };
-    const options: OpenDialogOptions = { title: `Import ${input.key}`, properties: ['openFile'] };
-    const selected = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
-    if (selected.canceled || !selected.filePaths[0]) return { status: 'CANCELED' };
-    try {
-      const selectedPath = selected.filePaths[0];
-      const before = await fs.promises.lstat(selectedPath);
-      if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_PRIVATE_ENV_IMPORT_BYTES || (typeof process.getuid === 'function' && before.uid !== process.getuid()) || (before.mode & 0o077) !== 0) {
-        return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' };
-      }
-      const handle = await fs.promises.open(selectedPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-      let bytes: Buffer | undefined;
-      try {
-        bytes = await readBoundedFile(handle, MAX_PRIVATE_ENV_IMPORT_BYTES);
-        const after = await handle.stat();
-        if (
-          !after.isFile() ||
-          before.dev !== after.dev ||
-          before.ino !== after.ino ||
-          before.size !== after.size ||
-          before.mtimeMs !== after.mtimeMs ||
-          (after.mode & 0o077) !== 0 ||
-          (typeof process.getuid === 'function' && after.uid !== process.getuid())
-        ) {
-          return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' };
-        }
-        const parsed = parseSelectedEnvValue(bytes, input.key);
-        if (parsed.status !== 'VALUE') {
-          const codes = { INVALID_KEY: 'INVALID_KEY', KEY_MISSING: 'KEY_MISSING', KEY_DUPLICATE: 'KEY_DUPLICATE', INVALID_FILE: 'UNSAFE_IMPORT_FILE' } as const;
-          return { status: 'FAILED', code: codes[parsed.status] };
-        }
-        const result = await service.setPreviewPrivateInput({ taskId: input.taskId, inputId: input.inputId, value: parsed.value });
-        return result.status === 'STORED' ? { status: 'IMPORTED' } : result;
-      } finally {
-        bytes?.fill(0);
-        await handle.close();
-      }
-    } catch { return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' }; }
-  });
+  handleTrustedIpc('design:preview:open', async (_, input: OpenPreviewRequest) => service.openDesignPreview(input));
   handleTrustedIpc('task:transition', async (_, input: TransitionTaskRequest) => {
     return service.transitionTask(input);
   });
@@ -1103,21 +1021,6 @@ function previewGenerationUnavailable(event: AppUpdateEvent): string | undefined
     : undefined;
 }
 
-async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: number): Promise<Buffer> {
-  const allocation = Buffer.alloc(maximumBytes + 1);
-  let offset = 0;
-  try {
-    while (offset < allocation.length) {
-      const { bytesRead } = await handle.read(allocation, offset, allocation.length - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    if (offset > maximumBytes) throw new Error('Selected private input file is too large.');
-    return Buffer.from(allocation.subarray(0, offset));
-  } finally {
-    allocation.fill(0);
-  }
-}
 
 function beginApplicationShutdown(): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
@@ -1209,13 +1112,6 @@ void app.whenReady().then(async () => {
   persistence = await ApplicationPersistence.open({
     profileRoot: userDataDir,
     appVersion: app.getVersion(),
-    previewSecretProtector: {
-      isAvailable: () =>
-        process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
-      encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
-      decrypt: async (value) =>
-        Buffer.from(safeStorage.decryptString(value), 'utf8')
-    }
   });
   service = new TaskManagerService(
     persistence.tasks,
@@ -1227,24 +1123,12 @@ void app.whenReady().then(async () => {
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
-      previewLauncherPath: resolveNativePreviewLauncherPath({
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-        appPath: app.getAppPath()
-      }),
       previewLauncherExecPath: process.execPath,
-      previewLauncherEnv: { ELECTRON_RUN_AS_NODE: '1' },
-      managedDesignStaticServerPath: resolveManagedDesignStaticServerPath({
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-        appPath: app.getAppPath()
-      }),
       designSkillRoot: resolveDesignSkillPackRoot({
         isPackaged: app.isPackaged,
         resourcesPath: process.resourcesPath,
         appPath: app.getAppPath()
       }),
-      previewPrivateVault: persistence.previewPrivateVault,
       previewOpenHost: createElectronPreviewUrlHost(),
       agentRuntimeStore: persistence.agentRuntime,
       taskRuntimeAccess: persistence.taskRuntime,

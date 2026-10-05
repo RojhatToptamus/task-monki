@@ -4,7 +4,6 @@ import type {
   AppUpdateEvent,
   Board,
   BoardSnapshot,
-  ApprovePreviewPlanRequest,
   CancelRunRequest,
   CancelDesignTurnRequest,
   CancelPromptRefinementRequest,
@@ -28,7 +27,6 @@ import type {
   DesignDraftRecord,
   DesignListItem,
   DiscardPreviewRecipeDraftRequest,
-  DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
   GeneratePreviewRecipeRequest,
@@ -41,8 +39,6 @@ import type {
   OpenTargetInspection,
   OpenPreviewRequest,
   OpenPreviewResult,
-  PreviewApprovalRecord,
-  PreviewGenerationRecord,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
   PrepareWorktreeResult,
@@ -51,22 +47,13 @@ import type {
   ReadArtifactRequest,
   Repository,
   RepositoryImpact,
-  ReadPreviewLogRequest,
-  ReadPreviewLogResult,
   ReadDesignDraftAttachmentRequest,
-  ResetPreviewDataRequest,
-  RetryPreviewSetupRequest,
-  ResolvePreviewRequest,
-  ResolvePreviewResult,
   RunRecord,
   StartRunRequest,
-  StartPreviewRequest,
-  SetPreviewLocalAttachmentBindingRequest,
   Task,
   TaskDetailSnapshot,
   TaskManagerApi,
   TransitionTaskRequest,
-  StopPreviewRequest,
   WorktreeRecord,
   WorktreePreparationInspection,
   RefreshEvidenceRequest,
@@ -507,8 +494,22 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord>(baseUrl, '/api/github/pr/create', input),
     refreshGitHub: (input: RefreshGitHubRequest) =>
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
-    resolvePreview: (input: ResolvePreviewRequest) =>
-      post<ResolvePreviewResult>(baseUrl, '/api/preview/resolve', input),
+    listApplicationPreviews: () => post(baseUrl, '/api/application/listApplicationPreviews', {}),
+    getApplicationPreview: input => post(baseUrl, '/api/application/getApplicationPreview', input),
+    connectApplicationPreviewDependency: input => post(baseUrl, '/api/application/connectApplicationPreviewDependency', input),
+    connectApplicationPreviewSource: input => post(baseUrl, '/api/application/connectApplicationPreviewSource', input),
+    createApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/createApplicationPreviewConfiguration', input),
+    startApplicationPreview: input => post(baseUrl, '/api/application/startApplicationPreview', input),
+    approveApplicationPreview: input => post(baseUrl, '/api/application/approveApplicationPreview', input),
+    stopApplicationPreview: input => post(baseUrl, '/api/application/stopApplicationPreview', input),
+    cancelApplicationPreview: input => post(baseUrl, '/api/application/cancelApplicationPreview', input),
+    openApplicationPreview: input => post(baseUrl, '/api/application/openApplicationPreview', input),
+    readApplicationPreviewLogs: input => post(baseUrl, '/api/application/readApplicationPreviewLogs', input),
+    inspectApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/inspectApplicationPreviewConfiguration', input),
+    applyApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/applyApplicationPreviewConfiguration', input),
+    saveApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/saveApplicationPreviewConfiguration', input),
+    rerunApplicationPreviewJob: input => post(baseUrl, '/api/application/rerunApplicationPreviewJob', input),
+    deleteApplicationPreviewData: input => post(baseUrl, '/api/application/deleteApplicationPreviewData', input),
     getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/get', input),
     generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
@@ -519,24 +520,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post(baseUrl, '/api/preview/recipe-generation/accept', input),
     discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/discard', input),
-    approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
-      post<PreviewApprovalRecord>(baseUrl, '/api/preview/approve', input),
-    startPreview: (input: StartPreviewRequest) =>
-      post<PreviewGenerationRecord>(baseUrl, '/api/preview/start', input),
-    stopPreview: (input: StopPreviewRequest) =>
-      post<PreviewGenerationRecord>(baseUrl, '/api/preview/stop', input),
-    openPreview: (input: OpenPreviewRequest) =>
-      post<OpenPreviewResult>(baseUrl, '/api/preview/open', input),
-    readPreviewLog: (input: ReadPreviewLogRequest) =>
-      post<ReadPreviewLogResult>(baseUrl, '/api/preview/log/read', input),
-    resetPreviewData: (input: ResetPreviewDataRequest) =>
-      post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
-    retryPreviewSetup: (input: RetryPreviewSetupRequest) =>
-      post<PreviewGenerationRecord>(baseUrl, '/api/preview/retry-setup', input),
-    setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
-      post(baseUrl, '/api/preview/binding/set', input),
-    deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
-      post<void>(baseUrl, '/api/preview/binding/delete', input),
+    openDesignPreview: (input: OpenPreviewRequest) => post<OpenPreviewResult>(baseUrl, '/api/design/preview/open', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

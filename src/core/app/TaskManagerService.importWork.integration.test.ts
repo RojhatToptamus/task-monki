@@ -1,3 +1,4 @@
+import { restoreLegacyPreviewSchema } from '../../testSupport/legacyPreviewSchema';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -254,6 +255,7 @@ describe('Import existing work', () => {
     await s.service.shutdown();
     await s.persistence.close();
     const old = new DatabaseSync(databasePath);
+    restoreLegacyPreviewSchema(old);
     old.exec(`UPDATE worktrees SET payload_json = json_remove(payload_json, '$.ownership'); DROP TABLE task_instructions; PRAGMA user_version = 1;`);
     old.close();
     const upgraded = await openTestPersistence(path.join(s.rootDir, 'profile'));

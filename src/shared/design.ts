@@ -30,7 +30,6 @@ export interface DesignOpenedCandidateCheckpoint {
 export interface DesignPreviewTarget {
   routeId: string;
   entryPath: string;
-  scenarioId?: string;
 }
 
 export interface StartDesignRequest { designId: string; acceptWorkspaceSnapshotId?: string }
@@ -40,9 +39,8 @@ export interface UpdateDesignPreviewTargetRequest {
   target: DesignPreviewTarget;
 }
 export function validateDesignPreviewTarget(target: DesignPreviewTarget): void {
-  if (!target || typeof target.routeId !== 'string' || !target.routeId.trim() || target.routeId.length > 128 ||
-      (target.scenarioId !== undefined && (typeof target.scenarioId !== 'string' || !target.scenarioId.trim()))) {
-    throw new Error('Select a Preview route and scenario.');
+  if (!target || typeof target.routeId !== 'string' || !target.routeId.trim() || target.routeId.length > 128) {
+    throw new Error('Select a Preview route.');
   }
   validateDesignEntryPath(target.entryPath);
 }

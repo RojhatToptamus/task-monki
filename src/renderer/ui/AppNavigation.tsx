@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Inbox,
   MessagesSquare,
+  Monitor,
   PanelLeft,
   PanelsTopLeft,
   Plus,
@@ -99,6 +100,10 @@ export function BoardIcon() {
 
 export function DesignIcon() {
   return <UiLucideIcon component={PanelsTopLeft} />;
+}
+
+export function PreviewIcon() {
+  return <UiLucideIcon component={Monitor} />;
 }
 
 export function DiscourseIcon() {

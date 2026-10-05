@@ -1,3 +1,6 @@
+import type { ApplicationPreviewApi, ApplicationPreviewInstance } from '../../shared/applicationPreview';
+import { ApplicationPreviewService } from '../preview/ApplicationPreviewService';
+import { DesignPreviewService } from '../design/DesignPreviewService';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
@@ -104,25 +107,11 @@ import type {
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
-  ApprovePreviewPlanRequest,
-  DeletePreviewLocalAttachmentBindingRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
-  PreviewApprovalRecord,
-  PreviewGenerationRecord,
-  PreviewLocalAttachmentBindingRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
-  ReadPreviewLogRequest,
-  ReadPreviewLogResult,
   ReadDesignDraftAttachmentRequest,
-  ResetPreviewDataRequest,
-  RetryPreviewSetupRequest,
-  ResolvePreviewRequest,
-  ResolvePreviewResult,
-  StartPreviewRequest,
-  SetPreviewLocalAttachmentBindingRequest,
-  StopPreviewRequest,
   ValidatePreviewRecipeDraftRequest,
   AttachmentContent,
   AttachmentDraftSnapshot,
@@ -211,8 +200,7 @@ import {
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
-import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
-import { createPreviewManager } from '../preview/createPreviewManager';
+import type { DesignPreviewContext } from '../design/DesignPreviewService';
 import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
 import {
   PreviewRecipeGenerationRunError,
@@ -222,7 +210,7 @@ import {
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
-} from '../preview/runtime/PreviewOpenService';
+} from '../design/DesignPreviewRoute';
 import {
   toAgentAttachmentSelection,
   toAgentTurnAttachments,
@@ -290,6 +278,7 @@ async function settleOwnedWork(
 }
 
 export class TaskManagerService {
+  private readonly previewOpenHost?: PreviewUrlHost;
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
   private readonly promptRefiner: PromptRefinementService;
@@ -309,10 +298,10 @@ export class TaskManagerService {
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
-  private readonly previews: PreviewManager;
+  private readonly applications: ApplicationPreviewService;
+  private readonly designPreviews: DesignPreviewService;
   private readonly previewRecipeGenerator: PreviewRecipeGenerationService;
   private readonly previewEnabled: boolean;
-  private readonly previewReconcile: boolean;
   private readonly browserDevAgentBoundary: boolean;
   private readonly allowCandidateDesignModels: boolean;
   private readonly runtimeExecutableOverrides: Readonly<Record<string, string | undefined>>;
@@ -350,20 +339,11 @@ export class TaskManagerService {
       discourseWorkspaceRoot?: string;
       defaultAgentRuntimeId?: string;
       openTargetHost?: OpenTargetHost;
-      previewManager?: PreviewManager;
       previewRecipeGenerator?: PreviewRecipeGenerationService;
       previewRoot?: string;
-      previewLauncherPath?: string;
       previewLauncherExecPath?: string;
-      previewLauncherEnv?: NodeJS.ProcessEnv;
-      managedDesignStaticServerPath?: string;
-      previewOciExecutablePath?: string;
-      previewOciContextName?: string;
-      previewOciEnv?: NodeJS.ProcessEnv;
       previewOpenHost?: PreviewUrlHost;
-      previewPrivateVault?: import('../preview/private/PreviewPrivateVault').PreviewPrivateVault;
       previewEnabled?: boolean;
-      previewReconcile?: boolean;
       allowAgentNetworkAccess?: boolean;
       agentProviderStartupDisabledReason?: string;
       designRepositoryRoot?: string;
@@ -404,29 +384,24 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
+    this.previewOpenHost = options.previewOpenHost;
+    this.applications = new ApplicationPreviewService({
+      root: path.join(options.previewRoot ?? process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(store.getStorageRoot(), 'previews'), 'previewhost'),
+      supervisor: {
+        executable: options.previewLauncherExecPath ?? process.execPath,
+        module: path.join(path.dirname(require.resolve('previewhost')), 'supervisor.js').replace(/\.asar([/\\])/, '.asar.unpacked$1'),
+        env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : undefined
+      },
+      openHost: options.previewOpenHost,
+      authorizeDesign: spec => this.designPreviews.authorizes(spec),
+      onApproval: async name => {
+        const worktree = (await store.snapshot()).worktrees.find(item => `tm-${item.id}` === name);
+        if (worktree) this.events.emit({ type: 'preview.updated', taskId: worktree.taskId, worktreeId: worktree.id, payload: {}, at: new Date().toISOString() });
+      }
+    });
     this.previewEnabled = options.previewEnabled === true;
-    this.previewReconcile = options.previewReconcile !== false;
-    this.previews =
-      options.previewManager ??
-      createPreviewManager(store, events, {
-        previewRoot:
-          options.previewRoot ??
-          process.env.TASK_MANAGER_PREVIEW_ROOT ??
-          path.join(os.tmpdir(), 'task-monki-preview-runtime'),
-        launcherPath:
-          options.previewLauncherPath ??
-          path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
-        launcherExecPath: options.previewLauncherExecPath,
-        launcherEnv: options.previewLauncherEnv,
-        managedDesignStaticServerPath: options.managedDesignStaticServerPath,
-        ociExecutablePath:
-          options.previewOciExecutablePath ?? process.env.TASK_MANAGER_OCI_BIN,
-        ociContextName:
-          options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
-        ociEnv: options.previewOciEnv,
-        openHost: options.previewOpenHost,
-        privateVault: options.previewPrivateVault
-      });
+    this.designPreviews = new DesignPreviewService(store, events, () => this.applications.owner(),
+      options.previewRoot ?? process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(store.getStorageRoot(), 'previews'));
     this.agentRuntimeStore = options.agentRuntimeStore;
     const taskRuntime = options.taskRuntimeAccess;
     this.taskRuntime = taskRuntime;
@@ -545,7 +520,7 @@ export class TaskManagerService {
       this.designUpdates = new DesignUpdateCoordinator({
         store,
         agents: this.agents,
-        previews: this.previews,
+        previews: this.designPreviews,
         source: this.designSource,
         browser: this.designBrowser,
         fence: designOwners.canvasFence,
@@ -649,16 +624,9 @@ export class TaskManagerService {
     });
     this.assertInitializing();
     if (this.previewEnabled) {
-      const gateway = await this.previews.init(this.appSettings.previewGateway.port ?? 0, {
-        reconcile: this.previewReconcile
-      });
-      this.assertInitializing();
-      if (this.appSettings.previewGateway.port !== gateway.port) {
-        this.appSettings = await this.appSettingsStore.update({
-          previewGateway: { port: gateway.port }
-        });
-        this.assertInitializing();
-      }
+      await this.applications.init();
+      await this.designPreviews.init();
+
     }
     if (!this.agentProviderStartupDisabledReason) {
       await this.reconcileTaskStateOnStartup();
@@ -1705,16 +1673,6 @@ export class TaskManagerService {
     }
     const repositorySetup = detail.repository.kind === 'USER_REGISTERED'
       ? await this.inspectDesignSetup(detail) : undefined;
-    if (repositorySetup) {
-      const preview = await this.store.getTaskDetail(designId);
-      repositorySetup.state = {
-        previewPlans: preview.previewPlans, previewApprovals: preview.previewApprovals,
-        previewGenerations: preview.previewGenerations, previewGenerationAttachments: preview.previewGenerationAttachments,
-        previewManagedResources: preview.previewManagedResources, previewNodeAttempts: preview.previewNodeAttempts,
-        previewComposeProjects: preview.previewComposeProjects, previewLocalBindings: preview.previewLocalBindings,
-        previewResources: preview.previewResources, previewTaskRoutes: preview.previewTaskRoutes
-      };
-    }
     return {
       ...detail,
       ...(repositorySetup?.blocker && detail.task.workflowPhase !== 'ARCHIVED' && !designRunActive(detail.currentRun) && !detail.turns.some((turn) => turn.runId && !turn.outcome)
@@ -1740,9 +1698,12 @@ export class TaskManagerService {
         const task = await this.requireRepositoryPreviewTask(input.designId, 'Design application selection');
         if (task.kind !== 'DESIGN') throw new Error('Select an application for a Design.');
         const context = await this.requireDesignPreviewContext(input.designId);
-        const resolved = await this.previews.resolve(context, input.target.scenarioId);
-        if (resolved.status !== 'PLAN' || !resolved.plan.executionPlan.routes.some((route) => route.id === input.target.routeId)) {
-          throw new Error('The selected application is not declared by this Preview recipe.');
+        const description = await this.designPreviews.inspectConfiguration(context);
+        const spec = description.spec;
+        const service = spec.type === 'environment' ? spec.services[input.target.routeId] : undefined;
+        if (input.target.routeId !== 'app' && !(service && ['static', 'command', 'attach', 'preview'].includes(service.type)) &&
+          !(spec.type === 'compose' && spec.services.some(value => value.id === input.target.routeId))) {
+          throw new Error('The selected application is not declared by this configuration.');
         }
         await this.store.updateDesignPreviewTarget(input.designId, input.target);
       });
@@ -1785,17 +1746,15 @@ export class TaskManagerService {
         return { blocker: 'The Design workspace is unavailable. Recover its worktree before continuing.' };
       }
       const workspace = await this.inspectDesignWorkspace(detail, observation);
-      if (workspace.blocker) return workspace;
+      if (workspace.blocker) return { ...workspace, application: await this.applications.read(detail.currentWorktree) };
+      const application = await this.applications.read(detail.currentWorktree);
+      if (!application.hasConfigurationFile) return { application, blocker: 'Save a preview.yaml configuration before starting Design.' };
+      const description = await this.designPreviews.inspectConfiguration({ task: detail.task, iteration: detail.currentIteration, worktree: detail.currentWorktree });
       const target = detail.task.designPreviewTarget;
-      const preview = await this.previews.resolve({ task: detail.task, iteration: detail.currentIteration, worktree: detail.currentWorktree }, target?.scenarioId);
-      if (preview.status !== 'PLAN') return { preview, blocker: preview.reason };
-      if (!target || !preview.plan.executionPlan.routes.some((route) => route.id === target.routeId)) {
-        return { preview, blocker: 'Select the application route to design.' };
-      }
-      if (!preview.approval) return { preview, blocker: 'Review and approve the Preview configuration.' };
-      if (preview.executionReadiness.status !== 'READY') return { preview, blocker: 'Configure the required Preview private inputs.' };
-      if (process.platform !== 'darwin') return { preview, blocker: 'Design application previews are supported on macOS only.' };
-      return { preview };
+      if (!target) return { application, description, blocker: 'Select the application to design.' };
+      if (process.platform !== 'darwin') return { application, description, blocker: 'Design application previews are supported on macOS only.' };
+      return { application, description, ...(application.approval ? { blocker: 'Review the requested application access.' } : {}) };
+
     } catch (error) {
       return { blocker: error instanceof Error ? error.message : 'Preview setup is unavailable.' };
     }
@@ -2207,7 +2166,7 @@ export class TaskManagerService {
       return updates.withExclusiveAccess(input.designId, async () => {
         const detail = await this.store.getDesignDetail(input.designId);
         if (!detail.actions.canArchive) throw new Error('Stop the current Design update before archiving.');
-        await this.previews.suspendTask(input.designId);
+        await this.designPreviews.stopTask(input.designId);
         await this.agents.releaseTask(input.designId);
         await this.store.archiveDesign(input.designId);
         this.emitDesignUpdate(input.designId, { reason: 'archived' });
@@ -3741,9 +3700,8 @@ export class TaskManagerService {
       await settleOwnedWork(this.agents.shutdown()),
       await settleOwnedWork(this.designToolBridge?.shutdown()),
       await settleOwnedWork(this.drainPostRunEvidence()),
-      await settleOwnedWork(
-        this.previewEnabled === false ? undefined : this.previews.shutdown()
-      )
+      await settleOwnedWork(this.previewEnabled ? this.designPreviews.shutdown() : undefined),
+      await settleOwnedWork(this.applications.close())
     ];
     this.disposeAgentEventListener();
     cleanupResults.push(
@@ -3770,22 +3728,191 @@ export class TaskManagerService {
     return this.discourseHost.service;
   }
 
-  async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
+  private async applicationWorktree(taskId: string): Promise<WorktreeRecord> {
     this.assertPreviewEnabled();
-    return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
-      await this.requireRepositoryPreviewTask(input.taskId, 'Preview plan resolution');
-      const context = await this.requirePreviewContext(input.taskId);
-      const result = await this.previews.resolve(context, input.scenarioId);
-      this.events.emit({
-        type: 'preview.updated',
-        taskId: input.taskId,
-        iterationId: context.iteration.id,
-        worktreeId: context.worktree.id,
-        payload: result,
-        at: new Date().toISOString()
+    const task = await this.requireRepositoryPreviewTask(taskId, 'Application preview');
+    return this.requireWorktree(task);
+  }
+
+  private withApplicationMutation<T>(taskId: string, operation: 'configure' | 'repair' | 'cleanup', action: () => Promise<T>): Promise<T> {
+    return this.withTaskAction(taskId, 'Application preview', async () => {
+      if ((await this.requireTask(taskId)).kind !== 'DESIGN') return action();
+      return (await this.requireDesignUpdates()).withExclusiveAccess(taskId, async () => {
+        const detail = await this.store.getDesignDetail(taskId);
+        if (designRunActive(detail.currentRun) || operation !== 'configure' && detail.turns.some(turn => !turn.outcome)) {
+          throw new Error('Stop and settle the Design turn before changing its application preview.');
+        }
+        if (operation === 'configure' && (await this.store.getPreviewGenerations(taskId)).some(generation => generation.state === 'READY' || generation.routingState === 'CANDIDATE' && !['STOPPED', 'FAILED'].includes(generation.state))) {
+          throw new Error('Stop the Design preview before editing its workspace configuration.');
+        }
+        if (operation !== 'cleanup') {
+          const workspace = await this.inspectDesignWorkspace(detail);
+          if (workspace.blocker) throw new Error(workspace.blocker);
+        }
+        return action();
       });
-      return result;
     });
+  }
+
+  listApplicationPreviews: ApplicationPreviewApi['listApplicationPreviews'] = async () => {
+    this.assertPreviewEnabled();
+    const [snapshot, previews] = await Promise.all([this.store.snapshot(), this.applications.owner().list()]);
+    const worktrees = new Map(snapshot.worktrees.map(worktree => [this.applications.name(worktree), worktree]));
+    const tasks = new Map(snapshot.tasks.map(task => [task.id, task]));
+    const repositories = new Map(snapshot.repositories.map(repository => [repository.id, repository]));
+    return previews.flatMap((status): ApplicationPreviewInstance[] => {
+      const worktree = worktrees.get(status.name);
+      const task = worktree && tasks.get(worktree.taskId);
+      const repository = worktree && repositories.get(worktree.repositoryId);
+      if (!worktree || !task || !repository) return [];
+      return [{
+        taskId: task.id,
+        worktreeId: worktree.id,
+        isCurrentWorktree: task.currentWorktreeId === worktree.id,
+        title: task.title,
+        kind: task.kind === 'DESIGN' ? 'design' : 'task',
+        repositoryName: repository.name,
+        branch: worktree.branchName,
+        projectDirectory: worktree.worktreePath,
+        status,
+        approvalPending: this.applications.hasPendingApproval(status.name)
+      }];
+    });
+  };
+
+  getApplicationPreview: ApplicationPreviewApi['getApplicationPreview'] = async ({ taskId }) => {
+    const snapshot = await this.applications.read(await this.applicationWorktree(taskId));
+    if ((await this.requireTask(taskId)).kind !== 'DESIGN') return snapshot;
+    return { ...snapshot, designAttempts: (await this.store.getPreviewGenerations(taskId)).flatMap(generation => generation.runtimeAttemptId ? [generation.runtimeAttemptId] : []) };
+  };
+
+  private async assertEditableApplicationAttempt(taskId: string, attemptId: string): Promise<void> {
+    if ((await this.store.getPreviewGenerations(taskId)).some(generation => generation.runtimeAttemptId === attemptId)) {
+      throw new Error('Load preview.yaml from the workspace to edit configuration. Saved Design sources are read only.');
+    }
+  }
+
+  connectApplicationPreviewDependency: ApplicationPreviewApi['connectApplicationPreviewDependency'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
+    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.allowWorktree(worktree);
+    await this.applications.owner().configureDependency(this.applications.name(worktree), input.attemptId, input.service, input.binding,
+      { operation: 'apply', expected: input.expected });
+    return this.applications.read(worktree);
+  });
+
+  connectApplicationPreviewSource: ApplicationPreviewApi['connectApplicationPreviewSource'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
+    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.owner().allowSources(
+      [worktree.worktreePath, input.directory],
+      new AbortController().signal
+    );
+    await this.applications.owner().configureSource(this.applications.name(worktree), input.attemptId, input.service, input.directory, input.expected);
+    return this.applications.read(worktree);
+  });
+
+  createApplicationPreviewConfiguration: ApplicationPreviewApi['createApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
+    const context = await this.requirePreviewContext(input.taskId);
+    await this.applicationWorktree(input.taskId);
+    return this.applications.createConfiguration(context.worktree, input);
+  });
+
+  startApplicationPreview: ApplicationPreviewApi['startApplicationPreview'] = input =>
+    this.withApplicationMutation(input.taskId, 'configure', async () => {
+      await this.applicationWorktree(input.taskId);
+      const context = await this.requirePreviewContext(input.taskId);
+      return this.applications.start(context.worktree, context.task.kind === 'DESIGN' ? 'file' : input.source);
+    });
+
+  approveApplicationPreview: ApplicationPreviewApi['approveApplicationPreview'] = async input =>
+    this.applications.approve(await this.applicationWorktree(input.taskId), input.attemptId);
+
+  stopApplicationPreview: ApplicationPreviewApi['stopApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'cleanup', async () => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.owner().stop(this.applications.name(worktree), { expected: input.expected });
+    if ((await this.requireTask(input.taskId)).kind === 'DESIGN') await this.designPreviews.stopTask(input.taskId);
+    return this.applications.read(worktree);
+ });
+
+  cancelApplicationPreview: ApplicationPreviewApi['cancelApplicationPreview'] = input => this.withControlAction(async () => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.owner().cancel(this.applications.name(worktree), input.attemptId);
+    return this.applications.read(worktree);
+ });
+
+  openApplicationPreview: ApplicationPreviewApi['openApplicationPreview'] = async input => {
+    this.assertPreviewEnabled();
+    const task = await this.requireTask(input.taskId);
+    const worktree = input.worktreeId ? await this.store.getWorktree(input.worktreeId) : await this.requireWorktree(task);
+    if (!worktree || worktree.taskId !== task.id) throw new Error('The worktree does not belong to this task.');
+    if (task.kind === 'DESIGN') {
+      const generation = (await this.store.getPreviewGenerations(task.id)).find(candidate =>
+        candidate.worktreeId === worktree.id && candidate.runtimeAttemptId === input.attemptId);
+      if (generation) {
+        const routeId = input.service ?? task.designPreviewTarget?.routeId ?? generation.routes.find(route => route.state === 'ATTACHED')?.id;
+        if (!routeId) throw new Error('Design route is unavailable.');
+        return this.openDesignPreview({ taskId: task.id, generationId: generation.id, routeId });
+      }
+    }
+    return this.applications.open(worktree, input.attemptId, input.service);
+  };
+
+  readApplicationPreviewLogs: ApplicationPreviewApi['readApplicationPreviewLogs'] = async input => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    return this.applications.owner().logs(this.applications.name(worktree), input.attemptId,
+      { source: input.source, after: input.after, maxBytes: input.maxBytes });
+  };
+
+  inspectApplicationPreviewConfiguration: ApplicationPreviewApi['inspectApplicationPreviewConfiguration'] = async input => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.allowWorktree(worktree);
+    return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes, { operation: 'inspect' });
+  };
+
+  applyApplicationPreviewConfiguration: ApplicationPreviewApi['applyApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
+    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.allowWorktree(worktree);
+    await this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
+      { operation: 'apply', expected: input.expected });
+    return this.applications.read(worktree);
+ });
+
+  saveApplicationPreviewConfiguration: ApplicationPreviewApi['saveApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
+    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.allowWorktree(worktree);
+    return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
+      { operation: 'save' }, { projectDirectory: worktree.worktreePath });
+ });
+
+  rerunApplicationPreviewJob: ApplicationPreviewApi['rerunApplicationPreviewJob'] = input => this.withApplicationMutation(input.taskId, 'repair', async () => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.allowWorktree(worktree);
+    await this.applications.owner().rerunJob(this.applications.name(worktree), input.attemptId, input.job);
+    return this.applications.read(worktree);
+ });
+
+  deleteApplicationPreviewData: ApplicationPreviewApi['deleteApplicationPreviewData'] = input => this.withApplicationMutation(input.taskId, 'repair', async () => {
+    const worktree = await this.applicationWorktree(input.taskId);
+    await this.applications.owner().deleteData(this.applications.name(worktree), { expected: input.expected });
+    return this.applications.read(worktree);
+ });
+
+  get previewSecrets(): import('../../shared/applicationPreview').PreviewSecretsApi {
+    const secrets = this.applications.secrets;
+    return {
+      status: () => this.withControlAction(() => secrets.status()),
+      list: input => this.withControlAction(() => secrets.list(input)),
+      unlock: input => this.withControlAction(() => secrets.unlock(input)),
+      lock: () => this.withControlAction(() => secrets.lock()),
+      remember: () => this.withControlAction(() => secrets.remember()),
+      forget: () => this.withControlAction(() => secrets.forget()),
+      create: input => this.withControlAction(() => secrets.create(input)),
+      update: input => this.withControlAction(() => secrets.update(input)),
+      remove: input => this.withControlAction(() => secrets.remove(input))
+    };
   }
 
   async getPreviewRecipeGeneration(
@@ -3855,27 +3982,7 @@ export class TaskManagerService {
           const observed = await this.refreshDesignGitEvidence(input.taskId);
           await this.store.acceptDesignWorkspaceSnapshot(input.taskId, observed.id);
         }
-        let resolution: ResolvePreviewResult | undefined;
-        let checkError: string | undefined;
-        try {
-          resolution = await this.previews.resolve(context);
-          this.events.emit({
-            type: 'preview.updated',
-            taskId: input.taskId,
-            iterationId: context.iteration.id,
-            worktreeId: context.worktree.id,
-            payload: resolution,
-            at: new Date().toISOString()
-          });
-        } catch {
-          checkError =
-            'The recipe was saved, but Preview could not finish checking it. Use Check preview to retry.';
-        }
-        return {
-          recipePath: '.taskmonki/preview.yaml',
-          resolution,
-          checkError
-        };
+        return { recipePath: 'preview.yaml' };
       };
       const task = await this.requireTask(input.taskId);
       return task.kind === 'DESIGN'
@@ -3898,7 +4005,7 @@ export class TaskManagerService {
   }
 
   private emitPreviewRecipeGenerationUpdate(
-    context: PreviewTaskContext,
+    context: DesignPreviewContext,
     state: PreviewRecipeGenerationSnapshot
   ): void {
     this.events.emit({
@@ -3947,226 +4054,22 @@ export class TaskManagerService {
     );
   }
 
-  approvePreviewPlan(
-    input: ApprovePreviewPlanRequest
-  ): Promise<PreviewApprovalRecord> {
-    return this.withControlAction(() => this.approvePreviewPlanInternal(input));
-  }
-
-  setPreviewPrivateInput(input: { taskId: string; inputId: string; value: string }) {
-    return this.withTaskAction(input.taskId, 'Private preview input update', () =>
-      this.previews.setPrivateInput(input.taskId, input.inputId, input.value)
-    );
-  }
-
-  deletePreviewPrivateInput(input: { taskId: string; inputId: string }) {
-    return this.withTaskAction(input.taskId, 'Private preview input deletion', () =>
-      this.previews.deletePrivateInput(input.taskId, input.inputId)
-    );
-  }
-
-  retryPreviewPrivateVaultCleanup() {
-    return this.withControlAction(() => this.previews.retryPrivateVaultCleanup());
-  }
-
-  private async approvePreviewPlanInternal(
-    input: ApprovePreviewPlanRequest
-  ): Promise<PreviewApprovalRecord> {
-    this.assertPreviewEnabled();
-    await this.requireRepositoryPreviewTask(input.taskId, 'Preview approval');
-    const approval = await this.previews.approve(input);
-    this.events.emit({
-      type: 'preview.updated',
-      taskId: input.taskId,
-      payload: approval,
-      at: approval.approvedAt
+  openDesignPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    return this.withControlAction(async () => {
+      await this.assertCurrentDesignPreviewRoute(input);
+      const url = await this.designPreviews.resolveExternalUrl(input);
+      await this.previewOpenHost?.openExternal(url);
+      return { url, opened: !!this.previewOpenHost };
     });
-    return approval;
-  }
-
-  async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
-    return this.startPreviewWithSetup(input);
-  }
-
-  private async startPreviewWithSetup(
-    input: StartPreviewRequest,
-    setupRetry?: RetryPreviewSetupRequest,
-    reset?: ResetPreviewDataRequest
-  ): Promise<PreviewGenerationRecord> {
-    this.assertPreviewEnabled();
-    if (process.platform !== 'darwin') {
-      throw new Error('Native previews are supported on macOS only.');
-    }
-    return this.withTaskAction(input.taskId, reset ? 'Preview data reset' : 'Preview startup', async () => {
-      await this.requireNormalTask(input.taskId, 'Preview startup');
-      const context = await this.requirePreviewContext(input.taskId);
-      const currentSnapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
-      const blockingGeneration = currentSnapshot.previewGenerations.find(
-        (generation) =>
-          generation.taskId === input.taskId &&
-          generation.routingState !== 'ACTIVE' &&
-          (
-            generation.state === 'CLEANUP_INCOMPLETE' ||
-            (generation.state === 'RECOVERY_REQUIRED' && !reset) ||
-            !['STOPPED', 'FAILED', 'RECOVERY_REQUIRED'].includes(generation.state)
-          )
-      );
-      if (blockingGeneration) {
-        throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
-      }
-      const gitSnapshot = await this.refreshEvidenceInternal({ taskId: input.taskId });
-      if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
-        throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
-      }
-      if (reset) await this.previews.resetData({ ...reset, context });
-      const setupRetryResourceIds = setupRetry
-        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
-        : undefined;
-      const prepared = await this.previews.prepare({
-        context,
-        gitSnapshot,
-        reobserveGit: () => this.refreshEvidenceInternal({ taskId: input.taskId })
-      }, input.scenarioId, setupRetryResourceIds);
-      return this.previews.execute(prepared);
-    });
-  }
-
-  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
-    return this.withControlAction(() => this.stopPreviewInternal(input));
-  }
-
-  private async stopPreviewInternal(
-    input: StopPreviewRequest
-  ): Promise<PreviewGenerationRecord> {
-    this.assertPreviewEnabled();
-    if ((await this.requireTask(input.taskId)).kind === 'DESIGN') {
-      return this.withTaskAction(input.taskId, 'Design Preview cleanup', async () =>
-        (await this.requireDesignUpdates()).withExclusiveAccess(input.taskId, async () => {
-          await this.requireRepositoryPreviewTask(input.taskId, 'Design Preview cleanup');
-          const detail = await this.store.getDesignDetail(input.taskId);
-          if (designRunActive(detail.currentRun) || detail.turns.some((turn) => !turn.outcome)) {
-            throw new Error('Stop and settle the Design turn before cleaning up Preview.');
-          }
-          const generation = await this.store.getPreviewGeneration(input.generationId);
-          if (!generation || generation.taskId !== input.taskId) {
-            throw new Error('Preview generation was not found for this task.');
-          }
-          return this.previews.stop(generation.id);
-        })
-      );
-    }
-    await this.requireNormalTask(input.taskId, 'Preview stop');
-    const generation = await this.store.getPreviewGeneration(input.generationId);
-    if (!generation || generation.taskId !== input.taskId) {
-      throw new Error('Preview generation was not found for this task.');
-    }
-    const cancelingStartup =
-      generation.routingState === 'CANDIDATE' &&
-      !['FAILED', 'STOPPED', 'CLEANUP_INCOMPLETE', 'RECOVERY_REQUIRED'].includes(generation.state);
-    if (cancelingStartup) {
-      return this.previews.stop(generation.id);
-    }
-    return this.withTaskAction(input.taskId, 'Preview stop', () =>
-      this.previews.stop(generation.id)
-    );
-  }
-
-  async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
-    if ((await this.requireTask(input.taskId)).kind === 'DESIGN') {
-      return this.repairDesignPreviewSetup(input);
-    }
-    return this.startPreviewWithSetup(
-      { taskId: input.taskId, scenarioId: input.scenarioId },
-      undefined,
-      input
-    );
-  }
-
-  async retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord> {
-    if ((await this.requireTask(input.taskId)).kind === 'DESIGN') {
-      return this.repairDesignPreviewSetup(input);
-    }
-    return this.startPreviewWithSetup(
-      { taskId: input.taskId, scenarioId: input.scenarioId },
-      input
-    );
-  }
-
-  private async repairDesignPreviewSetup(
-    input: RetryPreviewSetupRequest | ResetPreviewDataRequest
-  ): Promise<PreviewGenerationRecord> {
-    this.assertPreviewEnabled();
-    return this.withTaskAction(input.taskId, 'Design Preview setup repair', async () => {
-      const updates = await this.requireDesignUpdates();
-      return updates.withExclusiveAccess(input.taskId, async () => {
-        await this.requireRepositoryPreviewTask(input.taskId, 'Design Preview setup repair');
-        const detail = await this.store.getDesignDetail(input.taskId);
-        if (designRunActive(detail.currentRun) || detail.turns.some((turn) => !turn.outcome)) {
-          throw new Error('Stop and settle the Design turn before repairing Preview setup.');
-        }
-        const workspace = await this.inspectDesignWorkspace(detail);
-        if (workspace.blocker) throw new Error(workspace.blocker);
-        const context = await this.requireDesignPreviewContext(input.taskId);
-        if ((context.task.designPreviewTarget?.scenarioId ?? 'default') !== input.scenarioId) {
-          throw new Error('Repair the selected Design application scenario.');
-        }
-        if ('resourceId' in input) {
-          await this.previews.resetData({ ...input, context });
-          return (await this.store.getPreviewGeneration(input.generationId))!;
-        }
-        const setupRetryResourceIds = await this.previews.authorizeSetupRetry({ ...input, context });
-        const failed = await this.store.getPreviewGeneration(input.generationId);
-        if (failed?.source.type !== 'EXACT_COMMIT') throw new Error('The failed Design source is unavailable.');
-        const prepared = await this.previews.prepareManagedDesignExactCommit({
-          context, commitSha: failed.source.commitSha, setupRetryResourceIds
-        });
-        const candidate = await this.previews.executeManagedDesignCandidate(prepared, {
-          designId: input.taskId, async onCandidateReady() {}
-        });
-        // Setup repair retains managed data. Only a later inspected turn can publish Ready.
-        await this.previews.stopManagedDesignCandidate(candidate.id);
-        return (await this.store.getPreviewGeneration(candidate.id))!;
-      });
-    });
-  }
-
-  setPreviewLocalAttachmentBinding(
-    input: SetPreviewLocalAttachmentBindingRequest
-  ): Promise<PreviewLocalAttachmentBindingRecord> {
-    return this.withTaskAction(input.taskId, 'Preview binding update', async () => {
-      this.assertPreviewEnabled();
-      await this.requireRepositoryPreviewTask(input.taskId, 'Preview binding update');
-      const context = await this.requirePreviewContext(input.taskId);
-      return this.previews.setLocalAttachmentBinding({ ...input, context });
-    });
-  }
-
-  deletePreviewLocalAttachmentBinding(
-    input: DeletePreviewLocalAttachmentBindingRequest
-  ): Promise<void> {
-    return this.withTaskAction(input.taskId, 'Preview binding deletion', async () => {
-      this.assertPreviewEnabled();
-      await this.requireRepositoryPreviewTask(input.taskId, 'Preview binding deletion');
-      const context = await this.requirePreviewContext(input.taskId);
-      await this.previews.deleteLocalAttachmentBinding({ ...input, context });
-    });
-  }
-
-  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
-    return this.withControlAction(() => this.openPreviewInternal(input));
-  }
-
-  private async openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
-    this.assertPreviewEnabled();
-    await this.requireNormalTask(input.taskId, 'Open Preview');
-    return this.previews.open(input);
   }
 
   /** Main-process-only route resolution for the isolated Design canvas. */
-  async resolveDesignCanvasRoute(
-    input: OpenPreviewRequest
-  ): Promise<ResolvedPreviewRoute> {
+  async resolveDesignCanvasRoute(input: OpenPreviewRequest): Promise<ResolvedPreviewRoute> {
+    await this.assertCurrentDesignPreviewRoute(input);
+    return this.designPreviews.resolveDesignCanvasRoute(input);
+  }
+
+  private async assertCurrentDesignPreviewRoute(input: OpenPreviewRequest): Promise<void> {
     this.assertPreviewEnabled();
     const task = await this.requireTask(input.taskId);
     if (task.kind !== 'DESIGN') {
@@ -4186,12 +4089,6 @@ export class TaskManagerService {
     if (!isProjectedTarget && !isLastReadyTarget) {
       throw new Error('The Design canvas route is not current.');
     }
-    return this.previews.resolveDesignCanvasRoute(input);
-  }
-
-  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
-    this.assertPreviewEnabled();
-    return this.previews.readLog(input);
   }
 
   private async assertAgentRuntimeAvailable(): Promise<void> {
@@ -4259,7 +4156,6 @@ export class TaskManagerService {
       baseRef, baseSha, status: 'PRESENT', error: undefined
     }, evidence);
     const detail = await this.store.getTaskDetail(taskId);
-    if (detail.gitSnapshots[0]) await this.previews.observeGitSnapshot(detail.gitSnapshots[0]);
     this.events.emit({ type: 'task.updated', taskId, payload: await this.requireTask(taskId), at: new Date().toISOString() });
     return stored;
   }
@@ -4310,7 +4206,6 @@ export class TaskManagerService {
       ? (await captureExistingWorkEvidence(storedWorktree, snapshot)).diffEvidence
       : await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
-    await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({
       type: 'git.updated',
       taskId: task.id,
@@ -4649,7 +4544,9 @@ export class TaskManagerService {
 
         // Preview cleanup is part of deletion authority. The store keeps its
         // resource ledger intact if any process or workspace identity is ambiguous.
-        await this.previews.stopTask(task.id);
+        if (this.previewEnabled) {
+          for (const worktree of snapshot.worktrees.filter(item => item.taskId === task.id)) await this.applications.retireWorktree(worktree);
+        }
         await this.previewRecipeGenerator.clearTask(task.id);
         await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
         await this.agents.releaseTask(task.id);
@@ -4669,9 +4566,7 @@ export class TaskManagerService {
         }
 
         await this.store.serializePersistenceMutation(() =>
-          this.previews.retireDeletedTaskPrivateInputs(task.id, () =>
-            this.store.deleteTask(task.id)
-          )
+          this.store.deleteTask(task.id)
         );
         await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
         const result = { taskId: task.id, removedWorktree };
@@ -4727,7 +4622,8 @@ export class TaskManagerService {
       }
     }
 
-    await this.previews.stopTask(task.id);
+    await this.designPreviews.stopTask(task.id);
+    for (const worktree of snapshot.worktrees.filter(item => item.taskId === task.id)) await this.applications.retireWorktree(worktree);
     await this.previewRecipeGenerator.clearTask(task.id);
     await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
     await this.agents.deleteTaskProviderHistory(task);
@@ -4748,9 +4644,7 @@ export class TaskManagerService {
 
     const designDraft = await this.designDrafts?.get(task.id).catch(() => null);
     const released = await this.store.serializePersistenceMutation(() =>
-      this.previews.retireDeletedTaskPrivateInputs(task.id, () =>
-        this.store.deleteTaskAndReleaseManagedRepository(task.id)
-      )
+      this.store.deleteTaskAndReleaseManagedRepository(task.id)
     );
     await this.agentRuntimeStore.purgeTask(task.id).catch(() => undefined);
     await this.designDrafts?.deleteForDesign(task.id).catch(() => undefined);
@@ -5177,7 +5071,7 @@ export class TaskManagerService {
 
   private async requireDesignPreviewContext(
     designId: string
-  ): Promise<PreviewTaskContext> {
+  ): Promise<DesignPreviewContext> {
     const task = await this.requireTask(designId);
     if (task.kind !== 'DESIGN') throw new Error('Design not found.');
     const worktree = await this.ensureDesignWorktree(designId);

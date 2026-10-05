@@ -49,7 +49,7 @@ kept independent: Codex, ACP, and OpenCode adapters cannot import one another.
 | Application persistence composition | `src/core/storage/sqlite/ApplicationPersistence.ts` | One profile lease, SQLite connection, managed-file owner, and backup/recovery boundary. |
 | Discourse runtime composition | `src/core/app/DiscourseRuntimeHost.ts` | Owns scheduler, recovery, scoped routing, and shutdown without moving durable conversation truth out of its store. |
 | Provider composition | `src/core/app/AgentRuntimeComposition.ts` | Wires built-in adapters and scoped routers; provider protocol behavior stays in each adapter. |
-| Preview validation and execution | `src/core/preview` | YAML normalization remains separate from `PreviewExecutionAuthority`; preserve bounded lifecycle ownership and explicit private-input handling. |
+| Application preview runtime | Previewhost, embedded by `src/core/preview/ApplicationPreviewService.ts` | Owns configuration validation, processes, routing, data, and secrets. Task Monki owns worktree selection and user consent. |
 | Cross-process contracts | `src/shared` | Treat stored and transport shapes as durable. |
 | Derived UI state | `src/renderer/model` | Pure and directly testable; never a second workflow source of truth. |
 | React composition and local interaction state | `src/renderer/ui` | Split by a meaningful user-facing feature or lifecycle owner, not by element count. |

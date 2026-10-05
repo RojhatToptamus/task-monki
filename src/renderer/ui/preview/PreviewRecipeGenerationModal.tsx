@@ -177,7 +177,7 @@ export function PreviewRecipeGenerationModal({
                   <strong>Complete YAML</strong>
                   <span>{edited ? 'Edited' : 'Generated'} · {yaml.split('\n').length} lines</span>
                 </div>
-                <code>.taskmonki/preview.yaml</code>
+                <code>preview.yaml</code>
               </div>
               <textarea
                 aria-label="Preview recipe YAML"

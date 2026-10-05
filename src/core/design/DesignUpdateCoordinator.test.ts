@@ -8,14 +8,13 @@ import type {
   DesignSourceCheckpoint,
   GitSnapshotRecord,
   PreviewGenerationRecord,
-  PreviewPlanRecord,
   RunRecord
 } from '../../shared/contracts';
 import type {
   AgentOrchestrator,
   StartOrchestratedTurn
 } from '../agent/AgentOrchestrator';
-import type { PreviewManager } from '../preview/PreviewManager';
+import type { DesignPreviewService } from './DesignPreviewService';
 import { AppEventBus } from '../runner/AppEventBus';
 import { SqliteTaskStore, type ManagedDesignRepositoryInput } from '../storage/SqliteTaskStore';
 import {
@@ -1010,20 +1009,12 @@ async function createHarness(
     }),
     executeManagedDesignCandidate: vi.fn(async (prepared) => {
       const target = await store.getDesignDetail(prepared.context.task.id);
-      const plan = await store.savePreviewPlan(
-        managedPlan({
-          taskId: prepared.context.task.id,
-          iterationId: prepared.context.iteration.id,
-          worktreeId: prepared.context.worktree.id
-        })
-      );
       return store.savePreviewGeneration(
         managedCandidate({
           taskId: prepared.context.task.id,
           repositoryId: target.repository.id,
           iterationId: prepared.context.iteration.id,
           worktreeId: prepared.context.worktree.id,
-          planId: plan.id,
           commitSha: prepared.commitSha
         })
       );
@@ -1055,7 +1046,7 @@ async function createHarness(
   const coordinator = new DesignUpdateCoordinator({
     store,
     agents,
-    previews: previews as unknown as PreviewManager,
+    previews: previews as unknown as DesignPreviewService,
     source: source as unknown as DesignSourceService,
     browser,
     fence: {
@@ -1119,20 +1110,12 @@ async function startAndCompleteCurrentTurn(
     ...sourceCheckpoint,
     candidateCommitSha
   });
-  const plan = await harness.store.savePreviewPlan(
-    managedPlan({
-      taskId: harness.designId,
-      iterationId: detail.currentIteration!.id,
-      worktreeId: detail.currentWorktree!.id
-    })
-  );
   const generation = await harness.store.savePreviewGeneration(
     managedCandidate({
       taskId: harness.designId,
       repositoryId: detail.repository.id,
       iterationId: detail.currentIteration!.id,
       worktreeId: detail.currentWorktree!.id,
-      planId: plan.id,
       commitSha: candidateCommitSha
     })
   );
@@ -1181,7 +1164,7 @@ async function settleCurrentTurnReady(
 
 async function cutoverCandidate(
   store: SqliteTaskStore,
-  input: Parameters<PreviewManager['cutoverManagedDesignCandidate']>[0]
+  input: Parameters<DesignPreviewService['cutoverManagedDesignCandidate']>[0]
 ): Promise<PreviewGenerationRecord> {
   const stored = await store.getPreviewGeneration(input.generationId);
   if (!stored || stored.source.type !== 'EXACT_COMMIT') {
@@ -1214,35 +1197,10 @@ async function cutoverCandidate(
       designId: input.designId,
       commitSha: stored.source.commitSha,
       routeId: 'main',
-      settlement: input.settlement
+      settlement: input.settlement!
     }
   });
   return result.candidate;
-}
-
-function managedPlan(input: {
-  taskId: string;
-  iterationId: string;
-  worktreeId: string;
-}): PreviewPlanRecord {
-  return {
-    id: randomUUID(),
-    ...input,
-    planSource: { type: 'MANAGED_DESIGN_STATIC', adapterVersion: 1 },
-    executionDigest: 'd'.repeat(64),
-    executionPlan: {
-      version: 1,
-      jobs: [],
-      resources: [],
-      services: [],
-      workers: [],
-      routes: [],
-      scenarios: [{ id: 'default', jobs: [], resources: [] }],
-      selectedScenarioId: 'default'
-    },
-    warnings: [],
-    createdAt: new Date().toISOString()
-  };
 }
 
 function managedCandidate(input: {
@@ -1250,7 +1208,6 @@ function managedCandidate(input: {
   repositoryId: string;
   iterationId: string;
   worktreeId: string;
-  planId: string;
   commitSha?: string;
 }): PreviewGenerationRecord {
   const now = new Date().toISOString();
@@ -1260,12 +1217,6 @@ function managedCandidate(input: {
     taskId: input.taskId,
     iterationId: input.iterationId,
     worktreeId: input.worktreeId,
-    planId: input.planId,
-    executionAuthority: {
-      type: 'MANAGED_STATIC',
-      adapterVersion: 1,
-      executionDigest: 'd'.repeat(64)
-    },
     source: {
       type: 'EXACT_COMMIT',
       repositoryId: input.repositoryId,
@@ -1274,15 +1225,10 @@ function managedCandidate(input: {
     workspacePath: path.join('/tmp', randomUUID()),
     state: 'READY',
     routingState: 'CANDIDATE',
-    freshness: 'CURRENT',
     routes: [
       {
         id: 'main',
-        hostname: 'design.localhost',
         url: 'http://design.localhost:41000/',
-        gatewayPort: 41000,
-        targetHost: '127.0.0.1',
-        targetPort: 41001,
         state: 'ATTACHED'
       }
     ],

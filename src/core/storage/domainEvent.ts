@@ -11,7 +11,6 @@ export interface CreateDomainEventInput {
   agentItemId?: string;
   interactionRequestId?: string;
   worktreeId?: string;
-  previewPlanId?: string;
   previewGenerationId?: string;
   source: DomainEvent['source'];
   payload?: unknown;
@@ -32,7 +31,6 @@ export function createDomainEvent(input: CreateDomainEventInput): DomainEvent {
     agentItemId: input.agentItemId,
     interactionRequestId: input.interactionRequestId,
     worktreeId: input.worktreeId,
-    previewPlanId: input.previewPlanId,
     previewGenerationId: input.previewGenerationId,
     source: input.source,
     sourceEventId: input.sourceEventId ?? randomUUID(),

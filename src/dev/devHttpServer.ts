@@ -1104,13 +1104,82 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/preview/resolve') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.resolvePreview((await readJson()) as never)
-        );
+      if (request.method === 'POST' && url.pathname === '/api/application/listApplicationPreviews') {
+        sendJson(response, requestId, 200, await options.service.listApplicationPreviews());
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/getApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.getApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewDependency') {
+        sendJson(response, requestId, 200, await options.service.connectApplicationPreviewDependency((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewSource') {
+        sendJson(response, requestId, 200, await options.service.connectApplicationPreviewSource((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/createApplicationPreviewConfiguration') {
+        sendJson(response, requestId, 200, await options.service.createApplicationPreviewConfiguration((await readJson()) as Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/startApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.startApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/approveApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.approveApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/stopApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.stopApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/cancelApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.cancelApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/openApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.openApplicationPreview((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/readApplicationPreviewLogs') {
+        sendJson(response, requestId, 200, await options.service.readApplicationPreviewLogs((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/inspectApplicationPreviewConfiguration') {
+        sendJson(response, requestId, 200, await options.service.inspectApplicationPreviewConfiguration((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/applyApplicationPreviewConfiguration') {
+        sendJson(response, requestId, 200, await options.service.applyApplicationPreviewConfiguration((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/saveApplicationPreviewConfiguration') {
+        sendJson(response, requestId, 200, await options.service.saveApplicationPreviewConfiguration((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/rerunApplicationPreviewJob') {
+        sendJson(response, requestId, 200, await options.service.rerunApplicationPreviewJob((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/application/deleteApplicationPreviewData') {
+        sendJson(response, requestId, 200, await options.service.deleteApplicationPreviewData((await readJson()) as never));
         return;
       }
 
@@ -1164,89 +1233,8 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.approvePreviewPlan((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/start') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.startPreview((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.stopPreview((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/open') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.openPreview((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/log/read') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.readPreviewLog((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/reset-data') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.resetPreviewData((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/retry-setup') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.retryPreviewSetup((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/binding/set') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.setPreviewLocalAttachmentBinding((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/preview/binding/delete') {
-        await options.service.deletePreviewLocalAttachmentBinding((await readJson()) as never);
-        sendJson(response, requestId, 200, null);
+      if (request.method === 'POST' && url.pathname === '/api/design/preview/open') {
+        sendJson(response, requestId, 200, await options.service.openDesignPreview((await readJson()) as never));
         return;
       }
 

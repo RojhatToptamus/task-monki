@@ -16,11 +16,12 @@ profile.
 
 | Data | Authoritative owner | Physical representation |
 | --- | --- | --- |
-| Tasks, boards, repositories, workflow, worktree records, local evidence, Preview control records, Design metadata, task agent drafts and authored instructions | Task Monki domain stores | Normalized SQLite tables |
+| Tasks, boards, repositories, workflow, worktree records, local evidence, Design metadata, task agent drafts and authored instructions | Task Monki domain stores | Normalized SQLite tables |
 | Provider servers, sessions, runs, items, interactions, queues, usage, telemetry, operation receipts, and recovery records | The Task Monki runtime store owns its records. Providers remain authoritative for external runtime state. | Normalized SQLite tables |
 | Discourse conversations, participants, messages, context, waves, jobs, concerns, summaries, drafts, and tombstones | Task Monki Discourse store | Normalized SQLite tables |
 | Application settings | Task Monki settings store | One revisioned SQLite record |
-| Attachment, artifact, and encrypted Preview-private bytes | SQLite owns identity, reachability, size, digest, and media metadata. `ManagedFileStore` owns byte publication and verification. | Immutable files below `storage/files` |
+| Attachment and artifact bytes | SQLite owns identity, reachability, size, digest, and media metadata. `ManagedFileStore` owns byte publication and verification. | Immutable files below `storage/files` |
+| Application previews and secrets | Previewhost owns runtime records, retained data, and encrypted secret storage. | Profile-local `preview-runtime` directory, outside Task Monki's SQLite backup |
 | Managed Design source | The managed Git repository owns commits, trees, and refs. SQLite owns Task Monki's repository and Design records. | Git repositories below `storage/design-repositories` |
 | Redacted provider protocol diagnostics | The runtime server record owns retention. The journal owns bounded byte segments. | NDJSON below `storage/protocol-journals` |
 | User repositories, ordinary task worktrees, Git remotes, GitHub, provider processes, and Preview runtime objects | Their external systems | Task Monki observes and reconciles them. It does not copy them into application persistence. |
@@ -80,12 +81,11 @@ For a profile root, current application-owned paths are:
     protocol-journals/
     design-repositories/
     design-worktrees/
-    task-artifact-captures/
   backups/
     backup-<timestamp>-<id>/
 ```
 
-`design-worktrees` and `task-artifact-captures` are derived or staging data.
+`design-worktrees` are derived data.
 Managed Design repositories are durable. Registered-repository Design commits
 remain in the registered Git repository; profile backups do not include that
 external repository or uncommitted worktree edits. The desktop host keeps ordinary task
@@ -152,15 +152,16 @@ reconciliation:
    attachment drafts. Then the Task store loads and verifies its records and
    managed files. It retries garbage collection and reconciles owned files.
 7. The service uses the recovery order in `CRASH_RECOVERY.md`. It verifies
-   lazily loaded Discourse and Preview-private records before use.
+   lazily loaded Discourse records before use. Previewhost reconciles its own
+   runtime records and validates secret storage independently.
 
 A missing database is valid only for a new profile or an empty first-start
 directory skeleton. Startup preserves all suspicious residue and fails closed.
 It never turns interrupted restore state into a new empty profile.
 
 An integrity, identity, schema, relationship, or startup-loaded managed-file
-failure aborts startup. Other managed bytes, such as Preview-private
-ciphertext, are verified before use and fail closed. Task Monki does not
+failure aborts startup. Other managed bytes are verified before use and fail
+closed. Task Monki does not
 silently repair payloads, adopt unreferenced files, or reinterpret an
 unidentified database. External mutations can have succeeded before a stop.
 Task Monki observes them through their owning systems. It never replays an
@@ -188,6 +189,12 @@ SQLite migration 3 adds an empty custom agent profile library to settings schema
 12 and advances the settings payload to schema 13. Existing preferences remain
 unchanged. Tasks and Designs retain their creation-time profile selection in their existing
 task payloads. They need no additional table or column.
+
+Migration 10 transfers application runtime ownership to Previewhost. It removes
+the unused gateway-port preference and advances settings to schema 14 while
+preserving other preferences. It retains Design source history and refuses to
+discard unresolved process ownership. The pre-upgrade backup preserves the
+previous records.
 
 `WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
 external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;
@@ -271,15 +278,13 @@ re-verifies that backup and the prepared root, then resumes activation under the
 profile lease. Startup never resumes restore automatically.
 
 Backups exclude ordinary user repositories, task worktrees, and Design
-worktrees. They also exclude mutable artifact captures, Preview runtime objects,
+worktrees. They also exclude Preview runtime objects,
 and Discourse execution workspaces. Provider history and external Git or GitHub
 state are external authority. These items are not application persistence.
 
 These backups are exact local, same-profile recovery sets, not portable exports.
-Preview-private ciphertext is retained so a local upgrade or restore does not
-break durable reachability, but its operating-system key may not exist for a
-different machine or user. A future portable export must omit private values and
-require secret re-entry. Task Monki does not currently provide that export.
+Previewhost's encrypted keystore and retained application data are outside this
+backup. Restoring Task Monki's SQLite data does not restore or roll back them.
 
 ## Verified Scale Boundary
 

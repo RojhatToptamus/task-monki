@@ -1,5 +1,5 @@
 import { shell } from 'electron';
-import type { PreviewUrlHost } from '../core/preview/runtime/PreviewOpenService';
+import type { PreviewUrlHost } from '../core/design/DesignPreviewRoute';
 
 export function createElectronPreviewUrlHost(): PreviewUrlHost {
   return {

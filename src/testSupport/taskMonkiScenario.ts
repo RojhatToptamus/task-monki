@@ -61,9 +61,6 @@ export interface ScenarioOptions {
   name?: string;
   ghPath?: string;
   previewEnabled?: boolean;
-  previewOciExecutablePath?: string;
-  previewOciContextName?: string;
-  previewOciEnv?: NodeJS.ProcessEnv;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
   allowCandidateDesignModels?: boolean;
@@ -336,17 +333,6 @@ export async function createTaskMonkiScenario(
       previewRecipeGenerator: options.previewRecipeGenerator,
       previewEnabled: options.previewEnabled,
       previewRoot,
-      previewLauncherPath: path.join(
-        process.cwd(),
-        'src/core/preview/runtime/native-preview-launcher.mjs'
-      ),
-      managedDesignStaticServerPath: path.join(
-        process.cwd(),
-        'src/core/preview/runtime/managed-design-static-server.mjs'
-      ),
-      previewOciExecutablePath: options.previewOciExecutablePath,
-      previewOciContextName: options.previewOciContextName,
-      previewOciEnv: options.previewOciEnv,
       allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.designMode
         ? {

@@ -34,7 +34,7 @@ import {
   devRendererOrigin,
   type DevApiTokenLease
 } from './devApiSecurity';
-import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
+import { createDevHttpServer } from './devHttpServer';
 
 const REPORT_SCHEMA_VERSION = 'task-monki/agent-test-workflow@v1' as const;
 const STRESS_REPORT_SCHEMA_VERSION = 'task-monki/agent-resource-stress@v2' as const;
@@ -174,8 +174,7 @@ interface StressScenarioResult {
     completedCycles: number;
     targetPortsClosed: boolean;
     targetProcessesJoined: boolean;
-    maxStdoutArtifactBytes: number;
-    maxStderrArtifactBytes: number;
+    maxLogBytes: number;
     gatewayPort?: number;
   };
   providerDisappearance: {
@@ -814,8 +813,7 @@ async function exerciseNativePreviewCycles(
       completedCycles: 0,
       targetPortsClosed: true,
       targetProcessesJoined: true,
-      maxStdoutArtifactBytes: 0,
-      maxStderrArtifactBytes: 0
+      maxLogBytes: 0
     };
   }
   if (process.platform !== 'darwin') {
@@ -825,8 +823,7 @@ async function exerciseNativePreviewCycles(
       completedCycles: 0,
       targetPortsClosed: true,
       targetProcessesJoined: true,
-      maxStdoutArtifactBytes: 0,
-      maxStderrArtifactBytes: 0
+      maxLogBytes: 0
     };
   }
 
@@ -835,128 +832,63 @@ async function exerciseNativePreviewCycles(
     '[agent-stress:preview] Native Preview lifecycle',
     'Exercise native Preview lifecycle cleanup.'
   );
-  const recipeDir = path.join(prepared.worktree.worktreePath, '.taskmonki');
-  await fs.mkdir(recipeDir, { recursive: true });
-  await fs.writeFile(
-    path.join(recipeDir, 'preview.yaml'),
-    `version: 1
-services:
-  web:
-    command: [node, server.mjs]
-    ports: { http: { env: PORT } }
-    ready: { type: http, port: http, path: /ready }
-routes:
-  app: { service: web, port: http, primary: true }
-`,
-    'utf8'
-  );
-  await fs.writeFile(
-    path.join(prepared.worktree.worktreePath, 'server.mjs'),
-    `import http from 'node:http';
-const server = http.createServer((request, response) => {
-  response.statusCode = 200;
-  response.end(request.url === '/ready' ? 'ready' : 'preview');
+  const source = prepared.worktree.worktreePath;
+  await fs.writeFile(path.join(source, 'preview.yaml'), JSON.stringify({
+    name: 'stress', type: 'command', cwd: '.', command: [process.execPath, 'server.mjs'], readyPath: '/ready'
+  }));
+  await fs.writeFile(path.join(source, 'server.mjs'), `import http from 'node:http';
+import fs from 'node:fs';
+const server = http.createServer((request, response) => response.end(request.url === '/ready' ? 'ready' : 'preview'));
+server.listen(Number(process.env.PORT), '127.0.0.1', () => {
+  fs.writeFileSync('listener.json', JSON.stringify({ pid: process.pid, port: server.address().port }));
+  console.log('listening');
 });
-server.listen(Number(process.env.PORT), '127.0.0.1');
 const stop = () => server.close(() => process.exit(0));
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
-`,
-    'utf8'
-  );
-  const resolution = await environment.service.resolvePreview({
-    taskId: prepared.task.id
-  });
-  assert(resolution.status === 'PLAN', 'Native Preview recipe did not resolve to a plan.');
-  if (!resolution.approval) {
-    await environment.service.approvePreviewPlan({
-      taskId: prepared.task.id,
-      planId: resolution.plan.id,
-      executionDigest: resolution.plan.executionDigest
-    });
-  }
-
+`);
   let completedCycles = 0;
   let gatewayPort: number | undefined;
-  let maxStdoutArtifactBytes = 0;
-  let maxStderrArtifactBytes = 0;
+  let maxLogBytes = 0;
   for (let index = 0; index < requestedCycles; index += 1) {
-    const generation = await environment.service.startPreview({
-      taskId: prepared.task.id
-    });
-    assert(generation.state === 'READY', `Preview cycle ${index} did not become ready.`);
-    const runningSnapshot = await environment.store.snapshot();
-    for (const route of generation.routes) {
-      gatewayPort = route.gatewayPort;
-      observedPorts.add(route.targetPort);
-      assert(
-        await isLoopbackPortListening(route.targetPort),
-        `Preview cycle ${index} target port ${route.targetPort} was not listening.`
-      );
+    const pending = await environment.service.startApplicationPreview({ taskId: prepared.task.id, source: 'file' });
+    const attemptId = pending.status?.candidate?.id;
+    assert(attemptId, 'Previewhost did not create a candidate.');
+    const deadline = Date.now() + 15_000;
+    let snapshot = pending;
+    while (!snapshot.approval && Date.now() < deadline) {
+      await delay(25);
+      snapshot = await environment.service.getApplicationPreview({ taskId: prepared.task.id });
     }
-    const resources = runningSnapshot.previewResources.filter(
-      (resource) => resource.generationId === generation.id
-    );
-    for (const resource of resources) {
-      if (resource.native?.launcher.pid) {
-        observedProcessIds.add(resource.native.launcher.pid);
-      }
-      if (resource.native?.target?.pid) {
-        observedProcessIds.add(resource.native.target.pid);
-      }
-      if (resource.targetPort) observedPorts.add(resource.targetPort);
+    assert(snapshot.approval?.attemptId === attemptId, 'Preview did not request exact execution approval.');
+    await environment.service.approveApplicationPreview({ taskId: prepared.task.id, attemptId });
+    while (snapshot.status?.active?.id !== attemptId && Date.now() < deadline) {
+      await delay(25);
+      snapshot = await environment.service.getApplicationPreview({ taskId: prepared.task.id });
     }
-
-    const stopped = await environment.service.stopPreview({
-      taskId: prepared.task.id,
-      generationId: generation.id
-    });
-    assert(stopped.state === 'STOPPED', `Preview cycle ${index} did not stop cleanly.`);
-    await waitForProcessesToExit(
-      resources.flatMap((resource) => [
-        ...(resource.native?.launcher.pid ? [resource.native.launcher.pid] : []),
-        ...(resource.native?.target?.pid ? [resource.native.target.pid] : [])
-      ]),
-      5_000
-    );
-    assert(
-      await allPortsClosed(
-        resources.flatMap((resource) =>
-          typeof resource.targetPort === 'number' ? [resource.targetPort] : []
-        )
-      ),
-      `Preview cycle ${index} left a target port listening.`
-    );
-    const stoppedSnapshot = await environment.store.snapshot();
-    for (const attempt of stoppedSnapshot.previewNodeAttempts.filter(
-      (candidate) => candidate.generationId === generation.id
-    )) {
-      maxStdoutArtifactBytes = Math.max(
-        maxStdoutArtifactBytes,
-        stoppedSnapshot.artifacts.find(
-          (artifact) => artifact.id === attempt.stdoutArtifactId
-        )?.byteCount ?? 0
-      );
-      maxStderrArtifactBytes = Math.max(
-        maxStderrArtifactBytes,
-        stoppedSnapshot.artifacts.find(
-          (artifact) => artifact.id === attempt.stderrArtifactId
-        )?.byteCount ?? 0
-      );
-    }
+    assert(snapshot.status?.active?.id === attemptId, `Preview cycle ${index} did not become ready.`);
+    const url = snapshot.status.url;
+    assert(url && await (await fetch(url)).text() === 'preview', 'Preview did not serve the application.');
+    gatewayPort = Number(new URL(url).port);
+    const listener: { pid: number; port: number } = JSON.parse(await fs.readFile(path.join(source, 'listener.json'), 'utf8'));
+    observedProcessIds.add(listener.pid);
+    observedPorts.add(listener.port);
+    assert(await isLoopbackPortListening(listener.port), 'Preview target did not listen.');
+    const logs = await environment.service.readApplicationPreviewLogs({ taskId: prepared.task.id, attemptId });
+    maxLogBytes = Math.max(maxLogBytes, Buffer.byteLength(logs.text));
+    const stopped = await environment.service.stopApplicationPreview({ taskId: prepared.task.id, expected: {
+      active: attemptId, candidate: null, latest: snapshot.status.latest?.id ?? null
+    } });
+    assert(!stopped.status?.active && !stopped.status?.cleanup?.length, `Preview cycle ${index} did not stop cleanly.`);
+    await waitForProcessesToExit([listener.pid], 5_000);
+    assert(await allPortsClosed([listener.port]), `Preview cycle ${index} left a target port listening.`);
     completedCycles += 1;
   }
-
   return {
-    attempted: true,
-    completedCycles,
+    attempted: true, completedCycles,
     targetPortsClosed: await allPortsClosed(observedPorts),
-    targetProcessesJoined: [...observedProcessIds].every(
-      (pid) => !processIsRunning(pid)
-    ),
-    maxStdoutArtifactBytes,
-    maxStderrArtifactBytes,
-    gatewayPort
+    targetProcessesJoined: [...observedProcessIds].every((pid) => !processIsRunning(pid)),
+    maxLogBytes, gatewayPort
   };
 }
 
@@ -1547,17 +1479,7 @@ async function createAgentTestEnvironment(
       discourseWorkspaceRoot: path.join(rootDir, 'discourse-workspaces'),
       defaultAgentRuntimeId: RUNTIME_ID,
       previewRoot,
-      previewLauncherEnv: {
-        PATH: process.env.PATH,
-        HOME: runtimeHome,
-        USER: 'task-monki-agent-test',
-        LOGNAME: 'task-monki-agent-test',
-        TMPDIR: temporaryDir,
-        TMP: temporaryDir,
-        TEMP: temporaryDir
-      },
       previewEnabled: options.previewEnabled === true,
-      previewReconcile: false
     });
 
     await service.init();

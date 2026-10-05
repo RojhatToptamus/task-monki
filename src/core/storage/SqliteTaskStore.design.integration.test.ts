@@ -10,7 +10,6 @@ import type {
   DesignTurn,
   GitSnapshotRecord,
   PreviewGenerationRecord,
-  PreviewPlanRecord,
   RunRecord,
   Task,
   TaskIteration,
@@ -918,19 +917,12 @@ describe('SqliteTaskStore Design ownership', () => {
         gitSnapshotId: evidence.id
       }
     });
-
-    const plan = await store.savePreviewPlan(managedPlan({
-      taskId: created.task.id,
-      iterationId: iteration.id,
-      worktreeId: worktree.id
-    }));
     const firstCandidate = await store.savePreviewGeneration(
       managedCandidate({
         taskId: created.task.id,
         repositoryId: created.repository.id,
         iterationId: iteration.id,
         worktreeId: worktree.id,
-        planId: plan.id
       })
     );
     await store.updateDesignTurnCheckpoint({
@@ -949,7 +941,6 @@ describe('SqliteTaskStore Design ownership', () => {
         repositoryId: created.repository.id,
         iterationId: iteration.id,
         worktreeId: worktree.id,
-        planId: plan.id
       })
     );
     await expect(
@@ -1028,7 +1019,6 @@ describe('SqliteTaskStore Design ownership', () => {
       routeId: 'main'
     });
     expect(settled.candidate).toMatchObject({
-      freshness: 'REVISION',
       routingState: 'ACTIVE',
       source: { designRevisionId: settled.revision!.id }
     });
@@ -1199,37 +1189,11 @@ function managedRepository(dir: string): ManagedDesignRepositoryInput {
   };
 }
 
-function managedPlan(input: {
-  taskId: string;
-  iterationId: string;
-  worktreeId: string;
-}): PreviewPlanRecord {
-  return {
-    id: randomUUID(),
-    ...input,
-    planSource: { type: 'MANAGED_DESIGN_STATIC', adapterVersion: 1 },
-    executionDigest: EXECUTION_DIGEST,
-    executionPlan: {
-      version: 1,
-      jobs: [],
-      resources: [],
-      services: [],
-      workers: [],
-      routes: [],
-      scenarios: [{ id: 'default', jobs: [], resources: [] }],
-      selectedScenarioId: 'default'
-    },
-    warnings: [],
-    createdAt: new Date().toISOString()
-  };
-}
-
 function managedCandidate(input: {
   taskId: string;
   repositoryId: string;
   iterationId: string;
   worktreeId: string;
-  planId: string;
 }): PreviewGenerationRecord {
   const now = new Date().toISOString();
   return {
@@ -1238,12 +1202,6 @@ function managedCandidate(input: {
     taskId: input.taskId,
     iterationId: input.iterationId,
     worktreeId: input.worktreeId,
-    planId: input.planId,
-    executionAuthority: {
-      type: 'MANAGED_STATIC',
-      adapterVersion: 1,
-      executionDigest: EXECUTION_DIGEST
-    },
     source: {
       type: 'EXACT_COMMIT',
       repositoryId: input.repositoryId,
@@ -1252,15 +1210,10 @@ function managedCandidate(input: {
     workspacePath: path.join('/tmp', randomUUID()),
     state: 'READY',
     routingState: 'CANDIDATE',
-    freshness: 'CURRENT',
     routes: [
       {
         id: 'main',
-        hostname: 'design.localhost',
         url: 'http://design.localhost:41000/',
-        gatewayPort: 41000,
-        targetHost: '127.0.0.1',
-        targetPort: 41001,
         state: 'ATTACHED'
       }
     ],

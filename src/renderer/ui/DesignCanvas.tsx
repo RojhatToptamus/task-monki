@@ -83,7 +83,7 @@ export function DesignCanvas({
   const [error, setError] = useState<string>();
   const [failedGenerationId, setFailedGenerationId] = useState<string>();
   const [setupOpen, setSetupOpen] = useState<boolean>();
-  const setupVisible = Boolean(setup && (setupOpen ?? setupRequired));
+  const setupVisible = Boolean(setup && (setupRequired || setupOpen));
   const presentation = designCanvasPresentation({ project, desktopAvailable, occluded: occluded || setupVisible });
   const generationId = presentation.kind === 'NATIVE' ? presentation.target.generationId : undefined;
   const routeId = presentation.kind === 'NATIVE' ? presentation.target.routeId : undefined;

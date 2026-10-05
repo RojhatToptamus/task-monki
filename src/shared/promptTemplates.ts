@@ -308,7 +308,7 @@ function buildDesignPrompt(input: {
     'Always-applicable Task Monki Design boundary:',
     `Design worktree: ${input.worktree.worktreePath}`,
     input.task.designPreviewTarget
-      ? `Existing repository application: route ${input.task.designPreviewTarget.routeId}, entry ${input.task.designPreviewTarget.entryPath}, scenario ${input.task.designPreviewTarget.scenarioId ?? 'recipe default'}. Preview configuration: .taskmonki/preview.yaml. Base: ${input.worktree.baseRef ?? input.worktree.baseSha}.`
+      ? `Existing repository application: route ${input.task.designPreviewTarget.routeId}, entry ${input.task.designPreviewTarget.entryPath}. Preview configuration: preview.yaml. Base: ${input.worktree.baseRef ?? input.worktree.baseSha}.`
       : 'Source: standalone Design.',
     'Only modify files inside this worktree.',
     'Do not commit, push, change remotes, or operate Preview.',

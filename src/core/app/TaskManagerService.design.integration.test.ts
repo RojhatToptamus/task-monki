@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesignDetailSnapshot, PreviewGenerationRecord } from '../../shared/contracts';
 import { codexCapabilities } from '../agent/codex/codexCapabilities';
@@ -14,7 +13,8 @@ import {
 } from '../../testSupport/taskMonkiScenario';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { AppEventBus } from '../runner/AppEventBus';
-import type { PreviewGraph } from '../preview/PreviewGraph';
+import type { DesignPreviewService } from '../design/DesignPreviewService';
+import { PreviewSourcePreparer } from '../preview/PreviewSourcePreparer';
 import { TaskManagerService } from './TaskManagerService';
 
 const scenarioRegistry = new TaskMonkiScenarioRegistry();
@@ -27,6 +27,59 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService Design vertical slice', () => {
+  it('restarts with historical Design captures without losing revisions or Previewhost state', async () => {
+    const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
+    let detail = await scenario.service.createDesign({
+      brief: 'Preserve the published Design.', creationToken: 'design-capture-recovery', runtimeId: 'codex'
+    });
+    await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'index.html'), '<h1>Retained Design</h1>');
+    const inspection = scenario.service as unknown as { inspectDesignForAgent(input: { runId: string; operation: { operation: 'open_candidate' } }): Promise<unknown> };
+    await inspection.inspectDesignForAgent({ runId: requireRunId(detail), operation: { operation: 'open_candidate' } });
+    await scenario.completeRun(requireRunId(detail));
+    detail = await waitForDesign(scenario, detail.task.id, item => item.turns[0]?.outcome !== undefined);
+    expect(detail.canvas.state, detail.turns[0]?.failureReason).toBe('READY');
+    const generation = requireActivePreview(detail);
+    const runtimeAttemptId = generation.runtimeAttemptId;
+    const profileRoot = scenario.persistence.paths.profileRoot;
+    const storeId = scenario.store.getStoreIdentity();
+    await scenario.service.shutdown();
+    await scenario.persistence.close();
+    const persistence = await openTestPersistence(profileRoot);
+
+    let reopened: TaskManagerService | undefined;
+    try {
+      // The original runtime captured source directly below previewRoot. Its
+      // marker format and exact-commit exporter remain the source owner.
+      const historicalSources = new PreviewSourcePreparer(scenario.previewRoot, storeId);
+      const capture = await historicalSources.prepareExactCommit({
+        repositoryPath: detail.currentWorktree!.worktreePath, taskId: detail.task.id,
+        generationId: generation.id, commitSha: generation.source.commitSha
+      });
+      const stopped = (await persistence.tasks.getPreviewGeneration(generation.id))!;
+      await persistence.tasks.savePreviewGeneration({ ...stopped, workspacePath: capture.generationRoot });
+      const neighbor = path.join(scenario.previewRoot, 'unrelated', 'source');
+      await fs.mkdir(neighbor, { recursive: true });
+      await fs.writeFile(path.join(neighbor, 'keep.txt'), 'unrelated content');
+      const runtime = createScriptedAgentRuntimeFixture(persistence);
+      reopened = new TaskManagerService(persistence.tasks, scenario.repositoryPath, new AppEventBus(), {
+        ...runtime.serviceOptions, worktreeRoot: scenario.worktreeRoot,
+        previewEnabled: true, previewRoot: scenario.previewRoot
+      });
+      await reopened.init();
+      expect((await persistence.tasks.getDesignDetail(detail.task.id)).revisions).toEqual(detail.revisions);
+      expect(await persistence.tasks.getPreviewGeneration(generation.id)).toMatchObject({
+        source: generation.source, state: 'STOPPED', routes: generation.routes.map(route => ({ ...route, state: 'DETACHED' }))
+      });
+      await expect(fs.access(capture.generationRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(path.join(neighbor, 'keep.txt'), 'utf8')).toBe('unrelated content');
+      expect(await reopened.listApplicationPreviews()).toMatchObject([{
+        taskId: detail.task.id, status: { latest: { id: runtimeAttemptId, state: 'stopped' } }
+      }]);
+    } finally {
+      try { await reopened?.shutdown(); } finally { await persistence.close(); }
+    }
+  }, 30_000);
+
   it('isolates registered source, keeps setup queued, and retains repository bytes on archive and deletion', async () => {
     const scenario = await createTaskMonkiScenario({ designMode: true, previewEnabled: true });
     const inspection = await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId });
@@ -43,7 +96,7 @@ describeMac('TaskManagerService Design vertical slice', () => {
     expect(await fs.readFile(path.join(scenario.repositoryPath, 'uncommitted.txt'), 'utf8')).toBe('primary checkout only');
     await expect(fs.access(path.join(detail.currentWorktree!.worktreePath, 'uncommitted.txt'))).rejects.toThrow();
     expect(await git(scenario.repositoryPath, ['status', '--porcelain=v1'])).toBe(primaryStatus);
-    expect(detail.repositorySetup?.preview).toMatchObject({ status: 'UNAVAILABLE', reasonCode: 'RECIPE_MISSING' });
+    expect(detail.repositorySetup?.application?.hasConfigurationFile).toBe(false);
     expect(detail.design.status).toBe('NEEDS_ATTENTION');
     expect(detail.turns[0]?.outcome).toBeUndefined();
     expect(scenario.agent.startedTurns).toHaveLength(0);
@@ -80,35 +133,34 @@ describeMac('TaskManagerService Design vertical slice', () => {
 import fs from 'node:fs';
 http.createServer((request, response) => { response.end(fs.readFileSync('page.html', 'utf8')); }).listen(Number(process.env.PORT), '127.0.0.1');`);
     await scenario.commitFile('page.html', '<h1>Existing application</h1>');
-    await scenario.commitFile('.taskmonki/preview.yaml', `version: 1
-services:
-  web:
-    command: [node, server.mjs]
-    ports: { http: { env: PORT } }
-    ready: { type: http, port: http, path: /ready }
-routes:
-  admin: { service: web, port: http }
-  app: { service: web, port: http, primary: true }
+    await scenario.commitFile('preview.yaml', `name: repository-design
+type: command
+cwd: .
+command: [node, server.mjs]
+readyPath: /ready
 `);
     const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
     let detail = await scenario.service.createDesign({ brief: 'Improve the app page.', creationToken: 'repository-design-ready', runtimeId: 'codex',
       source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
     expect(scenario.agent.startedTurns).toHaveLength(0);
     detail = await scenario.service.updateDesignPreviewTarget({ designId: detail.design.id, target: { routeId: 'app', entryPath: '/products?view=grid' } });
-    const resolved = detail.repositorySetup!.preview!;
-    if (resolved.status !== 'PLAN') throw new Error('Expected a repository Preview plan.');
-    await scenario.service.approvePreviewPlan({ taskId: detail.task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest });
     expect.soft((await scenario.service.getDesign(detail.design.id)).canvas.state).toBe('EMPTY');
     detail = await scenario.service.startDesign({ designId: detail.design.id });
     expect(scenario.agent.startedTurns).toHaveLength(1);
     expect(scenario.agent.startedTurns[0]?.prompt).toContain('/products?view=grid');
+    expect(scenario.agent.startedTurns[0]?.prompt).toContain('Preview configuration: preview.yaml.');
     detail = await scenario.service.submitDesignTurn({ designId: detail.design.id, clientMessageId: 'queued-repository-refinement', message: 'Adjust the page spacing.', referenceIds: [] });
     expect.soft(detail.design.status).toBe('STARTING');
     detail = await scenario.service.cancelDesignTurn({ designId: detail.design.id, turnId: detail.turns.at(-1)!.id });
     expect.soft(detail.design.status).toBe('STARTING');
     await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'page.html'), '<h1>Updated application</h1>');
     const updates = (scenario.service as unknown as { designUpdates: { inspectDesign(input: { runId: string; operation: { operation: 'open_candidate' } }): Promise<unknown> } }).designUpdates;
-    await updates.inspectDesign({ runId: requireRunId(detail), operation: { operation: 'open_candidate' } });
+    await scenario.transitionRun(requireRunId(detail), { status: 'RUNNING' });
+    const inspecting = updates.inspectDesign({ runId: requireRunId(detail), operation: { operation: 'open_candidate' } });
+    await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: detail.task.id })).approval?.attemptId, { timeout: 15_000 }).toBeTruthy();
+    const pending = await scenario.service.getApplicationPreview({ taskId: detail.task.id });
+    await scenario.service.approveApplicationPreview({ taskId: detail.task.id, attemptId: pending.approval!.attemptId });
+    await inspecting;
     detail = await scenario.service.getDesign(detail.design.id);
     expect.soft(detail.canvas).toMatchObject({ state: 'PREVIEWING', target: { routeId: 'app' } });
     await scenario.completeRun(requireRunId(detail));
@@ -116,8 +168,9 @@ routes:
     expect(detail.turns[0]?.failureReason).toBeUndefined();
     expect(detail.turns[0]?.outcome).toBe('READY');
     expect(detail.revisions[0]).toMatchObject({ routeId: 'app', target: { routeId: 'app', entryPath: '/products?view=grid' }, verificationGenerationId: detail.currentPreview?.id });
-    expect(detail.currentPreview?.executionAuthority.type).toBe('USER_APPROVAL');
     expect(await requestActiveRoute(requireActivePreview(detail))).toContain('Updated application');
+    const openedApplication = await scenario.service.openApplicationPreview({ taskId: detail.task.id, attemptId: detail.currentPreview!.runtimeAttemptId! });
+    expect(new URL(openedApplication.url).pathname + new URL(openedApplication.url).search).toBe('/products?view=grid');
     expect(await fs.readFile(path.join(scenario.repositoryPath, 'page.html'), 'utf8')).toBe('<h1>Existing application</h1>');
     expect(detail.actions.canRestore).toBe(false);
     await expect(scenario.service.restoreDesignRevision({ designId: detail.design.id, revisionId: detail.revisions[0]!.id, clientActionId: randomUUID() })).rejects.toThrow('Duplicate');
@@ -127,12 +180,22 @@ routes:
     expect(copy.revisions).toEqual([]);
     expect(copy.task.designPreviewTarget).toEqual(detail.revisions[0]!.target);
     expect(copy.currentWorktree!.branchName).not.toBe(detail.currentWorktree!.branchName);
-    await expect(scenario.service.stopPreview({ taskId: copy.task.id, generationId: detail.currentPreview!.id })).rejects.toThrow('not found for this task');
-    const stopped = await scenario.service.stopPreview({ taskId: detail.task.id, generationId: detail.currentPreview!.id });
-    expect(stopped.state).toBe('STOPPED');
+    await expect(scenario.service.openApplicationPreview({ taskId: copy.task.id, attemptId: detail.currentPreview!.runtimeAttemptId! })).rejects.toThrow();
+    const savedAttempt = detail.currentPreview!.runtimeAttemptId!;
+    await expect(scenario.service.saveApplicationPreviewConfiguration({ taskId: detail.task.id, attemptId: savedAttempt, changes: [] })).rejects.toThrow('Stop the Design preview');
+    const application = (await scenario.service.getApplicationPreview({ taskId: detail.task.id })).status!;
+    const stopped = await scenario.service.stopApplicationPreview({ taskId: detail.task.id, expected: { active: application.active!.id, candidate: null, latest: application.latest!.id } });
+    expect(stopped.status?.active).toBeUndefined();
     const retained = await scenario.service.getDesign(detail.task.id);
     expect(retained.revisions).toEqual(detail.revisions);
     expect(retained.canvas.state).toBe('RESTART_REQUIRED');
+    await expect(scenario.service.saveApplicationPreviewConfiguration({ taskId: detail.task.id, attemptId: savedAttempt, changes: [] })).rejects.toThrow('Saved Design sources are read only');
+    const restartedSetup = await scenario.service.startApplicationPreview({ taskId: detail.task.id, source: 'retained' });
+    const setupAttempt = restartedSetup.status!.candidate!;
+    expect(await Promise.all(setupAttempt.sources.map(source => fs.realpath(source)))).toEqual([await fs.realpath(detail.currentWorktree!.worktreePath)]);
+    expect(setupAttempt.sources).not.toContain(detail.currentPreview!.workspacePath);
+    await scenario.service.cancelApplicationPreview({ taskId: detail.task.id, attemptId: setupAttempt.id });
+
   }, 30_000);
 
   it('requires explicit acceptance of observed edits and rejects stale acceptance or changed commits', async () => {
@@ -168,18 +231,18 @@ routes:
     const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
     let detail = await scenario.service.createDesign({ brief: 'Repair setup safely.', creationToken: 'repository-repair', runtimeId: 'codex',
       source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
-    const request = { taskId: detail.task.id, generationId: 'failed-generation', resourceId: 'database', scenarioId: 'default' };
-    const internals = scenario.service as unknown as { previews: { resetData(input: unknown): Promise<void> } };
-    const reset = vi.spyOn(internals.previews, 'resetData').mockRejectedValue(new Error('reset boundary reached'));
-    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('Stop and settle');
-    await expect(scenario.service.stopPreview(request)).rejects.toThrow('Stop and settle');
+    const request = { taskId: detail.task.id, expected: { attemptId: null, resources: [] } };
+    const internals = scenario.service as unknown as { applications: { owner(): import('previewhost').PreviewRuntime } };
+    const reset = vi.spyOn(internals.applications.owner(), 'deleteData').mockRejectedValue(new Error('reset boundary reached'));
+    await expect(scenario.service.deleteApplicationPreviewData(request)).rejects.toThrow('Stop and settle');
+    await expect(scenario.service.stopApplicationPreview({ taskId: detail.task.id, expected: { active: null, candidate: null, latest: null } })).rejects.toThrow('Stop and settle');
     await scenario.service.cancelDesignTurn({ designId: detail.task.id, turnId: detail.turns[0]!.id });
     await fs.writeFile(path.join(detail.currentWorktree!.worktreePath, 'external.txt'), 'keep these edits');
-    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('changed outside');
+    await expect(scenario.service.deleteApplicationPreviewData(request)).rejects.toThrow('changed outside');
     expect(reset).not.toHaveBeenCalled();
     detail = await scenario.service.getDesign(detail.task.id);
     await scenario.service.startDesign({ designId: detail.task.id, acceptWorkspaceSnapshotId: detail.repositorySetup!.workspaceSnapshotId });
-    await expect(scenario.service.resetPreviewData(request)).rejects.toThrow('reset boundary reached');
+    await expect(scenario.service.deleteApplicationPreviewData(request)).rejects.toThrow('reset boundary reached');
     expect(reset).toHaveBeenCalledOnce();
     expect((await scenario.service.getDesign(detail.task.id)).revisions).toEqual([]);
   }, 30_000);
@@ -237,7 +300,7 @@ routes:
     }
   });
 
-  it('upgrades and recovers a Design interrupted after branch publication but before index repair', async () => {
+  it('recovers a Design interrupted after branch publication but before index repair', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-design-upgrade-recovery',
       previewEnabled: true,
@@ -287,19 +350,6 @@ routes:
 
     const paths = scenario.persistence.paths;
     await scenario.persistence.close();
-    // Migration 3 changes only settings JSON; the interrupted task/Git records
-    // already have the schema 2 shape. Recreate that settings/version boundary.
-    const oldDatabase = new DatabaseSync(paths.databasePath);
-    try {
-      oldDatabase.exec(`
-        UPDATE app_settings
-        SET settings_json = json_remove(json_set(settings_json, '$.schemaVersion', 12), '$.agentProfiles');
-        DROP TABLE task_instructions; PRAGMA user_version = 2;
-      `);
-    } finally {
-      oldDatabase.close();
-    }
-
     const persistence = await openTestPersistence(paths.profileRoot);
     const runtime = createScriptedAgentRuntimeFixture(persistence);
     const restarted = new TaskManagerService(persistence.tasks, scenario.repositoryPath, new AppEventBus(), {
@@ -307,8 +357,6 @@ routes:
       worktreeRoot: scenario.worktreeRoot,
       previewEnabled: true,
       previewRoot: scenario.previewRoot,
-      previewLauncherPath: path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
-      managedDesignStaticServerPath: path.join(process.cwd(), 'src/core/preview/runtime/managed-design-static-server.mjs'),
       designRepositoryRoot: paths.designRepositoryRoot,
       designWorktreeRoot: paths.designWorktreeRoot,
       designDraftStore: persistence.designDrafts,
@@ -326,15 +374,6 @@ routes:
       }
     });
     try {
-      const backups = await fs.readdir(paths.backupsRoot);
-      expect(backups).toHaveLength(1);
-      const backup = await persistence.backups.verifyBackup(backups[0]!);
-      expect(backup.manifest).toMatchObject({ purpose: 'PRE_UPGRADE', database: { schemaVersion: 2 } });
-      expect(backup.manifest.designRepositories[0]?.refs).toContainEqual({
-        name: `refs/heads/${worktree.branchName}`,
-        objectId: candidate.candidateCommitSha
-      });
-      expect((await persistence.settings.get()).schemaVersion).toBe(13);
       expect(await git(worktree.worktreePath, ['status', '--porcelain=v1'])).not.toBe('');
 
       await restarted.init();
@@ -571,13 +610,7 @@ routes:
     expect(await requestResolvedRoute(firstProgress)).toContain('Ready design');
     expect(await requestResolvedRoute(firstProgress, '/styles.css')).toContain('royalblue');
     expect(await requestActiveRoute(ready, '/styles.css')).toContain('color: navy');
-    await expect(
-      scenario.service.openPreview({
-        taskId: detail.design.id,
-        generationId: detail.canvas.target!.generationId,
-        routeId: detail.canvas.target!.routeId
-      })
-    ).rejects.toThrow('not available for a Design');
+
 
     await fs.writeFile(
       path.join(worktreePath, 'styles.css'),
@@ -598,7 +631,7 @@ routes:
     expect(await requestResolvedRoute(finalProgress, '/styles.css')).toContain(
       'cornflowerblue'
     );
-    await expect(requestResolvedRoute(firstProgress)).rejects.toThrow('503');
+    await expect(requestResolvedRoute(firstProgress)).rejects.toThrow();
     expect(await requestActiveRoute(ready, '/styles.css')).toContain('color: navy');
 
     await scenario.completeRun(requireRunId(detail), 'The CSS refinement is ready.');
@@ -610,7 +643,7 @@ routes:
     expect(await requestActiveRoute(requireActivePreview(detail), '/styles.css')).toContain(
       'cornflowerblue'
     );
-    await expect(requestResolvedRoute(finalProgress)).rejects.toThrow('503');
+    await expect(requestResolvedRoute(finalProgress)).rejects.toThrow();
 
     const cssReady = requireActivePreview(detail);
     detail = await scenario.service.submitDesignTurn({
@@ -722,12 +755,11 @@ routes:
     expect(scenario.agent.startedTurns).toHaveLength(startedBeforeStop + 1);
     expect(detail.canvas.target?.generationId).toBe(preservedReady.id);
 
-    const graph = (scenario.service as unknown as { previews: { graph: PreviewGraph } }).previews.graph;
+    const previews = (scenario.service as unknown as { designPreviews: DesignPreviewService }).designPreviews;
     const startupEntered = deferred<void>();
     let rejectStartup: ((error: Error) => void) | undefined;
-    const startup = vi.spyOn(graph, 'start').mockImplementationOnce(async (input) => {
-      if (!input.signal) throw new Error('Preview startup has no cancellation signal.');
-      const signal = input.signal;
+    const startup = vi.spyOn(previews, 'executeManagedDesignCandidate').mockImplementationOnce(async (prepared) => {
+      const signal = prepared.controller.signal;
       startupEntered.resolve();
       return new Promise<never>((_resolve, reject) => {
         rejectStartup = reject;
@@ -1135,6 +1167,10 @@ routes:
     );
     const firstReadyRevisionId = detail.revisions[0]!.id;
     expect(await requestActiveRoute(requireActivePreview(detail))).toContain('First design');
+    const listed = (await scenario.service.listApplicationPreviews()).find(instance => instance.taskId === detail.task.id)!;
+    expect(listed.kind).toBe('design');
+    const openedApplication = await scenario.service.openApplicationPreview({ taskId: listed.taskId, worktreeId: listed.worktreeId, attemptId: listed.status.active!.id });
+    expect(await (await fetch(openedApplication.url)).text()).toContain('First design');
 
     detail = await scenario.service.submitDesignTurn({
       designId: detail.design.id,
@@ -1778,7 +1814,7 @@ routes:
     const restartEntered = deferred<void>();
     const releaseRestart = deferred<void>();
     const internals = scenario.service as unknown as {
-      previews: {
+      designPreviews: {
         restartManagedDesign(): Promise<PreviewGenerationRecord>;
         stopTask(taskId: string): Promise<void>;
       };
@@ -1788,7 +1824,7 @@ routes:
       taskActionLocks: Map<string, unknown>;
     };
     const restartPreview = vi
-      .spyOn(internals.previews, 'restartManagedDesign')
+      .spyOn(internals.designPreviews, 'restartManagedDesign')
       .mockImplementation(async () => {
         restartEntered.resolve();
         await releaseRestart.promise;
@@ -1823,7 +1859,7 @@ routes:
       }
     );
     await coordinatorEntered.promise;
-    const stopPreview = vi.spyOn(internals.previews, 'stopTask');
+    const stopPreview = vi.spyOn(internals.designPreviews, 'stopTask');
     const deletion = scenario.service.deleteTask({
       taskId: detail.design.id,
       removeWorktree: true
@@ -1886,15 +1922,17 @@ function requestActiveRoute(
 ): Promise<string> {
   const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
   if (!route) throw new Error('Active Preview route is missing.');
-  return requestPreviewRoute(route.gatewayPort, route.hostname, requestPath);
+  const url = new URL(route.url);
+  return requestPreviewRoute(Number(url.port), url.host, requestPath);
 }
 
-function requestResolvedRoute(route: { url: string }, requestPath?: string): Promise<string> {
+function requestResolvedRoute(route: { url: string; networkLease?: { proxyUrl: string } }, requestPath?: string): Promise<string> {
+  if (!route.networkLease) throw new Error('Design canvas must provide its network lease.');
   const parsed = new URL(route.url);
   return requestPreviewRoute(
-    Number(parsed.port),
+    Number(new URL(route.networkLease.proxyUrl).port),
     parsed.host,
-    requestPath ?? `${parsed.pathname}${parsed.search}`
+    new URL(requestPath ?? `${parsed.pathname}${parsed.search}`, parsed).href
   );
 }
 

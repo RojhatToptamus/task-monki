@@ -1458,6 +1458,75 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
       json(COALESCE((SELECT json_group_array(id) FROM task_attachments WHERE task_id = tasks.id), '[]')))
       WHERE json_extract(payload_json, '$.kind') = 'NORMAL'
         AND json_type(payload_json, '$.initialAttachmentIds') IS NULL;`
+  },
+  {
+    version: 10,
+    name: 'previewhost-runtime-ownership',
+    // The automatic pre-upgrade backup retains old runtime metadata. Never forget a live owner.
+    sql: `
+CREATE TEMP TABLE preview_runtime_upgrade_guard (
+  stopped INTEGER CONSTRAINT stop_previous_preview_runtime_before_upgrading CHECK (stopped = 1)
+);
+INSERT INTO preview_runtime_upgrade_guard SELECT CASE WHEN
+  EXISTS (SELECT 1 FROM preview_native_resources WHERE state NOT IN ('STOPPED', 'EXITED', 'FAILED')) OR
+  EXISTS (SELECT 1 FROM preview_managed_resources WHERE state != 'STOPPED') OR
+  EXISTS (SELECT 1 FROM preview_managed_environments WHERE state != 'STOPPED') OR
+  EXISTS (SELECT 1 FROM preview_compose_projects WHERE state != 'STOPPED')
+THEN 0 ELSE 1 END;
+DROP TABLE preview_runtime_upgrade_guard;
+
+UPDATE app_settings
+SET settings_json = json_set(json_remove(settings_json, '$.previewGateway'), '$.schemaVersion', 14),
+    record_revision = record_revision + 1
+WHERE json_extract(settings_json, '$.schemaVersion') = 13;
+
+DELETE FROM task_domain_events WHERE type IN ('PREVIEW_PLAN_RESOLVED', 'PREVIEW_PLAN_APPROVED', 'PREVIEW_NODE_UPDATED', 'PREVIEW_RESOURCE_UPDATED', 'PREVIEW_RECONCILED');
+ALTER TABLE task_domain_events DROP COLUMN preview_plan_id;
+DELETE FROM artifacts WHERE kind IN ('preview-source-manifest', 'preview-stdout', 'preview-stderr');
+
+CREATE TABLE replacement_preview_generations (
+  id TEXT PRIMARY KEY,
+  preview_key TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  iteration_id TEXT NOT NULL REFERENCES task_iterations(id) ON DELETE CASCADE,
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  routing_state TEXT NOT NULL,
+  replaces_generation_id TEXT,
+  record_revision INTEGER NOT NULL DEFAULT 0 CHECK (record_revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ready_at TEXT,
+  cutover_at TEXT,
+  stopped_at TEXT,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+) STRICT;
+INSERT INTO replacement_preview_generations
+SELECT id, preview_key, task_id, iteration_id, worktree_id, state, routing_state,
+  replaces_generation_id, record_revision, created_at, updated_at, ready_at, cutover_at, stopped_at,
+  json_remove(payload_json, '$.planId', '$.executionAuthority', '$.adapter', '$.composeChange',
+    '$.sourceManifestArtifactId', '$.sourceManifestDigest', '$.freshness', '$.attachmentReadiness')
+FROM preview_generations
+WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'DESIGN')
+  AND json_extract(payload_json, '$.source.type') = 'EXACT_COMMIT';
+DROP TABLE preview_private_references;
+DROP TABLE preview_private_current;
+DROP TABLE preview_private_revisions;
+DROP TABLE preview_generation_attachments;
+DROP TABLE preview_node_attempts;
+DROP TABLE preview_native_resources;
+DROP TABLE preview_compose_projects;
+DROP TABLE preview_managed_resources;
+DROP TABLE preview_managed_environments;
+DROP TABLE preview_local_bindings;
+DROP TABLE preview_approvals;
+DROP TABLE preview_generations;
+DROP TABLE preview_plans;
+ALTER TABLE replacement_preview_generations RENAME TO preview_generations;
+CREATE INDEX preview_generations_task_state_idx ON preview_generations(task_id, state, updated_at DESC, id);
+CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_key, routing_state, updated_at DESC, id);
+`
+
   }
 ] as const;
 

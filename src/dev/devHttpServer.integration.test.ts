@@ -484,17 +484,17 @@ describe('development HTTP server', () => {
   });
 
   it('keeps current preview endpoints behind the hardened boundary', async () => {
-    const startPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
-    const running = await startServer({ startPreview });
+    const startApplicationPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
+    const running = await startServer({ startApplicationPreview });
 
-    const response = await fetch(`${running.baseUrl}/api/preview/start`, {
+    const response = await fetch(`${running.baseUrl}/api/application/startApplicationPreview`, {
       method: 'POST',
       headers: { ...running.headers, 'content-type': 'application/json' },
       body: JSON.stringify({ taskId: 'task-1' })
     });
 
     expect(response.status).toBe(200);
-    expect(startPreview).toHaveBeenCalledWith({ taskId: 'task-1' });
+    expect(startApplicationPreview).toHaveBeenCalledWith({ taskId: 'task-1' });
     await expect(response.json()).resolves.toMatchObject({ id: 'generation-1' });
   });
 

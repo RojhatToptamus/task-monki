@@ -1,3 +1,4 @@
+import type { ApplicationPreviewApi } from './applicationPreview';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -21,35 +22,14 @@ import type {
 import type {
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
-  ApprovePreviewPlanRequest,
   DiscardPreviewRecipeDraftRequest,
-  DeletePreviewLocalAttachmentBindingRequest,
   GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
-  PreviewApprovalRecord,
-  PreviewComposeProjectRecord,
   PreviewGenerationRecord,
-  PreviewGenerationAttachmentRecord,
-  PreviewLocalAttachmentBindingRecord,
-  PreviewManagedEnvironmentRecord,
-  PreviewManagedResourceRecord,
-  PreviewNodeAttemptRecord,
-  PreviewPlanRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
-  PreviewResourceRecord,
-  PreviewTaskRouteOption,
-  ReadPreviewLogRequest,
-  ReadPreviewLogResult,
-  ResetPreviewDataRequest,
-  RetryPreviewSetupRequest,
-  ResolvePreviewRequest,
-  ResolvePreviewResult,
-  SetPreviewLocalAttachmentBindingRequest,
-  StartPreviewRequest,
-  StopPreviewRequest,
   ValidatePreviewRecipeDraftRequest
 } from './preview';
 import type {
@@ -86,12 +66,8 @@ export interface DesignRepositoryInspection {
   bases: WorktreeBaseOption[];
 }
 export interface DesignRepositorySetup {
-  state?: Pick<TaskDetailSnapshot,
-    'previewPlans' | 'previewApprovals' | 'previewGenerations' | 'previewGenerationAttachments' |
-    'previewManagedResources' | 'previewNodeAttempts' | 'previewComposeProjects' |
-    'previewLocalBindings' | 'previewResources' | 'previewTaskRoutes'>;
-
-  preview?: import('./preview').ResolvePreviewResult;
+  application?: import('./applicationPreview').ApplicationPreviewSnapshot;
+  description?: import('previewhost').PreviewDescription;
   blocker?: string;
   workspaceChanged?: boolean;
   workspaceSnapshotId?: string;
@@ -404,13 +380,8 @@ export const DOMAIN_EVENT_TYPES = [
   'ARTIFACT_CREATED',
   'PROJECTION_UPDATED',
   'REPOSITORY_PREFLIGHT_COMPLETED',
-  'PREVIEW_PLAN_RESOLVED',
-  'PREVIEW_PLAN_APPROVED',
   'PREVIEW_GENERATION_CREATED',
   'PREVIEW_GENERATION_UPDATED',
-  'PREVIEW_NODE_UPDATED',
-  'PREVIEW_RESOURCE_UPDATED',
-  'PREVIEW_RECONCILED'
 ] as const;
 
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
@@ -424,9 +395,6 @@ export const ARTIFACT_KINDS = [
   'diff',
   'git-snapshot',
   'pr-body',
-  'preview-source-manifest',
-  'preview-stdout',
-  'preview-stderr'
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -801,7 +769,6 @@ export interface DomainEvent {
   agentItemId?: string;
   interactionRequestId?: string;
   worktreeId?: string;
-  previewPlanId?: string;
   previewGenerationId?: string;
   source:
     | 'ui'
@@ -930,16 +897,7 @@ export interface TaskSnapshot {
   agentSettingsObservations: AgentSettingsObservationRecord[];
   agentSubagentObservations: AgentSubagentObservationRecord[];
   interactionRequests: InteractionRequestRecord[];
-  previewPlans: PreviewPlanRecord[];
-  previewApprovals: PreviewApprovalRecord[];
-  previewComposeProjects: PreviewComposeProjectRecord[];
   previewGenerations: PreviewGenerationRecord[];
-  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
-  previewManagedResources: PreviewManagedResourceRecord[];
-  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
-  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
-  previewNodeAttempts: PreviewNodeAttemptRecord[];
-  previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
@@ -1056,20 +1014,10 @@ export interface TaskDetailSnapshot {
   agentSettingsObservations: AgentSettingsObservationRecord[];
   agentSubagentObservations: AgentSubagentObservationRecord[];
   interactionRequests: InteractionRequestRecord[];
-  previewPlans: PreviewPlanRecord[];
-  previewApprovals: PreviewApprovalRecord[];
-  previewComposeProjects: PreviewComposeProjectRecord[];
   previewGenerations: PreviewGenerationRecord[];
-  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
-  previewManagedResources: PreviewManagedResourceRecord[];
-  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
-  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
-  previewNodeAttempts: PreviewNodeAttemptRecord[];
-  previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
-  previewTaskRoutes: PreviewTaskRouteOption[];
   textExcerpts: ClientTextExcerpt[];
   /** Process-owned post-run captures that have not settled yet. Never persisted. */
   postRunEvidencePendingRunIds?: string[];
@@ -1357,7 +1305,6 @@ export interface UpdateAppSettingsRequest {
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;
   selectedRepositoryId?: string | null;
-  previewGateway?: Partial<import('./agent').PreviewGatewaySettings>;
 }
 
 export type ExternalToolId = 'git' | 'codex' | 'gh';
@@ -1534,7 +1481,7 @@ export type LegacyTaskAppUpdateEvent = Omit<AppUpdateEvent, 'scope' | 'taskId'> 
   taskId: string;
 };
 
-export interface TaskManagerApi {
+export interface TaskManagerApi extends ApplicationPreviewApi {
   chooseRepositoryFolder(): Promise<string | undefined>;
   addRepository(path: string): Promise<Repository>;
   getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact>;
@@ -1710,7 +1657,6 @@ export interface TaskManagerApi {
   publishBranch(input: PublishBranchRequest): Promise<BranchPublicationRecord>;
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
-  resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult>;
   getPreviewRecipeGeneration(
     input: GetPreviewRecipeGenerationRequest
   ): Promise<PreviewRecipeGenerationSnapshot>;
@@ -1726,19 +1672,7 @@ export interface TaskManagerApi {
   discardPreviewRecipeDraft(
     input: DiscardPreviewRecipeDraftRequest
   ): Promise<PreviewRecipeGenerationSnapshot>;
-  approvePreviewPlan(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord>;
-  startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
-  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;
-  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
-  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
-  resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord>;
-  retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord>;
-  setPreviewLocalAttachmentBinding(
-    input: SetPreviewLocalAttachmentBindingRequest
-  ): Promise<PreviewLocalAttachmentBindingRecord>;
-  deletePreviewLocalAttachmentBinding(
-    input: DeletePreviewLocalAttachmentBindingRequest
-  ): Promise<void>;
+  openDesignPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

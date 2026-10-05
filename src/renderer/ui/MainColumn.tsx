@@ -43,6 +43,7 @@ import {
 } from '../model/taskView';
 
 interface MainColumnProps extends AgentProfilesSettingsActions {
+  previewSecretContext?: { title: string; references: string[]; onReturn(): void };
   view: NavView;
   board?: Board;
   tasks: TaskCardSource[];
@@ -136,6 +137,7 @@ const SETUP_VIEW_TITLES: Record<
 };
 
 export function MainColumn({
+  previewSecretContext,
   view,
   board,
   tasks,
@@ -260,6 +262,7 @@ export function MainColumn({
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
         <SettingsView
+          previewSecretContext={previewSecretContext}
           onSaveAgentProfile={onSaveAgentProfile}
           onDeleteAgentProfile={onDeleteAgentProfile}
           theme={theme}
