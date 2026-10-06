@@ -365,6 +365,9 @@ export function ApplicationPreviewPanel({
         aria-labelledby="preview-tab-Configuration"
         hidden={section !== 'Configuration'}
       >
+        <div hidden={!initialConfiguration || snapshot.hasConfigurationFile}>
+          {setup}
+        </div>
         {initialConfiguration ? (
           snapshot.hasConfigurationFile ? (
             <div className="tm-application-preview__empty">
@@ -378,9 +381,7 @@ export function ApplicationPreviewPanel({
                 Review and start
               </button>
             </div>
-          ) : (
-            setup
-          )
+          ) : null
         ) : (
           <ApplicationConfiguration
             designAttempts={snapshot?.designAttempts}

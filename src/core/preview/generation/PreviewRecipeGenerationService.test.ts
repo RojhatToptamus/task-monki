@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { loadPreviewSpec } from 'previewhost';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   PreviewRecipeGenerationRunError,
@@ -16,6 +17,81 @@ afterEach(async () => {
 });
 
 describe('PreviewRecipeGenerationService', () => {
+  it.each([
+    { name: 'app', type: 'command', cwd: '.', command: ['node', 'server.mjs'], env: { APP_LABEL: { fromEnv: 'APP_LABEL' } } },
+    { name: 'app', type: 'environment', primary: 'web', services: {
+      web: { type: 'command', cwd: '.', command: ['node', 'server.mjs'], ready: { type: 'command', command: ['node', 'check.mjs'], env: { APP_LABEL: { fromEnv: 'APP_LABEL' } } } }
+    } },
+    { name: 'app', type: 'environment', primary: 'web', services: {
+      web: { type: 'static', directory: '.' }, database: { type: 'external-postgres', url: { fromEnv: 'DATABASE_URL' } }
+    } }
+  ])('rejects owner inputs that the embedded runtime cannot supply', (spec) => {
+    expect(validatePreviewRecipeDraft(JSON.stringify(spec))).toMatchObject({ status: 'INVALID', issues: [{ message: expect.stringContaining('fromEnv') }] });
+  });
+
+  it('uses clarification with fresh evidence and rejects secret-bearing answers before provider delivery', async () => {
+    const root = await previewWorktree();
+    let calls = 0;
+    const question = 'Which application should run?';
+    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
+      calls += 1;
+      if (calls === 1) {
+        return { result: Promise.resolve(JSON.stringify({
+          ...JSON.parse(agentDraft()), status: 'insufficient-evidence', yaml: null,
+          unresolvedDecisions: [question]
+        })), cancel: async () => {} };
+      }
+      if (calls === 2) throw new PreviewRecipeGenerationRunError('UNAVAILABLE', 'Synthetic provider failure.');
+      expect(instruction).toContain(JSON.stringify({ questions: [question], answer: 'Use the web application.' }));
+      expect(await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')).toContain('Updated setup details.');
+      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+    });
+    expect((await service.generate({ taskId: 'task', worktreePath: root })).status).toBe('NEEDS_INPUT');
+    for (const clarification of ['DATABASE_PASSWORD=synthetic-only', '{"DATABASE_PASSWORD":"synthetic-only"}', '"API_SECRET": "synthetic-only"', '{"APP_LABEL":"web","DATABASE_PASSWORD":"synthetic-only"}']) {
+      await expect(service.generate({ taskId: 'task', worktreePath: root, clarification })).rejects.toThrow('without secret values');
+    }
+    expect(calls).toBe(1);
+    expect(service.get('task').status).toBe('NEEDS_INPUT');
+    await fs.writeFile(path.join(root, 'README.md'), 'Updated setup details.');
+    const failed = await service.generate({ taskId: 'task', worktreePath: root, clarification: 'Use the web application.' });
+    expect(failed.status).toBe('FAILED');
+    expect(failed.report?.unresolvedDecisions).toEqual([question]);
+    expect((await service.generate({ taskId: 'task', worktreePath: root, clarification: 'Use the web application.' })).status).toBe('READY');
+    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it.each([
+    'name: !!str application\ntype: static\ndirectory: .\n',
+    '%YAML 1.1\n---\nname: application\ntype: static\ndirectory: .\n'
+  ])('rejects YAML that the runtime loader cannot start', async (yaml) => {
+    const root = await previewWorktree();
+    const file = path.join(root, 'preview.yaml');
+    await fs.writeFile(file, yaml);
+    await expect(loadPreviewSpec(file)).rejects.toThrow();
+    expect(validatePreviewRecipeDraft(yaml)).toMatchObject({
+      status: 'INVALID', issues: [{ code: 'INVALID_RECIPE' }]
+    });
+  });
+
+  it('rejects a literal secret in a liveness probe without an explicit readiness probe', () => {
+    expect(validatePreviewRecipeDraft(`name: application
+type: environment
+primary: web
+services:
+  web:
+    type: command
+    cwd: .
+    command: [node, server.mjs]
+    liveness:
+      intervalMs: 1000
+      failureThreshold: 3
+      probe:
+        type: command
+        command: [node, check.mjs]
+        env: { API_SECRET: x }
+`)).toMatchObject({ status: 'INVALID', issues: [{ code: 'SECRET_LITERAL' }] });
+  });
+
   it('keeps a valid evidence-backed draft transient until exact acceptance', async () => {
     const root = await previewWorktree();
     let evidenceBundle = '';
@@ -618,7 +694,7 @@ services:
       status: 'INVALID',
       issues: [{
         code: 'SECRET_LITERAL',
-        message: 'Secret-like environment keys must use a private input reference, never a literal value.'
+        message: 'Secret-like environment keys must use a secret reference, never a literal value.'
       }]
     });
 

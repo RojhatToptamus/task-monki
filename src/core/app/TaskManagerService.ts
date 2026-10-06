@@ -3959,6 +3959,7 @@ export class TaskManagerService {
       return this.previewRecipeGenerator.generate({
         taskId: input.taskId,
         worktreePath: context.worktree.worktreePath,
+        clarification: input.clarification,
         onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
       });
     });

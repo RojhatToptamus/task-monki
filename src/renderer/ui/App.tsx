@@ -2177,15 +2177,10 @@ export function App() {
     return state;
   };
 
-  const generatePreviewRecipe = async (taskId: string) => {
-    try {
-      const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId }));
-      setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
-      return state;
-    } catch (caught) {
-      reportActionError(caught, 'Could not generate a Preview recipe.');
-      throw caught;
-    }
+  const generatePreviewRecipe = async (taskId: string, clarification?: string) => {
+    const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId, clarification }));
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
   };
 
   const validatePreviewRecipeDraft = (
@@ -2200,19 +2195,14 @@ export function App() {
     draftId: string,
     yaml: string
   ) => {
-    try {
-      const result = await withAppAction(() => taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }));
-      setPreviewRecipeGenerations((current) => ({
-        ...current,
-        [taskId]: { taskId, status: 'EMPTY' }
-      }));
-      await refresh();
-      notify('Preview configuration saved. Start to review and approve it.', 'success');
-      return result;
-    } catch (caught) {
-      reportActionError(caught, 'Could not accept the Preview recipe.');
-      throw caught;
-    }
+    const result = await withAppAction(() => taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }));
+    setPreviewRecipeGenerations((current) => ({
+      ...current,
+      [taskId]: { taskId, status: 'EMPTY' }
+    }));
+    await refresh();
+    notify('Preview configuration saved. Start to review and approve it.', 'success');
+    return result;
   };
 
   const discardPreviewRecipeDraft = async (taskId: string) => {

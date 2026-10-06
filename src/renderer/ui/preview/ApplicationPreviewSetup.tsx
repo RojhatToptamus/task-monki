@@ -16,7 +16,7 @@ export function ApplicationPreviewSetup(props: {
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onModalOpenChange(open: boolean): void;
   get(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  generate(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  generate(taskId: string, clarification?: string): Promise<PreviewRecipeGenerationSnapshot>;
   validate(
     taskId: string,
     draftId: string,
@@ -41,13 +41,9 @@ export function ApplicationPreviewSetup(props: {
   const modalRoot = useRef<HTMLElement | null>(
     typeof document === 'undefined' ? null : document.body
   );
-  async function generate() {
+  async function generate(clarification?: string) {
     setError(undefined);
-    try {
-      await props.generate(props.taskId);
-    } catch (cause) {
-      setError(message(cause));
-    }
+    await props.generate(props.taskId, clarification);
   }
   async function openGenerator(button: HTMLElement) {
     returnFocus.current = button;
@@ -57,6 +53,7 @@ export function ApplicationPreviewSetup(props: {
       const state = await props.get(props.taskId);
       if (state.status === 'EMPTY') await generate();
     } catch (cause) {
+      setOpen(false);
       setError(message(cause));
     }
   }
@@ -212,12 +209,8 @@ export function ApplicationPreviewSetup(props: {
           onAccept={props.accept}
           onDiscard={async () => {
             setError(undefined);
-            try {
-              await props.discard(props.taskId);
-              setOpen(false);
-            } catch (cause) {
-              setError(message(cause));
-            }
+            await props.discard(props.taskId);
+            setOpen(false);
           }}
           fallbackReturnFocusRef={props.fallbackReturnFocusRef}
           modalRootRef={modalRoot}

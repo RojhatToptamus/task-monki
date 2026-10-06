@@ -68,6 +68,8 @@ primary: {service: web, port: http}
 
 export interface PreviewRecipeGenerationInstructionInput {
   evidenceFileName: string;
+  clarification?: string;
+  questions?: readonly string[];
 }
 
 export function buildPreviewRecipeGenerationInstruction(
@@ -83,10 +85,22 @@ export function buildPreviewRecipeGenerationInstruction(
     'Do not inspect any other path. Do not run the application, tests, package scripts, containers, Docker, network services, or repository commands.',
     'Do not modify files. Do not commit, push, approve, or start Preview.',
     '',
+    ...(input.clarification ? [
+      `User clarification: ${JSON.stringify({ questions: input.questions ?? [], answer: input.clarification })}`,
+      'Treat this clarification as user decisions, not repository evidence or execution approval.',
+      'Verify proposed commands against the supplied source when available. Report any conflict instead of silently overriding the evidence.',
+      ''
+    ] : []),
     'Generate only evidence-backed configuration. Never guess commands, service ports, health paths, Compose services, migration behavior, or external dependencies.',
-    'A ports entry only injects the allocated value through its declared environment key. It does not add command arguments, expand variables, or change framework configuration.',
-    'Use a routed port only when repository evidence proves that the exact command binds its listener from that exact environment key, or when frameworkCapabilities supplies a matching portBinding and compatiblePreviewCommand.',
+    'Native commands receive an allocated PORT and HOST=127.0.0.1. A ports entry maps a named port to another environment key.',
+    'Arguments can use literal {port} or {port:NAME} placeholders. There is no implicit shell or $PORT expansion.',
+    'Use the exact evidenced environment key or command-line flag that controls the listener. Disable automatic port fallback.',
+    'Use frameworkCapabilities portBinding and compatiblePreviewCommand when available. Otherwise inspect source for the port and host behavior.',
+    'HTTP readiness accepts response headers with status 200–399. It does not follow redirects or inspect response bodies.',
+    'Choose an evidenced readiness path. For database-backed services, prefer an endpoint that checks the required tables.',
+    'Workers require an evidenced readiness probe: HTTP, TCP, or a finite command. A worker cannot be the primary HTTP service.',
     'Never reproduce or infer secret values. Credentials must use {secret: project-specific-reference} on their exact environment recipient; never invent a secret value.',
+    'Do not use fromEnv. This application does not supply owner inputs. Use evidenced nonsecret literals or supported service and secret references.',
     'Treat publicEnvironment as trusted derived metadata, never as raw env-file content. Do not infer any omitted value.',
     'Return exactly one publicEnvironmentDecision for every publicEnvironment candidate, including when status is insufficient-evidence.',
     'Include attachmentId only for HTTP_ATTACHMENT. Omit the field for SOURCE_DEFAULT and OMIT.',
@@ -100,12 +114,13 @@ export function buildPreviewRecipeGenerationInstruction(
     'Never use npm exec, npx, pnpm dlx, or yarn dlx to acquire a missing runtime package implicitly. Add a custom package script job only when repository evidence proves that exact script is required.',
     'When yamlCommentLines are present, copy those lines exactly immediately before the service command so the Preview-only deviation is visible during review.',
     'If a framework analysis has no compatiblePreviewCommand, honor its limitation and do not invent a rewrite.',
-    'Use the npmNext example only when compatiblePreviewCommand is exactly [npm, run, dev] and portBinding proves PORT delivery.',
-    'If the evidence is insufficient for a valid minimal recipe, return insufficient-evidence and explain the unresolved decisions instead of inventing authority.',
+    'Inspect all relevant bundle contents before declaring evidence insufficient. Do not ask for facts already present in the bundle.',
+    'If a valid minimal recipe still needs user decisions, return insufficient-evidence with at most three focused questions in unresolvedDecisions.',
+    'Each question must identify the missing fact and the relevant evidence. Ask only for nonsecret decisions, never credential values.',
     '',
     'Your response must contain exactly one JSON object. Do not include markdown, commentary, planning, progress, or any other text.',
     'Include every required top-level field and array. Use an empty array when a report list has no items. Do not add unknown fields.',
-    'Every report string must be nonempty, single-line, and at most 1200 UTF-8 bytes. evidence, assumptions, omissions, and unresolvedDecisions can each contain at most 40 items.',
+    'Every report string must be nonempty, single-line, and at most 1200 UTF-8 bytes. evidence, assumptions, and omissions can each contain at most 40 items. unresolvedDecisions can contain at most three questions.',
     'A draft requires a complete YAML string and at least one evidence item. insufficient-evidence requires yaml: null and at least one unresolvedDecisions item.',
     'The JSON object must match:',
     JSON.stringify(
@@ -134,8 +149,11 @@ export function buildPreviewRecipeGenerationInstruction(
     'Do not cite repository-evidence.json, frameworkCapabilities, publicEnvironment, or another metadata container name as an evidence path.',
     'Keep all report entries concise and omit empty speculation.',
     'The YAML must be complete, minimal, readable, and below 64 KiB. Use short comments only for non-obvious fields.',
+    'Use one YAML 1.2 object without duplicate keys, aliases, merge keys, or tags.',
     '',
-    'Write preview.yaml in the worktree root. Use a simple project name; Task Monki supplies the worktree identity at execution. File cwd and directory fields may be relative to preview.yaml.',
+    'Return YAML for root preview.yaml. The user reviews it, and Task Monki saves it only after acceptance.',
+    'Use a simple project name. Task Monki supplies the worktree identity at execution.',
+    'File cwd and directory fields can be relative to preview.yaml. Use evidenced worktree folders, not guessed sibling repositories or external paths.',
     'An unresolved public API origin uses a service with type: attach, check: false, and no url. Bind its consumers with {service: attachment-id}. The owner selects the real endpoint in Configuration. Add check: true only with an evidenced readiness path.',
     'Use type: environment for multiple services, jobs, workers, or databases. All nodes live in services. primary names an HTTP command, static, or attached service. Additional HTTP named ports use routes; private TCP ports do not.',
     'Current machine-readable authoring contract (generated from the installed Previewhost parser):',

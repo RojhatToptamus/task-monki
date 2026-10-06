@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { DesignDetailSnapshot,PreviewRecipeGenerationSnapshot } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
@@ -16,6 +16,11 @@ export function DesignRepositorySetup({ project, onUpdate, onOpenLocation, onMod
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [recipe, setRecipe] = useState<PreviewRecipeGenerationSnapshot>();
+  useEffect(() => taskManagerApi.onUpdate(event => {
+    if (event.type === 'preview.recipe-generation.updated' && event.taskId === project.task.id) {
+      setRecipe(event.payload as PreviewRecipeGenerationSnapshot);
+    }
+  }), [project.task.id]);
   const setup = project.repositorySetup;
   const spec = setup?.description?.spec;
   const services = spec?.type === 'environment' ? Object.entries(spec.services).filter(([, value]) => ['static', 'command', 'attach', 'preview'].includes(value.type)).map(([id]) => id)
@@ -49,7 +54,7 @@ export function DesignRepositorySetup({ project, onUpdate, onOpenLocation, onMod
       setup={<ApplicationPreviewSetup taskId={project.task.id} worktreeId={project.currentWorktree.id} state={recipe}
         disabledReason={active ? 'Wait for the Design turn to finish.' : undefined} fallbackReturnFocusRef={root} onModalOpenChange={onModalOpenChange}
         get={async taskId => { const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId }); setRecipe(state); return state; }}
-        generate={async taskId => { const state = await taskManagerApi.generatePreviewRecipe({ taskId }); setRecipe(state); return state; }}
+        generate={async (taskId, clarification) => { const state = await taskManagerApi.generatePreviewRecipe({ taskId, clarification }); setRecipe(state); return state; }}
         validate={(taskId, draftId, yaml) => taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml })}
         accept={async (taskId, draftId, yaml) => { const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }); await refresh(); return result; }}
         discard={async taskId => { const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId }); setRecipe(state); return state; }}

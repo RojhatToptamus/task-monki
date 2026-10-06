@@ -10,7 +10,7 @@ import {
   type PreviewPublicEnvironmentDecision,
   type PreviewRecipeValidation
 } from '../../../shared/contracts';
-import { parseDocument } from 'yaml';
+import { isAlias, isScalar, parseDocument, visit } from 'yaml';
 import { parsePreviewSpec, type PreviewSpec } from 'previewhost';
 import {
   buildPreviewRecipeGenerationInstruction,
@@ -127,13 +127,23 @@ export class PreviewRecipeGenerationService {
   generate(input: {
     taskId: string;
     worktreePath: string;
+    clarification?: string;
     onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
   }): Promise<PreviewRecipeGenerationSnapshot> {
     if (this.shuttingDown) {
       return Promise.reject(new Error('Preview recipe generation is shutting down.'));
     }
+    const clarification = input.clarification?.trim();
+    if (clarification && (
+      clarification.length > 4_000 || /\0/.test(clarification) || looksLikeSecret(clarification) ||
+      [...clarification.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)["']?\s*[:=]\s*(?=\S)/g)]
+        .some(match => SECRET_ENV_KEY.test(match[1]!))
+    )) {
+      return Promise.reject(new Error('Use at most 4,000 characters of setup details without secret values. Store secrets in Settings → Secrets.'));
+    }
     const active = this.operations.get(input.taskId);
     if (active?.settled) return active.settled;
+    const report = this.states.get(input.taskId)?.report;
     const operation: ActiveGeneration = {
       id: randomUUID(),
       canceled: false,
@@ -147,11 +157,12 @@ export class PreviewRecipeGenerationService {
         status: 'GENERATING',
         stage: 'PREPARING_EVIDENCE',
         draft: this.states.get(input.taskId)?.draft,
+        report,
         startedAt
       },
       input.onUpdate
     );
-    const settled = this.completeGeneration(operation, { ...input, startedAt });
+    const settled = this.completeGeneration(operation, { ...input, clarification, questions: report?.unresolvedDecisions, startedAt });
     operation.settled = settled;
     return settled;
   }
@@ -281,11 +292,14 @@ export class PreviewRecipeGenerationService {
     input: {
       taskId: string;
       worktreePath: string;
+      clarification?: string;
+      questions?: readonly string[];
       onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
       startedAt: string;
     }
   ): Promise<PreviewRecipeGenerationSnapshot> {
     const previousDraft = this.states.get(input.taskId)?.draft;
+    const previousReport = this.states.get(input.taskId)?.report;
     let evidence: Awaited<ReturnType<typeof preparePreviewRecipeEvidenceBundle>> | undefined;
     let retainEvidence = false;
     try {
@@ -302,6 +316,7 @@ export class PreviewRecipeGenerationService {
           status: 'GENERATING',
           stage: 'GENERATING_DRAFT',
           draft: previousDraft,
+          report: previousReport,
           startedAt: input.startedAt
         },
         input.onUpdate
@@ -315,7 +330,9 @@ export class PreviewRecipeGenerationService {
         generationId: operation.id,
         cwd: evidence.directoryPath,
         instruction: buildPreviewRecipeGenerationInstruction({
-          evidenceFileName: evidence.fileName
+          evidenceFileName: evidence.fileName,
+          clarification: input.clarification,
+          questions: input.questions
         })
       });
       operation.run = run;
@@ -348,6 +365,7 @@ export class PreviewRecipeGenerationService {
           status: 'GENERATING',
           stage: 'VALIDATING_DRAFT',
           draft: previousDraft,
+          report: previousReport,
           startedAt: input.startedAt
         },
         input.onUpdate
@@ -396,7 +414,7 @@ export class PreviewRecipeGenerationService {
           {
             taskId: input.taskId,
             status: 'FAILED',
-            report: previousDraft?.report ?? parsed.report,
+            report: previousReport ?? previousDraft?.report ?? parsed.report,
             draft: previousDraft,
             failureCode: 'INVALID_AGENT_OUTPUT',
             message: validation.issues[0]?.message ?? 'The generated recipe was invalid.'
@@ -456,6 +474,7 @@ export class PreviewRecipeGenerationService {
           taskId: input.taskId,
           status: 'FAILED',
           draft: previousDraft,
+          report: previousReport,
           failureCode: classified.code,
           message: classified.message
         },
@@ -554,9 +573,21 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
       issues: [
         {
           code: 'SECRET_LITERAL',
-          message: 'Secret-like environment keys must use a private input reference, never a literal value.'
+          message: 'Secret-like environment keys must use a secret reference, never a literal value.'
         }
       ]
+    };
+  }
+  const bindings = commandNodes(plan).flatMap(node => commandEnvironments(node).flatMap(Object.values));
+  if (plan.type === 'environment') {
+    for (const service of Object.values(plan.services)) {
+      if ((service.type === 'external-postgres' || service.type === 'external-redis') && service.url) bindings.push(service.url);
+    }
+  }
+  if (bindings.some(value => typeof value === 'object' && 'fromEnv' in value)) {
+    return {
+      status: 'INVALID',
+      issues: [{ code: 'INVALID_RECIPE', message: 'Task Monki does not supply fromEnv inputs. Use a secret reference or an explicit nonsecret value.' }]
     };
   }
   return { status: 'VALID' };
@@ -577,12 +608,7 @@ function validateAgentGeneratedPreviewRecipeDraft(
     const candidate = candidateById.get(decision.candidateId);
     if (!candidate) return invalidPublicEnvironmentDecision();
     const recipientValues = activeNodes.flatMap((node) => {
-      const environments = [node.env];
-      if ('ready' in node && node.ready?.type === 'command') environments.push(node.ready.env ?? {});
-      if ('liveness' in node && node.liveness?.probe.type === 'command') {
-        environments.push(node.liveness.probe.env ?? {});
-      }
-      return environments.flatMap((environment) =>
+      return commandEnvironments(node).flatMap((environment) =>
         environment[candidate.key] === undefined ? [] : [environment[candidate.key]]
       );
     });
@@ -724,8 +750,22 @@ function validateGeneratedPreviewRecipeDraft(
 }
 
 function parseConfiguration(yaml: string): Configuration {
-  const document = parseDocument(yaml, { schema: 'core', uniqueKeys: true, strict: true });
-  if (document.errors.length) throw new Error('Invalid YAML.');
+  // Match Previewhost's file loader before accepting text that it will later read.
+  const document = parseDocument(yaml, {
+    schema: 'core', version: '1.2', stringKeys: true, uniqueKeys: true,
+    resolveKnownTags: false, merge: false, customTags: [], prettyErrors: false
+  });
+  if (document.errors.length || document.warnings.length || document.directives?.yaml.version !== '1.2') {
+    throw new Error('Invalid YAML.');
+  }
+  visit(document, {
+    Node(_key, node) {
+      if (isAlias(node) || node.tag) throw new Error('Aliases and tags are unsupported.');
+    },
+    Pair(_key, pair) {
+      if (isScalar(pair.key) && pair.key.value === '<<') throw new Error('Merge keys are unsupported.');
+    }
+  });
   return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }) as PreviewSpec);
 }
 
@@ -733,6 +773,13 @@ function commandNodes(spec: Configuration) {
   if (spec.type === 'command') return [{ id: 'app', ...spec }];
   if (spec.type !== 'environment') return [];
   return Object.entries(spec.services).flatMap(([id, service]) => service.type === 'command' || service.type === 'worker' || service.type === 'job' ? [{ id, ...service }] : []);
+}
+
+function commandEnvironments(node: ReturnType<typeof commandNodes>[number]) {
+  const environments = [node.env];
+  if ('ready' in node && node.ready?.type === 'command') environments.push(node.ready.env ?? {});
+  if ('liveness' in node && node.liveness?.probe.type === 'command') environments.push(node.liveness.probe.env ?? {});
+  return environments;
 }
 
 function generatedCommands(plan: Configuration): string[][] {
@@ -794,14 +841,7 @@ function dependencyPreparationRequired(message: string): PreviewRecipeValidation
 
 function containsSecretLiteral(plan: Configuration): boolean {
   for (const node of commandNodes(plan)) {
-    const environments = [node.env];
-    if ('ready' in node) {
-      if (node.ready?.type === 'command') environments.push(node.ready.env ?? {});
-      if (node.liveness?.probe.type === 'command') {
-        environments.push(node.liveness.probe.env ?? {});
-      }
-    }
-    for (const environment of environments) {
+    for (const environment of commandEnvironments(node)) {
       if (
         Object.entries(environment).some(
           ([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string'
@@ -855,7 +895,8 @@ function parseAgentGeneration(
     omissions: normalizeReportList(value.omissions, 'omissions'),
     unresolvedDecisions: normalizeReportList(
       value.unresolvedDecisions,
-      'unresolvedDecisions'
+      'unresolvedDecisions',
+      3
     ),
     publicEnvironmentDecisions: normalizePublicEnvironmentDecisions(
       value.publicEnvironmentDecisions,
@@ -981,8 +1022,8 @@ function normalizeEvidence(
   });
 }
 
-function normalizeReportList(value: unknown, context: string): string[] {
-  if (!Array.isArray(value) || value.length > MAX_REPORT_ITEMS) {
+function normalizeReportList(value: unknown, context: string, limit = MAX_REPORT_ITEMS): string[] {
+  if (!Array.isArray(value) || value.length > limit) {
     throw new Error(`Invalid generation ${context}.`);
   }
   return uniqueBoundedStrings(

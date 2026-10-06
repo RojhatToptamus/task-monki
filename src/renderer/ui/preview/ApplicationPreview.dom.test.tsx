@@ -6,6 +6,7 @@ import {
   waitFor
 } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { createRef } from 'react';
 import type {
   ConfigurationBindingsInspection,
   PreviewStatus,
@@ -21,6 +22,9 @@ import { ApplicationSourceFolders } from './ApplicationSourceFolders';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
+import { ApplicationPreviewSetup } from './ApplicationPreviewSetup';
+import { PreviewRecipeGenerationModal } from './PreviewRecipeGenerationModal';
+import type { PreviewRecipeGenerationSnapshot } from '../../../shared/contracts';
 
 const api = vi.hoisted(() => ({
   getApplicationPreview: vi.fn(),
@@ -61,6 +65,58 @@ const inspected: ConfigurationBindingsInspection = {
   bindings: [{ key: 'TOKEN', value: null }]
 };
 beforeEach(() => vi.resetAllMocks());
+
+it('lets the user answer missing setup decisions before generating another draft', async () => {
+  const regenerate = vi.fn(async () => {});
+  const state: PreviewRecipeGenerationSnapshot = {
+    taskId: 'task', status: 'NEEDS_INPUT', report: {
+      summary: 'Two applications are available.', evidence: [], assumptions: [], omissions: [],
+      unresolvedDecisions: ['Which application should run: Alpha or Beta?'], publicEnvironmentDecisions: []
+    }
+  };
+  render(<PreviewRecipeGenerationModal taskId="task" state={state}
+    onClose={() => {}} onRegenerate={regenerate} onDiscard={async () => {}}
+    onValidate={async () => ({ status: 'VALID' })} onAccept={async () => ({ recipePath: 'preview.yaml' })}
+    fallbackReturnFocusRef={{ current: null }} modalRootRef={{ current: null }} onModalOpenChange={() => {}} />);
+  expect(screen.getByText('Which application should run: Alpha or Beta?')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Continue' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.change(screen.getByRole('textbox', { name: 'Setup details' }), { target: { value: 'Use Beta.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+  await waitFor(() => expect(regenerate).toHaveBeenCalledWith('Use Beta.'));
+});
+
+it('preserves draft edits when a configuration appears during review and allows save recovery', async () => {
+  const fallbackReturnFocusRef = createRef<HTMLDivElement>();
+  let snapshot: ApplicationPreviewSnapshot = { name: 'fixture', hasConfigurationFile: false };
+  api.getApplicationPreview.mockImplementation(async () => snapshot);
+  const accept = vi.fn().mockRejectedValueOnce(new Error('A Preview recipe already exists.'))
+    .mockResolvedValue({ recipePath: 'preview.yaml' });
+  const state: PreviewRecipeGenerationSnapshot = { taskId: 'task', status: 'READY', draft: {
+    id: 'draft', taskId: 'task', yaml: 'name: example\ntype: static\ndirectory: .\n', generatedAt: '', validation: { status: 'VALID' },
+    report: { summary: 'Serve the static site.', evidence: [], assumptions: [], omissions: [], unresolvedDecisions: [], publicEnvironmentDecisions: [] }
+  } };
+  render(<div ref={fallbackReturnFocusRef} tabIndex={-1}><ApplicationPreviewPanel taskId="task" setup={
+    <ApplicationPreviewSetup taskId="task" worktreeId="worktree" state={state}
+      get={async () => state} generate={async () => state} discard={async () => ({ taskId: 'task', status: 'EMPTY' })}
+      validate={async () => ({ status: 'VALID' })} accept={accept} writeManually={async () => {}}
+      fallbackReturnFocusRef={fallbackReturnFocusRef} onModalOpenChange={() => {}} />
+  } /></div>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Configure preview' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Generate with agent' }));
+  const edited = `${state.draft!.yaml}# Keep this edit\n`;
+  fireEvent.change(await screen.findByRole('textbox', { name: 'Preview recipe YAML' }), { target: { value: edited } });
+  snapshot = { ...snapshot, hasConfigurationFile: true };
+  fireEvent(document, new Event('visibilitychange'));
+  await screen.findByRole('heading', { name: 'Configuration ready' });
+  expect((screen.getByRole('textbox', { name: 'Preview recipe YAML' }) as HTMLTextAreaElement).value).toBe(edited);
+  fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('already exists');
+  expect(screen.getByRole('textbox', { name: 'Preview recipe YAML' }).hasAttribute('disabled')).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(accept).toHaveBeenLastCalledWith('task', 'draft', edited);
+  await waitFor(() => expect(document.activeElement).toBe(fallbackReturnFocusRef.current));
+});
 
 it('reviews an existing configuration before its first start and requires explicit approval', async () => {
   let snapshot: ApplicationPreviewSnapshot = {

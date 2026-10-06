@@ -19,6 +19,8 @@ start. Review an existing configuration, or choose **Add application** for a
 development command or static folder. For a multi-service app, use
 **Generate with agent** or edit root `preview.yaml`.
 The agent proposes configuration for review; it cannot approve execution.
+If evidence is insufficient, answer the focused questions with nonsecret details
+and regenerate. Review the draft before saving it. Saving does not start the app.
 
 A minimal file for a server that reads `PORT` and serves `/ready` is:
 
@@ -32,7 +34,9 @@ readyPath: /ready
 
 Task Monki assigns the runtime name from the worktree. Each worktree has its own
 application and managed data. Previewhost supplies `PORT`, `HOST`, and
-`PREVIEW_URL`; use `"{port}"` for a command-line port argument. Commands are
+`PREVIEW_URL`; use `"{port}"` for a command-line port argument. Named ports also
+support `"{port:NAME}"`. The command must honor the allocated port and bind to
+loopback without automatic port fallback. Commands are
 argument arrays, without an implicit shell. Install dependencies in the worktree
 or declare an explicit setup job.
 
@@ -43,6 +47,9 @@ configuration documentation for environment, database, worker, and Compose specs
 Review the services, commands, source access, and secret references before
 **Approve and start**. Source changes remain live. Readiness must succeed before
 the runtime exposes the new application.
+HTTP readiness accepts status 200–399 response headers. It does not follow
+redirects or inspect bodies. Use an endpoint that checks the application's
+dependencies when those dependencies determine readiness.
 
 ## Activity, logs, and configuration
 

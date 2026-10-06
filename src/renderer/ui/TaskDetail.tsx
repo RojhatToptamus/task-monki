@@ -217,7 +217,7 @@ interface TaskDetailProps {
   onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onGeneratePreviewRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onGeneratePreviewRecipe(taskId: string, clarification?: string): Promise<PreviewRecipeGenerationSnapshot>;
   onValidatePreviewRecipeDraft(
     taskId: string,
     draftId: string,
