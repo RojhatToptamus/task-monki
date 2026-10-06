@@ -135,7 +135,18 @@ async function removeDetachedCodeSignatureXattrs(appPath) {
   }
 }
 
+// An ARM64 release can include universal dependencies, but must run without Rosetta.
+async function releaseArchitectures(filePath) {
+  const { stdout } = await execFileAsync('lipo', ['-archs', filePath]);
+  const architectures = stdout.trim().split(/\s+/u).filter(Boolean);
+  if (!architectures.includes('arm64')) {
+    throw new Error(`${filePath} has no arm64 slice: ${architectures.join(', ')}.`);
+  }
+  return architectures;
+}
+
 module.exports = trustedMacSign;
 module.exports.createIgnore = createIgnore;
 module.exports.isJitCode = isJitCode;
 module.exports.signingOptionsForFile = signingOptionsForFile;
+module.exports.releaseArchitectures = releaseArchitectures;
