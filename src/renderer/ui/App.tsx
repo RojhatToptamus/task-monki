@@ -31,10 +31,7 @@ import {
   type RepositoryImpact,
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
-  type PreviewResolvedAttachmentTarget,
   type RefinePromptRequest,
-  type ResolvePreviewResult,
-  type Task,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
   type UpdateAgentNativeSessionRequest,
@@ -47,7 +44,6 @@ import type {
   RefreshDesignCanvasRequest,
   ShowDesignCanvasRequest
 } from '../../shared/designCanvas';
-import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
@@ -118,6 +114,7 @@ import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
+import { PreviewsPage, type PreviewsPageState } from './PreviewsPage';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 import { SoftwareUpdateNotice } from './SoftwareUpdateNotice';
@@ -144,6 +141,7 @@ import {
   NavItem,
   PanelIcon,
   PlusIcon,
+  PreviewIcon,
   ReviewIcon,
   SavedViewsFolderIcon,
   SettingsIcon
@@ -199,7 +197,7 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
-type AppView = NavView | 'discourse' | 'designs';
+type AppView = NavView | 'discourse' | 'designs' | 'previews';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
@@ -214,6 +212,10 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [view, setView] = useState<AppView>('board');
+  const [previewsPageState, setPreviewsPageState] = useState<PreviewsPageState>({ query: '', filter: 'all' });
+  const previewsScrollPosition = useRef(0);
+  const [previewDetailTab, setPreviewDetailTab] = useState<'preview' | 'overview'>('preview');
+  const [previewSecretContext, setPreviewSecretContext] = useState<{ taskId: string; title: string; references: string[] }>();
   const [designHistoryCollapsed, setDesignHistoryCollapsed] = useState(() =>
     focusedWorkspaceHistoryCollapsed('designs') ||
     focusedWorkspaceUsesCompactHistory(window.innerWidth)
@@ -354,12 +356,6 @@ export function App() {
   const designCanvasErrorRef = useRef<string | undefined>(undefined);
   const viewRef = useRef<AppView>(view);
   viewRef.current = view;
-  const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
-    Record<string, PreviewExecutionReadiness>
-  >({});
-  const [previewResolutions, setPreviewResolutions] = useState<
-    Record<string, ResolvePreviewResult>
-  >({});
   const [previewRecipeGenerations, setPreviewRecipeGenerations] = useState<
     Record<string, PreviewRecipeGenerationSnapshot>
   >({});
@@ -549,10 +545,6 @@ export function App() {
       readTaskDetail: (taskId) => taskManagerApi.getTaskDetail(taskId),
       applyBoard: (next) => {
         setSnapshot(next);
-        setPreviewExecutionReadiness((current) =>
-          retainTaskEntries(current, next.tasks)
-        );
-        setPreviewResolutions((current) => retainTaskEntries(current, next.tasks));
         setPreviewRecipeGenerations((current) =>
           retainTaskEntries(current, next.tasks)
         );
@@ -1724,32 +1716,6 @@ export function App() {
   const selectedSubagentObservations = selectedTask
     ? taskDetail?.agentSubagentObservations ?? []
     : [];
-  const selectedPreviewPlans = selectedTask ? taskDetail?.previewPlans ?? [] : [];
-  const selectedPreviewApprovals = selectedTask ? taskDetail?.previewApprovals ?? [] : [];
-  const selectedPreviewGenerations = selectedTask
-    ? taskDetail?.previewGenerations ?? []
-    : [];
-  const selectedPreviewGenerationAttachments = selectedTask
-    ? taskDetail?.previewGenerationAttachments ?? []
-    : [];
-  const selectedPreviewManagedResources = selectedTask
-    ? taskDetail?.previewManagedResources ?? []
-    : [];
-  const selectedPreviewComposeProjects = selectedTask
-    ? taskDetail?.previewComposeProjects ?? []
-    : [];
-  const selectedPreviewLocalBindings = selectedTask
-    ? taskDetail?.previewLocalBindings ?? []
-    : [];
-  const selectedPreviewRuntimeResources = selectedTask
-    ? taskDetail?.previewResources ?? []
-    : [];
-  const selectedPreviewNodeAttempts = selectedTask
-    ? taskDetail?.previewNodeAttempts ?? []
-    : [];
-  const selectedPreviewTaskRoutes = selectedTask
-    ? taskDetail?.previewTaskRoutes ?? []
-    : [];
   const selectedGitSnapshots = selectedTask ? taskDetail?.gitSnapshots ?? [] : [];
   const selectedTaskAttachments = useMemo(
     () =>
@@ -2205,64 +2171,16 @@ export function App() {
     }
   };
 
-  const resolvePreview = async (taskId: string, scenarioId?: string) => {
-    setError(undefined);
-    try {
-      const result = await withAppAction(() => taskManagerApi.resolvePreview({ taskId, scenarioId }));
-      setPreviewResolutions((current) => ({ ...current, [taskId]: result }));
-      if (result.status === 'UNAVAILABLE') return;
-      if (result.status === 'CONFIGURATION_REQUIRED') {
-        await refresh();
-        return;
-      }
-      setPreviewExecutionReadiness((current) => ({
-        ...current,
-        [taskId]: result.executionReadiness
-      }));
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Could not resolve preview configuration.');
-      throw caught;
-    }
-  };
-
-  const setPreviewLocalBinding = async (
-    taskId: string,
-    attachmentId: string,
-    target: PreviewResolvedAttachmentTarget,
-    scenarioId: string
-  ) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target }));
-    } catch (caught) {
-      reportActionError(caught, 'Could not configure the Preview target.');
-      throw caught;
-    }
-    notify('Preview target configured.', 'success');
-    try {
-      await resolvePreview(taskId, scenarioId);
-    } catch {
-      // Resolution reports its own failure. The public binding was still saved successfully.
-      await refresh().catch(() => undefined);
-    }
-  };
-
   const getPreviewRecipeGeneration = async (taskId: string) => {
     const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId });
     setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
     return state;
   };
 
-  const generatePreviewRecipe = async (taskId: string) => {
-    try {
-      const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId }));
-      setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
-      return state;
-    } catch (caught) {
-      reportActionError(caught, 'Could not generate a Preview recipe.');
-      throw caught;
-    }
+  const generatePreviewRecipe = async (taskId: string, clarification?: string) => {
+    const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId, clarification }));
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
   };
 
   const validatePreviewRecipeDraft = (
@@ -2277,32 +2195,14 @@ export function App() {
     draftId: string,
     yaml: string
   ) => {
-    try {
-      const result = await withAppAction(() => taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }));
-      setPreviewRecipeGenerations((current) => ({
-        ...current,
-        [taskId]: { taskId, status: 'EMPTY' }
-      }));
-      if (result.resolution) {
-        const resolution = result.resolution;
-        setPreviewResolutions((current) => ({ ...current, [taskId]: resolution }));
-        if (resolution.status === 'PLAN') {
-          setPreviewExecutionReadiness((current) => ({
-            ...current,
-            [taskId]: resolution.executionReadiness
-          }));
-        }
-      }
-      await refresh();
-      notify(
-        result.checkError ?? 'Preview recipe saved. Review the resolved plan before approving it.',
-        result.checkError ? 'info' : 'success'
-      );
-      return result;
-    } catch (caught) {
-      reportActionError(caught, 'Could not accept the Preview recipe.');
-      throw caught;
-    }
+    const result = await withAppAction(() => taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }));
+    setPreviewRecipeGenerations((current) => ({
+      ...current,
+      [taskId]: { taskId, status: 'EMPTY' }
+    }));
+    await refresh();
+    notify('Preview configuration saved. Start to review and approve it.', 'success');
+    return result;
   };
 
   const discardPreviewRecipeDraft = async (taskId: string) => {
@@ -2318,102 +2218,9 @@ export function App() {
         action: 'open'
       });
       if (!result.ok) throw new Error(result.message ?? 'Could not open the task worktree.');
-      notify('Worktree opened. Create .taskmonki/preview.yaml, then check Preview.', 'info');
+      notify('Worktree opened. Create preview.yaml, then load it in Preview.', 'info');
     } catch (caught) {
       reportActionError(caught, 'Could not open the task worktree.');
-      throw caught;
-    }
-  };
-
-  const approvePreview = async (taskId: string, planId: string, executionDigest: string) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.approvePreviewPlan({ taskId, planId, executionDigest }));
-      notify('Preview plan approved.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Could not approve preview plan.');
-      throw caught;
-    }
-  };
-
-  const startPreview = async (taskId: string, scenarioId?: string) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.startPreview({ taskId, scenarioId }));
-      notify('Preview is ready.', 'success');
-      await refresh();
-    } catch (caught) {
-      await refresh();
-      notify('Preview start did not complete. Review its status and logs.', 'error');
-      throw caught;
-    }
-  };
-
-  const stopPreview = async (taskId: string, generationId: string) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.stopPreview({ taskId, generationId }));
-      notify('Preview stopped.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Could not stop preview safely.');
-      await refresh();
-      throw caught;
-    }
-  };
-
-  const resetPreviewData = async (
-    taskId: string,
-    generationId: string,
-    resourceId: string,
-    scenarioId: string
-  ) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.resetPreviewData({ taskId, generationId, resourceId, scenarioId }));
-      notify('Preview data reset and scenario completed.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Could not reset preview data safely.');
-      await refresh();
-      throw caught;
-    }
-  };
-
-  const retryPreviewSetup = async (
-    taskId: string,
-    generationId: string,
-    scenarioId: string
-  ) => {
-    setError(undefined);
-    try {
-      await withAppAction(() => taskManagerApi.retryPreviewSetup({ taskId, generationId, scenarioId }));
-      notify('Preview setup completed.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Could not retry preview setup safely.');
-      await refresh();
-      throw caught;
-    }
-  };
-
-  const openPreview = async (taskId: string, generationId: string, routeId: string) => {
-    setError(undefined);
-    try {
-      const result = await taskManagerApi.openPreview({ taskId, generationId, routeId });
-      if (!result.opened) window.open(result.url, '_blank', 'noopener,noreferrer');
-    } catch (caught) {
-      reportActionError(caught, 'Could not open preview.');
-      throw caught;
-    }
-  };
-
-  const readPreviewLog = async (taskId: string, artifactId: string, offset: number, maxBytes: number) => {
-    try {
-      return await taskManagerApi.readPreviewLog({ taskId, artifactId, offset, maxBytes });
-    } catch (caught) {
-      reportActionError(caught, 'Could not read preview logs.');
       throw caught;
     }
   };
@@ -2861,6 +2668,11 @@ export function App() {
   // Back: from an open task to the view it was opened from.
   const goBack = () => {
     closeTaskDetail();
+    if (view === 'previews') {
+      // The preview list restores its row after the inventory request completes.
+      appRootRef.current?.focus({ preventScroll: true });
+      return;
+    }
     window.requestAnimationFrame(() => {
       taskNavigationReturnTarget(
         taskNavigationReturnFocusRef.current,
@@ -2879,6 +2691,7 @@ export function App() {
   };
 
   const showView = (next: AppView) => {
+    setPreviewSecretContext(undefined);
     setView(next);
     if (next !== 'settings') setPreviewThemePreset(null);
     setSelectedBoardId(undefined);
@@ -3072,6 +2885,13 @@ export function App() {
                 onClick={() => showView('designs')}
               />
               <NavItem
+                label="Previews"
+                icon={<PreviewIcon />}
+                active={!showDetail && view === 'previews'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('previews')}
+              />
+              <NavItem
                 label="Discourse"
                 icon={<DiscourseIcon />}
                 count={discourseAttentionCount}
@@ -3249,6 +3069,11 @@ export function App() {
               await withAppAction(() => taskManagerApi.sendTaskInstruction({ taskId: selectedTask.id, id, runId }));
               await refresh();
             }}
+            initialTab={view === 'previews' ? previewDetailTab : previewSecretContext?.taskId === selectedTask.id ? 'preview' : undefined}
+            onOpenPreviewSecrets={references => {
+              showView('settings');
+              setPreviewSecretContext({ taskId: selectedTask.id, title: selectedTask.title, references });
+            }}
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
@@ -3288,20 +3113,6 @@ export function App() {
             postRunEvidencePendingRunIds={taskDetail.postRunEvidencePendingRunIds}
             attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
-            previewPlans={selectedPreviewPlans}
-            previewApprovals={selectedPreviewApprovals}
-            previewGenerations={selectedPreviewGenerations}
-            previewGenerationAttachments={selectedPreviewGenerationAttachments}
-            previewManagedResources={selectedPreviewManagedResources}
-            previewComposeProjects={selectedPreviewComposeProjects}
-            previewLocalBindings={selectedPreviewLocalBindings}
-            previewTaskRoutes={selectedPreviewTaskRoutes}
-            previewRuntimeResources={selectedPreviewRuntimeResources}
-            previewNodeAttempts={selectedPreviewNodeAttempts}
-            previewExecutionReadiness={selectedTask
-              ? previewExecutionReadiness[selectedTask.id]
-              : undefined}
-            previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
             previewRecipeGeneration={selectedTask
               ? previewRecipeGenerations[selectedTask.id]
               : undefined}
@@ -3324,21 +3135,12 @@ export function App() {
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
-            onResolvePreview={resolvePreview}
-            onSetPreviewLocalBinding={setPreviewLocalBinding}
             onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
             onGeneratePreviewRecipe={generatePreviewRecipe}
             onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
             onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
             onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
             onWritePreviewRecipeManually={writePreviewRecipeManually}
-            onApprovePreview={approvePreview}
-            onStartPreview={startPreview}
-            onOpenPreview={openPreview}
-            onStopPreview={stopPreview}
-            onResetPreviewData={resetPreviewData}
-            onRetryPreviewSetup={retryPreviewSetup}
-            onReadPreviewLog={readPreviewLog}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}
@@ -3361,6 +3163,23 @@ export function App() {
             </div>
             {error ? <div className="tm-error">{error}</div> : null}
           </main>
+        ) : view === 'previews' ? (
+          <PreviewsPage
+            state={previewsPageState}
+            onStateChange={setPreviewsPageState}
+            scrollPosition={previewsScrollPosition}
+            onBrowseTasks={() => showView('board')}
+            onOpen={(instance, trigger) => {
+              if (instance.kind === 'design') {
+                setView('designs');
+                void refreshDesignList();
+                void loadDesign(instance.taskId, { select: true, showLoading: true });
+              } else {
+                setPreviewDetailTab(instance.isCurrentWorktree ? 'preview' : 'overview');
+                selectTask(instance.taskId, trigger);
+              }
+            }}
+          />
         ) : view === 'designs' ? (
           <DesignsWorkspace
             onUpdateProject={(detail) => applyDesignActionDetail(detail, false)}
@@ -3411,7 +3230,10 @@ export function App() {
             onRefreshCanvas={refreshDesignCanvas}
             onRestartCanvas={restartDesignCanvas}
             onSelectRevision={showDesignRevision}
-            onOpenCanvas={openPreview}
+            onOpenCanvas={async (taskId, generationId, routeId) => {
+                    const result = await taskManagerApi.openDesignPreview({ taskId, generationId, routeId });
+                    if (!result.opened) window.open(result.url, '_blank', 'noopener,noreferrer');
+                  }}
             onOpenDesignLocation={openDesignLocation}
             onRestoreRevision={restoreDesignRevision}
             onDuplicateDesign={duplicateDesign}
@@ -3443,6 +3265,7 @@ export function App() {
           />
         ) : (
           <MainColumn
+            previewSecretContext={previewSecretContext ? { ...previewSecretContext, onReturn: () => void openTaskDetail(previewSecretContext.taskId) } : undefined}
             view={view}
             board={selectedBoard}
             tasks={visibleTasks}

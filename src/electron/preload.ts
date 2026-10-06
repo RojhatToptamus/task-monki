@@ -25,17 +25,10 @@ import type {
   ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
-  ApprovePreviewPlanRequest,
   OpenPreviewRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
-  ReadPreviewLogRequest,
   ReadDesignDraftAttachmentRequest,
-  ResetPreviewDataRequest,
-  SetPreviewLocalAttachmentBindingRequest,
-  DeletePreviewLocalAttachmentBindingRequest,
-  RetryPreviewSetupRequest,
-  ResolvePreviewRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RespondToInteractionRequest,
@@ -43,7 +36,6 @@ import type {
   RefinePromptRequest,
   RemoveDesignReferenceRequest,
   StartRunRequest,
-  StartPreviewRequest,
   StartReviewRequest,
   QueueTaskInstructionRequest,
   EditTaskInstructionRequest,
@@ -66,7 +58,6 @@ import type {
   TaskManagerApi,
   TransitionTaskRequest,
   UpdateAgentNativeSessionRequest,
-  StopPreviewRequest,
   UpdateAppSettingsRequest,
   ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
@@ -103,7 +94,6 @@ import {
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 import type { SoftwareUpdateState } from '../shared/softwareUpdate';
-import type { PreviewPrivateInputApi } from '../shared/preview';
 import type { DesignCanvasApi } from '../shared/designCanvas';
 import {
   IPC_UPDATE_CHANNEL,
@@ -132,6 +122,23 @@ function getWindowChromePlatform(): WindowChromePlatform {
 const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
+  listApplicationPreviews: () => invokeIpc('application:listApplicationPreviews'),
+  getApplicationPreview: input => invokeIpc('application:getApplicationPreview', input),
+  connectApplicationPreviewDependency: input => invokeIpc('application:connectApplicationPreviewDependency', input),
+  connectApplicationPreviewSource: input => invokeIpc('application:connectApplicationPreviewSource', input),
+  createApplicationPreviewConfiguration: input => invokeIpc('application:createApplicationPreviewConfiguration', input),
+  startApplicationPreview: input => invokeIpc('application:startApplicationPreview', input),
+  approveApplicationPreview: input => invokeIpc('application:approveApplicationPreview', input),
+  stopApplicationPreview: input => invokeIpc('application:stopApplicationPreview', input),
+  cancelApplicationPreview: input => invokeIpc('application:cancelApplicationPreview', input),
+  openApplicationPreview: input => invokeIpc('application:openApplicationPreview', input),
+  readApplicationPreviewLogs: input => invokeIpc('application:readApplicationPreviewLogs', input),
+  inspectApplicationPreviewConfiguration: input => invokeIpc('application:inspectApplicationPreviewConfiguration', input),
+  applyApplicationPreviewConfiguration: input => invokeIpc('application:applyApplicationPreviewConfiguration', input),
+  saveApplicationPreviewConfiguration: input => invokeIpc('application:saveApplicationPreviewConfiguration', input),
+  rerunApplicationPreviewJob: input => invokeIpc('application:rerunApplicationPreviewJob', input),
+  deleteApplicationPreviewData: input => invokeIpc('application:deleteApplicationPreviewData', input),
+
   chooseRepositoryFolder: () => invokeIpc('repository:chooseFolder'),
   addRepository: (path) => invokeIpc('repository:add', path),
   getRepositoryImpact: (repositoryId) =>
@@ -298,7 +305,6 @@ const api: TaskManagerApi = {
   createPullRequest: (input: CreatePullRequestRequest) =>
     invokeIpc('github:createPullRequest', input),
   refreshGitHub: (input: RefreshGitHubRequest) => invokeIpc('github:refresh', input),
-  resolvePreview: (input: ResolvePreviewRequest) => invokeIpc('preview:resolve', input),
   getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
     invokeIpc('preview:recipe-generation:get', input),
   generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
@@ -309,18 +315,7 @@ const api: TaskManagerApi = {
     invokeIpc('preview:recipe-generation:accept', input),
   discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
     invokeIpc('preview:recipe-generation:discard', input),
-  approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
-    invokeIpc('preview:approve', input),
-  startPreview: (input: StartPreviewRequest) => invokeIpc('preview:start', input),
-  stopPreview: (input: StopPreviewRequest) => invokeIpc('preview:stop', input),
-  openPreview: (input: OpenPreviewRequest) => invokeIpc('preview:open', input),
-  readPreviewLog: (input: ReadPreviewLogRequest) => invokeIpc('preview:log:read', input),
-  resetPreviewData: (input: ResetPreviewDataRequest) => invokeIpc('preview:resetData', input),
-  retryPreviewSetup: (input: RetryPreviewSetupRequest) => invokeIpc('preview:retrySetup', input),
-  setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
-    invokeIpc('preview:binding:set', input),
-  deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
-    invokeIpc('preview:binding:delete', input),
+  openDesignPreview: (input: OpenPreviewRequest) => invokeIpc('design:preview:open', input),
   transitionTask: (input: TransitionTaskRequest) => invokeIpc('task:transition', input),
   deleteTask: (input: DeleteTaskRequest) => invokeIpc('task:delete', input),
   readArtifact: (input: ReadArtifactRequest) => invokeIpc('artifact:read', input),
@@ -334,13 +329,6 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
-const privateInputs: PreviewPrivateInputApi = {
-  set: (input) => invokeIpc('preview:private:set', input),
-  import: (input) => invokeIpc('preview:private:import', input),
-  delete: (input) => invokeIpc('preview:private:delete', input),
-  retryCleanup: () => invokeIpc('preview:private:retryCleanup')
-};
-contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
 const designCanvas: DesignCanvasApi = {
   show: (input) => invokeIpc('design:canvas:show', input),
   hide: (input) => invokeIpc('design:canvas:hide', input),
@@ -366,3 +354,16 @@ const shellApi: TaskManagerShellApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManagerShell', shellApi);
+
+const previewSecrets: import('../shared/applicationPreview').PreviewSecretsApi = {
+  list: input => invokeIpc('secrets:list', input),
+  unlock: input => invokeIpc('secrets:unlock', input),
+  create: input => invokeIpc('secrets:create', input),
+  update: input => invokeIpc('secrets:update', input),
+  remove: input => invokeIpc('secrets:remove', input),
+  status: () => invokeIpc('secrets:status'),
+  lock: () => invokeIpc('secrets:lock'),
+  remember: () => invokeIpc('secrets:remember'),
+  forget: () => invokeIpc('secrets:forget'),
+};
+contextBridge.exposeInMainWorld('previewSecrets', previewSecrets);

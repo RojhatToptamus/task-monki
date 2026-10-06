@@ -664,63 +664,13 @@ function validateDesignSourceCheckpoint(value: unknown, requireCandidate: boolea
 }
 
 function validatePreviewRecords(state: StoreState): void {
-  validateCollection(state.previewPlans, 'previewPlans', (plan) => {
-    const source = persistedRecord(plan.planSource, 'previewPlans');
-    enumField(
-      source,
-      'type',
-      ['REPOSITORY_RECIPE', 'MANAGED_DESIGN_STATIC'] as const,
-      'previewPlans'
-    );
-    if (source.type === 'REPOSITORY_RECIPE') {
-      enumField(source, 'recipePath', ['.taskmonki/preview.yaml'] as const, 'previewPlans');
-      if (source.recipeVersion !== 1) invalid('previewPlans');
-      sha256Field(source, 'recipeDigest', 'previewPlans');
-    } else {
-      if (source.adapterVersion !== 1) invalid('previewPlans');
-    }
-  });
-
   validateCollection(state.previewGenerations, 'previewGenerations', (generation) => {
-    const authority = persistedRecord(
-      generation.executionAuthority,
-      'previewGenerations'
-    );
-    enumField(
-      authority,
-      'type',
-      ['USER_APPROVAL', 'MANAGED_STATIC'] as const,
-      'previewGenerations'
-    );
-    sha256Field(authority, 'executionDigest', 'previewGenerations');
-    if (authority.type === 'USER_APPROVAL') {
-      uuidField(authority, 'approvalId', 'previewGenerations');
-    } else if (authority.adapterVersion !== 1) {
-      invalid('previewGenerations');
-    }
-
+    optionalUuidFields(generation, 'previewGenerations', ['runtimeAttemptId']);
     const source = persistedRecord(generation.source, 'previewGenerations');
-    enumField(
-      source,
-      'type',
-      ['WORKTREE_SNAPSHOT', 'EXACT_COMMIT'] as const,
-      'previewGenerations'
-    );
-    if (source.type === 'WORKTREE_SNAPSHOT') {
-      uuidField(source, 'gitSnapshotId', 'previewGenerations');
-      strings(source, 'previewGenerations', ['dirtyFingerprint']);
-      gitObjectIdField(source, 'headSha', 'previewGenerations');
-    } else {
-      uuidField(source, 'repositoryId', 'previewGenerations');
-      gitObjectIdField(source, 'commitSha', 'previewGenerations');
-      optionalUuidFields(source, 'previewGenerations', ['designRevisionId']);
-    }
-    enumField(
-      generation,
-      'freshness',
-      ['CURRENT', 'STALE', 'UNKNOWN', 'REVISION'] as const,
-      'previewGenerations'
-    );
+    enumField(source, 'type', ['EXACT_COMMIT'] as const, 'previewGenerations');
+    uuidField(source, 'repositoryId', 'previewGenerations');
+    gitObjectIdField(source, 'commitSha', 'previewGenerations');
+    optionalUuidFields(source, 'previewGenerations', ['designRevisionId']);
   });
 }
 
@@ -1134,7 +1084,7 @@ function validateEvents(state: StoreState): void {
       'iterationId', 'runId', 'agentSessionId', 'serverInstanceId',
       'agentItemId', 'interactionRequestId', 'worktreeId'
     ]);
-    optionalStrings(event, 'events', ['previewPlanId', 'previewGenerationId']);
+    optionalStrings(event, 'events', ['previewGenerationId']);
     enumField(event, 'type', DOMAIN_EVENT_TYPES, 'events');
     enumField(event, 'source', DOMAIN_EVENT_SOURCES, 'events');
     timestamp(event, 'occurredAt', 'events');

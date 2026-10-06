@@ -96,13 +96,10 @@ export function dialogReturnFocusTarget(
   primaryTarget?: HTMLElement | null,
   fallbackTarget?: HTMLElement | null
 ): HTMLElement | undefined {
-  if (primaryTarget?.isConnected) {
-    return primaryTarget;
-  }
-  if (fallbackTarget?.isConnected) {
-    return fallbackTarget;
-  }
-  return undefined;
+  return [primaryTarget, fallbackTarget].find(
+    (target): target is HTMLElement =>
+      !!target?.isConnected && !target.closest('[hidden], [inert], [aria-hidden="true"]')
+  );
 }
 
 export function useDialogFocusBoundary({

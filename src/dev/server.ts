@@ -61,7 +61,6 @@ async function start(): Promise<void> {
     {
       appSettingsStore: persistence.settings,
       previewEnabled: true,
-      previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
       // A same-user provider process can read ordinary filesystem secrets. Keep
       // the browser-only HTTP development surface unreachable from agent commands
       // by requiring non-escalatable, network-disabled turns. Startup also makes
@@ -104,10 +103,6 @@ async function start(): Promise<void> {
           }
         : {}),
       previewRoot,
-      previewLauncherPath: path.join(
-        process.cwd(),
-        'src/core/preview/runtime/native-preview-launcher.mjs'
-      )
     }
   );
   await service.init();

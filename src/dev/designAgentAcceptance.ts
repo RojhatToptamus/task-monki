@@ -634,15 +634,8 @@ function createService(
       discourseWorkspaceRoot: path.join(root, 'discourse-workspaces'),
       worktreeRoot: path.join(root, 'normal-worktrees'),
       previewEnabled: true,
-      previewReconcile: false,
       allowCandidateDesignModels: true,
       previewRoot: path.join(root, 'preview-runtime'),
-      previewLauncherPath: packagedResourcesRoot
-        ? path.join(packagedResourcesRoot, 'native-preview-launcher.mjs')
-        : path.resolve('src/core/preview/runtime/native-preview-launcher.mjs'),
-      managedDesignStaticServerPath: packagedResourcesRoot
-        ? path.join(packagedResourcesRoot, 'managed-design-static-server.mjs')
-        : path.resolve('src/core/preview/runtime/managed-design-static-server.mjs'),
       designRepositoryRoot: persistence.paths.designRepositoryRoot,
       designWorktreeRoot: persistence.paths.designWorktreeRoot,
       designDraftStore: persistence.designDrafts,
@@ -1511,13 +1504,14 @@ function requireWorktree(detail: DesignDetailSnapshot): string {
 function requestActivePreview(generation: PreviewGenerationRecord): Promise<number> {
   const route = generation.routes.find((candidate) => candidate.state === 'ATTACHED');
   if (!route) throw new Error('Ready Design Preview route is missing.');
+  const url = new URL(route.url);
   return new Promise((resolve, reject) => {
     const request = http.get(
       {
         host: '127.0.0.1',
-        port: route.gatewayPort,
+        port: Number(url.port),
         path: '/',
-        headers: { host: route.hostname },
+        headers: { host: url.host },
         timeout: 5_000
       },
       (response) => {

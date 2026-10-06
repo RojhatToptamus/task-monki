@@ -325,9 +325,9 @@ describe('createBrowserTaskManagerApi preview contract', () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }) as Response);
     vi.stubGlobal('fetch', fetchMock);
 
-    await createBrowserTaskManagerApi('').resolvePreview({ taskId: 'task-1' });
+    await createBrowserTaskManagerApi('').getApplicationPreview({ taskId: 'task-1' });
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/preview/resolve', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith('/api/application/getApplicationPreview', expect.any(Object));
   });
 
   it('uses typed preview operation endpoints rather than accepting an arbitrary URL', async () => {
@@ -340,34 +340,14 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       })
     );
     const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
-    await api.resolvePreview({ taskId: 'task-1' });
-    await api.approvePreviewPlan({ taskId: 'task-1', planId: 'plan-1', executionDigest: 'digest' });
-    await api.startPreview({ taskId: 'task-1' });
-    await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
-    await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
-    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65_536 });
-    await api.resetPreviewData({
-      taskId: 'task-1', generationId: 'generation-1', resourceId: 'database', scenarioId: 'full'
-    });
-    await api.retryPreviewSetup({
-      taskId: 'task-1', generationId: 'generation-1', scenarioId: 'full'
-    });
-
-    expect(calls.map((call) => call.url)).toEqual([
-      'http://127.0.0.1:3099/api/preview/resolve',
-      'http://127.0.0.1:3099/api/preview/approve',
-      'http://127.0.0.1:3099/api/preview/start',
-      'http://127.0.0.1:3099/api/preview/open',
-      'http://127.0.0.1:3099/api/preview/stop',
-      'http://127.0.0.1:3099/api/preview/log/read',
-      'http://127.0.0.1:3099/api/preview/reset-data',
-      'http://127.0.0.1:3099/api/preview/retry-setup'
+    await api.startApplicationPreview({ taskId: 'task-1', source: 'file' });
+    await api.openApplicationPreview({ taskId: 'task-1', attemptId: 'attempt-1', service: 'web' });
+    await api.readApplicationPreviewLogs({ taskId: 'task-1', attemptId: 'attempt-1', source: 'web', after: 3 });
+    expect(calls).toEqual([
+      { url: 'http://127.0.0.1:3099/api/application/startApplicationPreview', body: { taskId: 'task-1', source: 'file' } },
+      { url: 'http://127.0.0.1:3099/api/application/openApplicationPreview', body: { taskId: 'task-1', attemptId: 'attempt-1', service: 'web' } },
+      { url: 'http://127.0.0.1:3099/api/application/readApplicationPreviewLogs', body: { taskId: 'task-1', attemptId: 'attempt-1', source: 'web', after: 3 } }
     ]);
-    expect(calls[3]?.body).toEqual({
-      taskId: 'task-1',
-      generationId: 'generation-1',
-      routeId: 'app'
-    });
   });
 });
 

@@ -83,9 +83,9 @@ describe('dialog focus boundary', () => {
   });
 
   it('restores the invoker when possible and otherwise uses the stable fallback', () => {
-    const primary = { isConnected: true } as HTMLElement;
+    const primary = { isConnected: true, closest: () => null } as unknown as HTMLElement;
     const disconnectedPrimary = { isConnected: false } as HTMLElement;
-    const fallback = { isConnected: true } as HTMLElement;
+    const fallback = { isConnected: true, closest: () => null } as unknown as HTMLElement;
     const disconnectedFallback = { isConnected: false } as HTMLElement;
 
     expect(dialogReturnFocusTarget(primary, fallback)).toBe(primary);

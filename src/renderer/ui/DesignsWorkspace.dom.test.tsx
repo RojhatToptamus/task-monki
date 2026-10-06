@@ -1562,11 +1562,7 @@ describe('mounted Design workspace', () => {
       project: designProject({
         task: { ...designProject().task, projection: createInitialProjection('2026-08-20T10:00:00.000Z') },
         repository: { ...designProject().repository, kind: 'USER_REGISTERED' },
-        repositorySetup: { state: {
-          previewPlans: [], previewApprovals: [], previewGenerations: [],
-          previewGenerationAttachments: [], previewManagedResources: [], previewNodeAttempts: [],
-          previewComposeProjects: [], previewLocalBindings: [], previewResources: [], previewTaskRoutes: []
-        } }
+        repositorySetup: {}
       })
     });
     const view = render(

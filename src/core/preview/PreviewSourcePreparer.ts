@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
-import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -12,30 +11,18 @@ import {
   isPathWithin
 } from './PreviewPaths';
 
-export type PreviewSourceEntry =
-  | { path: string; kind: 'file'; mode: number; size: number; digest: string }
-  | { path: string; kind: 'symlink'; target: string; digest: string }
-  | { path: string; kind: 'deleted'; digest: string };
-
-export interface PreviewSourceManifest {
-  version: 1;
-  headSha: string;
-  entries: PreviewSourceEntry[];
-  digest: string;
-}
-
 export interface PreviewSourceLimits {
   maxEntries: number;
   maxPathBytes: number;
   maxTotalSourceBytes: number;
-  maxManifestBytes: number;
+  maxTreeBytes: number;
 }
 
 export const DEFAULT_PREVIEW_SOURCE_LIMITS: PreviewSourceLimits = {
   maxEntries: 100_000,
   maxPathBytes: 4_096,
   maxTotalSourceBytes: 2 * 1024 * 1024 * 1024,
-  maxManifestBytes: 32 * 1024 * 1024
+  maxTreeBytes: 32 * 1024 * 1024
 };
 
 interface PreviewWorkspaceMarker {
@@ -47,28 +34,18 @@ interface PreviewWorkspaceMarker {
   createdAt: string;
 }
 
-export interface PreparePreviewSourceInput {
-  repositoryPath: string;
-  taskId: string;
-  generationId: string;
-  expectedHeadSha: string;
-  afterEntryCopied?(relativePath: string): Promise<void> | void;
-}
-
 export interface PrepareExactCommitPreviewSourceInput {
   repositoryPath: string;
   taskId: string;
   generationId: string;
   commitSha: string;
   signal?: AbortSignal;
-  afterEntryCopied?(relativePath: string): Promise<void> | void;
 }
 
 export interface PreparedPreviewSource {
   generationRoot: string;
   sourcePath: string;
-  manifest: PreviewSourceManifest;
-  markerDigest: string;
+  commitSha: string;
 }
 
 export class PreviewSourcePreparer {
@@ -91,65 +68,17 @@ export class PreviewSourcePreparer {
       if (!task.isDirectory() || task.isSymbolicLink()) continue;
       for (const generation of await fs.readdir(path.join(this.previewRoot, task.name), { withFileTypes: true })) {
         if (!generation.isDirectory() || generation.isSymbolicLink() || recordedIds.has(generation.name)) continue;
-        // Export can finish before the exact recipe and generation are recorded.
-        // Unknown directories remain untouched unless the existing marker proves ownership.
-        await this.cleanupOwnedGeneration({ taskId: task.name, generationId: generation.name }).catch(() => undefined);
-      }
-    }
-  }
-
-  async prepare(input: PreparePreviewSourceInput): Promise<PreparedPreviewSource> {
-    const repositoryRoot = await fs.realpath(
-      path.resolve((await git(input.repositoryPath, ['rev-parse', '--show-toplevel'])).trim())
-    );
-    const workspace = await this.createOwnedWorkspace(
-      repositoryRoot,
-      input.taskId,
-      input.generationId
-    );
-    const { generationRoot, sourcePath, marker } = workspace;
-
-    try {
-      await fs.mkdir(sourcePath, { mode: 0o700 });
-      const before = await capturePreviewSourceManifest(repositoryRoot, this.limits);
-      if (before.headSha !== input.expectedHeadSha) {
-        throw new Error('Git HEAD changed before preview source preparation began.');
-      }
-
-      for (const entry of before.entries) {
-        if (entry.kind === 'deleted') continue;
-        const source = path.join(repositoryRoot, entry.path);
-        const destination = path.join(sourcePath, entry.path);
-        assertPathWithin(sourcePath, destination, 'Prepared source path');
-        await fs.mkdir(path.dirname(destination), { recursive: true });
-        if (entry.kind === 'symlink') {
-          await fs.symlink(entry.target, destination);
-        } else {
-          await fs.copyFile(source, destination);
-          await fs.chmod(destination, entry.mode);
-          if ((await hashFile(destination)) !== entry.digest) {
-            throw new Error(`Source changed while copying ${entry.path}.`);
-          }
+        let marker: Partial<PreviewWorkspaceMarker>;
+        try {
+          marker = JSON.parse(await fs.readFile(path.join(this.previewRoot, task.name, generation.name, 'ownership.json'), 'utf8'));
+        } catch (error) {
+          if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
         }
-        await input.afterEntryCopied?.(entry.path);
-      }
+        if (marker.storeId !== this.storeId || marker.taskId !== task.name || marker.generationId !== generation.name) continue;
+        await this.cleanupOwnedGeneration({ taskId: task.name, generationId: generation.name });
 
-      const after = await capturePreviewSourceManifest(repositoryRoot, this.limits);
-      if (after.digest !== before.digest) {
-        throw new Error('Source changed while the preview generation was being prepared.');
       }
-      return {
-        generationRoot,
-        sourcePath,
-        manifest: before,
-        markerDigest: hashText(canonicalJson(marker))
-      };
-    } catch (error) {
-      await this.cleanupOwnedGeneration({
-        taskId: input.taskId,
-        generationId: input.generationId
-      });
-      throw error;
     }
   }
 
@@ -172,7 +101,7 @@ export class PreviewSourcePreparer {
       input.taskId,
       input.generationId
     );
-    const { generationRoot, sourcePath, marker } = workspace;
+    const { generationRoot, sourcePath } = workspace;
 
     try {
       await fs.mkdir(sourcePath, { mode: 0o700 });
@@ -182,28 +111,15 @@ export class PreviewSourcePreparer {
         this.limits,
         input.signal
       );
-      const entries = await exportExactCommitBlobs({
+      await exportExactCommitBlobs({
         repositoryRoot,
-        commitSha,
         sourcePath,
         treeEntries,
         limits: this.limits,
-        signal: input.signal,
-        afterEntryCopied: input.afterEntryCopied
+        signal: input.signal
       });
-      const manifest: PreviewSourceManifest = {
-        version: 1,
-        headSha: commitSha,
-        entries,
-        digest: manifestDigest(commitSha, entries)
-      };
-      serializePreviewSourceManifest(manifest, this.limits.maxManifestBytes);
-      return {
-        generationRoot,
-        sourcePath,
-        manifest,
-        markerDigest: hashText(canonicalJson(marker))
-      };
+      return { generationRoot, sourcePath, commitSha };
+
     } catch (error) {
       await this.cleanupOwnedGeneration({
         taskId: input.taskId,
@@ -317,7 +233,7 @@ async function readExactCommitTree(
   signal?: AbortSignal
 ): Promise<ExactCommitTreeEntry[]> {
   const entries: ExactCommitTreeEntry[] = [];
-  let approximateManifestBytes = 0;
+  let treeBytes = 0;
   let totalSourceBytes = 0;
   await readNullDelimitedGitOutput({
     repositoryRoot,
@@ -362,10 +278,10 @@ async function readExactCommitTree(
       if (entries.length > limits.maxEntries) {
         throw new Error(`Preview source exceeds the ${limits.maxEntries} entry limit.`);
       }
-      approximateManifestBytes += Buffer.byteLength(relativePath) + objectId.length + 160;
-      if (approximateManifestBytes > limits.maxManifestBytes) {
+      treeBytes += Buffer.byteLength(relativePath) + objectId.length + 160;
+      if (treeBytes > limits.maxTreeBytes) {
         throw new Error(
-          `Preview source manifest exceeds the ${limits.maxManifestBytes} byte limit.`
+          `Preview source tree exceeds the ${limits.maxTreeBytes} byte limit.`
         );
       }
     }
@@ -376,13 +292,11 @@ async function readExactCommitTree(
 
 async function exportExactCommitBlobs(input: {
   repositoryRoot: string;
-  commitSha: string;
   sourcePath: string;
   treeEntries: ExactCommitTreeEntry[];
   limits: PreviewSourceLimits;
   signal?: AbortSignal;
-  afterEntryCopied?(relativePath: string): Promise<void> | void;
-}): Promise<PreviewSourceEntry[]> {
+}): Promise<void> {
   const child = spawnPortable(getGitExecutablePath(), ['cat-file', '--batch'], {
     cwd: input.repositoryRoot,
     stdio: ['pipe', 'pipe', 'pipe']
@@ -392,7 +306,7 @@ async function exportExactCommitBlobs(input: {
   const exit = childExit(child);
   const abort = () => child.kill('SIGKILL');
   input.signal?.addEventListener('abort', abort, { once: true });
-  const entries: PreviewSourceEntry[] = [];
+  const links: Array<{ path: string; target: string }> = [];
 
   try {
     for (const treeEntry of input.treeEntries) {
@@ -422,17 +336,15 @@ async function exportExactCommitBlobs(input: {
           throw new Error(`Unsafe Preview source symlink: ${treeEntry.path}`);
         }
         assertPathWithin(input.sourcePath, path.resolve(path.dirname(destination), target), 'Preview symlink target');
-        entries.push({ path: treeEntry.path, kind: 'symlink', target, digest: hashText(`symlink\0${treeEntry.path}\0${target}`) });
+        links.push({ path: treeEntry.path, target });
         continue;
       }
       const mode = treeEntry.mode === '100755' ? 0o755 : 0o644;
       const handle = await fs.open(destination, 'wx', mode);
-      const hash = createHash('sha256');
       const smallContent: Buffer[] = [];
       try {
         await reader.consume(size, async (chunk) => {
           throwIfAborted(input.signal);
-          hash.update(chunk);
           if (size <= 1024) smallContent.push(Buffer.from(chunk));
           await writeAll(handle, chunk);
         });
@@ -447,24 +359,13 @@ async function exportExactCommitBlobs(input: {
         throw new Error(`Git LFS content is not materialized: ${treeEntry.path}`);
       }
       await fs.chmod(destination, mode);
-      entries.push({
-        path: treeEntry.path,
-        kind: 'file',
-        mode,
-        size,
-        digest: hash.digest('hex')
-      });
-      await input.afterEntryCopied?.(treeEntry.path);
     }
     // Materialize links after regular files so no export write follows a link.
-    for (const entry of entries) {
-      if (entry.kind !== 'symlink') continue;
+    for (const entry of links) {
       await fs.symlink(entry.target, path.join(input.sourcePath, entry.path));
     }
-    for (const entry of entries) {
-      if (entry.kind !== 'symlink') continue;
+    for (const entry of links) {
       assertPathWithin(input.sourcePath, await fs.realpath(path.join(input.sourcePath, entry.path)), 'Resolved Preview symlink');
-      await input.afterEntryCopied?.(entry.path);
     }
     child.stdin.end();
     const status = await exit;
@@ -475,9 +376,10 @@ async function exportExactCommitBlobs(input: {
       );
     }
     throwIfAborted(input.signal);
-    return entries;
   } catch (error) {
     child.kill('SIGKILL');
+    // The blob reader may be paused with unread output; close it before awaiting child close.
+    child.stdout.destroy();
     await Promise.allSettled([exit, stderr]);
     throw error;
   } finally {
@@ -665,146 +567,8 @@ function validateExactCommitPath(relativePath: string): void {
   }
 }
 
-export async function capturePreviewSourceManifest(
-  repositoryPath: string,
-  limits: PreviewSourceLimits = DEFAULT_PREVIEW_SOURCE_LIMITS
-): Promise<PreviewSourceManifest> {
-  const root = await fs.realpath(path.resolve(repositoryPath));
-  const [headSha, listed, staged] = await Promise.all([
-    git(root, ['rev-parse', 'HEAD']).then((value) => value.trim()),
-    git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']),
-    git(root, ['ls-files', '--stage', '-z'])
-  ]);
-  const gitModes = parseGitModes(staged);
-  const includedPaths = listed.split('\0').filter(Boolean).sort();
-  if (includedPaths.length > limits.maxEntries) {
-    throw new Error(`Preview source exceeds the ${limits.maxEntries} entry limit.`);
-  }
-  const included = new Set(includedPaths);
-  const entries: PreviewSourceEntry[] = [];
-  let totalSourceBytes = 0;
-
-  for (const relativePath of includedPaths) {
-    validateRelativePath(relativePath);
-    if (Buffer.byteLength(relativePath) > limits.maxPathBytes) {
-      throw new Error(`Preview source path exceeds ${limits.maxPathBytes} bytes: ${relativePath}`);
-    }
-    if (gitModes.get(relativePath) === '160000') {
-      throw new Error(`Git submodules are unsupported by native previews: ${relativePath}`);
-    }
-    const absolutePath = path.join(root, relativePath);
-    assertPathWithin(root, absolutePath, 'Source path');
-    let stat: Awaited<ReturnType<typeof fs.lstat>>;
-    try {
-      stat = await fs.lstat(absolutePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        entries.push({
-          path: relativePath,
-          kind: 'deleted',
-          digest: hashText(`deleted\0${relativePath}`)
-        });
-        continue;
-      }
-      throw error;
-    }
-
-    if (stat.isSymbolicLink()) {
-      const target = await fs.readlink(absolutePath);
-      if (path.isAbsolute(target)) {
-        throw new Error(`Absolute symlinks are unsupported by native previews: ${relativePath}`);
-      }
-      const resolvedTarget = path.resolve(path.dirname(absolutePath), target);
-      assertPathWithin(root, resolvedTarget, 'Symlink target');
-      const targetRelative = path.relative(root, resolvedTarget).split(path.sep).join('/');
-      if (!included.has(targetRelative)) {
-        throw new Error(
-          `Symlink target must be included in the source manifest: ${relativePath} -> ${target}`
-        );
-      }
-      entries.push({
-        path: relativePath,
-        kind: 'symlink',
-        target,
-        digest: hashText(`symlink\0${relativePath}\0${target}`)
-      });
-      continue;
-    }
-    if (!stat.isFile()) {
-      throw new Error(`Unsupported source entry type: ${relativePath}`);
-    }
-    totalSourceBytes += stat.size;
-    if (totalSourceBytes > limits.maxTotalSourceBytes) {
-      throw new Error(
-        `Preview source exceeds the ${limits.maxTotalSourceBytes} byte aggregate limit.`
-      );
-    }
-    if (await isUnresolvedGitLfsPointer(absolutePath, stat.size)) {
-      throw new Error(`Git LFS content is not materialized: ${relativePath}`);
-    }
-    entries.push({
-      path: relativePath,
-      kind: 'file',
-      mode: stat.mode & 0o777,
-      size: stat.size,
-      digest: await hashFile(absolutePath)
-    });
-  }
-
-  const manifest: PreviewSourceManifest = {
-    version: 1,
-    headSha,
-    entries,
-    digest: manifestDigest(headSha, entries)
-  };
-  serializePreviewSourceManifest(manifest, limits.maxManifestBytes);
-  return manifest;
-}
-
-export function serializePreviewSourceManifest(
-  manifest: PreviewSourceManifest,
-  maxBytes = DEFAULT_PREVIEW_SOURCE_LIMITS.maxManifestBytes
-): string {
-  const serialized = `${JSON.stringify(manifest)}\n`;
-  if (Buffer.byteLength(serialized) > maxBytes) {
-    throw new Error(`Preview source manifest exceeds the ${maxBytes} byte limit.`);
-  }
-  return serialized;
-}
-
-function parseGitModes(value: string): Map<string, string> {
-  const modes = new Map<string, string>();
-  for (const record of value.split('\0').filter(Boolean)) {
-    const match = /^(\d+)\s+[0-9a-f]+\s+\d+\t(.+)$/s.exec(record);
-    if (match) modes.set(match[2], match[1]);
-  }
-  return modes;
-}
-
-function manifestDigest(headSha: string, entries: PreviewSourceEntry[]): string {
-  const hash = createHash('sha256');
-  hash.update(`version\0${1}\0head\0${headSha}\0`);
-  for (const entry of entries) {
-    hash.update(canonicalJson(entry));
-    hash.update('\0');
-  }
-  return hash.digest('hex');
-}
-
 function hashText(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-async function hashFile(filePath: string): Promise<string> {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
-  return hash.digest('hex');
-}
-
-async function isUnresolvedGitLfsPointer(filePath: string, size: number): Promise<boolean> {
-  if (size > 1024) return false;
-  const content = await fs.readFile(filePath, 'utf8').catch(() => '');
-  return isUnresolvedGitLfsPointerContent(Buffer.from(content));
 }
 
 function isUnresolvedGitLfsPointerContent(content: Buffer): boolean {
@@ -824,18 +588,6 @@ function validateRelativePath(relativePath: string): void {
   ) {
     throw new Error(`Unsafe source path: ${relativePath}`);
   }
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {

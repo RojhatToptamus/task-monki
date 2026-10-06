@@ -213,88 +213,14 @@ const COLLECTIONS: readonly CollectionCodec[] = [
   githubRollupCodec('reviewRollups', 'review_rollups'),
   githubRollupCodec('mergeSnapshots', 'merge_snapshots'),
   {
-    key: 'previewPlans', table: 'preview_plans', orderBy: 'created_at DESC, id',
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), iteration_id: field(r, 'iterationId'),
-      worktree_id: field(r, 'worktreeId'), execution_digest: field(r, 'executionDigest'),
-      created_at: field(r, 'createdAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewApprovals', table: 'preview_approvals', orderBy: 'approved_at DESC, id',
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), plan_id: field(r, 'planId'),
-      execution_digest: field(r, 'executionDigest'), approved_at: field(r, 'approvedAt'),
-      invalidated_at: field(r, 'invalidatedAt'), payload_json: json(r)
-    })
-  },
-  {
     key: 'previewGenerations', table: 'preview_generations', orderBy: 'created_at DESC, id', recordRevision: true,
     values: (r) => ({
       id: field(r, 'id'), preview_key: field(r, 'previewKey'), task_id: field(r, 'taskId'),
-      iteration_id: field(r, 'iterationId'), worktree_id: field(r, 'worktreeId'), plan_id: field(r, 'planId'),
-      state: field(r, 'state'), routing_state: field(r, 'routingState'), adapter: field(r, 'adapter'),
+      iteration_id: field(r, 'iterationId'), worktree_id: field(r, 'worktreeId'),
+      state: field(r, 'state'), routing_state: field(r, 'routingState'),
       replaces_generation_id: field(r, 'replacesGenerationId'), created_at: field(r, 'createdAt'),
       updated_at: field(r, 'updatedAt'), ready_at: field(r, 'readyAt'), cutover_at: field(r, 'cutoverAt'),
       stopped_at: field(r, 'stoppedAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewComposeProjects', table: 'preview_compose_projects', orderBy: 'created_at DESC, id', recordRevision: true,
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), preview_key: field(r, 'previewKey'),
-      state: field(r, 'state'), active_generation_id: field(r, 'activeGenerationId'),
-      pending_generation_id: field(r, 'pendingGenerationId'), created_at: field(r, 'createdAt'),
-      updated_at: field(r, 'updatedAt'), stopped_at: field(r, 'stoppedAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewManagedEnvironments', table: 'preview_managed_environments', orderBy: 'created_at DESC, id', recordRevision: true,
-    values: (r) => ({
-      id: field(r, 'id'), preview_key: field(r, 'previewKey'), task_id: field(r, 'taskId'),
-      state: field(r, 'state'), created_at: field(r, 'createdAt'), updated_at: field(r, 'updatedAt'),
-      stopped_at: field(r, 'stoppedAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewManagedResources', table: 'preview_managed_resources', orderBy: 'created_at DESC, id', recordRevision: true,
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), environment_id: field(r, 'environmentId'),
-      logical_resource_id: field(r, 'logicalResourceId'), type: field(r, 'type'), state: field(r, 'state'),
-      binding_id: nullable((r.binding as Record<string, unknown> | undefined)?.id),
-      created_at: field(r, 'createdAt'), updated_at: field(r, 'updatedAt'), stopped_at: field(r, 'stoppedAt'),
-      payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewGenerationAttachments', table: 'preview_generation_attachments', orderBy: 'attached_at, id',
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), generation_id: field(r, 'generationId'),
-      managed_resource_id: field(r, 'managedResourceId'), logical_resource_id: field(r, 'logicalResourceId'),
-      binding_id: field(r, 'bindingId'), attached_at: field(r, 'attachedAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewLocalBindings', table: 'preview_local_bindings', orderBy: 'created_at DESC, id', recordRevision: true,
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), attachment_id: field(r, 'attachmentId'),
-      created_at: field(r, 'createdAt'), updated_at: field(r, 'updatedAt'), payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewResources', table: 'preview_native_resources', orderBy: 'updated_at DESC, id', recordRevision: true,
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), generation_id: field(r, 'generationId'),
-      logical_node_id: field(r, 'logicalNodeId'), state: field(r, 'state'), updated_at: field(r, 'updatedAt'),
-      payload_json: json(r)
-    })
-  },
-  {
-    key: 'previewNodeAttempts', table: 'preview_node_attempts', orderBy: 'started_at DESC, id',
-    values: (r) => ({
-      id: field(r, 'id'), task_id: field(r, 'taskId'), generation_id: field(r, 'generationId'),
-      node_id: field(r, 'nodeId'), attempt: field(r, 'attempt'), kind: field(r, 'kind'), state: field(r, 'state'),
-      started_at: field(r, 'startedAt'), ended_at: field(r, 'endedAt'), payload_json: json(r)
     })
   },
   {
@@ -304,7 +230,7 @@ const COLLECTIONS: readonly CollectionCodec[] = [
       run_id: field(r, 'runId'), session_id: field(r, 'agentSessionId'),
       server_instance_id: field(r, 'serverInstanceId'), agent_item_id: field(r, 'agentItemId'),
       interaction_request_id: field(r, 'interactionRequestId'), worktree_id: field(r, 'worktreeId'),
-      preview_plan_id: field(r, 'previewPlanId'), preview_generation_id: field(r, 'previewGenerationId'),
+      preview_generation_id: field(r, 'previewGenerationId'),
       type: field(r, 'type'), source: field(r, 'source'), source_event_id: field(r, 'sourceEventId'),
       occurred_at: field(r, 'occurredAt'), received_at: field(r, 'receivedAt'), payload_json: json(r)
     })
@@ -419,10 +345,7 @@ export class TaskStateMapper {
     if (replacedOrRemoved.length > 0) {
       transaction.afterCommitDeferred(() =>
         Promise.allSettled(
-          replacedOrRemoved.flatMap((record) => [
-            this.artifactFiles.deleteRevision(record),
-            ...(nextById.has(record.id) ? [] : [this.artifactFiles.deleteCapture(record.id)])
-          ])
+          replacedOrRemoved.map((record) => this.artifactFiles.deleteRevision(record))
         ).then(() => undefined)
       );
     }
@@ -651,10 +574,8 @@ function emptyPersistedTaskState(): PersistedTaskState {
     repositories: [], boards: [], tasks: [], taskInstructions: [], designTurns: [], designReferences: [],
     designRevisions: [], designSourceActions: [], iterations: [], worktrees: [], gitSnapshots: [],
     githubRepositories: [], branchPublications: [], pullRequests: [], ciRollups: [], reviewRollups: [],
-    mergeSnapshots: [], previewPlans: [], previewApprovals: [], previewComposeProjects: [],
-    previewGenerations: [], previewManagedEnvironments: [], previewManagedResources: [],
-    previewGenerationAttachments: [], previewLocalBindings: [], previewNodeAttempts: [],
-    previewResources: [], events: [], artifacts: [], attachments: []
+    mergeSnapshots: [],
+    previewGenerations: [], events: [], artifacts: [], attachments: []
   };
 }
 

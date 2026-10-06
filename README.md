@@ -40,7 +40,7 @@ Task Monki can prepare dependencies, run jobs, start declared application servic
 
 When the recipe declares them, it can also run managed PostgreSQL or Redis and supported Docker Compose services. Each task gets a separate route and local environment, so you can compare full-stack changes without preparing every worktree by hand.
 
-Preview starts only after you review and approve the repository's `.taskmonki/preview.yaml` file. See the [Preview guide](https://www.monki.work/docs/?page=preview) for details.
+Preview starts only after you review and approve the application's root `preview.yaml` configuration. See the [Preview guide](https://www.monki.work/docs/?page=preview) for details.
 
 ## Discourse
 

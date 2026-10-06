@@ -4,9 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { git } from '../git/gitCli';
 import {
-  capturePreviewSourceManifest,
-  PreviewSourcePreparer,
-  serializePreviewSourceManifest
+  PreviewSourcePreparer
 } from './PreviewSourcePreparer';
 
 const fixtureRoots: string[] = [];
@@ -17,65 +15,6 @@ afterEach(async () => {
 });
 
 describe('PreviewSourcePreparer', () => {
-  it('captures dirty Git states outside the worktree and excludes ignored files', async () => {
-    const fixture = await createRepositoryFixture();
-    await fs.writeFile(path.join(fixture.repo, 'tracked.txt'), 'unstaged\n');
-    await fs.writeFile(path.join(fixture.repo, 'staged.txt'), 'staged\n');
-    await git(fixture.repo, ['add', 'staged.txt']);
-    await fs.rm(path.join(fixture.repo, 'deleted.txt'));
-    await fs.writeFile(path.join(fixture.repo, 'untracked.txt'), 'untracked\n');
-    await fs.writeFile(path.join(fixture.repo, 'ignored.secret'), 'do-not-copy\n');
-    await fs.symlink('tracked.txt', path.join(fixture.repo, 'tracked-link'));
-    await git(fixture.repo, ['add', 'tracked-link']);
-    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-
-    const prepared = await fixture.preparer.prepare({
-      repositoryPath: fixture.repo,
-      taskId: 'task-1',
-      generationId: 'generation-1',
-      expectedHeadSha: head
-    });
-    const byPath = new Map(prepared.manifest.entries.map((entry) => [entry.path, entry]));
-
-    await expect(fs.readFile(path.join(prepared.sourcePath, 'tracked.txt'), 'utf8')).resolves.toBe(
-      'unstaged\n'
-    );
-    await expect(fs.readFile(path.join(prepared.sourcePath, 'untracked.txt'), 'utf8')).resolves.toBe(
-      'untracked\n'
-    );
-    await expect(fs.access(path.join(prepared.sourcePath, 'ignored.secret'))).rejects.toMatchObject({
-      code: 'ENOENT'
-    });
-    expect(byPath.get('deleted.txt')?.kind).toBe('deleted');
-    expect(byPath.has('ignored.secret')).toBe(false);
-    expect(prepared.generationRoot.startsWith(fixture.repo)).toBe(false);
-  });
-
-  it('detects concurrent mutation and deletes only its marker-owned incomplete workspace', async () => {
-    const fixture = await createRepositoryFixture();
-    const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-    let mutated = false;
-    await expect(
-      fixture.preparer.prepare({
-        repositoryPath: fixture.repo,
-        taskId: 'task-1',
-        generationId: 'generation-2',
-        expectedHeadSha: head,
-        async afterEntryCopied(relativePath) {
-          if (!mutated && relativePath === '.gitignore') {
-            mutated = true;
-            await fs.writeFile(path.join(fixture.repo, 'tracked.txt'), 'changed-during-copy\n');
-          }
-        }
-      })
-    ).rejects.toThrow('Source changed while');
-    await expect(
-      fs.access(path.join(fixture.previewRoot, 'task-1', 'generation-2'))
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.readFile(path.join(fixture.repo, 'tracked.txt'), 'utf8')).resolves.toBe(
-      'changed-during-copy\n'
-    );
-  });
 
   it('recovers an unrecorded exact export without removing recorded or foreign source directories', async () => {
     const fixture = await createRepositoryFixture();
@@ -94,11 +33,11 @@ describe('PreviewSourcePreparer', () => {
   it('removes the empty task directory after its final generation is cleaned', async () => {
     const fixture = await createRepositoryFixture();
     const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-    await fixture.preparer.prepare({
+    await fixture.preparer.prepareExactCommit({
       repositoryPath: fixture.repo,
       taskId: 'task-1',
       generationId: 'generation-final',
-      expectedHeadSha: head
+      commitSha: head
     });
 
     await expect(
@@ -115,17 +54,17 @@ describe('PreviewSourcePreparer', () => {
   it('keeps the task directory while another captured generation remains', async () => {
     const fixture = await createRepositoryFixture();
     const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-    await fixture.preparer.prepare({
+    await fixture.preparer.prepareExactCommit({
       repositoryPath: fixture.repo,
       taskId: 'task-1',
       generationId: 'generation-first',
-      expectedHeadSha: head
+      commitSha: head
     });
-    await fixture.preparer.prepare({
+    await fixture.preparer.prepareExactCommit({
       repositoryPath: fixture.repo,
       taskId: 'task-1',
       generationId: 'generation-second',
-      expectedHeadSha: head
+      commitSha: head
     });
 
     await fixture.preparer.cleanupOwnedGeneration({
@@ -161,11 +100,11 @@ describe('PreviewSourcePreparer', () => {
     });
     try {
       await expect(
-        fixture.preparer.prepare({
+        fixture.preparer.prepareExactCommit({
           repositoryPath: fixture.repo,
           taskId: 'task-1',
           generationId: 'generation-replacement',
-          expectedHeadSha: head
+          commitSha: head
         })
       ).resolves.toMatchObject({ generationRoot });
       expect(raced).toBe(true);
@@ -177,11 +116,11 @@ describe('PreviewSourcePreparer', () => {
   it('does not misreport generation cleanup when optional parent removal fails', async () => {
     const fixture = await createRepositoryFixture();
     const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
-    await fixture.preparer.prepare({
+    await fixture.preparer.prepareExactCommit({
       repositoryPath: fixture.repo,
       taskId: 'task-1',
       generationId: 'generation-parent-error',
-      expectedHeadSha: head
+      commitSha: head
     });
     const rmdir = vi.spyOn(fs, 'rmdir').mockRejectedValueOnce(
       Object.assign(new Error('parent cleanup failed'), { code: 'EACCES' })
@@ -208,70 +147,17 @@ describe('PreviewSourcePreparer', () => {
     await fs.writeFile(path.join(collision, 'user-data.txt'), 'keep');
     const head = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
     await expect(
-      fixture.preparer.prepare({
+      fixture.preparer.prepareExactCommit({
         repositoryPath: fixture.repo,
         taskId: 'task-1',
         generationId: 'generation-3',
-        expectedHeadSha: head
+        commitSha: head
       })
     ).rejects.toThrow('already exists');
     await expect(
       fixture.preparer.cleanupOwnedGeneration({ taskId: 'task-1', generationId: 'generation-3' })
     ).rejects.toThrow();
     await expect(fs.readFile(path.join(collision, 'user-data.txt'), 'utf8')).resolves.toBe('keep');
-  });
-
-  it('rejects external/excluded symlinks, submodules, and unresolved LFS pointers', async () => {
-    const fixture = await createRepositoryFixture();
-    await fs.symlink('../outside.txt', path.join(fixture.repo, 'escape-link'));
-    await git(fixture.repo, ['add', 'escape-link']);
-    await expect(capturePreviewSourceManifest(fixture.repo)).rejects.toThrow('escapes');
-
-    await fs.rm(path.join(fixture.repo, 'escape-link'));
-    await git(fixture.repo, ['add', '-u']);
-    const pointer = [
-      'version https://git-lfs.github.com/spec/v1',
-      `oid sha256:${'a'.repeat(64)}`,
-      'size 1234',
-      ''
-    ].join('\n');
-    await fs.writeFile(path.join(fixture.repo, 'asset.bin'), pointer);
-    await git(fixture.repo, ['add', 'asset.bin']);
-    await expect(capturePreviewSourceManifest(fixture.repo)).rejects.toThrow('not materialized');
-
-    await fs.rm(path.join(fixture.repo, 'asset.bin'));
-    await git(fixture.repo, ['add', '-u']);
-    await git(fixture.repo, [
-      'update-index',
-      '--add',
-      '--cacheinfo',
-      '160000',
-      '0000000000000000000000000000000000000001',
-      'vendor/submodule'
-    ]);
-    await expect(capturePreviewSourceManifest(fixture.repo)).rejects.toThrow('submodules');
-  });
-
-  it('enforces injectable entry, source-byte, and manifest-byte production bounds', async () => {
-    const fixture = await createRepositoryFixture();
-    const base = {
-      maxEntries: 100,
-      maxPathBytes: 4_096,
-      maxTotalSourceBytes: 1_000_000,
-      maxManifestBytes: 1_000_000
-    };
-    await expect(
-      capturePreviewSourceManifest(fixture.repo, { ...base, maxEntries: 1 })
-    ).rejects.toThrow('entry limit');
-    await expect(
-      capturePreviewSourceManifest(fixture.repo, { ...base, maxPathBytes: 1 })
-    ).rejects.toThrow('path exceeds');
-    await expect(
-      capturePreviewSourceManifest(fixture.repo, { ...base, maxTotalSourceBytes: 1 })
-    ).rejects.toThrow('aggregate limit');
-    const manifest = await capturePreviewSourceManifest(fixture.repo, base);
-    expect(() => serializePreviewSourceManifest(manifest, 10)).toThrow('manifest exceeds');
-    expect(serializePreviewSourceManifest(manifest)).not.toContain('\n  ');
   });
 
   it('exports the exact commit without reading changed worktree bytes', async () => {
@@ -295,15 +181,10 @@ describe('PreviewSourcePreparer', () => {
       repositoryPath: fixture.repo,
       taskId: 'task-1',
       generationId: 'exact-1',
-      commitSha,
-      async afterEntryCopied(relativePath) {
-        if (relativePath === '.gitignore') {
-          await fs.writeFile(path.join(fixture.repo, 'staged.txt'), 'changed during export\n');
-        }
-      }
+      commitSha
     });
 
-    expect(prepared.manifest.headSha).toBe(commitSha);
+    expect(prepared.commitSha).toBe(commitSha);
     await expect(fs.readFile(path.join(prepared.sourcePath, 'tracked.txt'), 'utf8')).resolves.toBe(
       'tracked\n'
     );
@@ -411,7 +292,7 @@ describe('PreviewSourcePreparer', () => {
       maxEntries: 100,
       maxPathBytes: 4_096,
       maxTotalSourceBytes: 1,
-      maxManifestBytes: 1_000_000
+      maxTreeBytes: 1_000_000
     });
     await expect(
       limited.prepareExactCommit({
@@ -423,25 +304,33 @@ describe('PreviewSourcePreparer', () => {
     ).rejects.toThrow('aggregate limit');
   });
 
-  it('cleans a canceled exact export', async () => {
+  it('cleans a canceled exact export with unread Git output', async () => {
     const fixture = await createRepositoryFixture();
+    await fs.writeFile(path.join(fixture.repo, '.gitignore'), Buffer.alloc(1024 * 1024, 0x61));
+    await git(fixture.repo, ['add', '.gitignore']);
+    await git(fixture.repo, ['commit', '-m', 'Large first blob']);
     const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
     const controller = new AbortController();
+    const open = fs.open.bind(fs);
+    const opened = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      if (args[1] === 'wx') controller.abort();
+      return handle;
+    });
+    try {
     await expect(
       fixture.preparer.prepareExactCommit({
         repositoryPath: fixture.repo,
         taskId: 'task-1',
         generationId: 'exact-canceled',
         commitSha,
-        afterEntryCopied() {
-          controller.abort();
-        },
         signal: controller.signal
       })
     ).rejects.toThrow('canceled');
     await expect(
       fs.access(path.join(fixture.previewRoot, 'task-1', 'exact-canceled'))
     ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { opened.mockRestore(); }
   });
 });
 

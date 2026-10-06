@@ -4,21 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  type PreviewAttachmentPlan,
-  type PreviewEnvironmentValue,
-  type PreviewExecutionPlan,
   type PreviewRecipeGenerationDraft,
   type PreviewRecipeGenerationReport,
   type PreviewRecipeGenerationSnapshot,
   type PreviewPublicEnvironmentDecision,
   type PreviewRecipeValidation
 } from '../../../shared/contracts';
-import {
-  MAX_PREVIEW_RECIPE_BYTES,
-  PREVIEW_RECIPE_PATH,
-  parsePreviewRecipe
-} from '../PreviewRecipeLoader';
-import { activePreviewAttachmentIds } from '../PreviewExecutionAuthority';
+import { isAlias, isScalar, parseDocument, visit } from 'yaml';
+import { parsePreviewSpec, type PreviewSpec } from 'previewhost';
 import {
   buildPreviewRecipeGenerationInstruction,
   PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION
@@ -32,6 +25,10 @@ import type {
   PreviewPublicEnvironmentCandidate,
   PreviewPublicEnvironmentEvidence
 } from './PreviewPublicEnvironmentEvidence';
+
+export const PREVIEW_RECIPE_PATH = 'preview.yaml';
+const MAX_PREVIEW_RECIPE_BYTES = 65_536;
+type Configuration = ReturnType<typeof parsePreviewSpec>;
 
 const MAX_REPORT_ITEMS = 40;
 const MAX_REPORT_TEXT_BYTES = 1_200;
@@ -130,13 +127,23 @@ export class PreviewRecipeGenerationService {
   generate(input: {
     taskId: string;
     worktreePath: string;
+    clarification?: string;
     onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
   }): Promise<PreviewRecipeGenerationSnapshot> {
     if (this.shuttingDown) {
       return Promise.reject(new Error('Preview recipe generation is shutting down.'));
     }
+    const clarification = input.clarification?.trim();
+    if (clarification && (
+      clarification.length > 4_000 || /\0/.test(clarification) || looksLikeSecret(clarification) ||
+      [...clarification.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)["']?\s*[:=]\s*(?=\S)/g)]
+        .some(match => SECRET_ENV_KEY.test(match[1]!))
+    )) {
+      return Promise.reject(new Error('Use at most 4,000 characters of setup details without secret values. Store secrets in Settings → Secrets.'));
+    }
     const active = this.operations.get(input.taskId);
     if (active?.settled) return active.settled;
+    const report = this.states.get(input.taskId)?.report;
     const operation: ActiveGeneration = {
       id: randomUUID(),
       canceled: false,
@@ -150,11 +157,12 @@ export class PreviewRecipeGenerationService {
         status: 'GENERATING',
         stage: 'PREPARING_EVIDENCE',
         draft: this.states.get(input.taskId)?.draft,
+        report,
         startedAt
       },
       input.onUpdate
     );
-    const settled = this.completeGeneration(operation, { ...input, startedAt });
+    const settled = this.completeGeneration(operation, { ...input, clarification, questions: report?.unresolvedDecisions, startedAt });
     operation.settled = settled;
     return settled;
   }
@@ -284,11 +292,14 @@ export class PreviewRecipeGenerationService {
     input: {
       taskId: string;
       worktreePath: string;
+      clarification?: string;
+      questions?: readonly string[];
       onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
       startedAt: string;
     }
   ): Promise<PreviewRecipeGenerationSnapshot> {
     const previousDraft = this.states.get(input.taskId)?.draft;
+    const previousReport = this.states.get(input.taskId)?.report;
     let evidence: Awaited<ReturnType<typeof preparePreviewRecipeEvidenceBundle>> | undefined;
     let retainEvidence = false;
     try {
@@ -305,6 +316,7 @@ export class PreviewRecipeGenerationService {
           status: 'GENERATING',
           stage: 'GENERATING_DRAFT',
           draft: previousDraft,
+          report: previousReport,
           startedAt: input.startedAt
         },
         input.onUpdate
@@ -318,7 +330,9 @@ export class PreviewRecipeGenerationService {
         generationId: operation.id,
         cwd: evidence.directoryPath,
         instruction: buildPreviewRecipeGenerationInstruction({
-          evidenceFileName: evidence.fileName
+          evidenceFileName: evidence.fileName,
+          clarification: input.clarification,
+          questions: input.questions
         })
       });
       operation.run = run;
@@ -351,6 +365,7 @@ export class PreviewRecipeGenerationService {
           status: 'GENERATING',
           stage: 'VALIDATING_DRAFT',
           draft: previousDraft,
+          report: previousReport,
           startedAt: input.startedAt
         },
         input.onUpdate
@@ -399,7 +414,7 @@ export class PreviewRecipeGenerationService {
           {
             taskId: input.taskId,
             status: 'FAILED',
-            report: previousDraft?.report ?? parsed.report,
+            report: previousReport ?? previousDraft?.report ?? parsed.report,
             draft: previousDraft,
             failureCode: 'INVALID_AGENT_OUTPUT',
             message: validation.issues[0]?.message ?? 'The generated recipe was invalid.'
@@ -459,6 +474,7 @@ export class PreviewRecipeGenerationService {
           taskId: input.taskId,
           status: 'FAILED',
           draft: previousDraft,
+          report: previousReport,
           failureCode: classified.code,
           message: classified.message
         },
@@ -537,9 +553,9 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
       issues: [{ code: 'RECIPE_TOO_LARGE', message: 'The Preview recipe exceeds 64 KiB.' }]
     };
   }
-  let plan: PreviewExecutionPlan;
+  let plan: Configuration;
   try {
-    plan = parsePreviewRecipe(yaml).executionPlan;
+    plan = parseConfiguration(yaml);
   } catch {
     return {
       status: 'INVALID',
@@ -557,9 +573,21 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
       issues: [
         {
           code: 'SECRET_LITERAL',
-          message: 'Secret-like environment keys must use a private input reference, never a literal value.'
+          message: 'Secret-like environment keys must use a secret reference, never a literal value.'
         }
       ]
+    };
+  }
+  const bindings = commandNodes(plan).flatMap(node => commandEnvironments(node).flatMap(Object.values));
+  if (plan.type === 'environment') {
+    for (const service of Object.values(plan.services)) {
+      if ((service.type === 'external-postgres' || service.type === 'external-redis') && service.url) bindings.push(service.url);
+    }
+  }
+  if (bindings.some(value => typeof value === 'object' && 'fromEnv' in value)) {
+    return {
+      status: 'INVALID',
+      issues: [{ code: 'INVALID_RECIPE', message: 'Task Monki does not supply fromEnv inputs. Use a secret reference or an explicit nonsecret value.' }]
     };
   }
   return { status: 'VALID' };
@@ -573,46 +601,27 @@ function validateAgentGeneratedPreviewRecipeDraft(
 ): PreviewRecipeValidation {
   const validation = validateGeneratedPreviewRecipeDraft(yaml, capabilities);
   if (validation.status !== 'VALID') return validation;
-  const plan = parsePreviewRecipe(yaml).executionPlan;
-  const activeAttachmentIds = new Set(activePreviewAttachmentIds(plan));
-  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
-  const activeJobIds = new Set([
-    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
-    ...(scenario?.jobs ?? [])
-  ]);
-  const activeNodes = [
-    ...plan.jobs.filter((job) => activeJobIds.has(job.id)),
-    ...plan.services,
-    ...plan.workers
-  ];
+  const plan = parseConfiguration(yaml);
+  const activeNodes = commandNodes(plan);
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   for (const decision of decisions) {
     const candidate = candidateById.get(decision.candidateId);
     if (!candidate) return invalidPublicEnvironmentDecision();
-    const recipientValues = activeNodes.flatMap((node): PreviewEnvironmentValue[] => {
-      const environments = [node.env];
-      if ('ready' in node && node.ready.type === 'argv') environments.push(node.ready.env ?? {});
-      if ('liveness' in node && node.liveness?.probe.type === 'argv') {
-        environments.push(node.liveness.probe.env ?? {});
-      }
-      return environments.flatMap((environment) =>
+    const recipientValues = activeNodes.flatMap((node) => {
+      return commandEnvironments(node).flatMap((environment) =>
         environment[candidate.key] === undefined ? [] : [environment[candidate.key]]
       );
     });
     if (decision.decision === 'HTTP_ATTACHMENT') {
-      const attachment = plan.attachments?.find(
-        (candidate) => candidate.id === decision.attachmentId
-      );
+      const attachment = plan.type === 'environment' && decision.attachmentId ? plan.services[decision.attachmentId] : undefined;
       if (
         !decision.attachmentId || recipientValues.length === 0 ||
         recipientValues.some(
           (value) =>
-            typeof value === 'string' || value.type !== 'attached-http-origin' ||
-            value.attachment !== decision.attachmentId
+            typeof value === 'string' || !('service' in value && value.service === decision.attachmentId || 'browserUrl' in value && value.browserUrl === decision.attachmentId)
         ) ||
-        !activeAttachmentIds.has(decision.attachmentId) ||
-        attachment?.type !== 'http' ||
-        !publicTargetMatchesPolicy(attachment.target, candidate)
+        attachment?.type !== 'attach' ||
+        !publicTargetMatchesPolicy(attachment.url, candidate)
       ) return invalidPublicEnvironmentDecision();
     } else if (decision.decision === 'SOURCE_DEFAULT') {
       if (!candidate.sourceDefault || recipientValues.length > 0) {
@@ -625,19 +634,13 @@ function validateAgentGeneratedPreviewRecipeDraft(
   return validation;
 }
 
-function publicTargetMatchesPolicy(
-  target: PreviewAttachmentPlan['target'],
-  candidate: PreviewPublicEnvironmentCandidate
-): boolean {
-  if (target.type === 'local') return true;
-  if (
-    candidate.targetPolicy.kind !== 'LITERAL_ALLOWED' ||
-    target.type !== 'endpoint' ||
-    !('scheme' in target)
-  ) return false;
+function publicTargetMatchesPolicy(url: string | undefined, candidate: PreviewPublicEnvironmentCandidate): boolean {
+  if (!url) return true; // The owner must select a dependency before execution.
+  if (candidate.targetPolicy.kind !== 'LITERAL_ALLOWED') return false;
   const evidenced = candidate.targetPolicy.publicHttpTarget;
-  return target.scheme === evidenced.scheme && target.host === evidenced.host &&
-    target.port === evidenced.port && target.basePath === evidenced.basePath;
+  const target = new URL(url);
+  return target.protocol === `${evidenced.scheme}:` && target.hostname === evidenced.host &&
+    Number(target.port || (target.protocol === 'https:' ? 443 : 80)) === evidenced.port && target.pathname === evidenced.basePath;
 }
 
 function invalidPublicEnvironmentDecision(): PreviewRecipeValidation {
@@ -656,8 +659,8 @@ function validateGeneratedPreviewRecipeDraft(
 ): PreviewRecipeValidation {
   const validation = validatePreviewRecipeDraft(yaml);
   if (validation.status !== 'VALID') return validation;
-  const plan = parsePreviewRecipe(yaml).executionPlan;
-  const longNodes = [...plan.services, ...plan.workers];
+  const plan = parseConfiguration(yaml);
+  const longNodes = commandNodes(plan).filter(node => node.type !== 'job');
   const commands = longNodes.map((node) => node.command);
   if (generatedCommands(plan).some(isImplicitPackageAcquisition)) {
     return dependencyPreparationRequired(
@@ -712,8 +715,8 @@ function validateGeneratedPreviewRecipeDraft(
     }
     const preparation = capability.dependencyPreparation;
     if (!preparation || compatibleNodes.length === 0) continue;
-    const installJobs = plan.jobs.filter((job) =>
-      job.role === 'generic' &&
+    const installJobs = commandNodes(plan).filter((job) =>
+      job.type === 'job' &&
       job.cwd === preparation.cwd &&
       equalCommand(job.command, preparation.installCommand)
     );
@@ -723,14 +726,14 @@ function validateGeneratedPreviewRecipeDraft(
       );
     }
     const installJob = installJobs[0];
-    if (Object.keys(installJob.needs).length > 0 || Object.keys(installJob.env).length > 0) {
+    if (('dependsOn' in installJob && (installJob.dependsOn?.length ?? 0) > 0) || Object.keys(installJob.env).length > 0) {
       return dependencyPreparationRequired(
         'The trusted lockfile installation job must not invent prerequisites or environment overrides.'
       );
     }
     if (
       compatibleNodes.some((node) =>
-        node.cwd !== preparation.cwd || node.needs[installJob.id] !== 'succeeded'
+        node.cwd !== preparation.cwd || (!('dependsOn' in node) || !node.dependsOn?.includes(installJob.id))
       )
     ) {
       return dependencyPreparationRequired(
@@ -746,12 +749,45 @@ function validateGeneratedPreviewRecipeDraft(
   return validation;
 }
 
-function generatedCommands(plan: PreviewExecutionPlan): string[][] {
-  const nodes = [...plan.jobs, ...plan.services, ...plan.workers];
-  const commands = nodes.map((node) => node.command);
-  for (const node of [...plan.services, ...plan.workers]) {
-    if (node.ready.type === 'argv') commands.push(node.ready.command);
-    if (node.liveness?.probe.type === 'argv') commands.push(node.liveness.probe.command);
+function parseConfiguration(yaml: string): Configuration {
+  // Match Previewhost's file loader before accepting text that it will later read.
+  const document = parseDocument(yaml, {
+    schema: 'core', version: '1.2', stringKeys: true, uniqueKeys: true,
+    resolveKnownTags: false, merge: false, customTags: [], prettyErrors: false
+  });
+  if (document.errors.length || document.warnings.length || document.directives?.yaml.version !== '1.2') {
+    throw new Error('Invalid YAML.');
+  }
+  visit(document, {
+    Node(_key, node) {
+      if (isAlias(node) || node.tag) throw new Error('Aliases and tags are unsupported.');
+    },
+    Pair(_key, pair) {
+      if (isScalar(pair.key) && pair.key.value === '<<') throw new Error('Merge keys are unsupported.');
+    }
+  });
+  return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }) as PreviewSpec);
+}
+
+function commandNodes(spec: Configuration) {
+  if (spec.type === 'command') return [{ id: 'app', ...spec }];
+  if (spec.type !== 'environment') return [];
+  return Object.entries(spec.services).flatMap(([id, service]) => service.type === 'command' || service.type === 'worker' || service.type === 'job' ? [{ id, ...service }] : []);
+}
+
+function commandEnvironments(node: ReturnType<typeof commandNodes>[number]) {
+  const environments = [node.env];
+  if ('ready' in node && node.ready?.type === 'command') environments.push(node.ready.env ?? {});
+  if ('liveness' in node && node.liveness?.probe.type === 'command') environments.push(node.liveness.probe.env ?? {});
+  return environments;
+}
+
+function generatedCommands(plan: Configuration): string[][] {
+  const commands: string[][] = [];
+  for (const node of commandNodes(plan)) {
+    commands.push(node.command);
+    if ('ready' in node && node.ready?.type === 'command') commands.push(node.ready.command);
+    if ('liveness' in node && node.liveness?.probe.type === 'command') commands.push(node.liveness.probe.command);
   }
   return commands;
 }
@@ -803,16 +839,9 @@ function dependencyPreparationRequired(message: string): PreviewRecipeValidation
   };
 }
 
-function containsSecretLiteral(plan: PreviewExecutionPlan): boolean {
-  for (const node of [...plan.jobs, ...plan.services, ...plan.workers]) {
-    const environments = [node.env];
-    if ('ready' in node) {
-      if (node.ready.type === 'argv') environments.push(node.ready.env ?? {});
-      if (node.liveness?.probe.type === 'argv') {
-        environments.push(node.liveness.probe.env ?? {});
-      }
-    }
-    for (const environment of environments) {
+function containsSecretLiteral(plan: Configuration): boolean {
+  for (const node of commandNodes(plan)) {
+    for (const environment of commandEnvironments(node)) {
       if (
         Object.entries(environment).some(
           ([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string'
@@ -866,7 +895,8 @@ function parseAgentGeneration(
     omissions: normalizeReportList(value.omissions, 'omissions'),
     unresolvedDecisions: normalizeReportList(
       value.unresolvedDecisions,
-      'unresolvedDecisions'
+      'unresolvedDecisions',
+      3
     ),
     publicEnvironmentDecisions: normalizePublicEnvironmentDecisions(
       value.publicEnvironmentDecisions,
@@ -992,8 +1022,8 @@ function normalizeEvidence(
   });
 }
 
-function normalizeReportList(value: unknown, context: string): string[] {
-  if (!Array.isArray(value) || value.length > MAX_REPORT_ITEMS) {
+function normalizeReportList(value: unknown, context: string, limit = MAX_REPORT_ITEMS): string[] {
+  if (!Array.isArray(value) || value.length > limit) {
     throw new Error(`Invalid generation ${context}.`);
   }
   return uniqueBoundedStrings(
@@ -1137,21 +1167,7 @@ async function hashFile(filePath: string, expectedBytes: number): Promise<string
 
 async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promise<void> {
   const root = await fs.realpath(path.resolve(worktreePath));
-  const recipeDirectory = path.join(root, '.taskmonki');
-  try {
-    const directoryStat = await fs.lstat(recipeDirectory);
-    if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
-      throw new Error('.taskmonki must be a regular directory inside the task worktree.');
-    }
-    const realDirectory = await fs.realpath(recipeDirectory);
-    if (path.dirname(realDirectory) !== root) {
-      throw new Error('.taskmonki must remain inside the task worktree.');
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    await fs.mkdir(recipeDirectory, { mode: 0o700 });
-  }
-
+  await assertPreviewRecipeMissing(root);
   const recipePath = path.join(root, PREVIEW_RECIPE_PATH);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   let created = false;
@@ -1181,13 +1197,9 @@ async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promis
 }
 
 async function assertPreviewRecipeMissing(worktreePath: string): Promise<void> {
-  try {
-    await fs.lstat(path.join(worktreePath, PREVIEW_RECIPE_PATH));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
+  for (const name of ['preview.yaml', 'preview.yml']) {
+    try { await fs.lstat(path.join(worktreePath, name)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    throw new PreviewRecipeAlreadyExistsError('A Preview recipe already exists. Check it instead of generating a replacement.');
   }
-  throw new PreviewRecipeAlreadyExistsError(
-    'A Preview recipe already exists. Check it instead of generating a replacement.'
-  );
 }

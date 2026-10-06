@@ -57,7 +57,7 @@ Domain stores remain authoritative for product state.
 | Discourse conversation and wave state | Discourse services and `SqliteDiscourseStore` |
 | Attachment bytes and managed paths | `ManagedFileStore` and the owning attachment store |
 | Per-turn attachment selection | The runtime run record |
-| Preview processes and routes | `PreviewManager` and Preview runtime owners |
+| Preview processes and routes | Previewhost, embedded by `ApplicationPreviewService` |
 | Design source and candidate identity | `DesignSourceService` and `DesignUpdateCoordinator` |
 | Design browser process and screenshots | `AgentBrowserRuntime` |
 

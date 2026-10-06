@@ -90,11 +90,11 @@ registered repository and an explicitly selected local base. Task Monki creates
 a separate branch and managed worktree. It does not copy primary-checkout edits.
 A moved base requires a new selection.
 
-The queued brief waits for a valid `.taskmonki/preview.yaml`, an application
+The queued brief waits for a valid `preview.yaml`, an application
 route and entry path, Preview approval, and required private inputs. Preview
 setup uses the same controls as task Preview in the Design canvas. Configuration
 and approval open there when required; Preview setup remains available from the
-canvas toolbar. The conversation panel contains chat. A recipe can select a scenario.
+canvas toolbar. The conversation panel contains chat.
 The agent can diagnose startup failures after these prerequisites are met.
 Application execution and browser inspection currently require macOS.
 

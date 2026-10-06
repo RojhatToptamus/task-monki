@@ -18,8 +18,8 @@ import {
   buildInitialDesignPrompt
 } from '../../shared/promptTemplates';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import type { PreviewTaskContext } from '../preview/PreviewManager';
-import { PreviewManager } from '../preview/PreviewManager';
+import type { DesignPreviewContext } from './DesignPreviewService';
+import type { DesignPreviewService } from './DesignPreviewService';
 import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
 import { AppEventBus } from '../runner/AppEventBus';
 import { SqliteTaskStore } from '../storage/SqliteTaskStore';
@@ -59,7 +59,7 @@ class RecoverableCheckpointWriteError extends Error {
 export interface DesignUpdateCoordinatorOptions {
   store: SqliteTaskStore;
   agents: AgentOrchestrator;
-  previews: PreviewManager;
+  previews: Pick<DesignPreviewService, 'prepareManagedDesignExactCommit' | 'executeManagedDesignCandidate' | 'cutoverManagedDesignCandidate' | 'stopManagedDesignCandidate' | 'abortManagedDesignCandidateStartups' | 'openManagedDesignBrowserLease' | 'publishManagedDesignCandidateCanvas' | 'restartManagedDesign' | 'requireLiveDesignCandidate'>;
   source: DesignSourceService;
   browser: DesignBrowserOwner;
   fence: DesignCanvasCutoverFence;
@@ -465,7 +465,7 @@ export class DesignUpdateCoordinator {
   private async ensureSourceActionCandidate(input: {
     action: DesignSourceAction;
     designId: string;
-    context: PreviewTaskContext;
+    context: DesignPreviewContext;
     commitSha: string;
   }): Promise<PreviewGenerationRecord> {
     if (input.action.checkpoint.boundary === 'PREVIEW_CANDIDATE_READY') {
@@ -725,7 +725,7 @@ export class DesignUpdateCoordinator {
         expectedParentCommit: before.headSha
       });
       if (captured.kind === 'NO_CHANGE') {
-        if (detail.revisions.length > 0 && await this.canKeepReadyWithoutChange(detail, context)) {
+        if (detail.revisions.length > 0 && this.canKeepReadyWithoutChange(detail)) {
           await this.stopOpenedCandidate(turn).catch(() => undefined);
           await this.options.store.settleDesignTurn({
             designId: run.taskId,
@@ -912,11 +912,20 @@ export class DesignUpdateCoordinator {
           }
         : await this.options.source.prepareCandidateCommit({
             ...ownership,
-            checkpoint: captured.checkpoint
+            checkpoint: {
+              ...captured.checkpoint,
+              // Reopening unchanged source must keep the commit already inspected.
+              // prepareCandidateCommit verifies its tree, parent, and ownership.
+              candidateCommitSha:
+                turn.finalOpenedCandidate?.source.treeSha === captured.checkpoint.treeSha &&
+                turn.finalOpenedCandidate.source.expectedParentCommit === captured.checkpoint.expectedParentCommit
+                  ? turn.finalOpenedCandidate.source.candidateCommitSha
+                  : undefined
+            }
           });
 
     await this.closeBrowserRun(run.id);
-    let generation = await this.reusableOpenedGeneration(turn, source, detail, context);
+    let generation = await this.reusableOpenedGeneration(turn, source, detail);
     if (!generation) {
       await this.stopOpenedCandidate(turn).catch(() => undefined);
       const prepared = await this.options.previews.prepareManagedDesignExactCommit({
@@ -935,7 +944,7 @@ export class DesignUpdateCoordinator {
         onCandidateReady: async () => undefined
       });
     }
-    let lease: Awaited<ReturnType<PreviewManager['openManagedDesignBrowserLease']>> | undefined;
+    let lease: Awaited<ReturnType<DesignPreviewService['openManagedDesignBrowserLease']>> | undefined;
     try {
       await this.requireActiveDesignRun(run.id);
       lease = await this.options.previews.openManagedDesignBrowserLease(generation.id);
@@ -993,8 +1002,7 @@ export class DesignUpdateCoordinator {
   private async reusableOpenedGeneration(
     turn: DesignTurn,
     source: PublishedDesignCandidateCheckpoint,
-    detail: DesignDetailSnapshot,
-    context: PreviewTaskContext
+    detail: DesignDetailSnapshot
   ): Promise<PreviewGenerationRecord | undefined> {
     const opened = turn.finalOpenedCandidate;
     if (!opened || !sameSource(opened.source, source) || JSON.stringify(opened.target) !== JSON.stringify(detail.task.designPreviewTarget)) return undefined;
@@ -1002,10 +1010,6 @@ export class DesignUpdateCoordinator {
       opened.previewGenerationId
     );
     if (!isLiveVerificationCandidate(generation, turn.designId, source)) return undefined;
-    if (detail.repository.kind === 'USER_REGISTERED') {
-      const resolution = await this.options.previews.resolve(context, detail.task.designPreviewTarget?.scenarioId);
-      if (resolution.status !== 'PLAN' || !resolution.approval || generation.executionAuthority.executionDigest !== resolution.plan.executionDigest) return undefined;
-    }
     try { return await this.options.previews.requireLiveDesignCandidate(generation.id); }
     catch { return undefined; }
   }
@@ -1124,13 +1128,12 @@ export class DesignUpdateCoordinator {
     }
   }
 
-  private async canKeepReadyWithoutChange(detail: DesignDetailSnapshot, context: PreviewTaskContext): Promise<boolean> {
+  private canKeepReadyWithoutChange(detail: DesignDetailSnapshot): boolean {
     const previous = detail.revisions.at(-1);
     if (!previous || JSON.stringify(previous.target) !== JSON.stringify(detail.task.designPreviewTarget)) return false;
-    if (detail.repository.kind === 'DESIGN_MANAGED') return true;
-    const resolved = await this.options.previews.resolve(context, detail.task.designPreviewTarget?.scenarioId);
-    return resolved.status === 'PLAN' && Boolean(resolved.approval) &&
-      detail.currentPreview?.executionAuthority.executionDigest === resolved.plan.executionDigest;
+    // The captured commit includes its configuration; unchanged source and target
+    // keep the same verified result without introducing a second configuration owner.
+    return true;
   }
 
   private async settleTerminalFailure(
@@ -1198,7 +1201,7 @@ function rejectedReasons(results: readonly PromiseSettledResult<unknown>[]): unk
     .map((result) => result.reason);
 }
 
-function requireReadyContext(detail: DesignDetailSnapshot): PreviewTaskContext {
+function requireReadyContext(detail: DesignDetailSnapshot): DesignPreviewContext {
   if (
     detail.task.kind !== 'DESIGN' ||
     !detail.currentIteration ||
@@ -1217,7 +1220,7 @@ function requireReadyContext(detail: DesignDetailSnapshot): PreviewTaskContext {
 function promptForTurn(
   detail: DesignDetailSnapshot,
   turn: DesignTurn,
-  context: PreviewTaskContext,
+  context: DesignPreviewContext,
   currentCommitSha: string,
   userContext: string
 ): string {

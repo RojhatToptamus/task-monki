@@ -20,13 +20,6 @@ export function normalizeLoadedState(
   state: StoreState
 ): { state: StoreState; changed: boolean } {
   let changed = false;
-  const previewResources = state.previewResources.filter(
-    (resource) =>
-      (resource as { adapterKind: string }).adapterKind === 'NATIVE_PROCESS'
-  );
-  if (previewResources.length !== state.previewResources.length) {
-    changed = true;
-  }
   const activeRunStatuses: RunRecord['status'][] = [
     'QUEUED',
     'STARTING',
@@ -200,7 +193,7 @@ export function normalizeLoadedState(
   });
 
   return changed
-    ? { state: { ...state, runs, tasks, previewResources }, changed }
+    ? { state: { ...state, runs, tasks }, changed }
     : { state, changed };
 }
 

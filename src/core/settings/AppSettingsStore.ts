@@ -251,8 +251,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     codexExternalTools: { ...record.codexExternalTools },
     externalExecutables: { ...record.externalExecutables },
     runtimeExecutablePaths: { ...record.runtimeExecutablePaths },
-    selectedRepositoryId: record.selectedRepositoryId,
-    previewGateway: { ...record.previewGateway }
+    selectedRepositoryId: record.selectedRepositoryId
   };
 }
 
@@ -372,12 +371,6 @@ export function mergeAppSettings(
   if ('selectedRepositoryId' in input) {
     patch.selectedRepositoryId = normalizeOptionalString(input.selectedRepositoryId) ?? null;
   }
-  if (input.previewGateway) {
-    patch.previewGateway = normalizePreviewGateway({
-      ...current.previewGateway,
-      ...input.previewGateway
-    });
-  }
   return normalizeAppSettings({
     ...current,
     ...patch
@@ -446,17 +439,6 @@ function normalizeRuntimeIds(value: unknown): string[] {
     throw new Error('disabledRuntimeIds must be an array.');
   }
   return [...new Set(value.map((runtimeId) => requireString(runtimeId, 'Runtime id')))];
-}
-
-function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
-  if (!isRecord(value) || Object.keys(value).length !== 1) {
-    throw new Error('Preview gateway settings are invalid.');
-  }
-  const port = value.port;
-  if (port !== null && (!Number.isInteger(port) || Number(port) < 10_000 || Number(port) > 65_535)) {
-    throw new Error('Preview gateway port must be null or an integer from 10000 to 65535.');
-  }
-  return { port: port === null ? null : Number(port) };
 }
 
 function normalizeExecutablePath(value: unknown): string | null {
@@ -533,8 +515,7 @@ function isCurrentAppSettingsRecord(
     'codexExternalTools',
     'externalExecutables',
     'runtimeExecutablePaths',
-    'selectedRepositoryId',
-    'previewGateway'
+    'selectedRepositoryId'
   ]);
   const optionalStrings = [
     record.defaultModel,
@@ -554,7 +535,6 @@ function isCurrentAppSettingsRecord(
   const tools = record.codexExternalTools;
   const executables = record.externalExecutables;
   const runtimeExecutablePaths = record.runtimeExecutablePaths;
-  const previewGateway = record.previewGateway;
   return (
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     (record.theme === 'light' || record.theme === 'dark' || record.theme === 'device') &&
@@ -584,13 +564,7 @@ function isCurrentAppSettingsRecord(
       ([runtimeId, executable]) =>
         isCanonicalRequiredString(runtimeId) && isCanonicalNullableString(executable)
     ) &&
-    isCanonicalNullableString(record.selectedRepositoryId) &&
-    isRecord(previewGateway) &&
-    Object.keys(previewGateway).length === 1 &&
-    (previewGateway.port === null ||
-      (Number.isInteger(previewGateway.port) &&
-        Number(previewGateway.port) >= 10_000 &&
-        Number(previewGateway.port) <= 65_535))
+    isCanonicalNullableString(record.selectedRepositoryId)
   );
 }
 

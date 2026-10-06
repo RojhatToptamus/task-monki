@@ -16,19 +16,21 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService Preview recipe generation', () => {
-  it('projects missing setup, emits transient progress, and only resolves after explicit acceptance', async () => {
+  it('projects missing setup and writes a configuration only after explicit acceptance without starting it', async () => {
     const generator = new PreviewRecipeGenerationService(async () => ({
       result: Promise.resolve(JSON.stringify({
         schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
         status: 'draft',
-        yaml: `version: 1
+        yaml: `name: application
+type: environment
+primary: web
 services:
   web:
+    type: command
+    cwd: .
     command: [node, server.mjs]
-    ports: { http: { env: PORT } }
+    ports: { http: PORT }
     ready: { type: tcp, port: http }
-routes:
-  app: { service: web, port: http, primary: true }
 `,
         summary: 'Runs the proven server entry point.',
         evidence: [
@@ -64,16 +66,12 @@ routes:
       }
     });
 
-    await expect(scenario.service.resolvePreview({ taskId: task.id })).resolves.toMatchObject({
-      status: 'UNAVAILABLE',
-      reasonCode: 'RECIPE_MISSING'
-    });
+    await expect(scenario.service.getApplicationPreview({ taskId: task.id })).resolves.toMatchObject({ hasConfigurationFile: false });
     const generated = await scenario.service.generatePreviewRecipe({ taskId: task.id });
     expect(generated.status).toBe('READY');
     await expect(
-      fs.access(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'))
+      fs.access(path.join(worktree.worktreePath, 'preview.yaml'))
     ).rejects.toThrow();
-    expect((await scenario.store.snapshot()).previewPlans).toEqual([]);
 
     const accepted = await scenario.service.acceptPreviewRecipeDraft({
       taskId: task.id,
@@ -82,16 +80,14 @@ routes:
     });
 
     expect(accepted).toMatchObject({
-      recipePath: '.taskmonki/preview.yaml',
-      resolution: { status: 'PLAN' }
+      recipePath: 'preview.yaml'
     });
     expect(await fs.readFile(
-      path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'),
+      path.join(worktree.worktreePath, 'preview.yaml'),
       'utf8'
     )).toBe(generated.draft!.yaml);
     const snapshot = await scenario.store.snapshot();
-    expect(snapshot.previewPlans).toHaveLength(1);
-    expect(snapshot.previewApprovals).toEqual([]);
+    expect((await scenario.service.getApplicationPreview({ taskId: task.id })).status?.active).toBeUndefined();
     expect(snapshot.previewGenerations).toEqual([]);
     expect(generationStatuses).toEqual([
       'GENERATING',

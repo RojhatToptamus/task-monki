@@ -14,6 +14,7 @@ import type {
 import { humanizeEnum } from '../../model/formatting';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { StatusGlyph } from '../StatusBadge';
+import { message } from './previewPresentation';
 
 export function PreviewRecipeGenerationModal({
   taskId,
@@ -32,7 +33,7 @@ export function PreviewRecipeGenerationModal({
   state: PreviewRecipeGenerationSnapshot;
   returnFocus?: HTMLElement;
   onClose(): void;
-  onRegenerate(): Promise<void>;
+  onRegenerate(clarification?: string): Promise<void>;
   onValidate(taskId: string, draftId: string, yaml: string): Promise<PreviewRecipeValidation>;
   onAccept(
     taskId: string,
@@ -53,10 +54,15 @@ export function PreviewRecipeGenerationModal({
   const [accepting, setAccepting] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [regenerateArmed, setRegenerateArmed] = useState(false);
+  const [clarification, setClarification] = useState('');
+  const [actionError, setActionError] = useState<string>();
   const busy = accepting || discarding;
   const generating = state.status === 'GENERATING';
-  const report = state.report ?? state.draft?.report;
-  const compact = !state.draft && !report;
+  const report = state.draft?.report ?? state.report;
+  const questions = state.report?.unresolvedDecisions ?? [];
+  const compact = !state.draft;
+  const needsInput = state.status === 'NEEDS_INPUT';
+  const answeringQuestions = !generating && questions.length > 0;
 
   useEffect(() => {
     if (state.draft && state.draft.id !== loadedDraftId) {
@@ -65,6 +71,7 @@ export function PreviewRecipeGenerationModal({
       setEdited(false);
       setValidation(state.draft.validation);
       setRegenerateArmed(false);
+      setClarification('');
     }
   }, [loadedDraftId, state.draft]);
 
@@ -86,12 +93,15 @@ export function PreviewRecipeGenerationModal({
     const draft = state.draft;
     if (!draft || accepting || generating) return;
     setAccepting(true);
+    setActionError(undefined);
     try {
       const nextValidation = await onValidate(taskId, draft.id, yaml);
       setValidation(nextValidation);
       if (nextValidation.status !== 'VALID') return;
       await onAccept(taskId, draft.id, yaml);
       onClose();
+    } catch (cause) {
+      setActionError(message(cause));
     } finally {
       setAccepting(false);
     }
@@ -105,13 +115,21 @@ export function PreviewRecipeGenerationModal({
     }
     setValidation(undefined);
     setRegenerateArmed(false);
-    await onRegenerate();
+    setActionError(undefined);
+    try {
+      await onRegenerate(clarification.trim() || undefined);
+    } catch (cause) {
+      setActionError(message(cause));
+    }
   };
 
   const discard = async () => {
     setDiscarding(true);
+    setActionError(undefined);
     try {
       await onDiscard();
+    } catch (cause) {
+      setActionError(message(cause));
     } finally {
       setDiscarding(false);
     }
@@ -134,10 +152,9 @@ export function PreviewRecipeGenerationModal({
       >
         <header className="tm-preview-recipe-review__head">
           <div>
-            <span className="tm-preview-recipe-review__eyebrow">Agent draft</span>
-            <h3 id="preview-recipe-generation-title">Review Preview configuration</h3>
+            <h3 id="preview-recipe-generation-title">{needsInput ? 'Complete preview setup' : 'Preview configuration'}</h3>
             <p>
-              Nothing is written until you accept. Approval and Start remain separate.
+              Review and save the draft before approving execution.
             </p>
           </div>
           <button
@@ -162,10 +179,33 @@ export function PreviewRecipeGenerationModal({
           </div>
         ) : null}
 
-        {state.status === 'FAILED' || state.status === 'NEEDS_INPUT' ? (
+        {state.status === 'FAILED' ? (
           <div className="tm-preview-recipe-message" role="status">
-            <strong>{state.status === 'NEEDS_INPUT' ? 'More evidence is needed' : 'Draft not generated'}</strong>
-            <p>{state.message}</p>
+            <p role="alert">{state.message}</p>
+          </div>
+        ) : null}
+
+        {answeringQuestions && report ? (
+          <div className="tm-preview-recipe-questions">
+            <ul id="preview-generation-questions">
+              {questions.map((question, index) => <li key={index}>{question}</li>)}
+            </ul>
+            <label className="field">
+              <span id="preview-generation-details-label">Setup details</span>
+              <textarea
+                value={clarification}
+                onChange={event => {
+                  setClarification(event.target.value);
+                  setActionError(undefined);
+                }}
+                aria-labelledby="preview-generation-details-label"
+                aria-describedby="preview-generation-questions preview-generation-private-inputs"
+                maxLength={4000}
+                rows={3}
+                disabled={busy}
+              />
+              <small id="preview-generation-private-inputs">Use secret reference names here. Store values in Settings → Secrets.</small>
+            </label>
           </div>
         ) : null}
 
@@ -177,7 +217,7 @@ export function PreviewRecipeGenerationModal({
                   <strong>Complete YAML</strong>
                   <span>{edited ? 'Edited' : 'Generated'} · {yaml.split('\n').length} lines</span>
                 </div>
-                <code>.taskmonki/preview.yaml</code>
+                <code>preview.yaml</code>
               </div>
               <textarea
                 aria-label="Preview recipe YAML"
@@ -200,12 +240,12 @@ export function PreviewRecipeGenerationModal({
               ) : null}
             </section>
             {report ? (
-              <PreviewRecipeGenerationReportView report={report} originalDraftOnly={edited} />
+              <PreviewRecipeGenerationReportView report={report} originalDraftOnly={edited} omitQuestions={answeringQuestions} />
             ) : null}
           </div>
-        ) : report ? (
-          <PreviewRecipeGenerationReportView report={report} />
         ) : null}
+
+        {actionError ? <p className="form-error tm-preview-recipe-action-error" role="alert">{actionError}</p> : null}
 
         <footer className="tm-preview-recipe-review__footer">
           <div className="tm-preview-recipe-review__secondary">
@@ -243,17 +283,17 @@ export function PreviewRecipeGenerationModal({
                   disabled={busy || generating}
                   onClick={() => void validateAndAccept()}
                 >
-                  {accepting ? 'Checking…' : 'Accept & save recipe'}
+                  {accepting ? 'Checking…' : 'Save configuration'}
                 </button>
               </>
             ) : !generating ? (
               <button
                 type="button"
                 className="primary-button"
-                disabled={busy}
+                disabled={busy || (needsInput && !clarification.trim())}
                 onClick={() => void regenerate()}
               >
-                {state.status === 'EMPTY' ? 'Generate draft' : 'Try again'}
+                {needsInput ? 'Continue' : state.status === 'EMPTY' ? 'Generate draft' : 'Try again'}
               </button>
             ) : null}
           </div>
@@ -266,10 +306,12 @@ export function PreviewRecipeGenerationModal({
 
 function PreviewRecipeGenerationReportView({
   report,
-  originalDraftOnly = false
+  originalDraftOnly = false,
+  omitQuestions = false
 }: {
   report: import('../../../shared/contracts').PreviewRecipeGenerationReport;
   originalDraftOnly?: boolean;
+  omitQuestions?: boolean;
 }) {
   const sections = [
     ['Evidence', report.evidence.map((item) => `${item.path} — ${item.finding}`)],
@@ -278,7 +320,7 @@ function PreviewRecipeGenerationReportView({
     ['Public environment', report.publicEnvironmentDecisions.map((item) =>
       `${item.key} — ${humanizeEnum(item.decision)}: ${item.reason}`
     )],
-    ['Unresolved', report.unresolvedDecisions]
+    ['Unresolved', omitQuestions ? [] : report.unresolvedDecisions]
   ] as const;
   return (
     <aside className="tm-preview-recipe-report" aria-label="Generation report">

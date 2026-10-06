@@ -1,3 +1,5 @@
+import { SettingsPane } from './SettingsPane';
+import { PreviewSecretsSettings } from './preview/PreviewSecretsSettings';
 import { AgentProfilesSettings, type AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import {
   useCallback,
@@ -48,7 +50,7 @@ import { DisclosureChevron } from './DisclosureChevron';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
-type SettingsSection = 'profiles' | 'agents' | 'models' | 'tools' | 'updates' | 'appearance';
+type SettingsSection = 'profiles' | 'agents' | 'models' | 'tools' | 'updates' | 'appearance' | 'secrets';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'agents', label: 'Agents' },
@@ -56,10 +58,12 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'models', label: 'Models' },
   { id: 'tools', label: 'Tools' },
   { id: 'updates', label: 'Updates' },
-  { id: 'appearance', label: 'Appearance' }
+  { id: 'appearance', label: 'Appearance' },
+  { id: 'secrets', label: 'Secrets' }
 ];
 
 export interface SettingsViewProps extends AgentProfilesSettingsActions {
+  previewSecretContext?: { title: string; references: string[]; onReturn(): void };
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   onPreviewThemePreset?(themePreset: ThemePreset | null): void;
@@ -83,7 +87,7 @@ export interface SettingsViewProps extends AgentProfilesSettingsActions {
 }
 
 export function SettingsView(props: SettingsViewProps) {
-  const [section, setSection] = useState<SettingsSection>('agents');
+  const [section, setSection] = useState<SettingsSection>(props.previewSecretContext ? 'secrets' : 'agents');
 
   return (
     <div className="tm-settings">
@@ -117,6 +121,7 @@ export function SettingsView(props: SettingsViewProps) {
         {section === 'tools' ? <ToolSettings {...props} /> : null}
         {section === 'updates' ? <UpdateSettings {...props} /> : null}
         {section === 'appearance' ? <AppearanceSettings {...props} /> : null}
+        {section === 'secrets' ? <PreviewSecretsSettings context={props.previewSecretContext} /> : null}
       </div>
     </div>
   );
@@ -1091,37 +1096,6 @@ function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark'
   );
 }
 
-function SettingsPane({
-  id,
-  title,
-  detail,
-  action,
-  children
-}: {
-  id: SettingsSection;
-  title: string;
-  detail: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section
-      id={`settings-panel-${id}`}
-      className="tm-settings__pane"
-      role="tabpanel"
-      aria-labelledby={`settings-tab-${id}`}
-    >
-      <header className="tm-settings__pane-head">
-        <div>
-          <h2>{title}</h2>
-          <p>{detail}</p>
-        </div>
-        {action}
-      </header>
-      {children}
-    </section>
-  );
-}
 
 function SettingsSubsection({ title, children }: { title: string; children: ReactNode }) {
   return (

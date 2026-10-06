@@ -1,3 +1,4 @@
+import { restoreLegacyPreviewSchema } from '../../../testSupport/legacyPreviewSchema';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -110,6 +111,7 @@ describe('ApplicationPersistence', () => {
       providerParentSessionId: child.providerSessionId, relationshipState: 'RESOLVED',
       subagentStatus: 'RUNNING' };
     const legacy = new DatabaseSync(paths.databasePath);
+    restoreLegacyPreviewSchema(legacy);
     legacy.prepare('UPDATE runtime_sessions SET role = ?, payload_json = ? WHERE id = ?')
       .run('SUBAGENT', JSON.stringify(corrupted), root.id);
     legacy.exec(`DROP TABLE task_instructions; PRAGMA user_version = 5;
@@ -176,6 +178,7 @@ describe('ApplicationPersistence', () => {
     await close(persistence);
 
     const legacy = new DatabaseSync(paths.databasePath);
+    restoreLegacyPreviewSchema(legacy);
     const payload = JSON.parse(String(legacy.prepare('SELECT payload_json FROM tasks WHERE id = ?').get(task.id)!.payload_json));
     payload.projection.agentReview = {
       status: 'PASSED', runId: reviews[1]!.run.id,
@@ -224,7 +227,7 @@ describe('ApplicationPersistence', () => {
     const paths = resolveApplicationPersistencePaths(profileRoot);
     await fs.mkdir(paths.storageRoot, { mode: 0o700 });
     const { agentProfiles: _profiles, ...settings } = structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS);
-    const legacy = { ...settings, schemaVersion: 12, theme: 'light', showMascot: false };
+    const legacy = { ...settings, schemaVersion: 12, theme: 'light', showMascot: false, previewGateway: { port: 41234 } };
     const oldDatabase = new DatabaseSync(paths.databasePath);
     try {
       // Build the legacy fixture transactionally, as AppDatabase applies migrations.
@@ -242,7 +245,7 @@ describe('ApplicationPersistence', () => {
     await fs.chmod(paths.databasePath, 0o600);
     let persistence = await open(profileRoot);
     try {
-      expect(await persistence.settings.get()).toEqual({ ...legacy, schemaVersion: 13, agentProfiles: [] });
+      expect(await persistence.settings.get()).toEqual({ ...settings, schemaVersion: 14, theme: 'light', showMascot: false, agentProfiles: [] });
       const backups = await fs.readdir(paths.backupsRoot);
       expect(backups).toHaveLength(1);
       const backup = await persistence.backups.verifyBackup(backups[0]!);
