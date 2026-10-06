@@ -108,10 +108,10 @@ workspace configuration. Neither operation edits a historical capture.
 
 ## Packaging and upgrade
 
-The desktop package includes Previewhost outside ASAR. The main process supplies
-Electron's executable in Node mode and the unpacked `supervisor.js` path; there
-is no separate global CLI or MCP daemon dependency. The native Keychain helper
-ships with that same package.
+Previewhost is installed from npm through the application dependency and lockfile.
+The desktop package unpacks it from ASAR so its supervisor and native Keychain
+helper can execute. The main process supplies Electron's executable in Node mode
+and the unpacked `supervisor.js` path. No global CLI or MCP daemon is required.
 
 Database migration 10 removes superseded Task Monki runtime tables and contracts.
 The automatic pre-upgrade backup retains old metadata. The migration refuses to

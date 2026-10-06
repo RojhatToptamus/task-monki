@@ -12,7 +12,6 @@ import type {
 
 export interface ApplicationPreviewSnapshot {
   name: string;
-  projectDirectory: string;
   hasConfigurationFile: boolean;
   /** Exact-source attempts belong to Design publication and cannot be edited in place. */
   designAttempts?: string[];

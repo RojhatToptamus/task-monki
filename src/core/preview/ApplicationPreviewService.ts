@@ -125,19 +125,21 @@ export class ApplicationPreviewService {
       if (!(error instanceof PreviewError && error.code === 'NOT_FOUND'))
         throw error;
     }
-    const file = await resolvePreviewFile(worktree.worktreePath);
-    const hasConfigurationFile = await fs.lstat(file).then(
-      () => true,
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === 'ENOENT') return false;
-        throw error;
-      }
+    const configurationFiles = await Promise.all(
+      ['preview.yaml', 'preview.yml'].map((name) =>
+        fs.lstat(path.join(worktree.worktreePath, name)).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return false;
+            throw error;
+          }
+        )
+      )
     );
     const approval = this.approvals.get(name);
     return {
       name,
-      projectDirectory: worktree.worktreePath,
-      hasConfigurationFile,
+      hasConfigurationFile: configurationFiles.some(Boolean),
       status,
       ...(approval
         ? {
@@ -263,11 +265,6 @@ export class ApplicationPreviewService {
     }
     await this.options.openHost?.openExternal(url);
     return { url, opened: !!this.options.openHost };
-  }
-
-  async stopWorktree(worktree: WorktreeRecord): Promise<void> {
-    const { status, name } = await this.read(worktree);
-    if (status) await this.owner().stop(name);
   }
 
   async retireWorktree(worktree: WorktreeRecord): Promise<void> {

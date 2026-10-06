@@ -175,6 +175,7 @@ describe('Import existing work', () => {
     finally { await reopened.close(); }
   });
 
+  // Both previews collect Git diff statistics for all 105 untracked files.
   it('previews non-main branches, renamed and binary files, bounded lists, and unfinished Git operations', async () => {
     const s = await scenarios.create();
     await git(s.repositoryPath, ['branch', '-m', 'trunk']);
@@ -201,7 +202,7 @@ describe('Import existing work', () => {
     await expect(s.service.previewImport({ ...request, baseRef: 'HEAD' })).resolves.toMatchObject({
       unavailableReason: 'Finish the current Git operation and resolve conflicts before importing.'
     });
-  });
+  }, 15_000);
 
   it('lists unavailable checkouts and revalidates the selected branch before importing', async () => {
     const s = await scenarios.create();

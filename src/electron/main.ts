@@ -1123,7 +1123,6 @@ void app.whenReady().then(async () => {
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
-      previewLauncherExecPath: process.execPath,
       designSkillRoot: resolveDesignSkillPackRoot({
         isPackaged: app.isPackaged,
         resourcesPath: process.resourcesPath,

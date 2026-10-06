@@ -48,7 +48,8 @@ the runtime exposes the new application.
 **Activity** shows services, setup jobs, and their actual state. A row's **Logs**
 action selects that exact attempt and service. An update failure can coexist
 with a serving application; **Open app** continues to open that application.
-Expand **Source folders** to see each folder and its location. **Open folder**
+Expand **Source folders** to see compact rows with folder names and shortened
+locations. Hover a name or location for the full path. **Open folder**
 opens it in the file manager. The folder menu offers installed editors, including
 VS Code, and **Copy path** for the full location.
 

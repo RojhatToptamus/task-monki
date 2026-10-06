@@ -33,14 +33,3 @@ export function assertPathWithin(root: string, candidate: string, context = 'Pat
     throw new Error(`${context} escapes its owned root: ${candidate}`);
   }
 }
-
-export async function resolveContainedProspectivePath(
-  root: string,
-  relativePath: string,
-  context = 'Path'
-): Promise<string> {
-  const canonicalRoot = await canonicalProspectivePath(root);
-  const canonicalCandidate = await canonicalProspectivePath(path.join(root, relativePath));
-  assertPathWithin(canonicalRoot, canonicalCandidate, context);
-  return canonicalCandidate;
-}

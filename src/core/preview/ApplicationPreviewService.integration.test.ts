@@ -89,6 +89,28 @@ it('keeps synthetic values out of observations and logs and requires each worktr
   await service.secrets.lock();
 }, 30_000);
 
+it('keeps runtime observation, retained restart, and cleanup available when default configuration files conflict', async () => {
+  const { service, worktree, approveAndWait } = await fixture();
+  const tree = await worktree('retained application');
+  const pending = await service.start(tree, 'file');
+  const ready = await approveAndWait(tree, pending.status!.candidate!.id);
+  await fs.copyFile(path.join(tree.worktreePath, 'preview.yaml'), path.join(tree.worktreePath, 'preview.yml'));
+  await expect(service.read(tree)).resolves.toMatchObject({
+    hasConfigurationFile: true,
+    status: { active: { id: ready.id, state: 'ready' } }
+  });
+  await expect(service.start(tree, 'file')).rejects.toThrow('Both preview.yaml and preview.yml exist');
+  expect(await (await fetch(ready.url!)).text()).toBe('retained application');
+  await service.owner().stop(service.name(tree));
+  await expect(fetch(ready.url!)).rejects.toThrow();
+  const restarted = await service.start(tree, 'retained');
+  const restored = await approveAndWait(tree, restarted.status!.candidate!.id);
+  expect(await (await fetch(restored.url!)).text()).toBe('retained application');
+  await service.retireWorktree(tree);
+  await expect(fetch(restored.url!)).rejects.toThrow();
+  expect((await service.read(tree)).status).toBeUndefined();
+}, 30_000);
+
 it('blocks worktree deletion while another application consumes its source', async () => {
   const { service, worktree, approveAndWait } = await fixture();
   const source = await worktree('shared backend');
@@ -99,7 +121,7 @@ it('blocks worktree deletion while another application consumes its source', asy
   const ready = await approveAndWait(consumer, pending.status!.candidate!.id);
   await expect(service.retireWorktree(source)).rejects.toThrow(/source.*in use|uses this source/i);
   expect(await (await fetch(ready.url!)).text()).toBe('shared backend');
-  await service.stopWorktree(consumer);
+  await service.owner().stop(service.name(consumer));
   await service.retireWorktree(source);
   expect(service.owner().sourceRoots()).not.toContain(await fs.realpath(source.worktreePath));
 });

@@ -65,7 +65,6 @@ beforeEach(() => vi.resetAllMocks());
 it('reviews an existing configuration before its first start and requires explicit approval', async () => {
   let snapshot: ApplicationPreviewSnapshot = {
     name: 'fixture',
-    projectDirectory: '/fixture',
     hasConfigurationFile: true
   };
   api.getApplicationPreview.mockImplementation(async () => snapshot);

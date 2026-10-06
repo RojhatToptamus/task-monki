@@ -342,7 +342,6 @@ export class TaskManagerService {
       openTargetHost?: OpenTargetHost;
       previewRecipeGenerator?: PreviewRecipeGenerationService;
       previewRoot?: string;
-      previewLauncherExecPath?: string;
       previewOpenHost?: PreviewUrlHost;
       previewEnabled?: boolean;
       allowAgentNetworkAccess?: boolean;
@@ -389,7 +388,7 @@ export class TaskManagerService {
     this.applications = new ApplicationPreviewService({
       root: path.join(options.previewRoot ?? process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(store.getStorageRoot(), 'previews'), 'previewhost'),
       supervisor: {
-        executable: options.previewLauncherExecPath ?? process.execPath,
+        executable: process.execPath,
         module: path.join(path.dirname(require.resolve('previewhost')), 'supervisor.js').replace(/\.asar([/\\])/, '.asar.unpacked$1'),
         env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : undefined
       },

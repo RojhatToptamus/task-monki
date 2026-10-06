@@ -4,6 +4,7 @@ import { Ellipsis, Folder } from 'lucide-react';
 import type { OpenTargetRef } from '../../../shared/contracts';
 import { taskManagerApi } from '../../api/taskManagerClient';
 import { openTargetMenuPosition } from '../../model/openTargetMenu';
+import { repositoryDisplayPath, repositoryName } from '../../model/repositories';
 import { DisclosureChevron } from '../DisclosureChevron';
 import { OpenTargetContextMenu } from '../OpenTargetMenu';
 import { message } from './previewPresentation';
@@ -27,7 +28,7 @@ export function ApplicationSourceFolders({ taskId, attemptId, sources }: {
 }
 
 function SourceFolder({ source, target }: { source: string; target: OpenTargetRef }) {
-  const name = source.split(/[\\/]/).filter(Boolean).at(-1) ?? source;
+  const name = repositoryName(source);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string>();
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number }>();
@@ -51,9 +52,10 @@ function SourceFolder({ source, target }: { source: string; target: OpenTargetRe
     <li className="tm-preview-source" aria-label={name}>
       <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
       <div className="tm-preview-source__location">
-        <strong title={name}>{name}</strong>
-        <code title={source}>{source}</code>
-        {error ? <p className="tm-application-preview__error" role="alert">{error}</p> : null}
+        <strong title={source}>{name}</strong>
+        {error
+          ? <p className="tm-application-preview__error" role="alert">{error}</p>
+          : <code title={source}>{repositoryDisplayPath(source)}</code>}
       </div>
       <div className="tm-preview-source__actions">
         <button type="button" className="ghost-button" disabled={opening}
