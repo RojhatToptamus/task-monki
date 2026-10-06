@@ -54,11 +54,11 @@ jobs:
         run: >-
           npm exec vitest -- run
           src/core/app/TaskManagerService.design.integration.test.ts
-          src/core/app/TaskManagerService.preview.integration.test.ts
-          src/core/preview/PreviewReconciler.integration.test.ts
-      - name: Run macOS native launcher tests
+          src/core/app/TaskManagerService.applicationPreview.integration.test.ts
+          src/core/design/DesignPreviewService.integration.test.ts
+      - name: Run macOS application runtime tests
         if: runner.os == 'macOS'
-        run: npm exec vitest -- run src/core/preview/runtime/NativeLauncherHost.integration.test.ts
+        run: npm exec vitest -- run src/core/preview/ApplicationPreviewService.integration.test.ts
       - name: Run Windows storage integration tests
         if: runner.os == 'Windows'
         run: npm exec vitest -- run src/core/storage/SqliteTaskStore.integration.test.ts
@@ -81,9 +81,6 @@ jobs:
       - name: Verify packaged owned-process launch
         if: runner.os == 'macOS'
         run: npm run verify:packaged-owned-process
-      - name: Verify packaged Preview launcher
+      - name: Verify packaged application runtime and secrets
         if: runner.os == 'macOS'
         run: npm run verify:packaged-preview
-      - name: Verify packaged private-input persistence
-        if: runner.os == 'macOS'
-        run: npm run verify:packaged-preview-safe-storage

@@ -263,7 +263,7 @@ jobs:
         run: |
           npm run verify:packaged-runtime
           npm run verify:packaged-owned-process
-          npm run verify:packaged-preview-safe-storage
+          npm run verify:packaged-preview
       - name: Submit to Apple and wait
         id: notary
         shell: bash
