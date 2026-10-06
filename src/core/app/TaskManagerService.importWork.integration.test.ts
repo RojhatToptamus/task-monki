@@ -339,11 +339,14 @@ describe('Import existing work', () => {
     const initial = await s.store.snapshot();
     const changedFile = path.join(s.repositoryPath, 'external.txt');
     await fs.writeFile(changedFile, 'before capture\n');
+    const replacement = path.join(s.rootDir, 'external-replacement.txt');
+    await fs.writeFile(replacement, 'changed during capture\n');
     const executeGit = gitCli.git;
     const externalEdit = vi.spyOn(gitCli, 'git').mockImplementation(async (cwd, args, options) => {
       const result = await executeGit(cwd, args, options);
       if (args.length === 2 && args[0] === 'diff' && args[1] === `${initial.gitSnapshots[0]!.baseSha}..HEAD`) {
-        await fs.writeFile(changedFile, 'changed during capture\n');
+        // Preserve Git's open file while changing the checkout, as an atomic editor save does.
+        await fs.rename(replacement, changedFile);
       }
       return result;
     });
