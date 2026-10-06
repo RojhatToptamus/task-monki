@@ -51,6 +51,11 @@ The Linux AppImage is unsigned. Its update metadata and SHA-512 download digest
 detect corrupted or replaced update bytes. The GitHub Release checks protect
 the published asset set. They do not provide a Linux publisher signature.
 
+The ARM64 macOS release requires an ARM64 slice in every native binary.
+Universal dependencies are supported. Verification checks every shipped slice
+for signing identity, secure timestamp, Hardened Runtime, and allowed
+entitlements. Intel-only binaries are rejected.
+
 ## Release controls
 
 The protected `release` environment holds only the macOS secrets:

@@ -1,11 +1,12 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { createIgnore, isJitCode, signingOptionsForFile } = require('./trusted-mac-sign.cjs');
+const { createIgnore, isJitCode, signingOptionsForFile, releaseArchitectures } = require('./trusted-mac-sign.cjs');
 
 const app = path.join('/tmp', 'Task Monki.app');
 const testDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'trusted-mac-sign-test-'));
@@ -73,3 +74,17 @@ function chromeHelper(name) {
     `${name}.app`
   );
 }
+
+describe.skipIf(process.platform !== 'darwin')('trusted macOS architecture policy', () => {
+  it('accepts native and universal dependencies but rejects Intel-only code', async () => {
+    const universal = path.join(path.dirname(require.resolve('previewhost')), 'native', 'keychain');
+    const arm = path.join(testDirectory, 'keychain-arm64');
+    const intel = path.join(testDirectory, 'keychain-x86_64');
+    execFileSync('lipo', [universal, '-thin', 'arm64', '-output', arm]);
+    execFileSync('lipo', [universal, '-thin', 'x86_64', '-output', intel]);
+
+    expect(await releaseArchitectures(universal)).toEqual(expect.arrayContaining(['x86_64', 'arm64']));
+    expect(await releaseArchitectures(arm)).toEqual(['arm64']);
+    await expect(releaseArchitectures(intel)).rejects.toThrow('has no arm64 slice');
+  });
+});

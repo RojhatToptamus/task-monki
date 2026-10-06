@@ -11,7 +11,7 @@ import { gunzip } from 'node:zlib';
 const execFileAsync = promisify(execFile);
 const gunzipAsync = promisify(gunzip);
 const require = createRequire(import.meta.url);
-const { isJitCode } = require('./trusted-mac-sign.cjs');
+const { isJitCode, releaseArchitectures } = require('./trusted-mac-sign.cjs');
 const YAML = require('yaml');
 
 const AUTHORITY = 'Developer ID Application: rojhat toptamus (ZD35XP4V7D)';
@@ -201,28 +201,27 @@ async function verifyApplication(appPath, expected) {
   let entitlementIndex = 0;
   for (const codeObject of codeObjects) {
     await exec('codesign', ['--verify', '--strict', '--verbose=2', codeObject.path]);
-    await assertSignature(codeObject.path, { requireRuntime: true });
-    const entitlements = await readEntitlements(
-      codeObject.path,
-      expected.temporaryDirectory,
-      entitlementIndex++
-    );
-    const expectedKeys = isJitCode(codeObject.path) ? [ALLOW_JIT] : [];
-    const actualKeys = Object.keys(entitlements).sort();
-    if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
-      const relativePath = path.relative(appPath, codeObject.path) || path.basename(appPath);
-      throw new Error(
-        `${relativePath} has unexpected entitlements: ${actualKeys.join(', ') || 'none'}.`
+    const architectures = codeObject.machO
+      ? await releaseArchitectures(codeObject.path)
+      : [undefined];
+    for (const architecture of architectures) {
+      await assertSignature(codeObject.path, { requireRuntime: true, architecture });
+      const entitlements = await readEntitlements(
+        codeObject.path,
+        expected.temporaryDirectory,
+        entitlementIndex++,
+        architecture
       );
-    }
-    if (expectedKeys.length === 1 && entitlements[ALLOW_JIT] !== true) {
-      throw new Error(`${codeObject.path} does not enable its required JIT entitlement.`);
-    }
-    if (codeObject.machO) {
-      const { stdout } = await exec('lipo', ['-archs', codeObject.path]);
-      const architectures = stdout.trim().split(/\s+/u).filter(Boolean);
-      if (architectures.length !== 1 || architectures[0] !== 'arm64') {
-        throw new Error(`${codeObject.path} is not arm64-only: ${architectures.join(', ')}.`);
+      const expectedKeys = isJitCode(codeObject.path) ? [ALLOW_JIT] : [];
+      const actualKeys = Object.keys(entitlements).sort();
+      if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+        const relativePath = path.relative(appPath, codeObject.path) || path.basename(appPath);
+        throw new Error(
+          `${relativePath} has unexpected entitlements: ${actualKeys.join(', ') || 'none'}.`
+        );
+      }
+      if (expectedKeys.length === 1 && entitlements[ALLOW_JIT] !== true) {
+        throw new Error(`${codeObject.path} does not enable its required JIT entitlement.`);
       }
     }
   }
@@ -362,8 +361,12 @@ async function isMachO(filePath) {
   }
 }
 
-async function assertSignature(target, { requireRuntime }) {
-  const { stderr } = await exec('codesign', ['--display', '--verbose=4', target]);
+async function assertSignature(target, { requireRuntime, architecture }) {
+  const { stderr } = await exec('codesign', [
+    '--display', '--verbose=4',
+    ...(architecture ? ['--architecture', architecture] : []),
+    target
+  ]);
   if (!stderr.split('\n').includes(`Authority=${AUTHORITY}`)) {
     throw new Error(`${target} has the wrong signing authority.`);
   }
@@ -386,12 +389,13 @@ async function assertSignatureIdentifier(target, expected) {
   }
 }
 
-async function readEntitlements(target, temporaryDirectory, index) {
+async function readEntitlements(target, temporaryDirectory, index, architecture) {
   const { stdout } = await exec('codesign', [
     '--display',
     '--entitlements',
     '-',
     '--xml',
+    ...(architecture ? ['--architecture', architecture] : []),
     target
   ]);
   if (!stdout.includes('<plist')) return {};
