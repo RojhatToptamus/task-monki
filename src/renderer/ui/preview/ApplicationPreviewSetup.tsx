@@ -66,10 +66,9 @@ export function ApplicationPreviewSetup(props: {
   };
   return (
     <section className="tm-preview-setup" aria-label="Preview setup">
-      <h3 className="tm-panel__title">Configure your application</h3>
+      <h3 className="tm-panel__title tm-panel__title--flush">Configure your application</h3>
       <p className="tm-application-preview__notice">
-        Start a development command or serve a static folder. Use the agent for
-        a multi-service application.
+        Run a development command or serve a static folder.
       </p>
       <div className="tm-preview-workspace__actions">
         <button

@@ -128,7 +128,7 @@ export function PreviewDialog({
             aria-label="Close"
             title="Close"
           >
-            <X size={16} aria-hidden="true" />
+            <X size={16} strokeWidth={1.5} aria-hidden="true" />
           </button>
         </header>
         {onSubmit ? <form onSubmit={onSubmit}>{contents}</form> : contents}

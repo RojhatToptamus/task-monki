@@ -129,7 +129,7 @@ export function PreviewSecretsSettings({
             </button>
             <ActionMenu
               label="Secret storage actions"
-              trigger={<Ellipsis size={16} aria-hidden="true" />}
+              trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
               items={[
                 {
                   label: 'Lock storage',
@@ -190,11 +190,11 @@ export function PreviewSecretsSettings({
       ) : status.state !== 'unlocked' ? (
         <div className="tm-settings__list">
           <div className="tm-application-secrets__empty">
-            <LockKeyhole size={20} aria-hidden="true" />
-            <p>
-              {status.state === 'new'
+            <LockKeyhole size={20} strokeWidth={1.5} aria-hidden="true" />
+            <p role="status">
+              {status.warning ?? (status.state === 'new'
                 ? 'Store secrets once and use their references in your previews.'
-                : 'Unlock storage to manage your secret references.'}
+                : 'Unlock storage to manage your secret references.')}
             </p>
             <button
               ref={primaryAction}
@@ -281,7 +281,7 @@ export function PreviewSecretsSettings({
                   </button>
                   <ActionMenu
                     label={`Actions for ${id}`}
-                    trigger={<Ellipsis size={16} aria-hidden="true" />}
+                    trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
                     items={[
                       {
                         label: 'Delete secret…',
@@ -324,7 +324,7 @@ export function PreviewSecretsSettings({
           </div>
         </>
       )}
-      {status?.warning ? (
+      {status?.state === 'unlocked' && status.warning ? (
         <p role="status" className="form-warning">
           {status.warning}
         </p>
@@ -518,7 +518,7 @@ export function PreviewSecretsSettings({
                 Cancel
               </button>
               <button
-                className="primary-button"
+                className="danger-button"
                 disabled={busy}
                 onClick={() =>
                   void run(async () => {

@@ -14,9 +14,10 @@ the task's current preview. Tasks without a runtime instance are not listed.
 
 ## Configure and start
 
-Open the task's **Preview** tab. If no configuration exists, choose **Configure**,
-then **Add application** for a development command or static folder. For a
-multi-service app, use **Generate with agent** or edit root `preview.yaml`.
+Open the task's **Preview** tab and choose **Configure preview** for the first
+start. Review an existing configuration, or choose **Add application** for a
+development command or static folder. For a multi-service app, use
+**Generate with agent** or edit root `preview.yaml`.
 The agent proposes configuration for review; it cannot approve execution.
 
 A minimal file for a server that reads `PORT` and serves `/ready` is:

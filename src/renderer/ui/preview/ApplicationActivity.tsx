@@ -53,9 +53,8 @@ export function ApplicationActivity({
     <>
       {!attempts.length ? (
         <div className="tm-application-preview__empty">
-          <h3>Set up an application preview</h3>
           <p>Configure services and source folders to run this worktree.</p>
-          <button className="outline-button" onClick={onConfigure}>
+          <button className="primary-button" onClick={onConfigure}>
             Configure preview
           </button>
         </div>
@@ -70,7 +69,7 @@ export function ApplicationActivity({
             key={attempt.id}
             aria-label={serving ? 'Serving services' : 'Latest services'}
           >
-            <h3 className="tm-panel__title">
+            <h3 className="tm-panel__title tm-panel__title--flush">
               Services ·{' '}
               {serving
                 ? 'Serving'
@@ -191,7 +190,7 @@ export function ApplicationActivity({
       })}
       {retainedData.length ? (
         <section aria-label="Retained data">
-          <h3 className="tm-panel__title">Retained data</h3>
+          <h3 className="tm-panel__title tm-panel__title--flush">Retained data</h3>
           <div className="tm-application-preview__table-wrap">
             <table className="tm-application-preview__table">
               <thead>
@@ -223,7 +222,7 @@ export function ApplicationActivity({
       ) : null}
       {jobs.length && latest ? (
         <section aria-label="Setup jobs">
-          <h3 className="tm-panel__title">
+          <h3 className="tm-panel__title tm-panel__title--flush">
             Setup jobs ·{' '}
             {latest.id === status?.active?.id ? 'Serving' : 'Latest attempt'}
           </h3>

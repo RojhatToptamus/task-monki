@@ -215,7 +215,7 @@ export function ApplicationLogs({
         </button>
         <ActionMenu
           label="Log actions"
-          trigger={<Ellipsis size={16} aria-hidden="true" />}
+          trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
           items={[{ label: 'Clear view', onSelect: () => clearView.current() }]}
         />
       </div>

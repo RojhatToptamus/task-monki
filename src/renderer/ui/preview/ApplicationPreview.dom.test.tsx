@@ -82,11 +82,8 @@ it('reviews an existing configuration before its first start and requires explic
   });
   api.approveApplicationPreview.mockResolvedValue(undefined);
   render(<ApplicationPreviewPanel taskId="task" />);
-  await screen.findByRole('button', { name: 'Start' });
-  fireEvent.click(screen.getByRole('tab', { name: 'Configuration' }));
-  expect(
-    screen.getByRole('heading', { name: 'Configuration ready' })
-  ).toBeTruthy();
+  fireEvent.click(await screen.findByRole('button', { name: 'Configure preview' }));
+  await screen.findByRole('heading', { name: 'Configuration ready' });
   expect(screen.queryByRole('button', { name: 'Start' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Review and start' }));
   await screen.findByRole('dialog', { name: 'Review and start' });

@@ -126,10 +126,6 @@ export function ApplicationPreviewPanel({
   const serving = status?.active;
   const latest = status?.candidate ?? status?.latest;
   const initialConfiguration = !!snapshot && !serving && !latest;
-  const configurationEntry =
-    initialConfiguration &&
-    section === 'Configuration' &&
-    (snapshot.hasConfigurationFile || !!setup);
   const presentation = applicationPreviewStatus(status, !!snapshot?.approval);
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -237,24 +233,18 @@ export function ApplicationPreviewPanel({
                 ? 'Retry cleanup'
                 : 'Stop'}
             </button>
-          ) : !configurationEntry ? (
+          ) : status?.latest ? (
             <button
               className="primary-button"
               disabled={busy || !snapshot || status?.busy}
-              onClick={() =>
-                !status?.latest && !snapshot?.hasConfigurationFile
-                  ? selectSection('Configuration')
-                  : start()
-              }
+              onClick={start}
             >
-              {!status?.latest && !snapshot?.hasConfigurationFile
-                ? 'Configure'
-                : 'Start'}
+              Start
             </button>
           ) : null}
           <ActionMenu
             label="More preview actions"
-            trigger={<Ellipsis size={16} aria-hidden="true" />}
+            trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
             items={[
               {
                 label: serving
@@ -492,7 +482,7 @@ export function ApplicationPreviewPanel({
                 Cancel
               </button>
               <button
-                className="primary-button"
+                className="danger-button"
                 disabled={busy}
                 onClick={() =>
                   void run(async () => {
