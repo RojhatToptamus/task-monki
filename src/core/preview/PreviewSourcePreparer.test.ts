@@ -304,8 +304,11 @@ describe('PreviewSourcePreparer', () => {
     ).rejects.toThrow('aggregate limit');
   });
 
-  it('cleans a canceled exact export', async () => {
+  it('cleans a canceled exact export with unread Git output', async () => {
     const fixture = await createRepositoryFixture();
+    await fs.writeFile(path.join(fixture.repo, '.gitignore'), Buffer.alloc(1024 * 1024, 0x61));
+    await git(fixture.repo, ['add', '.gitignore']);
+    await git(fixture.repo, ['commit', '-m', 'Large first blob']);
     const commitSha = (await git(fixture.repo, ['rev-parse', 'HEAD'])).trim();
     const controller = new AbortController();
     const open = fs.open.bind(fs);

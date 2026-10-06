@@ -378,6 +378,8 @@ async function exportExactCommitBlobs(input: {
     throwIfAborted(input.signal);
   } catch (error) {
     child.kill('SIGKILL');
+    // The blob reader may be paused with unread output; close it before awaiting child close.
+    child.stdout.destroy();
     await Promise.allSettled([exit, stderr]);
     throw error;
   } finally {
