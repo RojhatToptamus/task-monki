@@ -1,6 +1,6 @@
 import { ApplicationSourceFolders } from './ApplicationSourceFolders';
 import { DisclosureChevron } from '../DisclosureChevron';
-import type { AttemptSummary, PreviewStatus } from 'previewhost';
+import type { AttemptSummary, Failure, PreviewStatus } from 'previewhost';
 import { label, ServiceName, serviceTypeLabel } from './previewPresentation';
 
 export function ApplicationActivity({
@@ -98,7 +98,7 @@ export function ApplicationActivity({
                           <ServiceName name={id} type={value.type} />
                           {value.error ? (
                             <p className="tm-application-preview__error">
-                              {value.error.message}
+                              {diagnostic(value.error, value.type)}
                             </p>
                           ) : null}
                         </th>
@@ -244,7 +244,7 @@ export function ApplicationActivity({
                       <ServiceName name={id} type="job" />
                       {job.error ? (
                         <p className="tm-application-preview__error">
-                          {job.error.message}
+                          {diagnostic(job.error)}
                         </p>
                       ) : null}
                     </th>
@@ -297,8 +297,10 @@ export function ApplicationActivity({
               ? 'Source access needs approval.'
               : latest.error.code === 'SECRET_STORE_UNAVAILABLE'
                 ? 'Unlock or create secret storage, then start again.'
-                : latest.error.message}
+                : diagnostic(latest.error)}
           </p>
+          <button className="outline-button" onClick={() => onLogs(latest.id)}>View attempt logs</button>
+          {latest.error.requirements?.map(secret => <p key={secret.id}><code>{secret.id}</code> — {secret.bindings.map(binding => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ')}</p>)}
           {latest.error.code === 'SOURCE_DENIED' ? (
             <>
               <button className="outline-button" onClick={onConfigure}>
@@ -329,10 +331,19 @@ export function ApplicationActivity({
               )
             }
           >
-            Open Secrets settings
+            Resolve secrets
           </button>
         </div>
       ) : null}
     </>
   );
+}
+
+function diagnostic(error: Failure, type?: string) {
+  if (error.code === 'SUPERVISOR_FAILED') return `${error.message} Task Monki's preview runtime could not start. View logs for the missing module or process error, then rebuild or reinstall Task Monki.`;
+  if (error.code === 'TIMEOUT') return `${error.message} Check this service's logs and readiness settings.`;
+  if (error.code === 'START_FAILED' && type && ['postgres', 'redis', 'compose'].includes(type)) return `${error.message} Check Docker and this service's logs before retrying.`;
+  if (error.code === 'START_FAILED' && type && ['attach', 'preview', 'external-tcp', 'external-postgres', 'external-redis'].includes(type)) return `${error.message} Check the dependency's local endpoint and credentials before retrying.`;
+  if (error.code === 'START_FAILED') return `${error.message} Check the command, installed project dependencies, and logs before retrying.`;
+  return error.message;
 }

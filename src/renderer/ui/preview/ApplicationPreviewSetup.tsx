@@ -1,4 +1,5 @@
 import { useRef, useState, type RefObject } from 'react';
+import type { ApplicationPreviewRecommendation } from '../../../shared/applicationPreview';
 import type {
   AcceptPreviewRecipeDraftResult,
   PreviewRecipeGenerationSnapshot,
@@ -30,6 +31,9 @@ export function ApplicationPreviewSetup(props: {
   discard(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   writeManually(taskId: string, worktreeId: string): Promise<void>;
 }) {
+  const [recommendations, setRecommendations] = useState<ApplicationPreviewRecommendation[]>([]);
+  const [projectDirectory, setProjectDirectory] = useState<string>();
+  const [explanation, setExplanation] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [type, setType] = useState<'command' | 'static'>('command');
@@ -41,6 +45,19 @@ export function ApplicationPreviewSetup(props: {
   const modalRoot = useRef<HTMLElement | null>(
     typeof document === 'undefined' ? null : document.body
   );
+  function choose(value: ApplicationPreviewRecommendation) {
+    setType(value.type); setDirectory(value.directory); setCommand(value.command ?? ''); setExplanation(value.explanation);
+  }
+  async function openSetup() {
+    setCreating(true); setBusy(true); setError(undefined);
+    try {
+      const result = await api.inspectApplicationPreviewSetup({ taskId: props.taskId });
+      setRecommendations(result.recommendations); setProjectDirectory(result.projectDirectory);
+      if (result.recommendations[0]) choose(result.recommendations[0]);
+      else setExplanation('Choose a static folder or enter the development command for this project. You can use the agent for a more complex setup.');
+    } catch (cause) { setError(message(cause)); }
+    finally { setBusy(false); }
+  }
   async function generate(clarification?: string) {
     setError(undefined);
     await props.generate(props.taskId, clarification);
@@ -63,21 +80,17 @@ export function ApplicationPreviewSetup(props: {
   };
   return (
     <section className="tm-preview-setup" aria-label="Preview setup">
-      <h3 className="tm-panel__title tm-panel__title--flush">Configure your application</h3>
+      <h3 className="tm-panel__title tm-panel__title--flush">Set up Preview</h3>
       <p className="tm-application-preview__notice">
-        Run a development command or serve a static folder.
+        Create preview.yaml from a suggested configuration, then review before starting.
       </p>
       <div className="tm-preview-workspace__actions">
         <button
           className="primary-button"
-          disabled={!!props.disabledReason}
-          title={props.disabledReason}
-          onClick={() => {
-            setError(undefined);
-            setCreating(true);
-          }}
+          disabled={busy}
+          onClick={() => void openSetup()}
         >
-          Add application
+          Set up Preview
         </button>
         <button
           className="outline-button"
@@ -109,7 +122,8 @@ export function ApplicationPreviewSetup(props: {
       ) : null}
       {creating ? (
         <PreviewDialog
-          title="Add application"
+          title="Set up Preview"
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
           busy={busy}
           onClose={() => setCreating(false)}
           onOpenChange={props.onModalOpenChange}
@@ -141,11 +155,15 @@ export function ApplicationPreviewSetup(props: {
                 Cancel
               </button>
               <button className="primary-button" disabled={busy}>
-                Review and start
+                {busy ? 'Saving…' : 'Save preview.yaml'}
               </button>
             </>
           }
         >
+          {projectDirectory ? <p>Project folder: <code>{projectDirectory}</code></p> : null}
+          {recommendations.length > 1 ? <label className="field"><span>Detected applications</span><select onChange={event => choose(recommendations[Number(event.target.value)])}>{recommendations.map((value, index) => <option key={value.directory} value={index}>{value.directory} · {value.type === 'static' ? 'Static site' : 'Development server'}</option>)}</select></label> : null}
+          {explanation ? <p>{explanation}</p> : null}
+          <p>Review and edit what Preview will run below. Saving creates a new file without starting commands or replacing an existing file.</p>
           <label className="field">
             <span>Application type</span>
             <select
@@ -178,7 +196,7 @@ export function ApplicationPreviewSetup(props: {
                 spellCheck={false}
               />
               <small>
-                The runtime provides PORT. The command must listen on it.
+                This command runs in your shell with your account permissions. It must stay running and listen on HOST=127.0.0.1 and the supplied PORT. It can read or change files. No dependencies are installed automatically.
               </small>
             </label>
           ) : null}

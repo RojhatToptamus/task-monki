@@ -205,7 +205,7 @@ export function ApplicationDependencies({
           ) : null}
           {database ? (
             <p className="tm-application-preview__notice">
-              Store the connection URL in Settings → Secrets. Enter its
+              Enter the secret reference for the connection URL. Add its value during Preview review. Use the
               reference here.
             </p>
           ) : null}

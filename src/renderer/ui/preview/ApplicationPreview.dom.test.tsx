@@ -101,8 +101,7 @@ it('preserves draft edits when a configuration appears during review and allows 
       validate={async () => ({ status: 'VALID' })} accept={accept} writeManually={async () => {}}
       fallbackReturnFocusRef={fallbackReturnFocusRef} onModalOpenChange={() => {}} />
   } /></div>);
-  fireEvent.click(await screen.findByRole('button', { name: 'Configure preview' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Generate with agent' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Generate with agent' }));
   const edited = `${state.draft!.yaml}# Keep this edit\n`;
   fireEvent.change(await screen.findByRole('textbox', { name: 'Preview recipe YAML' }), { target: { value: edited } });
   snapshot = { ...snapshot, hasConfigurationFile: true };
@@ -132,14 +131,13 @@ it('reviews an existing configuration before its first start and requires explic
         busy: false,
         candidate: { ...initial.active!, id: 'pending', state: 'starting' }
       },
-      approval: { attemptId: 'pending', description: inspected.description }
+      approval: { secrets: [], attemptId: 'pending', description: inspected.description }
     };
     return snapshot;
   });
   api.approveApplicationPreview.mockResolvedValue(undefined);
   render(<ApplicationPreviewPanel taskId="task" />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Configure preview' }));
-  await screen.findByRole('heading', { name: 'Configuration ready' });
+  await screen.findByRole('button', { name: 'Review and start' });
   expect(screen.queryByRole('button', { name: 'Start' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Review and start' }));
   await screen.findByRole('dialog', { name: 'Review and start' });
@@ -370,11 +368,13 @@ it('ignores late logs, preserves clear-view cursors across hidden tabs, and rele
 it('returns focus after unlocking and clears secret input before transport settles or entry is canceled', async () => {
   let complete!: () => void;
   const secrets: PreviewSecretsApi = {
+    has: vi.fn(async () => false),
     status: vi
       .fn<PreviewSecretsApi['status']>(async () => ({
         state: 'unlocked' as const,
         canRemember: false
       }))
+      .mockResolvedValueOnce({ state: 'locked', canRemember: false })
       .mockResolvedValueOnce({ state: 'locked', canRemember: false }),
     list: vi.fn(async () => ({ ids: [], usage: {} })),
     unlock: vi.fn(async () => ({
@@ -398,7 +398,7 @@ it('returns focus after unlocking and clears secret input before transport settl
   const unlock = await screen.findByRole('button', { name: 'Unlock' });
   unlock.focus();
   fireEvent.click(unlock);
-  fireEvent.change(screen.getByLabelText('Password'), {
+  fireEvent.change(await screen.findByLabelText('Password'), {
     target: { value: 'synthetic-password' }
   });
   fireEvent.submit(screen.getByLabelText('Password').closest('form')!);
@@ -411,17 +411,18 @@ it('returns focus after unlocking and clears secret input before transport settl
   fireEvent.change(screen.getByLabelText('Reference'), {
     target: { value: 'synthetic/dev/test' }
   });
-  const input = screen.getByLabelText('Secret value') as HTMLTextAreaElement;
-  fireEvent.change(input, { target: { value: 'SYNTHETIC_value' } });
+  const input = await screen.findByLabelText('Secret value') as HTMLInputElement;
+  expect(input.type).toBe('password');
+  fireEvent.paste(input, { clipboardData: { getData: () => 'SYNTHETIC_value\nsecond line' } });
   fireEvent.click(screen.getByRole('button', { name: 'Create secret' }));
   expect(input.value).toBe('');
   expect(secrets.create).toHaveBeenCalledWith({
     id: 'synthetic/dev/test',
-    value: 'SYNTHETIC_value'
+    value: 'SYNTHETIC_value\nsecond line'
   });
   await act(async () => complete());
   fireEvent.click(screen.getByRole('button', { name: 'New secret' }));
-  const canceled = screen.getByLabelText('Secret value') as HTMLTextAreaElement;
+  const canceled = await screen.findByLabelText('Secret value') as HTMLInputElement;
   fireEvent.change(canceled, { target: { value: 'SYNTHETIC_canceled' } });
   fireEvent.click(screen.getByRole('button', { name: 'Close' }));
   expect(canceled.value).toBe('');

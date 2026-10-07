@@ -204,7 +204,7 @@ export function PreviewRecipeGenerationModal({
                 rows={3}
                 disabled={busy}
               />
-              <small id="preview-generation-private-inputs">Use secret reference names here. Store values in Settings → Secrets.</small>
+              <small id="preview-generation-private-inputs">Use secret reference names here. Add values from Preview when reviewing startup.</small>
             </label>
           </div>
         ) : null}

@@ -235,7 +235,6 @@ interface TaskDetailProps {
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   onModalOpenChange(open: boolean): void;
-  onOpenPreviewSecrets?(references: string[]): void;
   initialTab?: DetailTab;
 }
 
@@ -1289,13 +1288,30 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? (
-          <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onOpenSecrets={props.onOpenPreviewSecrets} onModalOpenChange={setPreviewModalOpen}
+        {tab === 'preview' ? <>
+          {!worktree || ['REMOVED', 'MISSING', 'PRUNABLE', 'ERROR'].includes(worktree.status) ? (
+            <section className="tm-application-preview__feedback" aria-label="Preview source unavailable">
+              <h3>Prepare the project folder</h3>
+              <p>{worktree && ['MISSING', 'PRUNABLE'].includes(worktree.status)
+                ? 'The task worktree is missing. Restore it from its recorded Git state before starting Preview. Saved preview configuration and secrets are retained.'
+                : 'Preview needs an available task worktree. Prepare or reconnect it before configuring or starting the application.'}</p>
+              {worktree ? <p><code>{worktree.worktreePath}</code></p> : null}
+              <button className="primary-button" disabled={props.worktreePreparationPending}
+                onClick={() => worktree?.ownership === 'EXTERNAL'
+                  ? setExistingWorkModal('reconnect')
+                  : void props.onPrepareWorktree(task.id)}>
+                {props.worktreePreparationPending ? 'Preparing…'
+                  : worktree?.ownership === 'EXTERNAL' ? 'Reconnect checkout'
+                  : worktree && ['MISSING', 'PRUNABLE'].includes(worktree.status) ? 'Restore worktree' : 'Prepare worktree'}
+              </button>
+            </section>
+          ) : null}
+          {worktree ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onModalOpenChange={setPreviewModalOpen}
             setup={worktree ? <ApplicationPreviewSetup taskId={task.id} worktreeId={worktree.id} state={props.previewRecipeGeneration}
               disabledReason={props.previewRecipeGenerationDisabledReason} fallbackReturnFocusRef={detailRootRef} onModalOpenChange={setPreviewModalOpen}
               get={props.onGetPreviewRecipeGeneration} generate={props.onGeneratePreviewRecipe} validate={props.onValidatePreviewRecipeDraft}
-              accept={props.onAcceptPreviewRecipeDraft} discard={props.onDiscardPreviewRecipeDraft} writeManually={props.onWritePreviewRecipeManually} /> : undefined} />
-        ) : null}
+              accept={props.onAcceptPreviewRecipeDraft} discard={props.onDiscardPreviewRecipeDraft} writeManually={props.onWritePreviewRecipeManually} /> : undefined} /> : null}
+        </> : null}
 
         {tab === 'evidence' ? (
           <div className="tm-evtab">

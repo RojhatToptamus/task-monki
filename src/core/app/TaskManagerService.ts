@@ -2621,7 +2621,7 @@ export class TaskManagerService {
         );
         return { outcome: 'PREPARED', worktree: stored };
       }
-      if (stored.status !== 'MISSING' || existing.ownership === 'EXTERNAL') {
+      if (!['MISSING', 'PRUNABLE'].includes(stored.status) || existing.ownership === 'EXTERNAL') {
         throw new Error(stored.error ?? `The worktree is ${stored.status.toLowerCase()}. Resolve its Git state before restoring it.`);
       }
       await this.validateAndRecordRepository(task);
@@ -3819,15 +3819,12 @@ export class TaskManagerService {
     return this.applications.read(worktree);
   });
 
+  inspectApplicationPreviewSetup: ApplicationPreviewApi['inspectApplicationPreviewSetup'] = async input =>
+    this.applications.inspectSetup(await this.applicationWorktree(input.taskId));
+
   connectApplicationPreviewSource: ApplicationPreviewApi['connectApplicationPreviewSource'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.owner().allowSources(
-      [worktree.worktreePath, input.directory],
-      new AbortController().signal
-    );
-    await this.applications.owner().configureSource(this.applications.name(worktree), input.attemptId, input.service, input.directory, input.expected);
-    return this.applications.read(worktree);
+    if (input.attemptId) await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
+    return this.applications.connectSource(await this.applicationWorktree(input.taskId), input);
   });
 
   createApplicationPreviewConfiguration: ApplicationPreviewApi['createApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
@@ -3921,6 +3918,7 @@ export class TaskManagerService {
   get previewSecrets(): import('../../shared/applicationPreview').PreviewSecretsApi {
     const secrets = this.applications.secrets;
     return {
+      has: input => this.withControlAction(() => secrets.has(input)),
       status: () => this.withControlAction(() => secrets.status()),
       list: input => this.withControlAction(() => secrets.list(input)),
       unlock: input => this.withControlAction(() => secrets.unlock(input)),

@@ -2,11 +2,11 @@ import {
   Ellipsis,
   KeyRound,
   LockKeyhole,
-  ArrowLeft,
   Search
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PreviewSecretsApi } from '../../../shared/applicationPreview';
+import { PreviewSecretDialog } from './PreviewSecretDialog';
 import { PreviewDialog, message } from './previewPresentation';
 import { DisclosureChevron } from '../DisclosureChevron';
 import { SettingsPane } from '../SettingsPane';
@@ -15,11 +15,7 @@ import { ActionMenu } from '../ActionMenu';
 type VaultStatus = Awaited<ReturnType<PreviewSecretsApi['status']>>;
 type SecretPage = Awaited<ReturnType<PreviewSecretsApi['list']>>;
 
-export function PreviewSecretsSettings({
-  context
-}: {
-  context?: { title: string; references: string[]; onReturn(): void };
-}) {
+export function PreviewSecretsSettings() {
   const api = window.previewSecrets;
   const [status, setStatus] = useState<VaultStatus>();
   const [page, setPage] = useState<SecretPage>({ ids: [], usage: {} });
@@ -37,34 +33,6 @@ export function PreviewSecretsSettings({
   const [removing, setRemoving] = useState<string>();
   const [unlocking, setUnlocking] = useState(false);
   const primaryAction = useRef<HTMLButtonElement>(null);
-  const password = useRef<HTMLInputElement>(null);
-  const confirmation = useRef<HTMLInputElement>(null);
-  const value = useRef<HTMLTextAreaElement>(null);
-  const remember = useRef<HTMLInputElement>(null);
-  const attachValue = useCallback((node: HTMLTextAreaElement | null) => {
-    value.current = node;
-    if (node)
-      return () => {
-        node.value = '';
-        value.current = null;
-      };
-  }, []);
-  const attachPassword = useCallback((node: HTMLInputElement | null) => {
-    password.current = node;
-    if (node)
-      return () => {
-        node.value = '';
-        password.current = null;
-      };
-  }, []);
-  const attachConfirmation = useCallback((node: HTMLInputElement | null) => {
-    confirmation.current = node;
-    if (node)
-      return () => {
-        node.value = '';
-        confirmation.current = null;
-      };
-  }, []);
   useEffect(() => {
     let disposed = false;
     setLoading(true);
@@ -102,9 +70,6 @@ export function PreviewSecretsSettings({
     } catch (cause) {
       setError(message(cause));
     } finally {
-      if (password.current) password.current.value = '';
-      if (confirmation.current) confirmation.current.value = '';
-      if (value.current) value.current.value = '';
       setBusy(false);
     }
   }
@@ -156,33 +121,6 @@ export function PreviewSecretsSettings({
         ) : undefined
       }
     >
-      {context ? (
-        <div className="tm-application-preview__toolbar">
-          <button
-            className="outline-button"
-            disabled={busy}
-            onClick={context.onReturn}
-          >
-            <ArrowLeft size={16} strokeWidth={1.5} aria-hidden="true" />{' '}
-            {context.title}
-          </button>
-          {context.references.map((id) => (
-            <button
-              key={id}
-              className="outline-button"
-              disabled={busy || status?.state !== 'unlocked'}
-              onClick={() =>
-                void run(async () => {
-                  const matches = await api!.list({ query: id });
-                  setEditing({ id, create: !matches.ids.includes(id) });
-                })
-              }
-            >
-              {id}
-            </button>
-          ))}
-        </div>
-      ) : null}
       {!api ? (
         <p>Secret management is available in the desktop application.</p>
       ) : !status ? (
@@ -341,166 +279,13 @@ export function PreviewSecretsSettings({
           </button>
         </p>
       ) : null}
-      {unlocking && api ? (
-        <PreviewDialog
-          fallbackReturnFocusRef={primaryAction}
-          title={
-            status?.state === 'new'
-              ? 'Create secret storage'
-              : 'Unlock secret storage'
-          }
-          busy={busy}
-          onClose={() => setUnlocking(false)}
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (
-              status?.state === 'new' &&
-              password.current?.value !== confirmation.current?.value
-            ) {
-              setError('Passwords do not match.');
-              confirmation.current?.focus();
-              return;
-            }
-            void run(async () => {
-              const input = {
-                password: password.current?.value ?? '',
-                confirmation: confirmation.current?.value,
-                create: status?.state === 'new',
-                remember: remember.current?.checked
-              };
-              if (password.current) password.current.value = '';
-              if (confirmation.current) confirmation.current.value = '';
-              setStatus(await api.unlock(input));
-              setUnlocking(false);
-            });
-          }}
-          footer={
-            <>
-              <button
-                type="button"
-                className="outline-button"
-                disabled={busy}
-                onClick={() => setUnlocking(false)}
-              >
-                Cancel
-              </button>
-              <button className="primary-button" disabled={busy}>
-                {status?.state === 'new' ? 'Create' : 'Unlock'}
-              </button>
-            </>
-          }
-        >
-          <label className="field">
-            <span>Password</span>
-            <input
-              ref={attachPassword}
-              type="password"
-              required
-              minLength={status?.state === 'new' ? 12 : 1}
-              autoComplete={
-                status?.state === 'new' ? 'new-password' : 'current-password'
-              }
-            />
-          </label>
-          {status?.state === 'new' ? (
-            <label className="field">
-              <span>Confirm password</span>
-              <input
-                ref={attachConfirmation}
-                type="password"
-                required
-                minLength={12}
-                autoComplete="new-password"
-              />
-            </label>
-          ) : null}
-          {status?.canRemember ? (
-            <label className="tm-application-preview__checkbox">
-              <input type="checkbox" ref={remember} />
-              <span>Remember on this Mac</span>
-            </label>
-          ) : null}
-          {error ? (
-            <p className="form-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-        </PreviewDialog>
-      ) : null}
-      {editing && api ? (
-        <PreviewDialog
-          fallbackReturnFocusRef={primaryAction}
-          title={editing.create ? 'New secret' : 'Edit secret'}
-          busy={busy}
-          onClose={() => setEditing(undefined)}
-          onSubmit={(event) => {
-            event.preventDefault();
-            void run(async () => {
-              const input = {
-                id: editing.id,
-                value: value.current?.value ?? ''
-              };
-              if (value.current) value.current.value = '';
-              if (editing.create) await api.create(input);
-              else if (!(await api.update(input)))
-                throw new Error(
-                  'This secret was removed. Create a new reference to store it again.'
-                );
-              setEditing(undefined);
-            });
-          }}
-          footer={
-            <>
-              <button
-                type="button"
-                className="outline-button"
-                disabled={busy}
-                onClick={() => setEditing(undefined)}
-              >
-                Cancel
-              </button>
-              <button className="primary-button" disabled={busy}>
-                {editing.create ? 'Create secret' : 'Save'}
-              </button>
-            </>
-          }
-        >
-          <label className="field">
-            <span>Reference</span>
-            <input
-              value={editing.id}
-              readOnly={!editing.create}
-              onChange={(event) =>
-                setEditing({ ...editing, id: event.target.value })
-              }
-              required
-              pattern="[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}"
-              autoComplete="off"
-              placeholder="project/dev/api"
-            />
-          </label>
-          <label className="field">
-            <span>{editing.create ? 'Value' : 'New value'}</span>
-            <textarea
-              ref={attachValue}
-              required
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="Secret value"
-            />
-          </label>
-          {!editing.create ? (
-            <p className="tm-application-preview__muted">
-              The stored value is never displayed.
-            </p>
-          ) : null}
-          {error ? (
-            <p className="form-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-        </PreviewDialog>
-      ) : null}
+      {(unlocking || editing) && api ? <PreviewSecretDialog
+        inPreview={false}
+        fallbackReturnFocusRef={primaryAction}
+        references={unlocking ? [] : editing?.create ? undefined : [editing!.id]}
+        onClose={() => { setUnlocking(false); setEditing(undefined); }}
+        onSaved={async () => { setStatus(await api.status()); setUnlocking(false); setEditing(undefined); setRefresh(value => value + 1); }}
+      /> : null}
       {removing && api ? (
         <PreviewDialog
           fallbackReturnFocusRef={primaryAction}

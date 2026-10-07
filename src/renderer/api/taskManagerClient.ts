@@ -498,6 +498,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     getApplicationPreview: input => post(baseUrl, '/api/application/getApplicationPreview', input),
     connectApplicationPreviewDependency: input => post(baseUrl, '/api/application/connectApplicationPreviewDependency', input),
     connectApplicationPreviewSource: input => post(baseUrl, '/api/application/connectApplicationPreviewSource', input),
+    inspectApplicationPreviewSetup: input => post(baseUrl, '/api/application/inspectApplicationPreviewSetup', input),
     createApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/createApplicationPreviewConfiguration', input),
     startApplicationPreview: input => post(baseUrl, '/api/application/startApplicationPreview', input),
     approveApplicationPreview: input => post(baseUrl, '/api/application/approveApplicationPreview', input),

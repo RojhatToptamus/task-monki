@@ -7,6 +7,7 @@ import type {
   PreviewDescription,
   PreviewRuntime,
   PreviewStatus,
+  SecretRequirement,
   StopOptions
 } from 'previewhost';
 
@@ -16,7 +17,9 @@ export interface ApplicationPreviewSnapshot {
   /** Exact-source attempts belong to Design publication and cannot be edited in place. */
   designAttempts?: string[];
   status?: PreviewStatus;
-  approval?: { attemptId: string; description: PreviewDescription };
+  approval?: { attemptId: string; description: PreviewDescription; secrets: Array<SecretRequirement & { availability: 'available' | 'missing' | 'locked' | 'unavailable' }> };
+  fileSources?: Array<{ service: string; directory: string; connected: boolean }>;
+  configurationError?: string;
 }
 export interface ApplicationPreviewInstance {
   taskId: string;
@@ -41,7 +44,15 @@ export interface ApplicationPreviewConfigurationRequest
   extends ApplicationPreviewAttemptRequest {
   changes: ConfigurationBindingChange[];
 }
+export interface ApplicationPreviewRecommendation {
+  type: 'command' | 'static';
+  directory: string;
+  command?: string;
+  explanation: string;
+}
 export interface ApplicationPreviewApi {
+  inspectApplicationPreviewSetup(input: ApplicationPreviewRequest): Promise<{ projectDirectory: string; recommendations: ApplicationPreviewRecommendation[] }>;
+
   listApplicationPreviews(): Promise<ApplicationPreviewInstance[]>;
   connectApplicationPreviewDependency(
     input: ApplicationPreviewAttemptRequest & {
@@ -58,7 +69,8 @@ export interface ApplicationPreviewApi {
     }
   ): Promise<ApplicationPreviewSnapshot>;
   connectApplicationPreviewSource(
-    input: ApplicationPreviewAttemptRequest & {
+    input: ApplicationPreviewRequest & {
+      attemptId?: string;
       service?: string;
       directory: string;
       expected: NonNullable<StopOptions['expected']>;
@@ -114,6 +126,7 @@ export interface ApplicationPreviewApi {
 type Vault = PreviewRuntime['keystore'];
 /** Trusted desktop input only. No value-read endpoint, namespace selector, or event publication. */
 export interface PreviewSecretsApi {
+  has(input: { id: string }): Promise<boolean>;
   status(): ReturnType<Vault['status']>;
   list(input?: { query?: string; after?: string }): Promise<{
     ids: string[];

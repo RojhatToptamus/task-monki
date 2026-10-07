@@ -139,9 +139,11 @@ export function PreviewDialog({
 }
 
 export function ConfigurationDefinitions({
-  description
+  description,
+  showSecrets = true
 }: {
   description: ConfigurationBindingsInspection['description'];
+  showSecrets?: boolean;
 }) {
   const spec = description.spec;
   const services = description.compose
@@ -259,7 +261,7 @@ export function ConfigurationDefinitions({
         ))}
       </ul>
       {sources.length ? (
-        <details className="tm-application-preview__sources">
+        <details open className="tm-application-preview__sources">
           <summary>
             <DisclosureChevron />
             Source access · {sources.length}{' '}
@@ -272,7 +274,7 @@ export function ConfigurationDefinitions({
           ))}
         </details>
       ) : null}
-      {description.secrets?.length ? (
+      {showSecrets && description.secrets?.length ? (
         <div className="tm-application-preview__secret-references">
           <h4>Secret references</h4>
           {description.secrets.map((secret) => (

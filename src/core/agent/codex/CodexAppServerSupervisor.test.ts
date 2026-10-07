@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcess, ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,15 @@ import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import { resolveAgentGitExecutablePath } from '../../git/AgentGitMetadata';
 import type { ApplicationPersistence } from '../../storage/sqlite/ApplicationPersistence';
 import type { SqliteAgentRuntimeStore } from '../../storage/SqliteAgentRuntimeStore';
+
+// These fixtures simulate children. Never send their PIDs to the host's
+// process-tree terminator; real process ownership has separate coverage.
+vi.mock('../../process/portableChildProcess', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../process/portableChildProcess')>(),
+  terminatePortableProcessTree: async (child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') => {
+    child.kill(signal);
+  }
+}));
 
 const WEB_SEARCH_MODES: CodexWebSearchMode[] = ['disabled', 'cached', 'live'];
 const MCP_SERVER_MODES: CodexMcpServersMode[] = ['disabled', 'all'];

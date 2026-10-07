@@ -822,6 +822,7 @@ function installIpcHandlers(): void {
   handleTrustedIpc('application:getApplicationPreview', (_, input: Parameters<TaskManagerService['getApplicationPreview']>[0]) => service.getApplicationPreview(input));
   handleTrustedIpc('application:connectApplicationPreviewDependency', (_, input: Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]) => service.connectApplicationPreviewDependency(input));
   handleTrustedIpc('application:connectApplicationPreviewSource', (_, input: Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]) => service.connectApplicationPreviewSource(input));
+  handleTrustedIpc('application:inspectApplicationPreviewSetup', (_, input: Parameters<TaskManagerService['inspectApplicationPreviewSetup']>[0]) => service.inspectApplicationPreviewSetup(input));
   handleTrustedIpc('application:createApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]) => service.createApplicationPreviewConfiguration(input));
   handleTrustedIpc('application:startApplicationPreview', (_, input: Parameters<TaskManagerService['startApplicationPreview']>[0]) => service.startApplicationPreview(input));
   handleTrustedIpc('application:approveApplicationPreview', (_, input: Parameters<TaskManagerService['approveApplicationPreview']>[0]) => service.approveApplicationPreview(input));
@@ -838,6 +839,7 @@ function installIpcHandlers(): void {
   handleTrustedIpc('secrets:unlock', (_, input: Parameters<typeof service.previewSecrets.unlock>[0]) => service.previewSecrets.unlock(input));
   handleTrustedIpc('secrets:create', (_, input: Parameters<typeof service.previewSecrets.create>[0]) => service.previewSecrets.create(input));
   handleTrustedIpc('secrets:update', (_, input: Parameters<typeof service.previewSecrets.update>[0]) => service.previewSecrets.update(input));
+  handleTrustedIpc('secrets:has', (_, input: Parameters<typeof service.previewSecrets.has>[0]) => service.previewSecrets.has(input));
   handleTrustedIpc('secrets:remove', (_, input: Parameters<typeof service.previewSecrets.remove>[0]) => service.previewSecrets.remove(input));
   handleTrustedIpc('secrets:status', () => service.previewSecrets.status());
   handleTrustedIpc('secrets:lock', () => service.previewSecrets.lock());
