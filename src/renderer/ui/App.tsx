@@ -215,7 +215,6 @@ export function App() {
   const [previewsPageState, setPreviewsPageState] = useState<PreviewsPageState>({ query: '', filter: 'all' });
   const previewsScrollPosition = useRef(0);
   const [previewDetailTab, setPreviewDetailTab] = useState<'preview' | 'overview'>('preview');
-  const [previewSecretContext, setPreviewSecretContext] = useState<{ taskId: string; title: string; references: string[] }>();
   const [designHistoryCollapsed, setDesignHistoryCollapsed] = useState(() =>
     focusedWorkspaceHistoryCollapsed('designs') ||
     focusedWorkspaceUsesCompactHistory(window.innerWidth)
@@ -2691,7 +2690,6 @@ export function App() {
   };
 
   const showView = (next: AppView) => {
-    setPreviewSecretContext(undefined);
     setView(next);
     if (next !== 'settings') setPreviewThemePreset(null);
     setSelectedBoardId(undefined);
@@ -3069,11 +3067,7 @@ export function App() {
               await withAppAction(() => taskManagerApi.sendTaskInstruction({ taskId: selectedTask.id, id, runId }));
               await refresh();
             }}
-            initialTab={view === 'previews' ? previewDetailTab : previewSecretContext?.taskId === selectedTask.id ? 'preview' : undefined}
-            onOpenPreviewSecrets={references => {
-              showView('settings');
-              setPreviewSecretContext({ taskId: selectedTask.id, title: selectedTask.title, references });
-            }}
+            initialTab={view === 'previews' ? previewDetailTab : undefined}
             headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
@@ -3265,7 +3259,6 @@ export function App() {
           />
         ) : (
           <MainColumn
-            previewSecretContext={previewSecretContext ? { ...previewSecretContext, onReturn: () => void openTaskDetail(previewSecretContext.taskId) } : undefined}
             view={view}
             board={selectedBoard}
             tasks={visibleTasks}

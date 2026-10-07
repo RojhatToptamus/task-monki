@@ -35,6 +35,8 @@ export function ApplicationConfiguration({
   const [sourceEdit, setSourceEdit] = useState<{
     service?: string;
     directory: string;
+    attemptId: string;
+    expected: ReturnType<typeof expected>;
   }>();
   const [selectedService, setSelectedService] = useState<string>();
   const [selected, setSelected] = useState<string>();
@@ -164,6 +166,10 @@ export function ApplicationConfiguration({
             inspection.description.spec.type === 'static')
         ? [undefined]
         : [];
+  const currentSource = inspection?.description.spec.type === 'environment'
+    ? sourceEdit?.service ? inspection.description.spec.services[sourceEdit.service] : undefined
+    : inspection?.description.spec;
+  const currentFolder = currentSource && ('cwd' in currentSource ? currentSource.cwd : 'directory' in currentSource ? currentSource.directory : undefined);
   return (
     <div className="tm-application-preview__configuration">
       {attemptId ? (
@@ -411,7 +417,9 @@ export function ApplicationConfiguration({
                     setError(undefined);
                     setSourceEdit({
                       service: sourceServices[0],
-                      directory: ''
+                      directory: '',
+                      attemptId: attemptId!,
+                      expected: expected(status)
                     });
                   }}
                 >
@@ -679,8 +687,8 @@ export function ApplicationConfiguration({
           ) : null}
           {editing.type === 'secret' ? (
             <p>
-              Store secret values in Settings → Secrets. Enter only the
-              reference here.
+              Enter the secret reference here. Add or replace its concealed value
+              from the secret control in Preview before approving startup.
             </p>
           ) : null}
           {error ? (
@@ -703,10 +711,10 @@ export function ApplicationConfiguration({
             void api
               .connectApplicationPreviewSource({
                 taskId,
-                attemptId: attemptId!,
+                attemptId: sourceEdit.attemptId,
                 service: sourceEdit.service,
                 directory: sourceEdit.directory,
-                expected: expected(status)
+                expected: sourceEdit.expected
               })
               .then(
                 () => {
@@ -731,7 +739,7 @@ export function ApplicationConfiguration({
                 className="primary-button"
                 disabled={busy || !sourceEdit.directory}
               >
-                Review connection
+                Connect folder
               </button>
             </>
           }
@@ -756,9 +764,10 @@ export function ApplicationConfiguration({
               </select>
             </label>
           ) : null}
+          {currentFolder ? <p>Current folder: <code>{currentFolder}</code></p> : null}
           <div className="tm-application-preview__folder-picker">
             <label className="field">
-              <span>Source folder</span>
+              <span>New folder</span>
               <input
                 value={sourceEdit.directory}
                 readOnly
@@ -784,8 +793,10 @@ export function ApplicationConfiguration({
             </button>
           </div>
           <p className="tm-application-preview__notice">
-            This permits reading files and running commands in the selected
-            folder until Task Monki closes.
+            {sourceEdit.service ?? 'Application'} will use the selected folder.
+            Connection permits Previewhost to use it until Task Monki closes.
+            Commands run with your account permissions and may read or change files.
+            After connecting, review and approve the configuration before it runs.
           </p>
           {error ? (
             <p className="form-error" role="alert">

@@ -4,6 +4,7 @@ import {
   createPreviewRuntime,
   loadPreviewSpec,
   resolvePreviewFile,
+  savePreviewSpec,
   PreviewError,
   type AuthorizationRequest,
   type PreviewSpec,
@@ -14,6 +15,7 @@ import {
 import type {
   ApplicationPreviewSnapshot,
   ApplicationPreviewApi,
+  ApplicationPreviewRecommendation,
   PreviewSecretsApi
 } from '../../shared/applicationPreview';
 import type { WorktreeRecord } from '../../shared/contracts';
@@ -137,15 +139,26 @@ export class ApplicationPreviewService {
       )
     );
     const approval = this.approvals.get(name);
+    let fileSources: ApplicationPreviewSnapshot['fileSources'];
+    let configurationError: string | undefined;
+    if (configurationFiles.some(Boolean) && (!status?.latest || status.latest.error?.code === 'SOURCE_DENIED')) {
+      try {
+        const spec = await loadPreviewSpec(await resolvePreviewFile(worktree.worktreePath), { allowedRoots: [worktree.worktreePath] });
+        fileSources = await this.sources(spec, worktree.worktreePath);
+      } catch (error) { configurationError = error instanceof Error ? error.message : 'Cannot read preview.yaml.'; }
+    }
     return {
       name,
+      fileSources,
+      configurationError,
       hasConfigurationFile: configurationFiles.some(Boolean),
       status,
       ...(approval
         ? {
             approval: {
               attemptId: approval.attemptId,
-              description: await this.owner().describe(name, approval.attemptId)
+              description: await this.owner().describe(name, approval.attemptId),
+              secrets: await this.secretAvailability(name, approval.attemptId)
             }
           }
         : {})
@@ -228,7 +241,97 @@ export class ApplicationPreviewService {
                 ? ['cmd.exe', '/d', '/s', '/c', input.command!]
                 : ['/bin/sh', '-lc', input.command!]
           };
-    await runtime.start(spec, { expected: expected(current.status) });
+    await savePreviewSpec(spec, { projectDirectory: root, allowedRoots: [root] });
+    return this.read(worktree);
+  }
+
+  private async secretAvailability(name: string, attemptId: string): Promise<NonNullable<ApplicationPreviewSnapshot['approval']>['secrets']> {
+    const requirements = (await this.owner().describe(name, attemptId)).secrets ?? [];
+    if (!requirements.length) return [];
+    const vault = this.owner().keystore;
+    try {
+      const status = await vault.status();
+      return await Promise.all(requirements.map(async requirement => ({
+        ...requirement,
+        availability: status.state !== 'unlocked' ? 'locked' as const : await vault.has('user', requirement.id) ? 'available' as const : 'missing' as const
+      })));
+    } catch { return requirements.map(requirement => ({ ...requirement, availability: 'unavailable' })); }
+  }
+
+  async inspectSetup(worktree: WorktreeRecord) {
+    const projectDirectory = await fs.realpath(worktree.worktreePath);
+    const recommendations: ApplicationPreviewRecommendation[] = [];
+    for (const directory of ['.', 'web', 'client', 'frontend', 'app', 'apps/web']) {
+      const folder = path.resolve(projectDirectory, directory);
+      const canonical = await fs.realpath(folder).catch(() => undefined);
+      if (!canonical || !within(projectDirectory, canonical)) continue;
+      let manifest: { scripts?: Record<string, string> } | undefined;
+      try {
+        const info = await fs.stat(path.join(canonical, 'package.json'));
+        if (info.size <= 1_048_576) manifest = JSON.parse(await fs.readFile(path.join(canonical, 'package.json'), 'utf8'));
+      } catch { /* Missing or invalid manifests do not prevent manual setup. */ }
+      const script = manifest?.scripts?.dev;
+      const manager = await fs.access(path.join(canonical, 'pnpm-lock.yaml')).then(() => 'pnpm', () => fs.access(path.join(canonical, 'yarn.lock')).then(() => 'yarn', () => 'npm'));
+      if (typeof script === 'string' && /^(vite|next dev)(?:\s|$)/.test(script.trim())) {
+        const vite = script.trim().startsWith('vite');
+        recommendations.push({ type: 'command', directory, command: `${manager} run dev${manager === 'yarn' ? '' : ' --'} ${vite ? '--host 127.0.0.1 --port "$PORT" --strictPort' : '--hostname 127.0.0.1 --port "$PORT"'}`,
+          explanation: `Detected ${vite ? 'Vite' : 'Next.js'} in ${directory}. Runs the project's dev script on a private local port. Project dependencies must be installed first.` });
+      } else if (!manifest && await fs.access(path.join(canonical, 'index.html')).then(() => true, () => false)) {
+        recommendations.push({ type: 'static', directory, explanation: `Serve index.html and files in ${directory === '.' ? 'the project folder' : directory}. No development command or dependency installation is needed.` });
+      }
+    }
+    return { projectDirectory, recommendations };
+  }
+
+  private async sources(spec: PreviewSpec, worktreePath: string) {
+    const roots = [...this.owner().sourceRoots(), await fs.realpath(worktreePath)];
+    const entries = spec.type === 'environment' ? Object.entries(spec.services) : [['Application', spec] as const];
+    const sources: NonNullable<ApplicationPreviewSnapshot['fileSources']> = [];
+    for (const [service, value] of entries) {
+      const directory = 'cwd' in value ? value.cwd : 'directory' in value ? value.directory : undefined;
+      if (directory) {
+        const canonical = await fs.realpath(directory);
+        sources.push({ service, directory: canonical, connected: roots.some(root => within(root, canonical)) });
+      }
+      const probes = [
+        ['readiness', 'ready' in value ? value.ready : undefined],
+        ['liveness', 'liveness' in value ? value.liveness?.probe : undefined]
+      ] as const;
+      for (const [kind, probe] of probes) {
+        if (probe?.type !== 'command' || !probe.cwd) continue;
+        const canonical = await fs.realpath(probe.cwd);
+        sources.push({ service: `${service} ${kind}`, directory: canonical, connected: roots.some(root => within(root, canonical)) });
+      }
+    }
+    return sources;
+  }
+
+  async connectSource(worktree: WorktreeRecord, input: Parameters<ApplicationPreviewApi['connectApplicationPreviewSource']>[0]) {
+    const runtime = this.owner();
+    if (!path.isAbsolute(input.directory)) throw new Error('Choose an absolute source folder.');
+    const directory = await fs.realpath(input.directory);
+    if (!(await fs.stat(directory)).isDirectory()) throw new Error('Choose an existing folder.');
+    const current = await this.read(worktree);
+    if ((['active', 'candidate', 'latest'] as const).some(key => expected(current.status)[key] !== input.expected[key])) throw new Error('Preview changed. Review the current configuration before connecting.');
+    if (!input.attemptId) {
+      if (!current.fileSources?.some(source => source.service === input.service && source.directory === directory)) throw new Error('The configuration changed. Review its source folders again.');
+    } else {
+      const description = await runtime.describe(current.name, input.attemptId);
+      const value = description.spec.type === 'environment' ? input.service && description.spec.services[input.service] : input.service === undefined ? description.spec : undefined;
+      if (!value || !['static', 'command', 'worker', 'job', 'compose'].includes(value.type)) throw new Error('This service does not use a source folder.');
+      if (current.status?.candidate || ![current.status?.active?.id, current.status?.latest?.id].includes(input.attemptId)) throw new Error('Preview changed. Review the current configuration before connecting.');
+    }
+    const alreadyConnected = runtime.sourceRoots().some(root => within(root, directory));
+    await runtime.allowSources([directory], new AbortController().signal);
+    try {
+      if (input.attemptId) await runtime.configureSource(current.name, input.attemptId, input.service, directory, input.expected);
+    } catch (error) {
+      // A concurrent preview may now use the explicitly connected folder. Never revoke its access.
+      if (!alreadyConnected) {
+        try { runtime.releaseSources([directory]); } catch { /* The runtime retains shared or live roots. */ }
+      }
+      throw error;
+    }
     return this.read(worktree);
   }
 
@@ -236,6 +339,10 @@ export class ApplicationPreviewService {
     const approval = this.approvals.get(this.name(worktree));
     if (!approval || approval.attemptId !== attemptId)
       throw new Error('This approval is no longer current.');
+    const secrets = await this.secretAvailability(this.name(worktree), attemptId);
+    const blocked = secrets.filter(secret => secret.availability !== 'available');
+    if (blocked.length) throw new Error(`Resolve these secrets before approving: ${blocked.map(secret => `${secret.id} (${secret.availability})`).join(', ')}.`);
+    if (this.approvals.get(this.name(worktree)) !== approval) throw new Error('This approval is no longer current.');
     approval.approve();
   }
 
@@ -291,6 +398,7 @@ export class ApplicationPreviewService {
   }
 
   readonly secrets: PreviewSecretsApi = {
+    has: ({ id }) => this.owner().keystore.has('user', id),
     status: () => this.owner().keystore.status(),
     list: async (input) => {
       const runtime = this.owner();
@@ -340,4 +448,9 @@ function expected(status?: PreviewStatus) {
     candidate: status?.candidate?.id ?? null,
     latest: status?.latest?.id ?? null
   };
+}
+
+function within(root: string, directory: string) {
+  const relative = path.relative(root, directory);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }

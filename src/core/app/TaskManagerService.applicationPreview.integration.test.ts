@@ -131,6 +131,8 @@ it('retains source ownership across restart, replacement, and desktop opening', 
     const otherWorktree = await prepareTestWorktree(reopened, unstartedTask.id);
     await fs.writeFile(path.join(otherWorktree.worktreePath, 'index.html'), 'other task');
     await reopened.createApplicationPreviewConfiguration({ taskId: unstartedTask.id, type: 'static', directory: '.' });
+    expect((await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeUndefined();
+    await reopened.startApplicationPreview({ taskId: unstartedTask.id, source: 'file' });
     await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeTruthy();
     const other = await reopened.getApplicationPreview({ taskId: unstartedTask.id });
     await reopened.approveApplicationPreview({ taskId: unstartedTask.id, attemptId: other.approval!.attemptId });

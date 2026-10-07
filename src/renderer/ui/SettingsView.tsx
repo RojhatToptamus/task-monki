@@ -63,7 +63,6 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
 ];
 
 export interface SettingsViewProps extends AgentProfilesSettingsActions {
-  previewSecretContext?: { title: string; references: string[]; onReturn(): void };
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   onPreviewThemePreset?(themePreset: ThemePreset | null): void;
@@ -87,7 +86,7 @@ export interface SettingsViewProps extends AgentProfilesSettingsActions {
 }
 
 export function SettingsView(props: SettingsViewProps) {
-  const [section, setSection] = useState<SettingsSection>(props.previewSecretContext ? 'secrets' : 'agents');
+  const [section, setSection] = useState<SettingsSection>('agents');
 
   return (
     <div className="tm-settings">
@@ -121,7 +120,7 @@ export function SettingsView(props: SettingsViewProps) {
         {section === 'tools' ? <ToolSettings {...props} /> : null}
         {section === 'updates' ? <UpdateSettings {...props} /> : null}
         {section === 'appearance' ? <AppearanceSettings {...props} /> : null}
-        {section === 'secrets' ? <PreviewSecretsSettings context={props.previewSecretContext} /> : null}
+        {section === 'secrets' ? <PreviewSecretsSettings /> : null}
       </div>
     </div>
   );

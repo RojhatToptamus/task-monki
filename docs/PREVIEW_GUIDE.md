@@ -14,10 +14,13 @@ the task's current preview. Tasks without a runtime instance are not listed.
 
 ## Configure and start
 
-Open the task's **Preview** tab and choose **Configure preview** for the first
-start. Review an existing configuration, or choose **Add application** for a
-development command or static folder. For a multi-service app, use
-**Generate with agent** or edit root `preview.yaml`.
+Open the task's **Preview** tab. If no configuration exists, choose **Set up
+Preview**. Review the suggested Vite, Next.js, or static-site configuration, or
+enter your command and working folder. Manual setup does not require an agent.
+**Save preview.yaml** creates the file without overwriting an existing file or
+starting commands. Then choose **Review and start**.
+
+For a multi-service app, use **Generate with agent** or edit root `preview.yaml`.
 The agent proposes configuration for review; it cannot approve execution.
 If evidence is insufficient, answer the focused questions with nonsecret details
 and regenerate. Review the draft before saving it. Saving does not start the app.
@@ -41,8 +44,9 @@ argument arrays, without an implicit shell. Install dependencies in the worktree
 or declare an explicit setup job.
 
 Root `preview.yml` is also supported, but having both default files is an error.
-The former `.taskmonki/preview.yaml` format is not supported. See Previewhost's
-configuration documentation for environment, database, worker, and Compose specs.
+See Previewhost's configuration documentation for environment, database, worker,
+and Compose specs. The manual command form uses your shell; YAML command arrays
+do not use an implicit shell.
 
 Review the services, commands, source access, and secret references before
 **Approve and start**. Source changes remain live. Readiness must succeed before
@@ -71,10 +75,13 @@ Concealed values are not displayed. **Review and apply** starts a replacement
 with explicit authorization. Earlier attempts and saved Design captures are
 read-only.
 
-**Connect folder** selects the service or job that should use another source,
-then requests access and applies that connection. Access alone does not connect
-a service. Other tasks may use the same source; deletion is blocked while any
-active consumer remains.
+**Connect folder** shows the service, current folder, and selected replacement.
+Choosing or canceling the folder picker grants no access. The explicit connection
+permits Previewhost to use the folder until Task Monki closes. Commands run with
+your account permissions and can read or change files. Review and approve the
+resulting configuration before execution. External folders in an initial YAML
+file also require explicit connection. Shared folders remain protected while
+another preview uses them.
 
 **Connections** edits an existing attached URL, another preview, or a local
 database or TCP dependency. Database connection URLs use secret references.
@@ -86,9 +93,16 @@ After editing an existing file, use **Update from preview.yaml** from the menu.
 
 ## Secrets
 
-Use **Settings → Secrets** to create or unlock encrypted storage, then add named
-references. Enter only local development credentials. Values cannot be read back;
-editing replaces the value. The same reference may be used by several previews.
+Preview review identifies each required reference and its service or job. Choose
+**Add secret**, **Replace value**, or **Open secret storage** directly in Preview.
+The private dialog returns to the same review. Saving or unlocking never approves
+or starts a preview. Missing or locked references block execution approval.
+
+Values stay concealed, including through accessibility tools. Pasting multiple
+lines replaces the whole value and preserves every line. Clear it or paste again
+to change it. Stored values cannot be read back. **Settings → Secrets** uses the
+same private editor. Enter only local development credentials; a shared reference
+has one value for every preview that uses it.
 
 Configuration uses references, for example:
 
@@ -115,6 +129,18 @@ is separate from Stop and requires confirmation of the displayed retained data.
 Do not use production databases for local preview verification.
 
 ## Failure and recovery
+
+If the task folder is missing, Preview offers **Restore worktree**. Review the
+recorded Git state before restoration. Restoration keeps the task, retained
+preview configuration, and secrets. An external checkout uses **Reconnect
+checkout** instead. A locked registration or changed branch requires review.
+
+Use a failed service or job's **Logs** action to inspect that exact attempt.
+Readiness errors include the probe path, deadline, and last observed response.
+Command failures direct you to project commands and dependencies. Supervisor
+failures identify Task Monki's runtime and retain bootstrap output in the attempt
+logs; reinstall or rebuild the app instead of installing runtime modules in the
+project. **Review and retry** requires a new execution approval.
 
 A failed replacement usually keeps the previous application running. Its files
 are still live, and migrations may already have changed the database. This is

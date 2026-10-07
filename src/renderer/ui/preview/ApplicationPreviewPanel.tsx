@@ -14,6 +14,7 @@ import {
 } from './previewPresentation';
 import { ApplicationLogs } from './ApplicationLogs';
 import { ApplicationActivity } from './ApplicationActivity';
+import { PreviewSecretDialog } from './PreviewSecretDialog';
 import { ApplicationConfiguration } from './ApplicationConfiguration';
 
 function useApplicationPreview(taskId: string) {
@@ -95,13 +96,11 @@ export function ApplicationPreviewPanel({
   taskId,
   projectName,
   setup,
-  onOpenSecrets,
   onModalOpenChange
 }: {
   taskId: string;
   projectName?: string;
   setup?: React.ReactNode;
-  onOpenSecrets?(references: string[]): void;
   onModalOpenChange?(open: boolean): void;
 }) {
   const { snapshot, error: readError, refresh } = useApplicationPreview(taskId);
@@ -121,6 +120,8 @@ export function ApplicationPreviewPanel({
     attemptId: string;
     source?: string;
   }>();
+  const [secretReferences, setSecretReferences] = useState<string[]>();
+  const onOpenSecrets = (references: string[]) => setSecretReferences(references);
   const [confirmData, setConfirmData] = useState(false);
   const status = snapshot?.status;
   const serving = status?.active;
@@ -239,7 +240,7 @@ export function ApplicationPreviewPanel({
               disabled={busy || !snapshot || status?.busy}
               onClick={start}
             >
-              Start
+              {status.latest.state === 'failed' || status.latest.state === 'canceled' ? 'Review and retry' : 'Review and start'}
             </button>
           ) : null}
           <ActionMenu
@@ -252,11 +253,13 @@ export function ApplicationPreviewPanel({
                   : 'Load preview.yaml',
                 disabled:
                   busy ||
+                  !snapshot?.hasConfigurationFile ||
                   status?.busy ||
                   !!status?.candidate ||
                   (!!serving &&
                     !!snapshot?.designAttempts?.includes(serving.id)),
                 disabledReason:
+                  !snapshot?.hasConfigurationFile ? 'Set up Preview to create preview.yaml first.' :
                   serving && snapshot?.designAttempts?.includes(serving.id)
                     ? 'Stop the Design preview before loading workspace configuration.'
                     : 'Wait for the current preview operation to finish.',
@@ -309,6 +312,16 @@ export function ApplicationPreviewPanel({
           {item.error.message}
         </p>
       ))}
+      {snapshot?.configurationError ? <p className="form-error" role="alert">{snapshot.configurationError} Open preview.yaml to correct it, then review again.</p> : null}
+      {snapshot?.fileSources?.some(source => !source.connected) ? <section aria-label="Connect source folders">
+        <h3>Connect source folders</h3>
+        <p>These services use folders outside this worktree. Connect each folder before reviewing startup. Choosing a folder alone grants no access.</p>
+        {snapshot.fileSources.filter(source => !source.connected).map(source => <div key={`${source.service}:${source.directory}`} className="tm-application-preview__feedback">
+          <p><strong>{source.service}</strong> will use <code>{source.directory}</code>.</p>
+          <p>Connection permits Previewhost to use this folder until the app closes. Commands run with your account permissions and may read or change files.</p>
+          <button className="outline-button" disabled={busy} onClick={() => void run(() => api.connectApplicationPreviewSource({ taskId, service: source.service, directory: source.directory, expected: expected(status) }))}>Connect folder for {source.service}</button>
+        </div>)}
+      </section> : null}
       <nav className="tm-tabs" role="tablist" aria-label="Preview sections">
         {(['Activity', 'Logs', 'Configuration'] as const).map((value) => (
           <AccessibleTab
@@ -331,7 +344,10 @@ export function ApplicationPreviewPanel({
         aria-labelledby="preview-tab-Activity"
         hidden={section !== 'Activity'}
       >
-        <ApplicationActivity
+        <div hidden={!initialConfiguration || snapshot?.hasConfigurationFile}>{setup}</div>
+        {initialConfiguration ? <>
+          {snapshot?.hasConfigurationFile ? <div className="tm-application-preview__empty"><h3>Configuration ready</h3><p>Review services and access before starting.</p><button className="primary-button" disabled={busy || !!snapshot.configurationError || snapshot.fileSources?.some(source => !source.connected)} onClick={start}>Review and start</button></div> : null}
+        </> : <ApplicationActivity
           taskId={taskId}
           status={status}
           busy={busy}
@@ -343,7 +359,7 @@ export function ApplicationPreviewPanel({
               api.rerunApplicationPreviewJob({ taskId, attemptId, job })
             )
           }
-        />
+        />}
       </div>
       <div
         role="tabpanel"
@@ -365,9 +381,7 @@ export function ApplicationPreviewPanel({
         aria-labelledby="preview-tab-Configuration"
         hidden={section !== 'Configuration'}
       >
-        <div hidden={!initialConfiguration || snapshot.hasConfigurationFile}>
-          {setup}
-        </div>
+        {initialConfiguration && !snapshot.hasConfigurationFile ? <p>Open Activity to set up Preview.</p> : null}
         {initialConfiguration ? (
           snapshot.hasConfigurationFile ? (
             <div className="tm-application-preview__empty">
@@ -375,7 +389,7 @@ export function ApplicationPreviewPanel({
               <p>Review preview.yaml to start this application.</p>
               <button
                 className="primary-button"
-                disabled={busy || status?.busy}
+                disabled={busy || status?.busy || !!snapshot.configurationError || snapshot.fileSources?.some(source => !source.connected)}
                 onClick={start}
               >
                 Review and start
@@ -393,7 +407,7 @@ export function ApplicationPreviewPanel({
           />
         )}
       </div>
-      {snapshot?.approval ? (
+      {snapshot?.approval && !secretReferences ? (
         <PreviewDialog
           onOpenChange={onModalOpenChange}
           size="review"
@@ -428,7 +442,7 @@ export function ApplicationPreviewPanel({
               </button>
               <button
                 className="primary-button"
-                disabled={busy}
+                disabled={busy || snapshot.approval.secrets?.some(secret => secret.availability !== 'available')}
                 onClick={() =>
                   void run(() =>
                     api.approveApplicationPreview({
@@ -449,7 +463,16 @@ export function ApplicationPreviewPanel({
           </p>
           <ConfigurationDefinitions
             description={snapshot.approval.description}
+            showSecrets={false}
           />
+          {snapshot.approval.secrets?.length ? <section aria-label="Required secrets">
+            <h3>Secrets</h3>
+            {snapshot.approval.secrets.map(secret => <div key={secret.id} className="tm-application-preview__feedback">
+              <p><code>{secret.id}</code> · {secret.availability === 'available' ? 'Ready' : secret.availability === 'missing' ? 'Missing value' : secret.availability === 'locked' ? 'Storage locked' : 'Storage unavailable'}</p>
+              <p>Used by {secret.bindings.map(binding => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ')}.</p>
+              <button className="outline-button" onClick={() => onOpenSecrets([secret.id])}>{secret.availability === 'available' ? 'Replace value' : secret.availability === 'missing' ? 'Add secret' : 'Open secret storage'}</button>
+            </div>)}
+          </section> : null}
           {snapshot.approval.description.spec.type === 'compose' && serving ? (
             <p>
               The current app stops before this update starts. Retained data and
@@ -463,6 +486,11 @@ export function ApplicationPreviewPanel({
           ) : null}
         </PreviewDialog>
       ) : null}
+      {secretReferences ? <PreviewSecretDialog references={secretReferences}
+        recipients={Object.fromEntries((snapshot?.approval?.secrets ?? latest?.error?.requirements ?? []).map(secret => [secret.id, secret.bindings.map(binding => `${binding.service ?? 'Application'} → ${binding.key}`)]))}
+        onClose={() => { setSecretReferences(undefined); refresh(); }}
+        onSaved={() => { setSecretReferences(undefined); refresh(); }}
+        onModalOpenChange={onModalOpenChange} /> : null}
       {confirmData && status?.data ? (
         <PreviewDialog
           onOpenChange={onModalOpenChange}

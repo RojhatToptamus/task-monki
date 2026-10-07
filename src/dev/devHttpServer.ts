@@ -1123,6 +1123,11 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/application/inspectApplicationPreviewSetup') {
+        sendJson(response, requestId, 200, await options.service.inspectApplicationPreviewSetup((await readJson()) as Parameters<TaskManagerService['inspectApplicationPreviewSetup']>[0]));
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/application/createApplicationPreviewConfiguration') {
         sendJson(response, requestId, 200, await options.service.createApplicationPreviewConfiguration((await readJson()) as Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]));
         return;

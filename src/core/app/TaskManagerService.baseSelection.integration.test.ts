@@ -84,26 +84,23 @@ describe('Explicit worktree base selection', () => {
     });
   }, 20_000);
 
-  it.each(['LOCKED', 'MISSING_REGISTERED'] as const)('does not report a %s worktree as restored', async (status) => {
+  it.each(['LOCKED', 'LOCKED_MISSING'] as const)('does not report a %s worktree as restored', async (status) => {
     const scenario = await scenarios.create();
     const task = await scenario.createTask();
     const inspection = await scenario.service.inspectWorktreePreparation({ taskId: task.id });
     if (inspection.mode !== 'CREATE') throw new Error('Expected base selection.');
     const prepared = await scenario.service.prepareWorktree(createInput(task.id, inspection.bases[0]!));
     if (prepared.outcome !== 'PREPARED') throw new Error('Expected a prepared worktree.');
-    if (status === 'LOCKED') {
-      await git(scenario.repositoryPath, ['worktree', 'lock', prepared.worktree.worktreePath]);
-    } else {
-      await fs.rm(prepared.worktree.worktreePath, { recursive: true });
-    }
+    await git(scenario.repositoryPath, ['worktree', 'lock', prepared.worktree.worktreePath]);
+    if (status === 'LOCKED_MISSING') await fs.rm(prepared.worktree.worktreePath, { recursive: true });
     await expect(scenario.service.prepareWorktree({ taskId: task.id, intent: 'RECOVER' }))
-      .rejects.toThrow(status === 'LOCKED' ? /locked/ : /prunable|registered/i);
+      .rejects.toThrow(/locked|registered/i);
     expect((await scenario.store.getCurrentWorktree(task.id))?.status)
-      .toMatch(status === 'LOCKED' ? /^LOCKED$/ : /^(PRUNABLE|ERROR)$/);
+      .toMatch(/^(LOCKED|ERROR)$/);
     expect((await scenario.store.snapshot()).runs).toHaveLength(0);
   }, 20_000);
 
-  it('restores the last verified commit explicitly, refuses a conflicting task branch, and never recreates from Start', async () => {
+  it.each(['unregistered', 'registered'] as const)('restores a %s missing checkout at the last verified commit, refuses a conflicting branch, and never recreates from Start', async (registration) => {
     const scenario = await scenarios.create();
     const task = await scenario.createTask();
     const inspection = await scenario.service.inspectWorktreePreparation({ taskId: task.id });
@@ -121,7 +118,8 @@ describe('Explicit worktree base selection', () => {
     await git(worktree.worktreePath, ['commit', '-m', 'Save task progress']);
     await scenario.service.refreshEvidence({ taskId: task.id });
     const savedSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
-    await git(scenario.repositoryPath, ['worktree', 'remove', worktree.worktreePath]);
+    if (registration === 'registered') await fs.rm(worktree.worktreePath, { recursive: true });
+    else await git(scenario.repositoryPath, ['worktree', 'remove', worktree.worktreePath]);
     await expect(scenario.service.startRun({ taskId: task.id })).rejects.toThrow(/worktree/i);
     await expect(fs.access(worktree.worktreePath)).rejects.toThrow();
     await expect(scenario.service.prepareWorktree(createInput(task.id, base))).resolves.toMatchObject({ outcome: 'BASE_ALREADY_BOUND' });

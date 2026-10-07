@@ -7,6 +7,7 @@ import type {
   WorktreeStatus
 } from '../../shared/contracts';
 import {
+  canonicalPath as canonicalFilesystemPath,
   enforcePosixMode,
   isOwnedByCurrentUser
 } from '../filesystem/secureFilesystem';
@@ -94,7 +95,20 @@ export class WorktreeService {
           'The task branch already exists at a different commit than the last verified task state. Recovery requires review.'
         );
       }
-      await git(repositoryPath, ['worktree', 'add', record.worktreePath, record.branchName], 60_000);
+      const registered = await listGitWorktrees(repositoryPath);
+      const expectedPath = await canonicalPath(record.worktreePath);
+      const paths = await Promise.all(registered.map(async item => ({ item, path: await canonicalPath(item.path) })));
+      const missing = paths.find(item => samePath(item.path, expectedPath))?.item;
+      if (missing && (missing.locked || !missing.prunable || missing.bare || missing.detached ||
+          missing.branch !== record.branchName || missing.headSha !== expectedHeadSha)) {
+        throw new Error('The registered worktree is locked or differs from the approved task state. Recovery requires review.');
+      }
+      if (missing && registered.some(item => item !== missing && item.branch === record.branchName)) {
+        throw new Error('The task branch is registered in another checkout. Recovery requires review.');
+      }
+      // Git retains registration after a temporary checkout disappears. Force only
+      // that absent, unlocked registration; never prune other worktrees.
+      await git(repositoryPath, ['worktree', 'add', ...(missing ? ['--force'] : []), record.worktreePath, record.branchName], 60_000);
     } else {
       await git(
         repositoryPath,
@@ -188,7 +202,8 @@ export class WorktreeService {
     return {
       ...record,
       status: statusForParsedWorktree(match),
-      headSha: match.headSha,
+      // Missing checkout metadata cannot change the commit approved for recovery.
+      headSha: match.prunable ? record.headSha : match.headSha,
       error: undefined,
       updatedAt: new Date().toISOString(),
       lastVerifiedAt: new Date().toISOString()
@@ -487,11 +502,7 @@ async function hasUncommittedWork(worktreePath: string): Promise<boolean> {
 }
 
 async function canonicalPath(filePath: string): Promise<string> {
-  try {
-    return await fs.realpath(filePath);
-  } catch {
-    return path.resolve(filePath);
-  }
+  return canonicalFilesystemPath(filePath) ?? path.resolve(filePath);
 }
 
 function requireFullObjectId(value: string, label: string): void {

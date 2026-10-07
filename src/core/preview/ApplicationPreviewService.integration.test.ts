@@ -125,3 +125,65 @@ it('blocks worktree deletion while another application consumes its source', asy
   await service.retireWorktree(source);
   expect(service.owner().sourceRoots()).not.toContain(await fs.realpath(source.worktreePath));
 });
+
+it('saves a detected first-time configuration without starting or overwriting files', async () => {
+  const { service, worktree, approveAndWait } = await fixture();
+  const tree = await worktree('first setup');
+  await fs.unlink(path.join(tree.worktreePath, 'preview.yaml'));
+  await fs.writeFile(path.join(tree.worktreePath, 'index.html'), 'first setup');
+  expect((await service.inspectSetup(tree)).recommendations).toMatchObject([{ type: 'static', directory: '.' }]);
+  const input = { taskId: tree.taskId, type: 'static' as const, directory: '.' };
+  const saved = await service.createConfiguration(tree, input);
+  expect(saved.hasConfigurationFile).toBe(true);
+  expect(saved.status).toBeUndefined();
+  expect(saved.approval).toBeUndefined();
+  const original = await fs.readFile(path.join(tree.worktreePath, 'preview.yaml'), 'utf8');
+  await expect(service.createConfiguration(tree, input)).rejects.toThrow('already exists');
+  expect(await fs.readFile(path.join(tree.worktreePath, 'preview.yaml'), 'utf8')).toBe(original);
+  const pending = await service.start(tree, 'file');
+  const ready = await approveAndWait(tree, pending.status!.candidate!.id);
+  expect(await (await fetch(ready.url!)).text()).toBe('first setup');
+});
+
+it('blocks approval for the exact missing secret and saving its value does not approve execution', async () => {
+  const { service, worktree, approveAndWait } = await fixture();
+  const tree = await worktree('secret recovery');
+  await fs.writeFile(path.join(tree.worktreePath, 'preview.yaml'), JSON.stringify({ name: 'app', type: 'command', cwd: '.', command: [process.execPath, 'server.cjs'], env: { TOKEN: { secret: 'project/dev/exact-token' } } }));
+  const pending = await service.start(tree, 'file');
+  const id = pending.status!.candidate!.id;
+  await expect.poll(async () => (await service.read(tree)).approval?.attemptId).toBe(id);
+  await expect(service.approve(tree, id)).rejects.toThrow('project/dev/exact-token');
+  const password = 'SYNTHETIC_new_storage';
+  await service.secrets.unlock({ password, confirmation: password, create: true });
+  expect((await service.read(tree)).approval?.secrets).toEqual([{ id: 'project/dev/exact-token', selected: false, bindings: [{ key: 'TOKEN' }], availability: 'missing' }]);
+  await expect(service.approve(tree, id)).rejects.toThrow('missing');
+  await service.secrets.create({ id: 'project/dev/exact-token', value: 'SYNTHETIC_private_value' });
+  const recovered = await service.read(tree);
+  expect(recovered.approval?.attemptId).toBe(id);
+  expect(recovered.approval?.secrets[0].availability).toBe('available');
+  expect(recovered.status?.active).toBeUndefined();
+  expect((await service.owner().logs(service.name(tree), id)).text).not.toContain('started');
+  await approveAndWait(tree, id);
+});
+
+it('identifies initial external sources and grants access only to an exact explicit connection', async () => {
+  const { service, worktree, approveAndWait } = await fixture();
+  const tree = await worktree('main');
+  const external = await worktree('external');
+  const unrelated = await worktree('unrelated');
+  await fs.writeFile(path.join(external.worktreePath, 'index.html'), 'connected external');
+  await fs.writeFile(path.join(tree.worktreePath, 'preview.yaml'), JSON.stringify({ name: 'app', type: 'environment', primary: 'web', services: { web: { type: 'static', directory: external.worktreePath } } }));
+  const root = await fs.realpath(external.worktreePath);
+  expect((await service.read(tree)).fileSources).toEqual([{ service: 'web', directory: root, connected: false }]);
+  const before = service.owner().sourceRoots();
+  const input = { taskId: tree.taskId, service: 'web', directory: root, expected: { active: null, candidate: null, latest: null } };
+  await expect(service.connectSource(tree, { ...input, directory: unrelated.worktreePath })).rejects.toThrow('configuration changed');
+  expect(service.owner().sourceRoots()).toEqual(before);
+  const connected = await service.connectSource(tree, input);
+  expect(connected.fileSources?.[0].connected).toBe(true);
+  expect(connected.status).toBeUndefined();
+  expect(connected.approval).toBeUndefined();
+  const pending = await service.start(tree, 'file');
+  const ready = await approveAndWait(tree, pending.status!.candidate!.id);
+  expect(await (await fetch(ready.url!)).text()).toBe('connected external');
+});

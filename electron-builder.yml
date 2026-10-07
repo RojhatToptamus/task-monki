@@ -40,6 +40,8 @@ artifactName: Task-Monki-${version}-${os}-${arch}.${ext}
 asar: true
 asarUnpack:
   - node_modules/previewhost/**
+  # The unpacked supervisor must resolve its platform-specific Koffi runtime.
+  - node_modules/koffi/**
 compression: maximum
 npmRebuild: false
 generateUpdatesFilesForAllChannels: false
