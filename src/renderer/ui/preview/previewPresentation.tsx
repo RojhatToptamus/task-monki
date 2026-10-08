@@ -138,6 +138,130 @@ export function PreviewDialog({
   );
 }
 
+/** The approval surface shows commands and access without exposing environment values. */
+export function PreviewRunReview({
+  description
+}: {
+  description: ConfigurationBindingsInspection['description'];
+}) {
+  const spec = description.spec;
+  const services =
+    spec.type === 'environment'
+      ? Object.entries(spec.services)
+      : [['Application', spec] as const];
+  const probes = services.flatMap(([id, service]) => {
+    const candidates = [
+      ['readiness', 'ready' in service ? service.ready : undefined],
+      [
+        'health check',
+        'liveness' in service ? service.liveness?.probe : undefined
+      ]
+    ] as const;
+    return candidates.flatMap(([kind, probe]) =>
+      probe?.type === 'command' ? [{ id, kind, probe }] : []
+    );
+  });
+  const sources = [
+    ...new Set([
+      ...probes.flatMap(({ probe }) => (probe.cwd ? [probe.cwd] : [])),
+      ...services.flatMap(([, service]) =>
+        'cwd' in service && service.cwd
+          ? [service.cwd]
+          : 'directory' in service && service.directory
+            ? [service.directory]
+            : []
+      )
+    ])
+  ];
+  return (
+    <div className="tm-preview-run-review">
+      <h4 className="tm-panel__title">What runs</h4>
+      {services.map(([id, service]) => (
+        <div className="tm-preview-detail-row" key={id}>
+          <strong>{id}</strong>
+          <div>
+            {'command' in service && service.command ? (
+              <code>{commandText(service.command)}</code>
+            ) : (
+              <span>
+                {service.type === 'postgres' || service.type === 'redis'
+                  ? `${serviceTypeLabel(service.type)} managed by Preview · data kept after Stop`
+                  : service.type === 'attach' && service.url
+                    ? typeof service.url === 'string'
+                      ? service.url
+                      : 'secret' in service.url
+                        ? `Secret: ${service.url.secret}`
+                        : `Environment: ${service.url.fromEnv}`
+                    : serviceTypeLabel(service.type)}
+              </span>
+            )}
+            {'dependsOn' in service && service.dependsOn?.length ? (
+              <small>After {service.dependsOn.join(', ')}</small>
+            ) : null}
+            {service.type === 'job' ? (
+              <small>
+                {service.run === 'once'
+                  ? 'Once per retained environment'
+                  : 'Runs on every start'}
+              </small>
+            ) : null}
+          </div>
+          <span>
+            {'cwd' in service && service.cwd
+              ? service.cwd.split('/').at(-1)
+              : 'directory' in service
+                ? 'Static files'
+                : ''}
+          </span>
+        </div>
+      ))}
+      {probes.map(({ id, kind, probe }) => (
+        <div className="tm-preview-detail-row" key={`${id}:${kind}`}>
+          <strong>
+            {id} · {kind}
+          </strong>
+          <code>{commandText(probe.command)}</code>
+          <span>{probe.cwd?.split('/').at(-1)}</span>
+        </div>
+      ))}
+      <h4 className="tm-panel__title">Access</h4>
+      {sources.map((source) => (
+        <div className="tm-preview-detail-row" key={source}>
+          <strong>Source folder</strong>
+          <code>{source}</code>
+          <button
+            className="ghost-button"
+            onClick={() => void navigator.clipboard.writeText(source)}
+          >
+            Copy path
+          </button>
+        </div>
+      ))}
+      {description.secrets?.map((secret) => (
+        <div className="tm-preview-detail-row" key={secret.id}>
+          <code title={secret.id}>{secret.id}</code>
+          <span>
+            {secret.bindings
+              .map(
+                (binding) =>
+                  `${binding.service ?? 'Application'} → ${binding.key}`
+              )
+              .join(', ')}
+          </span>
+          <span>Concealed value</span>
+        </div>
+      ))}
+      <details className="tm-preview-disclosure">
+        <summary>
+          <DisclosureChevron />
+          Technical details
+        </summary>
+        <ConfigurationDefinitions description={description} />
+      </details>
+    </div>
+  );
+}
+
 export function ConfigurationDefinitions({
   description,
   showSecrets = true

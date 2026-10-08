@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentProps,
   type RefObject
 } from 'react';
 import type { PreviewSecretsApi } from '../../../shared/applicationPreview';
@@ -17,12 +18,14 @@ export function PreviewSecretDialog({
   onSaved,
   onModalOpenChange,
   fallbackReturnFocusRef,
-  inPreview = true
+  inPreview = true,
+  inline = false
 }: {
   /** Omit to create a reference; an empty list unlocks storage only. */
   references?: string[];
   fallbackReturnFocusRef?: RefObject<HTMLElement | null>;
   inPreview?: boolean;
+  inline?: boolean;
   recipients?: Record<string, string[]>;
   onClose(): void;
   onSaved(): void | Promise<void>;
@@ -160,8 +163,9 @@ export function PreviewSecretDialog({
       setBusy(false);
     }
   }
+  const Container = inline ? InlineSecretForm : PreviewDialog;
   return (
-    <PreviewDialog
+    <Container
       title={title}
       fallbackReturnFocusRef={fallbackReturnFocusRef}
       busy={busy}
@@ -182,7 +186,7 @@ export function PreviewSecretDialog({
             {inPreview ? 'Back to Preview' : 'Cancel'}
           </button>
           <button
-            className="primary-button"
+            className={inline ? 'outline-button' : 'primary-button'}
             disabled={
               busy ||
               !status ||
@@ -371,6 +375,33 @@ export function PreviewSecretDialog({
           </button>
         </div>
       ) : null}
-    </PreviewDialog>
+    </Container>
+  );
+}
+
+function InlineSecretForm({
+  title,
+  children,
+  footer,
+  onSubmit,
+  onClose,
+  busy
+}: ComponentProps<typeof PreviewDialog>) {
+  return (
+    <form
+      className="tm-preview-secret-form"
+      aria-label={title}
+      onSubmit={onSubmit}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !busy) {
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+    >
+      <h4>{title}</h4>
+      {children}
+      <div className="tm-preview-secret-actions">{footer}</div>
+    </form>
   );
 }

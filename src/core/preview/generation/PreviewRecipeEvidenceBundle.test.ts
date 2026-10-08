@@ -12,6 +12,26 @@ afterEach(async () => {
 });
 
 describe('PreviewRecipeEvidenceBundle', () => {
+  it('preserves framework-public configuration while concealing private bindings and leaving delivered logs intact', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-context-'));
+    roots.push(root);
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ dependencies: { next: '16.2.3' } }));
+    const evidenceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-context-evidence-'));
+    roots.push(evidenceRoot);
+    const bundle = await preparePreviewRecipeEvidenceBundle(root, {
+      rootDirectory: evidenceRoot, generationId: 'context',
+      configuration: { name: 'preview.yaml', text: 'name: app\ntype: command\ncwd: .\ncommand: [node, server.js]\nenv:\n  APP_ID: ordinary-looking-private-value\n  ACCESS: abc\n  NEXT_TELEMETRY_DISABLED: "1"\n  NEXT_PUBLIC_LABEL: browser-visible-value\n' },
+      diagnostics: { logs: 'ordinary-looking-private-value is a filename in this different attempt\nstep 1 of 10\nAPP_ID=[REDACTED]' }
+    });
+    const context = JSON.parse(await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8')).preview;
+    expect(context.configuration.env.APP_ID).toContain('concealed');
+    expect(context.configuration.env.ACCESS).toContain('concealed');
+    expect(context.configuration.env.NEXT_TELEMETRY_DISABLED).toBe('1');
+    expect(context.configuration.env.NEXT_PUBLIC_LABEL).toBe('browser-visible-value');
+    expect(context.diagnostics.logs).toBe('ordinary-looking-private-value is a filename in this different attempt\nstep 1 of 10\nAPP_ID=[REDACTED]');
+    await bundle.dispose();
+  });
+
   it('includes bounded source evidence while excluding likely secret-bearing files and contents', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-evidence-test-'));
     roots.push(root);
@@ -58,6 +78,27 @@ describe('PreviewRecipeEvidenceBundle', () => {
 
     await bundle.dispose();
     await expect(fs.access(bundle.directoryPath)).rejects.toThrow();
+  });
+
+  it('preserves a selected backend while withholding credential-bearing connection URLs', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-connections-'));
+    roots.push(root);
+    await fs.writeFile(path.join(root, 'client.ts'), 'const api = process.env.NEXT_PUBLIC_API_URL || "https://remote.example.com";');
+    const configuration = (url: string) => ({ type: 'environment', services: {
+      api: { type: 'attach', url }, web: { type: 'command', env: { NEXT_PUBLIC_API_URL: { service: 'api' } } }
+    } });
+    const evidenceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-connection-evidence-'));
+    roots.push(evidenceRoot);
+    for (const url of ['http://localhost:8001', 'http://user:private-canary@localhost:8001']) {
+      const bundle = await preparePreviewRecipeEvidenceBundle(root, { rootDirectory: evidenceRoot,
+        generationId: 'connection', diagnostics: { configuration: configuration(url) } });
+      const evidence = await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8');
+      expect(evidence).not.toContain('private-canary');
+      const policy = bundle.publicEnvironment.candidates[0].targetPolicy;
+      if (url === 'http://localhost:8001') expect(policy).toEqual({ kind: 'CONFIGURED', publicHttpTarget: { scheme: 'http', host: 'localhost', port: 8001, basePath: '/' } });
+      else expect(policy).not.toMatchObject({ publicHttpTarget: { host: 'localhost' } });
+      await bundle.dispose();
+    }
   });
 
   it('adds trusted actionable framework facts without exposing dependency contents', async () => {

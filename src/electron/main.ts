@@ -820,10 +820,12 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('application:listApplicationPreviews', () => service.listApplicationPreviews());
   handleTrustedIpc('application:getApplicationPreview', (_, input: Parameters<TaskManagerService['getApplicationPreview']>[0]) => service.getApplicationPreview(input));
-  handleTrustedIpc('application:connectApplicationPreviewDependency', (_, input: Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]) => service.connectApplicationPreviewDependency(input));
   handleTrustedIpc('application:connectApplicationPreviewSource', (_, input: Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]) => service.connectApplicationPreviewSource(input));
   handleTrustedIpc('application:inspectApplicationPreviewSetup', (_, input: Parameters<TaskManagerService['inspectApplicationPreviewSetup']>[0]) => service.inspectApplicationPreviewSetup(input));
-  handleTrustedIpc('application:createApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]) => service.createApplicationPreviewConfiguration(input));
+  handleTrustedIpc('application:readApplicationPreviewFile', (_, input: Parameters<TaskManagerService['readApplicationPreviewFile']>[0]) => service.readApplicationPreviewFile(input));
+  handleTrustedIpc('application:saveApplicationPreviewFile', (_, input: Parameters<TaskManagerService['saveApplicationPreviewFile']>[0]) => service.saveApplicationPreviewFile(input));
+  handleTrustedIpc('application:chooseApplicationPreviewFile', (_, input: Parameters<TaskManagerService['chooseApplicationPreviewFile']>[0]) => service.chooseApplicationPreviewFile(input));
+  handleTrustedIpc('application:startRetainedApplicationPreview', (_, input: Parameters<TaskManagerService['startRetainedApplicationPreview']>[0]) => service.startRetainedApplicationPreview(input));
   handleTrustedIpc('application:startApplicationPreview', (_, input: Parameters<TaskManagerService['startApplicationPreview']>[0]) => service.startApplicationPreview(input));
   handleTrustedIpc('application:approveApplicationPreview', (_, input: Parameters<TaskManagerService['approveApplicationPreview']>[0]) => service.approveApplicationPreview(input));
   handleTrustedIpc('application:stopApplicationPreview', (_, input: Parameters<TaskManagerService['stopApplicationPreview']>[0]) => service.stopApplicationPreview(input));
@@ -831,8 +833,6 @@ function installIpcHandlers(): void {
   handleTrustedIpc('application:openApplicationPreview', (_, input: Parameters<TaskManagerService['openApplicationPreview']>[0]) => service.openApplicationPreview(input));
   handleTrustedIpc('application:readApplicationPreviewLogs', (_, input: Parameters<TaskManagerService['readApplicationPreviewLogs']>[0]) => service.readApplicationPreviewLogs(input));
   handleTrustedIpc('application:inspectApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['inspectApplicationPreviewConfiguration']>[0]) => service.inspectApplicationPreviewConfiguration(input));
-  handleTrustedIpc('application:applyApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['applyApplicationPreviewConfiguration']>[0]) => service.applyApplicationPreviewConfiguration(input));
-  handleTrustedIpc('application:saveApplicationPreviewConfiguration', (_, input: Parameters<TaskManagerService['saveApplicationPreviewConfiguration']>[0]) => service.saveApplicationPreviewConfiguration(input));
   handleTrustedIpc('application:rerunApplicationPreviewJob', (_, input: Parameters<TaskManagerService['rerunApplicationPreviewJob']>[0]) => service.rerunApplicationPreviewJob(input));
   handleTrustedIpc('application:deleteApplicationPreviewData', (_, input: Parameters<TaskManagerService['deleteApplicationPreviewData']>[0]) => service.deleteApplicationPreviewData(input));
   handleTrustedIpc('secrets:list', (_, input: Parameters<typeof service.previewSecrets.list>[0]) => service.previewSecrets.list(input));

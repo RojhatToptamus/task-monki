@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import { readPreviewRecipeFile, writeReviewedPreviewRecipe, type PreviewRecipeFile } from './PreviewRecipeFile';
 import path from 'node:path';
 import {
   type PreviewRecipeGenerationDraft,
@@ -83,14 +84,12 @@ interface ParsedAgentGeneration {
 
 interface DraftValidationAuthority {
   taskId: string;
+  worktreePath: string;
+  originalFile?: PreviewRecipeFile;
   capabilities: PreviewFrameworkCapabilities;
-  publicEnvironmentCandidates: PreviewPublicEnvironmentCandidate[];
-  publicEnvironmentDecisions: PreviewPublicEnvironmentDecision[];
 }
 
 class InvalidAgentGenerationError extends Error {}
-
-class PreviewRecipeAlreadyExistsError extends Error {}
 
 class PreviewRecipeEvidenceChangedError extends Error {}
 
@@ -128,6 +127,7 @@ export class PreviewRecipeGenerationService {
     taskId: string;
     worktreePath: string;
     clarification?: string;
+    diagnostics?: unknown;
     onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
   }): Promise<PreviewRecipeGenerationSnapshot> {
     if (this.shuttingDown) {
@@ -167,6 +167,12 @@ export class PreviewRecipeGenerationService {
     return settled;
   }
 
+  reviewedFile(taskId: string, draftId: string): PreviewRecipeFile | undefined {
+    const authority = this.draftValidationAuthority.get(draftId);
+    if (!authority || authority.taskId !== taskId) throw new Error('The Preview proposal is no longer current.');
+    return authority.originalFile ? { ...authority.originalFile } : undefined;
+  }
+
   validate(taskId: string, draftId: string, yaml: string): PreviewRecipeValidation {
     const draft = this.states.get(taskId)?.draft;
     if (!draft || draft.id !== draftId) {
@@ -176,12 +182,10 @@ export class PreviewRecipeGenerationService {
     if (!authority || authority.taskId !== taskId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    return validateAgentGeneratedPreviewRecipeDraft(
-      yaml,
-      authority.capabilities,
-      authority.publicEnvironmentCandidates,
-      authority.publicEnvironmentDecisions
-    );
+    // Generation already checked the agent's evidence-backed decisions. During
+    // review, the user can supply a missing address or change a binding; the old
+    // report must not veto those edits. Schema, secret and command checks remain.
+    return validateGeneratedPreviewRecipeDraft(yaml, authority.capabilities);
   }
 
   async writeAcceptedRecipe(input: {
@@ -189,7 +193,7 @@ export class PreviewRecipeGenerationService {
     draftId: string;
     yaml: string;
     worktreePath: string;
-  }): Promise<void> {
+  }): Promise<'preview.yaml' | 'preview.yml'> {
     if (this.operations.has(input.taskId)) {
       throw new Error('Wait for Preview recipe generation to finish before accepting a draft.');
     }
@@ -201,16 +205,14 @@ export class PreviewRecipeGenerationService {
     if (!authority || authority.taskId !== input.taskId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    const validation = validateAgentGeneratedPreviewRecipeDraft(
-      input.yaml,
-      authority.capabilities,
-      authority.publicEnvironmentCandidates,
-      authority.publicEnvironmentDecisions
-    );
+    const validation = this.validate(input.taskId, input.draftId, input.yaml);
     if (validation.status !== 'VALID') {
       throw new Error(validation.issues[0]?.message ?? 'The Preview recipe is invalid.');
     }
-    await writeNewPreviewRecipe(input.worktreePath, input.yaml);
+    if (await fs.realpath(input.worktreePath) !== authority.worktreePath) {
+      throw new Error('The task worktree changed. Ask the agent for a fresh proposal.');
+    }
+    return writeReviewedPreviewRecipe(input.worktreePath, input.yaml, authority.originalFile);
   }
 
   completeAcceptance(taskId: string): PreviewRecipeGenerationSnapshot {
@@ -293,6 +295,7 @@ export class PreviewRecipeGenerationService {
       taskId: string;
       worktreePath: string;
       clarification?: string;
+      diagnostics?: unknown;
       questions?: readonly string[];
       onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
       startedAt: string;
@@ -303,11 +306,13 @@ export class PreviewRecipeGenerationService {
     let evidence: Awaited<ReturnType<typeof preparePreviewRecipeEvidenceBundle>> | undefined;
     let retainEvidence = false;
     try {
-      await assertPreviewRecipeMissing(input.worktreePath);
+      const originalFile = await readPreviewRecipeFile(input.worktreePath);
       evidence = await preparePreviewRecipeEvidenceBundle(input.worktreePath, {
         rootDirectory: this.evidenceRoot,
         generationId: operation.id,
-        signal: operation.abortController.signal
+        signal: operation.abortController.signal,
+        configuration: originalFile,
+        diagnostics: input.diagnostics
       });
       this.assertCurrent(input.taskId, operation);
       this.publish(
@@ -428,7 +433,9 @@ export class PreviewRecipeGenerationService {
         yaml: parsed.yaml!,
         report: parsed.report,
         validation,
-        generatedAt: new Date().toISOString()
+        generatedAt: new Date().toISOString(),
+        fileName: originalFile?.name ?? 'preview.yaml',
+        replacesExistingFile: !!originalFile
       };
       const finished = this.finish(
         input.taskId,
@@ -439,9 +446,9 @@ export class PreviewRecipeGenerationService {
       this.clearDraftAuthority(input.taskId);
       this.draftValidationAuthority.set(draft.id, {
         taskId: input.taskId,
-        capabilities: structuredClone(evidence.frameworkCapabilities),
-        publicEnvironmentCandidates: structuredClone(evidence.publicEnvironment.candidates),
-        publicEnvironmentDecisions: structuredClone(parsed.report.publicEnvironmentDecisions)
+        worktreePath: await fs.realpath(input.worktreePath),
+        originalFile,
+        capabilities: structuredClone(evidence.frameworkCapabilities)
       });
       return finished;
     } catch (error) {
@@ -567,6 +574,12 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
       ]
     };
   }
+  if (/^tm-[0-9a-f-]{36}$/i.test(plan.name)) {
+    return { status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: 'Use a readable project name. Task Monki assigns runtime identity separately.' }] };
+  }
+  if (/\[concealed literal[^\]]*\]|\[credential-like diagnostic withheld\]|\[REDACTED\]/i.test(yaml)) {
+    return { status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: 'Replace concealed placeholders with an explicit nonsecret value or secret reference before saving.' }] };
+  }
   if (looksLikeSecret(yaml) || containsSecretLiteral(plan)) {
     return {
       status: 'INVALID',
@@ -620,35 +633,40 @@ function validateAgentGeneratedPreviewRecipeDraft(
           (value) =>
             typeof value === 'string' || !('service' in value && value.service === decision.attachmentId || 'browserUrl' in value && value.browserUrl === decision.attachmentId)
         ) ||
-        attachment?.type !== 'attach' ||
-        !publicTargetMatchesPolicy(attachment.url, candidate)
-      ) return invalidPublicEnvironmentDecision();
+        attachment?.type !== 'attach'
+      ) return invalidPublicEnvironmentDecision(`The agent proposal must bind ${candidate.key} to its declared HTTP service ${decision.attachmentId ?? '(missing)'}. Ask the agent to correct this connection.`);
+      if (!publicTargetMatchesPolicy(attachment.url, candidate)) {
+        const expected = candidate.targetPolicy.kind === 'LOCAL_REQUIRED'
+          ? 'an explicit connection without a preselected URL'
+          : `${candidate.targetPolicy.publicHttpTarget.scheme}://${candidate.targetPolicy.publicHttpTarget.host}:${candidate.targetPolicy.publicHttpTarget.port}${candidate.targetPolicy.publicHttpTarget.basePath}`;
+        return invalidPublicEnvironmentDecision(`The agent proposal must use ${expected} for ${candidate.key} in service ${decision.attachmentId}. Ask the agent to retain the selected connection.`);
+      }
     } else if (decision.decision === 'SOURCE_DEFAULT') {
       if (!candidate.sourceDefault || recipientValues.length > 0) {
-        return invalidPublicEnvironmentDecision();
+        return invalidPublicEnvironmentDecision(`The agent report says ${candidate.key} uses its source default, but the YAML overrides it. Ask the agent to make the report and configuration agree.`);
       }
     } else if (recipientValues.length > 0) {
-      return invalidPublicEnvironmentDecision();
+      return invalidPublicEnvironmentDecision(`The agent report omits ${candidate.key}, but the YAML still sets it. Ask the agent to remove the unused setting.`);
     }
   }
   return validation;
 }
 
 function publicTargetMatchesPolicy(url: string | undefined, candidate: PreviewPublicEnvironmentCandidate): boolean {
-  if (!url) return true; // The owner must select a dependency before execution.
-  if (candidate.targetPolicy.kind !== 'LITERAL_ALLOWED') return false;
+  if (!url) return candidate.targetPolicy.kind !== 'CONFIGURED';
+  if (candidate.targetPolicy.kind === 'LOCAL_REQUIRED') return false;
   const evidenced = candidate.targetPolicy.publicHttpTarget;
   const target = new URL(url);
   return target.protocol === `${evidenced.scheme}:` && target.hostname === evidenced.host &&
     Number(target.port || (target.protocol === 'https:' ? 443 : 80)) === evidenced.port && target.pathname === evidenced.basePath;
 }
 
-function invalidPublicEnvironmentDecision(): PreviewRecipeValidation {
+function invalidPublicEnvironmentDecision(message = 'The generated public environment decision does not match the Preview recipe.'): PreviewRecipeValidation {
   return {
     status: 'INVALID',
     issues: [{
       code: 'PUBLIC_ENVIRONMENT_DECISION_INVALID',
-      message: 'The generated public environment decision does not match the Preview recipe.'
+      message
     }]
   };
 }
@@ -1065,7 +1083,6 @@ function classifyGenerationFailure(error: unknown): {
     | 'AGENT_UNAVAILABLE'
     | 'GENERATION_TIMED_OUT'
     | 'INVALID_AGENT_OUTPUT'
-    | 'RECIPE_EXISTS'
     | 'CANCELLATION_UNCONFIRMED';
   message: string;
 } {
@@ -1075,7 +1092,7 @@ function classifyGenerationFailure(error: unknown): {
   ) {
     return {
       code: 'GENERATION_TIMED_OUT',
-      message: 'The agent did not finish the Preview recipe within two minutes.'
+      message: 'Preview drafting timed out. Retry with specific service or connection details.'
     };
   }
   if (
@@ -1088,12 +1105,6 @@ function classifyGenerationFailure(error: unknown): {
         'Task Monki could not confirm that Preview recipe generation stopped. Restart the app before you try again.'
     };
   }
-  if (error instanceof PreviewRecipeAlreadyExistsError) {
-    return {
-      code: 'RECIPE_EXISTS',
-      message: 'A Preview recipe already exists. Check it instead of generating a replacement.'
-    };
-  }
   if (error instanceof PreviewRecipeEvidenceChangedError) {
     return {
       code: 'INVALID_AGENT_OUTPUT',
@@ -1104,13 +1115,14 @@ function classifyGenerationFailure(error: unknown): {
   if (error instanceof InvalidAgentGenerationError) {
     return {
       code: 'INVALID_AGENT_OUTPUT',
-      message: 'The agent response did not match the Preview generation contract.'
+      message:
+        'The agent did not return a valid Preview proposal. Nothing was saved. Ask the Preview agent to try again.'
     };
   }
   if (error instanceof PreviewRecipeGenerationRunError) {
     return {
       code: 'AGENT_UNAVAILABLE',
-      message: error.message
+      message: generationFailureMessage(error.message)
     };
   }
   if (error instanceof Error && error.name === 'AbortError') {
@@ -1123,9 +1135,17 @@ function classifyGenerationFailure(error: unknown): {
     code: 'AGENT_UNAVAILABLE',
     message:
       error instanceof Error && error.message.trim()
-        ? error.message
+        ? generationFailureMessage(error.message)
         : 'The Preview recipe agent could not produce a draft.'
   };
+}
+
+function generationFailureMessage(text: string): string {
+  try {
+    const value = JSON.parse(text) as { error?: { message?: unknown } };
+    if (typeof value.error?.message === 'string') return value.error.message;
+  } catch { /* Providers can also return plain text. */ }
+  return text;
 }
 
 async function hashFile(filePath: string, expectedBytes: number): Promise<string> {
@@ -1162,44 +1182,5 @@ async function hashFile(filePath: string, expectedBytes: number): Promise<string
     return hash.digest('hex');
   } finally {
     await handle.close();
-  }
-}
-
-async function writeNewPreviewRecipe(worktreePath: string, yaml: string): Promise<void> {
-  const root = await fs.realpath(path.resolve(worktreePath));
-  await assertPreviewRecipeMissing(root);
-  const recipePath = path.join(root, PREVIEW_RECIPE_PATH);
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  let created = false;
-  try {
-    handle = await fs.open(
-      recipePath,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_WRONLY |
-        constants.O_NOFOLLOW,
-      0o600
-    );
-    created = true;
-    await handle.writeFile(yaml, 'utf8');
-    await handle.sync();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error(
-        'A Preview recipe appeared while this draft was under review. Check that file before replacing anything.'
-      );
-    }
-    if (created) await fs.unlink(recipePath).catch(() => undefined);
-    throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
-async function assertPreviewRecipeMissing(worktreePath: string): Promise<void> {
-  for (const name of ['preview.yaml', 'preview.yml']) {
-    try { await fs.lstat(path.join(worktreePath, name)); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-    throw new PreviewRecipeAlreadyExistsError('A Preview recipe already exists. Check it instead of generating a replacement.');
   }
 }

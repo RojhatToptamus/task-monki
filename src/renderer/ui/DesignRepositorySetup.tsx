@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { DesignDetailSnapshot,PreviewRecipeGenerationSnapshot } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
-import { ApplicationPreviewSetup } from './preview/ApplicationPreviewSetup';
 import { DisclosureChevron } from './DisclosureChevron';
 
 /** Repository selection belongs to creation; application setup belongs to Preview. */
@@ -51,14 +50,13 @@ export function DesignRepositorySetup({ project, onUpdate, onOpenLocation, onMod
       </div>
     </div> : null}
     {project.currentWorktree?.status === 'PRESENT' ? <ApplicationPreviewPanel taskId={project.task.id} projectName={project.repository.name} onModalOpenChange={onModalOpenChange}
-      setup={<ApplicationPreviewSetup taskId={project.task.id} worktreeId={project.currentWorktree.id} state={recipe}
-        disabledReason={active ? 'Wait for the Design turn to finish.' : undefined} fallbackReturnFocusRef={root} onModalOpenChange={onModalOpenChange}
-        get={async taskId => { const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId }); setRecipe(state); return state; }}
-        generate={async (taskId, clarification) => { const state = await taskManagerApi.generatePreviewRecipe({ taskId, clarification }); setRecipe(state); return state; }}
-        validate={(taskId, draftId, yaml) => taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml })}
-        accept={async (taskId, draftId, yaml) => { const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }); await refresh(); return result; }}
-        discard={async taskId => { const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId }); setRecipe(state); return state; }}
-        writeManually={onOpenLocation} />} /> : null}
+      agent={{ state: recipe, disabledReason: active ? 'Wait for the active Design turn to finish.' : undefined,
+        get: async taskId => { const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId }); setRecipe(state); return state; },
+        generate: async (taskId, clarification) => { const state = await taskManagerApi.generatePreviewRecipe({ taskId, clarification }); setRecipe(state); return state; },
+        validate: (taskId, draftId, yaml) => taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml }),
+        accept: async (taskId, draftId, yaml) => { const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }); await refresh(); return result; },
+        discard: async taskId => { const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId }); setRecipe(state); return state; }
+      }} /> : null}
     {spec ? <section className="tm-design-repository-setup__application" aria-labelledby="design-application-title">
       <h3 id="design-application-title" className="tm-panel__title">Design target</h3>
       <form key={JSON.stringify(project.task.designPreviewTarget)} className="field-grid tm-design-repository-fields" onSubmit={event => void selectTarget(event)}>

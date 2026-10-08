@@ -33,7 +33,7 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       docs: { type: 'static', directory: './public' }
     }
   }));
-  await scenario.service.startApplicationPreview({ taskId: task.id, source: 'file' });
+  await scenario.service.startApplicationPreview({ taskId: task.id });
   await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).approval).toBeTruthy();
   const initial = await scenario.service.getApplicationPreview({ taskId: task.id });
   expect(await scenario.service.listApplicationPreviews()).toMatchObject([{
@@ -77,10 +77,16 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       taskId: task.id, attemptId: restored.status!.latest!.id, changes: []
     });
     expect(inspection.inspection?.error).toBeUndefined();
-    const pending = await reopened.connectApplicationPreviewSource({
+    const original = (await reopened.readApplicationPreviewFile({ taskId: task.id })).file!;
+    const config = JSON.parse(original.text);
+    config.services.docs.directory = extra;
+    await reopened.saveApplicationPreviewFile({ taskId: task.id, original, text: JSON.stringify(config) });
+    const connectedFolders = await reopened.connectApplicationPreviewSource({
       taskId: task.id, attemptId: restored.status!.latest!.id, service: 'docs', directory: extra,
       expected: { active: null, candidate: null, latest: restored.status!.latest!.id }
     });
+    expect(connectedFolders.status?.candidate).toBeUndefined();
+    const pending = await reopened.startApplicationPreview({ taskId: task.id });
     const candidateId = pending.status!.candidate!.id;
     await expect.poll(async () => {
       const current = await reopened.getApplicationPreview({ taskId: task.id });
@@ -113,7 +119,10 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       .resolves.toEqual({ ok: true });
     expect(launchExecutable).toHaveBeenLastCalledWith(editor, [await fs.realpath(extra)], await fs.realpath(extra));
 
-    await reopened.startApplicationPreview({ taskId: task.id, source: 'file' });
+    const edited = (await reopened.readApplicationPreviewFile({ taskId: task.id })).file!;
+    config.services.docs.directory = './public';
+    await reopened.saveApplicationPreviewFile({ taskId: task.id, original: edited, text: JSON.stringify(config) });
+    await reopened.startApplicationPreview({ taskId: task.id });
     await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: task.id })).approval).toBeTruthy();
     const replacement = await reopened.getApplicationPreview({ taskId: task.id });
     await reopened.approveApplicationPreview({ taskId: task.id, attemptId: replacement.approval!.attemptId });
@@ -130,9 +139,9 @@ it('retains source ownership across restart, replacement, and desktop opening', 
 
     const otherWorktree = await prepareTestWorktree(reopened, unstartedTask.id);
     await fs.writeFile(path.join(otherWorktree.worktreePath, 'index.html'), 'other task');
-    await reopened.createApplicationPreviewConfiguration({ taskId: unstartedTask.id, type: 'static', directory: '.' });
+    await reopened.saveApplicationPreviewFile({ taskId: unstartedTask.id, text: 'name: application\ntype: static\ndirectory: .\n' });
     expect((await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeUndefined();
-    await reopened.startApplicationPreview({ taskId: unstartedTask.id, source: 'file' });
+    await reopened.startApplicationPreview({ taskId: unstartedTask.id });
     await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeTruthy();
     const other = await reopened.getApplicationPreview({ taskId: unstartedTask.id });
     await reopened.approveApplicationPreview({ taskId: unstartedTask.id, attemptId: other.approval!.attemptId });

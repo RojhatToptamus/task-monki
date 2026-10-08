@@ -393,6 +393,12 @@ export class TaskManagerService {
         env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : undefined
       },
       openHost: options.previewOpenHost,
+      repositoryPath: async worktree => (await this.requireRepository(worktree.repositoryId)).path,
+      previewTitle: async name => {
+        const snapshot = await store.snapshot();
+        const worktree = snapshot.worktrees.find(item => `tm-${item.id}` === name);
+        return snapshot.tasks.find(task => task.id === worktree?.taskId)?.title ?? 'another preview';
+      },
       authorizeDesign: spec => this.designPreviews.authorizes(spec),
       onApproval: async name => {
         const worktree = (await store.snapshot()).worktrees.find(item => `tm-${item.id}` === name);
@@ -2338,7 +2344,7 @@ export class TaskManagerService {
       operationId: `preview-recipe-generation:${input.taskId}:${input.generationId}`,
       instruction: input.instruction,
       attachments: [],
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
       label: 'Preview recipe generation',
       terminationError: (cause) =>
         new PreviewRecipeGenerationRunError(
@@ -2358,7 +2364,7 @@ export class TaskManagerService {
         throw new PreviewRecipeGenerationRunError(
           timedOut ? 'TIMED_OUT' : 'UNAVAILABLE',
           timedOut
-            ? 'The selected Preview agent did not finish within two minutes.'
+            ? 'Preview drafting timed out. Retry with specific service or connection details.'
             : cause instanceof Error
               ? cause.message
               : 'The selected Preview agent could not produce a draft.',
@@ -3810,14 +3816,19 @@ export class TaskManagerService {
     }
   }
 
-  connectApplicationPreviewDependency: ApplicationPreviewApi['connectApplicationPreviewDependency'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    await this.applications.owner().configureDependency(this.applications.name(worktree), input.attemptId, input.service, input.binding,
-      { operation: 'apply', expected: input.expected });
-    return this.applications.read(worktree);
+  readApplicationPreviewFile: ApplicationPreviewApi['readApplicationPreviewFile'] = async input => ({
+    ...await this.applications.readFile(await this.applicationWorktree(input.taskId)),
+    ...(input.draftId ? { original: this.previewRecipeGenerator.reviewedFile(input.taskId, input.draftId) } : {})
   });
+
+  saveApplicationPreviewFile: ApplicationPreviewApi['saveApplicationPreviewFile'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.saveFile(await this.applicationWorktree(input.taskId), input.original, input.text));
+
+  chooseApplicationPreviewFile: ApplicationPreviewApi['chooseApplicationPreviewFile'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.chooseFile(await this.applicationWorktree(input.taskId), input.keep, input.files));
+
+  startRetainedApplicationPreview: ApplicationPreviewApi['startRetainedApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.startRetained(await this.applicationWorktree(input.taskId)));
 
   inspectApplicationPreviewSetup: ApplicationPreviewApi['inspectApplicationPreviewSetup'] = async input =>
     this.applications.inspectSetup(await this.applicationWorktree(input.taskId));
@@ -3827,21 +3838,15 @@ export class TaskManagerService {
     return this.applications.connectSource(await this.applicationWorktree(input.taskId), input);
   });
 
-  createApplicationPreviewConfiguration: ApplicationPreviewApi['createApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    const context = await this.requirePreviewContext(input.taskId);
-    await this.applicationWorktree(input.taskId);
-    return this.applications.createConfiguration(context.worktree, input);
-  });
-
   startApplicationPreview: ApplicationPreviewApi['startApplicationPreview'] = input =>
     this.withApplicationMutation(input.taskId, 'configure', async () => {
       await this.applicationWorktree(input.taskId);
       const context = await this.requirePreviewContext(input.taskId);
-      return this.applications.start(context.worktree, context.task.kind === 'DESIGN' ? 'file' : input.source);
+      return this.applications.start(context.worktree);
     });
 
-  approveApplicationPreview: ApplicationPreviewApi['approveApplicationPreview'] = async input =>
-    this.applications.approve(await this.applicationWorktree(input.taskId), input.attemptId);
+  approveApplicationPreview: ApplicationPreviewApi['approveApplicationPreview'] = input => this.withControlAction(async () =>
+    this.applications.approve(await this.applicationWorktree(input.taskId), input.attemptId));
 
   stopApplicationPreview: ApplicationPreviewApi['stopApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'cleanup', async () => {
     const worktree = await this.applicationWorktree(input.taskId);
@@ -3852,8 +3857,7 @@ export class TaskManagerService {
 
   cancelApplicationPreview: ApplicationPreviewApi['cancelApplicationPreview'] = input => this.withControlAction(async () => {
     const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.owner().cancel(this.applications.name(worktree), input.attemptId);
-    return this.applications.read(worktree);
+    return this.applications.cancel(worktree, input.attemptId);
  });
 
   openApplicationPreview: ApplicationPreviewApi['openApplicationPreview'] = async input => {
@@ -3884,23 +3888,6 @@ export class TaskManagerService {
     await this.applications.allowWorktree(worktree);
     return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes, { operation: 'inspect' });
   };
-
-  applyApplicationPreviewConfiguration: ApplicationPreviewApi['applyApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    await this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
-      { operation: 'apply', expected: input.expected });
-    return this.applications.read(worktree);
- });
-
-  saveApplicationPreviewConfiguration: ApplicationPreviewApi['saveApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
-      { operation: 'save' }, { projectDirectory: worktree.worktreePath });
- });
 
   rerunApplicationPreviewJob: ApplicationPreviewApi['rerunApplicationPreviewJob'] = input => this.withApplicationMutation(input.taskId, 'repair', async () => {
     const worktree = await this.applicationWorktree(input.taskId);
@@ -3958,6 +3945,7 @@ export class TaskManagerService {
         taskId: input.taskId,
         worktreePath: context.worktree.worktreePath,
         clarification: input.clarification,
+        diagnostics: await this.applications.diagnostics(context.worktree),
         onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
       });
     });
@@ -3975,36 +3963,24 @@ export class TaskManagerService {
     input: AcceptPreviewRecipeDraftRequest
   ): Promise<AcceptPreviewRecipeDraftResult> {
     this.assertPreviewEnabled();
-    return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+    return this.withApplicationMutation(input.taskId, 'configure', async () => {
       await this.requireRepositoryPreviewTask(input.taskId, 'Preview recipe acceptance');
-      const accept = async (): Promise<AcceptPreviewRecipeDraftResult> => {
-        const context = await this.requirePreviewContext(input.taskId);
-        if (context.task.kind === 'DESIGN') {
-          const detail = await this.store.getDesignDetail(input.taskId);
-          const setup = await this.inspectDesignWorkspace(detail);
-          if (setup.blocker) throw new Error(setup.blocker);
-          if (designRunActive(detail.currentRun)) throw new Error('Wait for the Design turn before changing Preview setup.');
-        }
-        await this.previewRecipeGenerator.writeAcceptedRecipe({
-          taskId: input.taskId,
-          draftId: input.draftId,
-          yaml: input.yaml,
-          worktreePath: context.worktree.worktreePath
-        });
-        this.emitPreviewRecipeGenerationUpdate(
-          context,
-          this.previewRecipeGenerator.completeAcceptance(input.taskId)
-        );
-        if (context.task.kind === 'DESIGN') {
-          const observed = await this.refreshDesignGitEvidence(input.taskId);
-          await this.store.acceptDesignWorkspaceSnapshot(input.taskId, observed.id);
-        }
-        return { recipePath: 'preview.yaml' };
-      };
-      const task = await this.requireTask(input.taskId);
-      return task.kind === 'DESIGN'
-        ? (await this.requireDesignUpdates()).withExclusiveAccess(input.taskId, accept)
-        : accept();
+      const context = await this.requirePreviewContext(input.taskId);
+      const recipePath = await this.previewRecipeGenerator.writeAcceptedRecipe({
+        taskId: input.taskId,
+        draftId: input.draftId,
+        yaml: input.yaml,
+        worktreePath: context.worktree.worktreePath
+      });
+      this.emitPreviewRecipeGenerationUpdate(
+        context,
+        this.previewRecipeGenerator.completeAcceptance(input.taskId)
+      );
+      if (context.task.kind === 'DESIGN') {
+        const observed = await this.refreshDesignGitEvidence(input.taskId);
+        await this.store.acceptDesignWorkspaceSnapshot(input.taskId, observed.id);
+      }
+      return { recipePath };
     });
   }
 

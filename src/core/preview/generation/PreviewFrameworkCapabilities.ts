@@ -99,7 +99,8 @@ const MAX_PACKAGE_LOCK_BYTES = 16 * 1024 * 1024;
 const NPM_INSTALL_COMMAND = ['npm', 'ci', '--no-audit', '--no-fund'];
 const NPM_INSTALL_COMMENT_LINES = [
   '# Installs exactly from package-lock.json in this live worktree.',
-  '# npm may run repository and dependency lifecycle scripts.'
+  '# npm may run repository and dependency lifecycle scripts.',
+  '# Reinstallation changes this live folder and can interrupt a serving app.'
 ];
 const NPM_INSTALL_LIFECYCLE_SCRIPTS = [
   'preinstall',

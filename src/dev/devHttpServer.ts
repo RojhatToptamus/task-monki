@@ -1114,10 +1114,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewDependency') {
-        sendJson(response, requestId, 200, await options.service.connectApplicationPreviewDependency((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]));
-        return;
-      }
       if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewSource') {
         sendJson(response, requestId, 200, await options.service.connectApplicationPreviewSource((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]));
         return;
@@ -1128,11 +1124,23 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/createApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.createApplicationPreviewConfiguration((await readJson()) as Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]));
+
+      if (request.method === 'POST' && url.pathname === '/api/application/readApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.readApplicationPreviewFile((await readJson()) as never));
         return;
       }
-
+      if (request.method === 'POST' && url.pathname === '/api/application/saveApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.saveApplicationPreviewFile((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/application/chooseApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.chooseApplicationPreviewFile((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/application/startRetainedApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.startRetainedApplicationPreview((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/application/startApplicationPreview') {
         sendJson(response, requestId, 200, await options.service.startApplicationPreview((await readJson()) as never));
         return;
@@ -1168,15 +1176,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/applyApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.applyApplicationPreviewConfiguration((await readJson()) as never));
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/application/saveApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.saveApplicationPreviewConfiguration((await readJson()) as never));
-        return;
-      }
 
       if (request.method === 'POST' && url.pathname === '/api/application/rerunApplicationPreviewJob') {
         sendJson(response, requestId, 200, await options.service.rerunApplicationPreviewJob((await readJson()) as never));

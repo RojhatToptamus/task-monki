@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { safePreviewContext, type PreviewRecipeFile } from './PreviewRecipeFile';
 import {
   analyzePreviewFrameworkCapabilities,
   inspectPreviewFrameworkRepositoryFacts,
@@ -100,6 +101,8 @@ export async function preparePreviewRecipeEvidenceBundle(
     rootDirectory: string;
     generationId: string;
     signal?: AbortSignal;
+    configuration?: PreviewRecipeFile;
+    diagnostics?: unknown;
   }
 ): Promise<PreparedPreviewRecipeEvidenceBundle> {
   throwIfAborted(options.signal);
@@ -155,7 +158,7 @@ export async function preparePreviewRecipeEvidenceBundle(
         omissions.symlinkOrSpecial += 1;
         continue;
       }
-      if (DERIVED_ONLY_BASENAMES.has(entry.name)) continue;
+      if (DERIVED_ONLY_BASENAMES.has(entry.name) || ['preview.yaml', 'preview.yml'].includes(relativePath)) continue;
       if (isSecretBearingPath(relativePath)) {
         omissions.secretBearing += 1;
         continue;
@@ -199,17 +202,33 @@ export async function preparePreviewRecipeEvidenceBundle(
     const safeOmissions = describeOmissions(omissions);
     const repositoryFacts = await inspectPreviewFrameworkRepositoryFacts(root);
     const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files, repositoryFacts);
-    const publicEnvironment = await inspectPreviewPublicEnvironmentEvidence(root, files);
+    const publicPrefixes = new Set<string>();
+    for (const file of files.filter(file => path.posix.basename(file.path) === 'package.json')) {
+      try {
+        const manifest = JSON.parse(file.content);
+        const dependencies = { ...manifest.dependencies, ...manifest.devDependencies };
+        if (dependencies.next) publicPrefixes.add('NEXT_PUBLIC_');
+        if (dependencies['@sveltejs/kit']) publicPrefixes.add('PUBLIC_');
+        else if (dependencies.vite) publicPrefixes.add('VITE_');
+        if (dependencies['react-scripts']) publicPrefixes.add('REACT_APP_');
+      } catch { /* An invalid manifest cannot establish public environment semantics. */ }
+    }
+    const preview = safePreviewContext(options.configuration, options.diagnostics, [...publicPrefixes]);
+    const runtimeConfiguration = preview.diagnostics && typeof preview.diagnostics === 'object' && 'configuration' in preview.diagnostics
+      ? preview.diagnostics.configuration : undefined;
+    const publicEnvironment = await inspectPreviewPublicEnvironmentEvidence(root, files, [preview.configuration, runtimeConfiguration]);
     for (const analysis of frameworkCapabilities.analyses) {
       if (analysis.dependencyPreparation) {
         includedPaths.add(analysis.dependencyPreparation.lockfilePath);
       }
     }
     for (const template of publicEnvironment.templates) includedPaths.add(template.path);
+    if (options.configuration) includedPaths.add(options.configuration.name);
     const evidenceBody = JSON.stringify(
       {
         schemaVersion: 'task-monki-preview-repository-evidence/v2',
         source: 'sanitized task worktree snapshot',
+        preview,
         files,
         frameworkCapabilities,
         publicEnvironment,

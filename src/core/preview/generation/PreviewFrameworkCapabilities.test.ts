@@ -53,7 +53,8 @@ describe('Preview framework capabilities', () => {
         repositoryLifecycleScripts: [],
         yamlCommentLines: [
           '# Installs exactly from package-lock.json in this live worktree.',
-          '# npm may run repository and dependency lifecycle scripts.'
+          '# npm may run repository and dependency lifecycle scripts.',
+          '# Reinstallation changes this live folder and can interrupt a serving app.'
         ]
       },
       yamlCommentLines: [

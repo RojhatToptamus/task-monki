@@ -158,7 +158,7 @@ describe('Model settings', () => {
     });
   });
 
-  it('shows a missing saved Preview model instead of displaying a fallback', () => {
+  it.each(['AVAILABLE', 'UNKNOWN'] as const)('preserves the saved Preview model when its catalog is %s', (catalog) => {
     renderSettings({
       appSettings: {
         ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -167,7 +167,9 @@ describe('Model settings', () => {
         previewRecipeGenerationModelProvider: 'openai'
       },
       models: [previewModel],
-      runtimes: [readyCodexRuntime]
+      runtimes: [{ ...readyCodexRuntime, preflight: { ...readyCodexRuntime.preflight,
+        readiness: { ...readyCodexRuntime.preflight.readiness,
+          checks: { ...readyCodexRuntime.preflight.readiness.checks, modelCatalog: catalog } } } }]
     });
 
     fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
@@ -175,12 +177,10 @@ describe('Model settings', () => {
     const trigger = screen.getByRole('button', {
       name: 'Preview generation: Codex · removed-model'
     });
-    expect(trigger.getAttribute('aria-invalid')).toBe('true');
-    expect(
-      screen.getByText(
-        'The selected Preview agent or model is no longer available. Choose another selection.'
-      )
-    ).not.toBeNull();
+    expect(trigger.getAttribute('aria-invalid')).toBe(catalog === 'AVAILABLE' ? 'true' : null);
+    expect(Boolean(screen.queryByText(
+      'The selected Preview agent or model is no longer available. Choose another selection.'
+    ))).toBe(catalog === 'AVAILABLE');
   });
 
   it('shows the configured Preview agent readiness error before a missing model error', () => {

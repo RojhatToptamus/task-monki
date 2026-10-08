@@ -92,6 +92,8 @@ export interface PreviewRecipeGenerationDraft {
   report: PreviewRecipeGenerationReport;
   validation: PreviewRecipeValidation;
   generatedAt: string;
+  fileName: 'preview.yaml' | 'preview.yml';
+  replacesExistingFile: boolean;
 }
 
 export type PreviewRecipeGenerationFailureCode =
@@ -99,7 +101,6 @@ export type PreviewRecipeGenerationFailureCode =
   | 'GENERATION_TIMED_OUT'
   | 'INVALID_AGENT_OUTPUT'
   | 'INSUFFICIENT_EVIDENCE'
-  | 'RECIPE_EXISTS'
   | 'CANCELLATION_UNCONFIRMED';
 
 export interface PreviewRecipeGenerationSnapshot {
@@ -132,7 +133,7 @@ export interface AcceptPreviewRecipeDraftRequest
   extends ValidatePreviewRecipeDraftRequest {}
 
 export interface AcceptPreviewRecipeDraftResult {
-  recipePath: 'preview.yaml';
+  recipePath: 'preview.yaml' | 'preview.yml';
 }
 
 export interface DiscardPreviewRecipeDraftRequest {

@@ -178,6 +178,45 @@ services:
     );
   });
 
+  it('reviews existing YAML with concealed failure context and refuses stale or cross-worktree replacements', async () => {
+    const root = await previewWorktree();
+    const original = 'name: application\ntype: command\ncwd: .\ncommand: [node, missing.cjs]\nenv:\n  API_TOKEN: synthetic-private-canary\n  FLAG: "1"\n  ACCESS: abc\n  NODE_ENV: development\n';
+    await fs.writeFile(path.join(root, 'preview.yml'), original);
+    let evidence = '';
+    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
+      evidence = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
+      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
+    });
+    const input = { taskId: 'repair', worktreePath: root,
+      diagnostics: { logs: 'missing.cjs not found\ntoken=[REDACTED]\n[REDACTED]\nstep 1 of 10 http://127.0.0.1:8001', state: 'failed',
+        configuration: { env: { ACCESS: 'runtime-only-canary' } } } };
+    const proposal = await service.generate(input);
+    expect(proposal.status).toBe('READY');
+    expect(proposal.draft).toMatchObject({ fileName: 'preview.yml', replacesExistingFile: true });
+    expect(evidence).toContain('missing.cjs not found');
+    expect(evidence).not.toContain('synthetic-private-canary');
+    expect(evidence).not.toContain('runtime-only-canary');
+    const context = JSON.parse(evidence).preview;
+    expect(context.configuration.env.FLAG).toContain('concealed');
+    expect(context.configuration.env.ACCESS).toContain('concealed');
+    expect(context.configuration.env.NODE_ENV).toBe('development');
+    expect(context.diagnostics.logs).toContain('step 1 of 10 http://127.0.0.1:8001');
+    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toBe(original);
+    const save = { taskId: 'repair', draftId: proposal.draft!.id, yaml: proposal.draft!.yaml, worktreePath: root };
+    await expect(service.writeAcceptedRecipe({ ...save, worktreePath: await previewWorktree() })).rejects.toThrow('worktree changed');
+    await fs.appendFile(path.join(root, 'preview.yml'), '# user edit\n');
+    await expect(service.writeAcceptedRecipe(save)).rejects.toThrow('changed');
+    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toContain('# user edit');
+    const fresh = await service.generate(input);
+    expect(await service.writeAcceptedRecipe({ ...save, draftId: fresh.draft!.id, yaml: fresh.draft!.yaml })).toBe('preview.yml');
+    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toBe(fresh.draft!.yaml);
+    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it('rejects runtime identities in portable project YAML', () => {
+    expect(validatePreviewRecipeDraft('name: tm-9551c62b-2f45-45b7-9563-e714183e2a0f\ntype: static\ndirectory: .\n')).toMatchObject({ status: 'INVALID' });
+  });
+
   it('keeps validation, regeneration, close/reopen state, and discard transient', async () => {
     const root = await previewWorktree();
     const service = new PreviewRecipeGenerationService(async () => ({
@@ -491,23 +530,37 @@ services:
     }]);
     expect(result.draft?.yaml).toContain('service: backend');
     if (!result.draft) throw new Error('Expected generated draft.');
-    const inconsistentEdit = result.draft.yaml.replace(
-      'NEXT_PUBLIC_API_URL:',
-      'NEXT_PUBLIC_OTHER_URL:'
+    const reviewedConnection = result.draft.yaml.replace(
+      '    type: attach',
+      '    type: attach\n    url: http://127.0.0.1:8001'
     );
-    expect(service.validate('task-next', result.draft.id, inconsistentEdit)).toEqual({
-      status: 'INVALID',
-      issues: [{
-        code: 'PUBLIC_ENVIRONMENT_DECISION_INVALID',
-        message: 'The generated public environment decision does not match the Preview recipe.'
-      }]
-    });
-    await expect(service.writeAcceptedRecipe({
+    expect(service.validate('task-next', result.draft.id, reviewedConnection)).toEqual({ status: 'VALID' });
+    await service.writeAcceptedRecipe({
       taskId: 'task-next',
       draftId: result.draft.id,
-      yaml: inconsistentEdit,
+      yaml: reviewedConnection,
       worktreePath: root
-    })).rejects.toThrow('does not match the Preview recipe');
+    });
+    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe(reviewedConnection);
+  });
+
+  it('requires a selected backend URL in repaired YAML instead of assuming runtime bindings are merged', async () => {
+    const root = await nextWorktreeWithPublicApi();
+    const unbound = JSON.parse(publicApiAgentDraft()) as { yaml: string };
+    const bound = { ...unbound, yaml: unbound.yaml.replace('    type: attach', '    type: attach\n    url: http://localhost:8001') };
+    await fs.writeFile(path.join(root, 'preview.yaml'), unbound.yaml);
+    let response = JSON.stringify(unbound);
+    const service = new PreviewRecipeGenerationService(async () => ({ result: Promise.resolve(response), cancel: async () => {} }));
+    const input = { taskId: 'repair-backend', worktreePath: root, diagnostics: { configuration: {
+      type: 'environment', services: { backend: { type: 'attach', url: 'http://localhost:8001' },
+        web: { type: 'command', env: { NEXT_PUBLIC_API_URL: { service: 'backend' } } } }
+    } } };
+    expect((await service.generate(input)).status).toBe('FAILED');
+    response = JSON.stringify(bound);
+    const repaired = await service.generate(input);
+    expect(repaired.status).toBe('READY');
+    await service.writeAcceptedRecipe({ taskId: input.taskId, draftId: repaired.draft!.id, yaml: repaired.draft!.yaml, worktreePath: root });
+    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toContain('url: http://localhost:8001');
   });
 
   it('accepts an omitted public value only when attachmentId is absent', async () => {
@@ -568,12 +621,12 @@ services:
     await expect(inconsistent.generate({ taskId: 'task-inconsistent', worktreePath: root })).resolves.toMatchObject({
       status: 'FAILED',
       failureCode: 'INVALID_AGENT_OUTPUT',
-      message: 'The generated public environment decision does not match the Preview recipe.'
+      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
     });
     await expect(mixedRecipients.generate({ taskId: 'task-mixed', worktreePath: root })).resolves.toMatchObject({
       status: 'FAILED',
       failureCode: 'INVALID_AGENT_OUTPUT',
-      message: 'The generated public environment decision does not match the Preview recipe.'
+      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
     });
   });
 
@@ -589,7 +642,7 @@ services:
     await expect(service.generate({ taskId: 'task-conflict', worktreePath: root })).resolves.toMatchObject({
       status: 'FAILED',
       failureCode: 'INVALID_AGENT_OUTPUT',
-      message: 'The generated public environment decision does not match the Preview recipe.'
+      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
     });
   });
 
@@ -989,7 +1042,8 @@ function publicApiAgentDraftWithMixedRecipient(): string {
 function nextInstallComment(): string {
   return [
     '    # Installs exactly from package-lock.json in this live worktree.',
-    '    # npm may run repository and dependency lifecycle scripts.'
+    '    # npm may run repository and dependency lifecycle scripts.',
+    '    # Reinstallation changes this live folder and can interrupt a serving app.'
   ].join('\n');
 }
 

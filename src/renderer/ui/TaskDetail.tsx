@@ -128,8 +128,7 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationPreview, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
-import { ApplicationPreviewSetup } from './preview/ApplicationPreviewSetup';
-import { ApplicationPreviewOverview,ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
+import { ApplicationPreviewOverview, ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
 import {
   isReviewPhase,
   shouldShowMoveToReviewHeaderAction,
@@ -150,6 +149,7 @@ interface TaskDetailProps {
   attachmentOptions: AgentSessionProps['attachmentOptions'];
   agentInstructions: AgentSessionProps['instructions'];
   agentDraft: string;
+  onPrepareTaskAgent(text: string): Promise<void>;
   onSavePrompt: import('react').ComponentProps<typeof PreRunSetup>['onSavePrompt'];
   onReadAttachment: import('react').ComponentProps<typeof PreRunSetup>['onReadAttachment'];
   agentDraftError?: string;
@@ -229,7 +229,6 @@ interface TaskDetailProps {
     yaml: string
   ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
   onDiscardPreviewRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onWritePreviewRecipeManually(taskId: string, worktreeId: string): Promise<void>;
   onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
@@ -1307,10 +1306,14 @@ export function TaskDetail(props: TaskDetailProps) {
             </section>
           ) : null}
           {worktree ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onModalOpenChange={setPreviewModalOpen}
-            setup={worktree ? <ApplicationPreviewSetup taskId={task.id} worktreeId={worktree.id} state={props.previewRecipeGeneration}
-              disabledReason={props.previewRecipeGenerationDisabledReason} fallbackReturnFocusRef={detailRootRef} onModalOpenChange={setPreviewModalOpen}
-              get={props.onGetPreviewRecipeGeneration} generate={props.onGeneratePreviewRecipe} validate={props.onValidatePreviewRecipeDraft}
-              accept={props.onAcceptPreviewRecipeDraft} discard={props.onDiscardPreviewRecipeDraft} writeManually={props.onWritePreviewRecipeManually} /> : undefined} /> : null}
+            onTaskAgent={async text => {
+              await props.onPrepareTaskAgent(text);
+              setTab('agent');
+              setAgentAttentionRequest(value => value + 1);
+            }}
+            agent={{ state: props.previewRecipeGeneration, disabledReason: props.previewRecipeGenerationDisabledReason,
+              get: props.onGetPreviewRecipeGeneration, generate: props.onGeneratePreviewRecipe,
+              validate: props.onValidatePreviewRecipeDraft, accept: props.onAcceptPreviewRecipeDraft, discard: props.onDiscardPreviewRecipeDraft }} /> : null}
         </> : null}
 
         {tab === 'evidence' ? (

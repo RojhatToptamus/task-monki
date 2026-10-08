@@ -1,349 +1,229 @@
+import { useState } from 'react';
+import { taskManagerApi as api } from '../../api/taskManagerClient';
+import type { PreviewDescription } from 'previewhost';
+import { ConfigurationDefinitions, message } from './previewPresentation';
+import type { AttemptSummary, PreviewStatus } from 'previewhost';
 import { ApplicationSourceFolders } from './ApplicationSourceFolders';
-import { DisclosureChevron } from '../DisclosureChevron';
-import type { AttemptSummary, Failure, PreviewStatus } from 'previewhost';
 import { label, ServiceName, serviceTypeLabel } from './previewPresentation';
+import { Chip } from '../StatusBadge';
+
+export function applicationAttempts(status?: PreviewStatus): AttemptSummary[] {
+  return [
+    status?.candidate,
+    status?.latest,
+    status?.active,
+    ...(status?.history ?? [])
+  ]
+    .filter(
+      (item, index, all): item is AttemptSummary =>
+        !!item && all.findIndex((other) => other?.id === item.id) === index
+    )
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+export function runLabel(attempt: AttemptSummary, status?: PreviewStatus) {
+  const date = new Date(attempt.startedAt);
+  const time = Number.isFinite(date.getTime())
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : 'Last run';
+  return `${time} · ${status?.active?.id === attempt.id ? 'serving' : attempt.state}`;
+}
 
 export function ApplicationActivity({
   taskId,
   status,
-  busy,
-  onLogs,
-  onRerun,
-  onOpenSecrets,
-  onConfigure
+  restoredRun,
+  onLogs
 }: {
   taskId: string;
   status?: PreviewStatus;
-  busy: boolean;
+  restoredRun?: boolean;
   onLogs(attemptId: string, source?: string): void;
-  onRerun(attemptId: string, job: string): void;
-  onOpenSecrets?(references: string[]): void;
-  onConfigure(): void;
 }) {
-  const latest = status?.candidate ?? status?.latest;
-  const attempts = [status?.active, latest].filter(
-    (attempt, index, all): attempt is AttemptSummary =>
-      !!attempt && all.findIndex((value) => value?.id === attempt.id) === index
-  );
-  const jobs = Object.entries(latest?.services ?? {}).filter(
-    ([, value]) => value.type === 'job'
-  );
-  const failureShownInRow = Object.values(latest?.services ?? {}).some(
-    (value) => value.error?.message === latest?.error?.message
-  );
-  const serviceAttempts = attempts.filter(
-    (attempt) =>
-      !(
-        attempt.id !== status?.active?.id &&
-        status?.active &&
-        !status.candidate &&
-        jobs.some(([, job]) => job.state === 'failed') &&
-        !Object.values(attempt.services ?? {}).some(
-          (service) => service.type !== 'job' && service.state === 'failed'
-        )
-      )
-  );
-  const retainedData = (status?.data?.resources ?? []).filter(
-    (resource) =>
-      !serviceAttempts.some(
-        (attempt) => attempt.services?.[resource.name]?.type === resource.type
-      )
-  );
+  const attempt = status?.candidate ?? status?.latest ?? status?.active;
+  const attempts = applicationAttempts(status);
+  if (!attempt)
+    return <p className="tm-application-preview__empty">No runs yet.</p>;
+  const services = Object.entries(attempt.services ?? {});
+  const serving = status?.active?.id === attempt.id;
   return (
     <>
-      {!attempts.length ? (
-        <div className="tm-application-preview__empty">
-          <p>Configure services and source folders to run this worktree.</p>
-          <button className="primary-button" onClick={onConfigure}>
-            Configure preview
-          </button>
-        </div>
-      ) : null}
-      {serviceAttempts.map((attempt) => {
-        const serving = attempt.id === status?.active?.id;
-        const services = Object.entries(attempt.services ?? {}).filter(
-          ([, value]) => value.type !== 'job'
-        );
-        return (
-          <section
-            key={attempt.id}
-            aria-label={serving ? 'Serving services' : 'Latest services'}
-          >
-            <h3 className="tm-panel__title tm-panel__title--flush">
-              Services ·{' '}
-              {serving
-                ? 'Serving'
-                : status?.candidate?.id === attempt.id
-                  ? 'Starting'
-                  : 'Latest attempt'}
-            </h3>
-            <div className="tm-application-preview__table-wrap">
-              <table className="tm-application-preview__table tm-application-preview__services">
-                <thead>
-                  <tr>
-                    <th scope="col">Service</th>
-                    <th scope="col">Type</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Address / data</th>
-                    <th scope="col">
-                      <span className="tm-visually-hidden">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {services.length ? (
-                    services.map(([id, value]) => (
-                      <tr key={id}>
-                        <th scope="row">
-                          <ServiceName name={id} type={value.type} />
-                          {value.error ? (
-                            <p className="tm-application-preview__error">
-                              {diagnostic(value.error, value.type)}
-                            </p>
-                          ) : null}
-                        </th>
-                        <td>{serviceTypeLabel(value.type)}</td>
-                        <td>
-                          <span
-                            className="tm-application-preview__state"
-                            data-state={value.state}
-                          >
-                            {label(value.state)}
-                          </span>
-                        </td>
-                        <td
-                          className="tm-application-preview__endpoint"
-                          title={value.browserUrl}
-                        >
-                          <span>
-                            {value.waitingFor?.length
-                              ? `Waiting for ${value.waitingFor.join(', ')}`
-                              : ((serving && value.state === 'ready'
-                                  ? value.browserUrl?.replace(
-                                      `${status?.name}--`,
-                                      '…--'
-                                    )
-                                  : undefined) ??
-                                (status?.data?.resources.some(
-                                  (resource) =>
-                                    resource.name === id &&
-                                    resource.type === value.type
-                                )
-                                  ? 'Data retained'
-                                  : '—'))}
-                          </span>
-                        </td>
-                        <td>
-                          {['command', 'worker', 'compose'].includes(
-                            value.type
-                          ) ? (
-                            <button
-                              className="ghost-button"
-                              aria-label={`Logs for ${id}`}
-                              onClick={() => onLogs(attempt.id, id)}
-                            >
-                              Logs
-                            </button>
-                          ) : null}
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <th scope="row">
-                        <ServiceName name="Application" type={attempt.type} />
-                      </th>
-                      <td>{serviceTypeLabel(attempt.type)}</td>
-                      <td>
-                        <span
-                          className="tm-application-preview__state"
-                          data-state={attempt.state}
-                        >
-                          {label(attempt.state)}
-                        </span>
-                      </td>
-                      <td className="tm-application-preview__endpoint">
-                        {serving ? status?.url : '—'}
-                      </td>
-                      <td>
-                        {attempt.type === 'command' ? (
-                          <button
-                            className="ghost-button"
-                            onClick={() => onLogs(attempt.id)}
-                          >
-                            Logs
-                          </button>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            {attempt.sources?.length ? (
-              <ApplicationSourceFolders taskId={taskId} attemptId={attempt.id} sources={attempt.sources} />
-            ) : null}
-          </section>
-        );
-      })}
-      {retainedData.length ? (
-        <section aria-label="Retained data">
-          <h3 className="tm-panel__title tm-panel__title--flush">Retained data</h3>
-          <div className="tm-application-preview__table-wrap">
-            <table className="tm-application-preview__table">
-              <thead>
-                <tr>
-                  <th scope="col">Service</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Data</th>
-                </tr>
-              </thead>
-              <tbody>
-                {retainedData.map((resource) => (
-                  <tr key={resource.name}>
-                    <th scope="row">
-                      <ServiceName name={resource.name} type={resource.type} />
-                    </th>
-                    <td>{serviceTypeLabel(resource.type)}</td>
-                    <td>Retained</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-      {status?.data?.cleanup ? (
-        <p role="alert" className="tm-application-preview__error">
-          {status.data.cleanup.message}
-        </p>
-      ) : null}
-      {jobs.length && latest ? (
-        <section aria-label="Setup jobs">
-          <h3 className="tm-panel__title tm-panel__title--flush">
-            Setup jobs ·{' '}
-            {latest.id === status?.active?.id ? 'Serving' : 'Latest attempt'}
-          </h3>
-          <div className="tm-application-preview__table-wrap">
-            <table className="tm-application-preview__table">
-              <thead>
-                <tr>
-                  <th scope="col">Job</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">
-                    <span className="tm-visually-hidden">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map(([id, job]) => (
+      <section aria-label="Preview services">
+        <h3 className="tm-panel__title">
+          Services{!serving && status?.active ? ' · latest attempt' : ''}
+        </h3>
+        <div className="tm-application-preview__table-wrap">
+          <table className="tm-application-preview__table tm-application-preview__services">
+            <thead>
+              <tr>
+                <th scope="col">Service</th>
+                <th scope="col">Type</th>
+                <th scope="col">Status</th>
+                <th scope="col">Address / data</th>
+                <th scope="col">
+                  <span className="tm-visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {services.length ? (
+                services.map(([id, service]) => (
                   <tr key={id}>
                     <th scope="row">
-                      <ServiceName name={id} type="job" />
-                      {job.error ? (
-                        <p className="tm-application-preview__error">
-                          {diagnostic(job.error)}
-                        </p>
-                      ) : null}
+                      <ServiceName name={id} type={service.type} />
                     </th>
+                    <td>{serviceTypeLabel(service.type)}</td>
                     <td>
                       <span
                         className="tm-application-preview__state"
-                        data-state={job.state}
+                        data-state={service.state}
                       >
-                        {label(job.state)}
+                        {service.state === 'skipped'
+                          ? 'Not started'
+                          : label(service.state)}
                       </span>
                     </td>
+                    <td className="tm-application-preview__endpoint">
+                      {serving && service.browserUrl
+                        ? service.browserUrl
+                        : status?.data?.resources.some(
+                              (resource) => resource.name === id
+                            )
+                          ? 'Data retained'
+                          : service.waitingFor?.length
+                            ? `Waiting for ${service.waitingFor.join(', ')}`
+                            : '—'}
+                    </td>
                     <td>
-                      <div className="tm-application-preview__toolbar">
-                        {!status?.active &&
-                        !status?.candidate &&
-                        ['failed', 'canceled'].includes(job.state) ? (
-                          <button
-                            className="outline-button"
-                            disabled={busy || status?.busy}
-                            onClick={() => onRerun(latest.id, id)}
-                          >
-                            Rerun
-                          </button>
-                        ) : null}
+                      {['command', 'worker', 'job', 'compose'].includes(
+                        service.type
+                      ) ? (
                         <button
                           className="ghost-button"
                           aria-label={`Logs for ${id}`}
-                          onClick={() => onLogs(latest.id, id)}
+                          onClick={() => onLogs(attempt.id, id)}
                         >
                           Logs
                         </button>
-                      </div>
+                      ) : null}
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {status?.active && jobs.some(([, job]) => job.state === 'failed') ? (
-            <p className="tm-application-preview__notice">
-              Stop the preview to rerun a failed job.
-            </p>
-          ) : null}
+                ))
+              ) : (
+                <tr>
+                  <th scope="row">
+                    <ServiceName name="Application" type={attempt.type} />
+                  </th>
+                  <td>{serviceTypeLabel(attempt.type)}</td>
+                  <td>{label(attempt.state)}</td>
+                  <td>{serving ? status?.url : '—'}</td>
+                  <td>
+                    {attempt.type !== 'static' ? (
+                      <button
+                        className="ghost-button"
+                        onClick={() => onLogs(attempt.id)}
+                      >
+                        Logs
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {status?.data?.resources.some(
+        (resource) => !services.some(([id]) => id === resource.name)
+      ) ? (
+        <section aria-label="Retained data">
+          <h3 className="tm-panel__title">Retained data</h3>
+          {status.data.resources
+            .filter(
+              (resource) => !services.some(([id]) => id === resource.name)
+            )
+            .map((resource) => (
+              <p key={resource.name}>
+                <strong>{resource.name}</strong> ·{' '}
+                {serviceTypeLabel(resource.type)} · Data retained
+              </p>
+            ))}
         </section>
       ) : null}
-      {latest?.error && !failureShownInRow ? (
-        <div className="tm-application-preview__feedback">
-          <p role="alert" className="form-error">
-            {latest.error.code === 'SOURCE_DENIED'
-              ? 'Source access needs approval.'
-              : latest.error.code === 'SECRET_STORE_UNAVAILABLE'
-                ? 'Unlock or create secret storage, then start again.'
-                : diagnostic(latest.error)}
-          </p>
-          <button className="outline-button" onClick={() => onLogs(latest.id)}>View attempt logs</button>
-          {latest.error.requirements?.map(secret => <p key={secret.id}><code>{secret.id}</code> — {secret.bindings.map(binding => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ')}</p>)}
-          {latest.error.code === 'SOURCE_DENIED' ? (
-            <>
-              <button className="outline-button" onClick={onConfigure}>
-                Connect source folder
-              </button>
-              <details className="tm-application-preview__technical">
-                <summary>
-                  <DisclosureChevron />
-                  Details
-                </summary>
-                <p>{latest.error.message}</p>
-              </details>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-      {latest?.error &&
-      ['SECRET_STORE_UNAVAILABLE', 'SECRET_REQUIRED', 'SECRET_DENIED'].includes(
-        latest.error.code
-      ) &&
-      onOpenSecrets ? (
-        <div className="tm-application-preview__feedback">
-          <button
-            className="outline-button"
-            onClick={() =>
-              onOpenSecrets(
-                latest.error?.requirements?.map((value) => value.id) ?? []
-              )
-            }
-          >
-            Resolve secrets
-          </button>
-        </div>
-      ) : null}
+      <section aria-label="Preview runs">
+        <h3 className="tm-panel__title">Runs · {attempts.length}</h3>
+        {attempts.map((item) => (
+          <div className="tm-preview-run" key={item.id}>
+            <span>
+              {restoredRun && item.id === status?.latest?.id
+                ? 'Last run · stopped when Task Monki quit · logs expired'
+                : runLabel(item, status)}
+            </span>
+            {item.id === status?.active?.id ? (
+              <Chip label="Serving" tone="success" />
+            ) : null}
+            <button
+              className="ghost-button"
+              aria-label={`Logs for run ${runLabel(item, status)}`}
+              onClick={() => onLogs(item.id)}
+            >
+              Logs
+            </button>
+            <AsRun taskId={taskId} attempt={item} />
+          </div>
+        ))}
+      </section>
     </>
   );
 }
 
-function diagnostic(error: Failure, type?: string) {
-  if (error.code === 'SUPERVISOR_FAILED') return `${error.message} Task Monki's preview runtime could not start. View logs for the missing module or process error, then rebuild or reinstall Task Monki.`;
-  if (error.code === 'TIMEOUT') return `${error.message} Check this service's logs and readiness settings.`;
-  if (error.code === 'START_FAILED' && type && ['postgres', 'redis', 'compose'].includes(type)) return `${error.message} Check Docker and this service's logs before retrying.`;
-  if (error.code === 'START_FAILED' && type && ['attach', 'preview', 'external-tcp', 'external-postgres', 'external-redis'].includes(type)) return `${error.message} Check the dependency's local endpoint and credentials before retrying.`;
-  if (error.code === 'START_FAILED') return `${error.message} Check the command, installed project dependencies, and logs before retrying.`;
-  return error.message;
+function AsRun({
+  taskId,
+  attempt
+}: {
+  taskId: string;
+  attempt: AttemptSummary;
+}) {
+  const [description, setDescription] = useState<PreviewDescription>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  async function inspect() {
+    if (description || loading) return;
+    setLoading(true);
+    setError(undefined);
+    try {
+      setDescription(
+        (
+          await api.inspectApplicationPreviewConfiguration({
+            taskId,
+            attemptId: attempt.id,
+            changes: []
+          })
+        ).description
+      );
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <details
+      className="tm-preview-disclosure"
+      onToggle={(event) => {
+        if (event.currentTarget.open) void inspect();
+      }}
+    >
+      <summary>As run</summary>
+      {loading ? <p>Reading configuration…</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
+      {description ? (
+        <ConfigurationDefinitions description={description} />
+      ) : null}
+      <ApplicationSourceFolders
+        taskId={taskId}
+        attemptId={attempt.id}
+        sources={attempt.sources}
+      />
+    </details>
+  );
 }

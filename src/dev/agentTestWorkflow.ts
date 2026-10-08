@@ -851,7 +851,7 @@ process.on('SIGINT', stop);
   let gatewayPort: number | undefined;
   let maxLogBytes = 0;
   for (let index = 0; index < requestedCycles; index += 1) {
-    const pending = await environment.service.startApplicationPreview({ taskId: prepared.task.id, source: 'file' });
+    const pending = await environment.service.startApplicationPreview({ taskId: prepared.task.id });
     const attemptId = pending.status?.candidate?.id;
     assert(attemptId, 'Previewhost did not create a candidate.');
     const deadline = Date.now() + 15_000;

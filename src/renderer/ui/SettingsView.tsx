@@ -411,7 +411,8 @@ function ModelSettings({
             ) ||
               ((appSettings.previewRecipeGenerationModel ||
                 appSettings.previewRecipeGenerationModelProvider) &&
-                !selected.selectedPreviewRecipeGenerationModel) ||
+                !selected.selectedPreviewRecipeGenerationModel &&
+                selectedPreviewRuntime?.preflight.readiness.checks.modelCatalog !== 'UNKNOWN') ||
               previewUnavailableReason
           )}
           selectionUnavailableMessage={

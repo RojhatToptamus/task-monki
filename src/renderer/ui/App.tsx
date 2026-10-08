@@ -1840,7 +1840,8 @@ export function App() {
     (appSettings.previewRecipeGenerationModel ||
       appSettings.previewRecipeGenerationModelProvider) &&
     !configuredPreviewRecipeGenerationModel &&
-    previewRuntimeSelection.runtime
+    previewRuntimeSelection.runtime &&
+    previewRuntimeSelection.runtime.preflight.readiness.checks.modelCatalog !== 'UNKNOWN'
       ? {
           unavailableReason:
             'The selected Preview agent or model is no longer available. Choose another selection.'
@@ -2208,20 +2209,6 @@ export function App() {
     const state = await withAppAction(() => taskManagerApi.discardPreviewRecipeDraft({ taskId }));
     setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
     return state;
-  };
-
-  const writePreviewRecipeManually = async (taskId: string, worktreeId: string) => {
-    try {
-      const result = await taskManagerApi.executeOpenTargetAction({
-        target: { type: 'worktree', worktreeId, taskId },
-        action: 'open'
-      });
-      if (!result.ok) throw new Error(result.message ?? 'Could not open the task worktree.');
-      notify('Worktree opened. Create preview.yaml, then load it in Preview.', 'info');
-    } catch (caught) {
-      reportActionError(caught, 'Could not open the task worktree.');
-      throw caught;
-    }
   };
 
   const readArtifact = async (artifactId: string) => {
@@ -3042,6 +3029,17 @@ export function App() {
               }
             }}
             onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
+            onPrepareTaskAgent={async (text) => {
+              if (taskDetail.runs.length) {
+                const draft = agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? '';
+                saveAgentDraft(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
+                await agentDraftWrites.current.get(selectedTask.id)?.work;
+              } else {
+                const prompt = selectedTask.promptDraft ?? selectedTask.prompt;
+                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: `${prompt}\n\n${text}`, draftOnly: true });
+                await refresh();
+              }
+            }}
             onSavePrompt={async (prompt, draftOnly, files) => {
               await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt, draftOnly, ...files });
               if (!draftOnly) await refresh();
@@ -3134,7 +3132,6 @@ export function App() {
             onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
             onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
             onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
-            onWritePreviewRecipeManually={writePreviewRecipeManually}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}

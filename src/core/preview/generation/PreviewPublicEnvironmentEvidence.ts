@@ -59,7 +59,7 @@ export interface PreviewPublicEnvironmentCandidate {
   sourceDefault?: PreviewPublicHttpTargetEvidence;
   targetPolicy:
     | { kind: 'LOCAL_REQUIRED' }
-    | { kind: 'LITERAL_ALLOWED'; publicHttpTarget: PreviewPublicHttpTargetEvidence };
+    | { kind: 'LITERAL_ALLOWED' | 'CONFIGURED'; publicHttpTarget: PreviewPublicHttpTargetEvidence };
 }
 
 export interface PreviewPublicEnvironmentEvidence {
@@ -80,14 +80,42 @@ interface Token {
 
 export async function inspectPreviewPublicEnvironmentEvidence(
   repositoryRoot: string,
-  files: readonly EvidenceFile[]
+  files: readonly EvidenceFile[],
+  configurations: readonly unknown[] = []
 ): Promise<PreviewPublicEnvironmentEvidence> {
   const templates = await inspectTrackedEnvironmentTemplates(repositoryRoot);
-  return {
-    schemaVersion: PREVIEW_PUBLIC_ENVIRONMENT_EVIDENCE_VERSION,
-    templates,
-    candidates: collectCandidates(files, templates)
-  };
+  const candidates = collectCandidates(files, templates);
+  for (const candidate of candidates) {
+    // A selected connection is a user decision, not an inferred source default.
+    for (const configuration of configurations) {
+      const target = configuredTarget(configuration, candidate.key);
+      if (!target) continue;
+      candidate.targetPolicy = { kind: 'CONFIGURED', publicHttpTarget: target };
+      break;
+    }
+  }
+  return { schemaVersion: PREVIEW_PUBLIC_ENVIRONMENT_EVIDENCE_VERSION, templates, candidates };
+}
+
+function configuredTarget(configuration: unknown, key: string): PreviewPublicHttpTargetEvidence | undefined {
+  const object = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const spec = object(configuration);
+  if (spec?.type !== 'environment') return undefined;
+  const services = object(spec.services);
+  if (!services) return undefined;
+  const targets = new Map<string, PreviewPublicHttpTargetEvidence>();
+  for (const service of Object.values(services)) {
+    const entry = object(service);
+    // YAML uses env; Previewhost's safe description exposes nonliteral bindings.
+    const binding = object(object(entry?.env ?? entry?.bindings)?.[key]);
+    const id = binding?.service ?? binding?.browserUrl;
+    const attachment = typeof id === 'string' ? object(services[id]) : undefined;
+    if (attachment?.type !== 'attach' || typeof attachment.url !== 'string') continue;
+    const target = safePublicHttpTarget(attachment.url);
+    if (target) targets.set(publicHttpTargetKey(target), target);
+  }
+  return targets.size === 1 ? [...targets.values()][0] : undefined;
 }
 
 async function inspectTrackedEnvironmentTemplates(
