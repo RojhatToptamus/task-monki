@@ -24,7 +24,8 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
-  trustedAppTool?: 'inspect_design';
+  /** A Task Monki tool the active run may call; the person still decides, but nothing else is weighed. */
+  trustedAppTool?: string;
   rememberedPermissionOwner?: string;
 }): MaterializedAcpPermission {
   const paths = pathsFromToolCall(input.toolCall);
@@ -42,7 +43,7 @@ export function materializeAcpPermission(input: {
   let localAllowed: AgentInteractionAction[];
   let hardBlocked = false;
 
-  if (input.trustedAppTool === 'inspect_design') {
+  if (input.trustedAppTool) {
     localAllowed = ['ACCEPT', 'DECLINE', 'CANCEL'];
   } else if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
     const policy = buildInteractionPolicy({

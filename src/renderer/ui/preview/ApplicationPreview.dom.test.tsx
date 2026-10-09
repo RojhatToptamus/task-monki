@@ -18,15 +18,21 @@ import type {
 } from '../../../shared/applicationPreview';
 import { ApplicationConfiguration } from './ApplicationConfiguration';
 import { ApplicationActivity } from './ApplicationActivity';
-import { ApplicationSourceFolders } from './ApplicationSourceFolders';
+import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
-import type { PreviewAgentActions } from './PreviewAgentActions';
-import type { PreviewRecipeGenerationSnapshot } from '../../../shared/contracts';
+import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
+import { createRuntimeReadiness } from '../../../core/agent/AgentRuntimeReadiness';
+import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../../core/agent/codex/codexCapabilities';
+import type {
+  AgentModel, AgentRuntimeState, InteractionRequestRecord, PreviewRecipeGenerationSnapshot, RunRecord, TaskInstruction, WorktreeRecord
+} from '../../../shared/contracts';
 
 const api = vi.hoisted(() => ({
   getApplicationPreview: vi.fn(),
+  inspectApplicationPreviewSetup: vi.fn(),
+  startRetainedApplicationPreview: vi.fn(),
   inspectOpenTarget: vi.fn(),
   executeOpenTargetAction: vi.fn(),
   startApplicationPreview: vi.fn(),
@@ -67,60 +73,117 @@ const inspected: ConfigurationBindingsInspection = {
   },
   bindings: [{ key: 'TOKEN', value: null }]
 };
+const worktree = (status: WorktreeRecord['status']): WorktreeRecord => ({
+  id: 'wt', taskId: 'task', iterationId: 'it', repositoryId: 'repo', ownership: 'MANAGED', worktreePath: '/fixture',
+  branchName: 'codex/fixture', baseRef: 'main', baseSha: 'abcdef1234567890', headSha: 'f390644abcdef0', status,
+  createdAt: '2026-10-08T12:00:00Z', updatedAt: '2026-10-08T12:00:00Z'
+});
 beforeEach(() => {
   vi.resetAllMocks();
   api.readApplicationPreviewFile.mockResolvedValue({});
+  api.inspectApplicationPreviewSetup.mockResolvedValue({ projectDirectory: '/fixture', recommendations: [], facts: [] });
   api.inspectApplicationPreviewConfiguration.mockResolvedValue(inspected);
   api.readApplicationPreviewLogs.mockResolvedValue({ text: '', cursor: 0, truncated: false });
 });
-function agentActions(state: PreviewRecipeGenerationSnapshot): PreviewAgentActions {
-  return { state, get: vi.fn(async () => state), generate: vi.fn(async () => state),
+function proposalActions(state: PreviewRecipeGenerationSnapshot): PreviewProposalActions {
+  return { state, get: vi.fn(async () => state),
     validate: vi.fn(async () => ({ status: 'VALID' as const })),
     accept: vi.fn(async () => ({ recipePath: 'preview.yaml' as const })),
     discard: vi.fn(async () => ({ taskId: 'task', status: 'EMPTY' as const })) };
 }
+const scenarioModel: AgentModel = {
+  id: 'codex:openai/scenario-model', runtimeId: 'codex', modelProvider: 'openai', model: 'scenario-model', displayName: 'Scenario model',
+  hidden: false, supportedReasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low', serviceTiers: [], inputModalities: ['text'], isDefault: true
+};
+const codexRuntime: AgentRuntimeState = {
+  preflight: { runtime: CODEX_RUNTIME_DESCRIPTOR, readiness: createRuntimeReadiness('READY', 'Codex is ready.'), capabilities: codexCapabilities() },
+  models: [scenarioModel],
+  refreshedAt: '2026-10-09T10:00:00Z'
+};
+const previewRun = (status: RunRecord['status'], id = 'preview-run'): RunRecord => ({
+  id, runtimeId: 'codex', taskId: 'task', iterationId: 'it', worktreeId: 'wt', sessionId: 'preview-session', mode: 'PREVIEW', origin: 'USER',
+  status, recoveryState: 'NONE', requestedSettings: { runtimeId: 'codex', model: 'scenario-model', modelProvider: 'openai' },
+  promptArtifactId: 'p', outputArtifactId: 'o', diagnosticArtifactId: 'd', providerTurnId: 'turn', startedAt: '2026-10-09T10:00:00Z', eventCount: 1,
+  attachmentSelection: []
+} as unknown as RunRecord);
+const previewMessage = (id: string, text: string, status: TaskInstruction['status'], runId?: string): TaskInstruction => ({
+  id, taskId: 'task', iterationId: 'it', worktreeId: 'wt', sourceRunId: 'preview-run', sessionId: 'preview-session', order: 1, text,
+  mode: runId ? 'FOLLOW_UP' : 'QUEUE', status, role: 'PREVIEW', runId, createdAt: '2026-10-09T10:00:00Z', updatedAt: '2026-10-09T10:00:00Z'
+});
+function agentConversation(overrides: Partial<PreviewAgentConversation> = {}): PreviewAgentConversation {
+  return {
+    runs: [], items: [], instructions: [], interactions: [], sessions: [], plans: [],
+    models: [scenarioModel], runtimes: [codexRuntime], defaults: { runtimeId: 'codex', model: scenarioModel.model, modelProvider: scenarioModel.modelProvider, reasoningEffort: 'low' },
+    send: vi.fn(async () => undefined), stop: vi.fn(async () => undefined), editQueued: vi.fn(async () => undefined), respond: vi.fn(async () => undefined),
+    ...overrides
+  };
+}
 const proposal: PreviewRecipeGenerationSnapshot = { taskId: 'task', status: 'READY', draft: {
   id: 'draft', taskId: 'task', fileName: 'preview.yaml', replacesExistingFile: false,
   yaml: 'name: example\ntype: static\ndirectory: .\n', generatedAt: '', validation: { status: 'VALID' },
-  report: { summary: 'Serve the static site.', evidence: [], assumptions: [], omissions: [], unresolvedDecisions: [], publicEnvironmentDecisions: [] }
+  report: { summary: 'Serve the static site.', notes: [] }
 } };
 
-it('keeps an agent question inline and passes the answer without approving a run', async () => {
+it('opens the conversation for a pending question, answers it in place, and never starts or approves a run from an answer', async () => {
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
-  const agent = agentActions({ taskId: 'task', status: 'NEEDS_INPUT', report: {
-    summary: 'Two applications are available.', evidence: [], assumptions: [], omissions: [],
-    unresolvedDecisions: ['Which application should run: Alpha or Beta?'], publicEnvironmentDecisions: []
-  } });
-  render(<ApplicationPreviewPanel taskId="task" agent={agent} />);
-  expect(await screen.findByText('Which application should run: Alpha or Beta?')).toBeTruthy();
-  fireEvent.change(screen.getByRole('textbox', { name: 'What should the Preview agent inspect or change?' }), { target: { value: 'Use Beta.' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Draft configuration' }));
-  await waitFor(() => expect(agent.generate).toHaveBeenCalledWith('task', 'Use Beta.'));
+  const question: InteractionRequestRecord = {
+    id: 'question', taskId: 'task', iterationId: 'it', worktreeId: 'wt', runId: 'preview-run', sessionId: 'preview-session', runtimeId: 'codex',
+    type: 'USER_INPUT', status: 'PENDING', requestedAt: '2026-10-09T10:01:00Z', allowedActions: ['ANSWER'], policyWarnings: [],
+    request: { questions: [{ id: 'app', header: 'Application', question: 'Which application should run: Alpha or Beta?', isOther: true, isSecret: false, options: [] }] }
+  } as unknown as InteractionRequestRecord;
+  const agent = agentConversation({
+    runs: [previewRun('AWAITING_USER_INPUT')],
+    instructions: [previewMessage('m1', 'Draft a preview configuration for this project.', 'SUBMITTED', 'preview-run')],
+    interactions: [question]
+  });
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
+  expect(panel.textContent).toContain('Draft a preview configuration for this project.');
+  expect(panel.textContent).toContain('Which application should run: Alpha or Beta?');
+  expect((screen.getByRole('button', { name: 'Preview agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
+  expect(panel.textContent).toContain('Waiting for your answer');
+  expect((screen.getByRole('button', { name: 'Queue' }) as HTMLButtonElement).disabled).toBe(true);
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
+  expect(screen.queryByRole('tab', { name: 'Configuration' })).toBeNull();
 });
 
 it('preserves a reviewed draft across a stale-save rejection and saves without starting', async () => {
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
-  const agent = agentActions(proposal);
-  vi.mocked(agent.accept).mockRejectedValueOnce(new Error('Configuration changed. Reload before replacing it.'));
-  render(<ApplicationPreviewPanel taskId="task" agent={agent} />);
-  fireEvent.click(await screen.findByRole('tab', { name: 'YAML' }));
+  const proposals = proposalActions(proposal);
+  vi.mocked(proposals.accept).mockRejectedValueOnce(new Error('Configuration changed. Reload before replacing it.'));
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposals} />);
+  expect(await screen.findByLabelText('Configuration changes')).toBeTruthy();
+  expect(screen.getByText('Proposal ready')).toBeTruthy();
+  fireEvent.click(screen.getByRole('tab', { name: 'YAML' }));
   const edited = proposal.draft!.yaml + '# Keep this edit\n';
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: edited } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   expect((await screen.findByRole('alert')).textContent).toContain('Configuration changed');
   expect((screen.getByRole('textbox', { name: 'Preview YAML' }) as HTMLTextAreaElement).value).toBe(edited);
-  fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
-  await waitFor(() => expect(agent.accept).toHaveBeenCalledTimes(2));
-  expect(agent.accept).toHaveBeenLastCalledWith('task', 'draft', edited);
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(proposals.accept).toHaveBeenCalledTimes(2));
+  expect(proposals.accept).toHaveBeenLastCalledWith('task', 'draft', edited);
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
+});
+
+it('returns to first-time setup after discarding an unsaved proposal', async () => {
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
+  const proposals = proposalActions(proposal);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposals} />);
+  await screen.findByLabelText('Configuration changes');
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  await waitFor(() => expect(proposals.discard).toHaveBeenCalled());
+  expect(await screen.findByRole('button', { name: 'Draft with Preview agent' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+  expect(api.saveApplicationPreviewFile).not.toHaveBeenCalled();
 });
 
 it('reviews an existing file inline and requires explicit approval before execution', async () => {
   let snapshot: ApplicationPreviewSnapshot = {
     name: 'fixture',
+    projectDirectory: '/fixture',
     hasConfigurationFile: true
   };
   api.getApplicationPreview.mockImplementation(async () => snapshot);
@@ -172,9 +235,10 @@ it('reviews an existing file inline and requires explicit approval before execut
     snapshot = { name: 'fixture', hasConfigurationFile: true };
     return snapshot;
   });
-  render(<ApplicationPreviewPanel taskId="task" />);
+  render(<ApplicationPreviewPanel taskId="task" worktree={{ ...worktree('PRESENT'), worktreePath: '/worktree-symlink' }} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Start preview' }));
   await screen.findByRole('button', { name: 'Approve and start' });
+  expect(screen.getByText('Task worktree', { exact: true })).toBeTruthy();
   expect(screen.getByText('/probe-tools', { exact: true })).toBeTruthy();
   expect(
     screen
@@ -213,13 +277,7 @@ it('shows current retained data after restart and deletion without duplicating s
       running: false
     }
   };
-  const props = {
-    taskId: 'task',
-    busy: false,
-    onLogs: vi.fn(),
-    onRerun: vi.fn(),
-    onConfigure: vi.fn()
-  };
+  const props = { onLogs: vi.fn(), onAsRun: vi.fn() };
   const view = render(<ApplicationActivity {...props} status={status} />);
   expect(screen.getByRole('region', { name: 'Retained data' })).toBeTruthy();
   expect(screen.getByText('database')).toBeTruthy();
@@ -239,7 +297,7 @@ it('shows current retained data after restart and deletion without duplicating s
   );
   expect(screen.queryByRole('region', { name: 'Retained data' })).toBeNull();
   expect(screen.getAllByText('database')).toHaveLength(1);
-  expect(screen.getByText('Data retained')).toBeTruthy();
+  expect(screen.getByText('Data kept')).toBeTruthy();
   view.rerender(
     <ApplicationActivity
       {...props}
@@ -253,7 +311,8 @@ it('shows current retained data after restart and deletion without duplicating s
       }}
     />
   );
-  expect(screen.queryByText('Data retained')).toBeNull();
+  expect(screen.queryByText('Data kept')).toBeNull();
+  expect(screen.getByRole('button', { name: /Configuration as run at/ })).toBeTruthy();
 });
 
 it('edits the file draft while preserving comments and unrelated secret references', async () => {
@@ -390,6 +449,24 @@ it('places a terminal marker after final service output and resumes the visible 
 
 });
 
+it('keeps a ready marker where it was observed while the service keeps logging', async () => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  api.readApplicationPreviewLogs.mockResolvedValueOnce({ text: '[api] Listening on 60312\n', cursor: 24, truncated: false });
+  const props = { taskId: 'task', onSelect: () => undefined };
+  const services = { api: { type: 'command' as const, state: 'starting' as const }, web: { type: 'command' as const, state: 'waiting' as const } };
+  const status = (apiState: 'starting' | 'ready') => ({ ...initial, active: undefined,
+    candidate: { ...initial.active!, type: 'environment' as const, state: 'starting' as const, services: { ...services, api: { ...services.api, state: apiState } } } });
+  const view = render(<ApplicationLogs {...props} status={status('starting')} />);
+  await screen.findByText('Listening on 60312');
+  api.readApplicationPreviewLogs.mockResolvedValue({ text: '[api] GET /api/notes 200\n', cursor: 49, truncated: false });
+  view.rerender(<ApplicationLogs {...props} status={status('ready')} />);
+  fireEvent(document, new Event('visibilitychange'));
+  await screen.findByText('GET /api/notes 200');
+  const text = screen.getByRole('region', { name: 'Application logs' }).textContent!;
+  expect(text.indexOf('Listening on 60312')).toBeLessThan(text.indexOf('api ready'));
+  expect(text.indexOf('api ready')).toBeLessThan(text.indexOf('GET /api/notes 200'));
+});
+
 it('returns focus after unlocking and clears secret input before transport settles or entry is canceled', async () => {
   let complete!: () => void;
   const secrets: PreviewSecretsApi = {
@@ -465,8 +542,16 @@ it('opens the selected source through desktop actions and keeps a failed open re
     preferredAppId: 'vscode', revealLabel: 'Reveal in Finder',
     canOpen: true, canReveal: true, canOpenTerminal: false, canCopyFileContents: false
   });
-  render(<ApplicationSourceFolders taskId="task" attemptId="attempt" sources={['/project/frontend', '/other/repository/backend']} />);
-  fireEvent.click(screen.getByText('Source folders'));
+  api.inspectApplicationPreviewConfiguration.mockResolvedValue({ ...inspected, description: { ...inspected.description, spec: {
+    name: 'fixture', type: 'environment', primary: 'web', timeoutMs: 1000,
+    services: { web: { type: 'command', cwd: '/project/frontend', command: ['npm', 'run', 'dev'] }, api: { type: 'command', cwd: '/other/repository/backend', command: ['npm', 'start'] } }
+  } } });
+  const attempt = { ...initial.active!, id: 'attempt', type: 'environment' as const, state: 'failed' as const, sources: ['/project/frontend', '/other/repository/backend'],
+    services: { web: { type: 'command' as const, state: 'skipped' as const }, api: { type: 'command' as const, state: 'failed' as const, error: { code: 'START_FAILED', message: 'api exited with code 127' } as never } } };
+  render(<PreviewAttemptConfiguration taskId="task" attempt={attempt} status={{ ...initial, active: undefined, latest: attempt }} projectDirectory="/project" onBack={() => undefined} />);
+  expect((await screen.findByLabelText('Configuration as run')).textContent).toContain('read-only');
+  expect(screen.getByText('Failed').parentElement?.textContent).toContain('exit 127');
+  expect(screen.getByText('Not started')).toBeTruthy();
   const target = { type: 'previewSource', taskId: 'task', attemptId: 'attempt', sourceIndex: 1 };
   fireEvent.click(screen.getByRole('button', { name: 'Open folder backend' }));
   expect((await screen.findByRole('alert')).textContent).toBe('Path is missing.');
@@ -497,7 +582,7 @@ it('opens the selected source through desktop actions and keeps a failed open re
   await screen.findByRole('menuitem', { name: 'Copy path' });
   fireEvent.scroll(screen.getByRole('menu'));
   expect(screen.getByRole('menu')).toBeTruthy();
-  fireEvent.scroll(screen.getByRole('list'));
+  fireEvent.scroll(screen.getByLabelText('Configuration as run'));
   expect(screen.queryByRole('menu')).toBeNull();
   fireEvent.click(trigger);
   await screen.findByRole('menuitem', { name: 'Copy path' });
@@ -510,7 +595,7 @@ it('blocks startup until the backend connection is present in the file', async (
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true,
     requirements: { sources: [], secrets: [], connections: ['api'] } });
   api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text: 'name: fixture\ntype: environment\nprimary: api\nservices:\n  api: {type: attach}\n' } });
-  render(<ApplicationPreviewPanel taskId="task" />);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
   expect((await screen.findByRole('button', { name: 'Start preview' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Set address' }));
   await screen.findByRole('button', { name: 'Connect address' });
@@ -523,7 +608,7 @@ it('shows a chosen missing folder before granting access and never starts on Con
     requirements: { secrets: [], connections: [], sources: ['api', 'migrate'].map(service => ({ service, declaration: '../backend', directory: '/projects/missing-backend', connected: false, missing: true })) } });
   api.chooseRepositoryFolder.mockResolvedValue('/chosen/backend');
   api.connectApplicationPreviewSource.mockResolvedValue(undefined);
-  render(<ApplicationPreviewPanel taskId="task" />);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Choose folder' }));
   expect(screen.getByText('api, migrate')).toBeTruthy();
   expect(await screen.findByText('/chosen/backend')).toBeTruthy();
@@ -546,7 +631,7 @@ it('saves and replaces a concealed value under the required reference without st
     vi.mocked(window.previewSecrets!.has).mockResolvedValue(true);
   });
   window.previewSecrets = { status: vi.fn(async () => ({ state: 'unlocked' })), has: vi.fn(async () => false), create } as unknown as PreviewSecretsApi;
-  render(<ApplicationPreviewPanel taskId="task" />);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Add value' }));
   const form = await screen.findByRole('form', { name: 'Add missing secret' });
   expect(screen.queryByRole('dialog')).toBeNull();
@@ -568,4 +653,108 @@ it('saves and replaces a concealed value under the required reference without st
   await waitFor(() => expect(screen.queryByRole('form', { name: 'Replace secret value' })).toBeNull());
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
+});
+
+it('carries a missing worktree inside the panel with Restore as the only primary and no Configuration tab', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false, status: stopped, restoredRun: true });
+  const onRestoreWorktree = vi.fn(async () => undefined);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('MISSING')} onRestoreWorktree={onRestoreWorktree} />);
+  const block = await screen.findByRole('region', { name: 'Worktree missing' });
+  expect(block.textContent).toContain('f390644');
+  expect(block.textContent).toContain('Git checkout hooks');
+  expect(screen.getAllByText('Worktree missing')).toHaveLength(2);
+  const primaries = screen.getAllByRole('button').filter((button) => button.className.includes('primary-button'));
+  expect(primaries.map((button) => button.textContent)).toEqual(['Restore worktree']);
+  expect(screen.getByRole('tab', { name: 'Activity' })).toBeTruthy();
+  expect(screen.queryByRole('tab', { name: 'Configuration' })).toBeNull();
+  expect(screen.getByText('Stopped when Task Monki quit')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Restore worktree' }));
+  expect(onRestoreWorktree).toHaveBeenCalledTimes(1);
+  expect(api.startApplicationPreview).not.toHaveBeenCalled();
+  expect(api.startRetainedApplicationPreview).not.toHaveBeenCalled();
+});
+
+it('opens a past run’s configuration read-only from the runs list and returns to the file', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped', startedAt: '2026-10-09T13:58:00Z',
+    services: { web: { type: 'command', state: 'stopped' } } } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
+  api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text: 'name: fixture\ntype: command\ncwd: .\ncommand: [node, server.js]\n' } });
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
+  fireEvent.click(await screen.findByRole('button', { name: /Configuration as run at/ }));
+  const view = await screen.findByLabelText('Configuration as run');
+  expect(view.textContent).toContain('read-only');
+  expect(await screen.findByText('What ran')).toBeTruthy();
+  expect(view.querySelector('textarea')).toBeNull();
+  expect(screen.getByRole('tab', { name: 'Configuration' }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(screen.getByRole('button', { name: 'Back to preview.yaml' }));
+  await waitFor(() => expect(api.readApplicationPreviewFile).toHaveBeenCalledWith({ taskId: 'task' }));
+  expect(await screen.findByText('preview.yaml')).toBeTruthy();
+  expect(screen.queryByLabelText('Configuration as run')).toBeNull();
+});
+
+it('opens the Preview agent from its own button, sends with the selected model, queues behind a turn, and stops it', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
+  const agent = agentConversation();
+  const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const toggle = await screen.findByRole('button', { name: 'Preview agent' });
+  expect(toggle.getAttribute('aria-pressed')).toBe('false');
+  fireEvent.click(toggle);
+  const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
+  expect(panel.textContent).toContain('Scenario model');
+  fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
+  expect(screen.getByRole('complementary', { name: 'Preview agent conversation' })).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration…' }), { target: { value: 'Add a Redis service' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(agent.send).toHaveBeenCalledWith('Add a Redis service', expect.any(String), { runtimeId: 'codex', model: 'scenario-model', modelProvider: 'openai', reasoningEffort: 'low' }));
+  expect(api.startApplicationPreview).not.toHaveBeenCalled();
+
+  // While the agent works, the composer queues and Stop interrupts; the model cannot change mid-turn.
+  const working = agentConversation({
+    runs: [previewRun('RUNNING')],
+    instructions: [previewMessage('m1', 'Add a Redis service', 'SUBMITTED', 'preview-run'), previewMessage('m2', 'Also a worker', 'QUEUED')]
+  });
+  view.rerender(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={working} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  expect(screen.getByRole('list', { name: 'Pending instructions' }).textContent).toContain('Also a worker');
+  expect(screen.getByRole('button', { name: 'Queue' })).toBeTruthy();
+  expect((screen.getByRole('button', { name: /^Preview agent model:/ }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+  await waitFor(() => expect(working.stop).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('button', { name: 'Remove instruction 1' }));
+  await waitFor(() => expect(working.editQueued).toHaveBeenCalledWith('m2'));
+
+  fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
+  expect(screen.getByRole('button', { name: 'Preview agent' }).getAttribute('aria-pressed')).toBe('false');
+  expect(api.cancelApplicationPreview).not.toHaveBeenCalled();
+});
+
+it('offers the retained run as the primary when the file is gone and shows its configuration read-only', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped', services: { web: { type: 'command', state: 'stopped' } } } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false, status: stopped });
+  api.startRetainedApplicationPreview.mockResolvedValue(undefined);
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const block = await screen.findByRole('region', { name: 'Configuration file missing' });
+  expect(screen.getByRole('button', { name: 'Start from last run' }).className).toContain('primary-button');
+  expect(screen.getByRole('button', { name: 'Draft with Preview agent' }).className).not.toContain('primary-button');
+  fireEvent.click(block.querySelector('button')!);
+  expect((await screen.findByLabelText('Configuration as run')).textContent).toContain('read-only');
+  fireEvent.click(screen.getByRole('button', { name: 'Start from last run' }));
+  await waitFor(() => expect(api.startRetainedApplicationPreview).toHaveBeenCalledWith({ taskId: 'task' }));
+  expect(api.approveApplicationPreview).not.toHaveBeenCalled();
+});
+
+
+it('continues the saved Preview model before its catalog loads and leaves provider selection usable when that runtime is unavailable', async () => {
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
+  const agent = agentConversation({ runs: [previewRun('COMPLETED')], models: [] });
+  const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview agent' }));
+  expect(screen.getByRole('button', { name: /Preview agent model:.*scenario-model/ })).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ask for a change or an explanation…' }), { target: { value: 'Continue our previous conversation.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(agent.send).toHaveBeenCalledWith('Continue our previous conversation.', expect.any(String), expect.objectContaining({ model: 'scenario-model', modelProvider: 'openai' })));
+  view.rerender(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={{ ...agent, runtimes: [{ ...codexRuntime, preflight: { ...codexRuntime.preflight, readiness: createRuntimeReadiness('DISABLED', 'Connection unavailable.') } }] }} />);
+  expect((screen.getByRole('button', { name: /Preview agent model:/ }) as HTMLButtonElement).disabled).toBe(false);
 });

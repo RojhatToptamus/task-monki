@@ -195,6 +195,16 @@ describe('run activity projection', () => {
           payload: { namespace: 'multi-agent', tool: 'spawn' }
         }),
         itemFixture({
+          id: 'preview-tool',
+          type: 'MCP_TOOL_CALL',
+          payload: { title: 'mcp__task-monki-preview-tools__inspect_preview', rawInput: { what: 'status' } }
+        }),
+        itemFixture({
+          id: 'design-tool',
+          type: 'DYNAMIC_TOOL_CALL',
+          payload: { namespace: null, tool: 'inspect_design', arguments: { operation: 'open_candidate' } }
+        }),
+        itemFixture({
           id: 'search',
           type: 'OTHER',
           payload: {
@@ -228,6 +238,8 @@ describe('run activity projection', () => {
     expect(projection.rows.map((row) => row.category)).toEqual([
       'mcp',
       'mcp',
+      'mcp',
+      'mcp',
       'search',
       'web',
       'compaction',
@@ -240,6 +252,9 @@ describe('run activity projection', () => {
     ]);
     expect(projection.rows).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ category: 'mcp', label: 'MCP', detail: 'docs/search' }),
+        expect.objectContaining({ category: 'mcp', label: 'Task Monki', detail: 'Reading the preview' }),
+        expect.objectContaining({ category: 'mcp', label: 'Task Monki', detail: 'Checking the design' }),
         expect.objectContaining({ category: 'search', label: 'Search', detail: '*.test.ts' }),
         expect.objectContaining({
           category: 'web',

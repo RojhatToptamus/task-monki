@@ -1,87 +1,42 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import os from 'node:os';
-import { readPreviewRecipeFile, writeReviewedPreviewRecipe, type PreviewRecipeFile } from './PreviewRecipeFile';
 import path from 'node:path';
-import {
-  type PreviewRecipeGenerationDraft,
-  type PreviewRecipeGenerationReport,
-  type PreviewRecipeGenerationSnapshot,
-  type PreviewPublicEnvironmentDecision,
-  type PreviewRecipeValidation
-} from '../../../shared/contracts';
 import { isAlias, isScalar, parseDocument, visit } from 'yaml';
 import { parsePreviewSpec, type PreviewSpec } from 'previewhost';
-import {
-  buildPreviewRecipeGenerationInstruction,
-  PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION
-} from './PreviewRecipeGenerationSupport';
-import type { PreviewFrameworkCapabilities } from './PreviewFrameworkCapabilities';
-import {
-  preparePreviewRecipeEvidenceBundle,
-  recoverPreviewRecipeEvidenceRoot
-} from './PreviewRecipeEvidenceBundle';
 import type {
-  PreviewPublicEnvironmentCandidate,
-  PreviewPublicEnvironmentEvidence
-} from './PreviewPublicEnvironmentEvidence';
+  PreviewRecipeGenerationDraft,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  PreviewRecipeValidationIssue
+} from '../../../shared/contracts';
+import {
+  analyzePreviewFrameworkCapabilities,
+  inspectPreviewFrameworkRepositoryFacts,
+  type PreviewFrameworkCapabilities
+} from './PreviewFrameworkCapabilities';
+import { readPreviewRecipeFile, writeReviewedPreviewRecipe, type PreviewRecipeFile } from './PreviewRecipeFile';
 
 export const PREVIEW_RECIPE_PATH = 'preview.yaml';
 const MAX_PREVIEW_RECIPE_BYTES = 65_536;
+const MAX_PACKAGE_MANIFEST_BYTES = 256 * 1024;
+const MAX_REASON_LENGTH = 300;
+const SECRET_ENV_KEY = /(?:^|_)(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i;
 type Configuration = ReturnType<typeof parsePreviewSpec>;
 
-const MAX_REPORT_ITEMS = 40;
-const MAX_REPORT_TEXT_BYTES = 1_200;
-const SECRET_ENV_KEY = /(?:^|_)(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i;
-
-export interface PreviewRecipeGenerationRunRequest {
+/** A configuration the Preview agent submits for review, with its own account of it. */
+export interface PreviewRecipeProposal {
   taskId: string;
-  generationId: string;
-  cwd: string;
-  instruction: string;
+  worktreePath: string;
+  yaml: string;
+  summary: string;
+  notes: string[];
 }
 
-export interface PreviewRecipeGenerationRun {
-  result: Promise<string>;
-  cancel(): Promise<void>;
-}
+export type PreviewRecipeProposalResult =
+  | { status: 'READY'; draft: PreviewRecipeGenerationDraft }
+  | { status: 'INVALID'; issues: PreviewRecipeValidationIssue[] };
 
-export type PreviewRecipeGenerationRunner = (
-  request: PreviewRecipeGenerationRunRequest
-) => Promise<PreviewRecipeGenerationRun>;
-
-export class PreviewRecipeGenerationRunError extends Error {
-  constructor(
-    readonly code:
-      | 'CANCELED'
-      | 'TIMED_OUT'
-      | 'TERMINATION_UNCONFIRMED'
-      | 'UNAVAILABLE',
-    message: string,
-    options?: ErrorOptions
-  ) {
-    super(message, options);
-    this.name = 'PreviewRecipeGenerationRunError';
-  }
-}
-
-interface ActiveGeneration {
-  id: string;
-  canceled: boolean;
-  abortController: AbortController;
-  cancellationError?: unknown;
-  cancellationWork?: Promise<void>;
-  run?: PreviewRecipeGenerationRun;
-  settled?: Promise<PreviewRecipeGenerationSnapshot>;
-}
-
-interface ParsedAgentGeneration {
-  status: 'draft' | 'insufficient-evidence';
-  yaml?: string;
-  report: PreviewRecipeGenerationReport;
-}
-
+/** What a draft was checked against; later edits are revalidated against the same facts and file. */
 interface DraftValidationAuthority {
   taskId: string;
   worktreePath: string;
@@ -89,103 +44,57 @@ interface DraftValidationAuthority {
   capabilities: PreviewFrameworkCapabilities;
 }
 
-class InvalidAgentGenerationError extends Error {}
-
-class PreviewRecipeEvidenceChangedError extends Error {}
-
+/**
+ * Holds the Preview agent's configuration proposals until the user saves or discards them.
+ * A proposal is validated against the Preview contract and the worktree's framework facts the
+ * moment it is submitted, so the agent learns the exact problem and the user only ever reviews
+ * a valid draft. Nothing here writes the worktree except the explicit acceptance.
+ */
 export class PreviewRecipeGenerationService {
   private readonly states = new Map<string, PreviewRecipeGenerationSnapshot>();
-  private readonly operations = new Map<string, ActiveGeneration>();
   private readonly draftValidationAuthority = new Map<string, DraftValidationAuthority>();
-  private shuttingDown = false;
-
-  constructor(
-    private readonly runAgent: PreviewRecipeGenerationRunner,
-    private readonly evidenceRoot = path.join(
-      os.tmpdir(),
-      `task-monki-preview-recipe-evidence-${process.pid}`
-    )
-  ) {}
-
-  recoverEvidence(retainedGenerationIds: ReadonlySet<string> = new Set()): Promise<void> {
-    return recoverPreviewRecipeEvidenceRoot(
-      this.evidenceRoot,
-      new Set([
-        ...retainedGenerationIds,
-        ...[...this.operations.values()].map((operation) => operation.id)
-      ])
-    );
-  }
 
   get(taskId: string): PreviewRecipeGenerationSnapshot {
-    return structuredClone(
-      this.states.get(taskId) ?? { taskId, status: 'EMPTY' }
-    );
+    return structuredClone(this.states.get(taskId) ?? { taskId, status: 'EMPTY' });
   }
 
-  generate(input: {
-    taskId: string;
-    worktreePath: string;
-    clarification?: string;
-    diagnostics?: unknown;
-    onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
-  }): Promise<PreviewRecipeGenerationSnapshot> {
-    if (this.shuttingDown) {
-      return Promise.reject(new Error('Preview recipe generation is shutting down.'));
+  async propose(input: PreviewRecipeProposal): Promise<PreviewRecipeProposalResult> {
+    const worktreePath = await fs.realpath(input.worktreePath);
+    const [originalFile, capabilities] = await Promise.all([
+      readPreviewRecipeFile(worktreePath),
+      readPreviewFrameworkCapabilities(worktreePath)
+    ]);
+    const validation = validateProposedPreviewRecipe(input.yaml, capabilities);
+    if (validation.status !== 'VALID') return validation;
+    const report = { summary: input.summary.trim(), notes: input.notes.map((note) => note.trim()).filter(Boolean) };
+    if ([report.summary, ...report.notes].some(looksLikeSecret)) {
+      return invalid('SECRET_LITERAL', 'The summary or notes contain a secret-like value. Name secrets; never write their values.');
     }
-    const clarification = input.clarification?.trim();
-    if (clarification && (
-      clarification.length > 4_000 || /\0/.test(clarification) || looksLikeSecret(clarification) ||
-      [...clarification.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)["']?\s*[:=]\s*(?=\S)/g)]
-        .some(match => SECRET_ENV_KEY.test(match[1]!))
-    )) {
-      return Promise.reject(new Error('Use at most 4,000 characters of setup details without secret values. Store secrets in Settings → Secrets.'));
-    }
-    const active = this.operations.get(input.taskId);
-    if (active?.settled) return active.settled;
-    const report = this.states.get(input.taskId)?.report;
-    const operation: ActiveGeneration = {
+    const draft: PreviewRecipeGenerationDraft = {
       id: randomUUID(),
-      canceled: false,
-      abortController: new AbortController()
+      taskId: input.taskId,
+      yaml: input.yaml,
+      report,
+      validation,
+      generatedAt: new Date().toISOString(),
+      fileName: originalFile?.name ?? PREVIEW_RECIPE_PATH,
+      replacesExistingFile: !!originalFile
     };
-    this.operations.set(input.taskId, operation);
-    const startedAt = new Date().toISOString();
-    this.publish(
-      {
-        taskId: input.taskId,
-        status: 'GENERATING',
-        stage: 'PREPARING_EVIDENCE',
-        draft: this.states.get(input.taskId)?.draft,
-        report,
-        startedAt
-      },
-      input.onUpdate
-    );
-    const settled = this.completeGeneration(operation, { ...input, clarification, questions: report?.unresolvedDecisions, startedAt });
-    operation.settled = settled;
-    return settled;
+    this.clearDraftAuthority(input.taskId);
+    this.draftValidationAuthority.set(draft.id, { taskId: input.taskId, worktreePath, originalFile, capabilities });
+    this.states.set(input.taskId, { taskId: input.taskId, status: 'READY', draft });
+    return { status: 'READY', draft: structuredClone(draft) };
   }
 
+  /** The file the draft was written against, so the editor can show what changes. */
   reviewedFile(taskId: string, draftId: string): PreviewRecipeFile | undefined {
-    const authority = this.draftValidationAuthority.get(draftId);
-    if (!authority || authority.taskId !== taskId) throw new Error('The Preview proposal is no longer current.');
+    const authority = this.requireAuthority(taskId, draftId);
     return authority.originalFile ? { ...authority.originalFile } : undefined;
   }
 
+  /** Revalidates the user's edits with the facts the proposal was checked against. */
   validate(taskId: string, draftId: string, yaml: string): PreviewRecipeValidation {
-    const draft = this.states.get(taskId)?.draft;
-    if (!draft || draft.id !== draftId) {
-      throw new Error('The Preview recipe draft is no longer current.');
-    }
-    const authority = this.draftValidationAuthority.get(draftId);
-    if (!authority || authority.taskId !== taskId) {
-      throw new Error('The Preview recipe draft is no longer current.');
-    }
-    // Generation already checked the agent's evidence-backed decisions. During
-    // review, the user can supply a missing address or change a binding; the old
-    // report must not veto those edits. Schema, secret and command checks remain.
-    return validateGeneratedPreviewRecipeDraft(yaml, authority.capabilities);
+    return validateProposedPreviewRecipe(yaml, this.requireAuthority(taskId, draftId).capabilities);
   }
 
   async writeAcceptedRecipe(input: {
@@ -193,336 +102,43 @@ export class PreviewRecipeGenerationService {
     draftId: string;
     yaml: string;
     worktreePath: string;
-  }): Promise<'preview.yaml' | 'preview.yml'> {
-    if (this.operations.has(input.taskId)) {
-      throw new Error('Wait for Preview recipe generation to finish before accepting a draft.');
-    }
-    const state = this.states.get(input.taskId);
-    if (!state?.draft || state.draft.id !== input.draftId) {
-      throw new Error('The Preview recipe draft is no longer current.');
-    }
-    const authority = this.draftValidationAuthority.get(input.draftId);
-    if (!authority || authority.taskId !== input.taskId) {
-      throw new Error('The Preview recipe draft is no longer current.');
-    }
-    const validation = this.validate(input.taskId, input.draftId, input.yaml);
+  }): Promise<PreviewRecipeFile['name']> {
+    const authority = this.requireAuthority(input.taskId, input.draftId);
+    const validation = validateProposedPreviewRecipe(input.yaml, authority.capabilities);
     if (validation.status !== 'VALID') {
       throw new Error(validation.issues[0]?.message ?? 'The Preview recipe is invalid.');
     }
-    if (await fs.realpath(input.worktreePath) !== authority.worktreePath) {
+    if ((await fs.realpath(input.worktreePath)) !== authority.worktreePath) {
       throw new Error('The task worktree changed. Ask the agent for a fresh proposal.');
     }
     return writeReviewedPreviewRecipe(input.worktreePath, input.yaml, authority.originalFile);
   }
 
   completeAcceptance(taskId: string): PreviewRecipeGenerationSnapshot {
+    return this.discard(taskId);
+  }
+
+  discard(taskId: string): PreviewRecipeGenerationSnapshot {
     this.states.delete(taskId);
     this.clearDraftAuthority(taskId);
     return { taskId, status: 'EMPTY' };
   }
 
-  async discard(
-    taskId: string,
-    onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void
-  ): Promise<PreviewRecipeGenerationSnapshot> {
-    const operation = this.operations.get(taskId);
-    if (operation) {
-      try {
-        await this.requestCancellation(operation);
-      } catch (cause) {
-        operation.cancellationError = cause;
-      }
-    }
-    const settled = operation?.settled
-      ? await operation.settled
-      : ({ taskId, status: 'EMPTY' } as const);
-    if (operation?.cancellationError) throw operation.cancellationError;
-    if (!operation) {
-      this.states.delete(taskId);
-      this.clearDraftAuthority(taskId);
-      onUpdate?.(structuredClone(settled));
-    }
-    return settled;
+  clearTask(taskId: string): void {
+    this.discard(taskId);
   }
 
-  async clearTask(taskId: string): Promise<void> {
-    const operation = this.operations.get(taskId);
-    if (operation) {
-      try {
-        await this.requestCancellation(operation);
-      } catch (cause) {
-        operation.cancellationError = cause;
-      }
-      if (operation.settled) await operation.settled;
-      if (operation.cancellationError) throw operation.cancellationError;
-    }
-    this.states.delete(taskId);
-    this.clearDraftAuthority(taskId);
-  }
-
-  async shutdown(): Promise<void> {
-    if (this.shuttingDown) return;
-    this.shuttingDown = true;
-    const operations = [...this.operations.values()];
-    const results = await Promise.allSettled(
-      operations.map(async (operation) => {
-        try {
-          await this.requestCancellation(operation);
-        } catch (cause) {
-          operation.cancellationError = cause;
-        }
-        await operation.settled;
-        if (operation.cancellationError) throw operation.cancellationError;
-      })
-    );
-    const failures = results.flatMap((result) =>
-      result.status === 'rejected' ? [result.reason] : []
-    );
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        'Preview recipe generation shutdown cleanup is incomplete.'
-      );
-    }
-    this.operations.clear();
+  shutdown(): void {
     this.states.clear();
     this.draftValidationAuthority.clear();
   }
 
-  private async completeGeneration(
-    operation: ActiveGeneration,
-    input: {
-      taskId: string;
-      worktreePath: string;
-      clarification?: string;
-      diagnostics?: unknown;
-      questions?: readonly string[];
-      onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void;
-      startedAt: string;
+  private requireAuthority(taskId: string, draftId: string): DraftValidationAuthority {
+    const authority = this.draftValidationAuthority.get(draftId);
+    if (!authority || authority.taskId !== taskId || this.states.get(taskId)?.draft?.id !== draftId) {
+      throw new Error('The Preview proposal is no longer current.');
     }
-  ): Promise<PreviewRecipeGenerationSnapshot> {
-    const previousDraft = this.states.get(input.taskId)?.draft;
-    const previousReport = this.states.get(input.taskId)?.report;
-    let evidence: Awaited<ReturnType<typeof preparePreviewRecipeEvidenceBundle>> | undefined;
-    let retainEvidence = false;
-    try {
-      const originalFile = await readPreviewRecipeFile(input.worktreePath);
-      evidence = await preparePreviewRecipeEvidenceBundle(input.worktreePath, {
-        rootDirectory: this.evidenceRoot,
-        generationId: operation.id,
-        signal: operation.abortController.signal,
-        configuration: originalFile,
-        diagnostics: input.diagnostics
-      });
-      this.assertCurrent(input.taskId, operation);
-      this.publish(
-        {
-          taskId: input.taskId,
-          status: 'GENERATING',
-          stage: 'GENERATING_DRAFT',
-          draft: previousDraft,
-          report: previousReport,
-          startedAt: input.startedAt
-        },
-        input.onUpdate
-      );
-      const evidenceHash = await hashFile(
-        path.join(evidence.directoryPath, evidence.fileName),
-        evidence.fileByteCount
-      );
-      const run = await this.runAgent({
-        taskId: input.taskId,
-        generationId: operation.id,
-        cwd: evidence.directoryPath,
-        instruction: buildPreviewRecipeGenerationInstruction({
-          evidenceFileName: evidence.fileName,
-          clarification: input.clarification,
-          questions: input.questions
-        })
-      });
-      operation.run = run;
-      if (operation.canceled) {
-        try {
-          await this.cancelStartedRun(operation);
-        } catch (cause) {
-          operation.cancellationError = cause;
-          throw cause;
-        }
-      }
-      const output = await run.result;
-      operation.run = undefined;
-      let currentEvidenceHash: string;
-      try {
-        currentEvidenceHash = await hashFile(
-          path.join(evidence.directoryPath, evidence.fileName),
-          evidence.fileByteCount
-        );
-      } catch {
-        throw new PreviewRecipeEvidenceChangedError();
-      }
-      if (evidenceHash !== currentEvidenceHash) {
-        throw new PreviewRecipeEvidenceChangedError();
-      }
-      this.assertCurrent(input.taskId, operation);
-      this.publish(
-        {
-          taskId: input.taskId,
-          status: 'GENERATING',
-          stage: 'VALIDATING_DRAFT',
-          draft: previousDraft,
-          report: previousReport,
-          startedAt: input.startedAt
-        },
-        input.onUpdate
-      );
-      let parsed: ParsedAgentGeneration;
-      try {
-        parsed = parseAgentGeneration(
-          output,
-          evidence.includedPaths,
-          evidence.publicEnvironment
-        );
-      } catch (cause) {
-        throw new InvalidAgentGenerationError('The response envelope is invalid.', {
-          cause
-        });
-      }
-      parsed.report.omissions = uniqueBoundedStrings([
-        ...evidence.safeOmissions,
-        ...parsed.report.omissions
-      ]);
-      if (parsed.status === 'insufficient-evidence') {
-        return this.finish(
-          input.taskId,
-          operation,
-          {
-            taskId: input.taskId,
-            status: 'NEEDS_INPUT',
-            report: parsed.report,
-            draft: previousDraft,
-            failureCode: 'INSUFFICIENT_EVIDENCE',
-            message: 'The agent did not find enough evidence for a safe Preview recipe.'
-          },
-          input.onUpdate
-        );
-      }
-      const validation = validateAgentGeneratedPreviewRecipeDraft(
-        parsed.yaml ?? '',
-        evidence.frameworkCapabilities,
-        evidence.publicEnvironment.candidates,
-        parsed.report.publicEnvironmentDecisions
-      );
-      if (validation.status !== 'VALID') {
-        return this.finish(
-          input.taskId,
-          operation,
-          {
-            taskId: input.taskId,
-            status: 'FAILED',
-            report: previousReport ?? previousDraft?.report ?? parsed.report,
-            draft: previousDraft,
-            failureCode: 'INVALID_AGENT_OUTPUT',
-            message: validation.issues[0]?.message ?? 'The generated recipe was invalid.'
-          },
-          input.onUpdate
-        );
-      }
-      const draft: PreviewRecipeGenerationDraft = {
-        id: randomUUID(),
-        taskId: input.taskId,
-        yaml: parsed.yaml!,
-        report: parsed.report,
-        validation,
-        generatedAt: new Date().toISOString(),
-        fileName: originalFile?.name ?? 'preview.yaml',
-        replacesExistingFile: !!originalFile
-      };
-      const finished = this.finish(
-        input.taskId,
-        operation,
-        { taskId: input.taskId, status: 'READY', draft },
-        input.onUpdate
-      );
-      this.clearDraftAuthority(input.taskId);
-      this.draftValidationAuthority.set(draft.id, {
-        taskId: input.taskId,
-        worktreePath: await fs.realpath(input.worktreePath),
-        originalFile,
-        capabilities: structuredClone(evidence.frameworkCapabilities)
-      });
-      return finished;
-    } catch (error) {
-      if (operation.canceled && !operation.cancellationError) {
-        const current = this.operations.get(input.taskId);
-        if (current !== operation) return this.get(input.taskId);
-        return this.finish(
-          input.taskId,
-          operation,
-          previousDraft
-            ? { taskId: input.taskId, status: 'READY', draft: previousDraft }
-            : { taskId: input.taskId, status: 'EMPTY' },
-          input.onUpdate
-        );
-      }
-      if (
-        operation.cancellationError ||
-        (error instanceof PreviewRecipeGenerationRunError &&
-          error.code === 'TERMINATION_UNCONFIRMED')
-      ) {
-        retainEvidence = true;
-      }
-      const classified = classifyGenerationFailure(
-        operation.cancellationError ?? error
-      );
-      return this.finish(
-        input.taskId,
-        operation,
-        {
-          taskId: input.taskId,
-          status: 'FAILED',
-          draft: previousDraft,
-          report: previousReport,
-          failureCode: classified.code,
-          message: classified.message
-        },
-        input.onUpdate
-      );
-    } finally {
-      if (!retainEvidence) await evidence?.dispose().catch(() => undefined);
-      if (this.operations.get(input.taskId) === operation) {
-        this.operations.delete(input.taskId);
-      }
-    }
-  }
-
-  private assertCurrent(taskId: string, operation: ActiveGeneration): void {
-    if (operation.canceled || this.operations.get(taskId) !== operation) {
-      throw new PreviewRecipeGenerationRunError(
-        'CANCELED',
-        'Preview recipe generation was canceled.'
-      );
-    }
-  }
-
-  private finish(
-    taskId: string,
-    operation: ActiveGeneration,
-    state: PreviewRecipeGenerationSnapshot,
-    onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void
-  ): PreviewRecipeGenerationSnapshot {
-    if (this.operations.get(taskId) !== operation) return this.get(taskId);
-    return this.publish(state, onUpdate);
-  }
-
-  private publish(
-    state: PreviewRecipeGenerationSnapshot,
-    onUpdate?: (state: PreviewRecipeGenerationSnapshot) => void
-  ): PreviewRecipeGenerationSnapshot {
-    const snapshot = structuredClone(state);
-    if (snapshot.status === 'EMPTY') this.states.delete(snapshot.taskId);
-    else this.states.set(snapshot.taskId, snapshot);
-    onUpdate?.(structuredClone(snapshot));
-    return snapshot;
+    return authority;
   }
 
   private clearDraftAuthority(taskId: string): void {
@@ -530,237 +146,129 @@ export class PreviewRecipeGenerationService {
       if (entry.taskId === taskId) this.draftValidationAuthority.delete(draftId);
     }
   }
-
-  private requestCancellation(operation: ActiveGeneration): Promise<void> {
-    operation.canceled = true;
-    operation.abortController.abort();
-    return this.cancelStartedRun(operation);
-  }
-
-  private cancelStartedRun(operation: ActiveGeneration): Promise<void> {
-    if (!operation.run) return Promise.resolve();
-    operation.cancellationWork ??= operation.run.cancel().catch((cause) => {
-      operation.cancellationError = cause;
-      throw cause;
-    });
-    return operation.cancellationWork;
-  }
 }
 
+/** Framework facts come from the root manifest and lockfile only; the agent reads the rest itself. */
+async function readPreviewFrameworkCapabilities(worktreePath: string): Promise<PreviewFrameworkCapabilities> {
+  const manifestPath = path.join(worktreePath, 'package.json');
+  const stat = await fs.lstat(manifestPath).catch(() => undefined);
+  const manifest = stat?.isFile() && stat.size <= MAX_PACKAGE_MANIFEST_BYTES
+    ? await fs.readFile(manifestPath, 'utf8').catch(() => undefined)
+    : undefined;
+  return analyzePreviewFrameworkCapabilities(
+    manifest === undefined ? [] : [{ path: 'package.json', content: manifest }],
+    await inspectPreviewFrameworkRepositoryFacts(worktreePath)
+  );
+}
+
+/** The contract every reviewed file must meet, whoever wrote it. */
 export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidation {
-  if (!yaml.trim()) {
-    return {
-      status: 'INVALID',
-      issues: [{ code: 'EMPTY_RECIPE', message: 'The Preview recipe is empty.' }]
-    };
-  }
+  if (!yaml.trim()) return invalid('EMPTY_RECIPE', 'The Preview recipe is empty.');
   if (Buffer.byteLength(yaml, 'utf8') > MAX_PREVIEW_RECIPE_BYTES) {
-    return {
-      status: 'INVALID',
-      issues: [{ code: 'RECIPE_TOO_LARGE', message: 'The Preview recipe exceeds 64 KiB.' }]
-    };
+    return invalid('RECIPE_TOO_LARGE', 'The Preview recipe exceeds 64 KiB.');
   }
   let plan: Configuration;
   try {
     plan = parseConfiguration(yaml);
-  } catch {
-    return {
-      status: 'INVALID',
-      issues: [
-        {
-          code: 'INVALID_RECIPE',
-          message: 'The YAML does not match the supported Preview recipe contract.'
-        }
-      ]
-    };
+  } catch (error) {
+    return invalid('INVALID_RECIPE', `The YAML does not match the Preview contract: ${reason(error)}`);
   }
   if (/^tm-[0-9a-f-]{36}$/i.test(plan.name)) {
-    return { status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: 'Use a readable project name. Task Monki assigns runtime identity separately.' }] };
+    return invalid('INVALID_RECIPE', 'Use a readable project name. Task Monki assigns runtime identity separately.');
   }
   if (/\[concealed literal[^\]]*\]|\[credential-like diagnostic withheld\]|\[REDACTED\]/i.test(yaml)) {
-    return { status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: 'Replace concealed placeholders with an explicit nonsecret value or secret reference before saving.' }] };
+    return invalid('INVALID_RECIPE', 'Replace concealed placeholders with an explicit nonsecret value or secret reference before saving.');
   }
   if (looksLikeSecret(yaml) || containsSecretLiteral(plan)) {
-    return {
-      status: 'INVALID',
-      issues: [
-        {
-          code: 'SECRET_LITERAL',
-          message: 'Secret-like environment keys must use a secret reference, never a literal value.'
-        }
-      ]
-    };
+    return invalid('SECRET_LITERAL', 'Secret-like environment keys must use a secret reference, never a literal value.');
   }
-  const bindings = commandNodes(plan).flatMap(node => commandEnvironments(node).flatMap(Object.values));
+  const bindings = commandNodes(plan).flatMap((node) => commandEnvironments(node).flatMap(Object.values));
   if (plan.type === 'environment') {
     for (const service of Object.values(plan.services)) {
       if ((service.type === 'external-postgres' || service.type === 'external-redis') && service.url) bindings.push(service.url);
     }
   }
-  if (bindings.some(value => typeof value === 'object' && 'fromEnv' in value)) {
-    return {
-      status: 'INVALID',
-      issues: [{ code: 'INVALID_RECIPE', message: 'Task Monki does not supply fromEnv inputs. Use a secret reference or an explicit nonsecret value.' }]
-    };
+  if (bindings.some((value) => typeof value === 'object' && 'fromEnv' in value)) {
+    return invalid('INVALID_RECIPE', 'Task Monki does not supply fromEnv inputs. Use a secret reference or an explicit nonsecret value.');
   }
   return { status: 'VALID' };
 }
 
-function validateAgentGeneratedPreviewRecipeDraft(
-  yaml: string,
-  capabilities: PreviewFrameworkCapabilities,
-  candidates: readonly PreviewPublicEnvironmentCandidate[],
-  decisions: readonly PreviewPublicEnvironmentDecision[]
-): PreviewRecipeValidation {
-  const validation = validateGeneratedPreviewRecipeDraft(yaml, capabilities);
-  if (validation.status !== 'VALID') return validation;
-  const plan = parseConfiguration(yaml);
-  const activeNodes = commandNodes(plan);
-  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-  for (const decision of decisions) {
-    const candidate = candidateById.get(decision.candidateId);
-    if (!candidate) return invalidPublicEnvironmentDecision();
-    const recipientValues = activeNodes.flatMap((node) => {
-      return commandEnvironments(node).flatMap((environment) =>
-        environment[candidate.key] === undefined ? [] : [environment[candidate.key]]
-      );
-    });
-    if (decision.decision === 'HTTP_ATTACHMENT') {
-      const attachment = plan.type === 'environment' && decision.attachmentId ? plan.services[decision.attachmentId] : undefined;
-      if (
-        !decision.attachmentId || recipientValues.length === 0 ||
-        recipientValues.some(
-          (value) =>
-            typeof value === 'string' || !('service' in value && value.service === decision.attachmentId || 'browserUrl' in value && value.browserUrl === decision.attachmentId)
-        ) ||
-        attachment?.type !== 'attach'
-      ) return invalidPublicEnvironmentDecision(`The agent proposal must bind ${candidate.key} to its declared HTTP service ${decision.attachmentId ?? '(missing)'}. Ask the agent to correct this connection.`);
-      if (!publicTargetMatchesPolicy(attachment.url, candidate)) {
-        const expected = candidate.targetPolicy.kind === 'LOCAL_REQUIRED'
-          ? 'an explicit connection without a preselected URL'
-          : `${candidate.targetPolicy.publicHttpTarget.scheme}://${candidate.targetPolicy.publicHttpTarget.host}:${candidate.targetPolicy.publicHttpTarget.port}${candidate.targetPolicy.publicHttpTarget.basePath}`;
-        return invalidPublicEnvironmentDecision(`The agent proposal must use ${expected} for ${candidate.key} in service ${decision.attachmentId}. Ask the agent to retain the selected connection.`);
-      }
-    } else if (decision.decision === 'SOURCE_DEFAULT') {
-      if (!candidate.sourceDefault || recipientValues.length > 0) {
-        return invalidPublicEnvironmentDecision(`The agent report says ${candidate.key} uses its source default, but the YAML overrides it. Ask the agent to make the report and configuration agree.`);
-      }
-    } else if (recipientValues.length > 0) {
-      return invalidPublicEnvironmentDecision(`The agent report omits ${candidate.key}, but the YAML still sets it. Ask the agent to remove the unused setting.`);
-    }
-  }
-  return validation;
-}
-
-function publicTargetMatchesPolicy(url: string | undefined, candidate: PreviewPublicEnvironmentCandidate): boolean {
-  if (!url) return candidate.targetPolicy.kind !== 'CONFIGURED';
-  if (candidate.targetPolicy.kind === 'LOCAL_REQUIRED') return false;
-  const evidenced = candidate.targetPolicy.publicHttpTarget;
-  const target = new URL(url);
-  return target.protocol === `${evidenced.scheme}:` && target.hostname === evidenced.host &&
-    Number(target.port || (target.protocol === 'https:' ? 443 : 80)) === evidenced.port && target.pathname === evidenced.basePath;
-}
-
-function invalidPublicEnvironmentDecision(message = 'The generated public environment decision does not match the Preview recipe.'): PreviewRecipeValidation {
-  return {
-    status: 'INVALID',
-    issues: [{
-      code: 'PUBLIC_ENVIRONMENT_DECISION_INVALID',
-      message
-    }]
-  };
-}
-
-function validateGeneratedPreviewRecipeDraft(
+/**
+ * The agent's proposal must also respect what Task Monki knows about the framework: no implicit
+ * package acquisition, no fixed ports or HTTPS flags, and a reviewed lockfile installation job
+ * wherever the trusted Next.js command needs one.
+ */
+export function validateProposedPreviewRecipe(
   yaml: string,
   capabilities: PreviewFrameworkCapabilities
 ): PreviewRecipeValidation {
   const validation = validatePreviewRecipeDraft(yaml);
   if (validation.status !== 'VALID') return validation;
   const plan = parseConfiguration(yaml);
-  const longNodes = commandNodes(plan).filter(node => node.type !== 'job');
-  const commands = longNodes.map((node) => node.command);
-  if (generatedCommands(plan).some(isImplicitPackageAcquisition)) {
+  const longNodes = commandNodes(plan).filter((node) => node.type !== 'job');
+  if (allCommands(plan).some(isImplicitPackageAcquisition)) {
     return dependencyPreparationRequired(
-      'Generated Preview recipes must declare dependency installation as an explicit finite job; implicit npm exec, npx, or dlx acquisition is not allowed.'
+      'Declare dependency installation as an explicit finite job; implicit npm exec, npx, or dlx acquisition is not allowed.'
     );
   }
-  for (const command of commands) {
-    if (containsExplicitRuntimeConflict(command)) {
+  for (const node of longNodes) {
+    if (containsExplicitRuntimeConflict(node.command)) {
       return incompatibleCommand(
-        'The generated command contains a fixed port or HTTPS listener flag that conflicts with Preview.'
+        `Service ${node.id} fixes a port or enables HTTPS. Preview assigns the port and serves HTTP; remove those flags.`
       );
     }
   }
   const normalizedYaml = yaml.split(/\r?\n/).map((line) => line.trimStart()).join('\n');
   for (const capability of capabilities.analyses) {
-    const repositoryScriptNodes = longNodes.filter((node) =>
-      equalCommand(node.command, capability.scriptCommand)
-    );
+    const repositoryScriptNodes = longNodes.filter((node) => equalCommand(node.command, capability.scriptCommand));
     const directFrameworkNodes = longNodes.filter((node) => invokesNextDev(node.command));
     if (!capability.compatiblePreviewCommand) {
       if (repositoryScriptNodes.length > 0 || directFrameworkNodes.length > 0) {
         return dependencyPreparationRequired(
-          capability.limitation ?? 'The generated framework command has no trusted dependency-preparation path.'
+          capability.limitation ?? 'The framework command has no trusted dependency-preparation path.'
         );
       }
       continue;
     }
     if (capability.conflicts.length > 0 && repositoryScriptNodes.length > 0) {
       return incompatibleCommand(
-        'The generated command uses a repository script with a known Preview port or protocol conflict.'
+        `The repository script "${capability.repositoryCommand}" conflicts with Preview. Use the compatible command [${capability.compatiblePreviewCommand.join(', ')}] instead.`
       );
     }
-    const compatibleNodes = longNodes.filter((node) =>
-      equalCommand(node.command, capability.compatiblePreviewCommand!)
-    );
-    if (
-      directFrameworkNodes.length > 0 &&
-      directFrameworkNodes.some((node) => !compatibleNodes.includes(node))
-    ) {
+    const compatibleNodes = longNodes.filter((node) => equalCommand(node.command, capability.compatiblePreviewCommand!));
+    if (directFrameworkNodes.some((node) => !compatibleNodes.includes(node))) {
       return incompatibleCommand(
-        'The generated direct framework command does not match the trusted Preview-compatible command.'
+        `Run the framework exactly as [${capability.compatiblePreviewCommand.join(', ')}]; other direct framework commands are not trusted.`
       );
     }
-    if (
-      compatibleNodes.length > 0 &&
-      capability.yamlCommentLines &&
-      !normalizedYaml.includes(capability.yamlCommentLines.join('\n'))
-    ) {
+    if (compatibleNodes.length > 0 && capability.yamlCommentLines && !normalizedYaml.includes(capability.yamlCommentLines.join('\n'))) {
       return incompatibleCommand(
-        'The generated Preview-only framework command must retain its compatibility comment.'
+        `Keep this comment above the framework command so the reviewer sees why it differs from the repository script:\n${capability.yamlCommentLines.join('\n')}`
       );
     }
     const preparation = capability.dependencyPreparation;
     if (!preparation || compatibleNodes.length === 0) continue;
-    const installJobs = commandNodes(plan).filter((job) =>
-      job.type === 'job' &&
-      job.cwd === preparation.cwd &&
-      equalCommand(job.command, preparation.installCommand)
+    const installJobs = commandNodes(plan).filter(
+      (job) => job.type === 'job' && job.cwd === preparation.cwd && equalCommand(job.command, preparation.installCommand)
     );
     if (installJobs.length !== 1) {
       return dependencyPreparationRequired(
-        'The generated framework command requires exactly one generic lockfile installation job in the package root.'
+        `Add exactly one job in ${preparation.cwd} running [${preparation.installCommand.join(', ')}] so dependencies install from the lockfile.`
       );
     }
     const installJob = installJobs[0];
     if (('dependsOn' in installJob && (installJob.dependsOn?.length ?? 0) > 0) || Object.keys(installJob.env).length > 0) {
-      return dependencyPreparationRequired(
-        'The trusted lockfile installation job must not invent prerequisites or environment overrides.'
-      );
+      return dependencyPreparationRequired(`The ${installJob.id} install job must not declare dependsOn or env.`);
     }
-    if (
-      compatibleNodes.some((node) =>
-        node.cwd !== preparation.cwd || (!('dependsOn' in node) || !node.dependsOn?.includes(installJob.id))
-      )
-    ) {
+    if (compatibleNodes.some((node) => node.cwd !== preparation.cwd || !('dependsOn' in node) || !node.dependsOn?.includes(installJob.id))) {
       return dependencyPreparationRequired(
-        'Every generated framework node must explicitly need the lockfile installation job to succeed.'
+        `Every framework service must run in ${preparation.cwd} and list ${installJob.id} in dependsOn.`
       );
     }
     if (!normalizedYaml.includes(preparation.yamlCommentLines.join('\n'))) {
       return dependencyPreparationRequired(
-        'The generated lockfile installation job must retain its lifecycle-script review comment.'
+        `Keep this comment above the ${installJob.id} install command so the reviewer sees what it may run:\n${preparation.yamlCommentLines.join('\n')}`
       );
     }
   }
@@ -773,9 +281,9 @@ function parseConfiguration(yaml: string): Configuration {
     schema: 'core', version: '1.2', stringKeys: true, uniqueKeys: true,
     resolveKnownTags: false, merge: false, customTags: [], prettyErrors: false
   });
-  if (document.errors.length || document.warnings.length || document.directives?.yaml.version !== '1.2') {
-    throw new Error('Invalid YAML.');
-  }
+  const problem = document.errors[0] ?? document.warnings[0];
+  if (problem) throw new Error(`${problem.message} (YAML 1.2 only: no duplicate keys, aliases, merge keys or tags)`);
+  if (document.directives?.yaml.version !== '1.2') throw new Error('Only YAML 1.2 documents are supported.');
   visit(document, {
     Node(_key, node) {
       if (isAlias(node) || node.tag) throw new Error('Aliases and tags are unsupported.');
@@ -787,10 +295,17 @@ function parseConfiguration(yaml: string): Configuration {
   return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }) as PreviewSpec);
 }
 
+function reason(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim();
+  return text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 1)}…` : text || 'invalid configuration.';
+}
+
 function commandNodes(spec: Configuration) {
   if (spec.type === 'command') return [{ id: 'app', ...spec }];
   if (spec.type !== 'environment') return [];
-  return Object.entries(spec.services).flatMap(([id, service]) => service.type === 'command' || service.type === 'worker' || service.type === 'job' ? [{ id, ...service }] : []);
+  return Object.entries(spec.services).flatMap(([id, service]) =>
+    service.type === 'command' || service.type === 'worker' || service.type === 'job' ? [{ id, ...service }] : []
+  );
 }
 
 function commandEnvironments(node: ReturnType<typeof commandNodes>[number]) {
@@ -800,14 +315,12 @@ function commandEnvironments(node: ReturnType<typeof commandNodes>[number]) {
   return environments;
 }
 
-function generatedCommands(plan: Configuration): string[][] {
-  const commands: string[][] = [];
-  for (const node of commandNodes(plan)) {
-    commands.push(node.command);
-    if ('ready' in node && node.ready?.type === 'command') commands.push(node.ready.command);
-    if ('liveness' in node && node.liveness?.probe.type === 'command') commands.push(node.liveness.probe.command);
-  }
-  return commands;
+function allCommands(plan: Configuration): string[][] {
+  return commandNodes(plan).flatMap((node) => [
+    node.command,
+    ...('ready' in node && node.ready?.type === 'command' ? [node.ready.command] : []),
+    ...('liveness' in node && node.liveness?.probe.type === 'command' ? [node.liveness.probe.command] : [])
+  ]);
 }
 
 function isImplicitPackageAcquisition(command: string[]): boolean {
@@ -820,25 +333,24 @@ function isImplicitPackageAcquisition(command: string[]): boolean {
 }
 
 function invokesNextDev(command: string[]): boolean {
-  const nextIndex = command.findIndex((argument) =>
-    argument === 'next' ||
-    argument.endsWith('/next') ||
-    argument.endsWith('/next/dist/bin/next')
+  const nextIndex = command.findIndex(
+    (argument) => argument === 'next' || argument.endsWith('/next') || argument.endsWith('/next/dist/bin/next')
   );
   return nextIndex >= 0 && command[nextIndex + 1] === 'dev';
 }
 
 function containsExplicitRuntimeConflict(command: string[]): boolean {
-  const nextIndex = command.findIndex((argument, index) =>
-    (argument === 'next' || argument.endsWith('/next')) && command[index + 1] === 'dev'
+  const nextIndex = command.findIndex(
+    (argument, index) => (argument === 'next' || argument.endsWith('/next')) && command[index + 1] === 'dev'
   );
   if (nextIndex < 0) return false;
-  return command.slice(nextIndex + 2).some((argument) =>
-    argument === '-p' ||
-    argument === '--port' ||
-    /^(?:-p=?|--port=)\d+$/.test(argument) ||
-    argument === '--experimental-https' ||
-    /^--experimental-https-(?:key|cert|ca)(?:=|$)/.test(argument)
+  return command.slice(nextIndex + 2).some(
+    (argument) =>
+      argument === '-p' ||
+      argument === '--port' ||
+      /^(?:-p=?|--port=)\d+$/.test(argument) ||
+      argument === '--experimental-https' ||
+      /^--experimental-https-(?:key|cert|ca)(?:=|$)/.test(argument)
   );
 }
 
@@ -846,225 +358,24 @@ function equalCommand(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function incompatibleCommand(message: string): PreviewRecipeValidation {
-  return { status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND', message }] };
+function invalid(code: PreviewRecipeValidationIssue['code'], message: string): { status: 'INVALID'; issues: PreviewRecipeValidationIssue[] } {
+  return { status: 'INVALID', issues: [{ code, message }] };
 }
 
-function dependencyPreparationRequired(message: string): PreviewRecipeValidation {
-  return {
-    status: 'INVALID',
-    issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED', message }]
-  };
+function incompatibleCommand(message: string) {
+  return invalid('INCOMPATIBLE_COMMAND', message);
+}
+
+function dependencyPreparationRequired(message: string) {
+  return invalid('DEPENDENCY_PREPARATION_REQUIRED', message);
 }
 
 function containsSecretLiteral(plan: Configuration): boolean {
-  for (const node of commandNodes(plan)) {
-    for (const environment of commandEnvironments(node)) {
-      if (
-        Object.entries(environment).some(
-          ([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string'
-        )
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function parseAgentGeneration(
-  output: string,
-  includedPaths: ReadonlySet<string>,
-  publicEnvironment: PreviewPublicEnvironmentEvidence
-): ParsedAgentGeneration {
-  const value = parseFinalGenerationObject(output);
-  const allowed = new Set([
-    'schemaVersion',
-    'status',
-    'yaml',
-    'summary',
-    'evidence',
-    'assumptions',
-    'omissions',
-    'unresolvedDecisions',
-    'publicEnvironmentDecisions'
-  ]);
-  if (
-    !value ||
-    typeof value !== 'object' ||
-    Object.keys(value).some((key) => !allowed.has(key)) ||
-    value.schemaVersion !== PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION ||
-    (value.status !== 'draft' && value.status !== 'insufficient-evidence')
-  ) {
-    throw new Error('Invalid agent generation shape.');
-  }
-  const status = value.status;
-  if (
-    (status === 'draft' && typeof value.yaml !== 'string') ||
-    (status === 'insufficient-evidence' && value.yaml !== null)
-  ) {
-    throw new Error('Invalid agent generation YAML.');
-  }
-  const evidence = normalizeEvidence(value.evidence, includedPaths);
-  const report: PreviewRecipeGenerationReport = {
-    summary: normalizeSafeReportText(value.summary, 'summary'),
-    evidence,
-    assumptions: normalizeReportList(value.assumptions, 'assumptions'),
-    omissions: normalizeReportList(value.omissions, 'omissions'),
-    unresolvedDecisions: normalizeReportList(
-      value.unresolvedDecisions,
-      'unresolvedDecisions',
-      3
-    ),
-    publicEnvironmentDecisions: normalizePublicEnvironmentDecisions(
-      value.publicEnvironmentDecisions,
-      publicEnvironment.candidates
+  return commandNodes(plan).some((node) =>
+    commandEnvironments(node).some((environment) =>
+      Object.entries(environment).some(([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string')
     )
-  };
-  if (status === 'draft' && evidence.length === 0) {
-    throw new Error('A generated draft requires repository evidence.');
-  }
-  if (status === 'insufficient-evidence' && report.unresolvedDecisions.length === 0) {
-    throw new Error('Insufficient evidence requires an unresolved decision.');
-  }
-  return {
-    status,
-    yaml: status === 'draft' ? (value.yaml as string) : undefined,
-    report
-  };
-}
-
-function parseFinalGenerationObject(output: string): Record<string, unknown> {
-  const normalized = stripJsonFence(output.trim());
-  try {
-    return JSON.parse(normalized) as Record<string, unknown>;
-  } catch (directError) {
-    // Some ACP agents send a separate progress message before their final
-    // response. ACP does not require a message ID or message separator, so the
-    // shared runtime cannot always separate that message from the final
-    // response. Accept only one complete JSON object after a short text
-    // prefix. Do not accept trailing commentary or an earlier JSON container.
-    const start = normalized.indexOf('{');
-    if (start > 0) {
-      const prefix = normalized.slice(0, start);
-      if (prefix.length <= 4_096 && !/[{}[\]]/.test(prefix)) {
-        try {
-          return JSON.parse(stripJsonFence(normalized.slice(start).trim())) as Record<
-            string,
-            unknown
-          >;
-        } catch {
-          // The complete suffix must be the final JSON object.
-        }
-      }
-    }
-    throw directError;
-  }
-}
-
-function stripJsonFence(value: string): string {
-  return value
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-}
-
-function normalizePublicEnvironmentDecisions(
-  value: unknown,
-  candidates: readonly PreviewPublicEnvironmentCandidate[]
-): PreviewPublicEnvironmentDecision[] {
-  if (!Array.isArray(value) || value.length !== candidates.length) {
-    throw new Error('Every public environment candidate requires one decision.');
-  }
-  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-  const seen = new Set<string>();
-  const decisions = value.map((item) => {
-    if (!item || typeof item !== 'object') throw new Error('Invalid public environment decision.');
-    const record = item as Record<string, unknown>;
-    const allowed = new Set(['candidateId', 'key', 'decision', 'reason', 'attachmentId']);
-    if (Object.keys(record).some((key) => !allowed.has(key))) {
-      throw new Error('Invalid public environment decision.');
-    }
-    const candidateId = normalizeSafeReportText(record.candidateId, 'candidateId');
-    const key = normalizeSafeReportText(record.key, 'public environment key');
-    const candidate = candidateById.get(candidateId);
-    if (!candidate || candidate.key !== key || seen.has(candidateId)) {
-      throw new Error('Invalid public environment decision candidate.');
-    }
-    seen.add(candidateId);
-    const decision = record.decision as PreviewPublicEnvironmentDecision['decision'];
-    if (decision !== 'HTTP_ATTACHMENT' && decision !== 'SOURCE_DEFAULT' && decision !== 'OMIT') {
-      throw new Error('Invalid public environment decision type.');
-    }
-    const reason = normalizeSafeReportText(record.reason, 'public environment decision reason');
-    const attachmentId = record.attachmentId === undefined
-      ? undefined
-      : normalizeSafeReportText(record.attachmentId, 'attachmentId');
-    if (
-      (decision === 'HTTP_ATTACHMENT' && (!attachmentId || !/^[a-z][a-z0-9-]{0,47}$/.test(attachmentId))) ||
-      (decision !== 'HTTP_ATTACHMENT' && attachmentId !== undefined) ||
-      (decision === 'SOURCE_DEFAULT' && !candidate.sourceDefault)
-    ) throw new Error('Invalid public environment decision authority.');
-    return { candidateId, key, decision, reason, attachmentId };
-  });
-  return decisions.sort((left, right) => left.candidateId.localeCompare(right.candidateId));
-}
-
-function normalizeEvidence(
-  value: unknown,
-  includedPaths: ReadonlySet<string>
-): PreviewRecipeGenerationReport['evidence'] {
-  if (!Array.isArray(value) || value.length > MAX_REPORT_ITEMS) {
-    throw new Error('Invalid generation evidence.');
-  }
-  return value.map((candidate) => {
-    if (!candidate || typeof candidate !== 'object') {
-      throw new Error('Invalid generation evidence.');
-    }
-    const record = candidate as Record<string, unknown>;
-    if (Object.keys(record).some((key) => key !== 'path' && key !== 'finding')) {
-      throw new Error('Invalid generation evidence.');
-    }
-    const evidencePath = normalizeSafeReportText(record.path, 'evidence path');
-    if (
-      path.posix.isAbsolute(evidencePath) ||
-      evidencePath.includes('\\') ||
-      evidencePath.split('/').includes('..') ||
-      !includedPaths.has(evidencePath)
-    ) {
-      throw new Error('Generation evidence references an unavailable path.');
-    }
-    return {
-      path: evidencePath,
-      finding: normalizeSafeReportText(record.finding, 'evidence finding')
-    };
-  });
-}
-
-function normalizeReportList(value: unknown, context: string, limit = MAX_REPORT_ITEMS): string[] {
-  if (!Array.isArray(value) || value.length > limit) {
-    throw new Error(`Invalid generation ${context}.`);
-  }
-  return uniqueBoundedStrings(
-    value.map((candidate) => normalizeSafeReportText(candidate, context))
   );
-}
-
-function normalizeSafeReportText(value: unknown, context: string): string {
-  if (typeof value !== 'string') throw new Error(`Invalid generation ${context}.`);
-  const normalized = value.trim();
-  if (
-    !normalized ||
-    Buffer.byteLength(normalized, 'utf8') > MAX_REPORT_TEXT_BYTES ||
-    /[\0\r\n]/.test(normalized) ||
-    looksLikeSecret(normalized)
-  ) {
-    throw new Error(`Invalid generation ${context}.`);
-  }
-  return normalized;
-}
-
-function uniqueBoundedStrings(values: string[]): string[] {
-  return [...new Set(values)].slice(0, MAX_REPORT_ITEMS);
 }
 
 function looksLikeSecret(value: string): boolean {
@@ -1076,111 +387,4 @@ function looksLikeSecret(value: string): boolean {
     /\b(?:password|passwd|token|secret|api[_-]?key|private[_-]?key|credentials?)\s*[:=]\s*["'][^"'`\r\n]{8,}["']/i.test(value) ||
     /\b(?:postgres(?:ql)?|redis|mysql|mongodb(?:\+srv)?):\/\/[^:\s/@]+:[^@\s/]+@/i.test(value)
   );
-}
-
-function classifyGenerationFailure(error: unknown): {
-  code:
-    | 'AGENT_UNAVAILABLE'
-    | 'GENERATION_TIMED_OUT'
-    | 'INVALID_AGENT_OUTPUT'
-    | 'CANCELLATION_UNCONFIRMED';
-  message: string;
-} {
-  if (
-    error instanceof PreviewRecipeGenerationRunError &&
-    error.code === 'TIMED_OUT'
-  ) {
-    return {
-      code: 'GENERATION_TIMED_OUT',
-      message: 'Preview drafting timed out. Retry with specific service or connection details.'
-    };
-  }
-  if (
-    error instanceof PreviewRecipeGenerationRunError &&
-    error.code === 'TERMINATION_UNCONFIRMED'
-  ) {
-    return {
-      code: 'CANCELLATION_UNCONFIRMED',
-      message:
-        'Task Monki could not confirm that Preview recipe generation stopped. Restart the app before you try again.'
-    };
-  }
-  if (error instanceof PreviewRecipeEvidenceChangedError) {
-    return {
-      code: 'INVALID_AGENT_OUTPUT',
-      message:
-        'The provider changed its read-only Preview evidence. Task Monki rejected the result.'
-    };
-  }
-  if (error instanceof InvalidAgentGenerationError) {
-    return {
-      code: 'INVALID_AGENT_OUTPUT',
-      message:
-        'The agent did not return a valid Preview proposal. Nothing was saved. Ask the Preview agent to try again.'
-    };
-  }
-  if (error instanceof PreviewRecipeGenerationRunError) {
-    return {
-      code: 'AGENT_UNAVAILABLE',
-      message: generationFailureMessage(error.message)
-    };
-  }
-  if (error instanceof Error && error.name === 'AbortError') {
-    return {
-      code: 'AGENT_UNAVAILABLE',
-      message: 'Preview recipe generation was canceled.'
-    };
-  }
-  return {
-    code: 'AGENT_UNAVAILABLE',
-    message:
-      error instanceof Error && error.message.trim()
-        ? generationFailureMessage(error.message)
-        : 'The Preview recipe agent could not produce a draft.'
-  };
-}
-
-function generationFailureMessage(text: string): string {
-  try {
-    const value = JSON.parse(text) as { error?: { message?: unknown } };
-    if (typeof value.error?.message === 'string') return value.error.message;
-  } catch { /* Providers can also return plain text. */ }
-  return text;
-}
-
-async function hashFile(filePath: string, expectedBytes: number): Promise<string> {
-  const handle = await fs.open(
-    filePath,
-    constants.O_RDONLY |
-      (constants.O_NOFOLLOW ?? 0) |
-      (constants.O_NONBLOCK ?? 0)
-  );
-  try {
-    const before = await handle.stat();
-    if (!before.isFile() || before.size !== expectedBytes) {
-      throw new PreviewRecipeEvidenceChangedError();
-    }
-    const hash = createHash('sha256');
-    const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, expectedBytes)));
-    let offset = 0;
-    while (offset < expectedBytes) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        0,
-        Math.min(buffer.length, expectedBytes - offset),
-        offset
-      );
-      if (bytesRead === 0) throw new PreviewRecipeEvidenceChangedError();
-      hash.update(buffer.subarray(0, bytesRead));
-      offset += bytesRead;
-    }
-    const trailing = await handle.read(Buffer.alloc(1), 0, 1, offset);
-    const after = await handle.stat();
-    if (trailing.bytesRead !== 0 || !after.isFile() || after.size !== expectedBytes) {
-      throw new PreviewRecipeEvidenceChangedError();
-    }
-    return hash.digest('hex');
-  } finally {
-    await handle.close();
-  }
 }

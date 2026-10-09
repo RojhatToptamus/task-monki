@@ -40,14 +40,29 @@ export async function diagnosePreviewFailure(
       : spec;
   const observed = error?.message ?? 'The preview stopped before it was ready.';
   const text = `${observed}\n${logs?.text ?? ''}`;
+  const subject = service ?? 'Application';
+  const exitCode = /exit(?:ed)?(?: with code)? \(?(\d+)\)?/i.exec(observed)?.[1];
+  // START_FAILED also covers steps that ran and exited; only the message says whether a process existed.
+  const neverRan = !exitCode && /could not start|ENOENT/i.test(observed);
+  const notStarted = Object.entries(attempt.services ?? {})
+    .filter(([id, node]) => id !== service && ['skipped', 'canceled'].includes(node.state))
+    .map(([id]) => id);
   const result: PreviewDiagnosis = {
     attemptId: attempt.id,
     service,
-    title: `${service ?? 'Application'} could not start`,
+    title: neverRan
+      ? `${subject} could not start`
+      : exitCode
+        ? `${subject} exited with code ${exitCode}`
+        : error?.code === 'TIMEOUT'
+          ? `${subject} did not become ready in time`
+          : `${subject} failed`,
     summary:
       status.active && status.url
-        ? 'The runtime still reports the previous preview serving. Shared files and data may have changed.'
-        : 'Nothing is serving. Review the failure before starting again.',
+        ? `The previous version is still serving at ${status.url}.`
+        : notStarted.length
+          ? `${notStarted.join(', ')} did not start. Nothing is serving.`
+          : 'Nothing is serving.',
     action: 'agent',
     actionLabel: 'Investigate with Preview agent',
     observed,
@@ -57,7 +72,7 @@ export async function diagnosePreviewFailure(
       spec?.type === 'compose'
         ? 'Compose stops the previous application before replacement. Data is retained across Stop.'
         : 'Routes switch after readiness. Shared files and databases are not rolled back.',
-    excerpt: logs?.text.trim().split('\n').slice(-2).join('\n') || undefined
+    excerpt: excerptOf(logs?.text, observed)
   };
   if (error?.code === 'SUPERVISOR_FAILED') {
     result.title = 'The packaged process supervisor could not start';
@@ -223,4 +238,22 @@ export async function diagnosePreviewFailure(
     }
   }
   return result;
+}
+
+/** The last lines of the service's own output, preferring the last line that names an error. */
+function excerptOf(text: string | undefined, observed: string): string | undefined {
+  const lines = (text ?? '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() && line.trim() !== observed.trim());
+  if (!lines.length) return undefined;
+  const tail = lines.slice(-24);
+  let at = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (/\b(error|exception|fatal|cannot|not found|failed|refused|denied)\b/i.test(tail[i]!)) {
+      at = i;
+      break;
+    }
+  }
+  return (at >= 0 ? tail.slice(at, at + 2) : tail.slice(-2)).join('\n');
 }

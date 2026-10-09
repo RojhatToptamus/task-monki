@@ -29,7 +29,8 @@ import type {
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
@@ -513,8 +514,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     deleteApplicationPreviewData: input => post(baseUrl, '/api/application/deleteApplicationPreviewData', input),
     getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/get', input),
-    generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
-      post(baseUrl, '/api/preview/recipe-generation/generate', input),
+    sendPreviewAgentMessage: (input: SendPreviewAgentMessageRequest) =>
+      post<TaskInstruction>(baseUrl, '/api/preview/agent/send', input),
+    stopPreviewAgent: (input: StopPreviewAgentRequest) =>
+      post<void>(baseUrl, '/api/preview/agent/stop', input),
     validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/validate', input),
     acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>

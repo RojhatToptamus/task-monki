@@ -4,11 +4,10 @@ import path from 'node:path';
 import { loadPreviewSpec } from 'previewhost';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  PreviewRecipeGenerationRunError,
   PreviewRecipeGenerationService,
-  validatePreviewRecipeDraft
+  validatePreviewRecipeDraft,
+  type PreviewRecipeProposal
 } from './PreviewRecipeGenerationService';
-import { PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION } from './PreviewRecipeGenerationSupport';
 
 const roots: string[] = [];
 
@@ -29,709 +28,26 @@ describe('PreviewRecipeGenerationService', () => {
     expect(validatePreviewRecipeDraft(JSON.stringify(spec))).toMatchObject({ status: 'INVALID', issues: [{ message: expect.stringContaining('fromEnv') }] });
   });
 
-  it('uses clarification with fresh evidence and rejects secret-bearing answers before provider delivery', async () => {
-    const root = await previewWorktree();
-    let calls = 0;
-    const question = 'Which application should run?';
-    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
-      calls += 1;
-      if (calls === 1) {
-        return { result: Promise.resolve(JSON.stringify({
-          ...JSON.parse(agentDraft()), status: 'insufficient-evidence', yaml: null,
-          unresolvedDecisions: [question]
-        })), cancel: async () => {} };
-      }
-      if (calls === 2) throw new PreviewRecipeGenerationRunError('UNAVAILABLE', 'Synthetic provider failure.');
-      expect(instruction).toContain(JSON.stringify({ questions: [question], answer: 'Use the web application.' }));
-      expect(await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')).toContain('Updated setup details.');
-      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-    });
-    expect((await service.generate({ taskId: 'task', worktreePath: root })).status).toBe('NEEDS_INPUT');
-    for (const clarification of ['DATABASE_PASSWORD=synthetic-only', '{"DATABASE_PASSWORD":"synthetic-only"}', '"API_SECRET": "synthetic-only"', '{"APP_LABEL":"web","DATABASE_PASSWORD":"synthetic-only"}']) {
-      await expect(service.generate({ taskId: 'task', worktreePath: root, clarification })).rejects.toThrow('without secret values');
-    }
-    expect(calls).toBe(1);
-    expect(service.get('task').status).toBe('NEEDS_INPUT');
-    await fs.writeFile(path.join(root, 'README.md'), 'Updated setup details.');
-    const failed = await service.generate({ taskId: 'task', worktreePath: root, clarification: 'Use the web application.' });
-    expect(failed.status).toBe('FAILED');
-    expect(failed.report?.unresolvedDecisions).toEqual([question]);
-    expect((await service.generate({ taskId: 'task', worktreePath: root, clarification: 'Use the web application.' })).status).toBe('READY');
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-  });
-
   it.each([
     'name: !!str application\ntype: static\ndirectory: .\n',
     '%YAML 1.1\n---\nname: application\ntype: static\ndirectory: .\n'
-  ])('rejects YAML that the runtime loader cannot start', async (yaml) => {
+  ])('rejects YAML that the runtime loader cannot start and names the reason', async (yaml) => {
     const root = await previewWorktree();
     const file = path.join(root, 'preview.yaml');
     await fs.writeFile(file, yaml);
     await expect(loadPreviewSpec(file)).rejects.toThrow();
     expect(validatePreviewRecipeDraft(yaml)).toMatchObject({
-      status: 'INVALID', issues: [{ code: 'INVALID_RECIPE' }]
+      status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: expect.stringContaining('The YAML does not match the Preview contract: ') }]
     });
   });
 
-  it('rejects a literal secret in a liveness probe without an explicit readiness probe', () => {
-    expect(validatePreviewRecipeDraft(`name: application
-type: environment
-primary: web
-services:
-  web:
-    type: command
-    cwd: .
-    command: [node, server.mjs]
-    liveness:
-      intervalMs: 1000
-      failureThreshold: 3
-      probe:
-        type: command
-        command: [node, check.mjs]
-        env: { API_SECRET: x }
-`)).toMatchObject({ status: 'INVALID', issues: [{ code: 'SECRET_LITERAL' }] });
+  it('tells the author which field the Preview contract rejected', () => {
+    const validation = validatePreviewRecipeDraft('name: application\ntype: command\ncwd: .\ncommand: node server.mjs\n');
+    expect(validation.status).toBe('INVALID');
+    if (validation.status === 'INVALID') expect(validation.issues[0]!.message).toMatch(/command/);
   });
 
-  it('keeps a valid evidence-backed draft transient until exact acceptance', async () => {
-    const root = await previewWorktree();
-    let evidenceBundle = '';
-    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
-      evidenceBundle = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
-      expect(instruction).toContain('Do not run the application');
-      return {
-        result: Promise.resolve(agentDraft()),
-        cancel: async () => {}
-      };
-    });
-
-    const generated = await service.generate({
-      taskId: 'task-1',
-      worktreePath: root
-    });
-
-    expect(generated.status).toBe('READY');
-    expect(generated.draft?.validation).toEqual({ status: 'VALID' });
-    expect(evidenceBundle).toContain('package.json');
-    expect(evidenceBundle).not.toContain('.env.local');
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-
-    await service.writeAcceptedRecipe({
-      taskId: 'task-1',
-      draftId: generated.draft!.id,
-      yaml: generated.draft!.yaml,
-      worktreePath: root
-    });
-
-    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe(
-      generated.draft!.yaml
-    );
-    expect(service.completeAcceptance('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
-  });
-
-  it('rejects a result when the provider changes its bounded read-only evidence', async () => {
-    const root = await previewWorktree();
-    const evidenceRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'preview-evidence-integrity-test-')
-    );
-    roots.push(evidenceRoot);
-    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
-      await fs.appendFile(
-        path.join(cwd, 'repository-evidence.json'),
-        '\nchanged by provider\n',
-        'utf8'
-      );
-      return {
-        result: Promise.resolve(agentDraft()),
-        cancel: async () => {}
-      };
-    }, evidenceRoot);
-
-    await expect(
-      service.generate({ taskId: 'task-evidence-change', worktreePath: root })
-    ).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'INVALID_AGENT_OUTPUT',
-      message: expect.stringContaining('changed its read-only Preview evidence')
-    });
-    expect(await fs.readdir(evidenceRoot)).toEqual([]);
-  });
-
-  it('never overwrites a manual recipe that appears while a draft is reviewed', async () => {
-    const root = await previewWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(agentDraft()),
-      cancel: async () => {}
-    }));
-    const generated = await service.generate({ taskId: 'task-1', worktreePath: root });
-    await fs.writeFile(path.join(root, 'preview.yaml'), 'manual\n', 'utf8');
-
-    await expect(
-      service.writeAcceptedRecipe({
-        taskId: 'task-1',
-        draftId: generated.draft!.id,
-        yaml: generated.draft!.yaml,
-        worktreePath: root
-      })
-    ).rejects.toThrow('already exists');
-    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe(
-      'manual\n'
-    );
-  });
-
-  it('reviews existing YAML with concealed failure context and refuses stale or cross-worktree replacements', async () => {
-    const root = await previewWorktree();
-    const original = 'name: application\ntype: command\ncwd: .\ncommand: [node, missing.cjs]\nenv:\n  API_TOKEN: synthetic-private-canary\n  FLAG: "1"\n  ACCESS: abc\n  NODE_ENV: development\n';
-    await fs.writeFile(path.join(root, 'preview.yml'), original);
-    let evidence = '';
-    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
-      evidence = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
-      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-    });
-    const input = { taskId: 'repair', worktreePath: root,
-      diagnostics: { logs: 'missing.cjs not found\ntoken=[REDACTED]\n[REDACTED]\nstep 1 of 10 http://127.0.0.1:8001', state: 'failed',
-        configuration: { env: { ACCESS: 'runtime-only-canary' } } } };
-    const proposal = await service.generate(input);
-    expect(proposal.status).toBe('READY');
-    expect(proposal.draft).toMatchObject({ fileName: 'preview.yml', replacesExistingFile: true });
-    expect(evidence).toContain('missing.cjs not found');
-    expect(evidence).not.toContain('synthetic-private-canary');
-    expect(evidence).not.toContain('runtime-only-canary');
-    const context = JSON.parse(evidence).preview;
-    expect(context.configuration.env.FLAG).toContain('concealed');
-    expect(context.configuration.env.ACCESS).toContain('concealed');
-    expect(context.configuration.env.NODE_ENV).toBe('development');
-    expect(context.diagnostics.logs).toContain('step 1 of 10 http://127.0.0.1:8001');
-    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toBe(original);
-    const save = { taskId: 'repair', draftId: proposal.draft!.id, yaml: proposal.draft!.yaml, worktreePath: root };
-    await expect(service.writeAcceptedRecipe({ ...save, worktreePath: await previewWorktree() })).rejects.toThrow('worktree changed');
-    await fs.appendFile(path.join(root, 'preview.yml'), '# user edit\n');
-    await expect(service.writeAcceptedRecipe(save)).rejects.toThrow('changed');
-    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toContain('# user edit');
-    const fresh = await service.generate(input);
-    expect(await service.writeAcceptedRecipe({ ...save, draftId: fresh.draft!.id, yaml: fresh.draft!.yaml })).toBe('preview.yml');
-    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toBe(fresh.draft!.yaml);
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-  });
-
-  it('rejects runtime identities in portable project YAML', () => {
-    expect(validatePreviewRecipeDraft('name: tm-9551c62b-2f45-45b7-9563-e714183e2a0f\ntype: static\ndirectory: .\n')).toMatchObject({ status: 'INVALID' });
-  });
-
-  it('keeps validation, regeneration, close/reopen state, and discard transient', async () => {
-    const root = await previewWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(agentDraft()),
-      cancel: async () => {}
-    }));
-
-    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
-    expect(service.get('task-1')).toEqual(first);
-    expect(service.validate('task-1', first.draft!.id, first.draft!.yaml)).toEqual({
-      status: 'VALID'
-    });
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-
-    const regenerated = await service.generate({ taskId: 'task-1', worktreePath: root });
-    expect(regenerated.status).toBe('READY');
-    expect(regenerated.draft!.id).not.toBe(first.draft!.id);
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-
-    await expect(service.discard('task-1')).resolves.toEqual({
-      taskId: 'task-1',
-      status: 'EMPTY'
-    });
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-  });
-
-  it('keeps the last valid draft when regeneration is stopped', async () => {
-    const root = await previewWorktree();
-    let secondStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      secondStarted = resolve;
-    });
-    let rejectSecond!: (error: Error) => void;
-    let callCount = 0;
-    const service = new PreviewRecipeGenerationService(async () => {
-      callCount += 1;
-      if (callCount === 1) {
-        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-      }
-      const result = new Promise<string>((_resolve, reject) => {
-        rejectSecond = reject;
-      });
-      secondStarted();
-      return {
-        result,
-        cancel: async () => {
-          rejectSecond(new PreviewRecipeGenerationRunError('CANCELED', 'canceled'));
-        }
-      };
-    });
-
-    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
-    const regeneration = service.generate({ taskId: 'task-1', worktreePath: root });
-    await started;
-    const stopped = await service.discard('task-1');
-
-    expect(await regeneration).toEqual(stopped);
-    expect(stopped).toMatchObject({ status: 'READY', draft: { id: first.draft!.id } });
-    expect(service.validate('task-1', first.draft!.id, first.draft!.yaml)).toEqual({
-      status: 'VALID'
-    });
-  });
-
-  it('keeps the displayed draft and report from the same valid generation', async () => {
-    const root = await previewWorktree();
-    let callCount = 0;
-    const service = new PreviewRecipeGenerationService(async () => {
-      callCount += 1;
-      if (callCount === 1) {
-        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-      }
-      const rejected = JSON.parse(agentDraft()) as {
-        yaml: string;
-        summary: string;
-      };
-      rejected.yaml = 'version: 1\nservices: {}\nroutes: {}\n';
-      rejected.summary = 'This report describes the rejected attempt.';
-      return {
-        result: Promise.resolve(JSON.stringify(rejected)),
-        cancel: async () => {}
-      };
-    });
-
-    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
-    const failed = await service.generate({ taskId: 'task-1', worktreePath: root });
-
-    expect(failed).toMatchObject({
-      status: 'FAILED',
-      draft: { id: first.draft!.id },
-      report: { summary: first.draft!.report.summary }
-    });
-    expect(failed.report?.summary).not.toBe(
-      'This report describes the rejected attempt.'
-    );
-  });
-
-  it('joins regeneration and removes the previous draft when its task is deleted', async () => {
-    const root = await previewWorktree();
-    let secondStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      secondStarted = resolve;
-    });
-    let rejectSecond!: (error: Error) => void;
-    let callCount = 0;
-    const service = new PreviewRecipeGenerationService(async () => {
-      callCount += 1;
-      if (callCount === 1) {
-        return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-      }
-      const result = new Promise<string>((_resolve, reject) => {
-        rejectSecond = reject;
-      });
-      secondStarted();
-      return {
-        result,
-        cancel: async () => {
-          rejectSecond(new PreviewRecipeGenerationRunError('CANCELED', 'canceled'));
-        }
-      };
-    });
-
-    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
-    const regeneration = service.generate({ taskId: 'task-1', worktreePath: root });
-    await started;
-    await service.clearTask('task-1');
-
-    await expect(regeneration).resolves.toMatchObject({
-      status: 'READY',
-      draft: { id: first.draft!.id }
-    });
-    expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
-    expect(() => service.validate('task-1', first.draft!.id, first.draft!.yaml)).toThrow(
-      'no longer current'
-    );
-  });
-
-  it('does not remove an active evidence bundle during recovery cleanup', async () => {
-    const root = await previewWorktree();
-    const evidenceRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'preview-active-evidence-test-')
-    );
-    roots.push(evidenceRoot);
-    let signalStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      signalStarted = resolve;
-    });
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const service = new PreviewRecipeGenerationService(async () => {
-      signalStarted();
-      await released;
-      return { result: Promise.resolve(agentDraft()), cancel: async () => {} };
-    }, evidenceRoot);
-
-    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
-    await started;
-    const [activeDirectory] = await fs.readdir(evidenceRoot);
-    await service.recoverEvidence();
-    expect(await fs.readdir(evidenceRoot)).toEqual([activeDirectory]);
-
-    release();
-    await expect(generation).resolves.toMatchObject({ status: 'READY' });
-    expect(await fs.readdir(evidenceRoot)).toEqual([]);
-  });
-
-  it('returns a reviewable evidence report when the agent refuses to invent authority', async () => {
-    const root = await previewWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(JSON.stringify({
-        schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
-        status: 'insufficient-evidence',
-        yaml: null,
-        summary: 'No application entry point was proven.',
-        evidence: [{ path: 'package.json', finding: 'No runnable preview script is declared.' }],
-        assumptions: [],
-        omissions: ['No command was guessed.'],
-        unresolvedDecisions: ['Choose the application command and listening port.'],
-        publicEnvironmentDecisions: []
-      })),
-      cancel: async () => {}
-    }));
-
-    const result = await service.generate({ taskId: 'task-1', worktreePath: root });
-
-    expect(result.status).toBe('NEEDS_INPUT');
-    expect(result.failureCode).toBe('INSUFFICIENT_EVIDENCE');
-    expect(result.report?.unresolvedDecisions).toEqual([
-      'Choose the application command and listening port.'
-    ]);
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-  });
-
-  it('accepts a final generation object after a separate ACP progress message', async () => {
-    const root = await previewWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(
-        `Inspecting repository-evidence.json to prepare the recipe.${agentDraft()}`
-      ),
-      cancel: async () => {}
-    }));
-
-    await expect(
-      service.generate({ taskId: 'task-acp-progress', worktreePath: root })
-    ).resolves.toMatchObject({ status: 'READY' });
-  });
-
-  it('rejects trailing commentary and more than one generation object', async () => {
-    const root = await previewWorktree();
-    for (const [taskId, output] of [
-      ['task-trailing', `${agentDraft()}\nDone.`],
-      ['task-multiple', `${agentDraft()}\n${agentDraft()}`],
-      ['task-long-prefix', `${'Working. '.repeat(600)}\n${agentDraft()}`]
-    ] as const) {
-      const service = new PreviewRecipeGenerationService(async () => ({
-        result: Promise.resolve(output),
-        cancel: async () => {}
-      }));
-
-      await expect(
-        service.generate({ taskId, worktreePath: root })
-      ).resolves.toMatchObject({
-        status: 'FAILED',
-        failureCode: 'INVALID_AGENT_OUTPUT'
-      });
-    }
-  });
-
-  it('turns trusted Next.js fixed-port and HTTPS analysis into an actionable draft', async () => {
-    const root = await nextWorktree();
-    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
-      const evidence = JSON.parse(
-        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
-      ) as { frameworkCapabilities: { analyses: Array<Record<string, unknown>> } };
-      expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
-        conflicts: [{ code: 'HTTPS_LISTENER' }, { code: 'FIXED_PORT' }],
-        compatiblePreviewCommand: [
-          './node_modules/.bin/next', 'dev', '--turbopack',
-          '--hostname', '127.0.0.1'
-        ],
-        dependencyPreparation: expect.objectContaining({
-          installCommand: ['npm', 'ci', '--no-audit', '--no-fund']
-        })
-      });
-      expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
-      return { result: Promise.resolve(nextAgentDraft()), cancel: async () => {} };
-    });
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('READY');
-    expect(result.draft?.yaml).toContain(
-      "# The repository's existing development script pins port 8000 and enables"
-    );
-    expect(result.draft?.report.unresolvedDecisions).toEqual([]);
-  });
-
-  it('uses trusted PORT support for a standard Next.js script instead of requesting more evidence', async () => {
-    const root = await nextWorktree('next dev --turbopack', '15.5.2');
-    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
-      const evidence = JSON.parse(
-        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
-      ) as { frameworkCapabilities: { analyses: Array<Record<string, unknown>> } };
-      expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
-        conflicts: [],
-        compatiblePreviewCommand: ['npm', 'run', 'dev'],
-        dependencyPreparation: expect.objectContaining({
-          installCommand: ['npm', 'ci', '--no-audit', '--no-fund']
-        }),
-        portBinding: { type: 'environment', name: 'PORT' }
-      });
-      return {
-        result: Promise.resolve(nextAgentDraft('[npm, run, dev]', '')),
-        cancel: async () => {}
-      };
-    });
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('READY');
-    expect(result.report).toBeUndefined();
-    expect(result.draft?.report.unresolvedDecisions).toEqual([]);
-  });
-
-  it('requires a structured HTTP attachment decision for an evidenced public API origin', async () => {
-    const root = await nextWorktreeWithPublicApi();
-    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
-      const evidence = JSON.parse(
-        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
-      ) as { publicEnvironment: { candidates: Array<Record<string, unknown>> } };
-      expect(evidence.publicEnvironment.candidates).toEqual([
-        expect.objectContaining({
-          id: 'next-public:NEXT_PUBLIC_API_URL',
-          key: 'NEXT_PUBLIC_API_URL',
-          sourceDefault: expect.objectContaining({ host: 'api.dev.example' })
-        })
-      ]);
-      return { result: Promise.resolve(publicApiAgentDraft()), cancel: async () => {} };
-    });
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('READY');
-    expect(result.draft?.report.publicEnvironmentDecisions).toEqual([{
-      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
-      key: 'NEXT_PUBLIC_API_URL',
-      decision: 'HTTP_ATTACHMENT',
-      reason: 'The browser API origin must be selected explicitly.',
-      attachmentId: 'backend'
-    }]);
-    expect(result.draft?.yaml).toContain('service: backend');
-    if (!result.draft) throw new Error('Expected generated draft.');
-    const reviewedConnection = result.draft.yaml.replace(
-      '    type: attach',
-      '    type: attach\n    url: http://127.0.0.1:8001'
-    );
-    expect(service.validate('task-next', result.draft.id, reviewedConnection)).toEqual({ status: 'VALID' });
-    await service.writeAcceptedRecipe({
-      taskId: 'task-next',
-      draftId: result.draft.id,
-      yaml: reviewedConnection,
-      worktreePath: root
-    });
-    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe(reviewedConnection);
-  });
-
-  it('requires a selected backend URL in repaired YAML instead of assuming runtime bindings are merged', async () => {
-    const root = await nextWorktreeWithPublicApi();
-    const unbound = JSON.parse(publicApiAgentDraft()) as { yaml: string };
-    const bound = { ...unbound, yaml: unbound.yaml.replace('    type: attach', '    type: attach\n    url: http://localhost:8001') };
-    await fs.writeFile(path.join(root, 'preview.yaml'), unbound.yaml);
-    let response = JSON.stringify(unbound);
-    const service = new PreviewRecipeGenerationService(async () => ({ result: Promise.resolve(response), cancel: async () => {} }));
-    const input = { taskId: 'repair-backend', worktreePath: root, diagnostics: { configuration: {
-      type: 'environment', services: { backend: { type: 'attach', url: 'http://localhost:8001' },
-        web: { type: 'command', env: { NEXT_PUBLIC_API_URL: { service: 'backend' } } } }
-    } } };
-    expect((await service.generate(input)).status).toBe('FAILED');
-    response = JSON.stringify(bound);
-    const repaired = await service.generate(input);
-    expect(repaired.status).toBe('READY');
-    await service.writeAcceptedRecipe({ taskId: input.taskId, draftId: repaired.draft!.id, yaml: repaired.draft!.yaml, worktreePath: root });
-    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toContain('url: http://localhost:8001');
-  });
-
-  it('accepts an omitted public value only when attachmentId is absent', async () => {
-    const root = await nextWorktreeWithPublicApi();
-    const omitted = JSON.parse(nextAgentDraft('[npm, run, dev]', '')) as Record<string, unknown>;
-    omitted.publicEnvironmentDecisions = [{
-      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
-      key: 'NEXT_PUBLIC_API_URL',
-      decision: 'OMIT',
-      reason: 'The Preview does not need the optional external API.'
-    }];
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(JSON.stringify(omitted)),
-      cancel: async () => {}
-    }));
-
-    await expect(
-      service.generate({ taskId: 'task-omit', worktreePath: root })
-    ).resolves.toMatchObject({ status: 'READY' });
-
-    omitted.publicEnvironmentDecisions = [{
-      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
-      key: 'NEXT_PUBLIC_API_URL',
-      decision: 'OMIT',
-      reason: 'The Preview does not need the optional external API.',
-      attachmentId: null
-    }];
-    const invalid = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(JSON.stringify(omitted)),
-      cancel: async () => {}
-    }));
-    await expect(
-      invalid.generate({ taskId: 'task-omit-invalid', worktreePath: root })
-    ).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'INVALID_AGENT_OUTPUT'
-    });
-  });
-
-  it('rejects missing or YAML-inconsistent public environment decisions', async () => {
-    const root = await nextWorktreeWithPublicApi();
-    const missing = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(nextAgentDraft()),
-      cancel: async () => {}
-    }));
-    const inconsistent = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(publicApiAgentDraft('other')),
-      cancel: async () => {}
-    }));
-    const mixedRecipients = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(publicApiAgentDraftWithMixedRecipient()),
-      cancel: async () => {}
-    }));
-
-    await expect(missing.generate({ taskId: 'task-missing', worktreePath: root })).resolves.toMatchObject({
-      status: 'FAILED', failureCode: 'INVALID_AGENT_OUTPUT'
-    });
-    await expect(inconsistent.generate({ taskId: 'task-inconsistent', worktreePath: root })).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'INVALID_AGENT_OUTPUT',
-      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
-    });
-    await expect(mixedRecipients.generate({ taskId: 'task-mixed', worktreePath: root })).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'INVALID_AGENT_OUTPUT',
-      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
-    });
-  });
-
-  it('enforces local selection when trusted public URL evidence conflicts', async () => {
-    const root = await nextWorktreeWithPublicApi();
-    const draft = JSON.parse(publicApiAgentDraft()) as { yaml: string };
-    draft.yaml = draft.yaml.replace('check: false', 'check: false\n    url: http://127.0.0.1:4000/');
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(JSON.stringify(draft)),
-      cancel: async () => {}
-    }));
-
-    await expect(service.generate({ taskId: 'task-conflict', worktreePath: root })).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'INVALID_AGENT_OUTPUT',
-      message: expect.stringContaining('NEXT_PUBLIC_API_URL')
-    });
-  });
-
-  it.each([
-    {
-      name: 'the original conflicting repository script',
-      command: '[npm, run, dev]',
-      comment: nextCompatibilityComment()
-    },
-    {
-      name: 'a rewritten command without its compatibility comment',
-      command: '[./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]',
-      comment: ''
-    },
-    {
-      name: 'a direct Next.js command retaining conflicting listener flags',
-      command: '[./node_modules/.bin/next, dev, --experimental-https, --port, "8000"]',
-      comment: nextCompatibilityComment()
-    }
-  ])('rejects $name', async ({ command, comment }) => {
-    const root = await nextWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(nextAgentDraft(command, comment)),
-      cancel: async () => {}
-    }));
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('FAILED');
-    expect(result.failureCode).toBe('INVALID_AGENT_OUTPUT');
-    expect(result.message).toMatch(/conflict|compatibility comment/);
-  });
-
-  it.each([
-    ['the install job', { includeInstall: false }],
-    ['the explicit success edge', { includeInstallNeed: false }],
-    ['the lifecycle-script comment', { includeInstallComment: false }]
-  ])('rejects a generated framework draft missing %s', async (_name, options) => {
-    const root = await nextWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(nextAgentDraft(undefined, undefined, options)),
-      cancel: async () => {}
-    }));
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('FAILED');
-    expect(result.failureCode).toBe('INVALID_AGENT_OUTPUT');
-    expect(result.message).toMatch(/installation|install|lifecycle-script/);
-  });
-
-  it('rejects implicit package acquisition even when the command is otherwise valid YAML', async () => {
-    const root = await nextWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(nextAgentDraft(
-        '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]'
-      )),
-      cancel: async () => {}
-    }));
-
-    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
-
-    expect(result.status).toBe('FAILED');
-    expect(result.message).toContain('implicit npm exec');
-  });
-
-  it('revalidates edited generated YAML against its transient framework facts before acceptance', async () => {
-    const root = await nextWorktree();
-    const service = new PreviewRecipeGenerationService(async () => ({
-      result: Promise.resolve(nextAgentDraft()),
-      cancel: async () => {}
-    }));
-    const generated = await service.generate({ taskId: 'task-next', worktreePath: root });
-    const edited = generated.draft!.yaml.replace('    dependsOn: [install]\n', '');
-
-    expect(service.validate('task-next', generated.draft!.id, edited)).toMatchObject({
-      status: 'INVALID',
-      issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED' }]
-    });
-    await expect(service.writeAcceptedRecipe({
-      taskId: 'task-next',
-      draftId: generated.draft!.id,
-      yaml: edited,
-      worktreePath: root
-    })).rejects.toThrow('explicitly need');
-    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
-  });
-
-  it('rejects literal secret-like environment delivery before acceptance', () => {
+  it('rejects literal secret-like environment delivery wherever a command runs', () => {
     expect(validatePreviewRecipeDraft(`name: application
 type: environment
 primary: web
@@ -745,12 +61,23 @@ services:
     ready: { type: tcp, port: http }
 `)).toEqual({
       status: 'INVALID',
-      issues: [{
-        code: 'SECRET_LITERAL',
-        message: 'Secret-like environment keys must use a secret reference, never a literal value.'
-      }]
+      issues: [{ code: 'SECRET_LITERAL', message: 'Secret-like environment keys must use a secret reference, never a literal value.' }]
     });
-
+    expect(validatePreviewRecipeDraft(`name: application
+type: environment
+primary: web
+services:
+  web:
+    type: command
+    cwd: .
+    command: [node, server.mjs]
+    ports: { http: PORT }
+    ready: { type: tcp, port: http }
+    liveness:
+      probe: { type: command, command: [node, probe.mjs], env: { DATABASE_PASSWORD: plaintext-canary } }
+      intervalMs: 5000
+      failureThreshold: 3
+`)).toMatchObject({ status: 'INVALID', issues: [{ code: 'SECRET_LITERAL' }] });
     expect(validatePreviewRecipeDraft(`name: application
 type: environment
 primary: web
@@ -762,158 +89,171 @@ services:
     command: [node, server.mjs]
     ports: { http: PORT }
     ready: { type: tcp, port: http }
-`)).toMatchObject({
-      status: 'INVALID',
-      issues: [{ code: 'SECRET_LITERAL' }]
+`)).toMatchObject({ status: 'INVALID', issues: [{ code: 'SECRET_LITERAL' }] });
+  });
+
+  it('rejects runtime identities in portable project YAML', () => {
+    expect(validatePreviewRecipeDraft('name: tm-9551c62b-2f45-45b7-9563-e714183e2a0f\ntype: static\ndirectory: .\n')).toMatchObject({ status: 'INVALID' });
+  });
+
+  it('keeps a valid proposal transient until exact acceptance', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService();
+    const result = await service.propose(proposal(root));
+    expect(result.status).toBe('READY');
+    if (result.status !== 'READY') return;
+    expect(result.draft).toMatchObject({
+      taskId: 'task-1',
+      fileName: 'preview.yaml',
+      replacesExistingFile: false,
+      validation: { status: 'VALID' },
+      report: { summary: 'Runs the Node entry point behind one route.', notes: ['No health endpoint was evidenced.'] }
+    });
+    expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'READY', draft: result.draft });
+    expect(service.reviewedFile('task-1', result.draft.id)).toBeUndefined();
+    expect(service.validate('task-1', result.draft.id, result.draft.yaml)).toEqual({ status: 'VALID' });
+    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
+
+    expect(await service.writeAcceptedRecipe({ taskId: 'task-1', draftId: result.draft.id, yaml: result.draft.yaml, worktreePath: root })).toBe('preview.yaml');
+    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe(result.draft.yaml);
+    expect(service.completeAcceptance('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+    expect(() => service.validate('task-1', result.draft.id, result.draft.yaml)).toThrow('no longer current');
+  });
+
+  it('returns the exact problems of a rejected proposal and keeps the previous draft', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService();
+    const first = await service.propose(proposal(root));
+    expect(first.status).toBe('READY');
+    const rejected = await service.propose({ ...proposal(root), yaml: 'name: application\ntype: static\n' });
+    expect(rejected).toMatchObject({ status: 'INVALID', issues: [{ code: 'INVALID_RECIPE', message: expect.stringContaining('directory') }] });
+    expect(service.get('task-1').draft?.id).toBe(first.status === 'READY' ? first.draft.id : undefined);
+  });
+
+  it('rejects secret-like text in the summary or notes', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService();
+    await expect(service.propose({ ...proposal(root), notes: ['Set token: "plaintext-canary-value" in the environment.'] })).resolves.toMatchObject({
+      status: 'INVALID', issues: [{ code: 'SECRET_LITERAL' }]
     });
   });
 
-  it('cancels and joins in-flight agent work during shutdown', async () => {
+  it('never overwrites a manual recipe that appears while a draft is reviewed', async () => {
     const root = await previewWorktree();
-    let signalStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      signalStarted = resolve;
-    });
-    let rejectResult!: (error: Error) => void;
-    let cancelCount = 0;
-    const result = new Promise<string>((_resolve, reject) => {
-      rejectResult = reject;
-    });
-    const service = new PreviewRecipeGenerationService(async () => {
-      signalStarted();
-      return {
-        result,
-        cancel: async () => {
-          cancelCount += 1;
-          rejectResult(
-            new PreviewRecipeGenerationRunError('CANCELED', 'canceled')
-          );
-        }
-      };
-    });
+    const service = new PreviewRecipeGenerationService();
+    const result = await service.propose(proposal(root));
+    if (result.status !== 'READY') throw new Error(result.status);
+    await fs.writeFile(path.join(root, 'preview.yaml'), 'manual\n', 'utf8');
+    await expect(service.writeAcceptedRecipe({ taskId: 'task-1', draftId: result.draft.id, yaml: result.draft.yaml, worktreePath: root })).rejects.toThrow('already exists');
+    expect(await fs.readFile(path.join(root, 'preview.yaml'), 'utf8')).toBe('manual\n');
+  });
 
-    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
-    await started;
-    const discard = service.discard('task-1');
-    await Promise.all([discard, service.shutdown()]);
+  it('replaces an existing file only from the reviewed bytes and never across worktrees', async () => {
+    const root = await previewWorktree();
+    const original = 'name: application\ntype: command\ncwd: .\ncommand: [node, missing.cjs]\n';
+    await fs.writeFile(path.join(root, 'preview.yml'), original);
+    const service = new PreviewRecipeGenerationService();
+    const result = await service.propose({ ...proposal(root), taskId: 'repair' });
+    if (result.status !== 'READY') throw new Error(result.status);
+    expect(result.draft).toMatchObject({ fileName: 'preview.yml', replacesExistingFile: true });
+    expect(service.reviewedFile('repair', result.draft.id)).toEqual({ name: 'preview.yml', text: original });
+    const save = { taskId: 'repair', draftId: result.draft.id, yaml: result.draft.yaml, worktreePath: root };
+    await expect(service.writeAcceptedRecipe({ ...save, worktreePath: await previewWorktree() })).rejects.toThrow('worktree changed');
+    await fs.appendFile(path.join(root, 'preview.yml'), '# user edit\n');
+    await expect(service.writeAcceptedRecipe(save)).rejects.toThrow('changed');
+    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toContain('# user edit');
+    const fresh = await service.propose({ ...proposal(root), taskId: 'repair' });
+    if (fresh.status !== 'READY') throw new Error(fresh.status);
+    expect(fresh.draft.id).not.toBe(result.draft.id);
+    expect(() => service.validate('repair', result.draft.id, result.draft.yaml)).toThrow('no longer current');
+    expect(await service.writeAcceptedRecipe({ ...save, draftId: fresh.draft.id, yaml: fresh.draft.yaml })).toBe('preview.yml');
+    expect(await fs.readFile(path.join(root, 'preview.yml'), 'utf8')).toBe(fresh.draft.yaml);
+    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
+  });
 
-    expect(cancelCount).toBe(1);
-    expect((await generation).status).toBe('EMPTY');
+  it('holds Next.js proposals to the trusted compatible command and lockfile installation job', async () => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService();
+    const propose = (yaml: string) => service.propose({ taskId: 'task-next', worktreePath: root, yaml, summary: 'Runs Next.js.', notes: [] });
+
+    const script = await propose(nextYaml('[npm, run, dev]', ''));
+    expect(script).toMatchObject({ status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND', message: expect.stringContaining('./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1') }] });
+
+    const fixedPort = await propose(nextYaml('[./node_modules/.bin/next, dev, -p, "3000"]', ''));
+    expect(fixedPort).toMatchObject({ status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND' }] });
+
+    const noInstall = await propose(nextYaml(COMPATIBLE_NEXT_COMMAND, nextCompatibilityComment(), { includeInstall: false }));
+    expect(noInstall).toMatchObject({ status: 'INVALID', issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED', message: expect.stringContaining('npm, ci, --no-audit, --no-fund') }] });
+
+    const noComment = await propose(nextYaml(COMPATIBLE_NEXT_COMMAND, ''));
+    expect(noComment).toMatchObject({ status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND', message: expect.stringContaining('Keep this comment') }] });
+
+    const accepted = await propose(nextYaml(COMPATIBLE_NEXT_COMMAND, nextCompatibilityComment()));
+    expect(accepted.status).toBe('READY');
+    if (accepted.status !== 'READY') return;
+    const edited = accepted.draft.yaml.replace('    dependsOn: [install]\n', '');
+    expect(service.validate('task-next', accepted.draft.id, edited)).toMatchObject({ status: 'INVALID', issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED' }] });
+    await expect(service.writeAcceptedRecipe({ taskId: 'task-next', draftId: accepted.draft.id, yaml: edited, worktreePath: root })).rejects.toThrow('dependsOn');
+    await expect(fs.access(path.join(root, 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it('accepts the standard Next.js script when it already consumes the allocated port', async () => {
+    const root = await nextWorktree('next dev --turbopack', '15.5.2');
+    const service = new PreviewRecipeGenerationService();
+    await expect(service.propose({ taskId: 'task-next', worktreePath: root, yaml: nextYaml('[npm, run, dev]', ''), summary: 'Runs Next.js.', notes: [] }))
+      .resolves.toMatchObject({ status: 'READY' });
+  });
+
+  it('rejects implicit package acquisition even when the command is otherwise valid YAML', async () => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService();
+    await expect(service.propose({
+      taskId: 'task-next', worktreePath: root, summary: 'Runs Next.js.', notes: [],
+      yaml: nextYaml('[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]', nextCompatibilityComment())
+    })).resolves.toMatchObject({ status: 'INVALID', issues: [{ message: expect.stringContaining('implicit npm exec') }] });
+  });
+
+  it('forgets drafts on discard, task removal, and shutdown', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService();
+    const first = await service.propose(proposal(root));
+    expect(service.discard('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+    if (first.status === 'READY') expect(() => service.reviewedFile('task-1', first.draft.id)).toThrow('no longer current');
+    await service.propose(proposal(root));
+    service.clearTask('task-1');
     expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
-  });
-
-  it('keeps recovery evidence when cancellation races provider startup and cannot be confirmed', async () => {
-    const root = await previewWorktree();
-    const evidenceRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'preview-cancel-recovery-test-')
-    );
-    roots.push(evidenceRoot);
-    let signalRunnerStarted!: () => void;
-    const runnerStarted = new Promise<void>((resolve) => {
-      signalRunnerStarted = resolve;
-    });
-    let releaseRunner!: () => void;
-    const runnerRelease = new Promise<void>((resolve) => {
-      releaseRunner = resolve;
-    });
-    const service = new PreviewRecipeGenerationService(async () => {
-      signalRunnerStarted();
-      await runnerRelease;
-      return {
-        result: new Promise<string>(() => {}),
-        cancel: async () => {
-          throw new PreviewRecipeGenerationRunError(
-            'TERMINATION_UNCONFIRMED',
-            'The provider stop result is uncertain.'
-          );
-        }
-      };
-    }, evidenceRoot);
-
-    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
-    await runnerStarted;
-    const discard = service.discard('task-1');
-    releaseRunner();
-
-    await expect(discard).rejects.toThrow('provider stop result is uncertain');
-    await expect(generation).resolves.toMatchObject({
-      status: 'FAILED',
-      failureCode: 'CANCELLATION_UNCONFIRMED'
-    });
-    expect(await fs.readdir(evidenceRoot)).toHaveLength(1);
-
-    await service.recoverEvidence();
-    expect(await fs.readdir(evidenceRoot)).toEqual([]);
+    await service.propose(proposal(root));
+    service.shutdown();
+    expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
   });
 });
 
 async function previewWorktree(): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-generation-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-proposal-test-'));
   roots.push(root);
-  await fs.writeFile(
-    path.join(root, 'package.json'),
-    JSON.stringify({ scripts: { dev: 'node server.mjs' } }),
-    'utf8'
-  );
-  await fs.writeFile(
-    path.join(root, 'server.mjs'),
-    'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n',
-    'utf8'
-  );
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { dev: 'node server.mjs' } }), 'utf8');
+  await fs.writeFile(path.join(root, 'server.mjs'), 'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n', 'utf8');
   await fs.writeFile(path.join(root, '.env.local'), 'API_TOKEN=plaintext-canary\n', 'utf8');
   return root;
 }
 
-async function nextWorktree(
-  script = 'next dev --turbopack --experimental-https -p 8000',
-  version = '^16.1.6'
-): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-next-generation-test-'));
+async function nextWorktree(script = 'next dev --turbopack --experimental-https -p 8000', version = '^16.1.6'): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-next-proposal-test-'));
   roots.push(root);
-  await fs.writeFile(
-    path.join(root, 'package.json'),
-    JSON.stringify({
-      dependencies: { next: version },
-      scripts: { dev: script }
-    }),
-    'utf8'
-  );
-  const lockedVersion = version.startsWith('^16') || version.startsWith('~16')
-    ? '16.2.3'
-    : version.startsWith('^15') || version.startsWith('~15')
-      ? '15.5.2'
-      : version.replace(/^[~^]/, '');
-  await fs.writeFile(
-    path.join(root, 'package-lock.json'),
-    JSON.stringify({
-      name: 'preview-next-fixture',
-      lockfileVersion: 3,
-      packages: {
-        '': { dependencies: { next: version } },
-        'node_modules/next': { version: lockedVersion }
-      },
-      ignoredPadding: 'x'.repeat(400 * 1024)
-    }),
-    'utf8'
-  );
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ dependencies: { next: version }, scripts: { dev: script } }), 'utf8');
+  const lockedVersion = version.startsWith('^16') || version.startsWith('~16') ? '16.2.3'
+    : version.startsWith('^15') || version.startsWith('~15') ? '15.5.2' : version.replace(/^[~^]/, '');
+  await fs.writeFile(path.join(root, 'package-lock.json'), JSON.stringify({
+    name: 'preview-next-fixture', lockfileVersion: 3,
+    packages: { '': { dependencies: { next: version } }, 'node_modules/next': { version: lockedVersion } }
+  }), 'utf8');
   return root;
 }
 
-async function nextWorktreeWithPublicApi(): Promise<string> {
-  const root = await nextWorktree('next dev --turbopack', '16.2.3');
-  await fs.mkdir(path.join(root, 'src'));
-  await fs.writeFile(
-    path.join(root, 'src', 'heyapi.ts'),
-    "export const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.dev.example';\n",
-    'utf8'
-  );
-  return root;
-}
-
-function agentDraft(): string {
-  return JSON.stringify({
-    schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
-    status: 'draft',
+function proposal(worktreePath: string): PreviewRecipeProposal {
+  return {
+    taskId: 'task-1',
+    worktreePath,
     yaml: `name: application
 type: environment
 primary: web
@@ -927,44 +267,23 @@ services:
       http: PORT
     # No health endpoint was evidenced, so readiness checks only the listener.
     ready: { type: tcp, port: http }
-
 `,
-    summary: 'Runs the proven Node entry point behind one stable route.',
-    evidence: [
-      { path: 'package.json', finding: 'The dev script runs node server.mjs.' },
-      { path: 'server.mjs', finding: 'The server listens on the injected PORT value.' }
-    ],
-    assumptions: [],
-    omissions: ['No health endpoint was evidenced.'],
-    unresolvedDecisions: [],
-    publicEnvironmentDecisions: []
-  });
+    summary: 'Runs the Node entry point behind one route.',
+    notes: ['No health endpoint was evidenced.']
+  };
 }
 
-function nextAgentDraft(
-  command = '[./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]',
-  comment = nextCompatibilityComment(),
-  options: {
-    includeInstall?: boolean;
-    includeInstallNeed?: boolean;
-    includeInstallComment?: boolean;
-  } = {}
-): string {
-  const includeInstall = options.includeInstall ?? true;
-  const install = includeInstall
-    ? `  install:
+const COMPATIBLE_NEXT_COMMAND = '[./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]';
+
+function nextYaml(command: string, comment: string, options: { includeInstall?: boolean } = {}): string {
+  const install = options.includeInstall === false ? '' : `  install:
     type: job
     cwd: .
-${options.includeInstallComment === false ? '' : `${nextInstallComment()}\n`}    command: [npm, ci, --no-audit, --no-fund]
-`
-    : '';
-  const installNeed = includeInstall && options.includeInstallNeed !== false
-    ? '    dependsOn: [install]\n'
-    : '';
-  return JSON.stringify({
-    schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
-    status: 'draft',
-    yaml: `name: application
+${nextInstallComment()}
+    command: [npm, ci, --no-audit, --no-fund]
+`;
+  const dependsOn = options.includeInstall === false ? '' : '    dependsOn: [install]\n';
+  return `name: application
 type: environment
 primary: web
 services:
@@ -973,70 +292,9 @@ ${install}
     type: command
     cwd: .
 ${comment}${comment ? '\n' : ''}    command: ${command}
-${installNeed}    ports: { http: PORT }
+${dependsOn}    ports: { http: PORT }
     ready: { type: tcp, port: http }
-`,
-    summary: 'Runs Next.js through the trusted Preview-compatible HTTP command.',
-    evidence: [
-      { path: 'package.json', finding: 'The repository declares a supported Next.js dev script.' },
-      { path: 'package-lock.json', finding: 'Trusted lockfile facts prove deterministic npm installation.' }
-    ],
-    assumptions: [],
-    omissions: [],
-    unresolvedDecisions: [],
-    publicEnvironmentDecisions: []
-  });
-}
-
-function publicApiAgentDraft(decisionAttachmentId = 'backend'): string {
-  const base = JSON.parse(nextAgentDraft('[npm, run, dev]', '')) as Record<string, unknown>;
-  base.yaml = `name: application
-type: environment
-primary: web
-
-services:
-  install:
-    type: job
-    cwd: .
-${nextInstallComment()}
-    command: [npm, ci, --no-audit, --no-fund]
-
-  backend:
-    type: attach
-    check: false
-  web:
-    type: command
-    cwd: .
-    command: [npm, run, dev]
-    dependsOn: [install]
-    env:
-      NEXT_PUBLIC_API_URL: { service: backend }
-    ports: { http: PORT }
-    ready: { type: tcp, port: http }
-
 `;
-  base.publicEnvironmentDecisions = [{
-    candidateId: 'next-public:NEXT_PUBLIC_API_URL',
-    key: 'NEXT_PUBLIC_API_URL',
-    decision: 'HTTP_ATTACHMENT',
-    reason: 'The browser API origin must be selected explicitly.',
-    attachmentId: decisionAttachmentId
-  }];
-  return JSON.stringify(base);
-}
-
-function publicApiAgentDraftWithMixedRecipient(): string {
-  const draft = JSON.parse(publicApiAgentDraft()) as Record<string, unknown>;
-  draft.yaml = `${draft.yaml}
-  monitor:
-    type: worker
-    cwd: .
-    command: [node, monitor.mjs]
-    env:
-      NEXT_PUBLIC_API_URL: https://different.example
-    ready: { type: command, command: [node, monitor-ready.mjs] }
-`;
-  return JSON.stringify(draft);
 }
 
 function nextInstallComment(): string {

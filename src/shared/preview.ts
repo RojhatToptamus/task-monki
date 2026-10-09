@@ -1,3 +1,5 @@
+import type { AgentExecutionSettings } from './agent';
+
 export type PreviewGenerationState =
   | 'CREATED'
   | 'PREPARING_SOURCE'
@@ -40,31 +42,10 @@ export interface PreviewGenerationRecord {
   stoppedAt?: string;
 }
 
-export type PreviewRecipeGenerationStage =
-  | 'PREPARING_EVIDENCE'
-  | 'GENERATING_DRAFT'
-  | 'VALIDATING_DRAFT';
-
-export interface PreviewRecipeGenerationEvidence {
-  path: string;
-  finding: string;
-}
-
+/** The agent's own account of a proposal: one summary and the facts it rests on. */
 export interface PreviewRecipeGenerationReport {
   summary: string;
-  evidence: PreviewRecipeGenerationEvidence[];
-  assumptions: string[];
-  omissions: string[];
-  unresolvedDecisions: string[];
-  publicEnvironmentDecisions: PreviewPublicEnvironmentDecision[];
-}
-
-export interface PreviewPublicEnvironmentDecision {
-  candidateId: string;
-  key: string;
-  decision: 'HTTP_ATTACHMENT' | 'SOURCE_DEFAULT' | 'OMIT';
-  reason: string;
-  attachmentId?: string;
+  notes: string[];
 }
 
 export type PreviewRecipeValidationIssueCode =
@@ -73,8 +54,7 @@ export type PreviewRecipeValidationIssueCode =
   | 'INVALID_RECIPE'
   | 'SECRET_LITERAL'
   | 'INCOMPATIBLE_COMMAND'
-  | 'DEPENDENCY_PREPARATION_REQUIRED'
-  | 'PUBLIC_ENVIRONMENT_DECISION_INVALID';
+  | 'DEPENDENCY_PREPARATION_REQUIRED';
 
 export interface PreviewRecipeValidationIssue {
   code: PreviewRecipeValidationIssueCode;
@@ -85,6 +65,7 @@ export type PreviewRecipeValidation =
   | { status: 'VALID' }
   | { status: 'INVALID'; issues: PreviewRecipeValidationIssue[] };
 
+/** A configuration the Preview agent proposed. It lives in memory until the user saves or discards it. */
 export interface PreviewRecipeGenerationDraft {
   id: string;
   taskId: string;
@@ -96,31 +77,27 @@ export interface PreviewRecipeGenerationDraft {
   replacesExistingFile: boolean;
 }
 
-export type PreviewRecipeGenerationFailureCode =
-  | 'AGENT_UNAVAILABLE'
-  | 'GENERATION_TIMED_OUT'
-  | 'INVALID_AGENT_OUTPUT'
-  | 'INSUFFICIENT_EVIDENCE'
-  | 'CANCELLATION_UNCONFIRMED';
-
 export interface PreviewRecipeGenerationSnapshot {
   taskId: string;
-  status: 'EMPTY' | 'GENERATING' | 'READY' | 'NEEDS_INPUT' | 'FAILED';
-  stage?: PreviewRecipeGenerationStage;
+  status: 'EMPTY' | 'READY';
   draft?: PreviewRecipeGenerationDraft;
-  report?: PreviewRecipeGenerationReport;
-  failureCode?: PreviewRecipeGenerationFailureCode;
-  message?: string;
-  startedAt?: string;
 }
 
 export interface GetPreviewRecipeGenerationRequest {
   taskId: string;
 }
 
-export interface GeneratePreviewRecipeRequest {
+/** One message to the task's Preview agent; `id` makes a retry idempotent. */
+export interface SendPreviewAgentMessageRequest {
   taskId: string;
-  clarification?: string;
+  id: string;
+  text: string;
+  /** Runtime, model and reasoning effort for this and later turns; defaults come from Settings. */
+  settings?: AgentExecutionSettings;
+}
+
+export interface StopPreviewAgentRequest {
+  taskId: string;
 }
 
 export interface ValidatePreviewRecipeDraftRequest {

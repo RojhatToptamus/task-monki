@@ -7,7 +7,9 @@ import {
 
 const DEPTH_LIMIT = 64;
 const DESIGN_TOOL_NAME = 'inspect_design';
-const OMITTED_DESIGN_IMAGE = '[transient Design screenshot omitted]';
+/** Replaces screenshot bytes wherever an app-owned tool result is kept; the adapters write the same text into run items. */
+export const OMITTED_CLIENT_TOOL_IMAGE = '[transient screenshot omitted]';
+const OMITTED_DESIGN_IMAGE = OMITTED_CLIENT_TOOL_IMAGE;
 
 export interface RedactedProtocolJournalRecord {
   raw: string;

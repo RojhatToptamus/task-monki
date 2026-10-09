@@ -406,7 +406,7 @@ async function createTestAgentSession(
     executionContext: {
       attestation: { status: 'ATTESTED' },
       primaryCwd: input.worktree.worktreePath,
-      repositoryAccess: 'WRITE',
+      repositoryAccess: input.role === 'PREVIEW' ? 'READ_ONLY' : 'WRITE',
       readRoots: [{
         canonicalPath: input.worktree.worktreePath,
         kind: 'WORKTREE',
@@ -753,6 +753,52 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     } finally {
       await adapter.shutdown();
     }
+  });
+
+  it('keeps read-only Preview chat output on the task-session transport', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-preview-chat-'));
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'agent.cjs');
+    await fs.writeFile(agentScript, readOnlyRuntimeAgentSource(path.join(directory, 'messages.jsonl'), false, false));
+    const runtimeId = 'test-acp-preview';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      approvalPolicies: ['on-request', 'never'],
+      readOnlyTurnPolicy: { kind: 'SESSION_MODE', modeId: 'ask', policyId: 'test/ask', detail: 'Read-only analysis.' },
+      executableCandidates: [process.execPath], argv: [agentScript]
+    };
+    const store = await createTestStore(path.join(directory, 'store'));
+    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
+      cwd: directory, requestTimeoutMs: 1_000,
+      clientToolBridge: {
+        createSessionGrant: async () => ({ id: 'preview-grant', launch: { executablePath: process.execPath, argv: [], environment: {} } }),
+        activateGrant: async () => undefined,
+        revokeGrant: async () => undefined,
+        releaseSessionGrant: async () => undefined
+      },
+      runtimeResolver: async () => ({ executable: process.execPath, version: process.version,
+        diagnostics: { selectedExecutable: process.execPath, selectedSource: 'test', selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript], requiredCapabilities: ['ACP protocolVersion=1'], probes: [] } })
+    });
+    try {
+      await adapter.initialize();
+      const repository = await addTestRepository(store, directory);
+      const settings: AgentExecutionSettings = { runtimeId, model: 'default', modelProvider: 'test-provider',
+        sandbox: 'DANGER_FULL_ACCESS', networkAccess: true, approvalPolicy: 'NEVER', approvalsReviewer: 'user',
+        runtimeOptions: { [runtimeId]: { modeId: 'ask' } } };
+      const task = await store.createTask({ title: 'Preview chat', prompt: 'Inspect only.', repositoryId: repository.id, runtimeId, agentSettings: settings });
+      const { iteration, worktree } = await store.createIterationAndWorktree({ task, branchName: 'preview-chat', worktreePath: directory, baseSha: 'base' });
+      const session = await createTestAgentSession(store, { task, iteration, worktree, runtimeId, role: 'PREVIEW', requestedSettings: settings });
+      const run = await createTestRun(store, { task, session, mode: 'PREVIEW', prompt: task.prompt, requestedSettings: settings,
+        clientToolGrants: ['inspect_preview', 'propose_preview_configuration'] });
+      await adapter.startTurn({ localRunId: run.id, session: { localSessionId: session.id }, mode: 'PREVIEW', instructionProfile: 'PREVIEW',
+        prompt: task.prompt, authoritativeGoal: task.prompt, settings, attachments: [] });
+      await waitFor(async () => (await getTestRun(store, run.id))?.status === 'COMPLETED' ? true : undefined);
+      const items = await runtimeFixture(store).runtime.getAgentItemsForRun(run.id);
+      expect(items.filter((item) => item.type === 'AGENT_MESSAGE').map(itemPayloadText)).toEqual(['Read-only answer.']);
+      expect((await store.getTask(task.id))?.currentRunId).not.toBe(run.id);
+    } finally { await adapter.shutdown(); }
   });
 
   it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
@@ -1181,130 +1227,6 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await expect(build(linkedWorktree)).rejects.toThrow(
         'because its native sandbox permits writes there'
       );
-    } finally {
-      await adapter.shutdown();
-    }
-  });
-
-  it('limits a qualified Preview exception to one app-owned evidence root', async () => {
-    const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-acp-preview-root-')
-    );
-    temporaryDirectories.push(directory);
-    const runtimeId = 'test-acp-preview-root';
-    const profile: AcpRuntimeProfile = {
-      ...TEST_ACP_PROFILE,
-      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
-      readOnlyTurnPolicy: {
-        kind: 'SESSION_MODE',
-        modeId: 'plan',
-        policyId: 'test-acp/isolated-preview@v1',
-        detail: 'Plan mode is qualified only for disposable Preview evidence.'
-      },
-      isolatedPreviewRecipeGeneration: {
-        detail: 'The test provider generates Preview YAML only from isolated evidence.'
-      }
-    };
-    const store = await createTestStore(path.join(directory, 'store'));
-    const fixture = runtimeFixture(store);
-    const adapter = createTestAdapter(store, new AppEventBus(), profile, {
-      cwd: directory,
-      runtimeResolver: async () => ({
-        executable: process.execPath,
-        version: process.version,
-        diagnostics: {
-          selectedExecutable: process.execPath,
-          selectedSource: 'test',
-          selectedVersion: process.version,
-          selectedLaunchArgv: [],
-          requiredCapabilities: ['ACP protocolVersion=1'],
-          probes: []
-        }
-      })
-    });
-    const sessionId = randomUUID();
-    const runId = randomUUID();
-    const owner = {
-      kind: 'PREVIEW_RECIPE_GENERATION' as const,
-      taskId: 'task-preview-root',
-      generationId: 'generation-preview-root'
-    };
-    const context = await adapter.buildExecutionContext({
-      sessionId,
-      primaryCwd: directory,
-      readRoots: [{ canonicalPath: directory, kind: 'WORKTREE', entityId: 'worktree-1' }],
-      modelSettings: {
-        runtimeId,
-        model: 'default',
-        modelProvider: 'test-provider'
-      },
-      clientOperationId: `preview-root-context:${sessionId}`,
-      attachments: []
-    });
-    const prepared = await fixture.runtimeStore.prepareRuntimeTurn({
-      session: {
-        id: sessionId,
-        owner,
-        accessEpoch: createAgentSessionAccessEpoch({
-          owner,
-          sessionId,
-          epoch: 1,
-          runtimeId,
-          model: 'default',
-          executionContext: context
-        }),
-        executionContext: context,
-        clientOperationId: `preview-root-session:${sessionId}`,
-        runtimeId,
-        role: 'PRIMARY',
-        relationshipState: 'ROOT',
-        status: 'NOT_MATERIALIZED',
-        materialized: false,
-        requestedSettings: context.modelSettings
-      },
-      run: {
-        id: runId,
-        owner,
-        scope: owner,
-        sessionId,
-        sessionAccessEpoch: 1,
-        purpose: 'PREVIEW_RECIPE_GENERATION',
-        generationKey: owner.generationId,
-        clientOperationId: `preview-root-run:${runId}`,
-        requestedSettings: context.modelSettings,
-        promptArtifactId: `prompt-${runId}`,
-        outputArtifactId: `output-${runId}`,
-        diagnosticArtifactId: `diagnostic-${runId}`
-      },
-      prompt: 'Generate Preview YAML from this evidence.',
-      priority: 'TASK_FOREGROUND',
-      queueOperationId: `preview-root-queue:${runId}`
-    });
-    const starting = await fixture.runtimeStore.updateRun(
-      runId,
-      prepared.run.recordRevision,
-      {
-        status: 'STARTING',
-        delivery: 'SENDING',
-        startedAt: new Date().toISOString()
-      },
-      `preview-root-starting:${runId}`
-    );
-
-    try {
-      await adapter.initialize();
-      await expect(
-        adapter.startRuntimeTurn({
-          session: prepared.session,
-          run: starting,
-          executionContext: context,
-          prompt: 'Generate Preview YAML from this evidence.',
-          attachments: []
-        })
-      ).rejects.toThrow('one app-owned isolated evidence directory');
-      const storedSession = await fixture.runtimeStore.getSession(sessionId);
-      expect(storedSession?.materialized).toBe(false);
-      expect(storedSession?.providerSessionId).toBeUndefined();
     } finally {
       await adapter.shutdown();
     }
@@ -1761,7 +1683,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       cwd: directory,
       requestTimeoutMs: 1_000,
       designSkillRoot,
-      designClientToolBridge: {
+      clientToolBridge: {
         createSessionGrant,
         activateGrant,
         revokeGrant,
@@ -1908,7 +1830,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         runtimeId,
         sessionId: session.id,
         worktreeId: worktree.id,
-        providerGeneration: expect.any(String)
+        providerGeneration: expect.any(String),
+        toolSet: 'design'
       });
       expect(activateGrant).toHaveBeenCalledWith({
         grantId: 'design-grant',
@@ -4355,7 +4278,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     });
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
-      designClientToolBridge: {
+      clientToolBridge: {
         createSessionGrant: vi.fn(async () => ({
           id: 'unused-design-grant',
           launch: {
@@ -4436,7 +4359,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     });
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
-      designClientToolBridge: {
+      clientToolBridge: {
         createSessionGrant: vi.fn(async () => ({
           id: 'unused-design-grant',
           launch: {
@@ -4539,7 +4462,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     });
     const adapter = createTestAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
-      designClientToolBridge: {
+      clientToolBridge: {
         createSessionGrant: vi.fn(async () => ({
           id: 'unused-design-grant',
           launch: {
@@ -6631,7 +6554,8 @@ input.on('line', (line) => {
 
 function readOnlyRuntimeAgentSource(
   messageLog: string,
-  confirmCancellation = false
+  confirmCancellation = false,
+  requestPermission = true
 ): string {
   return `
 const fs = require('node:fs');
@@ -6687,6 +6611,7 @@ input.on('line', (line) => {
         content: { type: 'text', text: 'Read-only answer.' }
       }
     }});
+    ${requestPermission ? '' : "send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } }); return;"}
     send({ jsonrpc: '2.0', id: 'permission-1', method: 'session/request_permission', params: {
       sessionId: message.params.sessionId,
       toolCall: { toolCallId: 'write-1', kind: 'edit', title: 'Edit a file' },

@@ -73,6 +73,8 @@ import {
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
   getImplementationRetryReason,
+  isDetachedRunMode,
+  isDetachedSessionRole,
   isImplementationRunMode,
   isTaskCreationToken,
   verifiedChecksMatchMergeHead
@@ -3965,7 +3967,7 @@ export class SqliteTaskStore {
       ) {
         throw new Error('Agent session Task ownership is inconsistent.');
       }
-      if (session.role !== 'REVIEW' && session.runtimeId !== task.runtimeId) {
+      if (!isDetachedSessionRole(session.role) && session.runtimeId !== task.runtimeId) {
         throw new Error('Primary Task work must use the Task runtime.');
       }
       const alreadyPublished = this.state.events.some(
@@ -4074,7 +4076,7 @@ export class SqliteTaskStore {
             worktree.id === run.worktreeId && worktree.ownership === 'EXTERNAL')) {
         await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for imported work.', false);
       }
-      const bindsCurrentTask = run.mode !== 'REVIEW';
+      const bindsCurrentTask = !isDetachedRunMode(run.mode);
       const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
       const now = new Date().toISOString();
       this.state = {
@@ -5706,7 +5708,7 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       !task ||
       !isRuntimeId(session.runtimeId) ||
       (session.runtimeId !== task.runtimeId &&
-        !belongsToDetachedReviewLineage(session, sessions)) ||
+        !belongsToDetachedLineage(session, sessions)) ||
       session.requestedSettings.runtimeId !== session.runtimeId ||
       (session.observedSettings?.runtimeId !== undefined &&
         session.observedSettings.runtimeId !== session.runtimeId)
@@ -5736,9 +5738,10 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       (run.runtimeId !== task.runtimeId &&
         !(
           (run.mode === 'REVIEW' && session.role === 'REVIEW') ||
+          (run.mode === 'PREVIEW' && session.role === 'PREVIEW') ||
           (run.mode === 'SUBAGENT' &&
             session.role === 'SUBAGENT' &&
-            belongsToDetachedReviewLineage(session, sessions))
+            belongsToDetachedLineage(session, sessions))
         )) ||
       run.requestedSettings.runtimeId !== run.runtimeId ||
       (run.observedSettings?.runtimeId !== undefined &&
@@ -5892,11 +5895,12 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
   }
 }
 
-function belongsToDetachedReviewLineage(
+/** Reviews and Preview conversations may run on another runtime than the task; their subagents inherit that. */
+function belongsToDetachedLineage(
   session: AgentSessionRecord,
   sessions: ReadonlyMap<string, AgentSessionRecord>
 ): boolean {
-  if (session.role === 'REVIEW') return true;
+  if (isDetachedSessionRole(session.role)) return true;
   if (session.role !== 'SUBAGENT') return false;
 
   const visited = new Set<string>([session.id]);
@@ -5913,7 +5917,7 @@ function belongsToDetachedReviewLineage(
     ) {
       return false;
     }
-    if (parent.role === 'REVIEW') return true;
+    if (isDetachedSessionRole(parent.role)) return true;
     visited.add(parent.id);
     child = parent;
   }

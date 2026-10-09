@@ -200,6 +200,7 @@ export type AgentRuntimePurpose =
   | 'TASK_RETRY'
   | 'TASK_REVIEW'
   | 'TASK_DESIGN'
+  | 'TASK_PREVIEW'
   | 'TASK_COMPACTION'
   | 'PROVIDER_SUBAGENT'
   | 'PROMPT_REFINEMENT'

@@ -73,7 +73,7 @@ it('pauses on upward scrolling, retains incoming lines, and resumes explicitly',
   expect(stream.scrollTop).toBe(100);
   expect(screen.getByText('request received')).toBeTruthy();
   fireEvent.click(
-    screen.getByRole('button', { name: '1 new lines · Resume follow' })
+    screen.getByRole('button', { name: '1 new line · Resume follow' })
   );
   expect(onFollow).toHaveBeenLastCalledWith(true);
   fireEvent.keyDown(stream, { key: 'Home' });
@@ -85,24 +85,23 @@ it('pauses on upward scrolling, retains incoming lines, and resumes explicitly',
 
 it('keeps follow paused when failure navigation itself scrolls to the end', () => {
   const onFollow = vi.fn();
-  const original = HTMLElement.prototype.scrollIntoView;
-  HTMLElement.prototype.scrollIntoView = function () {
-    const stream = this.closest('[role="region"]') as HTMLElement;
-    Object.defineProperties(stream, { scrollHeight: { value: 1000 }, clientHeight: { value: 200 } });
-    stream.scrollTop = 800;
-  };
-  try {
-    render(<ApplicationLogStream name="Application" lines={[...lines,
-      { id: 3, source: 'web', text: 'web failed', marker: 'failed' }]}
-      lanes={false} query="" matchesOnly={false} follow={false} onFollow={onFollow}
-      truncated={false} expired={false} empty="" failureTarget="failed:web" active />);
-    const stream = screen.getByRole('region', { name: 'Application logs' });
-    fireEvent.scroll(stream);
-    expect(onFollow).not.toHaveBeenCalled();
-    stream.scrollTop = 100;
-    fireEvent.scroll(stream);
-    stream.scrollTop = 800;
-    fireEvent.scroll(stream);
-    expect(onFollow).toHaveBeenLastCalledWith(true);
-  } finally { HTMLElement.prototype.scrollIntoView = original; }
+  const withMarker = [...lines, { id: 3, source: 'web', text: 'web', marker: 'failed' }];
+  const props = { name: 'Application', lines: withMarker, lanes: false, query: '', matchesOnly: false,
+    follow: false, onFollow, truncated: false, expired: false, empty: '', active: true };
+  const view = render(<ApplicationLogStream {...props} />);
+  const stream = screen.getByRole('region', { name: 'Application logs' });
+  Object.defineProperties(stream, { scrollHeight: { value: 1000 }, clientHeight: { value: 200 } });
+  stream.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+  const marker = stream.querySelector<HTMLElement>('[data-failure="true"]')!;
+  marker.getBoundingClientRect = () => ({ top: 900 }) as DOMRect;
+  Object.defineProperty(marker, 'offsetHeight', { value: 20 });
+  view.rerender(<ApplicationLogStream {...props} failureTarget="failed:web" />);
+  expect(stream.scrollTop).toBe(810);
+  fireEvent.scroll(stream);
+  expect(onFollow).not.toHaveBeenCalled();
+  stream.scrollTop = 100;
+  fireEvent.scroll(stream);
+  stream.scrollTop = 800;
+  fireEvent.scroll(stream);
+  expect(onFollow).toHaveBeenLastCalledWith(true);
 });

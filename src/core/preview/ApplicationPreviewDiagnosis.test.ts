@@ -110,3 +110,38 @@ it('keeps probe evidence distinct from an application error and an unavailable D
     (await diagnosis('No such image: postgres:17', 'START_FAILED'))?.command
   ).toBe('docker pull postgres:17');
 });
+
+it('names the exit code it saw and quotes the error line instead of the runtime summary', async () => {
+  const exited = await diagnosis(
+    'Job exited (1). Database writes are not rolled back.',
+    'START_FAILED',
+    [
+      'applying 0003_add_tags.sql',
+      'Error: relation "notes" does not exist',
+      '    at Migrator.apply (/project/src/migrate.ts:48:11)',
+      'Job exited (1). Database writes are not rolled back.'
+    ].join('\n'),
+    {
+      spec: {
+        name: 'app',
+        type: 'environment',
+        primary: 'web',
+        timeoutMs: 1000,
+        services: {
+          migrate: { type: 'job', cwd: '/project', command: ['node', 'migrate.js'] },
+          web: { type: 'command', cwd: '/project', command: ['node', 'server.js'], readyPath: '/', timeoutMs: 1000 }
+        }
+      }
+    } as unknown as PreviewDescription
+  );
+  expect(exited?.title).toBe('Application exited with code 1');
+  expect(exited?.summary).toBe('Nothing is serving.');
+  expect(exited?.excerpt).toBe(
+    'Error: relation "notes" does not exist\n    at Migrator.apply (/project/src/migrate.ts:48:11)'
+  );
+  const never = await diagnosis('Native command could not start (ENOENT)', 'START_FAILED');
+  expect(never?.title).toBe('The configured command could not be found');
+  expect(never?.excerpt).toBeUndefined();
+  const timeout = await diagnosis('Readiness probe timed out after 30000 ms.', 'TIMEOUT');
+  expect(timeout?.title).toBe('Application did not become ready in time');
+});

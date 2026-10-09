@@ -248,18 +248,12 @@ describe('ACP runtime profiles', () => {
       readOnlyTurns: {
         maturity: 'stable',
         detail: expect.stringContaining('compares repository state')
-      },
-      extensions: {
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
       }
     });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, {
       runtimeVersion: 'a-newer-version'
     })).toMatchObject({
-      readOnlyTurns: { maturity: 'stable' },
-      extensions: {
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
-      }
+      readOnlyTurns: { maturity: 'stable' }
     });
     expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       kind: 'DEDICATED_PROCESS',

@@ -40,8 +40,6 @@ import type {
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   Repository,
-  PreviewRecipeGenerationSnapshot,
-  PreviewRecipeValidation,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -129,6 +127,7 @@ import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationPreview, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
 import { ApplicationPreviewOverview, ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
+import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import {
   isReviewPhase,
   shouldShowMoveToReviewHeaderAction,
@@ -191,11 +190,14 @@ interface TaskDetailProps {
   textExcerpts?: ClientTextExcerpt[];
   attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
-  previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
-  previewRecipeGenerationDisabledReason?: string;
+  /** The task's Preview conversation; absent for tasks that cannot converse. */
+  previewAgent?: PreviewAgentConversation;
+  previewProposals?: PreviewProposalActions;
   onPrepareWorktree(taskId: string): Promise<void>;
+  /** Restores a missing managed worktree at its recorded commit without a confirmation dialog; the Preview block carries the consent. */
+  onRestoreWorktree(taskId: string): Promise<void>;
   worktreePreparationPending?: boolean;
   onStart(taskId: string, instruction?: string, settings?: AgentExecutionSettings): Promise<void>;
   onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
@@ -216,19 +218,6 @@ interface TaskDetailProps {
   onCreateDeliveryCommit(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
-  onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onGeneratePreviewRecipe(taskId: string, clarification?: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onValidatePreviewRecipeDraft(
-    taskId: string,
-    draftId: string,
-    yaml: string
-  ): Promise<PreviewRecipeValidation>;
-  onAcceptPreviewRecipeDraft(
-    taskId: string,
-    draftId: string,
-    yaml: string
-  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
-  onDiscardPreviewRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
@@ -537,9 +526,9 @@ export function TaskDetail(props: TaskDetailProps) {
       buildTaskActivityLedger({
         task,
         events: props.events,
-        runs: props.runs
+        runs: [...props.runs, ...(props.previewAgent?.runs ?? [])]
       }),
-    [task, props.events, props.runs]
+    [task, props.events, props.runs, props.previewAgent?.runs]
   );
   const overviewActivity = useMemo(
     () => projectOverviewTaskActivity(taskActivityLedger),
@@ -1143,7 +1132,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       <div
         id="task-detail-panel"
-        className={`tm-detail__body${tab === 'agent' ? ' tm-detail__body--agent' : ''}`}
+        className={`tm-detail__body${tab === 'agent' ? ' tm-detail__body--agent' : tab === 'preview' ? ' tm-detail__body--preview' : ''}`}
         ref={bodyRef}
         role="tabpanel"
         aria-labelledby={`task-detail-tab-${tab}`}
@@ -1287,34 +1276,17 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? <>
-          {!worktree || ['REMOVED', 'MISSING', 'PRUNABLE', 'ERROR'].includes(worktree.status) ? (
-            <section className="tm-application-preview__feedback" aria-label="Preview source unavailable">
-              <h3>Prepare the project folder</h3>
-              <p>{worktree && ['MISSING', 'PRUNABLE'].includes(worktree.status)
-                ? 'The task worktree is missing. Restore it from its recorded Git state before starting Preview. Saved preview configuration and secrets are retained.'
-                : 'Preview needs an available task worktree. Prepare or reconnect it before configuring or starting the application.'}</p>
-              {worktree ? <p><code>{worktree.worktreePath}</code></p> : null}
-              <button className="primary-button" disabled={props.worktreePreparationPending}
-                onClick={() => worktree?.ownership === 'EXTERNAL'
-                  ? setExistingWorkModal('reconnect')
-                  : void props.onPrepareWorktree(task.id)}>
-                {props.worktreePreparationPending ? 'Preparing…'
-                  : worktree?.ownership === 'EXTERNAL' ? 'Reconnect checkout'
-                  : worktree && ['MISSING', 'PRUNABLE'].includes(worktree.status) ? 'Restore worktree' : 'Prepare worktree'}
-              </button>
-            </section>
-          ) : null}
-          {worktree ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onModalOpenChange={setPreviewModalOpen}
-            onTaskAgent={async text => {
-              await props.onPrepareTaskAgent(text);
-              setTab('agent');
-              setAgentAttentionRequest(value => value + 1);
-            }}
-            agent={{ state: props.previewRecipeGeneration, disabledReason: props.previewRecipeGenerationDisabledReason,
-              get: props.onGetPreviewRecipeGeneration, generate: props.onGeneratePreviewRecipe,
-              validate: props.onValidatePreviewRecipeDraft, accept: props.onAcceptPreviewRecipeDraft, discard: props.onDiscardPreviewRecipeDraft }} /> : null}
-        </> : null}
+        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+          worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
+          onRestoreWorktree={() => props.onRestoreWorktree(task.id)}
+          onPrepareWorktree={() => props.onPrepareWorktree(task.id)}
+          onReconnectCheckout={() => setExistingWorkModal('reconnect')}
+          onTaskAgent={async text => {
+            await props.onPrepareTaskAgent(text);
+            setTab('agent');
+            setAgentAttentionRequest(value => value + 1);
+          }}
+          agent={props.previewAgent} proposals={props.previewProposals} /> : null}
 
         {tab === 'evidence' ? (
           <div className="tm-evtab">

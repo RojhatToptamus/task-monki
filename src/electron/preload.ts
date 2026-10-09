@@ -19,7 +19,8 @@ import type {
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
   ImportDesignReferenceAssetRequest,
@@ -308,8 +309,9 @@ const api: TaskManagerApi = {
   refreshGitHub: (input: RefreshGitHubRequest) => invokeIpc('github:refresh', input),
   getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
     invokeIpc('preview:recipe-generation:get', input),
-  generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
-    invokeIpc('preview:recipe-generation:generate', input),
+  sendPreviewAgentMessage: (input: SendPreviewAgentMessageRequest) =>
+    invokeIpc('preview:agent:send', input),
+  stopPreviewAgent: (input: StopPreviewAgentRequest) => invokeIpc('preview:agent:stop', input),
   validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
     invokeIpc('preview:recipe-generation:validate', input),
   acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>

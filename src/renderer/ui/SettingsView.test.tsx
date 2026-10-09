@@ -239,7 +239,7 @@ describe('SettingsView', () => {
   it('does not offer a model for an unavailable purpose runtime', () => {
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Preview generation"
+        label="Preview agent"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel]}
@@ -502,13 +502,13 @@ describe('SettingsView', () => {
 
     const html = renderToStaticMarkup(
       <AgentModelSetting
-        label="Preview generation"
+        label="Preview agent"
         runtimeId="codex"
         modelId={codexModel.id}
         models={[codexModel, providerModel]}
         runtimes={[runtimes[0]!, providerRuntime]}
         runtimeUnavailableReason={(runtime) =>
-          runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
+          runtimeExecutionUnavailableReason(runtime, 'PREVIEW_AGENT')
         }
         onSelectionChange={() => undefined}
       />

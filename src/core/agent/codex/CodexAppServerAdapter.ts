@@ -170,7 +170,10 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
-import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
+import {
+  buildDesignAgentDeveloperInstructions,
+  PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS
+} from '../../../shared/promptTemplates';
 import {
   loadDesignSkillPack,
   type DesignSkillPack
@@ -180,16 +183,20 @@ import {
   prepareCodexAttachmentDelivery
 } from './CodexAttachmentDelivery';
 import { CodexProtocolSanitizer } from './CodexProtocolSanitizer';
+import { OMITTED_CLIENT_TOOL_IMAGE } from '../journal/AgentProtocolRedaction';
 import {
-  parseInspectDesignOperation,
-  type DesignBrowserToolResult,
-  type InspectDesignOperation
-} from '../../design/AgentBrowserRuntime';
+  safeClientToolFailure,
+  type ClientToolDefinition,
+  type ClientToolResult,
+  type ClientToolSet
+} from '../clientTools/ClientToolContract';
 import {
-  INSPECT_DESIGN_TOOL_DEFINITION,
-  INSPECT_DESIGN_TOOL_NAME,
-  safeDesignClientToolFailure
-} from '../../design/DesignClientToolContract';
+  clientToolSetForMode,
+  DESIGN_CLIENT_TOOLS,
+  isClientToolName,
+  PREVIEW_CLIENT_TOOLS
+} from '../clientTools/ClientToolSets';
+import { clientToolActivityLabel } from '../../../shared/clientTools';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -222,10 +229,12 @@ const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const STREAM_OUTPUT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const STREAM_OUTPUT_MAX_FAILURES = 2;
 const RECOVERY_CONTINUATION_WAIT_MS = 1_000;
-export type CodexDesignBrowserToolHandler = (input: {
+/** Runs one app-owned tool for an admitted Codex dynamic tool call. */
+export type CodexClientToolHandler = (input: {
   runId: string;
-  operation: InspectDesignOperation;
-}) => Promise<DesignBrowserToolResult>;
+  tool: string;
+  arguments: unknown;
+}) => Promise<ClientToolResult>;
 
 interface CodexRunOutputBuffer {
   groups: Array<{ source: string; chunks: string[] }>;
@@ -403,8 +412,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   private readonly pendingRunByProviderTurn = new Map<string, string>();
   private readonly pendingRunByProviderThread = new Map<string, string>();
   private readonly protocolSanitizer = new CodexProtocolSanitizer();
-  private designBrowserToolHandler?: CodexDesignBrowserToolHandler;
-  private readonly activeDesignBrowserCalls = new Map<string, string>();
+  private clientToolHandler?: CodexClientToolHandler;
+  private readonly activeClientToolCalls = new Map<string, string>();
 
   constructor(
     private readonly taskStore: CodexTaskDomainStore,
@@ -593,8 +602,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     return this.supervisor.currentServer?.executable;
   }
 
-  setDesignBrowserToolHandler(handler: CodexDesignBrowserToolHandler): void {
-    this.designBrowserToolHandler = handler;
+  setClientToolHandler(handler: CodexClientToolHandler): void {
+    this.clientToolHandler = handler;
     this.preflightState = {
       ...this.preflightState,
       capabilities: this.runtimeCapabilities()
@@ -3514,7 +3523,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       return;
     }
     if (await this.handleRuntimeServerRequest(client, request, raw)) return;
-    if (await this.handleDesignBrowserToolRequest(client, request, raw)) return;
+    if (await this.handleClientToolRequest(client, request, raw)) return;
     const mapped = mapCodexInteractionRequest(request);
     if (!mapped) {
       await client.respondError(request.id, {
@@ -3625,7 +3634,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  private async handleDesignBrowserToolRequest(
+  private async handleClientToolRequest(
     client: CodexRpcClient,
     request: ServerRequest,
     raw: AgentProtocolMessageReference
@@ -3633,11 +3642,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     if (
       request.method !== 'item/tool/call' ||
       request.params.namespace !== null ||
-      request.params.tool !== INSPECT_DESIGN_TOOL_NAME
+      !isClientToolName(request.params.tool)
     ) {
       return false;
     }
     const params = request.params;
+    const tool = params.tool;
     const session = await this.taskRuntime.getAgentSessionByProviderId(
       this.descriptor.id,
       params.threadId
@@ -3653,64 +3663,56 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     const acknowledgedStartPending =
       pendingRunId !== undefined && pendingRunId === run?.id;
     const server = this.supervisor.currentServer;
+    const set = run ? clientToolSetForMode(run.mode) : undefined;
     if (
-      !this.designBrowserToolHandler ||
+      !this.clientToolHandler ||
       !session ||
       !run ||
       !server ||
-      run.mode !== 'DESIGN' ||
+      !set ||
+      !set.tools.includes(tool) ||
       (run.status !== 'RUNNING' &&
         !(acknowledgedStartPending && run.status === 'STARTING')) ||
       run.sessionId !== session.id ||
       run.worktreeId !== session.worktreeId ||
       (!acknowledgedStartPending && run.providerTurnId !== params.turnId) ||
       session.providerSessionId !== params.threadId ||
-      session.role !== 'PRIMARY' ||
+      session.role !== set.sessionRole ||
       client.serverInstanceId !== server.id ||
       !this.isCurrentClientEvent(client, raw)
     ) {
-      await client.respond(request.id, failedDesignToolResponse(
-        'inspect_design is available only in the current active Design Run.'
+      await client.respond(request.id, failedClientToolResponse(
+        `${tool} is available only in the current active ${set?.label ?? 'Task Monki'} run.`
       ));
       return true;
     }
     const task = await this.taskStore.getTask(run.taskId);
     const worktree = await this.taskStore.getWorktree(run.worktreeId);
     if (
-      task?.kind !== 'DESIGN' ||
+      !task ||
       task.currentWorktreeId !== run.worktreeId ||
       worktree?.taskId !== task.id ||
       worktree.worktreePath !== session.worktreePath
     ) {
-      await client.respond(request.id, failedDesignToolResponse(
-        'inspect_design does not own this Design workspace.'
+      await client.respond(request.id, failedClientToolResponse(
+        `${tool} does not own this task workspace.`
       ));
       return true;
     }
     const existing = await this.taskRuntime.getAgentItemByProviderId(run.id, params.callId);
     if (
-      hasDesignToolAdmission(existing?.payload) ||
+      hasClientToolAdmission(existing?.payload) ||
       (existing && ['COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED'].includes(existing.status))
     ) {
-      await client.respond(request.id, failedDesignToolResponse(
-        'This inspect_design call was already admitted. Task Monki will not repeat it.'
+      await client.respond(request.id, failedClientToolResponse(
+        `This ${tool} call was already admitted. Task Monki will not repeat it.`
       ));
       return true;
     }
-    if (this.activeDesignBrowserCalls.has(run.id)) {
-      await client.respond(request.id, failedDesignToolResponse(
-        'Another inspect_design operation is still running for this Design.'
+    if (this.activeClientToolCalls.has(run.id)) {
+      await client.respond(request.id, failedClientToolResponse(
+        `Another ${tool} operation is still running for this run.`
       ));
-      return true;
-    }
-    let operation: InspectDesignOperation;
-    try {
-      operation = parseInspectDesignOperation(params.arguments);
-    } catch (error) {
-      await client.respond(
-        request.id,
-        failedDesignToolResponse(errorMessage(error))
-      );
       return true;
     }
     await this.persistAgentItem({
@@ -3724,47 +3726,46 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         existing?.status === 'IN_PROGRESS' || existing?.status === 'STARTED'
           ? existing.status
           : 'STARTED',
-      payload: designToolItemPayload(params, operation, 'ADMITTED'),
+      payload: clientToolItemPayload(params, 'ADMITTED'),
       rawMessage: raw,
       providerStartedAt: existing?.providerStartedAt ?? new Date().toISOString()
     });
-    this.activeDesignBrowserCalls.set(run.id, params.callId);
+    this.activeClientToolCalls.set(run.id, params.callId);
     this.emitRunActivity(run, {
       itemType: 'DYNAMIC_TOOL_CALL',
       status: 'IN_PROGRESS',
-      label: 'Checking the design'
+      label: activityLabelForClientTool(tool)
     });
-    void this.executeDesignBrowserTool({
+    void this.executeClientTool({
       client,
       requestId: request.id,
       raw,
       run,
       session,
       callId: params.callId,
-      operation
+      tool,
+      arguments: params.arguments
     });
     return true;
   }
 
-  private async executeDesignBrowserTool(input: {
+  private async executeClientTool(input: {
     client: CodexRpcClient;
     requestId: ServerRequest['id'];
     raw: AgentProtocolMessageReference;
     run: RunRecord;
     session: AgentSessionRecord;
     callId: string;
-    operation: InspectDesignOperation;
+    tool: string;
+    arguments: unknown;
   }): Promise<void> {
-    let result: DesignBrowserToolResult | undefined;
     let response: DynamicToolCallResponse;
     try {
-      result = await this.designBrowserToolHandler!({
-        runId: input.run.id,
-        operation: input.operation
-      });
-      response = successfulDesignToolResponse(result);
+      response = successfulClientToolResponse(
+        await this.clientToolHandler!({ runId: input.run.id, tool: input.tool, arguments: input.arguments })
+      );
     } catch (error) {
-      response = failedDesignToolResponse(safeDesignClientToolFailure(error));
+      response = failedClientToolResponse(safeClientToolFailure(error));
     }
     try {
       if (!this.isCurrentClientEvent(input.client, input.raw)) return;
@@ -3777,14 +3778,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         providerItemId: input.callId,
         type: 'DYNAMIC_TOOL_CALL',
         status: response.success ? 'COMPLETED' : 'FAILED',
-        payload: designToolItemPayload(
-          {
-            callId: input.callId,
-            namespace: null,
-            tool: INSPECT_DESIGN_TOOL_NAME,
-            arguments: input.operation
-          },
-          input.operation,
+        payload: clientToolItemPayload(
+          { callId: input.callId, namespace: null, tool: input.tool, arguments: input.arguments },
           response.success ? 'COMPLETED' : 'FAILED',
           response
         ),
@@ -3795,15 +3790,14 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       this.emitRunActivity(input.run, {
         itemType: 'DYNAMIC_TOOL_CALL',
         status: response.success ? 'COMPLETED' : 'FAILED',
-        label: 'Checking the design'
+        label: activityLabelForClientTool(input.tool)
       });
     } catch {
       // The admitted provider request remains durable and is never replayed.
     } finally {
-      if (this.activeDesignBrowserCalls.get(input.run.id) === input.callId) {
-        this.activeDesignBrowserCalls.delete(input.run.id);
+      if (this.activeClientToolCalls.get(input.run.id) === input.callId) {
+        this.activeClientToolCalls.delete(input.run.id);
       }
-      void result;
     }
   }
 
@@ -6406,7 +6400,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
               this.designSkillFailure ??
               'The app-owned Design skill pack has not been validated yet.'
           },
-      designBrowserVerification: this.designBrowserToolHandler
+      designBrowserVerification: this.clientToolHandler
         ? { available: true }
         : {
             available: false,
@@ -6429,15 +6423,24 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   private async dynamicToolsForSession(
     session: AgentSessionRecord
   ): Promise<DynamicToolSpec[]> {
-    const task = await this.taskStore.getTask(session.taskId);
-    if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') return [];
-    this.requireDesignSkillPack();
-    if (!this.designBrowserToolHandler) {
+    const set = await this.clientToolSetForSession(session);
+    if (!set) return [];
+    if (set.id === 'design') this.requireDesignSkillPack();
+    if (!this.clientToolHandler) {
       throw new Error(
-        'Task Monki cannot start Design work because browser verification is unavailable.'
+        set.id === 'design'
+          ? 'Task Monki cannot start Design work because browser verification is unavailable.'
+          : `Task Monki cannot start ${set.label} work because its app-owned tools are unavailable.`
       );
     }
-    return [INSPECT_DESIGN_TOOL_SPEC];
+    return set.definitions.map(dynamicToolSpec);
+  }
+
+  /** Design sessions verify in the browser; Preview sessions read preview state and propose configuration. */
+  private async clientToolSetForSession(session: AgentSessionRecord): Promise<ClientToolSet | undefined> {
+    if (session.role === 'PREVIEW') return PREVIEW_CLIENT_TOOLS;
+    const task = await this.taskStore.getTask(session.taskId);
+    return task?.kind === 'DESIGN' && session.role === 'PRIMARY' ? DESIGN_CLIENT_TOOLS : undefined;
   }
 
   private async codexInteractiveCollaborationModeForSession(
@@ -6445,20 +6448,22 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>,
     settings: AgentExecutionSettings
   ): Promise<{ collaborationMode: CollaborationMode } | undefined> {
-    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') {
+    const set = clientToolSetForMode(input.mode);
+    if (!set || input.instructionProfile !== set.mode) {
+      // Mismatches between the mode and its profile are reported by the shared rule.
       return codexInteractiveCollaborationMode(input, settings);
     }
-    const task = await this.taskStore.getTask(session.taskId);
-    if (task?.kind !== 'DESIGN' || session.role !== 'PRIMARY') {
+    if ((await this.clientToolSetForSession(session))?.id !== set.id) {
       throw new Error(
-        'The DESIGN instruction profile is valid only for a primary Design session.'
+        `The ${set.mode} instruction profile is valid only for a ${set.id === 'design' ? 'primary Design' : 'Preview'} session.`
       );
     }
-    const pack = this.requireDesignSkillPack();
     return codexInteractiveCollaborationMode(
       input,
       settings,
-      buildDesignAgentDeveloperInstructions(pack.catalog)
+      set.id === 'design'
+        ? buildDesignAgentDeveloperInstructions(this.requireDesignSkillPack().catalog)
+        : PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS
     );
   }
 
@@ -6957,11 +6962,17 @@ function codexRuntimeOperationId(action: string, ...identity: unknown[]): string
   return `codex:${action}:${fingerprint}`;
 }
 
-const INSPECT_DESIGN_TOOL_SPEC: DynamicToolSpec = {
-  type: 'function',
-  ...INSPECT_DESIGN_TOOL_DEFINITION,
-  inputSchema: INSPECT_DESIGN_TOOL_DEFINITION.inputSchema as JsonValue
-};
+function activityLabelForClientTool(tool: string): string {
+  return clientToolActivityLabel(tool) ?? 'Using a Task Monki tool';
+}
+
+function dynamicToolSpec(definition: ClientToolDefinition): DynamicToolSpec {
+  return {
+    type: 'function',
+    ...definition,
+    inputSchema: definition.inputSchema as JsonValue
+  };
+}
 
 function withDynamicTools<T extends object>(
   params: T,
@@ -6970,8 +6981,8 @@ function withDynamicTools<T extends object>(
   return { ...params, dynamicTools: [...dynamicTools] };
 }
 
-function successfulDesignToolResponse(
-  result: DesignBrowserToolResult
+function successfulClientToolResponse(
+  result: ClientToolResult
 ): DynamicToolCallResponse {
   return {
     success: true,
@@ -6989,21 +7000,20 @@ function successfulDesignToolResponse(
   };
 }
 
-function failedDesignToolResponse(message: string): DynamicToolCallResponse {
+function failedClientToolResponse(message: string): DynamicToolCallResponse {
   return {
     success: false,
     contentItems: [{ type: 'inputText', text: message.slice(0, 1_000) }]
   };
 }
 
-function designToolItemPayload(
+function clientToolItemPayload(
   params: {
     callId: string;
     namespace: string | null;
     tool: string;
     arguments: unknown;
   },
-  operation: InspectDesignOperation,
   admission: 'ADMITTED' | 'COMPLETED' | 'FAILED',
   response?: DynamicToolCallResponse
 ): Record<string, unknown> {
@@ -7012,7 +7022,7 @@ function designToolItemPayload(
     id: params.callId,
     namespace: params.namespace,
     tool: params.tool,
-    arguments: operation,
+    arguments: params.arguments,
     status:
       admission === 'ADMITTED'
         ? 'inProgress'
@@ -7021,22 +7031,20 @@ function designToolItemPayload(
           : 'failed',
     contentItems: response?.contentItems.map((item) =>
       item.type === 'inputImage'
-        ? { type: 'inputImage', imageUrl: '[transient Design screenshot omitted]' }
+        ? { type: 'inputImage', imageUrl: OMITTED_CLIENT_TOOL_IMAGE }
         : item
     ) ?? null,
     success: response?.success ?? null,
-    taskMonkiDesignToolAdmission: admission
+    taskMonkiClientToolAdmission: admission
   };
 }
 
-function hasDesignToolAdmission(value: unknown): boolean {
-  return Boolean(
-    value &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      ['ADMITTED', 'COMPLETED', 'FAILED'].includes(
-        String((value as Record<string, unknown>).taskMonkiDesignToolAdmission)
-      )
+/** Items written before the tool bridge was generalized carry the Design-specific key. */
+function hasClientToolAdmission(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return ['ADMITTED', 'COMPLETED', 'FAILED'].includes(
+    String(record.taskMonkiClientToolAdmission ?? record.taskMonkiDesignToolAdmission)
   );
 }
 
@@ -7050,22 +7058,25 @@ function redactOptionalProviderText(
 function codexInteractiveCollaborationMode(
   input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>,
   settings: AgentExecutionSettings,
-  designDeveloperInstructions?: string
+  profileInstructions?: string
 ): { collaborationMode: CollaborationMode } | undefined {
-  const developerInstructions =
-    input.instructionProfile === 'DESIGN'
-      ? designDeveloperInstructions
-      : isImplementationRunMode(input.mode)
-        ? CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
-        : undefined;
+  const set = clientToolSetForMode(input.mode);
+  const developerInstructions = input.instructionProfile
+    ? profileInstructions
+    : isImplementationRunMode(input.mode)
+      ? CODEX_INTERACTIVE_IMPLEMENTATION_INSTRUCTIONS
+      : undefined;
   if (!developerInstructions) {
-    if (input.mode === 'DESIGN') {
-      throw new Error('Codex Design runs require the DESIGN instruction profile.');
+    if (set) {
+      throw new Error(`Codex ${set.label} runs require the ${set.mode} instruction profile.`);
     }
     return undefined;
   }
-  if (input.instructionProfile === 'DESIGN' && input.mode !== 'DESIGN') {
-    throw new Error('The DESIGN instruction profile is valid only for Design runs.');
+  if (input.instructionProfile && input.instructionProfile !== input.mode) {
+    const profileSet = clientToolSetForMode(input.instructionProfile);
+    throw new Error(
+      `The ${input.instructionProfile} instruction profile is valid only for ${profileSet?.label ?? input.instructionProfile} runs.`
+    );
   }
   const model = settings.model?.trim();
   if (!model) {

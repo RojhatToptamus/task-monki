@@ -8,13 +8,18 @@ import type {
 } from '../../../shared/agent';
 import { redactCredentialText } from '../AgentCredentialRedaction';
 import { INSPECT_DESIGN_TOOL_NAME } from '../../design/DesignClientToolContract';
+import { CLIENT_TOOL_SETS, DESIGN_CLIENT_TOOLS } from '../clientTools/ClientToolSets';
 import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
 
 const MAX_ERROR_DIAGNOSTIC_BYTES = 4 * 1024;
 const ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX = '… [OpenCode diagnostic truncated]';
-export const OPENCODE_DESIGN_MCP_SERVER_NAME = 'task_monki_design';
 export const OPENCODE_DESIGN_TOOL_NAME =
-  `${OPENCODE_DESIGN_MCP_SERVER_NAME}_${INSPECT_DESIGN_TOOL_NAME}`;
+  `${DESIGN_CLIENT_TOOLS.openCodeServerName}_${INSPECT_DESIGN_TOOL_NAME}`;
+
+/** OpenCode names an MCP tool `<server>_<tool>`; Task Monki's servers define which names are its own. */
+export function isOpenCodeClientToolName(tool: string): boolean {
+  return CLIENT_TOOL_SETS.some((set) => set.tools.some((name) => tool === `${set.openCodeServerName}_${name}`));
+}
 
 export interface OpenCodeHealth {
   healthy: true;
@@ -441,7 +446,7 @@ export function mapOpenCodePartType(part: OpenCodePart): AgentItemType {
       return 'FILE_CHANGE';
     case 'tool': {
       const tool = part.tool?.toLowerCase() ?? '';
-      if (tool === OPENCODE_DESIGN_TOOL_NAME) return 'MCP_TOOL_CALL';
+      if (isOpenCodeClientToolName(tool)) return 'MCP_TOOL_CALL';
       // The todo tools carry the native plan, which todo.updated records as plan revisions.
       if (tool === 'todowrite' || tool === 'todoread') return 'PLAN';
       if (['bash', 'shell', 'terminal'].some((name) => tool.includes(name))) return 'COMMAND_EXECUTION';

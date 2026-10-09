@@ -6,7 +6,7 @@ import type {
 export type AgentExecutionOperation =
   | 'ACTIVE_TURN_STEERING'
   | 'PROMPT_REFINEMENT'
-  | 'PREVIEW_RECIPE_GENERATION'
+  | 'PREVIEW_AGENT'
   | 'REVIEW'
   | 'DESIGN'
   | 'DISCOURSE';
@@ -58,7 +58,7 @@ export function projectAgentExecutionSupport(
     case 'PROMPT_REFINEMENT':
       return supported();
 
-    case 'PREVIEW_RECIPE_GENERATION':
+    case 'PREVIEW_AGENT':
       return supported();
 
     case 'REVIEW':

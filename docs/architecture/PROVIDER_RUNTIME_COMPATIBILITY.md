@@ -36,7 +36,7 @@ runtimes use stable ACP plus explicitly captured extensions.
 | OpenCode server | `opencode`; `opencode serve --hostname 127.0.0.1 --port <allocated-port>` | Native first-class | Connected provider and model registry, variants, sessions, native history fork, messages, parts, asynchronous prompts, abort, permissions, questions, plans, usage, recovery, bounded SSE, attachments, read-only workflows, and Design MCP transport | Discovery checks the real `opencode serve` launch contract and HTTP API. It does not reject a runtime by version number. Design uses each connected model's reported image and tool-call capabilities. Models missing either capability stay disabled. Price and free status are not capability signals. Review, refinement, and Discourse use a dedicated `--pure` session with native deny rules. The process remains unconfined and uses provider network access. Active steering, true pause, and provider goals remain unsupported. |
 | Grok Build ACP | `grok-acp`; `grok --no-auto-update --permission-mode default agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage and cost context, permissions, cancellation, provider sessions, embedded text, image input, shared read-only workflows, Design MCP transport, and the captured `grok-build-acp/session-models@v1` contract | Design uses negotiated ACP image support and low reasoning by default. Grok Build currently reports `image: false` for its whole catalog, although native image delivery works. The provider profile records this capability mismatch without listing versions or models. On macOS, read-only workflows use a separate process with Grok's native read-only launch contract. Task Monki denies edit, write, and MCP tools, checks repository state, and rejects roots in Grok's writable temp and state locations. Active steering, fork, goals, and standardized subagents remain unsupported. Structured user input is available only when Grok emits an ACP form elicitation. |
 | Cursor Agent ACP | `cursor-agent-acp`; automatic discovery uses `cursor-agent acp`, while `agent acp` needs explicit configuration and a Cursor contract probe | Registered ACP compatibility | ACP streaming, tool and diff updates, plans, exact permission choices, cancellation, Cursor rules, lazy model discovery, native session controls, text, negotiated image input, read-only workflows, and Design MCP transport | Cursor loads its current model catalog through its provider extension. ACP image support applies to the models in that catalog when Cursor advertises it. Task Monki does not use an executable-version allowlist. Cursor Ask mode provides the read-only policy. Task Monki rejects each permission request and compares repository state after the turn. Cursor does not advertise additional directories, so Task Monki omits that field. The process remains unconfined and uses provider network access. Active steering, fork, goals, and standardized subagents remain unsupported. Structured user input is available only when Cursor emits an ACP form elicitation. |
-| Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | The bridge provides ACP streaming, tools, diffs, plans, permissions, form questions, cancellation, modes, model selection, embedded text, negotiated image input, shared read-only workflows, and Design MCP transport. | This is not a direct native integration with the `claude` CLI. Task Monki creates and closes one temporary ACP session when the user requests the model list. It uses that session's standard model selector, so current choices such as Haiku and Sonnet are not hardcoded. Models are enabled for Design when Claude advertises image input. Read-only prompts use plan mode, but a packaged probe showed that plan mode can still complete a Write tool call. Task Monki rejects a result if its final repository comparison finds a change. Preview generation uses only an app-owned disposable evidence copy. Claude advertises additional directories, so Design sessions receive the app-owned skill root. Its AskUserQuestion bridge uses ACP form elicitation and resumes the same provider turn after Task Monki returns the answer. |
+| Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | The bridge provides ACP streaming, tools, diffs, plans, permissions, form questions, cancellation, modes, model selection, embedded text, negotiated image input, shared read-only workflows, and Design MCP transport. | This is not a direct native integration with the `claude` CLI. Task Monki creates and closes one temporary ACP session when the user requests the model list. It uses that session's standard model selector, so current choices such as Haiku and Sonnet are not hardcoded. Models are enabled for Design when Claude advertises image input. Read-only prompts use plan mode, but a packaged probe showed that plan mode can still complete a Write tool call. Task Monki rejects a result if its final repository comparison finds a change. Claude advertises additional directories, so Design sessions receive the app-owned skill root. Its AskUserQuestion bridge uses ACP form elicitation and resumes the same provider turn after Task Monki returns the answer. |
 
 ## Workflow support
 
@@ -45,14 +45,14 @@ runtimes use stable ACP plus explicitly captured extensions.
 | Normal Task | Yes | Yes | Yes | Yes | Yes |
 | Review | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
 | Prompt refinement | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
-| Preview recipe generation | Yes | Yes | Yes on macOS | Yes | Yes; disposable-evidence path |
+| Preview agent | Yes; dynamic tools | Yes; MCP tools | Yes on macOS; MCP tools | Yes; MCP tools | Yes; plan mode plus MCP tools |
 | Discourse | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
 | Managed attachments | Text and model-gated image | Text and model-gated image | Text and native image; capability drift reported | Text and negotiated image | Text and negotiated image |
 | Design | Catalog models that report image input | Connected catalog models that report image input and tool calls | Models with effective image support; low reasoning by default | Catalog models when Cursor advertises image input | Session-catalog models when Claude advertises image input |
 
 Review, prompt refinement, and Discourse use one shared read-only turn path.
-Preview generation uses that path unless an adapter confines it to the
-app-owned disposable evidence copy.
+The Preview agent is a task-bound read-only session with app-owned tools; see
+`docs/architecture/PREVIEW_RECIPE_GENERATION.md`.
 Every workflow prompt tells the agent not to modify files.
 Each adapter applies its provider-native restriction when one is available.
 Task Monki compares repository state before and after each applicable turn.
@@ -110,8 +110,7 @@ All registered ACP profiles share these implemented rules:
   Task Monki rejects every permission request during these turns.
 - Claude plan mode allowed a native Write tool call during the packaged mutation
   probe. Read-only workflows still use plan mode, but Task Monki accepts their
-  result only when the final repository comparison is unchanged. Preview
-  generation uses only a disposable app-owned evidence copy.
+  result only when the final repository comparison is unchanged.
 - Grok read-only turns use a separate process because its sandbox is
   process-scoped. Normal Task and Design turns stay on the writable process.
 - Permission choices return the exact opaque option ID advertised by the
@@ -217,8 +216,7 @@ only when their live initialization and session checks succeed.
   still compares repository state after the turn.
 - Claude Agent ACP plan mode allowed a native Write tool call. Its read-only
   workflows use a clear no-modification instruction and reject the result when
-  the final repository comparison changes. Preview generation uses only a
-  disposable app-owned evidence copy.
+  the final repository comparison changes.
 - Runtime children inherit only a minimal portable base environment. OpenCode
   and ACP children additionally receive a versioned, exact provider environment
   contract for credentials, cloud configuration, and documented runtime config

@@ -13,7 +13,7 @@ describe('projectAgentExecutionSupport', () => {
       supported: true
     });
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT')
     ).toEqual({ supported: true });
     expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
       supported: true
@@ -47,23 +47,19 @@ describe('projectAgentExecutionSupport', () => {
     }
   });
 
-  it('does not use runtime or model allowlists for Preview generation', () => {
+  it('does not use runtime or model allowlists for the Preview agent', () => {
     const capabilities = supportedCapabilities({
       readOnlyTurns: {
         maturity: 'unsupported',
         detail: 'This profile can still mutate a repository.'
-      },
-      extensions: {
-        ...supportedCapabilities().extensions,
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
       }
     });
 
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT')
     ).toEqual({ supported: true });
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION', {
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT', {
         model: {
           inputModalities: ['text']
         }

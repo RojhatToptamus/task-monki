@@ -1,37 +1,45 @@
-import { useEffect, useRef, useState } from 'react';
-import { Ellipsis } from 'lucide-react';
-import type {
-  ApplicationPreviewSnapshot,
-  PreviewConfigurationFile
-} from '../../../shared/applicationPreview';
+import { isActiveRunStatus } from '../../model/agentSession';
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { Ellipsis, MessageSquare } from 'lucide-react';
+import type { AttemptSummary } from 'previewhost';
+import type { ApplicationPreviewSnapshot, PreviewConfigurationFile } from '../../../shared/applicationPreview';
+import type { WorktreeRecord } from '../../../shared/contracts';
 import { taskManagerApi as api } from '../../api/taskManagerClient';
+import {
+  previewBlockerCount,
+  previewStatusRow,
+  type PreviewPrimaryAction,
+  type PreviewSecondaryAction,
+  type PreviewWorktreeAvailability
+} from '../../model/applicationPreviewPanel';
 import { applicationPreviewStatus } from '../../model/applicationPreviewStatus';
-import { Chip } from '../StatusBadge';
+import { previewRunRows } from '../../model/applicationPreviewRuns';
+import { DRAFT_REQUEST, investigationRequest } from '../../model/previewAgentRequests';
+import { initialPreviewAgentSelection, previewAgentUnavailableReason, type PreviewAgentSelection } from '../../model/previewAgentSelection';
+import { previewConfigurationChanges, type PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
 import { AccessibleTab } from '../AccessibleTabs';
-import { ActionMenu } from '../ActionMenu';
+import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
-import { DisclosureChevron } from '../DisclosureChevron';
-import {
-  message,
-  expected,
-  PreviewDialog,
-  ConfigurationDefinitions,
-  PreviewRunReview
-} from './previewPresentation';
-import { ApplicationLogs } from './ApplicationLogs';
+import { Chip } from '../StatusBadge';
 import { ApplicationActivity } from './ApplicationActivity';
-import { PreviewSecretDialog } from './PreviewSecretDialog';
-import {
-  ApplicationConfiguration,
-  type PreviewEditorDraft,
-  type ConfigurationView
-} from './ApplicationConfiguration';
-import type { PreviewAgentActions } from './PreviewAgentActions';
-function useApplicationPreview(taskId: string) {
+import { ApplicationConfiguration, type ConfigurationView, type PreviewEditorDraft } from './ApplicationConfiguration';
+import { ApplicationLogs } from './ApplicationLogs';
+import { PreviewAgentPanel } from './PreviewAgentPanel';
+import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
+import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
+import { PreviewDiagnosisBlock, PreviewProjectFacts, PreviewRequirementsBlock, PreviewRunApprovalBlock, PreviewWorktreeBlock } from './PreviewDecisionBlocks';
+import { expected, message, PreviewDialog } from './previewPresentation';
+
+/** Below this width the Preview agent becomes a tab instead of a 340px column beside the tabs. */
+const SPLIT_MIN_WIDTH = 900;
+const STATIC_DRAFT = '# Describe the services this project needs.\nname: application\ntype: static\ndirectory: .\n';
+
+function useApplicationPreview(taskId: string, enabled: boolean) {
   const [snapshot, setSnapshot] = useState<ApplicationPreviewSnapshot>();
   const [error, setError] = useState<string>();
   const readNow = useRef<() => void>(() => undefined);
   useEffect(() => {
+    if (!enabled) return;
     let disposed = false;
     let reading = false;
     let refreshPending = false;
@@ -54,8 +62,7 @@ function useApplicationPreview(taskId: string) {
         if (!disposed) setError(message(cause));
       }
       reading = false;
-      if (!disposed)
-        timer = setTimeout(() => void read(), refreshPending ? 0 : 1000);
+      if (!disposed) timer = setTimeout(() => void read(), refreshPending ? 0 : 1000);
       refreshPending = false;
     }
     const visible = () => {
@@ -71,120 +78,148 @@ function useApplicationPreview(taskId: string) {
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [taskId]);
+  }, [taskId, enabled]);
   return { snapshot, error, refresh: () => readNow.current() };
 }
 
-export function ApplicationPreviewOverview({
-  taskId,
-  onOpen
-}: {
-  taskId: string;
-  onOpen(): void;
-}) {
-  const { snapshot, error } = useApplicationPreview(taskId);
+/** Whether the surface is wide enough for the agent column; zero means not laid out yet, which is not narrow. */
+function useNarrow(ref: RefObject<HTMLElement | null>, threshold: number) {
+  const [narrow, setNarrow] = useState(false);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const width = node.getBoundingClientRect().width;
+      setNarrow(width > 0 && width < threshold);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref, threshold]);
+  return narrow;
+}
+
+export function worktreeAvailability(worktree: WorktreeRecord | undefined, pending: boolean): PreviewWorktreeAvailability {
+  if (!worktree) return { state: 'absent', pending };
+  const external = worktree.ownership === 'EXTERNAL';
+  if (['MISSING', 'PRUNABLE', 'REMOVED'].includes(worktree.status)) return { state: 'missing', external, pending };
+  if (worktree.status === 'ERROR') return { state: 'failed', external, pending };
+  return { state: 'available' };
+}
+
+export function ApplicationPreviewOverview({ taskId, onOpen }: { taskId: string; onOpen(): void }) {
+  const { snapshot, error } = useApplicationPreview(taskId, true);
   if (!snapshot?.status && !error) return null;
   return (
     <section className="tm-panel tm-preview-card" aria-label="Preview summary">
       <div className="tm-preview-card__head">
         <h3 className="tm-panel__title">Preview</h3>
-        <span>
-          {error
-            ? 'Unavailable'
-            : applicationPreviewStatus(snapshot?.status, !!snapshot?.approval)
-                .label}
-        </span>
+        <span>{error ? 'Unavailable' : applicationPreviewStatus(snapshot?.status, !!snapshot?.approval).label}</span>
       </div>
-      <button className="outline-button" onClick={onOpen}>
-        View Preview
-      </button>
+      <button className="outline-button" onClick={onOpen}>View Preview</button>
     </section>
   );
 }
 
+type Section = 'Activity' | 'Configuration' | 'Logs' | 'Preview agent';
+
 export function ApplicationPreviewPanel({
   taskId,
   projectName,
+  worktree,
+  worktreePending = false,
   agent,
+  proposals,
   onTaskAgent,
+  onRestoreWorktree,
+  onPrepareWorktree,
+  onReconnectCheckout,
   onModalOpenChange
 }: {
   taskId: string;
   projectName?: string;
-  agent?: PreviewAgentActions;
+  /** The task worktree: the folder commands run in, and the state that decides whether Preview can run at all. */
+  worktree?: WorktreeRecord;
+  worktreePending?: boolean;
+  /** The task's Preview conversation; absent when this task cannot converse, such as a Design. */
+  agent?: PreviewAgentConversation;
+  /** The agent's proposal under review and the actions that settle it. */
+  proposals?: PreviewProposalActions;
   onTaskAgent?(text: string): void | Promise<void>;
+  onRestoreWorktree?(): void | Promise<void>;
+  onPrepareWorktree?(): void | Promise<void>;
+  onReconnectCheckout?(): void;
   onModalOpenChange?(open: boolean): void;
 }) {
-  const { snapshot, error: readError, refresh } = useApplicationPreview(taskId);
+  const availability = worktreeAvailability(worktree, worktreePending);
+  const { snapshot, error: readError, refresh } = useApplicationPreview(taskId, !!worktree);
+  const projectDirectory = snapshot?.projectDirectory ?? worktree?.worktreePath;
   const root = useRef<HTMLElement>(null);
-  const [section, setSection] = useState<'Activity' | 'Configuration' | 'Logs'>(
-    'Activity'
-  );
+  const narrow = useNarrow(root, SPLIT_MIN_WIDTH);
+  const [section, setSection] = useState<Section>('Activity');
   const [view, setView] = useState<ConfigurationView>('Configuration');
   const [draft, setDraft] = useState<PreviewEditorDraft>();
   const [previous, setPrevious] = useState<PreviewConfigurationFile>();
-  const [reconciliation, setReconciliation] = useState<{
-    text: string;
-    changes: string[];
-    concealedKeys: string[];
-  }>();
+  const [reconciliation, setReconciliation] = useState<{ text: string; changes: string[]; concealedKeys: string[] }>();
   const [conflicts, setConflicts] = useState<PreviewConfigurationFile[]>();
-  const [clarification, setClarification] = useState('');
-  const [showAgent, setShowAgent] = useState(false);
+  const [asRun, setAsRun] = useState<AttemptSummary>();
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentSelection, setAgentSelection] = useState<PreviewAgentSelection>();
+  const [agentDraft, setAgentDraft] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [actionError, setActionError] = useState<{ message: string; state: string }>();
   const [dismissed, setDismissed] = useState<string>();
-  const [logSelection, setLogSelection] = useState<{
-    attemptId: string;
-    source?: string;
-    failure?: boolean;
-  }>();
+  const [logSelection, setLogSelection] = useState<{ attemptId: string; source?: string; failure?: boolean }>();
   const [secretReferences, setSecretReferences] = useState<string[]>();
   const [confirmData, setConfirmData] = useState(false);
-  const [chosenFolders, setChosenFolders] = useState<Record<string, string>>(
-    {}
-  );
-  const generation = agent?.state;
-  const generating = generation?.status === 'GENERATING';
+  const [restartChanges, setRestartChanges] = useState<{ id: string; changes?: PreviewConfigurationChange[] }>();
   const loadedProposal = useRef<string | undefined>(undefined);
+
+  const proposal = proposals?.state?.draft;
+  const selection = agent ? agentSelection ?? initialPreviewAgentSelection(agent.runs, agent.defaults) : undefined;
+  const agentDisabledReason = agent && selection
+    ? agent.disabledReason ?? previewAgentUnavailableReason(selection, agent.runtimes)
+    : 'The Preview agent is not available here.';
+  const questionPending = agent?.interactions.find((item) => item.status === 'PENDING');
   const status = snapshot?.status;
   const serving = status?.active;
   const latest = status?.candidate ?? status?.latest;
-  const approval = snapshot?.approval;
-  const restart = snapshot?.restartReview;
-  const secrets = approval?.secrets ?? snapshot?.requirements?.secrets ?? [];
-  const sources = snapshot?.requirements?.sources ?? [];
-  const folderRequirements = new Map<
-    string,
-    { source: (typeof sources)[number]; services: string[] }
-  >();
-  for (const source of sources) {
-    if (source.connected) continue;
-    const key = `${source.declaration}\0${source.directory}`;
-    const group = folderRequirements.get(key);
-    if (group) group.services.push(source.service);
-    else folderRequirements.set(key, { source, services: [source.service] });
+  const review = snapshot?.approval ?? snapshot?.restartReview;
+  const reviewId = snapshot?.approval?.attemptId ?? snapshot?.restartReview?.id;
+  const requirements = snapshot?.requirements
+    ? { ...snapshot.requirements, secrets: snapshot.approval?.secrets ?? snapshot.requirements.secrets }
+    : undefined;
+  const blockers = previewBlockerCount(requirements);
+  const dirty = !!draft && (!!draft.draftId || draft.text !== draft.original?.text);
+  const diagnosis = snapshot?.diagnosis?.attemptId !== dismissed ? snapshot?.diagnosis : undefined;
+  const agentWorking = !!agent?.runs.some((run) => isActiveRunStatus(run.status));
+  const waitingForAgent = !!draft?.draftId && agentWorking;
+  const editable = (!serving || !snapshot?.designAttempts?.includes(serving.id)) && !waitingForAgent;
+  const available = availability.state === 'available';
+  const row = previewStatusRow({
+    snapshot,
+    unavailable: !!readError,
+    worktree: availability,
+    agentDisabledReason,
+    agentWorking,
+    dirty,
+    proposal: !!draft?.draftId,
+    blockers,
+    busy
+  });
+  // An action error stays visible until the runtime state it described moves on.
+  const stateKey = [status?.active?.id, status?.candidate?.id, status?.latest?.id, status?.latest?.state, !!snapshot?.approval, !!snapshot?.restartReview].join('|');
+  const error = actionError && actionError.state === stateKey ? actionError.message : undefined;
+  const setError = (value: string | undefined) => setActionError(value ? { message: value, state: stateKey } : undefined);
+
+  // A question opens the conversation where it is answered, once per question.
+  const [seenQuestionId, setSeenQuestionId] = useState<string>();
+  if (questionPending?.id !== seenQuestionId) {
+    setSeenQuestionId(questionPending?.id);
+    if (questionPending) openAgent();
   }
-  const storage = snapshot?.requirements?.storage;
-  const blockers =
-    (storage && storage.state !== 'unlocked' ? 1 : 0) +
-    folderRequirements.size +
-    secrets.filter((secret) => secret.availability !== 'available').length +
-    (snapshot?.requirements?.connections.length ?? 0) +
-    (snapshot?.requirements?.description?.prerequisites?.filter(
-      (item) => item.status === 'missing'
-    ).length ?? 0);
-  const dirty =
-    !!draft && (!!draft.draftId || draft.text !== draft.original?.text);
-  const diagnosis =
-    snapshot?.diagnosis?.attemptId !== dismissed
-      ? snapshot?.diagnosis
-      : undefined;
-  const presentation = applicationPreviewStatus(
-    status,
-    !!approval || !!restart
-  );
-  const editable = !serving || !snapshot?.designAttempts?.includes(serving.id);
+
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
     setError(undefined);
@@ -197,40 +232,27 @@ export function ApplicationPreviewPanel({
       setBusy(false);
     }
   }
-  async function loadFile(nextView: ConfigurationView = 'Configuration') {
+  async function loadFile(nextView: ConfigurationView = 'Configuration', createWhenMissing = false) {
     const value = await api.readApplicationPreviewFile({ taskId });
-    setDraft({
-      original: value.file,
-      text:
-        value.file?.text ??
-        '# Describe the services this project needs.\nname: application\ntype: static\ndirectory: .\n'
-    });
+    setDraft(value.file ? { original: value.file, text: value.file.text } : createWhenMissing ? { text: STATIC_DRAFT } : undefined);
     setPrevious(value.previous);
     setReconciliation(value.reconciliation);
     setConflicts(value.files);
     setView(nextView);
-    setSection('Configuration');
+    setAsRun(undefined);
+    setSection(value.file || createWhenMissing ? 'Configuration' : 'Activity');
   }
   useEffect(() => {
-    if (generation?.status === 'NEEDS_INPUT') {
-      setSection('Configuration');
-      setShowAgent(true);
-    }
-    const proposal = generation?.draft;
     if (!proposal || proposal.id === loadedProposal.current) return;
     let disposed = false;
     void api.readApplicationPreviewFile({ taskId, draftId: proposal.id }).then(
       (value) => {
         if (disposed) return;
         loadedProposal.current = proposal.id;
-        setDraft({
-          original: value.original,
-          text: proposal.yaml,
-          draftId: proposal.id
-        });
+        setDraft({ original: value.original, text: proposal.yaml, draftId: proposal.id });
+        setAsRun(undefined);
         setSection('Configuration');
         setView('Changes');
-        setShowAgent(false);
       },
       (cause) => {
         if (!disposed) setError(message(cause));
@@ -239,66 +261,79 @@ export function ApplicationPreviewPanel({
     return () => {
       disposed = true;
     };
-  }, [taskId, generation?.draft, generation?.status]);
-  async function generate(request?: string) {
-    if (!agent) return;
+  }, [taskId, proposal]);
+  // The restart review compares the serving run's text with the file once per review.
+  useEffect(() => {
+    const id = snapshot?.restartReview?.id;
+    if (!id || restartChanges?.id === id) return;
+    let disposed = false;
+    void api.readApplicationPreviewFile({ taskId }).then(
+      (value) => {
+        if (disposed) return;
+        setRestartChanges({ id, changes: value.previous && value.file ? previewConfigurationChanges(value.previous.text, value.file.text) : undefined });
+      },
+      () => {
+        if (!disposed) setRestartChanges({ id });
+      }
+    );
+    return () => {
+      disposed = true;
+    };
+  }, [taskId, snapshot?.restartReview?.id, restartChanges?.id]);
+
+  /** Sends one message to the Preview agent from outside its panel and shows the conversation. */
+  async function requestAgent(text: string) {
+    if (!agent || !selection) return;
     const value = await api.readApplicationPreviewFile({ taskId });
     if (value.files) {
       setConflicts(value.files);
       setSection('Configuration');
       return;
     }
-    setSection('Configuration');
-    setShowAgent(true);
-    await agent.generate(
-      taskId,
-      request ?? (clarification.trim() || undefined)
-    );
+    openAgent();
+    await agent.send(text, crypto.randomUUID(), selection);
   }
-  async function save(review: boolean) {
+  async function discardProposal() {
+    if (proposals && proposal) await proposals.discard(taskId);
+  }
+  async function save(startAfter: boolean) {
     if (!draft) return;
-    if (draft.draftId && agent) {
-      const validation = await agent.validate(
-        taskId,
-        draft.draftId,
-        draft.text
-      );
-      if (validation.status !== 'VALID')
-        throw new Error(
-          validation.issues.map((issue) => issue.message).join('\n')
-        );
-      await agent.accept(taskId, draft.draftId, draft.text);
-    } else
-      await api.saveApplicationPreviewFile({
-        taskId,
-        original: draft.original,
-        text: draft.text
-      });
+    if (draft.draftId && proposals) {
+      const validation = await proposals.validate(taskId, draft.draftId, draft.text);
+      if (validation.status !== 'VALID') throw new Error(validation.issues.map((issue) => issue.message).join('\n'));
+      await proposals.accept(taskId, draft.draftId, draft.text);
+    } else await api.saveApplicationPreviewFile({ taskId, original: draft.original, text: draft.text });
     const saved = await api.readApplicationPreviewFile({ taskId });
-    setDraft(
-      saved.file ? { original: saved.file, text: saved.file.text } : undefined
-    );
+    setDraft(saved.file ? { original: saved.file, text: saved.file.text } : undefined);
     setPrevious(saved.previous);
-    setShowAgent(false);
-    if (review) {
+    if (startAfter) {
       setSection('Activity');
       await api.startApplicationPreview({ taskId });
     }
-    root.current
-      ?.querySelector<HTMLButtonElement>('[data-preview-primary]')
-      ?.focus();
+    root.current?.querySelector<HTMLButtonElement>('[data-preview-primary]')?.focus();
+  }
+  async function cancel() {
+    if (reviewId) await api.cancelApplicationPreview({ taskId, attemptId: reviewId });
+    else if (status?.candidate) await api.cancelApplicationPreview({ taskId, attemptId: status.candidate.id });
   }
   const start = () => run(() => api.startApplicationPreview({ taskId }));
-  const stop = () =>
-    run(() =>
-      api.stopApplicationPreview({ taskId, expected: expected(status) })
-    );
+  const stop = () => run(() => api.stopApplicationPreview({ taskId, expected: expected(status) }));
   function showLogs(attemptId: string, source?: string, failure = false) {
     setLogSelection({ attemptId, source, failure });
     setSection('Logs');
   }
+  function openAgent() {
+    setAgentOpen(true);
+    if (narrow) setSection('Preview agent');
+  }
+  function closeAgent() {
+    setAgentOpen(false);
+    if (section === 'Preview agent') setSection('Activity');
+  }
   function sendToTaskAgent(text: string) {
-    void run(async () => { await onTaskAgent?.(text); });
+    void run(async () => {
+      await onTaskAgent?.(text);
+    });
   }
   function handoff() {
     sendToTaskAgent(
@@ -307,96 +342,156 @@ export function ApplicationPreviewPanel({
         : 'Inspect preview.yaml and the project requirements. Explain the proposed changes before executing them. Keep secret values concealed.'
     );
   }
-  function repair() {
+  const investigate = () => void run(() => requestAgent(investigationRequest(diagnosis!)));
+  /** The diagnosis names the fix; this is the control that performs it. */
+  function recommended() {
     if (!diagnosis) return;
-    if (diagnosis.action === 'task-agent' && onTaskAgent) {
-      handoff();
-      return;
+    switch (diagnosis.action) {
+      case 'task-agent':
+        return onTaskAgent ? handoff() : investigate();
+      case 'logs':
+        return showLogs(diagnosis.attemptId, diagnosis.service, true);
+      case 'docker':
+        return void start();
+      case 'image':
+        return diagnosis.command ? void navigator.clipboard.writeText(diagnosis.command) : undefined;
+      case 'cleanup':
+        return void stop();
+      case 'secrets':
+        return setSecretReferences(requirements?.secrets.map((item) => item.id) ?? []);
+      case 'source':
+        return setSection('Activity');
+      case 'readiness':
+        return void run(() => loadFile());
+      default:
+        return investigate();
     }
-    if (diagnosis.action === 'logs') {
-      showLogs(diagnosis.attemptId, diagnosis.service, true);
-      return;
-    }
-    if (diagnosis.action === 'docker') {
-      void start();
-      return;
-    }
-    if (diagnosis.action === 'image' && diagnosis.command) {
-      void navigator.clipboard.writeText(diagnosis.command);
-      return;
-    }
-    if (diagnosis.action === 'cleanup') {
-      void stop();
-      return;
-    }
-    if (diagnosis.action === 'secrets') {
-      setSecretReferences(secrets.map((item) => item.id));
-      return;
-    }
-    if (diagnosis.action === 'source') {
-      setSection('Activity');
-      return;
-    }
-    if (diagnosis.action === 'readiness') {
-      void run(() => loadFile());
-      return;
-    }
-    void run(() =>
-      generate(
-        `Investigate ${diagnosis.service ?? 'Application'}: ${diagnosis.observed}. ${diagnosis.command ? `Recommended command: ${diagnosis.command}.` : ''} ${diagnosis.action === 'install' ? 'Propose the evidenced dependency install step and dependency ordering.' : ''} Return a configuration proposal for review; execute nothing.`
-      )
-    );
   }
-  const review = approval?.description ?? restart?.description;
-  const reviewId = approval?.attemptId ?? restart?.id;
-  const needsRequirements =
-    blockers > 0 && (!serving || !!review || snapshot?.configurationChanged);
-  const nextLabel =
-    status?.candidate && !reviewId
-      ? 'Starting preview…'
-      : generating
-        ? 'Drafting configuration…'
-        : dirty
-          ? 'Save and review startup'
-          : reviewId
-            ? restart
-              ? 'Approve restart'
-              : 'Approve and start'
-            : serving
-              ? 'Open app'
-              : snapshot?.hasConfigurationFile
-                ? 'Start preview'
-                : 'Draft configuration with agent';
-  const primaryDisabled =
-    (!!status?.candidate && !reviewId) ||
-    busy ||
-    generating ||
-    !!readError ||
-    !snapshot ||
-    (!dirty && !!reviewId && blockers > 0) ||
-    (!dirty &&
-      !serving &&
-      snapshot.hasConfigurationFile &&
-      (blockers > 0 || !!snapshot.configurationError)) ||
-    (!snapshot?.hasConfigurationFile &&
-      !dirty &&
-      (!agent || !!agent.disabledReason)) ||
-    (!editable && dirty);
-  async function next() {
-    if (dirty) await save(true);
-    else if (reviewId) {
-      await api.approveApplicationPreview({ taskId, attemptId: reviewId });
-      root.current?.querySelector<HTMLElement>('[role="status"]')?.focus();
-    } else if (serving)
-      await api.openApplicationPreview({ taskId, attemptId: serving.id });
-    else if (snapshot?.hasConfigurationFile)
-      await api.startApplicationPreview({ taskId });
-    else await generate();
-  }
+  const agentDisabled = !agent || !!agent.disabledReason;
+  const investigateItem = { label: 'Investigate with Preview agent', disabled: agentDisabled || busy, disabledReason: agent?.disabledReason, onSelect: investigate };
+  const agentToggleTitle = !agent ? 'The Preview agent is not available here.' : agentOpen ? 'Hide the Preview agent' : 'Ask the Preview agent to check the setup, inspect logs or draft configuration';
+  /** Diagnoses whose recommended fix is the agent's reading show one investigate control instead of two. */
+  const diagnosisInvestigates =
+    !!diagnosis && (['agent', 'install', 'command'].includes(diagnosis.action) || (diagnosis.action === 'task-agent' && !onTaskAgent));
+  const actions: Record<PreviewPrimaryAction | PreviewSecondaryAction, () => void> = {
+    'restore-worktree': () => void onRestoreWorktree?.(),
+    'reconnect-checkout': () => onReconnectCheckout?.(),
+    'prepare-worktree': () => void onPrepareWorktree?.(),
+    draft: () => void run(() => requestAgent(DRAFT_REQUEST)),
+    write: () => void run(() => loadFile('YAML', true)),
+    'start-retained': () => void run(() => api.startRetainedApplicationPreview({ taskId })),
+    'save-and-review': () => void run(() => save(true)),
+    approve: () =>
+      void run(async () => {
+        await api.approveApplicationPreview({ taskId, attemptId: reviewId! });
+        root.current?.querySelector<HTMLElement>('[role="status"]')?.focus();
+      }),
+    open: () => void run(() => api.openApplicationPreview({ taskId, attemptId: serving!.id })),
+    start: () => void start(),
+    cancel: () => void run(cancel),
+    stop: () => void stop(),
+    discard: () =>
+      void run(async () => {
+        await discardProposal();
+        await loadFile();
+      }),
+    save: () => void run(() => save(false))
+  };
+  const menu: ActionMenuItem[] = !available
+    ? [
+        ...(latest ? [{ label: 'Open in Logs', onSelect: () => showLogs(latest.id) }] : []),
+        ...(status?.data ? [{ label: 'Delete data…', danger: true, disabled: busy || !!serving || !!status.candidate, onSelect: () => setConfirmData(true) }] : [])
+      ]
+    : [
+        ...(onTaskAgent ? [{ label: 'Send to task agent', disabled: busy, onSelect: handoff }] : []),
+        {
+          label: snapshot?.hasConfigurationFile ? 'Edit configuration' : 'Write it myself',
+          disabled: busy || !editable,
+          onSelect: () => void run(() => loadFile('YAML', true))
+        },
+        ...(requirements?.secrets.length
+          ? [{ label: 'Manage required secrets', disabled: busy, onSelect: () => setSecretReferences(requirements.secrets.map((secret) => secret.id)) }]
+          : []),
+        ...(latest ? [{ label: 'Open in Logs', onSelect: () => showLogs(latest.id) }] : []),
+        ...(latest
+          ? Object.entries(latest.services ?? {})
+              .filter(([, service]) => service.type === 'job' && ['failed', 'canceled'].includes(service.state))
+              .map(([job]) => ({
+                label: `Run ${job} again`,
+                disabled: busy || !!serving || !!status?.candidate || !!status?.busy,
+                disabledReason: 'Stop the preview before rerunning a step. It can change retained data.',
+                onSelect: () => void run(() => api.rerunApplicationPreviewJob({ taskId, attemptId: latest.id, job }))
+              }))
+          : []),
+        { label: 'Reload configuration', disabled: dirty, disabledReason: 'Save or discard your edits first.', onSelect: () => void run(() => loadFile()) },
+        ...(snapshot?.canRestore
+          ? [
+              {
+                label: 'Edit last run’s configuration',
+                disabled: busy,
+                onSelect: () =>
+                  void run(async () => {
+                    const value = await api.readApplicationPreviewFile({ taskId });
+                    if (!value.previous) throw new Error('The original file is no longer available.');
+                    setDraft({ original: value.file, text: value.previous.text });
+                    setAsRun(undefined);
+                    setSection('Configuration');
+                    setView('Changes');
+                  })
+              }
+            ]
+          : []),
+        ...(snapshot?.hasConfigurationFile && serving ? [{ label: 'Review update', disabled: !editable || busy || !!status?.candidate, onSelect: () => void start() }] : []),
+        ...(snapshot && !snapshot.hasConfigurationFile
+          ? [
+              {
+                label: 'Check for a plain static site',
+                disabled: busy,
+                onSelect: () =>
+                  void run(async () => {
+                    const setup = await api.inspectApplicationPreviewSetup({ taskId });
+                    const choice = setup.recommendations[0];
+                    if (!choice) throw new Error('No folder with an index.html and no package manifest was found. Describe the services instead.');
+                    setDraft({ text: `name: application\ntype: static\ndirectory: ${JSON.stringify(choice.directory)}\n` });
+                    setAsRun(undefined);
+                    setSection('Configuration');
+                    setView('YAML');
+                  })
+              }
+            ]
+          : []),
+        ...(status?.data
+          ? [{ label: 'Delete data…', danger: true, disabled: busy || !!serving || !!status.candidate, disabledReason: 'Stop Preview before deleting its data.', onSelect: () => setConfirmData(true) }]
+          : [])
+      ];
+  const needsRequirements = blockers > 0 && (!serving || !!review || snapshot?.configurationChanged);
+  const empty = !!snapshot && available && !snapshot.hasConfigurationFile && !latest && !draft && !asRun;
+  const tabs: Section[] = [
+    ...(snapshot?.hasConfigurationFile || latest || draft || asRun ? (['Activity', ...(available ? ['Configuration' as const] : []), 'Logs'] as Section[]) : []),
+    ...(narrow && agentOpen ? (['Preview agent'] as Section[]) : [])
+  ];
+  const agentPanel = agent && selection && agentOpen ? (
+    <PreviewAgentPanel
+      agent={agent}
+      selection={selection}
+      onSelectionChange={setAgentSelection}
+      proposal={proposal}
+      worktreePath={projectDirectory}
+      draft={agentDraft}
+      onDraftChange={setAgentDraft}
+      onReviewProposal={() => {
+        setAsRun(undefined);
+        setSection('Configuration');
+        setView('Changes');
+      }}
+      onClose={closeAgent}
+    />
+  ) : null;
+  const latestMeta = `${serving && latest?.id !== serving.id ? 'update' : 'this run'}${latest?.startedAt ? ` · ${previewRunRows(status, false).find((run) => run.attempt.id === latest.id)?.time ?? ''}` : ''}`;
   return (
     <section
       ref={root}
-      className="tm-preview-workspace tm-application-preview"
+      className={`tm-application-preview${agentPanel && !narrow ? ' tm-application-preview--split' : ''}`}
       aria-label="Application preview"
       onKeyDown={(event) => {
         if (
@@ -404,817 +499,268 @@ export function ApplicationPreviewPanel({
           event.defaultPrevented ||
           !reviewId ||
           busy ||
-          (event.target as HTMLElement).closest(
-            'input, textarea, [role="menu"]'
-          )
+          (event.target as HTMLElement).closest('input, textarea, [role="menu"], .tm-side-conversation')
         )
           return;
         event.preventDefault();
         void run(async () => {
           await api.cancelApplicationPreview({ taskId, attemptId: reviewId });
-          root.current
-            ?.querySelector<HTMLButtonElement>('[data-preview-primary]')
-            ?.focus();
+          root.current?.querySelector<HTMLButtonElement>('[data-preview-primary]')?.focus();
         });
       }}
     >
-      <header className="tm-preview-workspace__head">
-        <div className="tm-preview-statusline">
-          <strong>{projectName ?? 'Application'}</strong>
-          <span role="status" tabIndex={-1}>
-            <Chip
-              tone={readError ? 'error' : presentation.tone}
-              label={
-                readError
-                  ? 'Unavailable'
-                  : generating
-                    ? 'Drafting configuration'
-                    : !snapshot
-                      ? 'Checking preview…'
-                      : !snapshot.hasConfigurationFile && !latest
-                        ? 'No configuration'
-                        : restart
-                          ? 'Restart review'
-                          : presentation.label
-              }
-            />
-          </span>
-          {serving && status?.url ? (
-            <code className="tm-application-preview__url">{status.url}</code>
-          ) : null}
-        </div>
-        <div className="tm-preview-workspace__actions">
-          {generating ? (
-            <button
-              className="outline-button"
-              onClick={() => void run(() => agent!.discard(taskId))}
-            >
-              Cancel drafting
-            </button>
-          ) : dirty ? (
-            <button
-              className="ghost-button"
-              disabled={busy}
-              onClick={() =>
-                void run(async () => {
-                  if (draft?.draftId) await agent?.discard(taskId);
-                  await loadFile();
-                })
-              }
-            >
-              Discard
-            </button>
-          ) : reviewId || status?.candidate ? (
-            <button
-              className="outline-button"
-              disabled={busy}
-              onClick={() =>
-                void run(() =>
-                  api.cancelApplicationPreview({
-                    taskId,
-                    attemptId: reviewId ?? status!.candidate!.id
-                  })
-                )
-              }
-            >
-              Cancel
-            </button>
-          ) : serving ? (
-            <button
-              className="outline-button"
-              disabled={busy}
-              onClick={() => void stop()}
-            >
-              Stop
-            </button>
-          ) : null}
-          <button
-            data-preview-primary
-            className={
-              !reviewId &&
-              !dirty &&
-              !needsRequirements &&
-              (diagnosis ||
-                snapshot?.configurationError ||
-                (snapshot?.configurationChanged && serving))
-                ? 'outline-button'
-                : 'primary-button'
-            }
-            disabled={primaryDisabled}
-            title={
-              primaryDisabled
-                ? blockers
-                  ? `Resolve ${blockers === 1 ? 'this requirement' : `${blockers} requirements`} before starting.`
-                  : (snapshot?.configurationError ??
-                    (nextLabel === 'Draft configuration with agent'
-                      ? agent?.disabledReason
-                      : undefined) ??
-                    'Wait for the current operation.')
-                : undefined
-            }
-            onClick={() => void run(next)}
-          >
-            {nextLabel}
-          </button>
-          <ActionMenu
-            label="More preview actions"
-            trigger={<Ellipsis size={16} aria-hidden="true" />}
-            items={[
-              {
-                label: 'Ask Preview agent',
-                disabled:
-                  !agent || busy || generating || !!agent.disabledReason,
-                disabledReason: agent?.disabledReason,
-                onSelect: () => {
-                  setSection('Configuration');
-                  setShowAgent(true);
-                }
-              },
-              ...(onTaskAgent
-                ? [
-                    {
-                      label: 'Send to task agent',
-                      disabled: busy,
-                      onSelect: handoff
-                    }
-                  ]
-                : []),
-              {
-                label: snapshot?.hasConfigurationFile
-                  ? 'Edit configuration'
-                  : 'Write it myself',
-                disabled: busy || !editable,
-                onSelect: () => void run(() => loadFile('YAML'))
-              },
-              ...(secrets.length
-                ? [
-                    {
-                      label: 'Manage required secrets',
-                      disabled: busy,
-                      onSelect: () =>
-                        setSecretReferences(secrets.map((secret) => secret.id))
-                    }
-                  ]
-                : []),
-              ...(latest
-                ? [
-                    {
-                      label: 'Open in Logs',
-                      onSelect: () => showLogs(latest.id)
-                    }
-                  ]
-                : []),
-              ...(latest
-                ? Object.entries(latest.services ?? {})
-                    .filter(
-                      ([, service]) =>
-                        service.type === 'job' &&
-                        ['failed', 'canceled'].includes(service.state)
-                    )
-                    .map(([job]) => ({
-                      label: `Run ${job} again`,
-                      disabled:
-                        busy ||
-                        !!serving ||
-                        !!status?.candidate ||
-                        !!status?.busy,
-                      disabledReason:
-                        'Stop the preview before rerunning a step. It can change retained data.',
-                      onSelect: () =>
-                        void run(() =>
-                          api.rerunApplicationPreviewJob({
-                            taskId,
-                            attemptId: latest.id,
-                            job
-                          })
-                        )
-                    }))
-                : []),
-              ...(dirty
-                ? [
-                    {
-                      label: 'Save configuration',
-                      onSelect: () => void run(() => save(false))
-                    }
-                  ]
-                : []),
-              {
-                label: 'Reload configuration',
-                disabled: dirty,
-                disabledReason: 'Save or discard your edits first.',
-                onSelect: () => void run(() => loadFile())
-              },
-              ...(snapshot?.canRestore
-                ? [
-                    {
-                      label: 'Restore running configuration',
-                      disabled: busy,
-                      onSelect: () =>
-                        void run(async () => {
-                          const value = await api.readApplicationPreviewFile({
-                            taskId
-                          });
-                          if (!value.previous)
-                            throw new Error(
-                              'The original file is no longer available.'
-                            );
-                          setDraft({
-                            original: value.file,
-                            text: value.previous.text
-                          });
-                          setSection('Configuration');
-                          setView('Changes');
-                        })
-                    }
-                  ]
-                : []),
-              ...(snapshot?.hasConfigurationFile && serving
-                ? [
-                    {
-                      label: 'Review update',
-                      disabled: !editable || busy || !!status?.candidate,
-                      onSelect: () => void start()
-                    }
-                  ]
-                : []),
-              ...(!snapshot?.hasConfigurationFile && latest
-                ? [
-                    {
-                      label: 'Start from last run’s configuration',
-                      onSelect: () =>
-                        void run(() =>
-                          api.startRetainedApplicationPreview({ taskId })
-                        )
-                    }
-                  ]
-                : []),
-              ...(status?.data
-                ? [
-                    {
-                      label: 'Delete data…',
-                      danger: true,
-                      disabled: busy || !!serving || !!status.candidate,
-                      disabledReason: 'Stop Preview before deleting its data.',
-                      onSelect: () => setConfirmData(true)
-                    }
-                  ]
-                : [])
-            ]}
-          />
-        </div>
-      </header>
-      {readError || error ? (
-        <p role="alert" className="form-error">
-          {error ?? readError}
-        </p>
-      ) : null}
-      {needsRequirements || secretReferences ? (
-        <DecisionBlock
-          kind="Before this runs"
-          tone="action"
-          summary={
-            blockers
-              ? `${blockers} ${blockers === 1 ? 'requirement needs' : 'requirements need'} attention`
-              : 'Review secret storage'
-          }
-        >
-          {[...folderRequirements.values()].map(({ source, services }) => {
-            const key = `${source.service}:${source.declaration}`;
-            const directory = chosenFolders[key] ?? source.directory;
-            return (
-              <div className="tm-preview-requirement" key={key}>
-                <strong>{services.join(', ')}</strong>
-                <div>
-                  <code>{source.declaration}</code>
-                  <p>
-                    {source.missing && !chosenFolders[key]
-                      ? 'Folder not found: '
-                      : ''}
-                    <code>{directory}</code>
-                  </p>
-                </div>
-                {source.missing && !chosenFolders[key] ? (
-                  <button
-                    className="outline-button"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        const selected = await api.chooseRepositoryFolder();
-                        if (selected)
-                          setChosenFolders((value) => ({
-                            ...value,
-                            [key]: selected
-                          }));
-                      })
-                    }
-                  >
-                    Choose folder
-                  </button>
-                ) : (
-                  <button
-                    className="outline-button"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(() =>
-                        api.connectApplicationPreviewSource({
-                          taskId,
-                          service: source.service,
-                          directory,
-                          expected: expected(status)
-                        })
-                      )
-                    }
-                  >
-                    Connect
-                  </button>
-                )}
-              </div>
-            );
-          })}
-          {sources.some((source) => !source.connected) ? (
-            <p className="tm-preview-help">
-              Connect lets these services use this folder for this app session.
-              Commands can read or change files your account can access.
-            </p>
-          ) : null}
-          {storage && storage.state !== 'unlocked' ? (
-            <div className="tm-preview-requirement">
-              <strong>Database credentials</strong>
-              <span>Used by {storage.services.join(', ')}</span>
-              <button
-                className="outline-button"
-                onClick={() => setSecretReferences([])}
-              >
-                {storage.state === 'new' ? 'Set up storage' : 'Unlock storage'}
-              </button>
+      <div className="tm-application-preview__main">
+        <div className="tm-preview-workspace">
+          <header className="tm-preview-workspace__head">
+            <div className="tm-preview-statusline">
+              <strong>{projectName ?? 'Application'}</strong>
+              <span role="status" tabIndex={-1}>
+                <Chip tone={row.chip.tone} label={row.chip.label} />
+              </span>
+              {row.url ? <code className="tm-application-preview__url">{row.url}</code> : null}
             </div>
-          ) : null}
-          {secrets
-            .filter((secret) => secret.availability !== 'available')
-            .map((secret) => (
-              <div className="tm-preview-requirement" key={secret.id}>
-                <code title={secret.id}>{secret.id}</code>
-                <span>
-                  Used by{' '}
-                  {secret.bindings
-                    .map(
-                      (binding) =>
-                        `${binding.service ?? 'Application'} → ${binding.key}`
-                    )
-                    .join(', ')}
-                </span>
-                <button
-                  className="outline-button"
-                  onClick={() => setSecretReferences([secret.id])}
-                >
-                  {secret.availability === 'missing'
-                    ? 'Add value'
-                    : secret.availability === 'locked'
-                      ? 'Unlock storage'
-                      : 'Set up storage'}
+            <div className="tm-preview-workspace__actions">
+              {row.secondary.map((item) => (
+                <button key={item.action} className={item.action === 'discard' ? 'ghost-button' : 'outline-button'} disabled={busy || (item.action === 'save' && !editable) || (item.action === 'draft' && agentWorking)} onClick={actions[item.action]}>
+                  {item.label}
                 </button>
-              </div>
-            ))}
-          {secretReferences ? (
-            <PreviewSecretDialog
-              inline
-              references={secretReferences}
-              recipients={Object.fromEntries(
-                secrets.map((secret) => [
-                  secret.id,
-                  secret.bindings.map(
-                    (binding) =>
-                      `${binding.service ?? 'Application'} → ${binding.key}`
-                  )
-                ])
-              )}
-              onClose={() => {
-                setSecretReferences(undefined);
-                refresh();
-              }}
-              onSaved={() => {
-                setSecretReferences(undefined);
-                refresh();
-              }}
-            />
-          ) : null}
-
-          {snapshot?.requirements?.connections.map((service) => (
-            <div className="tm-preview-requirement" key={service}>
-              <strong>{service}</strong>
-              <span>Connection address required</span>
+              ))}
+              {row.reason ? <span className="tm-preview-reason">{row.reason}</span> : null}
+              {row.primary ? (
+                <button
+                  data-preview-primary
+                  className="primary-button"
+                  disabled={row.primary.disabled || (row.primary.action === 'save-and-review' && !editable)}
+                  title={waitingForAgent ? 'Wait for the Preview agent to finish before saving its proposal.' : row.primary.disabledReason}
+                  onClick={actions[row.primary.action]}
+                >
+                  {row.primary.label}
+                </button>
+              ) : null}
               <button
-                className="outline-button"
-                onClick={() => void run(() => loadFile())}
+                type="button"
+                className="tm-iconbtn tm-preview-agent-toggle"
+                aria-pressed={agentOpen}
+                aria-label="Preview agent"
+                title={agentToggleTitle}
+                disabled={!agent}
+                onClick={() => (agentOpen ? closeAgent() : openAgent())}
               >
-                Set address
+                <MessageSquare size={16} strokeWidth={1.5} aria-hidden="true" />
+                {questionPending && !agentOpen ? <span className="tm-preview-agent-toggle__dot" aria-label="questions waiting" /> : null}
               </button>
+              {menu.length ? <ActionMenu label="More preview actions" trigger={<Ellipsis size={16} aria-hidden="true" />} items={menu} /> : null}
             </div>
-          ))}
-          {snapshot?.requirements?.description?.prerequisites
-            ?.filter((item) => item.status === 'missing')
-            .map((item, i) => (
-              <p key={i}>
-                {item.service ? `${item.service}: ` : ''}
-                {item.message}
-              </p>
-            ))}
-          <details className="tm-preview-disclosure">
-            <summary>
-              <DisclosureChevron />
-              Other checks
-            </summary>
-            {snapshot?.requirements?.description ? (
-              <ConfigurationDefinitions
-                description={snapshot.requirements.description}
-                showSecrets={false}
-              />
-            ) : (
-              <p>
-                Command requirements are inspected after the source folders are
-                connected.
-              </p>
-            )}
-          </details>
-        </DecisionBlock>
-      ) : review ? (
-        <DecisionBlock
-          kind={restart ? 'Restart review' : 'Approve this run'}
-          tone="action"
-          summary={
-            restart
-              ? 'Approving stops the running preview first. The app is unavailable until the new version is ready.'
-              : 'Review the commands and access for this run.'
-          }
-        >
-          {(restart?.affected ?? snapshot?.approval?.affected)?.map((row) => (
-            <p key={row.job}>
-              <strong>{row.job}</strong> runs in <code>{row.directory}</code>,
-              shared by {row.previews.join(', ')}. It may change files or
-              interrupt those previews.
-            </p>
-          ))}
-          <PreviewRunReview description={review} />
-          <p className="tm-preview-help">
-            Commands can read or change files your account can access. Saving or
-            connecting never approves a run.
-          </p>
-        </DecisionBlock>
-      ) : snapshot?.configurationError ? (
-        <DecisionBlock
-          kind="Configuration needs attention"
-          tone="error"
-          summary={snapshot.configurationError}
-          actions={
-            <button
-              className="primary-button"
-              onClick={() => void run(() => loadFile('YAML'))}
-            >
-              Review configuration
-            </button>
-          }
-        />
-      ) : diagnosis && !dirty ? (
-        <DecisionBlock
-          kind={
-            serving
-              ? 'Update failed · previous preview reported serving'
-              : `${diagnosis.service ?? 'Application'} failed`
-          }
-          tone="error"
-          title={diagnosis.title}
-          summary={diagnosis.summary}
-          actions={
-            <>
-              <button
-                className="primary-button"
-                disabled={busy || generating}
-                onClick={repair}
-              >
-                {diagnosis.actionLabel}
-              </button>
-              <ActionMenu
-                label="More recovery actions"
-                trigger="More"
-                items={[
-                  {
-                    label: 'Investigate with Preview agent',
-                    disabled: !!agent?.disabledReason,
-                    disabledReason: agent?.disabledReason,
-                    onSelect: () => void run(() => generate())
-                  },
-                  {
-                    label: 'Send to task agent',
-                    disabled: !onTaskAgent,
-                    onSelect: handoff
-                  },
-                  {
-                    label: 'Edit configuration',
-                    onSelect: () => void run(() => loadFile())
-                  },
-                  {
-                    label: 'Open in Logs',
-                    onSelect: () =>
-                      showLogs(diagnosis.attemptId, diagnosis.service, true)
-                  },
-                  { label: 'Start again', onSelect: () => void start() },
-                  ...(serving
-                    ? [
-                        {
-                          label: 'Dismiss',
-                          onSelect: () => setDismissed(diagnosis.attemptId)
-                        }
-                      ]
-                    : [])
-                ]}
-              />
-            </>
-          }
-          details={
-            <>
-              <p>{diagnosis.observed}</p>
-              <p>{diagnosis.unknown}</p>
-              <p>{diagnosis.guarantee}</p>
-              <button
-                className="ghost-button"
-                onClick={() =>
-                  showLogs(diagnosis.attemptId, diagnosis.service, true)
-                }
-              >
-                Open in Logs
-              </button>
-            </>
-          }
-        >
-          {diagnosis.excerpt ? (
-            <div className="tm-preview-failure-excerpt">
-              <pre>{diagnosis.excerpt}</pre>
-              <button
-                className="ghost-button"
-                onClick={() =>
-                  showLogs(diagnosis.attemptId, diagnosis.service, true)
-                }
-              >
-                Open in Logs
-              </button>
-            </div>
-          ) : null}
-        </DecisionBlock>
-      ) : snapshot?.configurationChanged && serving ? (
-        <DecisionBlock
-          kind="Configuration changed"
-          summary="preview.yaml differs from the running configuration."
-          actions={
-            <>
-              <button
-                className="primary-button"
-                disabled={busy || !editable}
-                onClick={() => void start()}
-              >
-                Review changes and restart
-              </button>
-              <button
-                className="ghost-button"
-                onClick={() => void run(() => loadFile('Changes'))}
-              >
-                View changes
-              </button>
-            </>
-          }
-        />
-      ) : null}
-      {!snapshot?.hasConfigurationFile &&
-      !latest &&
-      !draft &&
-      !generating &&
-      !showAgent ? (
-        <div className="tm-application-preview__empty">
-          <p>
-            Draft a configuration from this project’s dependencies, frontend,
-            backend, and connection requirements.
-          </p>
-          <p>Nothing runs until you review and approve it.</p>
-          {agent?.disabledReason ? (
-            <p>
-              {agent.disabledReason} Use Write it myself from the menu, or
-              configure a Preview agent in Settings.
-            </p>
-          ) : null}
-          <button
-            className="ghost-button"
-            onClick={() =>
-              void run(async () => {
-                const setup = await api.inspectApplicationPreviewSetup({
-                  taskId
-                });
-                if (!setup.recommendations.length)
-                  throw new Error(
-                    'This project needs agent-assisted setup or a complete configuration written manually.'
-                  );
-                const choice = setup.recommendations[0]!;
-                setDraft({
-                  text: `name: application\ntype: static\ndirectory: ${JSON.stringify(choice.directory)}\n`
-                });
-                setSection('Configuration');
-                setView('YAML');
-              })
-            }
-          >
-            Check for a plain static site
-          </button>
-        </div>
-      ) : null}
-      {snapshot?.hasConfigurationFile ||
-      latest ||
-      draft ||
-      showAgent ||
-      generation?.status === 'NEEDS_INPUT' ||
-      generating ? (
-        <>
-          <nav className="tm-tabs" role="tablist" aria-label="Preview sections">
-            {(['Activity', 'Configuration', 'Logs'] as const).map((item) => (
-              <AccessibleTab
-                key={item}
-                id={`preview-tab-${item}`}
-                panelId={`preview-panel-${item}`}
-                label={item}
-                selected={section === item}
-                onSelect={() => {
-                  if (item === 'Configuration' && !draft)
-                    void run(() => loadFile());
-                  else setSection(item);
-                }}
-              />
-            ))}
-          </nav>
-          <div
-            role="tabpanel"
-            id="preview-panel-Activity"
-            aria-labelledby="preview-tab-Activity"
-            hidden={section !== 'Activity'}
-          >
-            <ApplicationActivity
+          </header>
+          {readError || error ? <p role="alert" className="form-error">{error ?? readError}</p> : null}
+          {availability.state !== 'available' ? (
+            <PreviewWorktreeBlock worktree={worktree} availability={availability} />
+          ) : (needsRequirements || secretReferences) && requirements ? (
+            <PreviewRequirementsBlock
               taskId={taskId}
+              requirements={requirements}
               status={status}
-              restoredRun={snapshot?.restoredRun}
-              onLogs={showLogs}
+              busy={busy}
+              run={run}
+              onEditFile={() => void run(() => loadFile())}
+              secretReferences={secretReferences}
+              onSecretReferences={setSecretReferences}
+              refresh={refresh}
             />
-          </div>
-          <div
-            role="tabpanel"
-            id="preview-panel-Configuration"
-            aria-labelledby="preview-tab-Configuration"
-            hidden={section !== 'Configuration'}
-          >
-            {generating ? (
-              <p role="status">
-                The Preview agent is inspecting project requirements and
-                drafting the configuration…
-              </p>
-            ) : null}
-            {generation?.status === 'FAILED' ? (
-              <p role="alert" className="form-error">
-                {generation.message}
-              </p>
-            ) : null}
-            {showAgent || generation?.status === 'NEEDS_INPUT' ? (
-              <form
-                className="tm-preview-agent-request"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void run(() => generate());
-                }}
-              >
-                {(generation?.report?.unresolvedDecisions ?? []).map(
-                  (question, i) => (
-                    <p key={i}>{question}</p>
-                  )
-                )}
-                <label className="field">
-                  <span>What should the Preview agent inspect or change?</span>
-                  <textarea
-                    aria-label="What should the Preview agent inspect or change?"
-                    value={clarification}
-                    rows={3}
-                    maxLength={4000}
-                    disabled={generating}
-                    onChange={(event) => setClarification(event.target.value)}
-                  />
-                  <small>
-                    Use secret reference names here. Enter values only in secret
-                    storage.
-                  </small>
-                </label>
-                <button
-                  className="outline-button"
-                  disabled={
-                    generating ||
-                    busy ||
-                    !agent ||
-                    !!agent.disabledReason ||
-                    (generation?.status === 'NEEDS_INPUT' &&
-                      !clarification.trim())
-                  }
-                >
-                  Draft configuration
-                </button>
-              </form>
-            ) : null}
-            {conflicts ? (
-              <div className="tm-preview-file-conflict">
-                <p>
-                  Both default files exist. Compare them and choose one. The
-                  other is kept with a .unused suffix.
-                </p>
-                {conflicts.map((file) => (
-                  <section key={file.name}>
-                    <h3>{file.name}</h3>
-                    <pre>{file.text}</pre>
-                    <button
-                      className="outline-button"
-                      onClick={() =>
-                        void run(async () => {
-                          await api.chooseApplicationPreviewFile({
-                            taskId,
-                            keep: file.name,
-                            files: conflicts
-                          });
-                          await loadFile();
-                        })
-                      }
-                    >
-                      Keep {file.name}
-                    </button>
-                  </section>
-                ))}
-              </div>
-            ) : null}
-            {reconciliation ? (
-              <div className="tm-preview-reconciliation">
-                <p>
-                  The last run used settings that differ from this file:{' '}
-                  {reconciliation.changes.join(', ') ||
-                    'concealed environment values'}
-                  .
-                </p>
-                {reconciliation.concealedKeys.length ? (
-                  <p>
-                    Values for {reconciliation.concealedKeys.join(', ')} cannot
-                    be restored. Enter a secret reference or confirm the
-                    nonsecret value.
-                  </p>
-                ) : null}
-                {reconciliation.changes.length ? (
-                  <button
-                    className="outline-button"
-                    onClick={() => {
-                      if (draft)
-                        setDraft({ ...draft, text: reconciliation.text });
-                      setReconciliation(undefined);
-                      setView('Changes');
-                    }}
-                  >
-                    Review settings from last run
-                  </button>
-                ) : null}
+          ) : review ? (
+            <PreviewRunApprovalBlock
+              review={review}
+              restart={!!snapshot?.restartReview}
+              projectDirectory={projectDirectory}
+              busy={busy}
+              changes={restartChanges?.id === snapshot?.restartReview?.id ? restartChanges?.changes : undefined}
+              onViewChanges={() => void run(() => loadFile('Changes'))}
+            />
+          ) : snapshot?.configurationError ? (
+            <DecisionBlock
+              kind="Configuration needs attention"
+              tone="error"
+              summary={snapshot.configurationError}
+              actions={<button className="outline-button" onClick={() => void run(() => loadFile('YAML'))}>Review configuration</button>}
+            />
+          ) : diagnosis && !dirty ? (
+            <PreviewDiagnosisBlock
+              diagnosis={diagnosis}
+              meta={latestMeta}
+              primary={
+                diagnosisInvestigates
+                  ? investigateItem
+                  : { label: diagnosis.actionLabel, disabled: busy, onSelect: recommended }
+              }
+              secondary={diagnosisInvestigates ? undefined : investigateItem}
+              more={[
+                ...(onTaskAgent && diagnosis.action !== 'task-agent' ? [{ label: 'Send to task agent', disabled: busy, onSelect: handoff }] : []),
+                { label: 'Edit configuration', onSelect: () => void run(() => loadFile()) },
+                { label: 'Open in Logs', onSelect: () => showLogs(diagnosis.attemptId, diagnosis.service, true) },
+                ...(serving ? [{ label: 'Dismiss', onSelect: () => setDismissed(diagnosis.attemptId) }] : [])
+              ]}
+              onOpenLogs={() => showLogs(diagnosis.attemptId, diagnosis.service, true)}
+            />
+          ) : snapshot && !snapshot.hasConfigurationFile && latest && !dirty ? (
+            <DecisionBlock
+              kind="Configuration file missing"
+              summary="preview.yaml is not in this worktree. The configuration of the last run is retained and can run again; saving a file replaces it."
+              actions={
                 <button
                   className="ghost-button"
-                  onClick={() => setReconciliation(undefined)}
+                  onClick={() => {
+                    setAsRun(latest);
+                    setSection('Configuration');
+                  }}
                 >
-                  Not now
+                  View last run’s configuration
                 </button>
-              </div>
-            ) : null}
-            {draft && !conflicts ? (
-              <ApplicationConfiguration
-                draft={draft}
-                previous={previous}
-                view={view}
-                onView={setView}
-                onChange={(text) => setDraft({ ...draft, text })}
-                onSave={() => void run(() => save(false))}
-                busy={busy || generating || !editable}
-                generation={generation}
-              />
-            ) : null}
-          </div>
-          <div
-            role="tabpanel"
-            id="preview-panel-Logs"
-            aria-labelledby="preview-tab-Logs"
-            hidden={section !== 'Logs'}
-          >
-            <ApplicationLogs
-              taskId={taskId}
-              status={status}
-              selection={logSelection}
-              onSelect={setLogSelection}
-              active={section === 'Logs'}
-              onTaskAgent={onTaskAgent ? sendToTaskAgent : undefined}
+              }
             />
-          </div>
-        </>
-      ) : null}
+          ) : snapshot?.configurationChanged && serving ? (
+            <DecisionBlock
+              kind="Configuration changed since this run started"
+              summary="preview.yaml differs from the running configuration. Applying it restarts the app."
+              actions={
+                <>
+                  <button className="outline-button" disabled={busy || !editable} onClick={() => void start()}>Restart with changes</button>
+                  <button className="ghost-button" onClick={() => void run(() => loadFile('Changes'))}>View changes</button>
+                </>
+              }
+            />
+          ) : null}
+          {empty ? (
+            <PreviewProjectFacts
+              taskId={taskId}
+              lead={
+                agentDisabled
+                  ? `No preview configuration in this worktree. Write preview.yaml to describe what runs; nothing runs until you approve it.${agent?.disabledReason ? ` ${agent.disabledReason}` : ''}`
+                  : 'No preview configuration in this worktree. The agent reads the project and proposes preview.yaml for your review; nothing runs until you approve it.'
+              }
+            />
+          ) : null}
+          {tabs.length ? (
+            <>
+              <nav className="tm-tabs" role="tablist" aria-label="Preview sections">
+                {tabs.map((item) => (
+                  <AccessibleTab
+                    key={item}
+                    id={`preview-tab-${item.replace(' ', '-')}`}
+                    panelId={`preview-panel-${item.replace(' ', '-')}`}
+                    label={item}
+                    selected={section === item}
+                    badge={item === 'Preview agent' && questionPending ? '•' : undefined}
+                    badgeAccessibleLabel={item === 'Preview agent' && questionPending ? 'questions waiting' : undefined}
+                    onSelect={() => {
+                      if (item === 'Configuration' && !draft && !asRun) void run(() => loadFile());
+                      else setSection(item);
+                    }}
+                  />
+                ))}
+              </nav>
+              <div role="tabpanel" id="preview-panel-Activity" aria-labelledby="preview-tab-Activity" hidden={section !== 'Activity'}>
+                <ApplicationActivity
+                  status={status}
+                  restoredRun={snapshot?.restoredRun}
+                  onLogs={showLogs}
+                  onAsRun={(attempt) => {
+                    setAsRun(attempt);
+                    setSection('Configuration');
+                  }}
+                />
+              </div>
+              {available ? (
+                <div role="tabpanel" id="preview-panel-Configuration" aria-labelledby="preview-tab-Configuration" hidden={section !== 'Configuration'}>
+                  {asRun ? (
+                    <PreviewAttemptConfiguration
+                      taskId={taskId}
+                      attempt={asRun}
+                      status={status}
+                      projectDirectory={projectDirectory}
+                      onBack={() => {
+                        setAsRun(undefined);
+                        if (!draft) void run(() => loadFile());
+                      }}
+                    />
+                  ) : null}
+                  {!asRun && conflicts ? (
+                    <div className="tm-preview-file-conflict">
+                      <p>Both default files exist. Compare them and choose one. The other is kept with a .unused suffix.</p>
+                      {conflicts.map((file) => (
+                        <section key={file.name}>
+                          <h3>{file.name}</h3>
+                          <pre>{file.text}</pre>
+                          <button
+                            className="outline-button"
+                            onClick={() =>
+                              void run(async () => {
+                                await api.chooseApplicationPreviewFile({ taskId, keep: file.name, files: conflicts });
+                                await loadFile();
+                              })
+                            }
+                          >
+                            Keep {file.name}
+                          </button>
+                        </section>
+                      ))}
+                    </div>
+                  ) : null}
+                  {!asRun && reconciliation ? (
+                    <div className="tm-preview-reconciliation">
+                      <p>The last run used settings that differ from this file: {reconciliation.changes.join(', ') || 'concealed environment values'}.</p>
+                      {reconciliation.concealedKeys.length ? (
+                        <p>Values for {reconciliation.concealedKeys.join(', ')} cannot be restored. Enter a secret reference or confirm the nonsecret value.</p>
+                      ) : null}
+                      {reconciliation.changes.length ? (
+                        <button
+                          className="outline-button"
+                          onClick={() => {
+                            if (draft) setDraft({ ...draft, text: reconciliation.text });
+                            setReconciliation(undefined);
+                            setView('Changes');
+                          }}
+                        >
+                          Review settings from last run
+                        </button>
+                      ) : null}
+                      <button className="ghost-button" onClick={() => setReconciliation(undefined)}>Not now</button>
+                    </div>
+                  ) : null}
+                  {!asRun && draft && !conflicts ? (
+                    <ApplicationConfiguration
+                      draft={draft}
+                      previous={previous}
+                      view={view}
+                      onView={setView}
+                      onChange={(text) => setDraft({ ...draft, text })}
+                      onSave={() => void run(() => save(false))}
+                      busy={busy || !editable}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              <div role="tabpanel" id="preview-panel-Logs" aria-labelledby="preview-tab-Logs" hidden={section !== 'Logs'}>
+                <ApplicationLogs
+                  taskId={taskId}
+                  status={status}
+                  selection={logSelection}
+                  onSelect={setLogSelection}
+                  active={section === 'Logs'}
+                  onTaskAgent={onTaskAgent ? sendToTaskAgent : undefined}
+                />
+              </div>
+              {narrow && agentPanel ? (
+                <div role="tabpanel" id="preview-panel-Preview-agent" aria-labelledby="preview-tab-Preview-agent" hidden={section !== 'Preview agent'}>
+                  {agentPanel}
+                </div>
+              ) : null}
+            </>
+          ) : narrow && agentPanel ? (
+            agentPanel
+          ) : null}
+        </div>
+      </div>
+      {!narrow ? agentPanel : null}
       {confirmData && status?.data ? (
         <PreviewDialog
           title="Delete retained data?"
@@ -1223,25 +769,13 @@ export function ApplicationPreviewPanel({
           onOpenChange={onModalOpenChange}
           footer={
             <>
-              <button
-                className="outline-button"
-                disabled={busy}
-                onClick={() => setConfirmData(false)}
-              >
-                Cancel
-              </button>
+              <button className="outline-button" disabled={busy} onClick={() => setConfirmData(false)}>Cancel</button>
               <button
                 className="danger-button"
                 disabled={busy}
                 onClick={() =>
                   void run(async () => {
-                    await api.deleteApplicationPreviewData({
-                      taskId,
-                      expected: {
-                        attemptId: status.latest?.id ?? null,
-                        resources: status.data!.resources
-                      }
-                    });
+                    await api.deleteApplicationPreviewData({ taskId, expected: { attemptId: status.latest?.id ?? null, resources: status.data!.resources } });
                     setConfirmData(false);
                   })
                 }
@@ -1251,11 +785,7 @@ export function ApplicationPreviewPanel({
             </>
           }
         >
-          <p>
-            This deletes{' '}
-            {status.data.resources.map((resource) => resource.name).join(', ')}{' '}
-            for this worktree.
-          </p>
+          <p>This deletes {status.data.resources.map((resource) => resource.name).join(', ')} for this worktree.</p>
           {error ? <p className="form-error">{error}</p> : null}
         </PreviewDialog>
       ) : null}

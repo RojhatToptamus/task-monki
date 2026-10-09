@@ -13,6 +13,7 @@ import type {
 import {
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
+  isDetachedRunMode,
   isImplementationRunMode
 } from '../../shared/contracts';
 
@@ -126,8 +127,12 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
       event.runId &&
       event.runId !== task.currentRunId &&
       isAgentRunScopedEvent(event.type) &&
-      !isReviewRunEvent(task, event, currentRun)
+      !isDetachedRunEvent(task, event, currentRun)
     ) {
+      return next;
+    }
+    // A Preview conversation is telemetry beside the task: it never changes the task's run projection.
+    if (isPreviewRunEvent(event, currentRun)) {
       return next;
     }
 
@@ -305,14 +310,13 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
   }
   switch (event.type) {
     case 'TRANSITION_REQUESTED':
-      if (isReviewRunEvent(task, event, run)) {
+      if (isDetachedRunEvent(task, event, run)) {
         return task.workflowPhase;
       }
       return (getString(event.payload, 'toPhase') as Task['workflowPhase'] | undefined) ?? 'IN_PROGRESS';
     case 'AGENT_RUN_STARTED':
-      return getString(event.payload, 'mode') === 'REVIEW' ? task.workflowPhase : 'IN_PROGRESS';
     case 'PROCESS_STARTED':
-      return isReviewRunEvent(task, event, run) ? task.workflowPhase : 'IN_PROGRESS';
+      return isDetachedRunEvent(task, event, run) ? task.workflowPhase : 'IN_PROGRESS';
     case 'AGENT_RUN_COMPLETED':
       return run &&
         isImplementationRunMode(run.mode) &&
@@ -347,10 +351,17 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
   }
 }
 
-function isReviewRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
+function isPreviewRunEvent(event: DomainEvent, run?: RunRecord): boolean {
+  return run?.mode === 'PREVIEW' || getString(event.payload, 'mode') === 'PREVIEW';
+}
+
+/** Reviews and Preview agent turns run beside the task; their events never move its workflow phase. */
+function isDetachedRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
+  const eventMode = getString(event.payload, 'mode');
   return (
-    run?.mode === 'REVIEW' ||
-    getString(event.payload, 'mode') === 'REVIEW' ||
+    (run !== undefined && isDetachedRunMode(run.mode)) ||
+    eventMode === 'REVIEW' ||
+    eventMode === 'PREVIEW' ||
     Boolean(event.runId && task.projection.agentReview?.runId === event.runId)
   );
 }

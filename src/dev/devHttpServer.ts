@@ -1197,12 +1197,22 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/generate') {
+      if (request.method === 'POST' && url.pathname === '/api/preview/agent/send') {
         sendJson(
           response,
           requestId,
           200,
-          await options.service.generatePreviewRecipe((await readJson()) as never)
+          await options.service.sendPreviewAgentMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/agent/stop') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.stopPreviewAgent((await readJson()) as never)
         );
         return;
       }

@@ -5,7 +5,6 @@ import { randomUUID } from 'node:crypto';
 import { afterEach,expect,it } from 'vitest';
 import type { WorktreeRecord } from '../../shared/contracts';
 import { ApplicationPreviewService } from './ApplicationPreviewService';
-import { inspectPreviewPublicEnvironmentEvidence } from './generation/PreviewPublicEnvironmentEvidence';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -44,6 +43,7 @@ it('runs live independent worktrees only after exact approval and preserves the 
   const a = await worktree('first');
   const b = await worktree('neighbor');
   const pendingA = await service.start(a);
+  expect(pendingA.projectDirectory).toBe(await fs.realpath(a.worktreePath));
   const pendingB = await service.start(b);
   expect(pendingA.status?.active).toBeUndefined();
   await expect(service.approve(b, pendingA.status!.candidate!.id)).rejects.toThrow('no longer current');
@@ -234,11 +234,6 @@ it('keeps agent diagnostics available after runtime restart when historical logs
   expect(diagnostics).toMatchObject({
     state: 'stopped', configuration: { type: 'environment' }, logsUnavailable: expect.stringContaining('not retained')
   });
-  const evidence = await inspectPreviewPublicEnvironmentEvidence(tree.worktreePath,
-    [{ path: 'src/client.ts', content: 'fetch(process.env.NEXT_PUBLIC_API_URL)' }], [diagnostics.configuration]);
-  expect(evidence.candidates).toEqual([expect.objectContaining({ key: 'NEXT_PUBLIC_API_URL', targetPolicy: {
-    kind: 'CONFIGURED', publicHttpTarget: { scheme: 'http', host: 'localhost', port: 8001, basePath: '/' }
-  } })]);
 }, 30_000);
 
 it('reviews live-folder jobs before stopping and consumes approval only for the captured restart specification', async () => {

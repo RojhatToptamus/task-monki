@@ -61,7 +61,7 @@ import type {
   RunningOpenCodeServer
 } from './OpenCodeServerSupervisor';
 import type { ResolvedOpenCodeRuntime } from './OpenCodeRuntimeResolver';
-import type { DesignClientToolBridge } from '../../design/DesignClientToolBridge';
+import type { ClientToolBridge } from '../clientTools/ClientToolBridge';
 
 const SETTINGS: AgentExecutionSettings = {
   runtimeId: 'opencode',
@@ -122,38 +122,39 @@ describe('OpenCodeAdapter', () => {
     } finally { await fixture.adapter.shutdown(); }
   });
 
-  it('runs Design in pure mode with one registered MCP bridge and bounded turn grants', async () => {
+  it.each(['DESIGN', 'PREVIEW'] as const)('routes %s chat and tools through the task-session transport', async (mode) => {
+    const toolSet = mode === 'DESIGN' ? 'design' : 'preview';
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
-      designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      designSkillRoot: mode === 'DESIGN' ? path.resolve('resources/design-skills') : undefined,
+      clientToolBridge: bridge.api
     });
     await fixture.adapter.initialize();
-    const session = await createLocalSession(fixture);
+    const session = await createLocalSession(fixture, { role: mode === 'PREVIEW' ? 'PREVIEW' : 'PRIMARY' });
     const run = await createRun(fixture, session, SETTINGS, [], {
-      purpose: 'TASK_DESIGN',
-      clientToolGrants: ['inspect_design']
+      purpose: mode === 'DESIGN' ? 'TASK_DESIGN' : 'TASK_PREVIEW',
+      clientToolGrants: mode === 'DESIGN' ? ['inspect_design'] : ['inspect_preview', 'propose_preview_configuration']
     });
     const turn = await fixture.adapter.startTurn({
       localRunId: run.id,
       session: { localSessionId: session.id },
-      mode: 'DESIGN',
-      instructionProfile: 'DESIGN',
-      prompt: 'Create and verify the Design.',
-      authoritativeGoal: 'Create and verify the Design.',
+      mode,
+      instructionProfile: mode,
+      prompt: mode === 'DESIGN' ? 'Create and verify the Design.' : 'Inspect the project and propose its preview configuration.',
+      authoritativeGoal: mode === 'DESIGN' ? 'Create and verify the Design.' : 'Inspect the project and propose its preview configuration.',
       settings: SETTINGS
     });
 
     expect(fixture.harness.sessionSupervisor.currentServer?.argv).toContain('--pure');
     expect(fixture.harness.mcpRegistrations).toEqual([
       {
-        name: 'task_monki_design',
+        name: `task_monki_${toolSet}`,
         config: {
           type: 'local',
           command: ['/app/Task Monki', '/resources/design-tool-mcp-server.mjs'],
           environment: {
-            TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
-            TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+            TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL: 'session-credential',
+            TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE: '/private/grant-file'
           },
           timeout: 120_000
         }
@@ -166,7 +167,8 @@ describe('OpenCodeAdapter', () => {
       runtimeId: 'opencode',
       sessionId: session.id,
       worktreeId: fixture.worktree.id,
-      providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id
+      providerGeneration: fixture.harness.sessionSupervisor.currentServer?.id,
+      toolSet
     });
     expect(bridge.activateGrant).toHaveBeenCalledWith({
       grantId: 'design-grant-1',
@@ -179,9 +181,9 @@ describe('OpenCodeAdapter', () => {
       }
     });
     expect(fixture.harness.promptBodies[0]).toMatchObject({
-      system: expect.stringContaining('Task Monki Design agent')
+      system: expect.stringContaining(`Task Monki ${mode === 'DESIGN' ? 'Design' : 'Preview'} agent`)
     });
-    expect(JSON.stringify(fixture.harness.promptBodies[0])).toContain(
+    if (mode === 'DESIGN') expect(JSON.stringify(fixture.harness.promptBodies[0])).toContain(
       'Read each matching Task Monki skill with the normal file-reading tool at its exact Path.'
     );
 
@@ -224,13 +226,14 @@ describe('OpenCodeAdapter', () => {
     });
 
     expect(await fixture.runtime.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
+    expect((await fixture.runtime.getAgentItemsForRun(run.id)).some((item) => item.type === 'AGENT_MESSAGE')).toBe(true);
     expect(bridge.revokeGrant).toHaveBeenCalledWith('design-grant-1');
     await fixture.adapter.releaseSession({
       localSessionId: session.id,
       providerSessionId: activeSession.providerSessionId
     });
     expect(fixture.harness.mcpDisconnects).toEqual([
-      '/mcp/task_monki_design/disconnect'
+      `/mcp/task_monki_${toolSet}/disconnect`
     ]);
     expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
     await fixture.adapter.shutdown();
@@ -240,7 +243,7 @@ describe('OpenCodeAdapter', () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     fixture.harness.failNextMcpRegistrationAfterAccept = true;
     await fixture.adapter.initialize();
@@ -269,7 +272,7 @@ describe('OpenCodeAdapter', () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     fixture.harness.nextMcpRegistrationStatus = {
       status: 'failed',
@@ -301,7 +304,7 @@ describe('OpenCodeAdapter', () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     await fixture.adapter.initialize();
     fixture.harness.failProviderGetAt = fixture.harness.providerGetCount + 2;
@@ -342,7 +345,7 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture({
       runtimeResolver: async () => runtime,
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     const catalog = {
       connected: ['opencode', 'openai'],
@@ -450,7 +453,7 @@ describe('OpenCodeAdapter', () => {
   it('rejects Design before provider mutation when the worktree catalog loses image support', async () => {
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: fakeDesignToolBridge().api
+      clientToolBridge: fakeDesignToolBridge().api
     });
     await fixture.adapter.initialize();
     fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), {
@@ -497,7 +500,7 @@ describe('OpenCodeAdapter', () => {
     const fixture = await createFixture({
       interruptCompletionTimeoutMs: 80,
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     fixture.harness.settleAbort = true;
     await fixture.adapter.initialize();
@@ -536,7 +539,7 @@ describe('OpenCodeAdapter', () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     await fixture.adapter.initialize();
     const session = await createLocalSession(fixture);
@@ -566,7 +569,7 @@ describe('OpenCodeAdapter', () => {
     const bridge = fakeDesignToolBridge();
     const fixture = await createFixture({
       designSkillRoot: path.resolve('resources/design-skills'),
-      designClientToolBridge: bridge.api
+      clientToolBridge: bridge.api
     });
     await fixture.adapter.initialize();
     const session = await createLocalSession(fixture);
@@ -5763,8 +5766,8 @@ interface AdapterFixtureOptions {
   runtimeResolver?: OpenCodeAdapterOptions['runtimeResolver'];
   environment?: NodeJS.ProcessEnv;
   designSkillRoot?: string;
-  designClientToolBridge?: Pick<
-    DesignClientToolBridge,
+  clientToolBridge?: Pick<
+    ClientToolBridge,
     'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
   >;
 }
@@ -5935,7 +5938,7 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
   const runtimeAccess = persistence.taskRuntime;
   let task: Task;
   let designTurnId: string | undefined;
-  if (options.designClientToolBridge) {
+  if (options.designSkillRoot) {
     const created = await store.createDesignBundle({
       request: {
         brief: 'Create and verify the Design.',
@@ -6009,7 +6012,7 @@ function createAdapterForFixture(
     sessionIdleTimeoutMs: options.sessionIdleTimeoutMs,
     interruptCompletionTimeoutMs: options.interruptCompletionTimeoutMs,
     designSkillRoot: options.designSkillRoot,
-    designClientToolBridge: options.designClientToolBridge
+    clientToolBridge: options.clientToolBridge
   });
 }
 
@@ -6048,7 +6051,7 @@ async function createRun(
   requestedSettings: AgentExecutionSettings = SETTINGS,
   attachmentSelection: AgentAttachmentSelection[] = [],
   options: {
-    purpose?: 'TASK_IMPLEMENTATION' | 'TASK_DESIGN';
+    purpose?: 'TASK_IMPLEMENTATION' | 'TASK_DESIGN' | 'TASK_PREVIEW';
     clientToolGrants?: string[];
   } = {}
 ): Promise<RunRecord> {
@@ -6128,7 +6131,7 @@ async function createLocalSession(
   const operationId = `create:${id}`;
   const executionContext = {
     attestation: { status: 'ATTESTED' as const },
-    repositoryAccess: 'WRITE' as const,
+    repositoryAccess: input.role === 'PREVIEW' ? 'READ_ONLY' as const : 'WRITE' as const,
     primaryCwd: worktree.worktreePath,
     readRoots: [{
       canonicalPath: worktree.worktreePath,
@@ -6189,8 +6192,8 @@ function fakeDesignToolBridge() {
       executablePath: '/app/Task Monki',
       argv: ['/resources/design-tool-mcp-server.mjs'],
       environment: {
-        TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: 'session-credential',
-        TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: '/private/grant-file'
+        TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL: 'session-credential',
+        TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE: '/private/grant-file'
       }
     }
   }));
@@ -6576,7 +6579,7 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
         status: 'connected'
       };
       this.harness.nextMcpRegistrationStatus = undefined;
-      data = { task_monki_design: status };
+      data = { [(body as { name: string }).name]: status };
     } else if (requestPath.startsWith('/mcp/') && requestPath.endsWith('/disconnect')) {
       this.harness.mcpDisconnects.push(requestPath);
       if (this.harness.failNextMcpDisconnectAfterAccept) {

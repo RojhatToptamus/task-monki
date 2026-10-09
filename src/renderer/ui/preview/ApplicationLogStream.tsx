@@ -1,5 +1,8 @@
 import { useLayoutEffect, useRef } from 'react';
-import type { ApplicationLogLine } from '../../model/applicationPreviewLogs';
+import {
+  markerWord,
+  type ApplicationLogLine
+} from '../../model/applicationPreviewLogs';
 
 export function ApplicationLogStream({
   name,
@@ -69,9 +72,15 @@ export function ApplicationLogStream({
     }
   }, [failureTarget, lines, active]);
   function reveal(element: HTMLElement) {
+    // Scroll only the stream: scrollIntoView would also move the page around it.
     const node = stream.current!;
     const before = node.scrollTop;
-    element.scrollIntoView({ block: 'center' });
+    const nodeTop = node.getBoundingClientRect().top;
+    const elementTop = element.getBoundingClientRect().top - nodeTop + node.scrollTop;
+    node.scrollTop = Math.max(
+      0,
+      elementTop - node.clientHeight / 2 + element.offsetHeight / 2
+    );
     // A navigation scroll is not the user's request to resume at the end.
     if (node.scrollTop !== before) navigationScroll.current = node.scrollTop;
   }
@@ -169,7 +178,7 @@ export function ApplicationLogStream({
             Logs for this run expired when the runtime restarted.
           </p>
         ) : null}
-        {!expired && !lines.length ? <p>{empty}</p> : null}
+        {!expired && !lines.some((line) => !line.marker) ? <p>{empty}</p> : null}
         {lines
           .filter(
             (line) =>
@@ -187,7 +196,10 @@ export function ApplicationLogStream({
               data-log-source={line.source}
             >
               {line.marker ? (
-                <span data-state={line.marker}>{line.text}</span>
+                <span>
+                  {line.text} <b data-state={line.marker}>{markerWord(line.marker)}</b>
+                  {line.detail ? <i>{line.detail}</i> : null}
+                </span>
               ) : (
                 <>
                   {lanes ? (
@@ -208,7 +220,7 @@ export function ApplicationLogStream({
           className="tm-preview-follow outline-button"
           onClick={() => onFollow(true)}
         >
-          {newLines ? `${newLines} new lines · ` : ''}Resume follow
+          {newLines ? `${newLines} new ${newLines === 1 ? 'line' : 'lines'} · ` : ''}Resume follow
         </button>
       ) : null}
     </div>

@@ -23,13 +23,14 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   DiscardPreviewRecipeDraftRequest,
-  GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewGenerationRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   ValidatePreviewRecipeDraftRequest
 } from './preview';
 import type {
@@ -462,6 +463,8 @@ export interface TaskInstruction extends InstructionAttachments {
   text: string;
   mode: 'QUEUE' | 'FOLLOW_UP' | 'RETRY' | 'STEER';
   status: 'QUEUED' | 'HELD' | 'SENDING' | 'SUBMITTED' | 'FAILED' | 'UNCERTAIN';
+  /** The conversation this message belongs to; absent for the task's primary agent session. */
+  role?: 'PREVIEW';
   /** Reserved before admission; may be absent from runtime storage after a crash. */
   runId?: string;
   detail?: string;
@@ -1666,9 +1669,10 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   getPreviewRecipeGeneration(
     input: GetPreviewRecipeGenerationRequest
   ): Promise<PreviewRecipeGenerationSnapshot>;
-  generatePreviewRecipe(
-    input: GeneratePreviewRecipeRequest
-  ): Promise<PreviewRecipeGenerationSnapshot>;
+  sendPreviewAgentMessage(
+    input: SendPreviewAgentMessageRequest
+  ): Promise<TaskInstruction>;
+  stopPreviewAgent(input: StopPreviewAgentRequest): Promise<void>;
   validatePreviewRecipeDraft(
     input: ValidatePreviewRecipeDraftRequest
   ): Promise<PreviewRecipeValidation>;

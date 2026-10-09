@@ -123,9 +123,8 @@ untracked, or ignored files. The repository and branch remain available.
 First-launch defaults, New Task, and Settings use the same runtime/model
 selector. Implementation defaults can use every enabled runtime.
 Prompt refinement, review, and Discourse use one shared read-only support projection.
-All ready runtimes and models can use this path. Preview recipe generation normally
-uses that path. An adapter can instead use the app-owned disposable
-evidence copy, which contains no source repository path.
+All ready runtimes and models can use this path. The Preview agent is a
+task-bound read-only conversation that every enabled runtime and model can run.
 An unavailable or unauthenticated runtime remains visible with its exact readiness reason.
 Reasoning choices come from the selected model's native catalog.
 

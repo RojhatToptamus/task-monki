@@ -81,10 +81,6 @@ export interface AcpRuntimeProfile {
         launchArgv: readonly string[];
         startupFailurePattern: RegExp;
       };
-  /** Preview YAML may run only from the app-owned disposable evidence copy. */
-  isolatedPreviewRecipeGeneration?: {
-    detail: string;
-  };
   /**
    * Exact provider text that represents a failed turn despite an ACP
    * `end_turn` response. This is profile-owned because ACP has no structured
@@ -346,10 +342,6 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
     detail:
       'Claude Agent ACP plan mode limits normal edits. Task Monki also tells the agent not to modify files, denies reported permission requests, and compares repository state after the turn.'
   },
-  isolatedPreviewRecipeGeneration: {
-    detail:
-      'Claude Agent ACP generates Preview YAML from an app-owned disposable evidence copy. It receives no source repository path.'
-  },
   attachmentTextTransport: 'embedded-resource',
   imageMediaTypes: ACP_IMAGE_MEDIA_TYPES,
   discoverModelsFromSession: true,
@@ -526,17 +518,7 @@ export function acpCapabilities(
       'task-monki.design-skill-access': {
         maturity: 'unsupported',
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
-      },
-      'task-monki.preview-recipe-generation':
-        profile.isolatedPreviewRecipeGeneration
-          ? {
-              maturity: 'stable',
-              detail: profile.isolatedPreviewRecipeGeneration.detail
-            }
-          : {
-              maturity: 'unsupported',
-              detail: `${profile.descriptor.displayName} uses its shared read-only turn path for Preview generation.`
-            }
+      }
     }
   };
 }

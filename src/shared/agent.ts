@@ -93,11 +93,22 @@ export type AgentRunMode =
   | 'RETRY'
   | 'REVIEW'
   | 'DESIGN'
+  | 'PREVIEW'
   | 'COMPACTION'
   | 'SUBAGENT';
 
 /** Stable Task Monki instruction sets that adapters map to a high-priority provider role. */
-export type AgentInstructionProfile = 'DESIGN';
+export type AgentInstructionProfile = 'DESIGN' | 'PREVIEW';
+
+/** Modes that run beside the task's work and never bind or advance its workflow. */
+export function isDetachedRunMode(mode: AgentRunMode): boolean {
+  return mode === 'REVIEW' || mode === 'PREVIEW';
+}
+
+/** Sessions that may use a runtime other than the task's own, because they never carry its implementation work. */
+export function isDetachedSessionRole(role: AgentSessionRole): boolean {
+  return role === 'REVIEW' || role === 'PREVIEW';
+}
 
 /** Modes whose successful completion produces implementation work for review. */
 export function isImplementationRunMode(mode: AgentRunMode): boolean {
@@ -126,7 +137,7 @@ export type AgentServerStatus =
   | 'FAILED'
   | 'LOST';
 
-export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'SUBAGENT';
+export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'PREVIEW' | 'SUBAGENT';
 export type AgentSessionRelationshipState =
   | 'ROOT'
   | 'RESOLVED'

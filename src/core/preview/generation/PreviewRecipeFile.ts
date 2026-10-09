@@ -2,7 +2,6 @@ import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { parseDocument } from 'yaml';
 
 /** Reviewed file bytes are compared before every replacement. */
 export interface PreviewRecipeFile {
@@ -99,100 +98,4 @@ export async function writeReviewedPreviewRecipe(
     await fs.unlink(temporary).catch(() => undefined);
   }
   return name;
-}
-
-/** Runtime logs are already vault-redacted. Also conceal YAML literals and credential-shaped diagnostics. */
-export function safePreviewContext(
-  file?: PreviewRecipeFile,
-  diagnostics?: unknown,
-  publicPrefixes: readonly string[] = []
-) {
-  // These keys have documented, non-secret runtime semantics. Value shape alone
-  // never establishes that an arbitrary environment binding is safe to disclose.
-  const switches = new Set([
-    'NODE_ENV',
-    'NEXT_TELEMETRY_DISABLED',
-    'LOG_LEVEL',
-    'CI'
-  ]);
-  const conceal = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(conceal);
-    if (!value || typeof value !== 'object') return scrub(value);
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => {
-        if (key === 'env' && entry && typeof entry === 'object') {
-          return [
-            key,
-            Object.fromEntries(
-              Object.entries(entry).map(([name, binding]) => {
-                if (typeof binding !== 'string')
-                  return [name, conceal(binding)];
-                if (
-                  switches.has(name) &&
-                  /^(?:true|false|[0-9]{1,4}|development|production|test|debug|info|warn|error|silent)$/i.test(
-                    binding
-                  )
-                )
-                  return [name, binding];
-                // The evidenced framework publishes these values to browsers.
-                if (publicPrefixes.some((prefix) => name.startsWith(prefix)))
-                  return [name, binding];
-                return [
-                  name,
-                  '[concealed literal; confirm value or secret reference]'
-                ];
-              })
-            )
-          ];
-        }
-        if (
-          key === 'name' &&
-          typeof entry === 'string' &&
-          /^tm-[0-9a-f-]{36}$/i.test(entry)
-        )
-          return [key, 'application'];
-        return [key, conceal(entry)];
-      })
-    );
-  };
-  let configuration: unknown;
-  if (file) {
-    try {
-      const document = parseDocument(file.text);
-      if (document.errors.length) throw new Error('Invalid YAML');
-      configuration = document.toJS({ maxAliasCount: 0 });
-      configuration = conceal(configuration);
-    } catch {
-      configuration =
-        'The existing YAML could not be safely parsed. Its raw contents are withheld.';
-    }
-  }
-  function scrub(value: unknown): unknown {
-    if (typeof value === 'string') {
-      return value
-        .split('\n')
-        .map((line) =>
-          /(?:password|passwd|token|secret|api[_-]?key|private[_-]?key|authorization)\s*["']?\s*[:=]\s*(?!\{secret:)|-----BEGIN .*PRIVATE KEY|\b(?:gh[opusr]_|sk-(?:proj-)?)[A-Za-z0-9_-]{20,}|[a-z]+:\/\/[^\s/]+:[^\s/]+@/i.test(
-            line
-          )
-            ? '[credential-like diagnostic withheld]'
-            : line
-        )
-        .join('\n');
-    }
-    if (Array.isArray(value)) return value.map(scrub);
-    if (value && typeof value === 'object')
-      return Object.fromEntries(
-        Object.entries(value).map(([key, entry]) => [key, scrub(entry)])
-      );
-    return value;
-  }
-  // Runtime output is already redacted. Recorded file literals may belong to a
-  // different attempt and must never be used to rewrite its diagnostic output.
-  const safeDiagnostics = conceal(diagnostics);
-  return {
-    file: file?.name,
-    configuration,
-    diagnostics: scrub(safeDiagnostics)
-  };
 }

@@ -37,6 +37,7 @@ import {
   reconcileRetainedConfiguration
 } from './ApplicationPreviewConfiguration';
 import { diagnosePreviewFailure } from './ApplicationPreviewDiagnosis';
+import { readPreviewProjectFacts } from './PreviewProjectFacts';
 import type { PreviewUrlHost } from '../design/DesignPreviewRoute';
 
 interface Approval {
@@ -272,6 +273,7 @@ export class ApplicationPreviewService {
     return {
       name,
       status,
+      projectDirectory: await canonicalProspectivePath(worktree.worktreePath),
       hasConfigurationFile,
       configurationError,
       requirements,
@@ -589,7 +591,7 @@ export class ApplicationPreviewService {
         });
       }
     }
-    return { projectDirectory, recommendations };
+    return { projectDirectory, recommendations, facts: await readPreviewProjectFacts(projectDirectory) };
   }
 
   async connectSource(

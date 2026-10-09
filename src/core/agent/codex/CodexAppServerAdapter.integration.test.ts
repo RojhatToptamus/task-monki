@@ -1917,7 +1917,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: [],
       designSkillRoot
     });
-    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    adapter.setClientToolHandler(async () => ({ text: 'candidate ready' }));
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
@@ -2010,7 +2010,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         height: 1
       }
     }));
-    adapter.setDesignBrowserToolHandler(inspect);
+    adapter.setClientToolHandler(inspect);
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
@@ -2034,7 +2034,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     expect(inspect).toHaveBeenCalledWith({
       runId: run.id,
-      operation: { operation: 'open_candidate' }
+      tool: 'inspect_design',
+      arguments: { operation: 'open_candidate' }
     });
     expect(await store.getRun(run.id)).toMatchObject({ status: 'COMPLETED' });
     const snapshot = await store.snapshot();
@@ -2048,14 +2049,14 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         tool: 'inspect_design',
         contentItems: [
           { type: 'inputText', text: 'The candidate opened without console errors.' },
-          { type: 'inputImage', imageUrl: '[transient Design screenshot omitted]' }
+          { type: 'inputImage', imageUrl: '[transient screenshot omitted]' }
         ]
       }
     });
     const server = snapshot.agentServers[0]!;
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     expect(journal).not.toContain(Buffer.from('transient-browser-image').toString('base64'));
-    expect(journal).toContain('[transient Design screenshot omitted]');
+    expect(journal).toContain('[transient screenshot omitted]');
     const threadStart = readOutboundMessages(journal).find(
       (message) => message.method === 'thread/start'
     );
@@ -2085,7 +2086,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: [],
       designSkillRoot
     });
-    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    adapter.setClientToolHandler(async () => ({ text: 'candidate ready' }));
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
@@ -2189,7 +2190,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: [],
       designSkillRoot: await fs.realpath(path.resolve('resources/design-skills'))
     });
-    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    adapter.setClientToolHandler(async () => ({ text: 'candidate ready' }));
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
@@ -2246,7 +2247,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: [],
       designSkillRoot: await fs.realpath(path.resolve('resources/design-skills'))
     });
-    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    adapter.setClientToolHandler(async () => ({ text: 'candidate ready' }));
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();
@@ -2307,7 +2308,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       restartDelaysMs: [],
       designSkillRoot
     });
-    adapter.setDesignBrowserToolHandler(async () => ({ text: 'candidate ready' }));
+    adapter.setClientToolHandler(async () => ({ text: 'candidate ready' }));
     qualifyFakeDesignModel(adapter);
     const orchestrator = createAgentOrchestrator(store, events, adapter);
     await orchestrator.initialize();

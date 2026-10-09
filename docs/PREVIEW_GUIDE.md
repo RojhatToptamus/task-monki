@@ -14,19 +14,27 @@ the task's current preview. Tasks without a runtime instance are not listed.
 
 ## Configure and start
 
-Open the task's **Preview** tab. Choose **Draft configuration with agent**.
-The agent inspects dependencies, commands, and frontend/backend requirements.
-Review the proposal in **Configuration**, **YAML**, or **Changes**.
-**Save** writes the file without starting. **Save and review startup** opens the execution review.
-Resolve the listed requirements, then choose **Approve and start**.
+Open the task's **Preview** tab. Without a configuration file it lists what the
+project files say (application, dependencies, environment keys, Compose services)
+and offers **Draft with Preview agent** or **Write it myself**. The agent works in
+a conversation beside the tabs, opened any time from the chat button in the
+status row: ask it to draft the configuration, check the setup, inspect logs, or
+explain a failure. It reads the project and the runs, asks when the files do not
+decide something, and returns proposals that open in **Configuration** as a diff.
+Pick any enabled agent and model in the panel header; a message sent while the
+agent works waits in the queue, and **Stop** interrupts the current response.
+**Save** writes the file without starting. **Save and review startup** also opens
+the execution review. Resolve the listed requirements, then choose **Approve and
+start**. When a retained run exists but the file is gone, **Start from last run**
+is the primary action.
 
-**Check for a plain static site** offers a draft only for HTML folders without a package manifest.
-Use the Preview agent for projects that need commands or dependency installation.
-The menu also offers manual authoring.
+**Check for a plain static site** in the menu offers a draft only for HTML folders
+without a package manifest. Use the Preview agent for projects that need commands
+or dependency installation.
 
-The Preview agent remains available for existing configuration and failures.
-Its proposals use the same review and save controls. It cannot approve execution.
-If the file changes during review, saving is refused and the existing file stays intact.
+After a failure, **Investigate with Preview agent** sends the diagnosis to the
+conversation. The agent cannot save, approve, or start execution. If the file
+changes during review, saving is refused and the existing file stays intact.
 
 A minimal file for a server that reads `PORT` and serves `/ready` is:
 
@@ -135,10 +143,13 @@ Do not use production databases for local preview verification.
 
 ## Failure and recovery
 
-If the task folder is missing, Preview offers **Restore worktree**. Review the
-recorded Git state before restoration. Restoration keeps the task, retained
-preview configuration, and secrets. An external checkout uses **Reconnect
-checkout** instead. A locked registration or changed branch requires review.
+If the task folder is missing, the Preview tab shows a **Worktree missing** block
+with the recorded commit and branch, and **Restore worktree** is its only action.
+Restoration checks the branch out again at that commit; uncommitted files,
+including a preview configuration file in that folder, cannot be recovered. The
+task, retained run configuration, data, and secrets are kept. An external checkout
+uses **Reconnect checkout** instead. The runs list stays readable; **As run** opens
+the configuration each run started with.
 
 Use a failed service or job's **Logs** action to inspect that exact attempt.
 Readiness errors include the probe path, deadline, and last observed response.

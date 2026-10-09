@@ -649,10 +649,10 @@ function createService(
       designBrowserRequireCodeSignature: Boolean(packagedBrowserRoot),
       ...(packagedResourcesRoot && packagedRuntime
         ? {
-            designToolMcpExecutablePath: packagedRuntime,
-            designToolMcpServerPath: path.join(
+            clientToolMcpExecutablePath: packagedRuntime,
+            clientToolMcpServerPath: path.join(
               packagedResourcesRoot,
-              'design-tool-mcp-server.mjs'
+              'client-tool-mcp-server.mjs'
             )
           }
         : {}),

@@ -6,21 +6,38 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentRuntimeRunRecord,
   AgentRuntimeSessionRecord
-} from '../../shared/agentRuntime';
+} from '../../../shared/agentRuntime';
 import {
   REDACTED_CREDENTIAL,
   redactCredentialValue
-} from '../agent/AgentCredentialRedaction';
+} from '../AgentCredentialRedaction';
+import { parseInspectDesignOperation, type DesignBrowserToolResult, type InspectDesignOperation } from '../../design/AgentBrowserRuntime';
+import { INSPECT_DESIGN_TOOL_DEFINITION } from '../../design/DesignClientToolContract';
 import {
-  DesignClientToolBridge,
-  resolveDesignToolMcpServerPath,
-  type DesignClientToolHandler,
-  type DesignClientToolAuthority
-} from './DesignClientToolBridge';
+  INSPECT_PREVIEW_TOOL_DEFINITION,
+  PROPOSE_PREVIEW_CONFIGURATION_TOOL_DEFINITION
+} from '../../preview/agent/PreviewClientToolContract';
+import {
+  ClientToolBridge,
+  resolveClientToolMcpServerPath,
+  type ClientToolAuthority,
+  type ClientToolHandler
+} from './ClientToolBridge';
+
+type DesignHandler = (input: { runId: string; operation: InspectDesignOperation }) => Promise<DesignBrowserToolResult>;
+const SERVER_PATH = path.resolve('src/core/agent/clientTools/client-tool-mcp-server.mjs');
+
+/** The Design set has one tool; its handler parses the browser operation before running it. */
+function designHandlers(handler: DesignHandler): ClientToolHandler[] {
+  return [{
+    definition: INSPECT_DESIGN_TOOL_DEFINITION,
+    call: ({ runId, arguments: value }) => handler({ runId, operation: parseInspectDesignOperation(value) })
+  }];
+}
 
 const temporaryDirectories: string[] = [];
 const children: ChildProcessWithoutNullStreams[] = [];
-const bridges: DesignClientToolBridge[] = [];
+const bridges: ClientToolBridge[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -33,7 +50,7 @@ afterEach(async () => {
   );
 });
 
-describe('DesignClientToolBridge', () => {
+describe('ClientToolBridge', () => {
   it('delivers the shared tool and its bounded image through the packaged stdio contract', async () => {
     const scratchRoot = await temporaryDirectory();
     const staleGrant = path.join(scratchRoot, 'grant-stale');
@@ -57,11 +74,12 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     expect(redactCredentialValue(grant.launch.environment)).toMatchObject({
-      TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL: REDACTED_CREDENTIAL,
-      TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE: REDACTED_CREDENTIAL
+      TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL: REDACTED_CREDENTIAL,
+      TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE: REDACTED_CREDENTIAL
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     const mcp = startMcp(grant.launch);
@@ -115,7 +133,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     state.run.clientToolGrants = [];
@@ -126,7 +145,7 @@ describe('DesignClientToolBridge', () => {
       arguments: { operation: 'observe' }
     });
     expect(denied.result.isError).toBe(true);
-    expect(denied.result.content[0].text).toContain('current active Design Run');
+    expect(denied.result.content[0].text).toContain('current active run');
     expect(handler).not.toHaveBeenCalled();
 
     await expect(
@@ -158,7 +177,8 @@ describe('DesignClientToolBridge', () => {
         runtimeId: authority.runtimeId,
         sessionId: authority.sessionId,
         worktreeId: authority.worktreeId,
-        providerGeneration: authority.providerGeneration
+        providerGeneration: authority.providerGeneration,
+        toolSet: 'design'
       });
       const mcp = startMcp(grant.launch);
       await fs.chmod(scratchRoot, 0o500);
@@ -185,7 +205,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     const mcp = startMcp(grant.launch);
@@ -196,7 +217,7 @@ describe('DesignClientToolBridge', () => {
       arguments: { operation: 'observe' }
     });
     expect(result.result.isError).toBe(true);
-    expect(result.result.content[0].text).toContain('current active Design Run');
+    expect(result.result.content[0].text).toContain('current active run');
     expect(handler).not.toHaveBeenCalled();
     expect((await mcp.request('tools/list', {})).result.tools[0].name).toBe(
       'inspect_design'
@@ -214,11 +235,11 @@ describe('DesignClientToolBridge', () => {
     });
     let oldRunReadStarted = false;
     const handler = vi.fn(async () => ({ text: 'new run observed' }));
-    const bridge = new DesignClientToolBridge({
+    const bridge = new ClientToolBridge({
       executablePath: process.execPath,
-      serverPath: path.resolve('src/core/design/runtime/design-tool-mcp-server.mjs'),
+      serverPath: SERVER_PATH,
       scratchRoot,
-      handler,
+      handlers: designHandlers(handler),
       runtimeStore: {
         getSession: async (id) =>
           id === state.session.id ? state.session : undefined,
@@ -239,7 +260,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     const mcp = startMcp(grant.launch);
@@ -275,7 +297,7 @@ describe('DesignClientToolBridge', () => {
     const state = runtimeState(authority);
     let completeHandler!: (result: { text: string }) => void;
     const handler = vi
-      .fn<DesignClientToolHandler>()
+      .fn<DesignHandler>()
       .mockImplementationOnce(
         () => new Promise<{ text: string }>((resolve) => {
           completeHandler = resolve;
@@ -287,7 +309,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     const mcp = startMcp(grant.launch);
@@ -353,11 +376,11 @@ describe('DesignClientToolBridge', () => {
       releaseAuthorization = resolve;
     });
     const handler = vi.fn(async () => ({ text: 'observed once' }));
-    const bridge = new DesignClientToolBridge({
+    const bridge = new ClientToolBridge({
       executablePath: process.execPath,
-      serverPath: path.resolve('src/core/design/runtime/design-tool-mcp-server.mjs'),
+      serverPath: SERVER_PATH,
       scratchRoot,
-      handler,
+      handlers: designHandlers(handler),
       runtimeStore: {
         getSession: async (id) =>
           id === state.session.id ? state.session : undefined,
@@ -373,7 +396,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await bridge.activateGrant({ grantId: grant.id, authority });
     const firstMcp = startMcp(grant.launch);
@@ -442,7 +466,8 @@ describe('DesignClientToolBridge', () => {
       runtimeId: authority.runtimeId,
       sessionId: authority.sessionId,
       worktreeId: authority.worktreeId,
-      providerGeneration: authority.providerGeneration
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'design'
     });
     await vi.waitFor(() => expect(allocationStarted).toBe(true));
     await bridge.shutdown();
@@ -467,13 +492,14 @@ describe('DesignClientToolBridge', () => {
         runtimeId: authority.runtimeId,
         sessionId: authority.sessionId,
         worktreeId: authority.worktreeId,
-        providerGeneration: authority.providerGeneration
+        providerGeneration: authority.providerGeneration,
+        toolSet: 'design'
       });
       const mcp = startMcp(grant.launch);
       await fs.chmod(scratchRoot, 0o500);
 
       await expect(bridge.shutdown()).rejects.toThrow(
-        'Design client-tool bridge cleanup failed'
+        'Client-tool bridge cleanup failed'
       );
       await expect(mcp.request('tools/list', {})).resolves.toMatchObject({
         error: { code: -32603 }
@@ -485,40 +511,80 @@ describe('DesignClientToolBridge', () => {
       await mcp.close();
     }
   );
+
+  it('serves each session only its own tool set and routes calls by name', async () => {
+    const scratchRoot = await temporaryDirectory();
+    const authority = designAuthority();
+    const state = runtimeState(authority);
+    state.run.purpose = 'TASK_PREVIEW';
+    state.run.clientToolGrants = ['inspect_preview', 'propose_preview_configuration'];
+    const inspect = vi.fn(async () => ({ text: 'status: stopped' }));
+    const propose = vi.fn(async () => ({ text: 'Proposal registered.' }));
+    const bridge = createBridge(scratchRoot, state, vi.fn(async () => ({ text: 'design must not run' })), [
+      ...designHandlers(vi.fn(async () => ({ text: 'design must not run' }))),
+      { definition: INSPECT_PREVIEW_TOOL_DEFINITION, call: inspect },
+      { definition: PROPOSE_PREVIEW_CONFIGURATION_TOOL_DEFINITION, call: propose }
+    ]);
+    const grant = await bridge.createSessionGrant({
+      runtimeId: authority.runtimeId,
+      sessionId: authority.sessionId,
+      worktreeId: authority.worktreeId,
+      providerGeneration: authority.providerGeneration,
+      toolSet: 'preview'
+    });
+    await bridge.activateGrant({ grantId: grant.id, authority });
+    const mcp = startMcp(grant.launch);
+    await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+    const listed = await mcp.request('tools/list', {});
+    expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toEqual(['inspect_preview', 'propose_preview_configuration']);
+
+    const proposed = await mcp.request('tools/call', {
+      name: 'propose_preview_configuration',
+      arguments: { yaml: 'name: app\n', summary: 'Serve the app.' }
+    });
+    expect(proposed.result).toMatchObject({ content: [{ type: 'text', text: 'Proposal registered.' }] });
+    expect(propose).toHaveBeenCalledWith({ runId: authority.runId, arguments: { yaml: 'name: app\n', summary: 'Serve the app.' } });
+
+    const foreign = await mcp.request('tools/call', { name: 'inspect_design', arguments: { operation: 'observe' } });
+    expect(foreign.result.isError).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
+    await mcp.close();
+  });
 });
 
-describe('resolveDesignToolMcpServerPath', () => {
+describe('resolveClientToolMcpServerPath', () => {
   it('selects the unpacked resource in a packaged app', () => {
     expect(
-      resolveDesignToolMcpServerPath({
+      resolveClientToolMcpServerPath({
         isPackaged: true,
         resourcesPath: '/app/Contents/Resources',
         appPath: '/project'
       })
-    ).toBe('/app/Contents/Resources/design-tool-mcp-server.mjs');
+    ).toBe('/app/Contents/Resources/client-tool-mcp-server.mjs');
   });
 
   it('selects the source resource in development', () => {
     expect(
-      resolveDesignToolMcpServerPath({
+      resolveClientToolMcpServerPath({
         isPackaged: false,
         resourcesPath: '/resources',
         appPath: '/project'
       })
-    ).toBe('/project/src/core/design/runtime/design-tool-mcp-server.mjs');
+    ).toBe('/project/src/core/agent/clientTools/client-tool-mcp-server.mjs');
   });
 });
 
 function createBridge(
   scratchRoot: string,
   state: ReturnType<typeof runtimeState>,
-  handler: DesignClientToolHandler
-): DesignClientToolBridge {
-  const bridge = new DesignClientToolBridge({
+  handler: DesignHandler,
+  handlers: ClientToolHandler[] = designHandlers(handler)
+): ClientToolBridge {
+  const bridge = new ClientToolBridge({
     executablePath: process.execPath,
-    serverPath: path.resolve('src/core/design/runtime/design-tool-mcp-server.mjs'),
+    serverPath: SERVER_PATH,
     scratchRoot,
-    handler,
+    handlers,
     runtimeStore: {
       getSession: async (id) => (id === state.session.id ? state.session : undefined),
       getActiveRunForSession: async (id) =>
@@ -529,7 +595,7 @@ function createBridge(
   return bridge;
 }
 
-function designAuthority(): DesignClientToolAuthority {
+function designAuthority(): ClientToolAuthority {
   return {
     runtimeId: 'opencode',
     sessionId: 'session-1',
@@ -539,7 +605,7 @@ function designAuthority(): DesignClientToolAuthority {
   };
 }
 
-function runtimeState(authority: DesignClientToolAuthority): {
+function runtimeState(authority: ClientToolAuthority): {
   run: AgentRuntimeRunRecord;
   session: AgentRuntimeSessionRecord;
 } {
@@ -615,7 +681,7 @@ function startMcp(launch: {
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'task-monki-design-tool-test-')
+    path.join(os.tmpdir(), 'task-monki-client-tool-test-')
   );
   temporaryDirectories.push(directory);
   return directory;

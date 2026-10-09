@@ -21,12 +21,28 @@ function detailProps(): ComponentProps<typeof TaskDetail> {
     gitSnapshot: makeGitSnapshotRecord({ status: 'DIRTY', untrackedCount: 1 }),
     gitSnapshots: [], events: [], runs: [], sessions: [], items: [], goalSnapshots: [], planRevisions: [], usageSnapshots: [], settingsObservations: [], subagentObservations: [], artifacts: [], attachments: [], interactions: [],
     showMascot: false,
-    onPrepareWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onGetPreviewRecipeGeneration: vi.fn(), onGeneratePreviewRecipe: vi.fn(), onValidatePreviewRecipeDraft: vi.fn(), onAcceptPreviewRecipeDraft: vi.fn(), onDiscardPreviewRecipeDraft: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
+    onPrepareWorktree: vi.fn(), onRestoreWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
     onListExistingWorktrees: vi.fn(async () => []), onReconnectWorktree: vi.fn(), onUpdateWorktreeComparison: vi.fn(), onRefreshEvidence: vi.fn()
   };
 }
 
 describe('imported task actions', () => {
+  it('keeps the detached Preview conversation out of implementation activity', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = detailProps();
+    const previewRun = makeRunRecord({ id: 'preview-run', mode: 'PREVIEW', status: 'COMPLETED' });
+    props.events = [{ id: 'preview-complete', type: 'AGENT_RUN_COMPLETED', taskId: props.task!.id,
+      runId: previewRun.id, source: 'provider', sourceEventId: 'preview-complete',
+      occurredAt: TEST_NOW, receivedAt: TEST_NOW, payload: {} }];
+    props.previewAgent = {
+      runs: [previewRun], items: [], instructions: [], interactions: [], sessions: [], plans: [],
+      models: [], runtimes: [], defaults: { runtimeId: 'codex' },
+      send: vi.fn(), stop: vi.fn(), editQueued: vi.fn(), respond: vi.fn()
+    };
+    render(<TaskDetail {...props} />);
+    expect(screen.queryByText(/latest Implementation completed/i)).toBeNull();
+  });
+
   it('does not replace a missing historical capture with current Git evidence', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();

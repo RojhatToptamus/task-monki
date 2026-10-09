@@ -179,17 +179,14 @@ describe('runtimeReadinessView', () => {
     );
   });
 
-  it('does not block a Preview model with stale workflow capability metadata', () => {
+  it('does not block a Preview agent model on workflow capability metadata', () => {
     const runtime = state(createRuntimeReadiness('READY', 'Ready'));
-    runtime.preflight.capabilities.extensions['task-monki.preview-recipe-generation'] = {
-      maturity: 'stable'
-    };
 
     expect(
       selectConfiguredRuntimeForOperation(
         [runtime],
         'test',
-        'PREVIEW_RECIPE_GENERATION',
+        'PREVIEW_AGENT',
         {
           model: {
             inputModalities: ['text']

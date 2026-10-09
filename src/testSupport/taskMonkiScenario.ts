@@ -85,6 +85,8 @@ export interface TaskMonkiScenario {
   events: AppEventBus;
   agent: ScriptedAgentRuntimeAdapter;
   service: TaskManagerService;
+  /** Creates a task-owned session directly in both stores, as the orchestrator would. */
+  createSession: ScriptedAgentRuntimeFixture['createSession'];
   dispose(): Promise<void>;
   createTask(input?: CreateScenarioTaskInput): Promise<Task>;
   commitFile(relativePath: string, content: string, message?: string): Promise<string>;
@@ -395,6 +397,7 @@ export async function createTaskMonkiScenario(
     events,
     agent,
     service,
+    createSession: scriptedRuntime.createSession,
     dispose() {
       disposeWork ??= disposeScenario(service, persistence, rootDir);
       return disposeWork;

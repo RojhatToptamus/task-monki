@@ -63,6 +63,8 @@ export interface PreviewDiagnosis {
 
 export interface ApplicationPreviewSnapshot {
   name: string;
+  /** Canonical worktree root, matching runtime-resolved source paths in review. */
+  projectDirectory?: string;
   hasConfigurationFile: boolean;
   configurationChanged?: boolean;
   /** Exact-source attempts belong to Design publication and cannot be edited in place. */
@@ -114,6 +116,12 @@ export interface ApplicationPreviewRecommendation {
   directory: string;
   explanation: string;
 }
+/** One thing the project files say about running it; `source` is the file it came from. */
+export interface PreviewProjectFact {
+  label: 'Application' | 'Dependencies' | 'Environment' | 'Services';
+  detail: string;
+  source: string;
+}
 export interface ApplicationPreviewApi {
   readApplicationPreviewFile(
     input: ApplicationPreviewRequest & { draftId?: string }
@@ -143,6 +151,7 @@ export interface ApplicationPreviewApi {
   inspectApplicationPreviewSetup(input: ApplicationPreviewRequest): Promise<{
     projectDirectory: string;
     recommendations: ApplicationPreviewRecommendation[];
+    facts: PreviewProjectFact[];
   }>;
 
   listApplicationPreviews(): Promise<ApplicationPreviewInstance[]>;

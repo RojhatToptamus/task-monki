@@ -19,9 +19,24 @@ export interface ApplicationLogBuffer {
 export interface ApplicationLogLine {
   id: number;
   source: string;
+  /** Output text, or the displayed source name when this is a marker. */
   text: string;
+  /** Service state observed by Task Monki; the line is then a marker, not output. */
   marker?: string;
+  /** Marker detail: exit message and observed time. */
+  detail?: string;
 }
+
+/** "exited with code 1" from a runtime failure message, or the message itself. */
+export const failureWord = (message?: string) => {
+  const code = message ? /exit(?:ed)?(?: with code)? \(?(\d+)\)?/i.exec(message)?.[1] : undefined;
+  return code ? `exited with code ${code}` : message;
+};
+export const markerWord = (state: string) =>
+  state === 'succeeded' ? 'done' : state === 'skipped' ? 'not started' : state;
+/** Plain-text form of a marker for copying. */
+export const markerText = (line: ApplicationLogLine) =>
+  `${line.text} ${markerWord(line.marker ?? '')}${line.detail ?? ''}`;
 
 /** The leading label is transport framing; labels printed inside a message stay text. */
 export function splitApplicationLogs(

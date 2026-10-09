@@ -39,7 +39,8 @@ import type {
   DeleteDesignDraftRequest,
   DisconnectRepositoryRequest,
   DiscardPreviewRecipeDraftRequest,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
@@ -131,7 +132,7 @@ import {
   resolveOwnedProcessLauncherPath
 } from '../core/process/ownedProcess';
 import { resolveDesignSkillPackRoot } from '../core/design/DesignSkillPack';
-import { resolveDesignToolMcpServerPath } from '../core/design/DesignClientToolBridge';
+import { resolveClientToolMcpServerPath } from '../core/agent/clientTools/ClientToolBridge';
 import {
   resolveDesignBrowserRuntimePaths,
   resolveDesignBrowserSocketRoot
@@ -851,8 +852,12 @@ function installIpcHandlers(): void {
       service.getPreviewRecipeGeneration(input)
   );
   handleTrustedIpc(
-    'preview:recipe-generation:generate',
-    async (_, input: GeneratePreviewRecipeRequest) => service.generatePreviewRecipe(input)
+    'preview:agent:send',
+    async (_, input: SendPreviewAgentMessageRequest) => service.sendPreviewAgentMessage(input)
+  );
+  handleTrustedIpc(
+    'preview:agent:stop',
+    async (_, input: StopPreviewAgentRequest) => service.stopPreviewAgent(input)
   );
   handleTrustedIpc(
     'preview:recipe-generation:validate',
@@ -1135,6 +1140,13 @@ void app.whenReady().then(async () => {
       taskRuntimeAccess: persistence.taskRuntime,
       discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
+      clientToolMcpExecutablePath: process.execPath,
+      clientToolMcpServerPath: resolveClientToolMcpServerPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
+      clientToolCredentialRoot: path.join(userDataDir, 'client-tool-credentials'),
       ...(designCanvasHost
         ? {
             designRepositoryRoot: persistence.paths.designRepositoryRoot,
@@ -1149,16 +1161,6 @@ void app.whenReady().then(async () => {
             ),
             designBrowserSocketRoot: resolveDesignBrowserSocketRoot(userDataDir),
             designBrowserRequireCodeSignature: app.isPackaged,
-            designToolMcpExecutablePath: process.execPath,
-            designToolMcpServerPath: resolveDesignToolMcpServerPath({
-              isPackaged: app.isPackaged,
-              resourcesPath: process.resourcesPath,
-              appPath: app.getAppPath()
-            }),
-            designToolCredentialRoot: path.join(
-              userDataDir,
-              'design-tool-credentials'
-            ),
             designCanvasFence: designCanvasHost
           }
         : {})

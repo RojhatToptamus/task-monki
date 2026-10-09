@@ -90,10 +90,16 @@ export function sessionEntries(run: RunRecord, items: AgentItemRecord[], steers:
     if (typeof payload?.text !== 'string' || !payload.text.trim()) continue;
     entries.push({ key: item.id, at: item.createdAt, kind: 'message', author: 'Agent', text: payload.text });
   }
-  // The final-message projection is a fallback when the provider did not emit a message item.
-  if (run.finalMessage?.trim() && !entries.some((entry) => entry.kind === 'message' && entry.author === 'Agent' && entry.text.trim() === run.finalMessage!.trim())) {
+  // Providers may project the entire streamed response as the final message.
+  // Keep a distinct final answer, but do not repeat messages already displayed.
+  const messages = entries.flatMap((entry) => entry.kind === 'message' && entry.author === 'Agent' ? [entry] : [])
+    .sort((left, right) => left.at.localeCompare(right.at));
+  const finalMessage = run.finalMessage?.trim();
+  const alreadyShown = messages.some((entry) => entry.text.trim() === finalMessage) ||
+    messages.map((entry) => entry.text).join('\n').trim() === finalMessage;
+  if (finalMessage && !alreadyShown) {
     entries.push({ key: `${run.id}:final`, at: run.endedAt ?? run.lastEventAt ?? run.startedAt,
-      kind: 'message', author: 'Agent', text: run.finalMessage });
+      kind: 'message', author: 'Agent', text: finalMessage });
   }
   const activity = buildRunActivityProjection({ run,
     items: runItems.filter((item) => item.type !== 'AGENT_MESSAGE' && item.type !== 'REASONING_SUMMARY'), groupContext: false, cwd }).rows.flatMap((row) => buildOverviewRunActivityRows([row]));

@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import type {
   AttemptSummary,
   PreviewDescription,
@@ -19,9 +26,18 @@ import {
 } from '../../model/workspaceLayout';
 import { PanelResizeHandle } from '../PanelResizeHandle';
 import { nextTabIndex } from '../AccessibleTabs';
-import { applicationAttempts, runLabel } from './ApplicationActivity';
+import { applicationAttempts, previewRunRows } from '../../model/applicationPreviewRuns';
 import { ApplicationLogStream } from './ApplicationLogStream';
 import { message } from './previewPresentation';
+import { failureWord, markerText } from '../../model/applicationPreviewLogs';
+
+const TERMINAL_MARKERS = new Set([
+  'failed',
+  'succeeded',
+  'stopped',
+  'canceled',
+  'cleanup-incomplete'
+]);
 
 export interface LogSelection {
   attemptId: string;
@@ -37,6 +53,11 @@ export function ApplicationLogs(props: {
   onTaskAgent?(text: string): void;
 }) {
   const attempts = applicationAttempts(props.status);
+  const runs = previewRunRows(props.status, false);
+  const runLabel = (attemptId: string) => {
+    const run = runs.find((item) => item.attempt.id === attemptId);
+    return run ? `${run.time} · ${run.outcome}` : attemptId;
+  };
   const id =
     props.selection?.attemptId ??
     props.status?.candidate?.id ??
@@ -45,13 +66,14 @@ export function ApplicationLogs(props: {
   const attempt = attempts.find((item) => item.id === id);
   if (!id || !attempt)
     return <p className="tm-application-preview__empty">No runs yet.</p>;
-  return <RunLogs key={id} {...props} attempt={attempt} attempts={attempts} />;
+  return <RunLogs key={id} {...props} attempt={attempt} attempts={attempts} runLabel={runLabel} />;
 }
 
 function RunLogs({
   taskId,
   attempt,
   attempts,
+  runLabel,
   status,
   selection,
   onSelect,
@@ -61,6 +83,8 @@ function RunLogs({
   taskId: string;
   attempt: AttemptSummary;
   attempts: AttemptSummary[];
+  /** Names a run by time and outcome; ids never appear. */
+  runLabel(attemptId: string): string;
   status?: PreviewStatus;
   selection?: LogSelection;
   onSelect(value: LogSelection): void;
@@ -141,6 +165,12 @@ function RunLogs({
     attempt.services?.[source]?.state ?? attempt.state;
   const stateWord = (source: string) => {
     const state = sourceState(source);
+    if (state === 'failed') {
+      const code = /exit(?:ed)?(?: with code)? \(?(\d+)\)?/i.exec(
+        attempt.services?.[source]?.error?.message ?? ''
+      )?.[1];
+      return code ? `failed · exit ${code}` : 'failed';
+    }
     return state === 'skipped'
       ? 'not started'
       : state === 'succeeded'
@@ -267,6 +297,15 @@ function RunLogs({
     for (const source of sourcesRef.current) {
       const state = attempt.services?.[source]?.state ?? attempt.state;
       if (previous[source] === state) continue;
+      // A finished step stays finished; a later "stopped" only reflects the environment going away.
+      // "Stopped" is only worth a line when a live process was seen stopping.
+      if (
+        (previous[source] && TERMINAL_MARKERS.has(previous[source])) ||
+        (state === 'stopped' && !['starting', 'ready'].includes(previous[source] ?? ''))
+      ) {
+        previous[source] = state;
+        continue;
+      }
       if (
         [
           'failed',
@@ -284,7 +323,8 @@ function RunLogs({
           id: bufferRef.current.offset + bufferRef.current.text.length,
           source,
           marker: state,
-          text: `${displayName(source)} ${state === 'succeeded' ? 'done' : state}${exit ? ` · ${exit}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString()}`}`
+          text: displayName(source),
+          detail: `${exit ? ` · ${failureWord(exit)}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`}`
         });
       }
       previous[source] = state;
@@ -310,16 +350,22 @@ function RunLogs({
       buffer.offset
     );
     for (const marker of markers) {
-      let lastSource = -1;
-      for (let i = rows.length - 1; i >= 0; i--) {
-        if (rows[i]!.source === marker.source) {
-          lastSource = i;
-          break;
+      if (TERMINAL_MARKERS.has(marker.marker ?? '')) {
+        // Status can arrive before the final log read. Keep terminal markers
+        // after their source's output as that tail arrives.
+        let lastSource = -1;
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i]!.source === marker.source) {
+            lastSource = i;
+            break;
+          }
         }
+        rows.splice(lastSource + 1, 0, marker);
+      } else {
+        // A service that keeps running keeps its marker where it was observed.
+        const at = rows.findIndex((row) => !row.marker && row.id >= marker.id);
+        rows.splice(at === -1 ? rows.length : at, 0, marker);
       }
-      // Status can arrive before the final log read. Keep terminal markers
-      // after their source's output as that tail arrives.
-      rows.splice(lastSource + 1, 0, marker);
     }
     return rows;
   }, [buffer, framedSources.join('\0'), markers]);
@@ -382,6 +428,10 @@ function RunLogs({
   const pausedPanes = paused.filter((source) => side ? chosen.includes(source) : source === 'all');
   const singleFailed =
     chosen.length === 1 && sourceState(chosen[0]!) === 'failed';
+  const laneWidth = Math.min(
+    16,
+    Math.max(4, ...chosen.map((source) => displayName(source).length))
+  );
   const counts = new Map(
     sources.map((source) => [
       source,
@@ -403,7 +453,7 @@ function RunLogs({
       }}
     >
       <div className="tm-preview-logs__toolbar">
-        <label>
+        <label className="field">
           <span className="tm-visually-hidden">Log run</span>
           <select
             value={attempt.id}
@@ -411,7 +461,7 @@ function RunLogs({
           >
             {attempts.map((item) => (
               <option key={item.id} value={item.id}>
-                {runLabel(item, status)}
+                {runLabel(item.id)}
               </option>
             ))}
           </select>
@@ -433,7 +483,11 @@ function RunLogs({
             }}
           >
             <summary>
-              {selected.length === 1 ? displayName(selected[0]!) : 'Sources'}
+              {selected.length === 1
+                ? displayName(selected[0]!)
+                : selected.length
+                  ? `${selected.length} sources`
+                  : 'All sources'}
             </summary>
             <div role="group" aria-label="Log sources">
               <label>
@@ -443,6 +497,7 @@ function RunLogs({
                   onChange={() => toggle()}
                 />
                 All sources
+                <span>{lines.filter((line) => !line.marker).length}</span>
               </label>
               {sources.map((source) => (
                 <label key={source}>
@@ -451,12 +506,15 @@ function RunLogs({
                     checked={!selected.length || selected.includes(source)}
                     onChange={() => toggle(source, true)}
                   />
-                  {displayName(source)} · {stateWord(source)} ·{' '}
-                  {counts.get(source)} lines
+                  {displayName(source)}
+                  <span>
+                    {stateWord(source)} · {counts.get(source)}
+                  </span>
                 </label>
               ))}
               <button
                 className="ghost-button"
+                disabled={!sources.some((source) => sourceState(source) === 'failed')}
                 onClick={() =>
                   setSelected(
                     sources.filter((source) => sourceState(source) === 'failed')
@@ -468,101 +526,104 @@ function RunLogs({
             </div>
           </details>
         ) : null}
-        <label className="field tm-preview-log-search">
-          <Search size={14} aria-hidden="true" />
-          <input
-            ref={search}
-            type="search"
-            aria-label="Search logs"
-            placeholder="Search logs…"
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setMatchesOnly(false);
-              setMatchIndex(-1);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                navigateMatch(event.shiftKey ? -1 : 1);
-              }
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                setQuery('');
-                setMatchesOnly(false);
-                panel.current
-                  ?.querySelector<HTMLElement>('.tm-preview-stream')
-                  ?.focus();
-              }
-            }}
-          />
-        </label>
-        {query ? (
-          <>
-            <span aria-live="polite">
-              {matches.length
-                ? `${matchIndex < 0 ? 0 : (matchIndex % matches.length) + 1} of ${matches.length}`
-                : 'No matches'}
-            </span>
-            <button
-              className="ghost-button"
-              aria-label="Previous log match"
-              onClick={() => navigateMatch(-1)}
-              disabled={!matches.length}
-            >
-              ↑
-            </button>
-            <button
-              className="ghost-button"
-              aria-label="Next log match"
-              onClick={() => navigateMatch(1)}
-              disabled={!matches.length}
-            >
-              ↓
-            </button>
-            <label>
-              <input
-                type="checkbox"
-                checked={matchesOnly}
-                onChange={(event) => setMatchesOnly(event.target.checked)}
-              />
-              Matches only
-            </label>
-          </>
-        ) : null}
-        <button
-          className="outline-button"
-          aria-pressed={sideBySide}
-          disabled={chosen.length < 2 || chosen.length > 4}
-          title={
-            chosen.length < 2
-              ? 'Select two to four sources.'
-              : chosen.length > 4
-                ? 'Select at most four sources.'
-                : 'Arrange selected sources side by side'
-          }
-          onClick={() => setSideBySide((value) => !value)}
-        >
-          Side by side
-        </button>
-        {side ? (
-          <label>
+        <div className="tm-preview-logs__right">
+          <label className="field field--search tm-preview-log-search">
+            <Search size={14} aria-hidden="true" />
             <input
-              type="checkbox"
-              checked={linkFollow}
-              onChange={(event) => setLinkFollow(event.target.checked)}
+              ref={search}
+              type="search"
+              aria-label="Search logs"
+              placeholder="Search logs"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setMatchesOnly(false);
+                setMatchIndex(-1);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  navigateMatch(event.shiftKey ? -1 : 1);
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setQuery('');
+                  setMatchesOnly(false);
+                  panel.current
+                    ?.querySelector<HTMLElement>('.tm-preview-stream')
+                    ?.focus();
+                }
+              }}
             />
-            Link follow
           </label>
-        ) : (
-          <button
-            className="ghost-button"
-            aria-pressed={!paused.includes('all')}
-            onClick={() => follow('all', paused.includes('all'))}
-          >
-            {paused.includes('all') ? 'Resume follow' : 'Pause follow'}
-          </button>
-        )}
+          {query ? (
+            <>
+              <span className="tm-preview-log-count" aria-live="polite">
+                {matches.length
+                  ? `${matchIndex < 0 ? 0 : (matchIndex % matches.length) + 1} of ${matches.length}`
+                  : 'No matches'}
+              </span>
+              <button
+                className="ghost-button"
+                aria-label="Previous log match"
+                onClick={() => navigateMatch(-1)}
+                disabled={!matches.length}
+              >
+                ↑
+              </button>
+              <button
+                className="ghost-button"
+                aria-label="Next log match"
+                onClick={() => navigateMatch(1)}
+                disabled={!matches.length}
+              >
+                ↓
+              </button>
+              <button
+                className="ghost-button"
+                aria-pressed={matchesOnly}
+                onClick={() => setMatchesOnly((value) => !value)}
+              >
+                Matches only
+              </button>
+            </>
+          ) : null}
+          {sources.length > 1 ? (
+            <button
+              className="ghost-button"
+              aria-pressed={side}
+              disabled={chosen.length < 2 || chosen.length > 4}
+              title={
+                chosen.length < 2
+                  ? 'Select two to four sources to show them side by side.'
+                  : chosen.length > 4
+                    ? 'Select at most four sources to show them side by side.'
+                    : undefined
+              }
+              onClick={() => setSideBySide((value) => !value)}
+            >
+              Side by side
+            </button>
+          ) : null}
+          {side ? (
+            <button
+              className="ghost-button"
+              aria-pressed={linkFollow}
+              title="Pause and resume every pane together"
+              onClick={() => setLinkFollow((value) => !value)}
+            >
+              Link follow
+            </button>
+          ) : (
+            <button
+              className="ghost-button"
+              aria-pressed={!paused.includes('all')}
+              onClick={() => follow('all', paused.includes('all'))}
+            >
+              {paused.includes('all') ? 'Resume follow' : 'Pause follow'}
+            </button>
+          )}
+        </div>
       </div>
       {sources.length > 1 ? (
         <div
@@ -573,8 +634,13 @@ function RunLogs({
           aria-hidden={narrow || undefined}
         >
           {[undefined, ...sources].map((source, index) => (
+            <Fragment key={source ?? 'all'}>
+            {index > 1 ? (
+              <span className="tm-preview-log-steps__sep" aria-hidden="true">
+                ›
+              </span>
+            ) : null}
             <button
-              key={source ?? 'all'}
               className="ghost-button"
               tabIndex={
                 narrow
@@ -613,7 +679,7 @@ function RunLogs({
             >
               {source ? (
                 <>
-                  {displayName(source)}{' '}
+                  {displayName(source)}
                   <span data-state={sourceState(source)}>
                     {stateWord(source)}
                   </span>
@@ -622,6 +688,7 @@ function RunLogs({
                 'All'
               )}
             </button>
+            </Fragment>
           ))}
         </div>
       ) : null}
@@ -638,16 +705,17 @@ function RunLogs({
       ) : null}
       <div
         className={`tm-preview-log-panes ${side ? `tm-preview-log-panes--${chosen.length}` : ''}`}
-        style={
-          side
+        style={{
+          ['--lane' as string]: `${laneWidth}ch`,
+          ...(side
             ? {
                 gridTemplateColumns:
                   chosen.length === 3
                     ? `minmax(160px, min(${paneWidth}px, 40%)) 5px minmax(160px, min(${secondWidth}px, 40%)) 5px minmax(160px, 1fr)`
                     : `minmax(160px, min(${paneWidth}px, 70%)) 5px minmax(160px, 1fr)`
               }
-            : undefined
-        }
+            : {})
+        }}
       >
         {(side ? chosen : ['all']).map((source, index) => {
           const paneLines = side
@@ -687,11 +755,13 @@ function RunLogs({
               >
                 {side ? (
                   <header>
-                    <strong>{displayName(source)}</strong>
+                    {displayName(source)}
                     <span data-state={sourceState(source)}>
                       {stateWord(source)}
-                      {paused.includes(source) ? ' · paused' : ''}
                     </span>
+                    {paused.includes(source) ? (
+                      <span className="tm-preview-log-pane__paused">paused</span>
+                    ) : null}
                   </header>
                 ) : null}
                 <ApplicationLogStream
@@ -750,7 +820,11 @@ function RunLogs({
                     line.marker ||
                     line.text.toLowerCase().includes(query.toLowerCase())
                 )
-                .map((line) => `[${displayName(line.source)}] ${line.text}`)
+                .map((line) =>
+                  line.marker
+                    ? `[${displayName(line.source)}] ${markerText(line)}`
+                    : `[${displayName(line.source)}] ${line.text}`
+                )
                 .join('\n')
             )
           }
@@ -759,10 +833,10 @@ function RunLogs({
         </button>
         {singleFailed && onTaskAgent ? (
           <button
-            className="outline-button"
+            className="ghost-button"
             onClick={() =>
               onTaskAgent(
-                `Investigate Preview run ${runLabel(attempt, status)}, service ${displayName(chosen[0]!)}. Review before making changes.\n${visible
+                `Investigate Preview run ${runLabel(attempt.id)}, service ${displayName(chosen[0]!)}. Review before making changes.\n${visible
                   .filter((line) => line.source === chosen[0])
                   .slice(-40)
                   .map((line) => line.text)
