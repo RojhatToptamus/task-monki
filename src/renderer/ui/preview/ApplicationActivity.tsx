@@ -1,6 +1,6 @@
 import type { AttemptSummary, PreviewStatus, ServiceStatus } from 'previewhost';
-import { previewAddresses, previewRunRows, type PreviewAddress } from '../../model/applicationPreviewRuns';
-import { PreviewAddressLink } from './PreviewAddress';
+import { previewAddress, previewRunRows, type PreviewAddress } from '../../model/applicationPreviewRuns';
+import { PreviewAddressActions } from './PreviewAddress';
 import { clock, GroupLabel, Row, serviceTypeLabel, StateWord } from './previewPresentation';
 
 const hasLogs = (service: Pick<ServiceStatus, 'type'>) => ['command', 'worker', 'job', 'compose'].includes(service.type);
@@ -58,15 +58,15 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
               </thead>
               <tbody>
                 {(services.length || jobs.length ? services : [['Application', { type: attempt.type, state: attempt.state } as ServiceStatus] as const]).map(([id, service]) => {
-                  const addresses = serving ? previewAddresses(status, id === 'Application' ? undefined : id) : [];
+                  const address = serving ? previewAddress(status, id === 'Application' ? undefined : id) : undefined;
                   return (
                     <tr key={id}>
                       <th scope="row"><span className="tm-application-preview__service-name" title={id}>{id}</span></th>
                       <td>{serviceTypeLabel(service.type)}</td>
                       <td><StateWord service={service} /></td>
                       <td className="tm-application-preview__endpoint">
-                        {addresses.length ? (
-                          <PreviewAddressLink name={id} addresses={onOpenAddress ? addresses : addresses.map((address) => ({ ...address, openable: false }))} onOpen={(address) => onOpenAddress?.(address)} />
+                        {address ? (
+                          <PreviewAddressActions name={id} address={address} onOpen={onOpenAddress} />
                         ) : retained(id) ? 'Data kept' : null}
                       </td>
                       <td>{logsFor(id === 'Application' ? undefined : id, service)}</td>

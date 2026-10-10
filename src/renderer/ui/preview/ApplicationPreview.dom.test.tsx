@@ -942,7 +942,7 @@ it('opens the agent as a drawer when the Preview is narrow and returns focus to 
   }
 });
 
-it('opens and copies each service at its own routed address', async () => {
+it('opens and copies each service at its own routed host name, and Open app uses the primary host, never the numeric address', async () => {
   const route = 'tm-6ef76297-2457-4e2a-a3ad-a6d0cbac62b0';
   const host = (name: string) => `http://${route}--${name}.localhost:62492`;
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: { name: 'fixture', busy: false, url: 'http://127.0.0.1:62492', active: {
@@ -952,33 +952,22 @@ it('opens and copies each service at its own routed address', async () => {
       queue: { type: 'command', state: 'ready', browserUrl: host('queue') }
     } } } });
   api.openApplicationPreview.mockImplementation(async ({ service }: { service?: string }) => ({ url: service ? host(service) : 'http://127.0.0.1:62492', opened: true }));
-  const onNotify = vi.fn();
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
   try {
-    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} onNotify={onNotify} />);
+    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
     const table = await screen.findByRole('region', { name: 'Preview services' });
     for (const name of ['api', 'web', 'queue']) {
-      const link = within(table).getByRole('link', { name: `tm-6ef7…--${name}.localhost:62492` });
-      expect(link.getAttribute('href')).toBe(host(name));
-      fireEvent.click(link);
+      expect(within(table).getByTitle(host(name)).textContent).toBe(`tm-6ef7…--${name}.localhost:62492`);
+      fireEvent.click(within(table).getByRole('button', { name: `Open ${name}` }));
       await waitFor(() => expect(api.openApplicationPreview).toHaveBeenLastCalledWith({ taskId: 'task', attemptId: 'serving', service: name }));
+      fireEvent.click(within(table).getByRole('button', { name: `Copy address of ${name}` }));
+      await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(host(name)));
     }
-    // api has no IP address of its own: the router's port serves only the primary service, so it has no menu.
-    expect(within(table).queryByRole('button', { name: 'All addresses of api' })).toBeNull();
-    fireEvent.click(within(table).getByRole('button', { name: 'Copy address of api' }));
-    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(host('api')));
-    expect(await within(table).findByRole('button', { name: 'Copied' })).toBeTruthy();
-    // The primary service lists both addresses: each row opens its address, its copy item copies it and keeps the menu open.
-    fireEvent.keyDown(within(table).getByRole('button', { name: 'All addresses of web' }), { key: 'ArrowDown' });
-    const menu = await screen.findByRole('menu', { name: 'All addresses of web' });
-    expect(within(menu).getAllByRole('menuitem').map((item) => item.getAttribute('aria-label'))).toEqual([
-      `Open host name ${host('web')}`, 'Copy host name', 'Open IP address http://127.0.0.1:62492', 'Copy IP address'
-    ]);
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy IP address' }));
-    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith('http://127.0.0.1:62492'));
-    expect(screen.getByRole('menu', { name: 'All addresses of web' })).toBeTruthy();
-    expect(onNotify).not.toHaveBeenCalled();
+    // The primary's numeric address would be another origin than the one the app allows (CORS).
+    expect(screen.queryByText('127.0.0.1:62492')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open app' }));
+    await waitFor(() => expect(api.openApplicationPreview).toHaveBeenLastCalledWith({ taskId: 'task', attemptId: 'serving', service: 'web' }));
   } finally {
     Reflect.deleteProperty(navigator, 'clipboard');
   }

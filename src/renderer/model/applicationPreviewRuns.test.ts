@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { AttemptSummary, PreviewStatus } from 'previewhost';
-import { previewAddresses, previewRunRows, primaryService, runTime, serviceOutcome } from './applicationPreviewRuns';
+import { previewAddress, previewRunRows, primaryService, runTime, serviceOutcome } from './applicationPreviewRuns';
 
 const now = new Date('2026-10-09T14:40:00');
 const attempt = (overrides: Partial<AttemptSummary>): AttemptSummary => ({
@@ -47,7 +47,7 @@ it('words a service state with the fact that decided it', () => {
   expect(serviceOutcome({ type: 'job', state: 'skipped' })).toEqual({ word: 'Not started' });
 });
 
-it('gives each service its own routable address and opens the IP address only for the primary', () => {
+it('gives each service its own routed host name, including the primary, never the numeric address', () => {
   const route = 'tm-6ef76297-2457-4e2a-a3ad-a6d0cbac62b0';
   const host = (name: string) => `http://${route}--${name}.localhost:62492`;
   const status: PreviewStatus = { name: 'fixture', busy: false, url: 'http://127.0.0.1:62492', active: {
@@ -57,12 +57,12 @@ it('gives each service its own routable address and opens the IP address only fo
       queue: { type: 'command', state: 'ready', browserUrl: host('queue') }
     } } };
   for (const name of ['api', 'web', 'queue']) {
-    const [named] = previewAddresses(status, name);
-    // The text is the real host, shortened: a stripped "api.localhost" does not route.
-    expect(named).toMatchObject({ kind: 'host', url: host(name), text: `tm-6ef7…--${name}.localhost:62492`, service: name, openable: true });
+    // The text is the real host, shortened: a stripped "api.localhost" does not route, and the
+    // primary's numeric address would give the app another origin than the one it allows (CORS).
+    expect(previewAddress(status, name)).toEqual({ url: host(name), text: `tm-6ef7…--${name}.localhost:62492`, service: name });
   }
-  expect(previewAddresses(status, 'api')).toHaveLength(1);
-  expect(previewAddresses(status, 'web')[1]).toMatchObject({ kind: 'ip', url: 'http://127.0.0.1:62492', text: '127.0.0.1:62492', openable: true });
   expect(primaryService(status)).toBe('web');
-  expect(previewAddresses({ ...status, active: undefined, latest: status.active })).toEqual([]);
+  // A single-application preview has only the router's address.
+  expect(previewAddress(status)).toEqual({ url: 'http://127.0.0.1:62492', text: '127.0.0.1:62492' });
+  expect(previewAddress({ ...status, active: undefined, latest: status.active }, 'web')).toBeUndefined();
 });

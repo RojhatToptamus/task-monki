@@ -13,7 +13,7 @@ import {
   type PreviewWorktreeAvailability
 } from '../../model/applicationPreviewPanel';
 import { applicationPreviewStatus } from '../../model/applicationPreviewStatus';
-import { previewAddresses, previewRunRows, primaryService, type PreviewAddress } from '../../model/applicationPreviewRuns';
+import { previewAddress, previewRunRows, primaryService, type PreviewAddress } from '../../model/applicationPreviewRuns';
 import { DRAFT_REQUEST, investigationRequest } from '../../model/previewAgentRequests';
 import { initialPreviewAgentSelection, previewAgentUnavailableReason, type PreviewAgentSelection } from '../../model/previewAgentSelection';
 import { previewConfigurationChanges, type PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
@@ -30,7 +30,7 @@ import { PreviewAgentPanel } from './PreviewAgentPanel';
 import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
 import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { PreviewDiagnosisBlock, PreviewProjectFacts, PreviewRequirementsBlock, PreviewRunApprovalBlock, PreviewWorktreeBlock } from './PreviewDecisionBlocks';
-import { openPreviewAddress, PreviewAddressLink } from './PreviewAddress';
+import { openPreviewAddress, PreviewAddressActions } from './PreviewAddress';
 import { expected, message, PreviewDialog, PreviewNotifyContext, type PreviewNotify } from './previewPresentation';
 
 /**
@@ -144,9 +144,13 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
   const serving = status?.active;
   const notify = onNotify ?? silent;
   const services = serving
-    ? Object.entries(serving.services ?? {}).filter(([, service]) => service.browserUrl || service.url).map(([id]) => ({ id, addresses: previewAddresses(status, id) }))
+    ? Object.keys(serving.services ?? {}).flatMap((id) => {
+        const address = previewAddress(status, id);
+        return address ? [{ id, address }] : [];
+      })
     : [];
-  const rows = serving && !services.length ? [{ id: 'Application', addresses: previewAddresses(status) }] : services;
+  const application = serving && !Object.keys(serving.services ?? {}).length ? previewAddress(status) : undefined;
+  const rows = application ? [{ id: 'Application', address: application }] : services;
   const last = previewRunRows(status, !!snapshot?.restoredRun)[0];
   const line = error
     ? error
@@ -177,7 +181,7 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
               <div className="tm-config__row" key={row.id}>
                 <span className="tm-config__k">{row.id}</span>
                 <span className="tm-config__v">
-                  <PreviewAddressLink name={row.id} addresses={row.addresses} onOpen={open} />
+                  <PreviewAddressActions name={row.id} address={row.address} onOpen={open} />
                 </span>
               </div>
             ))}
@@ -409,9 +413,10 @@ export function ApplicationPreviewPanel({
   const openAddress = (address: PreviewAddress) => {
     if (serving) void run(() => openPreviewAddress(taskId, serving.id, address));
   };
-  // The status row names the address the primary service answers on.
+  // The status row names the primary service; it opens at its routed host name, which is the
+  // origin the app allows (its numeric address would fail CORS).
   const primary = primaryService(status);
-  const statusAddresses = primary ? previewAddresses(status, primary) : previewAddresses(status);
+  const primaryAddress = previewAddress(status, primary);
   /** Starting is followed in Activity, where its approval and outcome appear. */
   const start = () => {
     setSection('Activity');
@@ -505,7 +510,7 @@ export function ApplicationPreviewPanel({
         root.current?.querySelector<HTMLElement>('[role="status"]')?.focus();
       });
     },
-    open: () => void run(() => openPreviewAddress(taskId, serving!.id)),
+    open: () => void run(() => openPreviewAddress(taskId, serving!.id, primaryAddress)),
     start: () => void start(),
     cancel: () => void run(cancel),
     stop: () => void stop(),
@@ -738,9 +743,9 @@ export function ApplicationPreviewPanel({
               <span role="status" tabIndex={-1}>
                 <Chip tone={row.chip.tone} label={row.chip.label} />
               </span>
-              {row.url && serving ? (
+              {row.url && serving && primaryAddress ? (
                 <span className="tm-application-preview__url">
-                  <PreviewAddressLink name={primary ?? 'the application'} addresses={statusAddresses} onOpen={openAddress} />
+                  <PreviewAddressActions name={primary ?? 'the application'} address={primaryAddress} label={primary} onOpen={openAddress} />
                 </span>
               ) : null}
             </div>

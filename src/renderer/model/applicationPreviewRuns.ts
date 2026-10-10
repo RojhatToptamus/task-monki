@@ -97,30 +97,23 @@ export function serviceOutcome(service: Pick<ServiceStatus, 'type' | 'state' | '
 }
 
 /**
- * One address a serving service answers on. The host name routes by service
- * (`tm-<id>--api.localhost:port`); the IP address is the router's own port, which serves the
- * primary service only. `service` is what the runtime needs to open it; the IP address opens
- * without one and only when it is the preview's own address.
+ * The address a serving service answers on: its routed host name (`tm-<id>--api.localhost:port`),
+ * which is what the browser must use for the app's own origins and CORS. Only a single-application
+ * preview without a routed name falls back to the router's numeric address.
  */
 export interface PreviewAddress {
-  kind: 'host' | 'ip';
   url: string;
   /** Short enough for a table cell, still the real host: `tm-6ef7…--api.localhost:62492`. */
   text: string;
+  /** The service the runtime opens; absent for a single-application preview. */
   service?: string;
-  openable: boolean;
 }
 
-/** The addresses of one serving service, or of the application when `service` is omitted. */
-export function previewAddresses(status: PreviewStatus | undefined, service?: string): PreviewAddress[] {
-  const active = status?.active;
-  if (!active || !status?.url) return [];
-  const entry = service ? active.services?.[service] : undefined;
-  const addresses: PreviewAddress[] = [];
-  if (entry?.browserUrl) addresses.push({ kind: 'host', url: entry.browserUrl, text: shortAddress(entry.browserUrl), service, openable: true });
-  const ip = service ? entry?.url : status.url;
-  if (ip) addresses.push({ kind: 'ip', url: ip, text: shortAddress(ip), openable: ip === status.url });
-  return addresses;
+/** The address of one serving service, or of the application when `service` is omitted. */
+export function previewAddress(status: PreviewStatus | undefined, service?: string): PreviewAddress | undefined {
+  if (!status?.active || !status.url) return undefined;
+  const url = service ? status.active.services?.[service]?.browserUrl : status.url;
+  return url ? { url, text: shortAddress(url), ...(service ? { service } : {}) } : undefined;
 }
 
 /** The service that answers on the preview's own address, when the run is an environment. */

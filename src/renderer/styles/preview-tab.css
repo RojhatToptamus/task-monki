@@ -6,21 +6,11 @@
 .tm-preview-overview__services .tm-config__k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-overview__more { margin: 6px 0 0; color: var(--muted); font-size: var(--t-help); }
 
-/* A serving address: the real host, shortened, as a link; every address of it in the menu beside it. */
-.tm-preview-address { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; font: var(--t-meta)/1.4 var(--font-mono); }
-.tm-preview-address > :is(a, span) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-preview-address > a { color: var(--accent-ink); text-decoration: none; }
-.tm-preview-address > a:hover { color: var(--accent); text-decoration: underline; }
-/* Compact icon actions beside an address: copy it, or list the service's other addresses. */
+/* A serving address: the service name or its shortened host, then Open and Copy. */
+.tm-preview-address { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; font: var(--t-meta)/1.4 var(--font-mono); }
+.tm-preview-address__label { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+/* Open and Copy beside an address, in the compact icon-button style of the rows they sit in. */
 .tm-preview-address__action { flex: 0 0 auto; width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
-.tm-preview-address-menu { min-width: 280px; max-width: min(420px, calc(100vw - 32px)); }
-.tm-preview-address-menu__row { display: grid; grid-template-columns: minmax(0, 1fr) var(--h-icon); align-items: center; gap: 2px; }
-.tm-preview-address-menu__open { display: grid; gap: 2px; }
-.tm-preview-address-menu__open small { color: var(--muted); font-size: var(--t-meta); }
-/* The end of a routed URL names the service and port, so it wraps rather than truncating. */
-.tm-preview-address-menu__open code { color: var(--text); font: var(--t-meta)/1.4 var(--font-mono); overflow-wrap: anywhere; }
-.tm-preview-address-menu__copy { justify-content: center; width: var(--h-icon); min-height: var(--h-icon); padding: 0; color: var(--muted); }
-.tm-preview-address-menu__copy[data-highlighted] { color: var(--text); }
 
 /*
  * Preview is a workspace: one scroll owner (__main) whose sticky head holds the status row and the
@@ -30,15 +20,16 @@
  * document (see .tm-app in app-shell.css).
  */
 .tm-detail__body.tm-detail__body--preview { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
-.tm-application-preview { position: relative; display: grid; flex: 1; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
+.tm-application-preview { --preview-head-top: 8px; --preview-statusrow: 44px; --preview-sections: 32px; position: relative; display: grid; flex: 1; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
 .tm-application-preview--split { grid-template-columns: minmax(480px, 1fr) auto minmax(0, var(--preview-agent-width, 380px)); }
 .tm-application-preview__main { position: relative; container: application-preview / inline-size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
-.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: 0 24px; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
-.tm-preview-statusrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 44px; min-width: 0; }
+/* The top padding gives the status row's controls the same space above as below, before the sections. */
+.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) 24px 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-preview-statusrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: var(--preview-statusrow); min-width: 0; }
 .tm-preview-statusrow__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .tm-preview-statusrow__actions :is(.primary-button, .outline-button) { height: var(--h-toolbar); padding: 0 12px; }
 .tm-preview-statusrow__actions .tm-action-menu__trigger { width: var(--h-toolbar); }
-.tm-preview-sections { height: 32px; }
+.tm-preview-sections { height: var(--preview-sections); }
 .tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px 24px 32px; }
 .tm-preview-attention { min-width: 0; border-radius: var(--r-md); outline: 0; }
 .app-shell[data-input-modality='keyboard'] .tm-preview-attention:focus { box-shadow: 0 0 0 3px var(--focus-ring); }
@@ -275,12 +266,14 @@
 /* Preview agent: the shared side conversation, docked or as a drawer; its toggle sits before the overflow menu. */
 .tm-preview-agent-dock { display: flex; min-width: 0; min-height: 0; }
 .tm-preview-agent-dock > .tm-side-conversation, .tm-preview-agent-drawer > .tm-side-conversation { flex: 1; min-width: 0; min-height: 0; }
+/* Docked, its title lines up with the Preview status row beside it. */
+.tm-preview-agent-dock .tm-side-conversation__head { box-sizing: content-box; padding-top: var(--preview-head-top); }
 /* The panel's own --edge seam is the boundary; the handle shows only on hover or keyboard focus. */
 .tm-application-preview--split > .tm-panel-resize span { background: transparent; }
 /* The drawer opens under the workspace head so the primary action and its own toggle stay reachable. */
-.tm-preview-agent-drawer { position: absolute; inset: 44px 0 0 auto; z-index: var(--layer-overlay); display: flex; width: min(380px, 100%); box-shadow: var(--shadow-pop); animation: tm-preview-drawer-in var(--motion-standard) ease-out; }
+.tm-preview-agent-drawer { position: absolute; inset: calc(var(--preview-head-top) + var(--preview-statusrow)) 0 0 auto; z-index: var(--layer-overlay); display: flex; width: min(380px, 100%); box-shadow: var(--shadow-pop); animation: tm-preview-drawer-in var(--motion-standard) ease-out; }
 .tm-preview-agent-drawer > .tm-side-conversation { background: var(--surface); }
-.tm-preview-agent-drawer--below-sections { top: 76px; }
+.tm-preview-agent-drawer--below-sections { top: calc(var(--preview-head-top) + var(--preview-statusrow) + var(--preview-sections)); }
 @keyframes tm-preview-drawer-in { from { opacity: 0; transform: translateX(12px); } }
 .tm-preview-agent-toggle { position: relative; }
 .tm-preview-agent-toggle[aria-pressed='true'] { background: var(--sel); color: var(--text); }
