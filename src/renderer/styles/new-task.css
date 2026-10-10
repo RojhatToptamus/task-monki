@@ -437,7 +437,17 @@ so it also
 /* Refining in progress: the surface says it is busy and the text stays
    readable,
 instead of the user reading through a 45% veil. */
-.field__prompt-shell--running {
+/* In a form the composer is one more field, filled and focused like the inputs
+   beside it. */
+.field--prompt .tm-composer {
+  background: var(--field);
+}
+
+.field--prompt .tm-composer:has(textarea:focus) {
+  background: var(--field-focus);
+}
+
+.field--prompt .tm-composer.field__prompt-shell--running {
   background: var(--field-disabled);
 }
 
@@ -451,7 +461,7 @@ instead of the user reading through a 45% veil. */
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  resize: vertical;
+  resize: none;
 }
 
 .field.field--prompt textarea:focus {

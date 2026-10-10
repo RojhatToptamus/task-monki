@@ -623,7 +623,8 @@ multi-question request says how many are answered beside a disabled Submit.
 as one interaction. Use the shared composer surface without another input-shaped
 container inside it. The composer is raised on the card plane and the user's
 messages use the field fill, so the place to type never looks like something
-already sent. Separate mode selection from actions. Make delivery timing
+already sent. Inside a form (New task, a new Design) it is one more field and
+takes the field fill like the inputs beside it. Separate mode selection from actions. Make delivery timing
 and held states clear where the user sends or edits a message. Preserve the draft
 and selected files through supported navigation, failure, and restart paths.
 

@@ -70,6 +70,12 @@
   box-sizing: border-box;
 }
 
+/* A component's own display never overrides hidden, so a closed collapsible
+   keeps none of its padding. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
