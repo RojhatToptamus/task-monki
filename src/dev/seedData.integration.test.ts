@@ -468,7 +468,7 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
-  it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
+  it('preserves every seeded scenario during provider-inert initialization', async () => {
     const persistence = await openSeedPersistence(manifest.profileRoot);
     const store = persistence.tasks;
     const runtimeStore = persistence.agentRuntime;
@@ -552,12 +552,13 @@ describe('Task Monki development seed data', () => {
         worktrees: manifest.counts.worktrees,
         events: manifest.counts.events
       });
+      // Seeded runs use the runtime's default access, auto review.
       for (const run of after.runs) {
         expect(run.requestedSettings).toMatchObject({
           sandbox: 'WORKSPACE_WRITE',
           networkAccess: false,
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user'
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'auto_review'
         });
       }
 
