@@ -32,7 +32,6 @@ import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer'
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
 import { ArrowUp, CornerDownRight, RotateCcw, Square } from 'lucide-react';
-import { StatusGlyph } from './StatusBadge';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -441,8 +440,7 @@ export function DesignConversation({
           attachmentLabel="Files for this Design message"
           className="tm-design-composer__shell"
           removeDisabled={submitting || submissionOutcomeUnknown}
-          addButtonTitle="Add read-only references to this Design message."
-          addButtonLabel="Reference"
+          addButtonLabel="Attach"
           onAddButtonClick={onOpenReferences}
           toolbarAction={
             <>
@@ -462,14 +460,14 @@ export function DesignConversation({
                       .finally(() => setStopping(false));
                   }}
                 >
-                  {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
+                  <Square size={14} aria-hidden="true" />
                 </button>
               ) : null}
               {!questionPending ? <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
                 aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
                 title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
-                {submitting ? <StatusGlyph kind="working" /> : submissionOutcomeUnknown ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
-                  : activeWork ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+                {submissionOutcomeUnknown ? <RotateCcw size={16} aria-hidden="true" />
+                  : activeWork ? <CornerDownRight size={16} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
               </button> : null}
             </>
           }

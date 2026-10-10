@@ -184,9 +184,9 @@ function formatCompactDate(value: string): string {
 }
 
 function PlusIcon() {
-  return <Plus aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <Plus aria-hidden="true" size={16} />;
 }
 
 function SearchIcon() {
-  return <Search aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <Search aria-hidden="true" size={16} />;
 }

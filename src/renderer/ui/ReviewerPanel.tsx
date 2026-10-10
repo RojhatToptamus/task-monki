@@ -8,7 +8,6 @@ import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
 import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
-import { StatusGlyph } from './StatusBadge';
 
 export interface ReviewerConversation {
   records: AgentConversationRecords;
@@ -65,7 +64,8 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
     !runs.some((run) => run.id === question.runId) && (question.status === 'SENDING' || question.status === 'UNCERTAIN' || (question.status === 'FAILED' && !question.runId))
   );
 
-  const disabledReason = stale ? 'Review out of date' : active ? 'Answering…' : undefined;
+  // The working line says when the reviewer is answering; the hint only says why a question cannot be asked.
+  const disabledReason = stale ? 'Review out of date' : undefined;
   const send = async (text: string) => {
     await conversation.ask({ reviewRunId, text, messageId: crypto.randomUUID(), findingId: focusFinding?.id });
     onClearFocus();
@@ -82,7 +82,7 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
       autoFocus={autoFocus}
       composer={{
         placeholder: focusFinding ? 'Ask about this finding' : 'Ask about this review',
-        hint: disabledReason ?? 'Read-only · can revise its findings',
+        hint: disabledReason ?? '',
         disabled: stale || Boolean(active),
         draft,
         onDraftChange,
@@ -97,10 +97,10 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
             : undefined,
         above: focusFinding && !stale ? (
           <div className="tm-reviewer__about">
-            <CornerUpLeft size={13} strokeWidth={1.5} aria-hidden="true" />
+            <CornerUpLeft size={13} aria-hidden="true" />
             <span>{focusFinding.title}</span>
             <button type="button" className="tm-iconbtn" aria-label="Ask about the whole review instead" onClick={onClearFocus}>
-              <X size={13} strokeWidth={1.5} aria-hidden="true" />
+              <X size={13} aria-hidden="true" />
             </button>
           </div>
         ) : undefined
@@ -138,8 +138,7 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
       ))}
       {active && (active.status === 'QUEUED' || active.status === 'STARTING' || !turns.at(-1)?.entries.length) && questionIds.size > 0 ? (
         <div className="tm-side-conversation__working">
-          <StatusGlyph kind="working" />
-          <span role="status">{active.status === 'INTERRUPTING' ? 'Stopping…' : 'Reading the review…'}</span>
+          <span role="status" className="tm-shimmer">{active.status === 'INTERRUPTING' ? 'Stopping…' : 'Reading the review…'}</span>
           <Elapsed since={active.startedAt} />
         </div>
       ) : null}

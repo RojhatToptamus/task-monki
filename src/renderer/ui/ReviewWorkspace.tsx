@@ -19,7 +19,6 @@ import {
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { MessageTime } from './Message';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
-import { StatusGlyph } from './StatusBadge';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
@@ -303,8 +302,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           </>
         ) : (
           <>
-            <span className="tm-review__headline">
-              {review?.status === 'RUNNING' ? <StatusGlyph kind="working" /> : null}
+            <span className={`tm-review__headline${review?.status === 'RUNNING' ? ' tm-shimmer' : ''}`}>
               {reviewHeadline(review?.status, openFindings.length)}
             </span>
             {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' ? (
@@ -315,7 +313,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               label="Changes to show"
               selection="single"
               side="bottom"
-              trigger={<>{SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} strokeWidth={1.5} aria-hidden="true" /></>}
+              trigger={<>{SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} aria-hidden="true" /></>}
               items={scopeItems}
             />
             {props.runReview ? (
@@ -363,7 +361,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                 onClick={() => scrollToFile(file.id)}
               >
                 <span className="tm-review__index-path">{indexLabel(file, files)}</span>
-                {isViewed(file) ? <Check size={13} strokeWidth={1.5} aria-label="Viewed" /> : <DiffStat file={file} />}
+                {isViewed(file) ? <Check size={13} aria-label="Viewed" /> : <DiffStat file={file} />}
               </button>
               {fileFindings.map((finding) => (
                 <IndexFinding key={finding.id} finding={finding} active={focusedFindingId === finding.id} onSelect={() => scrollToFinding(finding.id)} />
@@ -436,7 +434,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                     aria-label={`Comment on line ${line.newLine}`}
                                     onClick={() => setCommentDraft({ anchor: commentKey, path: file.path, line: line.newLine, text: '' })}
                                   >
-                                    <MessageSquarePlus size={13} strokeWidth={1.5} aria-hidden="true" />
+                                    <MessageSquarePlus size={13} aria-hidden="true" />
                                   </button>
                                 ) : null}
                               </div>
@@ -584,7 +582,7 @@ function ReviewFindingThread({ finding, focused, actionable, onFocus, onDismiss,
         <span>Dismissed{finding.dismissal?.note ? `: ${finding.dismissal.note}` : ''}</span>
         {actionable && onRestore ? (
           <button type="button" className="ghost-button tm-review-thread__undo" disabled={busy} onClick={() => void run(() => onRestore(finding.id))}>
-            <Undo2 size={13} strokeWidth={1.5} aria-hidden="true" />Undo
+            <Undo2 size={13} aria-hidden="true" />Undo
           </button>
         ) : null}
       </div>
@@ -614,7 +612,7 @@ function ReviewFindingThread({ finding, focused, actionable, onFocus, onDismiss,
             {onDismiss ? (
               <Tooltip label="Dismiss">
                 <button type="button" className="tm-iconbtn" aria-label="Dismiss this finding" aria-expanded={dismissing} onClick={() => setDismissing((value) => !value)}>
-                  <X size={14} strokeWidth={1.5} aria-hidden="true" />
+                  <X size={14} aria-hidden="true" />
                 </button>
               </Tooltip>
             ) : null}

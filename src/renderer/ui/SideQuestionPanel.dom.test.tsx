@@ -45,11 +45,10 @@ function Harness(props: { conversation: SideConversation; implementationActive?:
 }
 
 describe('SideQuestionPanel', () => {
-  it('asks in the open thread and says the answer stays out of the conversation', async () => {
+  it('asks in the open thread', async () => {
     const side = conversation();
     render(<Harness conversation={side} implementationActive />);
 
-    expect(screen.getByText('Read-only snapshot · stays out of the conversation')).toBeDefined();
     fireEvent.change(screen.getByRole('textbox', { name: 'Ask Codex without interrupting it' }), { target: { value: 'Why a Map?' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
 

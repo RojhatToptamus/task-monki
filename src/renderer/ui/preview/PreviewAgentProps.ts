@@ -1,3 +1,4 @@
+import type { RefObject } from 'react';
 import type {
   AcceptPreviewRecipeDraftResult,
   AgentExecutionSettings,
@@ -35,4 +36,19 @@ export interface PreviewAgentConversation extends AgentConversationRecords {
   editQueued(id: string, text?: string): Promise<void>;
   respond(interaction: InteractionRequestRecord, decision: AgentInteractionDecision): Promise<void>;
   readArtifact?(id: string): Promise<string>;
+}
+
+/**
+ * The task page's side sheet that shows the Preview agent, as for the reviewer
+ * and side questions. The Preview owns the conversation and renders it into
+ * `slot`; the page owns whether it is open, where it docks, and its toggle.
+ */
+export interface PreviewAgentHost {
+  open: boolean;
+  /** `focus` when the person asked for it, so a panel opened by a question never takes focus. */
+  onOpenChange(open: boolean, focus?: boolean): void;
+  slot: HTMLElement | null;
+  docked: boolean;
+  autoFocus: boolean;
+  toggleRef: RefObject<HTMLElement | null>;
 }

@@ -43,7 +43,7 @@ export function RepositorySettings({
       title="Repositories"
       action={
         <button type="button" className="outline-button button--sm" disabled={addingRepository} onClick={() => void onAddRepository()}>
-          <Plus size={14} strokeWidth={1.5} aria-hidden="true" />
+          <Plus size={14} aria-hidden="true" />
           Add repository
         </button>
       }
@@ -93,7 +93,7 @@ export function RepositorySettings({
                           className="tm-table__menu"
                           label={`Actions for ${repository.name}`}
                           side="bottom"
-                          trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
+                          trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                           items={items}
                         />
                       ) : null}

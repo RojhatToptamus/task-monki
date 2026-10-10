@@ -1,22 +1,18 @@
-import { useId, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   AgentExecutionSettings,
   AgentModel,
   AgentRuntimeState,
-  InstructionAttachments,
-  WorktreeRecord
+  InstructionAttachments
 } from '../../shared/contracts';
 import type { AttachmentContent, TaskAttachmentRecord } from '../../shared/attachments';
-import {
-  matchingExecutionPolicyPreset,
-  settingsForExecutionPolicyPreset
-} from '../model/agentPermissions';
 import {
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
+import { matchingExecutionPolicyPreset, settingsForExecutionPolicyPreset } from '../model/agentPermissions';
 import { AgentModelSelector } from './AgentModelSelector';
-import { ExecutionPolicySelect } from './NewTaskPanel';
+import { AccessMenu, presetNetworkOn } from './AccessMenu';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments, type UseTaskAttachmentsOptions } from './useTaskAttachments';
@@ -28,7 +24,6 @@ export function PreRunSetup({
   attachments,
   attachmentOptions,
   onReadAttachment,
-  worktree,
   runtimeId,
   settings,
   models,
@@ -44,7 +39,6 @@ export function PreRunSetup({
   attachments: TaskAttachmentRecord[];
   attachmentOptions: Omit<UseTaskAttachmentsOptions, 'blocked' | 'preserveDraftOnClose'>;
   onReadAttachment(id: string): Promise<AttachmentContent>;
-  worktree?: WorktreeRecord;
   runtimeId: string;
   settings: AgentExecutionSettings;
   models: AgentModel[];
@@ -75,8 +69,8 @@ export function PreRunSetup({
     });
     void writes.current.catch(() => setSaveError('Draft could not be saved. Keep this page open and try Save again.'));
   };
-  const savePrompt = async () => {
-    if (saving || files.busy || files.hasErrors || files.modelError || !text.trim()) return;
+  const savePrompt = async (): Promise<boolean> => {
+    if (saving || files.busy || files.hasErrors || files.modelError || !text.trim()) return false;
     setSaving(true);
     try {
       await writes.current.catch(() => undefined);
@@ -86,107 +80,83 @@ export function PreRunSetup({
       setSaved(text.trim());
       setText(text.trim());
       setSaveError(undefined);
-    } catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
-    finally { setSaving(false); }
+      return true;
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally { setSaving(false); }
+  };
+  // Starting saves the prompt first, so there is no separate save step.
+  const submit = async () => {
+    if (dirty && !(await savePrompt())) return;
+    if (action && !action.disabled) action.onClick();
   };
   const availableRuntimes = runtimes.filter((runtime) => runtime.preflight.runtime.id === runtimeId);
-  const selected = availableRuntimes[0];
-  const presets = selected?.preflight.capabilities.executionPolicy.presets ?? [];
+  const presets = availableRuntimes[0]?.preflight.capabilities.executionPolicy.presets ?? [];
   const preset = matchingExecutionPolicyPreset(presets, settings);
-  const networkLocked = preset?.networkAccess === 'DISABLED' || preset?.networkAccess === 'REQUIRED';
-  const networkOn = preset?.networkAccess === 'REQUIRED' || (preset?.networkAccess !== 'DISABLED' && settings.networkAccess === true);
-  const networkLabelId = useId();
+  const fileError = files.draftError ?? files.modelError ?? files.overflowError;
+  const canSubmit = !saving && !files.busy && !files.hasErrors && !files.modelError && text.trim().length > 0
+    && (action ? !action.disabled : dirty);
 
   return <section className="tm-prerun" aria-label="Start this task">
-    <form onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}>
-      <AttachmentComposerShell attachments={files} attachmentLabel="Prompt attachments" addButtonTitle="Attach images or text files"
-        hint={dirty ? 'Unsaved prompt' : 'Task prompt'} toolbarAction={
-          <button type="submit" className="outline-button" disabled={saving || files.busy || files.hasErrors || Boolean(files.modelError) || !dirty || !text.trim()}>{saving ? 'Saving…' : 'Save prompt'}</button>
-        }>
-      <label className="tm-visually-hidden" htmlFor="initial-task-prompt">Task prompt</label>
-      <textarea className="tm-composer__input" id="initial-task-prompt" rows={4} value={text} readOnly={saving} maxLength={65_536}
-        onPaste={files.paste}
-        onChange={(event) => changePrompt(event.target.value)}
-        onKeyDown={(event) => {
-          if (!event.nativeEvent.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault(); void savePrompt();
-          }
-        }} />
-      {attachments.length ? <ul className="task-attachments" aria-label="Saved prompt attachments">
-        {attachments.map((attachment) => <StoredAttachmentChip key={attachment.id} attachment={attachment} onRead={() => onReadAttachment(attachment.id)} />)}
-      </ul> : null}
+    <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      <AttachmentComposerShell
+        className="tm-prerun__composer"
+        attachments={files}
+        attachmentLabel="Prompt attachments"
+        hint={saveError ?? fileError}
+        toolbarStart={<>
+          <AgentModelSelector
+            label="Model"
+            presentation="compact"
+            runtimeId={runtimeId}
+            modelId={selectedModel?.id ?? settings.model ?? ''}
+            reasoningEffort={settings.reasoningEffort}
+            models={models}
+            runtimes={availableRuntimes}
+            disabled={disabled}
+            fallbackSummary={settings.model}
+            runtimeUnavailableReason={(runtime) => runtime.preflight.readiness.canStart ? undefined : (runtime.preflight.readiness.detail ?? runtime.preflight.readiness.summary)}
+            onDiscoverModels={onDiscoverModels}
+            onSelectionChange={(nextRuntimeId, nextModelId) => {
+              const model = selectModel(models, nextModelId, nextRuntimeId);
+              onSettingsChange({
+                ...settings,
+                runtimeId: nextRuntimeId,
+                model: model?.model ?? nextModelId,
+                modelProvider: model?.modelProvider,
+                reasoningEffort: resolveReasoningEffort(model, settings.reasoningEffort)
+              });
+            }}
+            onReasoningEffortChange={(value) => onSettingsChange({ ...settings, reasoningEffort: value })}
+          />
+          {presets.length ? <AccessMenu
+            presets={presets}
+            selected={preset}
+            networkOn={presetNetworkOn(preset, settings.networkAccess)}
+            disabled={disabled}
+            onPresetChange={(next) => onSettingsChange({ ...settings, ...settingsForExecutionPolicyPreset(next, { networkAccess: settings.networkAccess }) })}
+            onNetworkChange={(networkAccess) => onSettingsChange({ ...settings, networkAccess })}
+          /> : null}
+        </>}
+        toolbarAction={action
+          ? <button type="submit" className="primary-button button--sm" disabled={!canSubmit} title={action.title}>{action.label}</button>
+          : <button type="submit" className="outline-button button--sm" disabled={!canSubmit}>{saving ? 'Saving…' : 'Save'}</button>}
+      >
+        <label className="tm-visually-hidden" htmlFor="initial-task-prompt">Task prompt</label>
+        <textarea className="tm-composer__input" id="initial-task-prompt" rows={8} value={text} readOnly={saving} maxLength={65_536}
+          placeholder="Describe the task"
+          onPaste={files.paste}
+          onChange={(event) => changePrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (!event.nativeEvent.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault(); void submit();
+            }
+          }} />
+        {attachments.length ? <ul className="task-attachments" aria-label="Saved prompt attachments">
+          {attachments.map((attachment) => <StoredAttachmentChip key={attachment.id} attachment={attachment} onRead={() => onReadAttachment(attachment.id)} />)}
+        </ul> : null}
       </AttachmentComposerShell>
     </form>
-    {saveError ? <p className="tm-error" role="alert">{saveError}</p> : null}
-    {files.draftError || files.modelError || files.overflowError ? <p className="tm-error" role="alert">{files.draftError ?? files.modelError ?? files.overflowError}</p> : null}
-    <div className="tm-prerun__settings">
-      <AgentModelSelector
-        label="Model"
-        presentation="full"
-        runtimeId={runtimeId}
-        modelId={selectedModel?.id ?? settings.model ?? ''}
-        reasoningEffort={settings.reasoningEffort}
-        models={models}
-        runtimes={availableRuntimes}
-        disabled={disabled}
-        fallbackSummary={settings.model}
-        runtimeUnavailableReason={(runtime) => runtime.preflight.readiness.canStart ? undefined : (runtime.preflight.readiness.detail ?? runtime.preflight.readiness.summary)}
-        onDiscoverModels={onDiscoverModels}
-        onSelectionChange={(nextRuntimeId, nextModelId) => {
-          const model = selectModel(models, nextModelId, nextRuntimeId);
-          onSettingsChange({
-            ...settings,
-            runtimeId: nextRuntimeId,
-            model: model?.model ?? nextModelId,
-            modelProvider: model?.modelProvider,
-            reasoningEffort: resolveReasoningEffort(model, settings.reasoningEffort)
-          });
-        }}
-        onReasoningEffortChange={(value) => onSettingsChange({ ...settings, reasoningEffort: value })}
-        access={presets.length ? <div className="tm-agent-console__row">
-          <span className="tm-agent-console__label">Access</span>
-          <div className="tm-agent-console__access">
-            <ExecutionPolicySelect
-              presets={presets}
-              selectedPreset={preset}
-              unmatchedSummary={{ label: 'Custom settings', detail: 'Saved execution settings do not match a preset.' }}
-              disabled={Boolean(disabled)}
-              onChange={(presetId) => {
-                const next = presets.find((candidate) => candidate.id === presetId);
-                if (!next) return;
-                onSettingsChange({
-                  ...settings,
-                  ...settingsForExecutionPolicyPreset(next, { networkAccess: settings.networkAccess })
-                });
-              }}
-            />
-          </div>
-        </div> : undefined}
-      />
-      {preset ? <div className="network-toggle">
-        <div className="network-toggle__copy">
-          <span className="network-toggle__title" id={networkLabelId}>Network</span>
-          <span className="network-toggle__state">
-            {preset.networkAccess === 'DISABLED' ? `Off · ${preset.label}`
-              : preset.networkAccess === 'REQUIRED' ? `On · ${preset.label}`
-              : networkOn ? 'On' : 'Off'}
-          </span>
-        </div>
-        <button type="button" className={`network-toggle__switch${networkOn ? ' network-toggle__switch--on' : ''}`}
-          role="switch" aria-labelledby={networkLabelId} aria-checked={networkOn}
-          disabled={disabled || networkLocked}
-          onClick={() => onSettingsChange({ ...settings, networkAccess: !networkOn })}>
-          <span />
-        </button>
-      </div> : null}
-      {worktree?.status === 'PRESENT' ? <p className="tm-prerun__worktree">
-        {worktree.branchName ?? 'Detached'}{worktree.baseRef ? ` · ${worktree.baseRef}` : ''}
-      </p> : null}
-    </div>
-    {action ? <div className="tm-prerun__action">
-      <button type="button" className="primary-button" disabled={action.disabled || saving || dirty || files.busy} title={dirty ? 'Save the prompt before continuing' : action.title} onClick={action.onClick}>
-        {action.label}
-      </button>
-    </div> : null}
   </section>;
 }

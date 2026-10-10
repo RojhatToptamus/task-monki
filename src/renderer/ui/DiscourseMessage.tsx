@@ -112,7 +112,7 @@ export function DiscourseMessage({
               {copyState === 'copied' ? 'Message copied' : copyState === 'failed' ? 'Message could not be copied' : ''}
             </span>
             {!user && message.author.kind === 'AGENT' && message.status === 'VISIBLE' ? (
-              <button type="button" className="tm-discourse-message-action" aria-label={`Ask ${peerName} to review`} title={`Ask ${peerName} to review`} onClick={onAskOthers}><Users size={16} strokeWidth={1.5} aria-hidden="true" /></button>
+              <button type="button" className="tm-discourse-message-action" aria-label={`Ask ${peerName} to review`} title={`Ask ${peerName} to review`} onClick={onAskOthers}><Users size={16} aria-hidden="true" /></button>
             ) : null}
             <ActionMenu
               className="tm-discourse-message-menu"

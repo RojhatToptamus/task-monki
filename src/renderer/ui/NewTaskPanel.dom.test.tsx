@@ -18,12 +18,13 @@ describe('mounted NewTaskPanel prompt refinement', () => {
     const onCreate = vi.fn(() => new Promise<void>(() => undefined));
     const onTextDraftChange = vi.fn();
     renderPanel({ agentProfiles: [profile], onCreate, onTextDraftChange });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Agent profile:/ }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: profile.name }));
     expect(onTextDraftChange).toHaveBeenLastCalledWith({ title: 'Sync badge', prompt: 'add a sync badge', agentProfileId: profile.id });
     fireEvent.click(screen.getByRole('button', { name: 'Create task in project' }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ agentProfileId: profile.id }));
-    expect((screen.getByRole('combobox', { name: 'Agent profile' }) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /^Agent profile:/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('sends the full refinement input and invalidates a proposal when that input changes', async () => {

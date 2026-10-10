@@ -79,7 +79,7 @@
 .tm-discourse-rail__head h2 {
   margin: 0;
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.01em;
 }
 
@@ -225,13 +225,13 @@
   border: 0;
   background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font: 600 var(--t-meta)/17px var(--font-mono);
+  font: 500 var(--t-meta)/17px var(--font-mono);
   text-align: center;
 }
 
 .tm-discourse-attention {
   color: var(--waiting-ink);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-rail__empty {
@@ -283,7 +283,7 @@
 
 .tm-discourse-header__title h1 {
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1.2;
 }
@@ -318,7 +318,7 @@
   padding: 0 8px;
   background: var(--field-focus);
   color: var(--text);
-  font: 600 var(--t-heading) var(--font-ui);
+  font: 500 var(--t-heading) var(--font-ui);
   outline: 0;
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
@@ -377,7 +377,7 @@
   margin: 4px auto 16px;
   color: var(--accent-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-status-banner {
@@ -418,7 +418,7 @@
   background: transparent;
   color: inherit;
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-status-banner button:not(:disabled):hover {
@@ -581,7 +581,7 @@
   gap: 4px;
   margin-right: 7px;
   color: var(--text-soft);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-reply-reference svg {
@@ -678,7 +678,7 @@ so a long transcript reads as text. */
   color: var(--accent-ink);
   box-shadow: var(--shadow-pop);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-response__concerns {
@@ -737,7 +737,7 @@ so a long transcript reads as text. */
 .tm-discourse-response__concerns p strong {
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* Comparison explanations are prose,
@@ -800,7 +800,7 @@ not the legacy review label/value grid. */
   background: var(--accent-soft);
   color: var(--accent-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-selection-bar > div {
@@ -816,7 +816,7 @@ not the legacy review label/value grid. */
   border-radius: var(--r-xs);
   color: var(--accent-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-composer {
@@ -1144,7 +1144,7 @@ not the legacy review label/value grid. */
   padding: 0 5px;
   color: var(--accent-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-mode-menu__trigger { display: inline-flex; align-items: center; gap: 6px; width: auto; min-height: var(--h-toolbar); padding: 0 8px; color: var(--text-soft); font-size: var(--t-help); }
@@ -1170,7 +1170,7 @@ not the legacy review label/value grid. */
   background: var(--waiting-bg);
   color: var(--waiting-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-composer__buttons {
@@ -1188,7 +1188,7 @@ not the legacy review label/value grid. */
   padding: 0 9px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-preview-button:hover {
@@ -1210,7 +1210,7 @@ not the legacy review label/value grid. */
   background: var(--primary);
   color: var(--on-primary);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-send.tm-composer-action { padding: 0; }
@@ -1366,7 +1366,7 @@ not the legacy review label/value grid. */
 .tm-discourse-access-policy dd {
   margin: 0;
   color: var(--text-soft);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-discourse-context-popover {

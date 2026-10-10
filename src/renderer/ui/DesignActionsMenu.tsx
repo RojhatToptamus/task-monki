@@ -91,6 +91,6 @@ function DesignMenu({ label, items, compact = false, onOpenChange }: {
 }) {
   return <ActionMenu className={compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'} label={label}
     onOpenChange={onOpenChange}
-    trigger={<MoreHorizontal aria-hidden="true" size={16} strokeWidth={1.5} />}
+    trigger={<MoreHorizontal aria-hidden="true" size={16} />}
     items={items.map(({ action, ...item }) => ({ ...item, onSelect: action }))} />;
 }

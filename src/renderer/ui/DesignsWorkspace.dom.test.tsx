@@ -224,7 +224,8 @@ describe('mounted Design workspace', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: '  Build a calm project portfolio.  ' }
     });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Agent profile:/ }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: profile.name }));
     const create = screen.getByRole('button', { name: 'Create Design' });
     fireEvent.click(create);
     fireEvent.click(create);
@@ -506,7 +507,6 @@ describe('mounted Design workspace', () => {
     fireEvent.drop(composer, { dataTransfer: { types: ['Files'], files: [file] } });
 
     expect(screen.getByText('dropped.txt')).toBeTruthy();
-    expect(screen.getByText(/1 file/)).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: 'Build from the dropped direction.' }
     });

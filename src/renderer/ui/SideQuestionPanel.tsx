@@ -6,7 +6,6 @@ import { sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } f
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
 import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
-import { StatusGlyph } from './StatusBadge';
 
 export interface SideConversation {
   records: AgentConversationRecords;
@@ -69,8 +68,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
       autoFocus={autoFocus}
       composer={{
         placeholder: `Ask ${agentName} without interrupting it`,
-        hint: active ? 'Answering…'
-          : runtimeUnavailable ?? (implementationActive ? 'Read-only snapshot · stays out of the conversation' : 'Read-only · stays out of the conversation'),
+        hint: runtimeUnavailable ?? '',
         disabled: Boolean(active || runtimeUnavailable),
         draft,
         onDraftChange,
@@ -85,7 +83,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
     >
       {turns.length === 0 && unattached.length === 0 ? (
         <p className="tm-side-conversation__empty">
-          Ask about the work while {agentName} keeps going. Answers stay here unless you use one in a follow-up.
+          Ask about the work while {agentName} keeps going.
         </p>
       ) : null}
       {turns.map((turn) => {
@@ -97,7 +95,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
             {snapshot ? <p className="tm-side-conversation__note">{snapshot}</p> : null}
             {followUp ? (
               <button type="button" className="ghost-button" onClick={() => onUseInFollowUp(followUp)}>
-                <CornerDownLeft size={14} strokeWidth={1.5} aria-hidden="true" />
+                <CornerDownLeft size={14} aria-hidden="true" />
                 Use in follow-up
               </button>
             ) : null}
@@ -114,8 +112,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
       ))}
       {active && (active.status === 'QUEUED' || active.status === 'STARTING' || !turns.at(-1)?.entries.length) ? (
         <div className="tm-side-conversation__working">
-          <StatusGlyph kind="working" />
-          <span role="status">{active.status === 'INTERRUPTING' ? 'Stopping…' : implementationActive ? 'Taking a snapshot and reading…' : 'Reading the task…'}</span>
+          <span role="status" className="tm-shimmer">{active.status === 'INTERRUPTING' ? 'Stopping…' : implementationActive ? 'Reading a snapshot…' : 'Reading the task…'}</span>
           <Elapsed since={active.startedAt} />
         </div>
       ) : null}

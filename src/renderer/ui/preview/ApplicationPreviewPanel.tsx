@@ -1,7 +1,7 @@
 import { isActiveRunStatus } from '../../model/agentSession';
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Ellipsis } from 'lucide-react';
-import { AgentMark } from '../UiIcons';
 import type { AttemptSummary } from 'previewhost';
 import type { ApplicationPreviewSnapshot, PreviewConfigurationFile } from '../../../shared/applicationPreview';
 import type { WorktreeRecord } from '../../../shared/contracts';
@@ -18,44 +18,22 @@ import { previewAddress, previewRunRows, primaryService, type PreviewAddress } f
 import { DRAFT_REQUEST, investigationRequest } from '../../model/previewAgentRequests';
 import { initialPreviewAgentSelection, previewAgentUnavailableReason, type PreviewAgentSelection } from '../../model/previewAgentSelection';
 import { previewConfigurationChanges, type PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
-import { focusedPanelWidth, persistFocusedPanelWidth, persistPreviewAgentOpen, previewAgentOpen } from '../../model/workspaceLayout';
 import { AccessibleTab } from '../AccessibleTabs';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
-import { PanelResizeHandle } from '../PanelResizeHandle';
 import { Chip } from '../StatusBadge';
 import { ApplicationActivity } from './ApplicationActivity';
 import { ApplicationConfiguration, type ConfigurationView, type PreviewEditorDraft } from './ApplicationConfiguration';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewAgentPanel } from './PreviewAgentPanel';
-import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
+import { FloatingSidePanel } from '../TaskSidePanel';
+import { AgentMark } from '../UiIcons';
+import type { PreviewAgentConversation, PreviewAgentHost, PreviewProposalActions } from './PreviewAgentProps';
 import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { PreviewDiagnosisBlock, PreviewProjectFacts, PreviewRequirementsBlock, PreviewRunApprovalBlock, PreviewWorktreeBlock } from './PreviewDecisionBlocks';
 import { openPreviewAddress, PreviewAddressActions } from './PreviewAddress';
 import { expected, message, PreviewDialog, PreviewNotifyContext, type PreviewNotify } from './previewPresentation';
 
-/**
- * Below this width the Preview agent opens as a drawer over the Preview instead of a column beside it:
- * a docked panel (380px by default) must leave the Preview about 640px for rows and logs.
- */
-const SPLIT_MIN_WIDTH = 1040;
-const AGENT_WIDTH = { default: 380, min: 320, max: 560 };
-
-/** Layout preferences are conveniences: storage that is unavailable or full never breaks the Preview. */
-function readAgentLayout(): { open: boolean; width: number } {
-  try {
-    return { open: previewAgentOpen(), width: focusedPanelWidth('preview-agent', AGENT_WIDTH.default, AGENT_WIDTH.min, AGENT_WIDTH.max) };
-  } catch {
-    return { open: false, width: AGENT_WIDTH.default };
-  }
-}
-function remember(write: () => void) {
-  try {
-    write();
-  } catch {
-    // The preference is lost; the layout still works for this session.
-  }
-}
 const silent: PreviewNotify = () => undefined;
 const STATIC_DRAFT = '# Describe the services this project needs.\nname: application\ntype: static\ndirectory: .\n';
 
@@ -105,24 +83,6 @@ function useApplicationPreview(taskId: string, enabled: boolean) {
     };
   }, [taskId, enabled]);
   return { snapshot, error, refresh: () => readNow.current() };
-}
-
-/** Whether the surface is wide enough for the agent column; zero means not laid out yet, which is not narrow. */
-function useNarrow(ref: RefObject<HTMLElement | null>, threshold: number) {
-  const [narrow, setNarrow] = useState(false);
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node || typeof ResizeObserver === 'undefined') return;
-    const update = () => {
-      const width = node.getBoundingClientRect().width;
-      setNarrow(width > 0 && width < threshold);
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [ref, threshold]);
-  return narrow;
 }
 
 export function worktreeAvailability(worktree: WorktreeRecord | undefined, pending: boolean): PreviewWorktreeAvailability {
@@ -208,7 +168,8 @@ export function ApplicationPreviewPanel({
   onPrepareWorktree,
   onReconnectCheckout,
   onModalOpenChange,
-  onNotify
+  onNotify,
+  agentHost
 }: {
   taskId: string;
   projectName?: string;
@@ -226,6 +187,8 @@ export function ApplicationPreviewPanel({
   onPrepareWorktree?(): void | Promise<void>;
   onReconnectCheckout?(): void;
   onModalOpenChange?(open: boolean): void;
+  /** Where the task page shows the Preview agent: its side sheet, open state and focus. */
+  agentHost?: PreviewAgentHost;
 }) {
   const availability = worktreeAvailability(worktree, worktreePending);
   const notify = onNotify ?? silent;
@@ -233,8 +196,6 @@ export function ApplicationPreviewPanel({
   const projectDirectory = snapshot?.projectDirectory ?? worktree?.worktreePath;
   const root = useRef<HTMLElement>(null);
   const main = useRef<HTMLDivElement>(null);
-  const agentToggle = useRef<HTMLButtonElement>(null);
-  const narrow = useNarrow(root, SPLIT_MIN_WIDTH);
   const [section, setSection] = useState<Section>('Activity');
   const [view, setView] = useState<ConfigurationView>('Configuration');
   const [draft, setDraft] = useState<PreviewEditorDraft>();
@@ -242,11 +203,19 @@ export function ApplicationPreviewPanel({
   const [reconciliation, setReconciliation] = useState<{ text: string; changes: string[]; concealedKeys: string[] }>();
   const [conflicts, setConflicts] = useState<PreviewConfigurationFile[]>();
   const [asRun, setAsRun] = useState<AttemptSummary>();
-  // The docked panel's open state and width persist; the narrow drawer opens only on request.
-  const [agentLayout, setAgentLayout] = useState(readAgentLayout);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [agentAutoFocus, setAgentAutoFocus] = useState(false);
-  const agentOpen = narrow ? drawerOpen : agentLayout.open;
+  // Without a host (a repository Design), the Preview keeps its own toggle and
+  // opens the agent as the same floating sheet over itself.
+  const [ownAgent, setOwnAgent] = useState({ open: false, focus: false });
+  const ownAgentToggle = useRef<HTMLButtonElement>(null);
+  const host: PreviewAgentHost = agentHost ?? {
+    open: ownAgent.open,
+    onOpenChange: (open, focus = false) => setOwnAgent({ open, focus: open && focus }),
+    slot: null,
+    docked: false,
+    autoFocus: ownAgent.focus,
+    toggleRef: ownAgentToggle
+  };
+  const agentOpen = host.open;
   const [agentSelection, setAgentSelection] = useState<PreviewAgentSelection>();
   const [agentDraft, setAgentDraft] = useState('');
   const [busy, setBusy] = useState(false);
@@ -299,10 +268,7 @@ export function ApplicationPreviewPanel({
   const [seenQuestionId, setSeenQuestionId] = useState<string>();
   if (questionPending?.id !== seenQuestionId) {
     setSeenQuestionId(questionPending?.id);
-    if (questionPending) {
-      if (narrow) setDrawerOpen(true);
-      else setAgentLayout((current) => ({ ...current, open: true }));
-    }
+    if (questionPending) host.onOpenChange(true);
   }
   // A new approval or a new failure follows from what the person just did; it is decided in Activity.
   const attentionKey = { review: reviewId, failure: diagnosis?.attemptId };
@@ -428,20 +394,12 @@ export function ApplicationPreviewPanel({
     setLogSelection({ attemptId, source, failure });
     setSection('Logs');
   }
-  function setDocked(next: Partial<typeof agentLayout>) {
-    setAgentLayout((current) => ({ ...current, ...next }));
-    if (next.open !== undefined) remember(() => persistPreviewAgentOpen(next.open!));
-    if (next.width !== undefined) remember(() => persistFocusedPanelWidth('preview-agent', next.width!));
-  }
   /** Opens the agent; `focus` when the person asked for it, so a restored or question-opened panel never takes focus. */
   function openAgent(focus = false) {
-    setAgentAutoFocus(focus);
-    if (narrow) setDrawerOpen(true);
-    else setDocked({ open: true });
+    host.onOpenChange(true, focus);
   }
   function closeAgent() {
-    if (narrow) setDrawerOpen(false);
-    else setDocked({ open: false });
+    host.onOpenChange(false);
   }
   /** Shows the requirements, approval or failure that holds the preview: Activity, top, focused. */
   function showAttention() {
@@ -604,7 +562,7 @@ export function ApplicationPreviewPanel({
     setSection('Configuration');
     if (nextView) setView(nextView);
   };
-  const agentPanel = agent && selection && agentOpen ? (
+  const agentConversation = agent && selection && agentOpen ? (
     <PreviewAgentPanel
       agent={agent}
       selection={selection}
@@ -617,14 +575,18 @@ export function ApplicationPreviewPanel({
       onDraftChange={setAgentDraft}
       onReviewProposal={() => {
         showConfiguration('Changes');
-        if (narrow) setDrawerOpen(false);
+        // Floating over the Preview, the panel steps aside for the review.
+        if (!host.docked) closeAgent();
       }}
       onClose={closeAgent}
-      returnFocusRef={agentToggle}
-      docked={!narrow}
-      autoFocus={agentAutoFocus}
+      returnFocusRef={host.toggleRef}
+      docked={host.docked}
+      autoFocus={host.autoFocus}
     />
   ) : null;
+  const agentPanel = !agentConversation ? null
+    : agentHost ? (agentHost.slot ? createPortal(agentConversation, agentHost.slot) : null)
+    : <FloatingSidePanel label="Preview agent">{agentConversation}</FloatingSidePanel>;
   const latestMeta = `${serving && latest?.id !== serving.id ? 'update' : 'this run'}${latest?.startedAt ? ` · ${previewRunRows(status, false).find((run) => run.attempt.id === latest.id)?.time ?? ''}` : ''}`;
   // What holds the preview, decided in Activity only: Configuration and Logs are never pushed down.
   const attentionBlock = availability.state !== 'available' ? (
@@ -705,13 +667,10 @@ export function ApplicationPreviewPanel({
   ) : null;
   const attention = attentionBlock ? <div className="tm-preview-attention" data-preview-attention tabIndex={-1}>{attentionBlock}</div> : null;
   const primaryDisabled = !!row.primary && (row.primary.disabled || (row.primary.action === 'save-and-review' && !editable));
-  const agentSignal = agentOpen ? undefined : questionPending ? 'waiting' : agentWorking ? 'working' : undefined;
-  const docked = !narrow && !!agentPanel;
   const workspace = (
     <section
       ref={root}
-      className={`tm-application-preview${docked ? ' tm-application-preview--split' : ''}`}
-      style={docked ? ({ '--preview-agent-width': `${agentLayout.width}px` } as CSSProperties) : undefined}
+      className="tm-application-preview"
       aria-label="Application preview"
       onKeyDown={(event) => {
         if (
@@ -729,14 +688,7 @@ export function ApplicationPreviewPanel({
         });
       }}
     >
-      <div
-        ref={main}
-        className="tm-application-preview__main"
-        onPointerDownCapture={(event) => {
-          // The drawer is dismissed by a click outside it; its own toggle closes it instead.
-          if (narrow && drawerOpen && !(event.target as HTMLElement).closest('.tm-preview-agent-toggle')) setDrawerOpen(false);
-        }}
-      >
+      <div ref={main} className="tm-application-preview__main">
         <header className="tm-preview-head">
           <div className="tm-preview-statusrow">
             <div className="tm-preview-statusline">
@@ -772,24 +724,12 @@ export function ApplicationPreviewPanel({
                   {row.primary.label}
                 </button>
               ) : null}
-              <button
-                ref={agentToggle}
-                type="button"
-                className="ghost-button tm-preview-agent-toggle"
-                aria-pressed={agentOpen}
-                aria-describedby={agentSignal ? `${taskId}-preview-agent-signal` : undefined}
-                title={agent ? 'Preview agent' : 'The Preview agent is not available here.'}
-                disabled={!agent}
-                onClick={() => (agentOpen ? closeAgent() : openAgent(true))}
-              >
-                <AgentMark />
-                <span className="tm-preview-agent-toggle__label">Agent</span>
-                {agentSignal ? <span className="tm-preview-agent-toggle__dot" data-signal={agentSignal} aria-hidden="true" /> : null}
-              </button>
-              {agentSignal ? (
-                <span id={`${taskId}-preview-agent-signal`} className="tm-visually-hidden">
-                  {agentSignal === 'waiting' ? 'Question waiting' : 'Agent working'}
-                </span>
+              {agent && !agentHost ? (
+                <button ref={ownAgentToggle} type="button" className="tm-detail__assistant" aria-pressed={agentOpen}
+                  onClick={() => (agentOpen ? closeAgent() : openAgent(true))}>
+                  <AgentMark />
+                  Preview agent
+                </button>
               ) : null}
               {menu.length ? <ActionMenu label="More preview actions" trigger={<Ellipsis size={16} aria-hidden="true" />} items={menu} /> : null}
             </div>
@@ -929,23 +869,7 @@ export function ApplicationPreviewPanel({
           )}
         </div>
       </div>
-      {docked ? (
-        <>
-          <PanelResizeHandle
-            label="Resize Preview agent"
-            value={agentLayout.width}
-            min={AGENT_WIDTH.min}
-            max={AGENT_WIDTH.max}
-            defaultValue={AGENT_WIDTH.default}
-            direction={-1}
-            controls={`${taskId}-preview-agent`}
-            onChange={(width) => setDocked({ width })}
-          />
-          <div className="tm-preview-agent-dock" id={`${taskId}-preview-agent`}>{agentPanel}</div>
-        </>
-      ) : agentPanel ? (
-        <div className={`tm-preview-agent-drawer${tabs.length ? ' tm-preview-agent-drawer--below-sections' : ''}`}>{agentPanel}</div>
-      ) : null}
+      {agentPanel}
       {confirmData && status?.data ? (
         <PreviewDialog
           title="Delete retained data?"

@@ -214,33 +214,19 @@ and a hair seam that keeps the corner legible
   color: var(--text);
 }
 
-.tm-rail__count {
-  position: absolute;
-  top: 1px;
-  right: -1px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: var(--r-pill);
-  background: var(--waiting-bg);
-  color: var(--waiting-ink);
-  box-shadow: 0 0 0 2px var(--ground);
-  font-size: var(--t-meta);
-  font-weight: 600;
-  line-height: 16px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
 .tm-rail__dot {
   position: absolute;
   top: 7px;
   right: 7px;
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: var(--r-pill);
   background: var(--accent);
   box-shadow: 0 0 0 2px var(--ground);
+}
+
+.tm-rail__item--active .tm-rail__dot {
+  box-shadow: 0 0 0 2px var(--sel);
 }
 
 .tm-rail__update[data-tone='failed'] {
@@ -276,7 +262,7 @@ and a hair seam that keeps the corner legible
 .tm-main__title {
   margin: 0;
   font-size: var(--t-title);
-  font-weight: 600;
+  font-weight: var(--w-title);
   line-height: 1.25;
   letter-spacing: -0.02em;
   color: var(--text);
@@ -377,7 +363,7 @@ then one control that
 .tm-col__label {
   margin: 0;
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
 }
 
@@ -1080,7 +1066,7 @@ its answer in place. */
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.35;
 }
 
@@ -1153,7 +1139,7 @@ its answer in place. */
 .tm-setup-tools__copy strong {
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-setup-tools__copy span {
@@ -1173,7 +1159,7 @@ its answer in place. */
 .tm-setup-tools__meta strong {
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-setup-tools__meta span {
@@ -1288,7 +1274,7 @@ the section in an 880px reading column on the right. */
   margin: 4px 10px 14px;
   color: var(--text);
   font-size: var(--t-title);
-  font-weight: 600;
+  font-weight: var(--w-title);
   letter-spacing: -0.02em;
 }
 
@@ -1343,7 +1329,7 @@ the section in an 880px reading column on the right. */
   margin: 0;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.01em;
 }
 
@@ -1421,7 +1407,6 @@ the section in an 880px reading column on the right. */
   font-family: var(--font-mono);
   font-size: var(--t-help);
 }
-
 
 .tm-theme-picker {
   position: relative;
@@ -1625,7 +1610,7 @@ so it
 .tm-theme-preview__title {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-theme-preview__tabs {
@@ -1698,7 +1683,7 @@ so it
 .tm-settings__k {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-settings__description {
@@ -1716,7 +1701,7 @@ so it
   background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
-  font: 600 var(--t-help)/1 var(--font-ui);
+  font: 500 var(--t-help)/1 var(--font-ui);
 }
 
 .tm-settings__select {
@@ -1754,7 +1739,7 @@ so it
   gap: 7px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-agent-setting {
@@ -1788,7 +1773,7 @@ so it
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-agent-setting__identity p,
@@ -1837,7 +1822,6 @@ so it
   padding: 10px 0 5px 20px;
 }
 
-
 .tm-model-default {
   display: grid;
   grid-template-columns: minmax(142px, 0.75fr) minmax(0, 2.25fr);
@@ -1860,7 +1844,7 @@ so it
 .tm-model-default__title strong {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-model-default__title span {
@@ -1905,7 +1889,7 @@ so it
   padding-top: 7px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-agent-console__row--agent .tm-agent-console__label {
@@ -1962,7 +1946,7 @@ so it
 .tm-agent-console__summary {
   overflow: hidden;
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1974,15 +1958,6 @@ so it
 
 .tm-agent-console__chevron.is-open {
   transform: rotate(180deg);
-}
-
-.tm-agent-console__spinner {
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid var(--edge);
-  border-top-color: var(--text-soft);
-  border-radius: 50%;
-  animation: tm-spin 700ms linear infinite;
 }
 
 .tm-agent-console__menu {
@@ -2245,7 +2220,7 @@ so it
   overflow: hidden;
   max-width: 100%;
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2273,7 +2248,7 @@ so it
   border-radius: var(--r-xs);
   background-color: var(--card);
   color: var(--text);
-  font: 600 var(--t-meta)/1 var(--font-ui);
+  font: 500 var(--t-meta)/1 var(--font-ui);
 }
 
 @container tm-agent-reasoning (max-width: 280px) {
@@ -2379,160 +2354,6 @@ so it
   color: var(--blocked-ink);
   font-size: var(--t-meta);
   line-height: 1.3;
-}
-
-.tm-agent-console__access {
-  position: relative;
-  display: grid;
-  min-width: 0;
-}
-
-.tm-access-select {
-  position: relative;
-  min-width: 0;
-}
-
-.tm-access-select__trigger {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 34px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-  color: var(--text);
-  text-align: left;
-}
-
-.tm-access-select__trigger:not(:disabled):hover,
-.tm-access-select.is-open .tm-access-select__trigger {
-  background: var(--field-hover);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-access-select__trigger:focus {
-  outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-access-select__option:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-access-select__summary {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  min-width: 0;
-}
-
-.tm-access-select__summary strong {
-  flex: 0 0 auto;
-  font-size: var(--t-help);
-  font-weight: 500;
-}
-
-.tm-access-select__summary small {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--t-meta);
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-access-select__chevron {
-  width: 12px;
-  height: 12px;
-  color: var(--muted);
-  stroke: currentColor;
-  transition: transform 120ms ease;
-}
-
-.tm-access-select.is-open .tm-access-select__chevron {
-  transform: rotate(180deg);
-}
-
-.tm-access-select__menu {
-  position: absolute;
-  z-index: var(--layer-menu);
-  bottom: calc(100% + 6px);
-  right: 0;
-  left: 0;
-  display: grid;
-  gap: 1px;
-  padding: 6px;
-  border: 1px solid var(--edge);
-  border-radius: var(--r);
-  background: var(--card);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-access-select__option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 16px;
-  align-items: start;
-  gap: 10px;
-  width: 100%;
-  min-height: 46px;
-  padding: 7px 9px;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--text-soft);
-  text-align: left;
-}
-
-.tm-access-select__option:not(:disabled):hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-access-select__option.is-selected {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.tm-access-select__option:disabled {
-  cursor: default;
-}
-
-.tm-access-select__option > span:first-child {
-  display: grid;
-  gap: 2px;
-}
-
-.tm-access-select__option strong {
-  font-size: var(--t-help);
-  font-weight: 500;
-}
-
-.tm-access-select__option small {
-  color: var(--muted);
-  font-size: var(--t-meta);
-  font-weight: 400;
-  line-height: 1.35;
-}
-
-.tm-access-select__check {
-  display: grid;
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  place-items: center;
-}
-
-.tm-access-select__check svg {
-  width: 13px;
-  height: 13px;
-  stroke-width: 1.8;
 }
 
 .tm-executable-setting {

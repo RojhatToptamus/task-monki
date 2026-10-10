@@ -63,6 +63,7 @@ import { AgentMark } from './UiIcons';
 import { ReviewerPanel, type ReviewerConversation } from './ReviewerPanel';
 import { SideQuestionPanel, type SideConversation } from './SideQuestionPanel';
 import { appendToDraft } from '../model/sideQuestions';
+import { persistPreviewAgentOpen, previewAgentOpen as storedPreviewAgentOpen } from '../model/workspaceLayout';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
 import { DockedSidePanel, FloatingSidePanel, useTaskSidePanelLayout } from './TaskSidePanel';
 import { InteractionAuditPanel } from './InteractionAuditPanel';
@@ -318,6 +319,19 @@ export function TaskDetail(props: TaskDetailProps) {
     void thread.end(thread.id).catch(() => undefined);
   }, []);
   useEffect(() => endSideThread, [endSideThread]);
+  // The Preview agent's sheet: whether it is open persists across tasks; the
+  // Preview renders the conversation into the sheet's slot.
+  const [previewAgentOpen, setPreviewAgentOpen] = useState(() => {
+    try { return storedPreviewAgentOpen(); } catch { return false; }
+  });
+  const [previewAgentFocus, setPreviewAgentFocus] = useState(false);
+  const [previewAgentSlot, setPreviewAgentSlot] = useState<HTMLDivElement | null>(null);
+  const previewAgentToggleRef = useRef<HTMLButtonElement>(null);
+  const changePreviewAgentOpen = useCallback((open: boolean, focus = false) => {
+    setPreviewAgentOpen(open);
+    setPreviewAgentFocus(open && focus);
+    try { persistPreviewAgentOpen(open); } catch { /* the preference is lost; the panel still works */ }
+  }, []);
   // The Review tab keeps its 248px index and a 560px diff before the panel floats.
   const sidePanelLayout = useTaskSidePanelLayout(808);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
@@ -1349,7 +1363,7 @@ export function TaskDetail(props: TaskDetailProps) {
           <TaskLifecycleTrack steps={lifecycle} />
           <div id={repositoryContextId} className="tm-detail__meta">
             <span className="tm-detail__repo">
-              <FolderGit2 size={13} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
+              <FolderGit2 size={13} aria-hidden="true" />
               <span>{props.repository?.name ?? 'Unknown repository'}</span>
               {repositoryUnavailable ? (
                 <span className="tm-detail__repostate">{humanizeEnum(props.repository!.status)}</span>
@@ -1357,13 +1371,13 @@ export function TaskDetail(props: TaskDetailProps) {
             </span>
             {worktree?.branchName ? (
               <span className="tm-detail__branch" title={worktree.branchName}>
-                <GitBranch size={13} strokeWidth={1.5} absoluteStrokeWidth aria-label="Branch" />
+                <GitBranch size={13} aria-label="Branch" />
                 <code>{worktree.branchName}</code>
               </span>
             ) : null}
           </div>
-          {/* On the Overview the Now panel holds the request itself. */}
-          {pendingInteraction && tab !== 'overview' ? (
+          {/* The Overview's Now panel and the Agent tab hold the request itself. */}
+          {pendingInteraction && tab !== 'overview' && tab !== 'agent' ? (
             <button type="button" className="tm-detail__attention" onClick={() => {
               setTab('agent'); setAgentAttentionRequest((value) => value + 1);
             }}>Go to request</button>
@@ -1430,10 +1444,15 @@ export function TaskDetail(props: TaskDetailProps) {
       autoFocus
     />
   ) : null;
-  // One assistant panel per tab: the reviewer on Review, side questions on Agent.
+  // One assistant panel per tab: the reviewer on Review, side questions on
+  // Agent, the Preview agent on Preview (rendered into this slot by the Preview).
+  const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent
+    ? <div ref={setPreviewAgentSlot} className="tm-side-sheet__slot" />
+    : null;
   const sidePanel = reviewerPanel
     ? { label: 'Reviewer', element: reviewerPanel }
-    : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel } : undefined;
+    : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
+    : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
 
   const taskNav = (
         <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
@@ -1499,6 +1518,21 @@ export function TaskDetail(props: TaskDetailProps) {
           >
             <AgentMark />
             Side question
+          </button>
+        ) : null}
+        {tab === 'preview' && props.previewAgent ? (
+          <button
+            ref={previewAgentToggleRef}
+            type="button"
+            className="tm-detail__assistant"
+            aria-pressed={previewAgentOpen}
+            onClick={() => changePreviewAgentOpen(!previewAgentOpen, true)}
+          >
+            <AgentMark />
+            Preview agent
+            {!previewAgentOpen && props.previewAgent.runs.some((agentRun) => isActiveRunStatus(agentRun.status))
+              ? <span className="tm-detail__assistant-dot" role="img" aria-label="Working" />
+              : null}
           </button>
         ) : null}
       </div>
@@ -1620,7 +1654,6 @@ export function TaskDetail(props: TaskDetailProps) {
             attachmentOptions={props.attachmentOptions}
             onReadAttachment={props.onReadAttachment}
             attachments={props.attachments.filter((file) => task.initialAttachmentIds?.includes(file.id))}
-            worktree={worktree}
             runtimeId={task.runtimeId}
             settings={executionSettings}
             models={props.models ?? props.runtimeState?.models ?? []}
@@ -1652,7 +1685,15 @@ export function TaskDetail(props: TaskDetailProps) {
             setTab('agent');
             setAgentAttentionRequest(value => value + 1);
           }}
-          agent={props.previewAgent} proposals={props.previewProposals} /> : null}
+          agent={props.previewAgent} proposals={props.previewProposals}
+          agentHost={{
+            open: previewAgentOpen,
+            onOpenChange: changePreviewAgentOpen,
+            slot: previewAgentSlot,
+            docked: sidePanelLayout.docked,
+            autoFocus: previewAgentFocus,
+            toggleRef: previewAgentToggleRef
+          }} /> : null}
 
         {tab === 'review' ? (
           <ReviewWorkspace
@@ -2249,7 +2290,7 @@ function formatCheckDuration(startedAt?: string, completedAt?: string): string |
 }
 
 function RefreshIcon() {
-  return <RefreshCw aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
+  return <RefreshCw aria-hidden="true" size={13} />;
 }
 
 function healthFindingRank(severity: Finding['severity']): number {

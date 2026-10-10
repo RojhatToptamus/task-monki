@@ -16,8 +16,8 @@ import { UiLucideIcon } from './UiIcons';
 
 /**
  * One destination on the icon rail. The rail never expands, so the name lives
- * in the accessible label and in a tooltip. A count appears only when it waits
- * on the user; every other count belongs to the page it opens.
+ * in the accessible label and in a tooltip. Something waiting on the user is a
+ * dot at the icon's corner; how many is in the tooltip and on the page itself.
  */
 export function RailItem({
   label,
@@ -36,23 +36,23 @@ export function RailItem({
   onClick(): void;
 }) {
   const descriptionId = useId();
-  const countDescription = count > 0 ? `${count} ${countNoun}${count === 1 ? '' : 's'} waiting` : undefined;
+  const waiting = count > 0 ? `${count} ${countNoun}${count === 1 ? '' : 's'} waiting` : undefined;
   return (
-    <Tooltip label={label} side="right">
+    <Tooltip label={waiting ? `${label} · ${count > 99 ? '99+' : count} waiting` : label} side="right">
       <button
         type="button"
         className={`tm-rail__item${active ? ' tm-rail__item--active' : ''}`}
         onClick={onClick}
         aria-label={label}
         aria-current={active ? 'page' : undefined}
-        aria-describedby={countDescription ? descriptionId : undefined}
+        aria-describedby={waiting ? descriptionId : undefined}
       >
         {icon}
-        {count > 0 ? (
-          <span className="tm-rail__count" aria-hidden="true">{count > 99 ? '99+' : count}</span>
-        ) : null}
-        {countDescription ? (
-          <span id={descriptionId} className="tm-visually-hidden">{countDescription}</span>
+        {waiting ? (
+          <>
+            <span className="tm-rail__dot" aria-hidden="true" />
+            <span id={descriptionId} className="tm-visually-hidden">{waiting}</span>
+          </>
         ) : null}
       </button>
     </Tooltip>

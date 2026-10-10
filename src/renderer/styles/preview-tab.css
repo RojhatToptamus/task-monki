@@ -17,26 +17,22 @@ in the compact icon-button style of the rows they sit in. */
 
 /*
  * Preview is a workspace: one scroll owner (__main) whose sticky head holds the status row and the
- * sections,
-content full width on the task header's 24px gutter. The agent docks beside it as a
- * resizable column,
-or opens over it as a drawer below the split width.
- * __main is positioned so visually hidden labels inside it scroll with it instead of extending the
- * document (see .tm-app in app-shell.css).
+ * sections, content full width on the task header's gutter. The Preview agent opens in the
+ * task page's side sheet (TaskDetail). __main is positioned so visually hidden labels inside it
+ * scroll with it instead of extending the document (see .tm-app in app-shell.css).
  */
 .tm-detail__body.tm-detail__body--preview { padding: 0; overflow: hidden; scrollbar-gutter: auto; display: flex; flex-direction: column; }
 .tm-application-preview { --preview-head-top: 8px; --preview-statusrow: 44px; --preview-sections: 32px; position: relative; display: grid; flex: 1; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
-.tm-application-preview--split { grid-template-columns: minmax(480px, 1fr) auto minmax(0, var(--preview-agent-width, 380px)); }
 .tm-application-preview__main { position: relative; container: application-preview / inline-size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 /* The top padding gives the status row's controls the same space above as below,
 before the sections. */
-.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) 24px 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) var(--tm-gutter, 24px) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-preview-statusrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: var(--preview-statusrow); min-width: 0; }
 .tm-preview-statusrow__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .tm-preview-statusrow__actions :is(.primary-button, .outline-button) { height: var(--h-toolbar); padding: 0 12px; }
 .tm-preview-statusrow__actions .tm-action-menu__trigger { width: var(--h-toolbar); }
 .tm-preview-sections { height: var(--preview-sections); }
-.tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px 24px 32px; }
+.tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px var(--tm-gutter, 24px) 32px; }
 .tm-preview-attention { min-width: 0; border-radius: var(--r-md); outline: 0; }
 .app-shell[data-input-modality='keyboard'] .tm-preview-attention:focus { box-shadow: 0 0 0 3px var(--focus-ring); }
 .tm-application-preview [role='tabpanel']:not([hidden]) { display: grid; gap: 24px; min-width: 0; }
@@ -101,7 +97,7 @@ before the sections. */
 
 .tm-preview-statusline { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; }
 .tm-preview-statusline > * { flex: 0 0 auto; }
-.tm-preview-statusline strong { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-statusline strong { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-statusline .tm-application-preview__url { display: flex; flex: 0 1 auto; min-width: 0; }
 
 .tm-preview-setup {
@@ -121,7 +117,7 @@ before the sections. */
   cursor: pointer;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   list-style: none;
 }
 
@@ -207,7 +203,7 @@ group labels and hairline rows. */
 .tm-decision--expanded .tm-decision__actions .tm-action-menu__trigger svg { color: var(--muted); }
 
 /* Group labels and rows (DESIGN §3 group label, §5 settings row): no cards inside the block. */
-.tm-preview-group { margin: 4px 0 0; color: var(--faint); font-size: var(--t-group); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+.tm-preview-group { margin: 4px 0 0; color: var(--faint); font-size: var(--t-group); font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; }
 .tm-preview-group__meta { color: var(--muted); font-size: var(--t-meta); font-weight: 400; letter-spacing: normal; text-transform: none; }
 .tm-preview-group__meta time { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-preview-rows { display: grid; min-width: 0; }
@@ -266,7 +262,7 @@ Logs and As run. */
 .tm-preview-more { justify-self: start; margin-left: -8px; }
 .tm-preview-agent__proposal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .tm-preview-secret-form { display: grid; gap: 10px; max-width: 480px; padding: 8px 0 6px; }
-.tm-preview-secret-form h4 { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 600; }
+.tm-preview-secret-form h4 { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 500; }
 .tm-preview-secret-form p { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-preview-secret-form__progress code { color: var(--text); font-size: var(--t-help); }
 /* Inline,
@@ -274,54 +270,14 @@ the row or the progress line names what the form is for; the heading only names 
 .tm-preview-secret-form > h4 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .tm-preview-secret-form :is(.outline-button, .ghost-button) { height: var(--h-toolbar); }
 
-/* Preview agent: the shared side conversation,
-docked or as a drawer; its toggle sits before the overflow menu. */
-.tm-preview-agent-dock { display: flex; min-width: 0; min-height: 0; }
-.tm-preview-agent-dock > .tm-side-conversation,
-.tm-preview-agent-drawer > .tm-side-conversation { flex: 1; min-width: 0; min-height: 0; }
-/* Docked,
-its title lines up with the Preview status row beside it. */
-.tm-preview-agent-dock .tm-side-conversation__head { box-sizing: content-box; padding-top: var(--preview-head-top); }
-/* The panel's own --edge seam is the boundary; the handle shows only on hover or keyboard focus. */
-.tm-application-preview--split > .tm-panel-resize span { background: transparent; }
-/* The drawer opens under the workspace head so the primary action and its own toggle stay reachable. */
-.tm-preview-agent-drawer { position: absolute; inset: calc(var(--preview-head-top) + var(--preview-statusrow)) 0 0 auto; z-index: var(--layer-overlay); display: flex; width: min(380px, 100%); box-shadow: var(--shadow-pop); animation: tm-preview-drawer-in var(--motion-standard) ease-out; }
-.tm-preview-agent-drawer > .tm-side-conversation { background: var(--surface); }
-.tm-preview-agent-drawer--below-sections { top: calc(var(--preview-head-top) + var(--preview-statusrow) + var(--preview-sections)); }
-@keyframes tm-preview-drawer-in { from { opacity: 0; transform: translateX(12px); } }
-.tm-preview-agent-toggle { position: relative; }
-.tm-preview-agent-toggle[aria-pressed='true'] { background: var(--sel); color: var(--text); }
-.tm-preview-agent-toggle__dot { position: absolute; top: 5px; left: 19px; width: 6px; height: 6px; border-radius: var(--r-pill); }
-.tm-preview-agent-toggle__dot[data-signal='working'] { background: var(--accent); animation: tm-preview-agent-working 2.4s ease-in-out infinite; }
-.tm-preview-agent-toggle__dot[data-signal='waiting'] { background: var(--waiting); }
-@keyframes tm-preview-agent-working { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .tm-preview-agent-toggle__dot[data-signal='working'],
-.tm-preview-agent-drawer { animation: none; }
-}
-/* Label-last collapse: the agent entry keeps its accessible name and tooltip as an icon. */
-@container application-preview (max-width: 720px) {
-  .tm-preview-agent-toggle { width: var(--h-toolbar); padding: 0; }
-  .tm-preview-agent-toggle__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .tm-preview-agent-toggle__dot { left: 18px; }
-}
 .tm-preview-agent__intro { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-preview-agent__proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--well); }
-.tm-preview-agent__proposal strong { color: var(--text); font-size: var(--t-label); font-weight: 600; }
+.tm-preview-agent__proposal strong { color: var(--text); font-size: var(--t-label); font-weight: 500; }
 .tm-preview-agent__proposal span { color: var(--muted); font: var(--t-meta) var(--font-mono); }
 .tm-preview-agent__proposal .ghost-button { margin-left: auto; }
-/* Model and effort keep one compact width whatever the panel width; the hint takes what is left. */
-.tm-side-conversation__tools { flex: 0 1 auto; min-width: 120px; }
+/* The model chip keeps its width; the hint takes what is left. */
+.tm-side-conversation__tools { display: inline-flex; flex: 0 1 auto; min-width: 0; }
 .tm-side-conversation .tm-composer__hint { flex: 1 1 0; }
-.tm-side-conversation__tools + :is(.tm-composer__secondary, .tm-composer-action) { margin-left: auto; }
-.tm-side-conversation__tools .tm-agent-console--compact { display: grid; grid-template-columns: minmax(0, 190px); }
-.tm-side-conversation__tools .tm-agent-console--compact:has(.tm-agent-console__reasoning) { grid-template-columns: minmax(0, 190px) 100px; }
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__trigger,
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__reasoning-select { width: 100%; height: var(--h-compact); min-height: var(--h-compact); border-radius: var(--r-sm); background-color: var(--field); font: 500 var(--t-help)/1 var(--font-ui); }
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-sm); }
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__reasoning-select { background-color: transparent; box-shadow: none; }
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__reasoning button { min-height: var(--h-compact); }
-.tm-side-conversation__tools .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-side-conversation .tm-agent-session__editing { margin: 0; padding: 6px 12px; }
 
 /* Logs: one run,

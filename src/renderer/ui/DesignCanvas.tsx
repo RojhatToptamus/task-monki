@@ -349,7 +349,7 @@ export function DesignCanvas({
             disabled={!generationId || operation !== undefined}
             onClick={() => void refreshPreview()}
           >
-            <UiRefreshIcon busy={operation === 'refresh'} />
+            <UiRefreshIcon />
           </button>
           <button
             type="button"

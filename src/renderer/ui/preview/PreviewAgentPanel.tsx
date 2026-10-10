@@ -10,7 +10,6 @@ import { ConversationPanel } from '../ConversationPanel';
 import { InteractionPanel } from '../InteractionPanel';
 import { MessageQueue } from '../MessageQueue';
 import { Elapsed, Turn, UserMessage, useSessionTurns } from '../SessionTurns';
-import { StatusGlyph } from '../StatusBadge';
 import type { PreviewAgentConversation } from './PreviewAgentProps';
 
 /**
@@ -108,7 +107,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
         />
       }
       composer={{
-        placeholder: editing ? 'Edit the queued message' : active ? 'Queue a message for after this response' : turns.length ? 'Ask for a change or an explanation…' : 'Ask about the preview or request a configuration…',
+        placeholder: editing ? 'Edit the queued message' : active ? 'Queue a message for after this response' : turns.length ? 'Ask for a change or an explanation' : 'Ask about the preview or request a configuration',
         hint: disabledReason ?? '',
         sendLabel: editing ? 'Save' : active ? 'Queue' : 'Send',
         disabled: !!disabledReason || (!editing && questionPending),
@@ -140,7 +139,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
             />
             {editing ? (
               <div className="tm-agent-session__editing">
-                <Pencil size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />Editing queued message
+                <Pencil size={13} aria-hidden="true" />Editing queued message
                 <button type="button" className="ghost-button" onClick={() => setEditing(undefined)} disabled={busy}>Cancel</button>
               </div>
             ) : null}
@@ -161,8 +160,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       ))}
       {active && !questionPending && (active.status === 'INTERRUPTING' || active.status === 'STARTING' || active.status === 'QUEUED' || !liveWorkVisible) ? (
         <div className="tm-side-conversation__working">
-          <StatusGlyph kind="working" />
-          <span role="status">{workingLabel}</span>
+          <span role="status" className="tm-shimmer">{workingLabel}</span>
           <Elapsed since={active.startedAt} />
         </div>
       ) : null}

@@ -19,7 +19,7 @@ export function useCopied(onError?: () => void): [boolean, (text: string) => voi
 
 /** The copy glyph, swapped for a check while the copy is confirmed. */
 export function CopyGlyph({ copied, size = 16 }: { copied: boolean; size?: number }) {
-  return copied ? <Check size={size} strokeWidth={1.5} aria-hidden="true" /> : <Copy size={size} strokeWidth={1.5} aria-hidden="true" />;
+  return copied ? <Check size={size} aria-hidden="true" /> : <Copy size={size} aria-hidden="true" />;
 }
 
 /** An icon button that copies a value; it confirms on itself rather than elsewhere on the page. */

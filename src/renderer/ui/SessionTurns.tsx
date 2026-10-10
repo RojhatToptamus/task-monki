@@ -99,8 +99,8 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
       ? <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
       : <Message from="user" className="tm-message--action">
         <span className="tm-message__action">{turn.opener.label === 'Retried'
-          ? <RotateCcw size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
-          : <Play size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />}{turn.opener.label}</span>
+          ? <RotateCcw size={13} aria-hidden="true" />
+          : <Play size={13} aria-hidden="true" />}{turn.opener.label}</span>
         <MessageMeta><MessageTime value={turn.opener.at} /></MessageMeta>
       </Message> : null}
     {entries.map((entry, index) => {
@@ -112,7 +112,7 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
     })}
     {failure ? <div className="tm-turn__notice" data-status={failure.status}>
-      <CircleAlert size={16} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
+      <CircleAlert size={16} aria-hidden="true" />
       <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
         {failure.reportedReason ? <figure className="tm-turn__reported">
           <figcaption>{sourceName ?? 'Agent'}</figcaption>
@@ -161,7 +161,7 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
       <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
       {end ? <MessageTime value={end} /> : null}
       {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
-      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />} items={details} /> : null}
+      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={details} /> : null}
     </div>
     {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">
       {prompt.error ? <p role="alert">{prompt.error}</p> : prompt.text === undefined ? <p>Loading prompt…</p> : <pre>{prompt.text}</pre>}

@@ -165,13 +165,13 @@ function AttachmentPreviewDialog({ name, onClose, onOpenChange, children }: {
 }
 
 function CloseIcon() {
-  return <X aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
+  return <X aria-hidden="true" size={15} />;
 }
 
 function ImageFileIcon() {
-  return <Image aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <Image aria-hidden="true" size={16} />;
 }
 
 function TextFileIcon() {
-  return <FileText aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <FileText aria-hidden="true" size={16} />;
 }

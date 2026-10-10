@@ -9,6 +9,13 @@
   --t-meta: 11.5px;
   --t-group: 12px;
 
+  /* Weights — 600 is the page title alone; everything else is 500 or 400. */
+  --w-title: 500;
+  --w-medium: 500;
+
+  /* Icons draw one line weight at every size (DESIGN.md 3.3). */
+  --icon-stroke: 1.25px;
+
   /* Control heights — decision surface, toolbar, compact, icon button. */
   --h-control: 32px;
   --h-toolbar: 28px;
@@ -154,9 +161,14 @@ body {
   }
 }
 
-@keyframes tm-spin {
+/* Live text: a soft highlight crosses the words once every 2.4s. */
+@keyframes tm-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
   to {
-    transform: rotate(360deg);
+    background-position: -100% 0;
   }
 }
 
@@ -235,7 +247,6 @@ so they
 .app-shell :where(
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
-  .tm-access-select__trigger,
   .tm-repository-select__trigger
 ):focus {
   outline: 0;
@@ -249,7 +260,6 @@ so they
   select,
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
-  .tm-access-select__trigger,
   .tm-repository-select__trigger
 ):focus,
 .app-shell[data-input-modality='keyboard'] :where(
@@ -301,6 +311,11 @@ so they
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  .tm-shimmer {
+    background: none;
+    color: var(--text-soft);
   }
 }
 

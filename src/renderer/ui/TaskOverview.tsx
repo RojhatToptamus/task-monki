@@ -127,7 +127,7 @@ export function SlotActions({
             label="More actions"
             side="bottom"
             align="start"
-            trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
+            trigger={<MoreHorizontal size={16} aria-hidden="true" />}
             items={overflow.map((action) => ({
               label: action.label,
               disabled: action.disabled,

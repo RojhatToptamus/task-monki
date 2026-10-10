@@ -87,7 +87,6 @@ import {
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { PanelResizeHandle } from './PanelResizeHandle';
-import { StatusGlyph } from './StatusBadge';
 import {
   focusedPanelWidth,
   persistFocusedPanelWidth
@@ -1768,8 +1767,7 @@ export function DiscourseWorkspace({
         aria-label="Loading Discourse"
       >
         <div className="tm-workspace-loading">
-          <StatusGlyph kind="working" />
-          <strong>Loading Discourse</strong>
+          <span className="tm-shimmer">Loading Discourse</span>
         </div>
       </div>
     );
@@ -2018,8 +2016,7 @@ export function DiscourseWorkspace({
             </div>
           ) : conversationPending ? (
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
-              <StatusGlyph kind="working" />
-              <h2>Loading conversation…</h2>
+              <h2 className="tm-shimmer">Loading conversation…</h2>
             </div>
           ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
@@ -2167,7 +2164,7 @@ export function DiscourseWorkspace({
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
-                  {sending || (activeWave && ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status)) ? <StatusGlyph kind="working" /> : activeWave ? <Square size={14} strokeWidth={1.5} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+                  {activeWave ? <Square size={14} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
                 </button>
               </div>
             )}
@@ -2263,7 +2260,7 @@ export function DiscourseWorkspace({
                   <ContextReference key={reference.contextLinkId} kind={reference.entityKind} label={reference.labelSnapshot}
                     description={`${reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · ${availabilityLabel(reference.availability)}`}>
                     <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
-                      <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+                      <X aria-hidden="true" size={14} />
                     </button>
                   </ContextReference>
                 ))}
@@ -2326,7 +2323,7 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
     <div className="tm-discourse-composer-target">
       <span><strong>{label}</strong><small>{compactText(message.body, 120)}</small></span>
       <button type="button" aria-label="Remove reply target" onClick={onRemove}>
-        <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+        <X aria-hidden="true" size={14} />
       </button>
     </div>
   );

@@ -391,9 +391,9 @@ function formatList(values: readonly string[]): string {
 }
 
 function FolderIcon() {
-  return <Folder aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
+  return <Folder aria-hidden="true" size={14} />;
 }
 
 function RefreshIcon() {
-  return <RefreshCw aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
+  return <RefreshCw aria-hidden="true" size={14} />;
 }

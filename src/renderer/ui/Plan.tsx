@@ -73,8 +73,6 @@ export function PlanList({
             <Mark
               className="tm-plan__mark"
               size={14}
-              strokeWidth={1.5}
-              absoluteStrokeWidth
               aria-hidden="true"
             />
             <span className="tm-plan__label">{step.step}</span>
@@ -103,7 +101,7 @@ export function PlanCard({ steps, marker, live = false }: {
   const done = steps.filter((step) => step.status === 'COMPLETED').length;
   return <Collapsible.Root className="tm-plan-card" open={userOpen ?? (live || Boolean(marker))} onOpenChange={setUserOpen}>
     <Collapsible.Trigger className="tm-plan-card__head" data-disclosure="">
-      <ListChecks size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+      <ListChecks size={13} aria-hidden="true" />
       <span className="tm-plan-card__title">Plan</span>
       <span className="tm-plan-card__count">{done} of {steps.length} done</span>
       <DisclosureChevron />

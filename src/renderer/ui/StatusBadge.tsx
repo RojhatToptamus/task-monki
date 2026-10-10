@@ -1,4 +1,4 @@
-import { CircleCheck, CircleChevronRight, CircleX, LoaderCircle } from 'lucide-react';
+import { CircleCheck, CircleChevronRight, CircleX } from 'lucide-react';
 import { formatStatusValue } from './display';
 
 interface StatusBadgeProps {
@@ -25,7 +25,6 @@ export function StatusChip({ label, value, tone = 'neutral', muted = false }: St
     'status-pill',
     'status-pill--with-value',
     `status-pill--${resolvedTone}`,
-    isRunningValue(value) ? 'status-pill--running' : '',
     muted ? 'status-pill--muted' : ''
   ].filter(Boolean);
   return (
@@ -38,11 +37,10 @@ export function StatusChip({ label, value, tone = 'neutral', muted = false }: St
 
 export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
-/** A badge: the state word on a tint of its tone. A spinner leads it only while work is in flight. */
-export function Chip({ tone, label, running = false }: { tone: StatusPillTone; label: string; running?: boolean }) {
+/** A badge: the state word on a tint of its tone. Nothing in it moves (DESIGN.md 7). */
+export function Chip({ tone, label }: { tone: StatusPillTone; label: string }) {
   return (
     <span className={`status-pill status-pill--${tone}`}>
-      {running ? <StatusGlyph kind="working" /> : null}
       <span className="status-pill__label">{label}</span>
     </span>
   );
@@ -89,38 +87,25 @@ export type StatusGlyphKind = 'working' | 'waiting' | 'blocked' | 'verified' | '
 
 export function StatusGlyph({
   kind,
-  className = '',
-  animate = kind === 'working'
+  className = ''
 }: {
   kind: StatusGlyphKind;
   className?: string;
-  animate?: boolean;
 }) {
   if (kind === 'idle') return null;
-  const classes = [
-    'tm-status-glyph',
-    `tm-status-glyph--${kind}`,
-    !animate ? 'tm-status-glyph--static' : '',
-    className
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const Component = kind === 'working'
-    ? LoaderCircle
-    : kind === 'waiting'
-      ? CircleChevronRight
-      : kind === 'blocked'
-        ? CircleX
-        : CircleCheck;
-  return (
-    <Component
-      absoluteStrokeWidth
-      aria-hidden="true"
-      className={classes}
-      size={14}
-      strokeWidth={1.5}
-    />
-  );
+  const classes = ['lucide', 'tm-status-glyph', `tm-status-glyph--${kind}`, className].filter(Boolean).join(' ');
+  if (kind === 'working') {
+    // Work in flight is a half-filled circle that holds still; motion belongs
+    // to the one line of live text on a surface (DESIGN.md 7).
+    return (
+      <svg className={classes} viewBox="0 0 24 24" width={14} height={14} aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" />
+        <path d="M12 6a6 6 0 0 1 0 12z" fill="currentColor" />
+      </svg>
+    );
+  }
+  const Component = kind === 'waiting' ? CircleChevronRight : kind === 'blocked' ? CircleX : CircleCheck;
+  return <Component aria-hidden="true" className={classes} size={14} />;
 }
 
 export function statusKindForTone(

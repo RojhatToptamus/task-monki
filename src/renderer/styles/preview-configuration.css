@@ -3,7 +3,7 @@
 .tm-preview-configuration { display: grid; gap: 14px; min-width: 0; }
 .tm-preview-configuration__toolbar { display: flex; align-items: center; gap: 16px; min-height: var(--h-toolbar); }
 .tm-preview-configuration__file { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
-.tm-preview-configuration__file strong { color: var(--text); font-weight: 600; }
+.tm-preview-configuration__file strong { color: var(--text); font-weight: 500; }
 .tm-preview-configuration__views { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .tm-preview-configuration__views .ghost-button[aria-pressed='true'] { background: var(--sel); color: var(--text); }
 .tm-preview-configuration__link { padding: 0; color: var(--accent-ink); font-size: inherit; }
@@ -31,7 +31,7 @@
 .tm-preview-entry--toggle { width: calc(100% + 16px); margin: 0 -8px; padding: 1px 8px; }
 .tm-preview-entry--toggle:not(:disabled):hover { background: var(--hover); }
 .tm-preview-entry__head { display: flex; align-items: baseline; gap: 8px; min-width: 0; grid-column: 1; grid-row: 1; line-height: 18px; white-space: nowrap; }
-.tm-preview-entry__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: 600; text-overflow: ellipsis; }
+.tm-preview-entry__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: 500; text-overflow: ellipsis; }
 code.tm-preview-entry__name { flex: 0 1 auto; font-size: var(--t-help); }
 .tm-preview-entry__type { flex: 0 0 auto; color: var(--muted); font-size: var(--t-help); }
 .tm-preview-entry__path { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; }

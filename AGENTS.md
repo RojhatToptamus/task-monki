@@ -174,6 +174,12 @@ shared primitives instead of building a local variant:
 - Settings: `SettingsPane` and `SettingsRow` inside `tm-settings__list`.
 - Side conversations: `ConversationPanel` in `DockedSidePanel` or
   `FloatingSidePanel` from `useTaskSidePanelLayout`.
+- Composers: `AttachmentComposerShell` or `ConversationPanel`, with chips
+  (`AgentModelSelector` compact, `AccessMenu`, `AgentProfileSelect`) in the toolbar.
+- Activity: `StatusGlyph` "working" is still; live text takes `.tm-shimmer`. Never
+  add a spinner.
+- Icons: Lucide with a `size` only; the line weight is `--icon-stroke` in CSS, so
+  never pass `strokeWidth` or `absoluteStrokeWidth`.
 - Agents: `AgentMark` is the only icon for any agent.
 - Values: colours, radii, font sizes, control heights, durations and easing are
   tokens (`themes.css`, `src/renderer/styles/foundation.css`); a literal is a

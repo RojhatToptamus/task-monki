@@ -169,7 +169,7 @@ export function CompletedChangeSummaryCard({
     ].filter(Boolean).join(', ');
     return <section className="tm-changes" aria-label="Changed files">
       <header className="tm-changes__head">
-        <FilePlus2 size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+        <FilePlus2 size={13} aria-hidden="true" />
         <span className="tm-changes__title">{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
         <DiffStat additions={summary.additions} deletions={summary.deletions} />
         {note ? <span className="tm-changes__note" title={historical
@@ -195,7 +195,7 @@ export function CompletedChangeSummaryCard({
     <section className="tm-change-summary" aria-label="Captured Git changes">
       <div className="tm-change-summary__head">
         <span className="tm-change-summary__icon" aria-hidden="true">
-          <FilePlus2 absoluteStrokeWidth size={16} strokeWidth={1.5} />
+          <FilePlus2 size={16} />
         </span>
         <div className="tm-change-summary__title">
           <h3>{title}</h3>

@@ -347,9 +347,7 @@ describe('NewTaskPanel', () => {
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
-    expect(html).toContain('Execution policy: Restricted');
-    expect(html).toContain('Restricted');
-    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Access: Restricted"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');
@@ -361,17 +359,12 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('aria-keyshortcuts="Meta+Enter Control+Enter"');
     expect(html).not.toContain('aria-pressed=');
-    expect(html).toContain('Network access');
-    expect(html).toContain('Add files');
-    expect(html).toContain(
-      'title="Stored locally and shared read-only with Codex for this task."'
-    );
-    expect(html).toContain('Paste or drop files');
+    expect(html).toContain('aria-label="Add files"');
+    expect(html).not.toContain('Paste or drop files');
     expect(html).not.toContain('After validation, Task Monki stores');
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
-    expect(html).toContain('aria-labelledby="task-network-access-label"');
-    expect(html).toContain('<details');
-    expect(html).toContain('>Model<');
+    // Model and access are chips in the description's toolbar, not a settings section.
+    expect(html).not.toContain('<details');
     expect(html).toContain('aria-label="Search models and providers"');
     expect(html).toContain('aria-label="Models by provider"');
     expect(html).toContain('OpenCode');
@@ -382,8 +375,9 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('Resize new task panel');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
-    expect(html).toContain('Provider commands run outside a Task Monki sandbox.');
-    expect(html).toContain('The saved runtime change will apply after this turn.');
+    // Runtime notices belong to Settings, not to every task created on that runtime.
+    expect(html).not.toContain('Provider commands run outside a Task Monki sandbox.');
+    expect(html).not.toContain('The saved runtime change will apply after this turn.');
     expect(html).not.toContain('Internal ACP client-tool notice.');
     expect(html).not.toContain('Reasoning effort');
 
@@ -397,7 +391,8 @@ describe('NewTaskPanel', () => {
     expect(preservedDraftHtml).toContain('>Preserved description</textarea>');
 
     const fullAccessHtml = renderPanel({ defaultPresetId: 'full-access' });
-    expect(fullAccessHtml).toContain('Required by this execution policy.');
+    // A preset that requires the network shows it on: the access chip names it.
+    expect(fullAccessHtml).toMatch(/aria-label="Access: [^"]+ · Network"/);
 
     const fallbackHtml = renderPanel({
       repositoryId: 'repository-disconnected',
@@ -431,8 +426,7 @@ describe('NewTaskPanel', () => {
     expect(fallbackHtml).not.toContain('Create task in old-project');
 
     const gatedHtml = renderPanel({ attachmentsEnabled: false });
-    expect(gatedHtml).toContain('Unavailable in this build');
-    expect(gatedHtml).toContain('Attachments require file-read isolation between tasks.');
+    expect(gatedHtml).toContain('Files are unavailable in this build');
   });
 });
 

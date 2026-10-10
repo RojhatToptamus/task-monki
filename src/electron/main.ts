@@ -186,6 +186,18 @@ const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
 
+/**
+ * Development only: with the environment `npm run dev:seed` writes, the desktop
+ * shell opens the deterministic seed profile with live agents off, as the seeded
+ * dev API does, so its synthetic runs keep their state. Packaged builds ignore it.
+ */
+const devSeedProfileRoot = !app.isPackaged && process.env.TASK_MANAGER_DEV_SEED_MODE === '1'
+  ? process.env.TASK_MANAGER_PROFILE_ROOT
+  : undefined;
+if (devSeedProfileRoot) {
+  app.setPath('userData', devSeedProfileRoot);
+}
+
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
@@ -1151,6 +1163,13 @@ void app.whenReady().then(async () => {
     {
       agentCwd: providerRuntimeCwd,
       appSettingsStore: persistence.settings,
+      ...(devSeedProfileRoot
+        ? {
+            agentProviderStartupDisabledReason:
+              'Live agents are off for the development seed so its synthetic runs keep their state.',
+            allowAgentNetworkAccess: false
+          }
+        : {}),
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),

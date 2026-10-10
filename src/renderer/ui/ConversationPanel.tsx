@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode,
 import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
-import { StatusGlyph } from './StatusBadge';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
@@ -99,7 +98,7 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
         {meta ? <span className="tm-side-conversation__meta">{meta}</span> : null}
         <Tooltip label="Close" shortcut="Esc">
           <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} onClick={onClose}>
-            <X size={16} strokeWidth={1.5} aria-hidden="true" />
+            <X size={16} aria-hidden="true" />
           </button>
         </Tooltip>
       </header>
@@ -139,7 +138,7 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
             </button>
           ) : null}
           <button type="submit" className="primary-button tm-composer-action" disabled={!canSend} aria-label={sendLabel} title={`${sendLabel} · ⌘/Ctrl Enter`}>
-            {sending ? <StatusGlyph kind="working" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
+            <ArrowUp size={16} aria-hidden="true" />
           </button>
         </div>
         {error ? <p className="tm-visually-hidden" role="alert">{error}</p> : null}

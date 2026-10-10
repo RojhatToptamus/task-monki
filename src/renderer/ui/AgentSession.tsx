@@ -129,7 +129,7 @@ export function AgentSession(props: AgentSessionProps) {
   };
   const sessionBlocked = activeReview ? 'Wait for the review to finish.'
     : props.worktreeHeld ? props.worktreeHeld
-    : answerPending ? 'Answer the agent request before sending an instruction.'
+    : answerPending ? 'Answer the request first.'
     : attentionPending ? 'Waiting for confirmation before sending an instruction.'
     : run?.status === 'INTERRUPTING' ? 'Waiting for the agent to stop.'
     : ['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase) ? 'Reopen the task to continue work.'
@@ -253,7 +253,6 @@ export function AgentSession(props: AgentSessionProps) {
     setHistoryWindow((current) => earlierHistory(turns, current));
   };
   const workingLabel = displayedRun?.status === 'INTERRUPTING' ? 'Stopping…'
-    : answerPending ? 'Waiting for your answer'
     : attentionPending ? 'Waiting for confirmation'
     : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
     : activeReview ? 'Reviewing…' : 'Working…';
@@ -280,11 +279,12 @@ export function AgentSession(props: AgentSessionProps) {
         {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
           attachments={props.attachments.filter((file) => item.attachmentIds?.includes(file.id))} onReadAttachment={props.onReadAttachment}
           status={item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}
-        {active && displayedRun && (attentionPending || displayedRun.status === 'INTERRUPTING'
+        {/* A pending request is its own card below; the line would only repeat it. */}
+        {active && displayedRun && !answerPending && (attentionPending || displayedRun.status === 'INTERRUPTING'
           || displayedRun.status === 'STARTING' || displayedRun.status === 'QUEUED' || !liveWorkVisible)
           ? <div className="tm-agent-session__working">
-            <StatusGlyph kind={attentionPending ? 'waiting' : 'working'} />
-            <span role="status">{workingLabel}</span>
+            {attentionPending ? <StatusGlyph kind="waiting" /> : null}
+            <span role="status" className={attentionPending ? undefined : 'tm-shimmer'}>{workingLabel}</span>
             <Elapsed since={displayedRun.startedAt} />
           </div> : null}
         <div ref={attention} tabIndex={-1} className="tm-agent-session__requests">
@@ -297,12 +297,12 @@ export function AgentSession(props: AgentSessionProps) {
     </Conversation>
     {run ? <div className="tm-agent-session__footer">
       <form className="tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
-        <AttachmentComposerShell compact={questionPending} attachments={composerFiles} attachmentLabel="Message attachments" addButtonTitle="Attach images or text files"
+        <AttachmentComposerShell compact={questionPending} attachments={composerFiles} attachmentLabel="Message attachments"
           hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
           toolbarAction={<>
             {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}>{busy ? 'Saving…' : 'Save'}</button> : <>
               {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" disabled={busy || hasFiles}
-                trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />}
+                trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                 items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
                   onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}
               {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
@@ -311,10 +311,10 @@ export function AgentSession(props: AgentSessionProps) {
                 <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
                   aria-label={delivery[mode].label}
                   title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
-                  {pendingAction === 'submit' ? <StatusGlyph kind="working" /> : sendControl(mode, followUp)}
+                  {sendControl(mode, followUp)}
                 </button>
                 {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
-                  trigger={<ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />}
+                  trigger={<ChevronDown size={14} aria-hidden="true" />}
                   items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,
                     onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : null}
               </div> : null}
@@ -334,7 +334,7 @@ export function AgentSession(props: AgentSessionProps) {
             await props.onEditQueue(id); if (editing?.id === id) cancelEdit(); composer.current?.focus();
           })} />
         {editing ? <div className="tm-agent-session__editing">
-          <Pencil size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />Editing queued message
+          <Pencil size={13} aria-hidden="true" />Editing queued message
           <button type="button" className="ghost-button" onClick={cancelEdit} disabled={busy}>Cancel</button>
         </div> : null}
         <label className="tm-visually-hidden" htmlFor={`agent-draft-${task.id}`}>{editing ? 'Edit queued instruction' : 'Instruction'}</label>
@@ -380,10 +380,10 @@ function sendUsesIcon(mode: SendMode, followUp: boolean): boolean {
 }
 
 function sendControl(mode: SendMode, followUp: boolean) {
-  if (mode === 'RETRY') return <><RotateCcw size={13} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />Retry</>;
-  if (mode === 'CONTINUE' && !followUp) return <><Play size={13} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />Continue</>;
-  if (mode === 'QUEUE') return <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" />;
-  return <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />;
+  if (mode === 'RETRY') return <><RotateCcw size={13} aria-hidden="true" />Retry</>;
+  if (mode === 'CONTINUE' && !followUp) return <><Play size={13} aria-hidden="true" />Continue</>;
+  if (mode === 'QUEUE') return <CornerDownRight size={16} aria-hidden="true" />;
+  return <ArrowUp size={16} aria-hidden="true" />;
 }
 
 function savedReading(taskId: string): ReadingPosition | undefined {

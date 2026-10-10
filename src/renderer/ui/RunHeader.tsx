@@ -16,8 +16,7 @@ export function RunHeader({
   onStop,
   stopDisabled,
   stopTitle,
-  trailingLabel,
-  pulse
+  trailingLabel
 }: {
   running: boolean;
   tone: Tone;
@@ -28,18 +27,12 @@ export function RunHeader({
   stopDisabled?: boolean;
   stopTitle?: string;
   trailingLabel?: string;
-  /** Animate the working mark. Defaults to `running`; pass false to hold it still. */
-  pulse?: boolean;
 }) {
   const elapsed = useElapsed(startedAt, running);
-  const animate = pulse ?? running;
   return (
     <div className="tm-runheader">
-      <StatusGlyph
-        kind={statusKindForTone(tone, running)}
-        animate={animate}
-      />
-      <h3 className="tm-runheader__name">{operationName}</h3>
+      <StatusGlyph kind={statusKindForTone(tone, running)} />
+      <h3 className={`tm-runheader__name${running ? ' tm-shimmer' : ''}`}>{operationName}</h3>
       {scope ? <span className="tm-runheader__scope">{scope}</span> : null}
       <span className="tm-runheader__spacer" />
       {running && elapsed !== undefined ? (

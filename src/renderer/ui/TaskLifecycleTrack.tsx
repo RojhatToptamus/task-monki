@@ -20,7 +20,7 @@ export function TaskLifecycleTrack({ steps }: { steps: TaskLifecycleStep[] }) {
             title={step.status?.label}
           >
             {index > 0 ? (
-              <ChevronRight className="tm-lifecycle__sep" size={12} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
+              <ChevronRight className="tm-lifecycle__sep" size={12} aria-hidden="true" />
             ) : null}
             {glyph ? <StatusGlyph kind={glyph} /> : null}
             <span className="tm-lifecycle__label">{step.label}</span>

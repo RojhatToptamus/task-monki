@@ -43,7 +43,7 @@ export function SourceFolderActions({ source, target }: { source: string; target
           const rect = event.currentTarget.getBoundingClientRect();
           setMenuPosition(openTargetMenuPosition(rect.right, rect.bottom));
         }}>
-        <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+        <Ellipsis size={16} aria-hidden="true" />
       </button>
       {menuPosition ? createPortal(
         <OpenTargetContextMenu target={target} position={menuPosition} onClose={closeMenu} />, document.body

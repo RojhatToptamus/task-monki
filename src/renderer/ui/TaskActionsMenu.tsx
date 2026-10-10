@@ -239,5 +239,5 @@ export function taskMenuGeometry(
 }
 
 function KebabIcon() {
-  return <MoreHorizontal aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <MoreHorizontal aria-hidden="true" size={16} />;
 }

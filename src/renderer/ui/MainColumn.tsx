@@ -589,7 +589,6 @@ export function TaskCard({
               <Chip
                 tone={vm.stateInFlight && vm.stateTone === 'neutral' ? 'info' : vm.stateTone}
                 label={vm.stateLabel}
-                running={vm.stateInFlight}
               />
             ) : null}
           </div>
@@ -608,7 +607,7 @@ export function TaskCard({
         </div>
         {vm.lineage ? (
           <div className="tm-card__fact">
-            <GitFork aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />
+            <GitFork aria-hidden="true" size={13} />
             <span>{vm.lineage}</span>
           </div>
         ) : null}
@@ -636,7 +635,7 @@ function CardPullRequest({ pullRequest }: { pullRequest: TaskCardPullRequest }) 
   const name = pullRequest.number ? `#${pullRequest.number}` : 'Pull request';
   return (
     <span className="tm-card__pr">
-      <Icon aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />
+      <Icon aria-hidden="true" size={13} />
       <span className="tm-card__pr-name">{name}</span>
       <span className="tm-visually-hidden">, {pullRequest.state}</span>
       {pullRequest.note ? <span className="tm-card__pr-note">{pullRequest.note}</span> : null}
@@ -685,7 +684,7 @@ function Inbox({
         {decisions.length === 0 ? (
           <div className="tm-inbox__empty">
             <span className="tm-inbox__empty-mark">
-              <CircleCheck aria-hidden="true" absoluteStrokeWidth size={20} strokeWidth={1.5} />
+              <CircleCheck aria-hidden="true" size={20} />
             </span>
             <span>Approvals, questions and failed runs appear here.</span>
           </div>
@@ -725,7 +724,7 @@ function AttentionTile({ kind, tone }: { kind: TaskAttentionKind; tone: TaskAtte
   const Icon = ATTENTION_ICONS[kind];
   return (
     <span className="tm-attention-tile" data-tone={tone} aria-hidden="true">
-      <Icon size={15} strokeWidth={1.5} absoluteStrokeWidth />
+      <Icon size={15} />
     </span>
   );
 }

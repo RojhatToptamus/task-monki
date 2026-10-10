@@ -420,8 +420,10 @@ better-aimed steps.
 ### 3.1 Families
 
 Two families, both named in the token layer as `--font-ui` and `--font-mono`.
-A component references those tokens and never a family name. Weights: **400,
-500, 600** only — no 300, no 700, no italic outside quoted prose. `font-feature-settings:
+A component references those tokens and never a family name. Weights: **400 and
+500** only (`--w-medium`; the page title takes `--w-title`, also 500). Semibold
+reads heavy in the system face the app falls back to, so the hierarchy comes
+from size and ink, not weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
 "tnum"` on every number that sits in a column or updates in place, so digits
 don't jitter. System fallbacks in the token, `font-display: swap`, and nothing
 that depends on a webfont having loaded to be legible.
@@ -434,9 +436,9 @@ Interface type is one sans; machine values are one mono. No third family.
 
 | Role | Token | Size / weight |
 |---|---|---|
-| Page title | `--t-title` | 22 / 600 · `-0.02em` |
-| Section heading | `--t-heading` | 15 / 600 |
-| Panel title, control label | `--t-label` | 13 / 600 |
+| Page title | `--t-title` | 22 / 500 · `-0.02em` |
+| Section heading | `--t-heading` | 15 / 500 |
+| Panel title, control label | `--t-label` | 13 / 500 |
 | Body, prose | `--t-body` | 13 / 400 |
 | Secondary, helper | `--t-help` | 12 / 400 `--text-soft` |
 | Metadata, counts | `--t-meta` | 11.5 / 400 `--muted` |
@@ -467,9 +469,11 @@ and keep the full value in `title`; never wrap a machine value mid-token.
 substitute an emoji, a glyph from the mono font, or a hand-drawn SVG for a missing
 icon — use the nearest icon in the set or a word.
 
-Sizes **13 / 16 / 20**, matched to the row they sit in (13 in compact rows, 16
-everywhere else, 20 only in empty states). Stroke 1.5 at 16px, scaled
-proportionally. `stroke="currentColor"`, `fill="none"` — an icon inherits ink
+Sizes **13 / 16 / 18**, matched to the row they sit in (13 in compact rows, 16
+everywhere else, 18 on the rail). **One line weight at every size:** every
+stroke icon draws `--icon-stroke` (1.25px) in screen pixels, set once in
+`base-components.css` with a non-scaling stroke, so a component never passes a
+`strokeWidth`. `stroke="currentColor"`, `fill="none"` — an icon inherits ink
 from its row so it dims with `--muted` automatically and needs no colour of its
 own. Never a coloured icon where a status word or dot would do.
 
@@ -611,6 +615,21 @@ container inside it. Separate mode selection from actions. Make delivery timing
 and held states clear where the user sends or edits a message. Preserve the draft
 and selected files through supported navigation, failure, and restart paths.
 
+One toolbar anatomy everywhere (`AttachmentComposerShell`, `ConversationPanel`):
+the paperclip as an icon button with a tooltip, then the chips — model
+(`AgentModelSelector` compact), access (`AccessMenu`, which holds network
+access too), profile (`AgentProfileSelect`, shown only when profiles exist) —
+then at most one line of state, then the actions. A chip has no fill or rim
+until hovered or open (`.tm-composer-chip`); the same chips outside a composer
+sit in a `.tm-chip-row`. The hint states a reason or a state that changes what
+sending does; it never explains the control ("Paste or drop files", "Read-only",
+"Task prompt" are not hints). Placeholders end without an ellipsis.
+
+**Before the first run, the Agent tab is one composer**, centred in the tab: the
+prompt, saved attachments, and the toolbar with model and access chips and the
+step (Prepare worktree or Start). Starting saves the prompt; there is no
+separate save. New task uses the same chips in its description's toolbar.
+
 **Badges.** A state word on a 12–14% tint of its tone (`status-pill`, the
 `Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, no border, no dot. A
 spinner leads it only while work is in flight. One size everywhere.
@@ -734,14 +753,16 @@ as earlier context, without Ask, Dismiss or the request bar. J/K move between
 files, N/P between findings, V marks the file viewed.
 
 **Side panels.** An assistant panel (Ask reviewer on Review, Side question on
-Agent) is its own sheet beside the task page, 380px by default and resizable
+Agent, Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable
 from 320 to 560, toggled from the right end of the tab bar with the agent mark.
 It docks while the page keeps 808px (the Review index and a 560px diff) and
 floats over it below that, sliding in 8% with the drawer curve. Its head is
 48px: mark, name, the runtime that answers, close. Escape closes it and focus
 returns to the toggle. An empty panel says in one muted sentence what it is
 for; each answer it can act on carries that action under it ("Use in
-follow-up"). The Preview agent predates this and docks inside the Preview tab.
+follow-up"). The Preview renders its agent into the sheet's slot; a Preview
+shown without a task page (a repository Design) keeps its own toggle and opens
+the same panel as a floating sheet over itself.
 
 A side question goes to the task's own runtime and model in a fresh read-only
 session, so the implementation keeps working; while it works, the question
@@ -810,13 +831,20 @@ single action that resolves it. No illustration, no second button.
 - **In a collection, state is a word, never a bare mark.** A column of coloured
   dots is unreadable; words are scannable. On task cards the word is a badge in
   the card's top-right corner; in the Inbox it is the reason line beside the
-  tile; elsewhere it is ink. A spinner leads a word only while work is in
-  flight. Attention outranks motion: a task that needs an approval never spins.
+  tile; elsewhere it is ink. Nothing in a badge or a status word moves.
+- **Activity is shown, not spun.** No spinner anywhere. Work in flight is a
+  still half-filled circle (`StatusGlyph` "working") wherever its state sits —
+  the lifecycle track, a status word, a run header. Motion is kept for the one
+  line of live text on a surface — a conversation's working line, the running
+  step when it is the latest thing said, "Reviewing" — which takes a slow text
+  shimmer (`.tm-shimmer`, 2.4s) beside a ticking elapsed time. Reduced motion
+  leaves the words still. A pending button keeps its own icon and is disabled;
+  its label changes only when it has one ("Checking…").
 - **A checklist is read by its marks.** An agent's plan is the one collection
   whose state is a mark, because every checklist reads that way: shapes, not
   colours — a check for done, a dot for the current step, a ring for what is
   left. A word appears only on the step where a run failed or stopped. The plan
-  never spins; the running command and the live working line carry the motion.
+  never moves; the live words below it carry the motion.
 - **One tone per unit, carried by one element.** Never tint the mark, the heading
   and the border of the same card. The badge or the status word carries it: the
   waiting tone when the user owes a step, the blocked tone when something
@@ -829,8 +857,8 @@ single action that resolves it. No illustration, no second button.
   Done — except where the task's phase is not its lane's stage: a backlog item
   reads Backlog, a canceled or archived task reads Canceled or Archived. Past
   stages are `--muted`, future ones `--faint`, and the task's stage is
-  `--text`/600 with a glyph only when it needs the user or has failed; the glyph
-  spins only while an agent run or review is actually working. Its status word
+  `--text`/500 with a glyph only when it needs the user, has failed, or is
+  working (the still half-filled circle). Its status word
   is announced to assistive technology and stated in words by the Now panel. The
   track never repeats that word. The order is a decision the user owes, a broken checkout and
   recovery (an interrupted run included), work in flight, verified local and
@@ -886,9 +914,9 @@ Page tabs are words on the bar's baseline; the selected one carries a 2px
   bottom edges, on `--surface` with `--r-md` corners and a `--hair` seam.
 - **The rail is permanent and icon-only:** Inbox, Tasks, Designs, Previews,
   Discourse, then the update control and Settings at the foot. It never
-  expands; names are tooltips. A count appears only when it waits on the user —
-  a `--waiting-bg` pill with `--waiting-ink` — and every other count belongs to
-  the page it opens. Repositories are managed in Settings; New task opens on the
+  expands; names are tooltips. Something waiting on the user is a 7px accent
+  dot at the icon's corner, ringed in the ground; how many is in the tooltip
+  ("Inbox · 20 waiting") and on the page itself, never a number over the icon. Repositories are managed in Settings; New task opens on the
   repository used last.
 - Give each workspace a clear scroll owner. Keep navigation and actions reachable
   without unnecessarily reducing the reading area. Menus and popovers must escape
@@ -896,7 +924,8 @@ Page tabs are words on the bar's baseline; the selected one carries a 2px
 - Related tabs share the same shell geometry. Switching tabs must not introduce
   unexplained gutters, background seams, or header movement.
 - Every boundary between two panels is a resize handle: 5px hit area, visible
-  only on hover, with a keyboard-reachable equivalent.
+  only on hover, with a keyboard-reachable equivalent. A handle on the edge of a
+  sheet that clips its overflow lies inside that edge, or nothing can grab it.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
   collapses to a toggle and the primary task keeps its size and order. Semantic
   order never changes across widths. Nothing at the app's minimum window

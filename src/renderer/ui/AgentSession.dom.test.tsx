@@ -255,7 +255,7 @@ describe('Agent session interactions', () => {
     })} />);
     const queue = screen.getByRole('button', { name: 'Queue' });
     expect(queue).toHaveProperty('disabled', true);
-    expect(screen.getByText('Answer the agent request before sending an instruction.')).toBeTruthy();
+    expect(screen.getByText('Answer the request first.')).toBeTruthy();
     expect(screen.queryByText('Live Codex is disabled for deterministic seed data.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Stop' })).toHaveProperty('disabled', false);
   });

@@ -1151,7 +1151,7 @@ function InteractionTechnicalDetails({
 function ChoiceMark({ kind }: { kind: 'radio' | 'checkbox' }) {
   return (
     <span className="interaction-choice__mark" data-kind={kind} aria-hidden="true">
-      {kind === 'checkbox' ? <Check size={12} strokeWidth={2} /> : null}
+      {kind === 'checkbox' ? <Check size={12} /> : null}
     </span>
   );
 }

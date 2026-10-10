@@ -170,7 +170,7 @@ quieter than prose. */
 .tm-plan-card__head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--h-control); padding: 0 12px; border-radius: var(--r-md); color: var(--muted); font-size: var(--t-help); text-align: left; cursor: pointer; }
 .tm-plan-card__head:hover { color: var(--text); }
 .tm-plan-card__head[data-state='open'] .tm-disclosure__chevron { transform: rotate(90deg); }
-.tm-plan-card__title { color: var(--text-soft); font-weight: 600; }
+.tm-plan-card__title { color: var(--text-soft); font-weight: 500; }
 .tm-plan-card__count { margin-right: auto; font-size: var(--t-help); font-variant-numeric: tabular-nums; }
 .tm-plan-card__body { padding: 2px 12px 8px; }
 .tm-plan-card__body > .tm-plan__steps { max-height: 280px; overflow: auto; }
@@ -178,7 +178,7 @@ quieter than prose. */
 /* Pending messages stay inside the shared composer surface. */
 .tm-queue { padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--hair); }
 .tm-queue__head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; min-height: var(--h-compact); padding-top: 2px; }
-.tm-queue__title { color: var(--text-soft); font-size: var(--t-help); font-weight: 600; }
+.tm-queue__title { color: var(--text-soft); font-size: var(--t-help); font-weight: 500; }
 .tm-queue__hint { color: var(--muted); font-size: var(--t-meta); }
 .tm-queue ol { max-height: min(152px, 20vh); margin: 0; padding: 0; overflow: auto; list-style: none; }
 .tm-queue__item { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--h-icon); border-radius: var(--r-xs); font-size: var(--t-help); }
@@ -194,7 +194,7 @@ the composer. */
 .tm-side-conversation { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); box-shadow: inset 1px 0 0 var(--edge); }
 .tm-side-conversation:focus { outline: 0; }
 .tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--hair); }
-.tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 600; white-space: nowrap; }
+.tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 500; white-space: nowrap; }
 .tm-side-conversation__mark { flex: 0 0 auto; color: var(--accent-ink); }
 .tm-side-conversation__meta { min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-side-conversation__head .tm-iconbtn { margin-left: auto; width: var(--h-icon); height: var(--h-icon); }
@@ -209,11 +209,15 @@ the composer. */
 .tm-side-conversation__exchange { display: flex; flex-direction: column; gap: 8px; }
 .tm-side-conversation__empty { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-side-conversation__note { margin: 0; color: var(--muted); font-size: var(--t-meta); }
+/* The Preview renders its agent into the sheet's slot; the slot itself takes no box. */
+.tm-side-sheet__slot { display: contents; }
 .tm-side-conversation__exchange > .ghost-button { align-self: flex-start; }
 
 /* An assistant's own sheet beside the page (DESIGN.md 5, side panels). Docked,
    it is a sibling of the page's sheet; floating, it slides over the page. */
 .tm-side-sheet > .tm-side-conversation { flex: 1; background: transparent; box-shadow: none; }
-.tm-side-sheet__resize { position: absolute; top: 0; bottom: 0; left: -6px; z-index: var(--layer-handle); }
+/* The sheet clips its overflow, so the handle lies along its inside edge; the sheet's own seam is the line. */
+.tm-side-sheet__resize { position: absolute; top: 0; bottom: 0; left: 0; width: 8px; margin: 0; z-index: var(--layer-handle); }
+.tm-side-sheet__resize span { background: transparent; }
 .tm-side-sheet--floating { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: var(--layer-overlay); display: flex; width: min(380px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
 @keyframes tm-panel-in { from { opacity: 0; transform: translateX(8%); } }

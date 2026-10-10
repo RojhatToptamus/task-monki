@@ -261,7 +261,7 @@ function RepositorySearch({
           disabled={disabled}
           onClick={() => onQueryChange('')}
         >
-          <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+          <X aria-hidden="true" size={14} />
         </button>
       ) : null}
     </div>
@@ -273,9 +273,9 @@ function formatRepositoryStatus(status: RepositoryOption['status']): string {
 }
 
 function SearchIcon() {
-  return <Search aria-hidden="true" absoluteStrokeWidth className="tm-filefilter__search-icon" size={14} strokeWidth={1.5} />;
+  return <Search aria-hidden="true" className="tm-filefilter__search-icon" size={14} />;
 }
 
 function CheckIcon() {
-  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
+  return <Check aria-hidden="true" size={13} />;
 }

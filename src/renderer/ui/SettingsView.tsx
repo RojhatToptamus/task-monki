@@ -1027,10 +1027,10 @@ function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark'
         <div className="tm-theme-preview__titlebar"><span className="tm-theme-preview__new">New task</span></div>
         <div className="tm-theme-preview__body">
           <div className="tm-theme-preview__rail">
-            <span className="tm-theme-preview__rail-item"><Inbox size={12} strokeWidth={1.5} /><i /></span>
-            <span className="tm-theme-preview__rail-item tm-theme-preview__rail-item--active"><Columns3 size={12} strokeWidth={1.5} /></span>
-            <span className="tm-theme-preview__rail-item"><PanelsTopLeft size={12} strokeWidth={1.5} /></span>
-            <span className="tm-theme-preview__rail-item"><Monitor size={12} strokeWidth={1.5} /></span>
+            <span className="tm-theme-preview__rail-item"><Inbox size={12} /><i /></span>
+            <span className="tm-theme-preview__rail-item tm-theme-preview__rail-item--active"><Columns3 size={12} /></span>
+            <span className="tm-theme-preview__rail-item"><PanelsTopLeft size={12} /></span>
+            <span className="tm-theme-preview__rail-item"><Monitor size={12} /></span>
           </div>
           <div className="tm-theme-preview__sheet">
             <strong className="tm-theme-preview__title">Tasks</strong>

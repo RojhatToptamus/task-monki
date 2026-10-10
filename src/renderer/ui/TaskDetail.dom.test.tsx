@@ -317,13 +317,13 @@ describe('Agent pre-run setup', () => {
     const editor = await screen.findByRole('textbox', { name: 'Task prompt' });
     expect((editor as HTMLTextAreaElement).value).toContain('Inspect preview.yaml');
     expect((editor as HTMLTextAreaElement).value).toContain(props.task!.prompt);
-    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false);
-    expect(screen.getByRole('button', { name: 'Start implementation' })).toHaveProperty('disabled', true);
+    // The handoff only drafts the prompt; starting stays the person's step.
+    expect(screen.getByRole('button', { name: 'Start implementation' })).toBeTruthy();
     expect(props.onStart).not.toHaveBeenCalled();
     expect(props.onAgentDraftChange).not.toHaveBeenCalled();
   });
 
-  it('keeps an edited prompt and prevents preparation until an explicit save succeeds', async () => {
+  it('saves an edited prompt before preparing, and keeps it when the save fails', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     const props = detailProps();
@@ -338,17 +338,14 @@ describe('Agent pre-run setup', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     const editor = screen.getByRole('textbox', { name: 'Task prompt' });
     fireEvent.change(editor, { target: { value: 'Use the revised request.' } });
-    expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
-    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
     await screen.findByText('Storage unavailable');
     expect(editor).toHaveProperty('value', 'Use the revised request.');
     expect(props.onPrepareWorktree).not.toHaveBeenCalled();
     rejectSave = false;
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
+    await waitFor(() => expect(props.onPrepareWorktree).toHaveBeenCalled());
     expect(props.onSavePrompt).toHaveBeenLastCalledWith('Use the revised request.', false, undefined);
-    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
-    expect(props.onPrepareWorktree).toHaveBeenCalled();
   });
 
   it('validates prompt image drafts against the model selected before the first run', async () => {
@@ -374,11 +371,11 @@ describe('Agent pre-run setup', () => {
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     await screen.findByRole('button', { name: 'reference.png' });
-    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
     fireEvent.click(screen.getByRole('button', { name: 'Model: Codex · Test model' }));
     fireEvent.click(screen.getByRole('option', { name: 'Image model via Codex' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false));
-    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
     await waitFor(() => expect(props.onSavePrompt).toHaveBeenCalledWith('Describe the reference.', false, { attachmentDraftId: 'image-draft' }));
     expect(props.attachmentOptions.onStageBatch).not.toHaveBeenCalled();
   });
@@ -434,7 +431,7 @@ describe('Agent pre-run setup', () => {
     expect(screen.getByRole('region', { name: 'Start this task' })).toBeTruthy();
     expect(screen.getByText('Add a multiply helper and cover it with tests.')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Request' })).toBeNull();
-    expect(screen.getByRole('switch', { name: 'Network' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Access: / })).toBeTruthy();
   });
 
   it('does not present a different permission preset as the saved execution settings', async () => {
@@ -448,7 +445,7 @@ describe('Agent pre-run setup', () => {
     Object.assign(props, readyRuntime());
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
-    expect(screen.getByRole('button', { name: 'Execution policy: Custom settings' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Access: Custom' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings));
   });
@@ -461,7 +458,8 @@ describe('Agent pre-run setup', () => {
     Object.assign(props, readyRuntime());
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
-    fireEvent.click(screen.getByRole('switch', { name: 'Network' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Access: / }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemcheckbox', { name: 'Network access' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, {
       networkAccess: true

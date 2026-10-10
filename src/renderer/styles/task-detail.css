@@ -70,7 +70,7 @@ the task menu on the same line at the right edge. */
   min-width: 0;
   margin: 0;
   font-size: var(--t-title);
-  font-weight: 600;
+  font-weight: var(--w-title);
   letter-spacing: -0.02em;
   line-height: 1.22;
   color: var(--text);
@@ -141,7 +141,7 @@ then where the work lives. */
 
 .tm-lifecycle__step--current {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-lifecycle .tm-status-glyph {
@@ -317,7 +317,7 @@ in ink rather than accent. */
   margin: 0;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.35;
   text-wrap: balance;
 }
@@ -364,7 +364,7 @@ so it never reads as
 .tm-slot__reported > span:first-child {
   margin-right: 6px;
   color: var(--muted);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-slot__code {
@@ -483,7 +483,7 @@ so
   margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-osection__aside {
@@ -535,7 +535,7 @@ so
 .tm-workpanels > .tm-reviewcard > .tm-reviewcard__head .tm-panel__title {
   color: var(--muted);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-workpanels > .tm-reviewcard > .tm-reviewcard__body {
@@ -680,7 +680,7 @@ above what Task Monki captured. */
 .tm-oresult__report figcaption {
   color: var(--muted);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-oresult__report blockquote {
@@ -750,7 +750,7 @@ the value in the interface face unless it is a string to copy. */
 .tm-panel__title {
   margin: 0 0 12px;
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.2;
   color: var(--text);
 }
@@ -785,7 +785,7 @@ the value in the interface face unless it is a string to copy. */
   margin: 0;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.45;
 }
 
@@ -1180,7 +1180,7 @@ no marks. */
 .tm-taskactivity__evidence-row strong {
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -1246,7 +1246,7 @@ the head's own padding + divider
 .tm-reviewcard__status {
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-reviewcard__body {
@@ -1262,7 +1262,7 @@ the head's own padding + divider
   margin: 0;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-reviewcard__summary p,
@@ -1287,7 +1287,7 @@ the head's own padding + divider
 .tm-reviewcard__activity-k {
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-reviewcard__activity-row {
@@ -1416,7 +1416,7 @@ the head's own padding + divider
 
 .tm-finding__severity span:last-child {
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1;
 }
 
@@ -1446,7 +1446,7 @@ the head's own padding + divider
 .tm-finding__title {
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.35;
 }
 
@@ -1546,7 +1546,7 @@ never a brighter fill.
   margin: 0 0 8px;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 :where(.tm-modal__panel p) {
@@ -1642,7 +1642,7 @@ never a brighter fill.
   padding: 0;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-board-editor__swatches {
@@ -1705,7 +1705,7 @@ never a brighter fill.
   padding: 0;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-board-editor__filter-head {
@@ -1719,7 +1719,7 @@ never a brighter fill.
 .tm-board-editor__filter-head button {
   color: var(--accent-ink);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-board-editor__options {
@@ -1830,13 +1830,13 @@ never a brighter fill.
 .tm-draftpr-modal__context span {
   color: var(--muted);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-draftpr-modal__context strong {
   min-width: 0;
   color: var(--text);
-  font: 600 var(--t-help)/1.4 var(--font-mono);
+  font: 500 var(--t-help)/1.4 var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -1898,7 +1898,7 @@ never a brighter fill.
 .tm-delete-modal__worktree strong {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-delete-modal__worktree small {
@@ -1941,7 +1941,7 @@ never a brighter fill.
 .tm-runheader__name {
   margin: 0;
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
   flex: 0 0 auto;
 }
@@ -2085,9 +2085,6 @@ a word only where a run stopped. */
   width: 16px;
   height: 16px;
   stroke: currentColor;
-  stroke-width: 1.55;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .tm-change-summary__title {
@@ -2102,7 +2099,7 @@ a word only where a run stopped. */
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-change-summary__files {
@@ -2151,7 +2148,7 @@ a word only where a run stopped. */
 .tm-change-summary__status {
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-change-summary__path {
@@ -2177,7 +2174,7 @@ a word only where a run stopped. */
   color: var(--text-soft);
   cursor: pointer;
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   list-style: none;
 }
 
@@ -2316,7 +2313,7 @@ a word only where a run stopped. */
   gap: 8px;
   min-width: 58px;
   color: var(--muted);
-  font: 600 var(--t-meta)/1 var(--font-mono);
+  font: 500 var(--t-meta)/1 var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2417,7 +2414,7 @@ so code stays in one
 .tm-diffline--hunk code {
   background: var(--field);
   color: var(--muted);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-diffline--meta {
@@ -2478,7 +2475,7 @@ not a tinted full-width box
   border: 1px solid var(--hair);
   border-radius: var(--r-pill);
   color: var(--muted);
-  font: 600 var(--t-meta)/1 var(--font-ui);
+  font: 500 var(--t-meta)/1 var(--font-ui);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2600,14 +2597,6 @@ not a tinted full-width box
   }
 }
 
-/* Keep this final so later component animation declarations cannot override
-   the operating-system Reduce Motion preference through source order. */
-@media (prefers-reduced-motion: reduce) {
-
-  .tm-status-glyph--working {
-    animation: none;
-  }
-}
 
 /* The Overview names what the review found; the findings themselves live in the Review tab. */
 .tm-reviewcard__findings { display: flex; align-items: baseline; gap: 12px; margin: 4px 0 0; font-size: var(--t-help); }
@@ -2616,3 +2605,11 @@ not a tinted full-width box
 .tm-reviewcard__counts [data-severity='MAJOR'] { color: var(--blocked-ink); }
 .tm-reviewcard__counts[data-earlier] [data-severity] { color: var(--muted); }
 .tm-reviewcard__closed { color: var(--muted); }
+
+/* The tab's assistant panel toggle, at the right end of the tab bar: Ask
+   reviewer, Side question, Preview agent. */
+.tm-detail__assistant { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: var(--h-toolbar); margin-left: auto; padding: 0 10px; border-radius: var(--r-sm); color: var(--text-soft); font-size: var(--t-help); font-weight: 500; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-detail__assistant svg { color: var(--accent-ink); }
+.tm-detail__assistant:hover { background: var(--hover); color: var(--text); }
+.tm-detail__assistant[aria-pressed='true'] { background: var(--sel); color: var(--text); }
+.tm-detail__assistant-dot { position: absolute; top: 5px; left: 21px; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }

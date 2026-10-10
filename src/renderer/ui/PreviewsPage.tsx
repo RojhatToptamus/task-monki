@@ -109,7 +109,7 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
         </div>
         <button type="button" className="tm-preview-icon-button" aria-label="Refresh previews" title="Refresh previews"
           disabled={reading} onClick={() => refresh.current()}>
-          <RefreshCw size={16} strokeWidth={1.5} aria-hidden="true" />
+          <RefreshCw size={16} aria-hidden="true" />
         </button>
       </header>
       <div className="tm-previews__toolbar">
@@ -119,7 +119,7 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
             onSelect={() => onStateChange({ ...state, filter: value })} />)}
         </div>
         <label className="field field--search">
-          <Search size={16} strokeWidth={1.5} aria-hidden="true" />
+          <Search size={16} aria-hidden="true" />
           <input ref={search} type="search" aria-label="Search previews" placeholder="Search previews…"
             value={state.query} onChange={(event) => onStateChange({ ...state, query: event.target.value })} />
         </label>
@@ -157,7 +157,7 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
                   {instance.status.active && instance.status.url ? <button type="button" className="outline-button"
                     disabled={Boolean(openingId)} onClick={() => void openApp(instance)}>Open app</button> : null}
                   <button type="button" className="tm-preview-icon-button" aria-label={`View ${owner}: ${context}`} title={`View ${owner}`}
-                    onClick={(event) => openOwner(instance, event.currentTarget)}><ChevronRight size={16} strokeWidth={1.5} aria-hidden="true" /></button>
+                    onClick={(event) => openOwner(instance, event.currentTarget)}><ChevronRight size={16} aria-hidden="true" /></button>
                 </div>{actionError?.worktreeId === instance.worktreeId ? <p className="form-error" role="alert">{actionError.message}</p> : null}</td>
               </tr>;
             })}</tbody>

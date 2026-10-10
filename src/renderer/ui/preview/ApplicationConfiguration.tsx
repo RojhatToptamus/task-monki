@@ -346,7 +346,7 @@ function EntryEditor({ entry, entries, text, busy, onChange, onYaml, onDone }: {
             trigger={
               <>
                 <span className={entry.dependsOn.length ? undefined : 'tm-preview-entry-editor__none'}>{entry.dependsOn.join(', ') || 'Nothing'}</span>
-                <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
+                <ChevronDown size={14} aria-hidden="true" />
               </>
             }
             items={others.map((other) => ({
@@ -656,7 +656,7 @@ function EnvironmentTable({ labelId, entry, entries, text, busy, write }: {
                 disabled={busy}
                 onClick={() => (added ? setPending(undefined) : write(() => removeEnvironmentBinding(text, entry.path, binding.key)))}
               >
-                <X size={16} strokeWidth={1.5} aria-hidden="true" />
+                <X size={16} aria-hidden="true" />
               </button>
             </span>
           </div>
@@ -664,7 +664,7 @@ function EnvironmentTable({ labelId, entry, entries, text, busy, write }: {
       })}
       <div className="tm-preview-env__add">
         <button type="button" className="ghost-button" disabled={busy || !!pending} onClick={() => setPending({ kind: 'text', value: '' })}>
-          <Plus size={16} strokeWidth={1.5} aria-hidden="true" />
+          <Plus size={16} aria-hidden="true" />
           Add variable
         </button>
       </div>

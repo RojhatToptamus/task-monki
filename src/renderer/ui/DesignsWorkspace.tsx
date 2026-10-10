@@ -60,7 +60,6 @@ import {
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
-import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { useTaskAttachments } from './useTaskAttachments';
 import { DesignProjectMenu } from './DesignActionsMenu';
@@ -537,8 +536,7 @@ export function DesignsWorkspace({
             </header>
             <div className="tm-designs-loading__body">
               <div className="tm-workspace-loading">
-                <StatusGlyph kind="working" />
-                <span>Loading Design</span>
+                <span className="tm-shimmer">Loading Design</span>
               </div>
             </div>
           </div>
@@ -1135,21 +1133,10 @@ function NewDesignForm({
                   />
                 }
                 removeDisabled={composerLocked}
-                addButtonTitle={
-                  attachmentsEnabled
-                    ? 'Stored locally and shared read-only with the Design agent.'
-                    : 'The selected agent runtime does not support references.'
-                }
                 hint={
                   !attachmentsEnabled
-                    ? 'Unavailable for this runtime'
-                    : attachments.isReadingClipboardImage
-                      ? 'Reading clipboard image…'
-                      : attachments.activeItems.length > 0
-                        ? `${attachments.activeItems.length} ${
-                            attachments.activeItems.length === 1 ? 'file' : 'files'
-                          } · ${formatAttachmentBytes(attachments.byteCount)}`
-                        : 'Paste or drop files'
+                    ? 'Files are unavailable for this runtime'
+                    : attachments.isReadingClipboardImage ? 'Reading clipboard image…' : undefined
                 }
               >
                 <textarea

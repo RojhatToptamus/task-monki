@@ -88,7 +88,7 @@ export function Conversation({ instance, label, className = '', header, children
         }
         void instance.scrollToBottom();
       }}>
-      <ArrowDown size={16} strokeWidth={1.5} aria-hidden="true" />
+      <ArrowDown size={16} aria-hidden="true" />
     </button>}
   </div>;
 }

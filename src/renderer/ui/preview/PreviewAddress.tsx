@@ -39,7 +39,7 @@ export function PreviewAddressActions({ name, address, label, onOpen }: {
           title={`Open ${address.url}`}
           onClick={() => onOpen(address)}
         >
-          <ExternalLink size={13} strokeWidth={1.5} aria-hidden="true" />
+          <ExternalLink size={13} aria-hidden="true" />
         </button>
       ) : null}
       <CopyIconButton

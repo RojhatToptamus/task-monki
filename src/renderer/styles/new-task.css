@@ -42,7 +42,7 @@
 
 .newtask-modal__heading strong {
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .newtask-modal__close {
@@ -93,7 +93,7 @@
   padding: 0;
   color: var(--text);
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tm-repository-select {
@@ -308,7 +308,7 @@
   overflow: hidden;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -354,11 +354,10 @@
 .field__header > label,
 .field__label {
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.field__label,
-.network-toggle__title {
+.field__label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -387,7 +386,7 @@
   color: var(--accent-ink);
   padding: 0;
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .field__refine:not(:disabled):hover {
@@ -468,72 +467,9 @@ and
   display: none;
 }
 
-.tm-profile-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: var(--t-meta);
-}
-
-.tm-composer__toolbar .tm-profile-picker select {
-  width: auto;
-  max-width: 180px;
-  min-width: 0;
-  height: var(--h-toolbar);
-  min-height: 0;
-  padding: 0 6px;
-  border: 0;
-  border-radius: var(--r-sm);
-  box-shadow: none;
-  background-color: transparent;
-  color: var(--text-soft);
-  font: inherit;
-  cursor: pointer;
-  text-overflow: ellipsis;
-}
-
-.tm-composer__toolbar .tm-profile-picker select:not(:disabled):hover {
-  background-color: var(--hover);
-}
-
-.tm-composer__toolbar .tm-profile-picker select:disabled {
-  color: var(--text-disabled);
-  cursor: default;
-}
-
-.task-attachment-add {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--text-soft);
-  font-size: var(--t-meta);
-  font-weight: 600;
-}
-
-.task-attachment-add:not(:disabled):hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.app-shell[data-input-modality='keyboard'] .task-attachment-add:focus,
-.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus,
-.app-shell[data-input-modality='keyboard'] .newtask-settings > summary:focus {
+.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus {
   outline: 0;
   box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.task-attachment-add:disabled {
-  cursor: default;
 }
 
 .task-attachment-hint {
@@ -664,7 +600,7 @@ and
   background: var(--surface);
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   pointer-events: none;
 }
 
@@ -701,7 +637,7 @@ and
 
 .field__proposal-title {
   font-size: var(--t-help);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
 }
 
@@ -802,98 +738,6 @@ and
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
     0 0 0 3px var(--focus-ring);
-}
-
-.newtask-settings {
-  border-top: 1px solid var(--hair);
-  border-bottom: 1px solid var(--hair);
-}
-
-.newtask-settings > summary {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 46px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.newtask-settings > summary::-webkit-details-marker {
-  display: none;
-}
-
-.newtask-settings > summary:hover .newtask-settings__title {
-  color: var(--text);
-}
-
-.newtask-settings__title {
-  color: var(--text-soft);
-  font-size: var(--t-help);
-  font-weight: 600;
-}
-
-.newtask-settings__title small {
-  display: block;
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: var(--t-help);
-  font-weight: 400;
-}
-
-.newtask-settings__summary {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: var(--t-help);
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.newtask-settings > summary svg {
-  color: var(--muted);
-  transition: transform 140ms ease;
-}
-
-.newtask-settings[open] > summary .tm-disclosure__chevron {
-  transform: rotate(90deg);
-}
-
-.newtask-settings__content {
-  display: grid;
-  gap: 14px;
-  padding: 4px 0 16px;
-}
-
-.network-toggle {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  padding: 14px 2px 0;
-  border: 0;
-  border-top: 1px solid var(--hair);
-  border-radius: 0;
-  background: transparent;
-}
-
-.network-toggle__copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.network-toggle__title {
-  color: var(--text);
-  font-size: var(--t-body);
-  font-weight: 600;
-}
-
-.network-toggle__state {
-  color: var(--muted);
-  font-size: var(--t-meta);
-  line-height: 1.4;
 }
 
 .network-toggle__switch {
@@ -1183,3 +1027,7 @@ so the active option's ring is drawn inside the row. */
 .task-attachment-preview__content { max-height: 65vh; overflow: auto; }
 .task-attachment-preview__image { display: block; max-width: 100%; max-height: 65vh; margin: auto; object-fit: contain; }
 .task-attachment-preview__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--t-help); }
+
+/* Imported work has no description, so its model and access chips get a row. */
+.newtask-run { gap: 8px; }
+.newtask-run__label { margin-right: 4px; color: var(--text); font-size: var(--t-label); font-weight: 500; }

@@ -439,12 +439,8 @@ export function AgentModelSelector({
           disabled={disabled || runtimes.length === 0}
           onClick={() => (open ? closeMenu(false) : openMenu())}
         >
-          <span className="tm-agent-console__summary">{triggerSummary}</span>
-          {discovery?.runtimeId === runtimeId && discovery.status === 'loading' ? (
-            <SpinnerIcon />
-          ) : (
-            <ChevronIcon open={open} />
-          )}
+          <span className={`tm-agent-console__summary${discovery?.runtimeId === runtimeId && discovery.status === 'loading' ? ' tm-shimmer' : ''}`}>{triggerSummary}</span>
+          <ChevronIcon open={open} />
         </button>
 
         <div
@@ -463,7 +459,7 @@ export function AgentModelSelector({
           }
         >
           <div className="tm-agent-console__search">
-            <Search aria-hidden="true" size={14} strokeWidth={1.5} />
+            <Search aria-hidden="true" size={14} />
             <input
               ref={searchRef}
               type="text"
@@ -490,7 +486,7 @@ export function AgentModelSelector({
                   searchRef.current?.focus();
                 }}
               >
-                <X aria-hidden="true" size={12} strokeWidth={1.6} />
+                <X aria-hidden="true" size={12} />
               </button>
             ) : null}
           </div>
@@ -568,16 +564,13 @@ export function AgentModelSelector({
                       onClick={() => void choose(option)}
                     >
                       <span className="tm-agent-console__option-name">
-                        {discoveryLoading ? (
-                          <SpinnerIcon />
-                        ) : option.kind === 'discovery' ? (
+                        {option.kind === 'discovery' ? (
                           <RefreshCw
                             aria-hidden="true"
                             size={13}
-                            strokeWidth={1.5}
                           />
                         ) : null}
-                        {optionLabel}
+                        <span className={discoveryLoading ? 'tm-shimmer' : undefined}>{optionLabel}</span>
                       </span>
                       <span className="tm-agent-console__option-meta">
                         {option.meta}
@@ -962,19 +955,13 @@ function modelCatalogNeedsActivation(runtime: AgentRuntimeState): boolean {
 function ChevronIcon({ open }: { open: boolean }) {
   return (
     <ChevronDown
-      absoluteStrokeWidth
       className={`tm-agent-console__chevron ${open ? 'is-open' : ''}`}
       aria-hidden="true"
       size={12}
-      strokeWidth={1.5}
     />
   );
 }
 
 function CheckIcon() {
-  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
-}
-
-function SpinnerIcon() {
-  return <span className="tm-agent-console__spinner" aria-hidden="true" />;
+  return <Check aria-hidden="true" size={13} />;
 }

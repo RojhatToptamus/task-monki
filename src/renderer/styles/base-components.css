@@ -79,6 +79,16 @@ no border and no dot; the tint and
   font-size: var(--t-body);
 }
 
+/* One line weight for every stroke icon at every size: the stroke is drawn in
+   screen pixels, so a 13px glyph and a 20px rail icon read as one family. */
+svg.lucide {
+  stroke-width: var(--icon-stroke);
+}
+
+svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
+  vector-effect: non-scaling-stroke;
+}
+
 .tm-status-glyph {
   width: 14px;
   height: 14px;
@@ -93,11 +103,16 @@ no border and no dot; the tint and
 
 .tm-status-glyph--working {
   color: var(--accent);
-  animation: tm-spin 900ms linear infinite;
 }
 
-.tm-status-glyph--static {
-  animation: none;
+/* Live text, such as a conversation's working line: at most one per surface.
+   Reduced motion leaves the words still (foundation.css). */
+.tm-shimmer {
+  background: linear-gradient(90deg, var(--muted) 35%, var(--text) 50%, var(--muted) 65%) 0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: tm-shimmer 2.4s linear infinite;
 }
 
 .tm-status-glyph--waiting {
@@ -148,7 +163,7 @@ no border and no dot; the tint and
   color: inherit;
   font-family: var(--font-mono);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .status-pill--neutral {
@@ -176,9 +191,6 @@ no border and no dot; the tint and
   color: var(--accent-ink);
 }
 
-.status-pill--running .tm-status-glyph {
-  animation: tm-spin 900ms linear infinite;
-}
 
 .tm-panel__title.tm-panel__title--flush {
   margin: 0;
@@ -283,7 +295,7 @@ no border and no dot; the tint and
 }
 
 .segmented__btn[aria-pressed='true'] {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .segmented__btn[aria-pressed='true']:where(:not(:disabled)) {
@@ -450,7 +462,7 @@ secondary
 .card__header h3 {
   margin: 0;
   font-size: var(--t-heading);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .card__header span {
@@ -676,7 +688,7 @@ secondary
   cursor: pointer;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 600;
+  font-weight: 500;
   list-style: none;
 }
 
@@ -744,7 +756,7 @@ secondary
   font-size: var(--t-label);
   line-height: 1.5;
   overflow-wrap: anywhere;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .interaction-question__prompt {
@@ -875,6 +887,28 @@ keyboard hint and the primary action right. */
 .tm-composer__hint { min-width: 0; margin-left: auto; overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
 .tm-composer__input { display: block; width: 100%; min-height: 88px; max-height: min(200px, 24vh); padding: 12px 12px 4px; resize: none; field-sizing: content; color: var(--text); font: var(--t-body)/1.62 var(--font-ui); }
 .tm-composer__toolbar > .tm-composer__hint + * { margin-left: 4px; }
+/* A control inside a composer toolbar (the model, access, a mode) reads as part
+   of the composer: no fill or rim of its own until it is hovered or open. A
+   row of the same chips outside a composer is a .tm-chip-row. */
+.tm-chip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.tm-composer-chip { display: inline-flex; flex: 0 1 auto; min-width: 0; }
+.tm-composer-chip__trigger.tm-action-menu__trigger,
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger { display: inline-flex; align-items: center; gap: 6px; width: auto; min-width: 0; max-width: 240px; height: var(--h-toolbar); padding: 0 8px; border-radius: var(--r-sm); background: transparent; box-shadow: none; color: var(--muted); font-size: var(--t-help); }
+.tm-composer-chip__trigger.tm-action-menu__trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-composer-chip__trigger.tm-action-menu__trigger:not(:disabled):hover,
+.tm-composer-chip__trigger.tm-action-menu__trigger[data-state='open'],
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:not(:disabled):hover,
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger[aria-expanded='true'] { background: var(--hover); box-shadow: none; color: var(--text-soft); }
+/* Size containment would collapse the chip to nothing inside a flex toolbar. */
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { background: var(--hover); box-shadow: none; }
+.app-shell[data-input-modality='keyboard'] :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { box-shadow: 0 0 0 2px var(--focus-ring); }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact { display: inline-flex; flex: 0 1 auto; gap: 2px; min-width: 0; container-type: normal; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: 400; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-select { height: var(--h-toolbar); background-color: transparent; color: var(--muted); font: var(--t-help)/1 var(--font-ui); }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error,
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error:not(:disabled):hover { box-shadow: none; color: var(--blocked-ink); }
 .tm-composer__primary,
 .tm-composer__secondary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--h-toolbar); min-width: 64px; padding: 0 12px; font-size: var(--t-help); }
 .tm-composer__primary--icon { min-width: var(--h-toolbar); width: var(--h-toolbar); padding: 0; }

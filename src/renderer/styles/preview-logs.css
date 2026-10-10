@@ -37,7 +37,7 @@ split by --hair seams. */
 .tm-preview-log-surface--4 .tm-preview-log-pane:nth-child(3) { box-shadow: inset 0 1px 0 var(--hair); }
 .tm-preview-log-surface--4 .tm-preview-log-pane:nth-child(4) { box-shadow: inset 1px 0 0 var(--hair), inset 0 1px 0 var(--hair); }
 .tm-preview-log-pane__head { display: flex; flex: 0 0 var(--h-toolbar); align-items: center; gap: 8px; min-width: 0; padding: 0 4px 0 12px; box-shadow: inset 0 -1px 0 var(--hair); font-size: var(--t-help); }
-.tm-preview-log-pane__name { overflow: hidden; min-width: 0; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-log-pane__name { overflow: hidden; min-width: 0; color: var(--text); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-log-pane__state { flex: 0 0 auto; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
 .tm-preview-log-pane__state[data-state='failed'] { color: var(--blocked-ink); }
 .tm-preview-log-pane__head > button { margin-left: auto; }
@@ -56,7 +56,7 @@ split by --hair seams. */
 .tm-preview-log-marker::before,
 .tm-preview-log-marker::after { content: ''; flex: 1; height: 1px; background: var(--hair); }
 .tm-preview-log-marker > span { overflow: hidden; max-width: 80%; text-overflow: ellipsis; white-space: nowrap; }
-.tm-preview-log-marker b { color: var(--text-soft); font-weight: 600; }
+.tm-preview-log-marker b { color: var(--text-soft); font-weight: 500; }
 .tm-preview-log-marker b[data-state='failed'] { color: var(--blocked-ink); }
 .tm-preview-log-marker b:is([data-state='ready'], [data-state='succeeded']) { color: var(--verified-ink); font-weight: 500; }
 .tm-preview-log-marker i { color: var(--faint); font-style: normal; }
