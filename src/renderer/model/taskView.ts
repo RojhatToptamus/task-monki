@@ -14,7 +14,6 @@ import {
   getImplementationRetryReason
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
-import { formatShortId } from './selectors';
 import {
   describeAttentionStatus,
   describeTaskAttention,
@@ -37,7 +36,7 @@ export interface TaskCardVM {
   id: string;
   title: string;
   meta?: string;
-  /** Lineage cue for a forked task, e.g. "Fork of #task-rev"; undefined otherwise. */
+  /** Lineage cue for a forked task, e.g. "Fork of Add rate limiting"; undefined otherwise. */
   lineage?: string;
   repositoryId: string;
   stateLabel: string;
@@ -204,6 +203,8 @@ export interface TaskCardOptions {
    */
   showReviewCount?: boolean;
   repositoryName?: string;
+  /** Titles of other tasks, so a fork names the task it came from. */
+  taskTitles?: ReadonlyMap<string, string>;
 }
 
 export interface TaskCardRepositoryIdentity {
@@ -485,7 +486,7 @@ export function buildTaskCardVM(
     title: task.title,
     meta: showRepo ? options.repositoryName : undefined,
     lineage: task.forkedFromTaskId
-      ? `Fork of #${formatShortId(task.forkedFromTaskId)}`
+      ? options.taskTitles?.has(task.forkedFromTaskId) ? `Fork of ${options.taskTitles.get(task.forkedFromTaskId)}` : 'Fork'
       : undefined,
     repositoryId: task.repositoryId,
     stateLabel: state.label,

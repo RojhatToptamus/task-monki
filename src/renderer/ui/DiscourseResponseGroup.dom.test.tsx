@@ -16,7 +16,6 @@ describe('Discourse response lifecycle', () => {
     render(<DiscourseResponseGroup wave={wave} aggregate={aggregate} streamDrafts={{}}
       onRetry={vi.fn()} onConfirm={vi.fn()} onStop={vi.fn()} />);
     expect(screen.getByText('Discussion paused')).toBeTruthy();
-    expect(screen.getByText('Completed responses are kept above.')).toBeTruthy();
     expect(screen.queryByText(/No completed answer|Stopped before/)).toBeNull();
   });
 

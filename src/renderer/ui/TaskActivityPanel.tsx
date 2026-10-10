@@ -192,25 +192,26 @@ export interface TaskActivityTimestamp {
   date: string;
   time: string;
   full: string;
-  /** Compact but absolute, e.g. "Jul 2, 10:05"; never relative to now. */
+  /** Compact but absolute, e.g. "Jul 2, 10:05 AM" in the system clock format; never relative to now. */
   label: string;
 }
+
+// Every time in the app follows the system clock format, as conversation times do.
+const ACTIVITY_TIME_FORMAT = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
 const ACTIVITY_LABEL_FORMAT = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23'
+  hour: 'numeric',
+  minute: '2-digit'
 });
 
 const ACTIVITY_LABEL_FORMAT_WITH_YEAR = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',
   month: 'short',
   day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23'
+  hour: 'numeric',
+  minute: '2-digit'
 });
 
 export function formatTaskActivityTimestamp(value: string): TaskActivityTimestamp {
@@ -226,10 +227,8 @@ export function formatTaskActivityTimestamp(value: string): TaskActivityTimestam
   const year = date.getFullYear();
   const month = pad2(date.getMonth() + 1);
   const day = pad2(date.getDate());
-  const hours = pad2(date.getHours());
-  const minutes = pad2(date.getMinutes());
   const dateLabel = `${year}-${month}-${day}`;
-  const timeLabel = `${hours}:${minutes}`;
+  const timeLabel = ACTIVITY_TIME_FORMAT.format(date);
   const label = (year === new Date().getFullYear()
     ? ACTIVITY_LABEL_FORMAT
     : ACTIVITY_LABEL_FORMAT_WITH_YEAR

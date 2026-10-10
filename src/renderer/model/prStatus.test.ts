@@ -290,7 +290,7 @@ describe('buildPrStatusViewModel', () => {
     expect(changesRequested.headline).toBe('GitHub changes requested');
     expect(changesRequested.evidenceLine).toBe('No checks reported');
     expect(draft.headline).toBe('Draft PR');
-    expect(draft.evidenceLine).toBe('Checks not applicable');
+    expect(draft.evidenceLine).toBeUndefined();
   });
 
   it('does not apply delivery records without the current PR identity', () => {

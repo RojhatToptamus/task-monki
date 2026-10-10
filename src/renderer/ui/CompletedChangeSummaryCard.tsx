@@ -307,11 +307,12 @@ function ChangeFileRow({ file }: { file: CompletedChangeFile }) {
   );
 }
 
+/** Lines added and removed; a side with nothing to count is left out. */
 function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
   return (
     <span className="tm-diffstat">
-      <span>+{additions}</span>
-      <span>-{deletions}</span>
+      {additions || !deletions ? <span>+{additions}</span> : null}
+      {deletions ? <span>-{deletions}</span> : null}
     </span>
   );
 }

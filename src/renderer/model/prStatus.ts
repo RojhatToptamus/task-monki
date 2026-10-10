@@ -725,8 +725,9 @@ function checksAbsenceLine(ciRollup?: CiRollupRecord): string | undefined {
       return 'Checks not observed';
     case 'NO_CHECKS':
       return ciRollup.totalCount > 0 ? undefined : 'No checks reported';
+    // Checks that do not apply have nothing to report.
     case 'NOT_APPLICABLE':
-      return 'Checks not applicable';
+      return undefined;
     case 'UNKNOWN':
       return 'Checks unknown';
     default:
@@ -849,9 +850,8 @@ function formatRefreshLine(value?: string): string | undefined {
   return new Intl.DateTimeFormat(undefined, {
     month: 'short',
     day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
+    hour: 'numeric',
+    minute: '2-digit'
   }).format(new Date(timestamp));
 }
 

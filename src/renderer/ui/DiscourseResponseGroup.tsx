@@ -58,7 +58,7 @@ export function DiscourseResponseGroup({ aggregate, wave, streamDrafts, models, 
     : wave.settlementReason === 'TIME_LIMIT' ? 'The 20-minute allowance ended. Completed answers are kept.'
     : failed ? discourseTerminalJobDetail(jobs) ?? 'This response did not finish. You can ask again.'
     : settled && status ? output ? 'Partial text is kept here; it is not a completed answer.'
-      : jobs.some((candidate) => candidate.status === 'COMPLETED') ? 'Completed responses are kept above.' : 'No completed answer was recorded.' : undefined;
+      : jobs.some((candidate) => candidate.status === 'COMPLETED') ? undefined : 'No completed answer was recorded.' : undefined;
   const tone = stopping || (!settled && job?.status === 'RUNNING' && !recovery && !reconfirm) ? 'working'
     : changed || recovery ? 'waiting' : failed ? 'blocked' : 'idle';
   if (!status && !legacyConcerns.length) return null;

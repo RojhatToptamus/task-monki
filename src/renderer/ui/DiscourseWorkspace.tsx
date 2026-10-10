@@ -2161,7 +2161,7 @@ export function DiscourseWorkspace({
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : files.busy || files.hasErrors || Boolean(files.modelError) || files.interactionBlocked || !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                   aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Post note' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
                   title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
-                  aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
+                  aria-describedby={!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
                   {activeWave ? <Square size={14} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
@@ -2209,7 +2209,8 @@ export function DiscourseWorkspace({
                 })}
               </div>
             ) : null}
-            {!safeResponseReady && responsePolicy !== 'NONE' ? (
+            {/* With the settings open, the agent field there states this itself. */}
+            {!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? (
               <p id="discourse-response-requirement" className="tm-discourse-composer__requirement" role="status">
                 {responseRequirement}
               </p>

@@ -134,7 +134,7 @@ export function shortAddress(url: string): string {
 export function runTime(iso: string, now = new Date()): string {
   const date = new Date(iso);
   if (!Number.isFinite(date.getTime())) return '';
-  const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const clock = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
   if (sameDay(date, now)) return clock;
   const yesterday = new Date(now);

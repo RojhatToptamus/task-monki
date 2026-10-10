@@ -106,6 +106,15 @@ export function DesignCanvas({
   const sourceFile =
     project.projectFiles.find((file) => file.path.endsWith('/index.html') || file.path === 'index.html') ??
     project.projectFiles[0];
+  const footerSource = displayedTarget ? (
+    <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
+      {displayedTarget.routeId}{displayedTarget.entryPath}
+    </span>
+  ) : sourceFile && !viewingEarlierRevision ? (
+    <span className="tm-design-canvas__source" title={`${sourceFile.path}, ${formatAttachmentBytes(sourceFile.byteCount)}`}>
+      {sourceFile.path}
+    </span>
+  ) : null;
   const canvasStatus = canvasStatusView(
     project,
     activeOrdinal,
@@ -276,7 +285,7 @@ export function DesignCanvas({
       <header className="tm-design-canvas__toolbar">
         {setupVisible ? <strong className="tm-design-canvas__setup-title">Preview setup</strong> : <nav className="tm-design-canvas__versions" aria-label="Design versions">
           {project.revisions.length === 0 ? (
-            <span aria-current="true">v1</span>
+            presentation.kind === 'NATIVE' ? <span aria-current="true">v1</span> : null
           ) : project.revisions.map((revision) => {
             const selected =
               !previewInProgress && revision.id === selectedRevision?.id;
@@ -417,23 +426,15 @@ export function DesignCanvas({
         </div>
       </div>}
 
-      <footer className="tm-design-canvas__footer">
+      {canvasStatus || footerSource || selectedRevision ? <footer className="tm-design-canvas__footer">
         {canvasStatus ? <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
           <StatusGlyph kind={canvasStatus.tone} />
           {canvasStatus.label}
         </span> : null}
-        {displayedTarget ? <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
-          {displayedTarget.routeId}{displayedTarget.entryPath}
-        </span> : sourceFile && !viewingEarlierRevision ? (
-          <span className="tm-design-canvas__source" title={`${sourceFile.path}, ${formatAttachmentBytes(sourceFile.byteCount)}`}>
-            {sourceFile.path}
-          </span>
-        ) : null}
+        {footerSource}
         <span className="tm-design-canvas__footer-spacer" />
-        <time dateTime={selectedRevision?.createdAt ?? project.design.updatedAt}>
-          {formatDesignUpdatedAt(selectedRevision?.createdAt ?? project.design.updatedAt)}
-        </time>
-      </footer>
+        {selectedRevision ? <time dateTime={selectedRevision.createdAt}>{formatDesignUpdatedAt(selectedRevision.createdAt)}</time> : null}
+      </footer> : null}
       {error ? <p className="tm-design-canvas__error" role="alert">{error}</p> : null}
     </section>
   );

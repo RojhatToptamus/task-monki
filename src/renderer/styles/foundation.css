@@ -70,6 +70,12 @@
   box-sizing: border-box;
 }
 
+/* Headings and emphasis take the medium weight unless a component sets one;
+   the browser's bold is outside the two weights the interface uses. */
+.app-shell :where(h1, h2, h3, h4, h5, h6, strong, b, th) {
+  font-weight: var(--w-medium);
+}
+
 /* A component's own display never overrides hidden, so a closed collapsible
    keeps none of its padding. */
 [hidden] {
@@ -130,12 +136,17 @@ body {
   height: 9px;
 }
 
+/* A scroll thumb shows only while the pointer is over its scroller, as on the
+   system's overlay scrollbars; at rest a long page carries no extra line. */
 ::-webkit-scrollbar-thumb {
-  background: var(--edge);
+  background-color: transparent;
   border-radius: var(--r-sm);
   border: 2px solid transparent;
   background-clip: content-box;
-  opacity: 0.4;
+}
+
+:hover::-webkit-scrollbar-thumb {
+  background-color: var(--edge);
 }
 
 ::-webkit-scrollbar-track,

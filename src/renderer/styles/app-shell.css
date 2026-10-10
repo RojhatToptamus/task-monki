@@ -558,6 +558,12 @@ then
   flex: 0 0 auto;
 }
 
+.tm-card__fact > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tm-card__foot {
   display: flex;
   align-items: center;
@@ -1269,7 +1275,7 @@ the section in an 880px reading column on the right. */
   /* Item text starts on the page gutter: the items carry 10px of their own. */
   padding: 20px 12px 20px calc(var(--tm-gutter) - 10px);
   overflow-y: auto;
-  box-shadow: inset -1px 0 0 var(--hair);
+  background: var(--panel);
 }
 
 .tm-settings__title {
@@ -1321,7 +1327,7 @@ the section in an 880px reading column on the right. */
 
 .tm-settings__pane-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 24px;
   min-height: var(--h-toolbar);
@@ -1352,13 +1358,6 @@ the section in an 880px reading column on the right. */
   border-radius: var(--r-md);
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--edge-raised);
-}
-
-.tm-settings__note {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--t-help);
-  line-height: 1.55;
 }
 
 .tm-settings__empty {

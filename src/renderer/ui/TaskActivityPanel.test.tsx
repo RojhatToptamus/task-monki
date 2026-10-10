@@ -9,7 +9,8 @@ describe('Activity Timeline timestamp formatting', () => {
     const timestamp = formatTaskActivityTimestamp('2026-07-02T10:05:00.000Z');
 
     expect(timestamp.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(timestamp.time).toMatch(/^\d{2}:\d{2}$/);
+    // The clock follows the system format, as conversation times do.
+    expect(timestamp.time).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date('2026-07-02T10:05:00.000Z')));
     expect(timestamp.full).toBe(`${timestamp.date} ${timestamp.time}`);
     expect(`${timestamp.date} ${timestamp.time}`).not.toMatch(/now|^\d+m$/i);
     // The compact label stays absolute: a day and a clock time, never "now" or "5m ago".

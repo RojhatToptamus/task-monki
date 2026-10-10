@@ -681,8 +681,7 @@ secondary
 }
 
 .interaction-actions__hint {
-  order: -1;
-  margin-right: auto;
+  margin-right: 4px;
   color: var(--muted);
   font-size: var(--t-meta);
   font-variant-numeric: tabular-nums;
@@ -1028,6 +1027,7 @@ a 36px
 .tm-table__primary { color: var(--text); font-weight: 500; white-space: nowrap; }
 .tm-table__mono { max-width: 0; width: 100%; overflow: hidden; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-table .tm-table__num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tm-table__quiet { color: var(--muted); font-size: var(--t-help); }
 .tm-table .tm-table__actions { width: 1%; text-align: right; }
 /* A long path keeps its end visible: the ellipsis takes the start. */
 .tm-table__path { direction: rtl; text-align: left; }

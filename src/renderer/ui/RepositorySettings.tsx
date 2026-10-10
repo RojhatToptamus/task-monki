@@ -85,7 +85,8 @@ export function RepositorySettings({
                     <td className="tm-table__mono tm-table__path" title={repository.path}>
                       <span dir="ltr">{abbreviateHomePath(repository.path)}</span>
                     </td>
-                    <td><Chip tone={status.tone} label={status.label} /></td>
+                    {/* Only a repository that needs something carries a chip. */}
+                    <td>{repository.status === 'AVAILABLE' ? <span className="tm-table__quiet">{status.label}</span> : <Chip tone={status.tone} label={status.label} />}</td>
                     <td className="tm-table__num">{repository.taskCount}</td>
                     <td className="tm-table__actions">
                       {items.length ? (
@@ -105,7 +106,6 @@ export function RepositorySettings({
           </table>
         </div>
       )}
-      <p className="tm-settings__note">Disconnecting keeps every task and its history. Reconnect the same repository to continue.</p>
     </SettingsPane>
   );
 }

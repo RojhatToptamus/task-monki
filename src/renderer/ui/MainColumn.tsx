@@ -187,6 +187,7 @@ export function MainColumn({
   onEditBoard
 }: MainColumnProps) {
   const tasksPage = isTasksView(view);
+  const taskTitles = new Map(tasks.map((task) => [task.id, task.title]));
   const showRepositorySetup = repositorySetupState !== 'complete' && view !== 'settings';
   const setupHead =
     repositorySetupState === 'complete'
@@ -243,6 +244,7 @@ export function MainColumn({
       {view === 'board' ? (
         <BoardKanban
           tasks={tasks}
+          taskTitles={taskTitles}
           repositories={repositories}
           showRepository={shouldShowTaskRepository(board)}
           onSelect={onSelect}
@@ -253,6 +255,7 @@ export function MainColumn({
       {view === 'active' || view === 'review' || view === 'done' ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
+          taskTitles={taskTitles}
           repositories={repositories}
           view={view}
           onSelect={onSelect}
@@ -389,6 +392,7 @@ function TasksHead({
 
 function BoardKanban({
   tasks,
+  taskTitles,
   repositories,
   showRepository,
   onSelect,
@@ -396,6 +400,7 @@ function BoardKanban({
   onRequestDelete
 }: {
   tasks: TaskCardSource[];
+  taskTitles: ReadonlyMap<string, string>;
   repositories: Repository[];
   showRepository: boolean;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -459,6 +464,7 @@ function BoardKanban({
                   key={task.id}
                   vm={buildTaskCardVM(task, {
                     columnKey: column.key,
+                    taskTitles,
                     ...selectTaskCardRepositoryIdentity(
                       task.repositoryId,
                       repositoriesById,
@@ -496,6 +502,7 @@ function BoardKanban({
 
 function CardGrid({
   tasks,
+  taskTitles,
   repositories,
   view,
   onSelect,
@@ -503,6 +510,7 @@ function CardGrid({
   onRequestDelete
 }: {
   tasks: TaskCardSource[];
+  taskTitles: ReadonlyMap<string, string>;
   repositories: Repository[];
   view: NavView;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -525,6 +533,7 @@ function CardGrid({
               key={task.id}
               vm={buildTaskCardVM(task, {
                 showReviewCount,
+                taskTitles,
                 columnKey: view === 'active' ? 'progress' : view,
                 ...selectTaskCardRepositoryIdentity(
                   task.repositoryId,

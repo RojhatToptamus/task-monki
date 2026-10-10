@@ -1306,9 +1306,7 @@ export function TaskDetail(props: TaskDetailProps) {
           value={<>{worktree.baseRef ?? 'Detached HEAD'} <code title={worktree.baseSha}>{worktree.baseSha.slice(0, 7)}</code></>}
         />
       ) : null}
-      {worktree?.branchName ? (
-        <PropRow label="Branch" value={<code title={worktree.branchName}>{worktree.branchName}</code>} />
-      ) : null}
+      {/* The branch is in the page header. */}
       {externalWork && worktree ? (
         <PropRow label="Checkout" value={<code title={worktree.worktreePath}>{worktree.worktreePath}</code>} />
       ) : null}

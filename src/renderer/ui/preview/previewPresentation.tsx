@@ -36,7 +36,7 @@ export const expected = (status?: PreviewStatus) => ({
 export const clock = (iso: string) => {
   const date = new Date(iso);
   return Number.isFinite(date.getTime())
-    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
     : '';
 };
 export const label = (state: string) =>

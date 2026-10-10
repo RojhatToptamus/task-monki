@@ -1256,7 +1256,7 @@ the head's own padding + divider
   font-weight: 500;
 }
 
-.tm-reviewcard__summary p,
+.tm-reviewcard__summary p:not(.tm-reviewcard__meta),
 .tm-reviewcard__runningstate p {
   margin: 0;
   color: var(--text-soft);
@@ -1298,15 +1298,15 @@ the head's own padding + divider
 .tm-reviewcard__meta {
   margin: 0;
   color: var(--muted);
-  font-size: var(--t-help);
+  font-size: var(--t-meta);
 }
 
 .tm-reviewcard__meta code {
   padding: 0;
   background: none;
-  color: var(--text-soft);
+  color: inherit;
   font-family: var(--font-mono);
-  font-size: var(--t-help);
+  font-size: var(--t-meta);
 }
 
 .tm-reviewcard__raw {

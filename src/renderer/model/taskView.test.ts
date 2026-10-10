@@ -408,7 +408,8 @@ describe('task card view model', () => {
   it('shows a lineage cue for a forked task', () => {
     expect(buildTaskCardVM(createTask()).lineage).toBeUndefined();
     const forked = createTask({ forkedFromTaskId: 'src12345-6789' });
-    expect(buildTaskCardVM(forked).lineage).toBe('Fork of #src12345');
+    expect(buildTaskCardVM(forked, { taskTitles: new Map([['src12345-6789', 'Add rate limiting']]) }).lineage).toBe('Fork of Add rate limiting');
+    expect(buildTaskCardVM(forked).lineage).toBe('Fork');
   });
 
   it('summarizes review findings by severity for the review queue', () => {

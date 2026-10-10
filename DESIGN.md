@@ -453,6 +453,10 @@ and never a literal. A size that is not on this list does not exist: the reason
 to name them is that an unnamed scale is not a scale, and the renderer had
 drifted to 22 distinct sizes against these seven.
 
+**Times follow the system clock format everywhere** — "5:29 PM" or "17:29"
+as the OS says, never a forced 24-hour clock or a zero-padded hour; a date is
+added ("Oct 10, 5:29 PM") where the time alone could mean another day.
+
 **Mono is for strings the user copies or compares character for character** —
 branches, commit hashes, paths, commands, payloads, token names. Model names,
 counts, dates, durations and setting values ("Restricted", "Low") are set in the
