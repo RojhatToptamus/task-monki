@@ -30,13 +30,13 @@ import {
   writeReviewedPreviewRecipe
 } from './generation/PreviewRecipeFile';
 import {
-  parseConfigurationFile,
   resolveConfigurationSources,
   missingConnections,
   within,
   reconcileRetainedConfiguration
 } from './ApplicationPreviewConfiguration';
 import { diagnosePreviewFailure } from './ApplicationPreviewDiagnosis';
+import { validatePreviewRecipeDraft } from './generation/PreviewRecipeGenerationService';
 import { readPreviewProjectFacts } from './PreviewProjectFacts';
 import type { PreviewUrlHost } from '../design/DesignPreviewRoute';
 
@@ -356,11 +356,11 @@ export class ApplicationPreviewService {
     original: PreviewConfigurationFile | undefined,
     text: string
   ) {
-    const spec = parseConfigurationFile(text);
-    if (/^tm-[0-9a-f-]{36}$/i.test(spec.name))
-      throw new Error(
-        'Use a readable project name. Runtime identity is assigned separately.'
-      );
+    // Every route that writes the file meets the same contract as an agent proposal: Previewhost's
+    // strict loader, no secret-like literals or concealment placeholders, no fromEnv inputs.
+    const validation = validatePreviewRecipeDraft(text);
+    if (validation.status !== 'VALID')
+      throw new Error(validation.issues.map((issue) => issue.message).join(' '));
     await writeReviewedPreviewRecipe(worktree.worktreePath, text, original);
     return this.read(worktree);
   }
@@ -383,35 +383,6 @@ export class ApplicationPreviewService {
     await fs.link(source, source + '.unused');
     await fs.unlink(source);
     return this.read(worktree);
-  }
-
-  async diagnostics(worktree: WorktreeRecord): Promise<unknown> {
-    const snapshot = await this.read(worktree);
-    const attempt =
-      snapshot.status?.candidate ??
-      snapshot.status?.latest ??
-      snapshot.status?.active;
-    if (!attempt) return { configurationError: snapshot.configurationError };
-    const runtime = this.owner();
-    const logs = await runtime
-      .logs(snapshot.name, attempt.id, { maxBytes: 16_384 })
-      .catch((error) => {
-        if (error instanceof PreviewError && error.code === 'ATTEMPT_EXPIRED')
-          return undefined;
-        throw error;
-      });
-    return {
-      state: attempt.state,
-      error: attempt.error,
-      services: attempt.services,
-      configuration: (await runtime.describe(snapshot.name, attempt.id)).spec,
-      ...(logs
-        ? { logs: logs.text, logsTruncated: logs.truncated }
-        : {
-            logsUnavailable:
-              'Logs are not retained across runtime restarts. Use the retained configuration and state, or ask the user to retry for fresh logs.'
-          })
-    };
   }
 
   async start(worktree: WorktreeRecord): Promise<ApplicationPreviewSnapshot> {

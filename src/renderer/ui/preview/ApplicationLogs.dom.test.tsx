@@ -48,6 +48,11 @@ it('searches split panes as one list in reading order, including the status mark
   expect(apiPane.querySelectorAll('mark')).toHaveLength(1);
   expect(webPane.querySelectorAll('mark')).toHaveLength(2);
   const current = () => document.querySelector('[data-current-match="true"]');
+  // Previous before any match is current goes to the last match, not the second to last.
+  fireEvent.keyDown(search, { key: 'Enter', shiftKey: true });
+  expect(screen.getByText('3 of 3')).toBeTruthy();
+  fireEvent.change(search, { target: { value: '' } });
+  fireEvent.change(search, { target: { value: 'ready' } });
   fireEvent.keyDown(search, { key: 'Enter' });
   expect(screen.getByText('1 of 3')).toBeTruthy();
   expect(apiPane.contains(current())).toBe(true);

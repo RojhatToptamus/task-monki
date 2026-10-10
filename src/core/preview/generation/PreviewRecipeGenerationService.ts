@@ -179,8 +179,13 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
   if (/\[concealed literal[^\]]*\]|\[credential-like diagnostic withheld\]|\[REDACTED\]/i.test(yaml)) {
     return invalid('INVALID_RECIPE', 'Replace concealed placeholders with an explicit nonsecret value or secret reference before saving.');
   }
-  if (looksLikeSecret(yaml) || containsSecretLiteral(plan)) {
-    return invalid('SECRET_LITERAL', 'Secret-like environment keys must use a secret reference, never a literal value.');
+  // Name where the problem is, never the value, so the file can be corrected without repeating it.
+  const literalKeys = secretLiteralKeys(plan);
+  if (literalKeys.length) {
+    return invalid('SECRET_LITERAL', `Use a secret reference for ${literalKeys.slice(0, 5).join(', ')}${literalKeys.length > 5 ? ` and ${literalKeys.length - 5} more` : ''}: secret-like environment keys never take a literal value.`);
+  }
+  if (looksLikeSecret(yaml)) {
+    return invalid('SECRET_LITERAL', 'The file contains a credential-like value, such as a private key, an access token or a connection URL with a password. Use a secret reference instead.');
   }
   const bindings = commandNodes(plan).flatMap((node) => commandEnvironments(node).flatMap(Object.values));
   if (plan.type === 'environment') {
@@ -366,12 +371,13 @@ function dependencyPreparationRequired(message: string) {
   return invalid('DEPENDENCY_PREPARATION_REQUIRED', message);
 }
 
-function containsSecretLiteral(plan: Configuration): boolean {
-  return commandNodes(plan).some((node) =>
-    commandEnvironments(node).some((environment) =>
-      Object.entries(environment).some(([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string')
+/** Each `service KEY` whose secret-like key holds a literal string. */
+function secretLiteralKeys(plan: Configuration): string[] {
+  return [...new Set(commandNodes(plan).flatMap((node) =>
+    commandEnvironments(node).flatMap((environment) =>
+      Object.entries(environment).filter(([key, value]) => SECRET_ENV_KEY.test(key) && typeof value === 'string').map(([key]) => `${node.id} ${key}`)
     )
-  );
+  ))];
 }
 
 function looksLikeSecret(value: string): boolean {

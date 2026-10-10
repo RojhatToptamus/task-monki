@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PreviewError } from 'previewhost';
 import type { AgentRuntimeId } from '../../../shared/agent';
 import type {
   AgentExecutionSettings,
@@ -17,13 +18,14 @@ import type { AgentOrchestrator } from '../../agent/AgentOrchestrator';
 import type { AgentRuntimeAdapter } from '../../agent/AgentRuntimeAdapter';
 import type { AgentRuntimeRegistry } from '../../agent/AgentRuntimeRegistry';
 import type { ClientToolHandler } from '../../agent/clientTools/ClientToolBridge';
+import { projectAgentExecutionSupport } from '../../../shared/agentExecutionSupport';
 import { mergeRunSettings } from '../../app/AgentRunSettingsPolicy';
 import { ACTIVE_AGENT_RUN_STATUSES } from '../../app/TaskTransitionPolicy';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import type { ApplicationPreviewService } from '../ApplicationPreviewService';
 import type { PreviewRecipeGenerationService } from '../generation/PreviewRecipeGenerationService';
-import { describePreviewState, PREVIEW_LOG_READ_BYTES, previewLogsReport, previewStatusReport, proposalReport } from './PreviewAgentTools';
+import { describePreviewState, EXPIRED_LOGS_REPORT, PREVIEW_LOG_READ_BYTES, previewLogsReport, previewStatusReport, proposalReport } from './PreviewAgentTools';
 import {
   INSPECT_PREVIEW_TOOL_DEFINITION,
   PROPOSE_PREVIEW_CONFIGURATION_TOOL_DEFINITION,
@@ -155,13 +157,20 @@ export class PreviewAgentCoordinator {
           if (request.what === 'status') {
             const file = await this.options.applications.readFile(context.worktree);
             const { repositories } = await this.options.store.getBoardSnapshot();
-            return { text: previewStatusReport({ snapshot, repositories, configurationFile: file.file?.name, proposal: this.options.proposals.get(context.task.id).draft }) };
+            const projectRepositoryPath = repositories.find((repository) => repository.id === context.task.repositoryId)?.path;
+            return { text: previewStatusReport({ snapshot, repositories, projectRepositoryPath, configurationFile: file.file?.name, proposal: this.options.proposals.get(context.task.id).draft }) };
           }
           const attempt = snapshot.status?.candidate ?? snapshot.status?.latest ?? snapshot.status?.active;
           if (!attempt) return { text: 'There are no runs yet, so there are no logs. Read the configuration and project files instead.' };
           const logs = await this.options.applications
             .owner()
-            .logs(this.options.applications.name(context.worktree), attempt.id, { source: request.source, maxBytes: PREVIEW_LOG_READ_BYTES });
+            .logs(this.options.applications.name(context.worktree), attempt.id, { source: request.source, maxBytes: PREVIEW_LOG_READ_BYTES })
+            .catch((error: unknown) => {
+              // Run logs live only as long as the runtime that captured them; the state and configuration remain.
+              if (error instanceof PreviewError && error.code === 'ATTEMPT_EXPIRED') return undefined;
+              throw error;
+            });
+          if (!logs) return { text: EXPIRED_LOGS_REPORT };
           return { text: previewLogsReport({ attempt, source: request.source, text: logs.text, truncated: logs.truncated, lines: request.lines }) };
         }
       },
@@ -376,6 +385,8 @@ export async function resolvePreviewAgentExecution(
   if (requested.runtimeId !== undefined && requested.runtimeId !== adapter.descriptor.id) {
     throw new Error('Agent runtime and execution settings runtime must match.');
   }
+  const support = projectAgentExecutionSupport(await adapter.capabilities(), 'PREVIEW_AGENT');
+  if (!support.supported) throw new Error(`${adapter.descriptor.displayName}: ${support.reason}`);
   const resolved = await adapter.resolveExecution({
     settings: {
       ...mergeRunSettings({ readOnly: true, settings: [{ ...requested, runtimeId: adapter.descriptor.id }] }),

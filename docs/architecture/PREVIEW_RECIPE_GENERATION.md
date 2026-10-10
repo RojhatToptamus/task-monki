@@ -18,6 +18,15 @@ workflow phase, and never binds the task's current session. The renderer splits
 them out of the Agent tab (`partitionPreviewAgentRecords`) and renders them in
 the Preview panel with the same turn, step, question and queue components.
 
+A repository-backed Design has the same conversation on its own workspace. It
+drafts the `preview.yaml` that the queued Design brief waits for. Its Preview runs
+are the only non-`DESIGN` runs a Design owns. They never become Design turns, bind
+the Design's current run or session, or appear in the Design conversation. The
+Design detail projects them separately as `previewAgent`. Messages are refused
+while a Design turn runs, and an active Preview turn blocks archiving. Saving a
+proposal also accepts the resulting workspace change, so the brief continues to
+the application-selection step.
+
 The conversation is keyed by runtime and model. The panel offers the full model
 catalog of the enabled runtimes; the Settings default (**Models → Preview
 agent**) is the starting selection. Choosing another runtime or model starts
@@ -38,14 +47,23 @@ Each turn's prompt is the person's message followed by one line of preview
 state (`buildPreviewAgentTurnPrompt`); the agent's permanent instructions are
 `PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS`. Codex receives them as plan-mode
 developer instructions, ACP agents as a prompt prefix, OpenCode as the system
-prompt. Turns use the existing provider-specific read-only analysis policy,
-with command and file-change approvals rejected. Codex can request explicit read-only
-access to another project folder through the existing permission interaction. The exact
-folder is shown before consent; home directories, their ancestors, writes and network
-access cannot be granted. These inspection grants belong to the provider turn/session,
-not to Previewhost's separate permission to run a service. Codex otherwise enforces a read-only, offline sandbox;
-Claude ACP uses its provider plan mode, which allows file reads and read-only
-shell commands and does not provide an OS sandbox or offline guarantee. The
+prompt. Turns use each provider's read-only policy, with command and
+file-change approvals rejected. A read outside the worktree that the provider
+asks about becomes an explicit read-only permission request for the exact folder
+or file; a file qualifies only when its folder would. Home directories, their
+ancestors, writes and network access cannot be granted. Codex asks through its
+permission tool, OpenCode through its external-directory permission, and an ACP
+agent through a read permission request, which Task Monki answers with
+the agent's one-time choice. These inspection grants belong to the provider
+turn/session, not to Previewhost's separate permission to run a service.
+
+Codex otherwise enforces a read-only, offline sandbox. OpenCode runs a `--pure`
+session whose native rules deny edits, commands, delegation and web tools; allow
+reads, questions and the Task Monki tools; and ask before external paths. Its
+process is not confined and keeps provider network access. Claude ACP uses plan
+mode and Cursor ACP uses Ask mode. In live qualification both read a file
+outside the worktree without a permission request, so only the instructions
+limit those reads. Neither mode provides an OS sandbox or offline guarantee. The
 exact model selected must resolve or the message is refused before a record
 is written.
 
@@ -62,7 +80,10 @@ The Preview agent calls two Task Monki tools through the generic client-tool
 bridge (`src/core/agent/clientTools`), the same bridge that serves
 `inspect_design` to the Design agent. Codex receives them as dynamic tools; ACP
 and OpenCode agents register a stdio MCP server (`task-monki-preview-tools`,
-`task_monki_preview`) whose grant is bound to the active run.
+`task_monki_preview`) whose grant is bound to the active run. They need no
+person's approval: an ACP permission request that correlates with the active
+run's own tool call is answered with its one-time choice, and OpenCode's
+Preview rules allow exactly these tool names.
 
 - `inspect_preview` with `what: "status"` returns the configuration file name,
   each run with its services and outcome, the requirements that block a start,

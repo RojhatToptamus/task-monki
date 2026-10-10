@@ -11,6 +11,7 @@ import {
 import { AppEventBus } from '../runner/AppEventBus';
 import { TaskManagerService } from './TaskManagerService';
 import { createNodeOpenTargetHost } from '../open/OpenTargetService';
+import { validatePreviewRecipeDraft } from '../preview/generation/PreviewRecipeGenerationService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
 afterEach(() => scenarios.dispose());
@@ -178,3 +179,35 @@ it('retains source ownership across restart, replacement, and desktop opening', 
     await persistence.close();
   }
 }, 20_000);
+
+it('rejects on manual Save exactly what it rejects in an agent proposal, without touching the file', async () => {
+  const scenario = await scenarios.create({ previewEnabled: true });
+  const task = await scenario.createTask({ title: 'Manual save parity' });
+  const worktree = await prepareTestWorktree(scenario.service, task.id);
+  const file = path.join(worktree.worktreePath, 'preview.yaml');
+  const base = 'name: application\ntype: command\ncwd: .\ncommand: [node, server.js]\n';
+  await fs.writeFile(file, base);
+  const original = (await scenario.service.readApplicationPreviewFile({ taskId: task.id })).file!;
+  const unsafe = {
+    // A synthetic value, never a real credential: the key alone marks it as one.
+    secretLiteral: `${base}env:\n  API_TOKEN: SYNTHETIC_REVIEW_VALUE\n`,
+    placeholder: `${base}env:\n  API_URL: "[concealed literal]"\n`,
+    fromEnv: `${base}env:\n  API_URL: {fromEnv: API_URL}\n`
+  };
+  for (const text of Object.values(unsafe)) {
+    const proposal = validatePreviewRecipeDraft(text);
+    expect(proposal.status).toBe('INVALID');
+    await expect(scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text }))
+      .rejects.toThrow(proposal.status === 'INVALID' ? proposal.issues[0]!.message : 'unreachable');
+    expect(await fs.readFile(file, 'utf8')).toBe(base);
+  }
+  // The message names the rule, never the value.
+  await expect(scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text: unsafe.secretLiteral }))
+    .rejects.not.toThrow('SYNTHETIC_REVIEW_VALUE');
+  const safe = `${base}env:\n  API_TOKEN: {secret: application/dev/api-token}\n`;
+  const saved = await scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text: safe });
+  expect(saved.hasConfigurationFile).toBe(true);
+  expect(saved.approval).toBeUndefined();
+  expect(saved.status?.candidate).toBeUndefined();
+  expect(await fs.readFile(file, 'utf8')).toBe(safe);
+});

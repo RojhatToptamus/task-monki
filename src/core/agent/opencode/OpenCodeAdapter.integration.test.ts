@@ -33,6 +33,7 @@ import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import type { AgentRuntimeTurnEvent } from '../AgentRuntimeCoordinator';
 import { AgentInteractionService } from '../AgentInteractionService';
+import { resolvePreviewAgentExecution } from '../../preview/agent/PreviewAgentCoordinator';
 import {
   createOpenCodeMessageId,
   OpenCodeAdapter,
@@ -237,6 +238,86 @@ describe('OpenCodeAdapter', () => {
     ]);
     expect(bridge.releaseSessionGrant).toHaveBeenCalledWith('design-grant-1');
     await fixture.adapter.shutdown();
+  });
+
+  it('runs Preview with the coordinator settings under native read-only rules and explicit external-folder consent', async () => {
+    const bridge = fakeDesignToolBridge();
+    const fixture = await createFixture({ clientToolBridge: bridge.api });
+    const { adapter, harness, runtime } = fixture;
+    await adapter.initialize();
+    // The coordinator's portable request: read-only, offline, interactive.
+    const settings = await resolvePreviewAgentExecution(adapter, {
+      runtimeId: 'opencode',
+      model: SETTINGS.model,
+      modelProvider: SETTINGS.modelProvider,
+      reasoningEffort: SETTINGS.reasoningEffort
+    });
+    expect(settings).toMatchObject({ model: SETTINGS.model, modelProvider: SETTINGS.modelProvider, approvalPolicy: 'on-request' });
+    const session = await createLocalSession(fixture, { role: 'PREVIEW', requestedSettings: settings });
+    const run = await createRun(fixture, session, settings, [], {
+      purpose: 'TASK_PREVIEW',
+      clientToolGrants: ['inspect_preview', 'propose_preview_configuration']
+    });
+    const turn = await adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'PREVIEW',
+      instructionProfile: 'PREVIEW',
+      prompt: 'Inspect the project and propose its preview configuration.',
+      authoritativeGoal: 'Inspect the project and propose its preview configuration.',
+      settings
+    });
+
+    const active = (await runtime.getAgentSession(session.id))!;
+    const rules = harness.sessions.get(active.providerSessionId!)!.permission!;
+    const effective = (permission: string) =>
+      rules.filter((rule) => rule.pattern === '*' && (rule.permission === '*' || rule.permission === permission)).at(-1)?.action;
+    for (const permission of ['read', 'glob', 'grep', 'list', 'question', 'task_monki_preview_inspect_preview', 'task_monki_preview_propose_preview_configuration']) {
+      expect(effective(permission), permission).toBe('allow');
+    }
+    for (const permission of ['edit', 'write', 'bash', 'webfetch', 'websearch', 'task', 'unknown_tool']) {
+      expect(effective(permission), permission).toBe('deny');
+    }
+    expect(effective('external_directory')).toBe('ask');
+
+    // A read outside the worktree becomes explicit read-only consent for the exact folder.
+    const backend = path.join(fixture.root, 'backend');
+    await fs.mkdir(backend);
+    const interactions = new AgentInteractionService(runtime, new AppEventBus(), () => adapter);
+    const ask = async (id: string, permission: string, pattern: string) => {
+      await harness.emit({ type: 'permission.asked', properties: {
+        id, sessionID: active.providerSessionId, permission, patterns: [pattern],
+        metadata: { filepath: path.join(pattern.replace(/\/\*$/u, ''), 'package.json') },
+        tool: { messageID: turn.providerTurnId }
+      } });
+      return (await runtime.snapshot()).interactionRequests.find((item) => item.providerRequestId === id)!;
+    };
+    const folder = await ask('per_backend', 'external_directory', `${backend}/*`);
+    expect(folder).toMatchObject({
+      type: 'PERMISSION_APPROVAL',
+      request: { permissions: { fileSystem: { entries: [{ path: { type: 'path', path: backend }, access: 'read' }] } } },
+      allowedActions: ['GRANT_TURN', 'DECLINE']
+    });
+    await expect(interactions.respond({ taskId: run.taskId, runId: run.id, interactionRequestId: folder.id,
+      decision: { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: {
+        fileSystem: { entries: [{ path: { type: 'path', path: backend }, access: 'write' }] }
+      } }
+    })).rejects.toThrow();
+    await interactions.respond({ taskId: run.taskId, runId: run.id, interactionRequestId: folder.id,
+      decision: { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN',
+        permissions: (folder.request as import('../../../shared/agent').AgentPermissionApprovalRequest).permissions }
+    });
+    expect(harness.permissionReplies.at(-1)).toEqual({ reply: 'once' });
+
+    // The home directory is never grantable, and a command reaching the person stays decline-only.
+    const home = await ask('per_home', 'external_directory', `${os.homedir()}/*`);
+    expect(home.allowedActions).toEqual(['DECLINE']);
+    await interactions.respond({ taskId: run.taskId, runId: run.id, interactionRequestId: home.id,
+      decision: { interactionType: 'PERMISSION_APPROVAL', action: 'DECLINE' } });
+    expect(harness.permissionReplies.at(-1)).toEqual({ reply: 'reject' });
+    const command = await ask('per_bash', 'bash', 'npm install');
+    expect(command.allowedActions).toEqual(['DECLINE', 'CANCEL']);
+    await adapter.shutdown();
   });
 
   it('quarantines an uncertain Design MCP registration and releases its grant', async () => {

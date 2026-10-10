@@ -1685,6 +1685,11 @@
   margin: 0;
 }
 
+/* The Preview agent conversation docks beside or over the setup; give it room to read and reply. */
+.tm-design-repository-setup > .tm-application-preview:has(.tm-preview-agent-dock, .tm-preview-agent-drawer) {
+  min-height: 560px;
+}
+
 .tm-design-repository-setup__application {
   display: grid;
   gap: 16px;

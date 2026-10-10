@@ -45,14 +45,19 @@ runtimes use stable ACP plus explicitly captured extensions.
 | Normal Task | Yes | Yes | Yes | Yes | Yes |
 | Review | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
 | Prompt refinement | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
-| Preview agent | Yes; dynamic tools | Yes; MCP tools | Yes on macOS; MCP tools | Yes; MCP tools | Yes; plan mode plus MCP tools |
+| Preview agent | Yes; dynamic tools | Yes; MCP tools; external reads ask first | No; its read-only process denies MCP tools | Yes; Ask mode plus MCP tools; external reads are not gated | Yes; plan mode plus MCP tools; external reads are not gated |
 | Discourse | Yes | Yes | Yes on macOS | Yes | Yes; plan mode plus repository comparison |
 | Managed attachments | Text and model-gated image | Text and model-gated image | Text and native image; capability drift reported | Text and negotiated image | Text and negotiated image |
 | Design | Catalog models that report image input | Connected catalog models that report image input and tool calls | Models with effective image support; low reasoning by default | Catalog models when Cursor advertises image input | Session-catalog models when Claude advertises image input |
 
 Review, prompt refinement, and Discourse use one shared read-only turn path.
 The Preview agent is a task-bound read-only session with app-owned tools; see
-`docs/architecture/PREVIEW_RECIPE_GENERATION.md`.
+`docs/architecture/PREVIEW_RECIPE_GENERATION.md`. It needs a read-only mode inside
+the task session, so a runtime whose read-only work runs only in a separate process
+(Grok Build) is refused before any message is recorded. OpenCode asks for consent
+before reading outside the worktree. Claude and Cursor read through their own
+tools without a permission request, so only the agent instructions keep them inside
+the worktree; that is not filesystem confinement.
 Every workflow prompt tells the agent not to modify files.
 Each adapter applies its provider-native restriction when one is available.
 Task Monki compares repository state before and after each applicable turn.
@@ -146,6 +151,12 @@ All registered ACP profiles share these implemented rules:
   A sparse permission request must correlate with the exact prior tool item.
   Its display title is not authority by itself.
   A suffix match cannot receive automatic permission.
+  A correlated request for the run's own Task Monki tool is accepted
+  automatically through the agent's single one-time choice; without exactly
+  one such choice it can only be declined.
+  In Preview, a read permission request becomes a read-only
+  permission approval for its exact paths. Granting it selects the one-time
+  choice; other requests keep the command approval and stay decline-only.
   Shutdown and quarantine revoke active Design grants before the ACP process stops.
 - Task Monki advertises the form mode of the
   [ACP elicitation contract](https://agentclientprotocol.com/protocol/v1/elicitation).
@@ -201,6 +212,13 @@ only when their live initialization and session checks succeed.
   Task Monki registers the Design bridge through OpenCode's native MCP endpoint.
   It does not merge the bridge into user or managed configuration.
   Task Monki revokes the active Design grant before it waits for an uncertain shutdown.
+- The OpenCode Preview agent uses a `--pure` task session. Its portable
+  read-only, offline request resolves to provider-controlled access with
+  `runtimeOptions.opencode.permissionProfile: read-only`. That profile's rule
+  suffix keeps the read-only denials, allows questions and the exact Task Monki
+  MCP tool names, and asks before external directories. OpenCode disables an MCP
+  tool whose name a rule denies. An external-directory grant can only be used to
+  read in this profile, so it is presented as read-only folder consent.
 - ACP agent processes own filesystem and network access, and permission events
   do not prove OS-level confinement. Claude exposes **Ask for approval** and
   **Full access**. Cursor and Grok additionally expose **Auto-accept edits**

@@ -801,6 +801,90 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     } finally { await adapter.shutdown(); }
   });
 
+  it('runs Preview permission requests through tool, read-consent and mutation decisions to the provider', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-preview-permissions-'));
+    temporaryDirectories.push(directory);
+    const worktreePath = path.join(directory, 'frontend');
+    const backendFile = path.join(directory, 'backend', 'package.json');
+    await fs.mkdir(worktreePath);
+    await fs.mkdir(path.dirname(backendFile));
+    await fs.writeFile(backendFile, '{}');
+    const messageLog = path.join(directory, 'messages.jsonl');
+    const agentScript = path.join(directory, 'agent.cjs');
+    await fs.writeFile(agentScript, previewPermissionAgentSource(messageLog, backendFile, path.join(worktreePath, 'preview.yaml')));
+    // Cursor's packaged MCP identity is how the adapter recognizes Task Monki's own tool.
+    const runtimeId = 'cursor-agent-acp';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      approvalPolicies: ['on-request', 'never'],
+      readOnlyTurnPolicy: { kind: 'SESSION_MODE', modeId: 'ask', policyId: 'test/ask', detail: 'Read-only analysis.' },
+      executableCandidates: [process.execPath], argv: [agentScript]
+    };
+    const store = await createTestStore(path.join(directory, 'store'));
+    const events = new AppEventBus();
+    const adapter = createTestAdapter(store, events, profile, {
+      cwd: directory, requestTimeoutMs: 1_000,
+      clientToolBridge: {
+        createSessionGrant: async () => ({ id: 'preview-grant', launch: { executablePath: process.execPath, argv: [], environment: {} } }),
+        activateGrant: async () => undefined,
+        revokeGrant: async () => undefined,
+        releaseSessionGrant: async () => undefined
+      },
+      runtimeResolver: async () => ({ executable: process.execPath, version: process.version,
+        diagnostics: { selectedExecutable: process.execPath, selectedSource: 'test', selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript], requiredCapabilities: ['ACP protocolVersion=1'], probes: [] } })
+    });
+    const interactions = new AgentInteractionService(runtimeFixture(store).runtime, events, () => adapter);
+    const pending = (providerRequestId: string) => waitFor(async () =>
+      (await store.snapshot()).interactionRequests.find((item) =>
+        item.providerRequestId === providerRequestId && item.status === 'PENDING'));
+    const responses = async () => (await readProtocolMessagesFromLog(messageLog))
+      .filter((message) => typeof message.id === 'string' && message.id.endsWith('-permission') && 'result' in message)
+      .map((message) => [message.id, (message.result as { outcome: unknown }).outcome]);
+    try {
+      await adapter.initialize();
+      const repository = await addTestRepository(store, worktreePath);
+      // The ACP Preview settings that the coordinator's read-only request resolves to.
+      const settings: AgentExecutionSettings = { runtimeId, model: 'default', modelProvider: 'test-provider',
+        sandbox: 'DANGER_FULL_ACCESS', networkAccess: true, approvalPolicy: 'NEVER', approvalsReviewer: 'user',
+        runtimeOptions: { [runtimeId]: { modeId: 'ask' } } };
+      const task = await store.createTask({ title: 'Preview permissions', prompt: 'Inspect only.', repositoryId: repository.id, runtimeId, agentSettings: settings });
+      const { iteration, worktree } = await store.createIterationAndWorktree({ task, branchName: 'preview-permissions', worktreePath, baseSha: 'base' });
+      const session = await createTestAgentSession(store, { task, iteration, worktree, runtimeId, role: 'PREVIEW', requestedSettings: settings });
+      const run = await createTestRun(store, { task, session, mode: 'PREVIEW', prompt: task.prompt, requestedSettings: settings,
+        clientToolGrants: ['inspect_preview', 'propose_preview_configuration'] });
+      await adapter.startTurn({ localRunId: run.id, session: { localSessionId: session.id }, mode: 'PREVIEW', instructionProfile: 'PREVIEW',
+        prompt: task.prompt, authoritativeGoal: task.prompt, settings, attachments: [] });
+
+      // Task Monki's own tool is accepted through the exact one-time choice, without a person.
+      const read = await pending('read-permission');
+      expect(await responses()).toEqual([['tool-permission', { outcome: 'selected', optionId: 'allow-once' }]]);
+      expect((await store.snapshot()).interactionRequests.some((item) => item.providerRequestId === 'tool-permission')).toBe(false);
+
+      // A read outside the worktree is explicit read-only consent for the exact file.
+      expect(read).toMatchObject({
+        type: 'PERMISSION_APPROVAL',
+        request: { permissions: { fileSystem: { entries: [{ path: { type: 'path', path: backendFile }, access: 'read' }] } } },
+        allowedActions: ['GRANT_TURN', 'DECLINE']
+      });
+      const readRequest = read.request as import('../../../shared/agent').AgentPermissionApprovalRequest;
+      await interactions.respond({ taskId: task.id, runId: run.id, interactionRequestId: read.id,
+        decision: { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: readRequest.permissions } });
+      expect((await responses()).at(-1)).toEqual(['read-permission', { outcome: 'selected', optionId: 'allow-once' }]);
+
+      // A file write stays rejected whatever the provider offers.
+      const edit = await pending('edit-permission');
+      expect(edit).toMatchObject({ type: 'COMMAND_APPROVAL', allowedActions: ['DECLINE', 'CANCEL'] });
+      await expect(interactions.respond({ taskId: task.id, runId: run.id, interactionRequestId: edit.id,
+        decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT', providerOptionId: 'allow-once' } })).rejects.toThrow();
+      await interactions.respond({ taskId: task.id, runId: run.id, interactionRequestId: edit.id,
+        decision: { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE', providerOptionId: 'reject-once' } });
+      expect((await responses()).at(-1)).toEqual(['edit-permission', { outcome: 'selected', optionId: 'reject-once' }]);
+      await waitFor(async () => (await getTestRun(store, run.id))?.status === 'COMPLETED' ? true : undefined);
+    } finally { await adapter.shutdown(); }
+  }, 15_000);
+
   it('fences unconfirmed shared read-only cancellation before recovery is visible', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-acp-read-only-runtime-')
@@ -6633,6 +6717,63 @@ input.on('line', (line) => {
   if (message.method === 'session/close') {
     send({ jsonrpc: '2.0', id: message.id, result: {} });
   }
+});
+`;
+}
+
+function previewPermissionAgentSource(messageLog: string, backendFile: string, worktreeFile: string): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const options = [
+  { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+  { optionId: 'allow-always', name: 'Allow always', kind: 'allow_always' },
+  { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+];
+let promptId;
+let sessionId;
+const ask = (id, toolCall) => send({ jsonrpc: '2.0', id, method: 'session/request_permission', params: { sessionId, toolCall, options } });
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(messageLog)}, JSON.stringify(message) + '\\n');
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1, agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'preview-permission-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'preview-permission-session',
+      modes: { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'ask', name: 'Ask' }] } } });
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    promptId = message.id;
+    sessionId = message.params.sessionId;
+    const rawInput = { providerIdentifier: 'task-monki-preview-tools', toolName: 'inspect_preview', args: { what: 'status' } };
+    send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: {
+      sessionUpdate: 'tool_call', toolCallId: 'preview-tool-1', title: 'task-monki-preview-tools: inspect_preview',
+      kind: 'other', status: 'pending', rawInput
+    } } });
+    ask('tool-permission', { toolCallId: 'preview-tool-1', title: 'task-monki-preview-tools-inspect_preview: inspect_preview', kind: 'other', status: 'pending' });
+    return;
+  }
+  if (message.id === 'tool-permission' && message.result) {
+    ask('read-permission', { toolCallId: 'read-1', kind: 'read', title: 'Read backend manifest', locations: [{ path: ${JSON.stringify(backendFile)} }] });
+    return;
+  }
+  if (message.id === 'read-permission' && message.result) {
+    ask('edit-permission', { toolCallId: 'edit-1', kind: 'edit', title: 'Write preview.yaml', locations: [{ path: ${JSON.stringify(worktreeFile)} }] });
+    return;
+  }
+  if (message.id === 'edit-permission' && message.result) {
+    send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  if (message.method !== undefined && message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, result: {} });
 });
 `;
 }

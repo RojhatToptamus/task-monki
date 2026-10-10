@@ -262,4 +262,15 @@ describe('the changes view', () => {
     ]);
     expect(configurationDiff('', 'a: 1\n')).toEqual([{ kind: 'hunk', content: '@@ -1,0 +1,1 @@' }, { kind: 'addition', content: '+a: 1', newLine: 1 }]);
   });
+
+  it('keeps a file-sized rewrite cheap: a valid 36 KB file changed on every line reads as one replacement', () => {
+    // 12,000 changed lines on each side would need a 576 MB alignment table.
+    const file = (word: string) => `name: app\ntype: static\ndirectory: .\n${Array.from({ length: 12_000 }, (_, index) => `#${word}${index}`).join('\n')}\n`;
+    const started = performance.now();
+    const lines = configurationDiff(file('a'), file('b'));
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(lines.filter((line) => line.kind === 'hunk').map((line) => line.content)).toEqual(['@@ -1,12003 +1,12003 @@']);
+    expect(lines.filter((line) => line.kind === 'deletion')).toHaveLength(12_000);
+    expect(lines.filter((line) => line.kind === 'addition')).toHaveLength(12_000);
+  });
 });

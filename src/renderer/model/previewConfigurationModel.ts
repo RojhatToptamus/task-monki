@@ -361,6 +361,9 @@ interface Hunk {
   side: 'written' | 'edited';
 }
 
+/** About 1 MB of alignment table: a few hundred changed lines on each side align line by line. */
+const MAX_ALIGNED_LINE_PAIRS = 250_000;
+
 /** Line ranges where `after` differs from `before`, from a longest-common-subsequence alignment. */
 function lineChanges(before: string[], after: string[], side: Hunk['side']): Hunk[] {
   // An edit touches a few lines; only the span between the common head and tail needs aligning.
@@ -370,6 +373,11 @@ function lineChanges(before: string[], after: string[], side: Hunk['side']): Hun
   while (tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
   const left = before.slice(head, before.length - tail);
   const right = after.slice(head, after.length - tail);
+  // The alignment table grows with the product of the differing spans. Past the bound, the whole
+  // span reads as one replacement: still exact about which lines changed, and the work stays small.
+  if (left.length * right.length > MAX_ALIGNED_LINE_PAIRS) {
+    return [{ from: head, to: head + left.length, start: head, end: head + right.length, side }];
+  }
   const columns = right.length + 1;
   const table = new Uint32Array((left.length + 1) * columns);
   for (let i = left.length - 1; i >= 0; i--)

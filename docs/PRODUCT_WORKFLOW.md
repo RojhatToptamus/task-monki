@@ -92,7 +92,8 @@ A moved base requires a new selection.
 
 The queued brief waits for a valid `preview.yaml`, an application
 route and entry path, Preview approval, and required private inputs. Preview
-setup uses the same controls as task Preview in the Design canvas. Configuration
+setup uses the same controls as task Preview in the Design canvas, including the
+Preview agent, which can draft `preview.yaml` for review. Configuration
 and approval open there when required; Preview setup remains available from the
 canvas toolbar. The conversation panel contains chat.
 The agent can diagnose startup failures after these prerequisites are met.

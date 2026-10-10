@@ -3,6 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ClientToolBridge } from '../agent/clientTools/ClientToolBridge';
+import { git } from '../git/gitCli';
+import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { TaskMonkiScenarioRegistry, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 
@@ -56,6 +58,71 @@ describe('TaskManagerService Preview agent', () => {
     });
     expect(logs.text).toContain('Missing local setup for web');
     expect(logs.text).toContain('(failed,');
+  });
+
+  it('tells the agent its run logs expired with the runtime instead of failing the tool call', async () => {
+    const { scenario, task, worktree } = await previewScenario('preview-agent-expired-logs');
+    await fs.writeFile(path.join(worktree.worktreePath, 'preview.yaml'), JSON.stringify({
+      name: 'application', type: 'environment', primary: 'web', services: {
+        web: { type: 'command', cwd: '.', command: [process.execPath, '-e', "console.error('output before restart'); process.exit(4)"] }
+      }
+    }));
+    const started = await scenario.service.startApplicationPreview({ taskId: task.id });
+    const attemptId = started.status!.candidate!.id;
+    await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).approval?.attemptId).toBe(attemptId);
+    await scenario.service.approveApplicationPreview({ taskId: task.id, attemptId });
+    await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).status?.latest?.state).toBe('failed');
+    // A runtime restart keeps the run's record and configuration but not its output.
+    const applications = (scenario.service as unknown as { applications: { close(): Promise<void>; init(): Promise<void> } }).applications;
+    await applications.close();
+    await applications.init();
+    const message = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Why did it fail?' });
+    const logs = await bridgeOf(scenario).invoke({ tool: 'inspect_preview', runId: message.runId!, arguments: { what: 'logs', lines: 20 } });
+    expect(logs.text).toContain('expired when the Preview runtime restarted');
+    const status = await bridgeOf(scenario).invoke({ tool: 'inspect_preview', runId: message.runId!, arguments: { what: 'status' } });
+    expect(status.text).toContain(attemptId);
+  }, 30_000);
+
+  it('starts the turn when provider activity lands on the run while its repository baseline is taken', async () => {
+    const { scenario, task } = await previewScenario('preview-agent-concurrent-activity');
+    // A resumed provider session (Codex) records activity for the queued run while Task Monki
+    // inspects the repository; the baseline must not be rejected as a stale update.
+    const store = scenario.runtimeStore;
+    const getSession = store.getSession.bind(store);
+    let landed = false;
+    store.getSession = async (id: string) => {
+      const session = await getSession(id);
+      if (!landed && session?.role === 'PREVIEW') {
+        // Only once the turn's submission is claimed, which is when the orchestrator takes its baseline.
+        const starting = (await store.listRunsByOwner(session.owner)).find((candidate) => candidate.sessionId === id && candidate.status === 'STARTING');
+        if (starting) {
+          landed = true;
+          await store.updateRun(starting.id, starting.recordRevision, { lastEventAt: new Date().toISOString() }, `provider-activity:${starting.id}`);
+        }
+      }
+      return session;
+    };
+    const message = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Check the setup.' });
+    expect(landed).toBe(true);
+    expect(message).toMatchObject({ status: 'SUBMITTED' });
+    const run = (await store.getRun(message.runId!))!;
+    expect(run.repositoryIntegrity).toMatchObject({ status: 'PENDING', beforeFingerprint: expect.any(String) });
+    expect(scenario.agent.startedTurns.at(-1)).toMatchObject({ mode: 'PREVIEW' });
+  });
+
+  it('names each registered checkout by the portable path preview.yaml uses, not one from the temporary worktree', async () => {
+    const { scenario, task } = await previewScenario('preview-agent-checkout-paths');
+    const backend = path.join(path.dirname(scenario.repositoryPath), 'sibling-backend');
+    await fs.mkdir(backend);
+    await git(backend, ['init', '-b', 'main']);
+    await git(backend, ['-c', 'user.email=task-monki@example.invalid', '-c', 'user.name=Task Monki', 'commit', '--allow-empty', '-m', 'Initial commit']);
+    await scenario.service.addRepository(backend);
+    const message = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Which backends can I use?' });
+    const status = JSON.parse((await bridgeOf(scenario).invoke({ tool: 'inspect_preview', runId: message.runId!, arguments: { what: 'status' } })).text);
+    expect(status.repositories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'sibling-backend', configurationPath: '../sibling-backend' }),
+      expect.objectContaining({ name: path.basename(scenario.repositoryPath), configurationPath: '.' })
+    ]));
   });
 
   it('runs a detached PREVIEW conversation whose messages, questions and proposals never move the task workflow', async () => {
@@ -212,5 +279,87 @@ describe('TaskManagerService Preview agent', () => {
     expect(await fs.readFile(path.join(worktree.worktreePath, 'server.mjs'), 'utf8')).toBe('// unexpected change\n');
     expect((await scenario.service.getPreviewRecipeGeneration({ taskId: task.id })).status).toBe('EMPTY');
   });
+
+  (process.platform === 'darwin' ? it : it.skip)('lets a repository Design without preview.yaml draft and save one through its detached Preview conversation', async () => {
+    const scenario = await scenarioRegistry.create({ name: 'preview-agent-design-setup', designMode: true, previewEnabled: true });
+    await scenario.commitFile('package.json', JSON.stringify({ scripts: { dev: 'node server.mjs' } }));
+    await scenario.commitFile('server.mjs', 'import http from "node:http"; http.createServer().listen(Number(process.env.PORT));\n');
+    const base = (await scenario.service.inspectDesignRepository({ repositoryId: scenario.repositoryId })).bases[0]!;
+    let detail = await scenario.service.createDesign({ brief: 'Improve the home page.', creationToken: 'preview-agent-design-setup', runtimeId: 'codex',
+      source: { kind: 'EXISTING_REPOSITORY', repositoryId: scenario.repositoryId, baseRef: base.refName, expectedBaseSha: base.sha } });
+    const designId = detail.task.id;
+    const workspace = detail.currentWorktree!.worktreePath;
+    expect(detail.repositorySetup?.blocker).toBe('Save a preview.yaml configuration before starting Design.');
+    const before = detail.task;
+
+    const message = await scenario.service.sendPreviewAgentMessage({ taskId: designId, id: randomUUID(), text: 'Draft a preview configuration.' });
+    expect(message).toMatchObject({ role: 'PREVIEW', status: 'SUBMITTED' });
+    expect(scenario.agent.startedTurns.at(-1)).toMatchObject({ mode: 'PREVIEW', instructionProfile: 'PREVIEW' });
+    detail = await scenario.service.getDesign(designId);
+    // The conversation is the Design's own, beside its work: no phase, run or session binding, and no Design turn.
+    expect([detail.task.workflowPhase, detail.task.currentRunId, detail.task.currentAgentSessionId])
+      .toEqual([before.workflowPhase, before.currentRunId, before.currentAgentSessionId]);
+    expect(detail.turns).toHaveLength(1);
+    expect([detail.turns[0]?.runId, detail.turns[0]?.outcome]).toEqual([undefined, undefined]);
+    expect(detail.previewAgent?.runs.map((run) => [run.id, run.mode])).toEqual([[message.runId, 'PREVIEW']]);
+    expect(detail.previewAgent?.instructions.map((item) => item.id)).toEqual([message.id]);
+    // Messages queue behind the turn and can be removed, as on a task.
+    const queued = await scenario.service.sendPreviewAgentMessage({ taskId: designId, id: randomUUID(), text: 'Then explain it.' });
+    expect(queued).toMatchObject({ status: 'QUEUED', sourceRunId: message.runId });
+    await scenario.service.editTaskInstruction({ taskId: designId, id: queued.id });
+    expect((await scenario.service.getDesign(designId)).previewAgent?.instructions.map((item) => item.id)).toEqual([message.id]);
+
+    // The agent's question belongs to the Preview conversation, never to the Design conversation.
+    const run = (await scenario.store.getRun(message.runId!))!;
+    const server = await scenario.runtimeStore.createAgentServer({ runtimeId: run.runtimeId, runtimeKind: 'APP_SERVER', transport: 'STDIO', executable: 'scenario', argv: [] });
+    await scenario.transitionRun(run.id, { status: 'RUNNING', serverInstanceId: server.id });
+    const question = await scenario.taskRuntime.createInteractionRequest({
+      runtimeId: run.runtimeId, serverInstanceId: server.id, providerRequestId: 1,
+      taskId: designId, iterationId: run.iterationId, runId: run.id, sessionId: run.sessionId,
+      type: 'USER_INPUT', request: { questions: [{ id: 'backend', header: 'Backend', question: 'Use a local backend?', isOther: true, isSecret: false }] },
+      allowedActions: ['ANSWER'], policyWarnings: [], requestRawMessage: await scenario.runtimeStore.appendProtocolMessage(server.id, 'INBOUND', '{"id":1}')
+    }, 'design-preview-question');
+    detail = await scenario.service.getDesign(designId);
+    expect(detail.interactions).toEqual([]);
+    expect(detail.previewAgent?.interactions.map((item) => item.id)).toEqual([question.id]);
+    await scenario.taskRuntime.transitionInteractionRequest(question.id, 'PENDING', {
+      status: 'STALE', respondedAt: new Date().toISOString(),
+      decision: { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { backend: ['No backend.'] } }
+    }, 'design-preview-answer');
+    await scenario.transitionRun(run.id, { status: 'RUNNING' });
+
+    const proposed = await bridgeOf(scenario).invoke({
+      tool: 'propose_preview_configuration', runId: message.runId!,
+      arguments: { yaml: PROPOSAL_YAML, summary: 'Runs the Node server.' }
+    });
+    expect(proposed.text).toMatch(/^Accepted\./);
+    await scenario.completeRun(message.runId!, 'Proposed preview.yaml.');
+    const generation = await scenario.service.getPreviewRecipeGeneration({ taskId: designId });
+    expect(generation.status).toBe('READY');
+    await expect(fs.access(path.join(workspace, 'preview.yaml'))).rejects.toThrow();
+
+    // Saving writes the file into the Design workspace without approving or starting the application.
+    await expect(scenario.service.acceptPreviewRecipeDraft({ taskId: designId, draftId: generation.draft!.id, yaml: generation.draft!.yaml }))
+      .resolves.toEqual({ recipePath: 'preview.yaml' });
+    expect(await fs.readFile(path.join(workspace, 'preview.yaml'), 'utf8')).toBe(PROPOSAL_YAML);
+    const application = await scenario.service.getApplicationPreview({ taskId: designId });
+    expect([application.status?.active, application.status?.candidate, application.approval]).toEqual([undefined, undefined, undefined]);
+    // The queued Design turn now proceeds to the next setup step instead of waiting for a file.
+    detail = await scenario.service.getDesign(designId);
+    expect(detail.repositorySetup).toMatchObject({ blocker: 'Select the application to design.' });
+    expect(detail.repositorySetup?.workspaceChanged).toBeFalsy();
+    expect(detail.task.workflowPhase).toBe(before.workflowPhase);
+
+    // The Design's Preview conversation is durable state the next launch accepts.
+    const profileRoot = scenario.persistence.paths.profileRoot;
+    await scenario.service.shutdown();
+    await scenario.persistence.close();
+    const reopened = await openTestPersistence(profileRoot);
+    try {
+      expect((await reopened.tasks.getDesignDetail(designId)).previewAgent?.instructions.map((item) => item.id)).toEqual([message.id]);
+    } finally {
+      await reopened.close();
+    }
+  }, 30_000);
 
 });

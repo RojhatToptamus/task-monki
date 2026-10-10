@@ -61,7 +61,8 @@ services:
     ready: { type: tcp, port: http }
 `)).toEqual({
       status: 'INVALID',
-      issues: [{ code: 'SECRET_LITERAL', message: 'Secret-like environment keys must use a secret reference, never a literal value.' }]
+      // The message names the service and key so the author can fix it, and never repeats the value.
+      issues: [{ code: 'SECRET_LITERAL', message: 'Use a secret reference for web API_TOKEN: secret-like environment keys never take a literal value.' }]
     });
     expect(validatePreviewRecipeDraft(`name: application
 type: environment

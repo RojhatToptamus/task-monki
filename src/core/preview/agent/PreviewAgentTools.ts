@@ -1,3 +1,4 @@
+import { relative } from 'node:path';
 import type { AttemptSummary, PreviewStatus } from 'previewhost';
 import type { ApplicationPreviewSnapshot } from '../../../shared/applicationPreview';
 import type { PreviewRecipeGenerationDraft, PreviewRecipeValidationIssue, Repository } from '../../../shared/contracts';
@@ -33,6 +34,8 @@ export function previewStatusReport(input: {
   configurationFile?: string;
   proposal?: PreviewRecipeGenerationDraft;
   repositories: Repository[];
+  /** The task's registered repository checkout, from which preview.yaml resolves folders outside the worktree. */
+  projectRepositoryPath?: string;
 }): string {
   const { snapshot } = input;
   const status = snapshot.status;
@@ -53,8 +56,15 @@ export function previewStatusReport(input: {
       : undefined
   }));
   const report = {
-    repositories: input.repositories.slice(0, 50).map(({ name, path, branch, status }) => ({ name, path, branch, status })),
-    repositoryAccess: 'These are registered checkouts, not read grants. Ask which checkout to use, then request read-only access before inspecting it. Do not switch branches or create worktrees.',
+    repositories: input.repositories.slice(0, 50).map(({ name, path, branch, status }) => ({
+      name,
+      path,
+      branch,
+      status,
+      // Portable: the path preview.yaml uses for this checkout, never one computed from the temporary worktree.
+      ...(input.projectRepositoryPath ? { configurationPath: relative(input.projectRepositoryPath, path) || '.' } : {})
+    })),
+    repositoryAccess: 'These are registered checkouts, not read grants. Ask which checkout to use, then request read-only access before inspecting it. Do not switch branches or create worktrees. In preview.yaml, use a checkout\'s configurationPath as its cwd: folders outside the worktree resolve from the task\'s registered repository.',
     repositoriesTruncated: input.repositories.length > 50 || undefined,
     configurationFile: input.configurationFile
       ? { name: input.configurationFile, note: 'Read it with your file tools; its contents are not repeated here.' }
@@ -95,6 +105,10 @@ export function previewStatusReport(input: {
 }
 
 /** The final lines of one run's output, already secret-redacted by the runtime. */
+/** What the agent reads when the runtime that captured a run's output has restarted since. */
+export const EXPIRED_LOGS_REPORT =
+  'The logs of this run expired when the Preview runtime restarted. Use inspect_preview status and the configuration file instead, or ask the person to start the preview again for fresh logs.';
+
 export function previewLogsReport(input: { attempt: AttemptSummary; source?: string; text: string; truncated: boolean; lines: number }): string {
   const all = input.text.replace(/\r\n/g, '\n').split('\n');
   if (all.at(-1) === '') all.pop();

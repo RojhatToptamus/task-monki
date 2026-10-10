@@ -282,7 +282,7 @@ export function PreviewRunApprovalBlock({ review, restart, projectDirectory, bus
                 <Row key={i} name={change.service} detail={change.change} end={change.concealed ? 'value concealed' : <button className="ghost-button" onClick={onViewChanges}>View</button>} />
               ))
             ) : (
-              <Row name="preview.yaml" detail="No service changes; only comments or ordering differ." end={<button className="ghost-button" onClick={onViewChanges}>View</button>} />
+              <Row name="preview.yaml" detail="Runs the same configuration; only comments or formatting differ." end={<button className="ghost-button" onClick={onViewChanges}>View</button>} />
             )}
           </div>
         </>

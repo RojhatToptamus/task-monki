@@ -57,4 +57,3 @@ function diffLineCode(line: DiffLine): string {
   }
   return line.content;
 }
-

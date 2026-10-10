@@ -9,11 +9,16 @@ import type {
   AgentJsonValue,
   InteractionRequestType
 } from '../../../shared/agent';
-import type {
-  OpenCodePermissionRule,
-  OpenCodePermissionRequest,
-  OpenCodeQuestionRequest
+import {
+  OPENCODE_CLIENT_TOOL_NAMES,
+  type OpenCodePermissionRule,
+  type OpenCodePermissionRequest,
+  type OpenCodeQuestionRequest
 } from './OpenCodeProtocol';
+import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
+
+/** `runtimeOptions.opencode.permissionProfile` value selecting the interactive read-only rules. */
+const INTERACTIVE_READ_ONLY_PROFILE = 'read-only';
 
 export interface MappedOpenCodeInteraction {
   type: InteractionRequestType;
@@ -32,6 +37,9 @@ export function openCodePermissionRules(
   settings: AgentExecutionSettings
 ): OpenCodePermissionRule[] {
   assertOpenCodeExecutionSettings(settings);
+  if (isOpenCodeInteractiveReadOnlySettings(settings)) {
+    return openCodeInteractiveReadOnlyPermissionRules();
+  }
   const defaultAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const taskAction = settings.approvalPolicy === 'never' ? 'allow' : 'deny';
   const networkAction = settings.networkAccess === true ? 'allow' : 'deny';
@@ -75,6 +83,64 @@ export function openCodeReadOnlyPermissionRules(): OpenCodePermissionRule[] {
   ];
 }
 
+/**
+ * Provider-native policy for interactive read-only work such as the Preview
+ * agent. It keeps the read-only workflow denials for mutation, delegation, and
+ * web tools, and likewise does not confine the OpenCode process. It also allows
+ * native questions and Task Monki's own MCP tools, and asks before any path
+ * outside the worktree so the person can consent to reading that folder.
+ */
+export function openCodeInteractiveReadOnlyPermissionRules(): OpenCodePermissionRule[] {
+  const interactive: Partial<Record<string, OpenCodePermissionRule['action']>> = {
+    question: 'allow',
+    external_directory: 'ask'
+  };
+  return [
+    ...openCodeReadOnlyPermissionRules().map((rule) => ({
+      ...rule,
+      action: interactive[rule.permission] ?? rule.action
+    })),
+    ...OPENCODE_CLIENT_TOOL_NAMES.map((permission) => ({
+      permission,
+      pattern: '*',
+      action: 'allow' as const
+    }))
+  ];
+}
+
+/** Whether the settings select OpenCode's interactive read-only permission rules. */
+export function isOpenCodeInteractiveReadOnlySettings(settings: AgentExecutionSettings): boolean {
+  const native = settings.runtimeOptions?.[OPENCODE_RUNTIME_ID];
+  return isRecord(native) && native.permissionProfile === INTERACTIVE_READ_ONLY_PROFILE;
+}
+
+/**
+ * Native settings for a portable read-only request that still needs questions
+ * and consent. OpenCode cannot attest an OS sandbox or an offline process, so
+ * the settings report provider-controlled access like the read-only workflows;
+ * the recorded permission profile selects the native rules that deny mutation
+ * and web tools.
+ */
+export function openCodeInteractiveReadOnlySettings(
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  const native = settings.runtimeOptions?.[OPENCODE_RUNTIME_ID];
+  return {
+    ...settings,
+    sandbox: 'DANGER_FULL_ACCESS',
+    approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
+    networkAccess: true,
+    runtimeOptions: {
+      ...settings.runtimeOptions,
+      [OPENCODE_RUNTIME_ID]: {
+        ...(isRecord(native) ? (native as Record<string, AgentJsonValue>) : {}),
+        permissionProfile: INTERACTIVE_READ_ONLY_PROFILE
+      }
+    }
+  };
+}
+
 /** OpenCode applies the last matching rule, so the desired suffix is effective. */
 export function openCodePermissionRulesEndWith(
   actual: readonly OpenCodePermissionRule[] | undefined,
@@ -107,11 +173,24 @@ export function assertOpenCodeExecutionSettings(settings: AgentExecutionSettings
       `OpenCode supports only on-request or never approval policies; ${settings.approvalPolicy ?? 'an unspecified policy'} is not enforceable.`
     );
   }
+  const native = settings.runtimeOptions?.[OPENCODE_RUNTIME_ID];
+  if (
+    isRecord(native) &&
+    native.permissionProfile !== undefined &&
+    (native.permissionProfile !== INTERACTIVE_READ_ONLY_PROFILE ||
+      settings.approvalPolicy !== 'on-request')
+  ) {
+    throw new Error(
+      'OpenCode supports only its interactive read-only permission profile, and only with on-request approvals.'
+    );
+  }
 }
 
 export function mapOpenCodePermission(
   permission: OpenCodePermissionRequest,
-  worktreePath: string
+  worktreePath: string,
+  /** Interactive read-only rules deny every mutation tool, so an external directory can only be read. */
+  interactiveReadOnly = false
 ): MappedOpenCodeInteraction {
   const nativeAction =
     typeof permission.action === 'string'
@@ -154,7 +233,8 @@ export function mapOpenCodePermission(
     };
   }
   const network = action.includes('web') || action.includes('network');
-  const readOnly = action.includes('read');
+  const readOnly =
+    action.includes('read') || (interactiveReadOnly && action === 'external_directory');
   return {
     type: 'PERMISSION_APPROVAL',
     providerItemId,
@@ -285,4 +365,8 @@ function looksLikeSecretQuestion(header: string, question: string): boolean {
   return /\b(?:api[ -]?key|access[ -]?token|secret|password|credential|private[ -]?key)\b/iu.test(
     `${header} ${question}`
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

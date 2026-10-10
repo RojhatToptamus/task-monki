@@ -8,6 +8,8 @@ import type {
   AgentItemRecord,
   AgentJsonValue,
   AgentModel,
+  AgentPermissionApprovalDecision,
+  AgentPermissionApprovalRequest,
   AgentPreflight,
   AgentProtocolMessageReference,
   AgentRuntimeDiagnostic,
@@ -148,7 +150,9 @@ import {
   clientCapabilitiesForAcpProfile
 } from './AcpStdioSupervisor';
 import {
+  acpReadPermissionOutcome,
   materializeAcpPermission,
+  materializeAcpReadPermission,
   selectAutomaticAcpPermissionOption
 } from './AcpPermissionPolicy';
 import {
@@ -2203,7 +2207,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (!client || !server || server.id !== interaction.serverInstanceId) {
       throw new Error('ACP interaction belongs to a prior runtime process.');
     }
-    const method = interaction.type === 'COMMAND_APPROVAL'
+    const method = isAcpPermissionInteraction(interaction)
       ? 'session/request_permission'
       : 'elicitation/create';
     const result = interaction.type === 'COMMAND_APPROVAL'
@@ -2213,11 +2217,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             input.decision as AgentCommandApprovalDecision
           )
         }
-      : mapAcpElicitationResponse(
-          interaction.type,
-          interaction.request,
-          input.decision
-        );
+      : interaction.type === 'PERMISSION_APPROVAL'
+        ? {
+            outcome: acpReadPermissionOutcome(
+              await this.journaledPermissionOptions(interaction),
+              interaction.request as AgentPermissionApprovalRequest,
+              input.decision as AgentPermissionApprovalDecision
+            )
+          }
+        : mapAcpElicitationResponse(
+            interaction.type,
+            interaction.request,
+            input.decision
+          );
     let responseEvidencePersisted = false;
     let responseRaw: AgentProtocolMessageReference;
     try {
@@ -3812,6 +3824,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const trustedAppTool = correlatedToolCall
       ? this.activeClientTool(run, correlatedToolCall, server.id)
       : undefined;
+    const readAccess = trustedAppTool
+      ? undefined
+      : materializeAcpReadPermission({ toolCall, options: permission.options, session, run });
     const materialized = materializeAcpPermission({
       toolCall,
       options: permission.options,
@@ -3824,12 +3839,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           : undefined
     });
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
-    const automaticOption = selectAutomaticAcpPermissionOption({
-      approvalPolicy: run.requestedSettings.approvalPolicy,
-      toolCall,
-      options: permission.options,
-      materialized
-    });
+    const automaticOption = readAccess
+      ? undefined
+      : selectAutomaticAcpPermissionOption({
+          approvalPolicy: run.requestedSettings.approvalPolicy,
+          toolCall,
+          options: permission.options,
+          materialized
+        });
     if (automaticOption) {
       await this.respondToAutomaticPermission({
         client,
@@ -3852,10 +3869,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         sessionId: session.id,
         providerTurnId: run.providerTurnId,
         providerItemId: toolCall.toolCallId,
-        type: 'COMMAND_APPROVAL',
-        request: this.redactProviderValue(materialized.request),
-        allowedActions: materialized.allowedActions,
-        policyWarnings: materialized.warnings,
+        ...(readAccess
+          ? {
+              type: 'PERMISSION_APPROVAL' as const,
+              request: this.redactProviderValue(readAccess.request),
+              allowedActions: readAccess.allowedActions,
+              policyWarnings: readAccess.warnings
+            }
+          : {
+              type: 'COMMAND_APPROVAL' as const,
+              request: this.redactProviderValue(materialized.request),
+              allowedActions: materialized.allowedActions,
+              policyWarnings: materialized.warnings
+            }),
         requestRawMessage: raw
       }, acpProtocolOperationId('interaction/create', raw, run.id, request.id));
     } catch (cause) {
@@ -6159,7 +6185,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       );
       const raw = await client.respond(
         responding.providerRequestId,
-        responding.type === 'COMMAND_APPROVAL'
+        isAcpPermissionInteraction(responding)
           ? { outcome: { outcome: 'cancelled' } }
           : { action: 'cancel' },
         async (reference) => {
@@ -6175,7 +6201,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         {
           status: 'CANCELED',
           responseRawMessage: raw,
-          resolution: responding.type === 'COMMAND_APPROVAL'
+          resolution: isAcpPermissionInteraction(responding)
             ? { outcome: 'cancelled' }
             : { action: 'cancel' },
           resolvedAt: new Date().toISOString()
@@ -6564,6 +6590,25 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         providerGeneration
       }
     });
+  }
+
+  /**
+   * A read approval keeps the shared permission shape, so its exact provider
+   * choices are read back from the journaled request it answers.
+   */
+  private async journaledPermissionOptions(
+    interaction: InteractionRequestRecord
+  ): Promise<AcpPermissionOption[]> {
+    const { raw } = await this.providerRuntime.readProtocolMessage(interaction.requestRawMessage);
+    const message: unknown = JSON.parse(raw);
+    if (
+      !isRecord(message) ||
+      message.method !== 'session/request_permission' ||
+      message.id !== interaction.providerRequestId
+    ) {
+      throw new Error('The journaled ACP permission request does not match this interaction.');
+    }
+    return parsePermissionRequest(message.params).options;
   }
 
   /** The app-owned tool this call names, when the run may call it in the current generation. */
@@ -7454,6 +7499,11 @@ function runtimeDeliveryErrorForAcp(
     `${operation} failed: ${errorMessage(cause)}`,
     { cause }
   );
+}
+
+/** Command approvals and Preview read approvals both answer `session/request_permission`. */
+function isAcpPermissionInteraction(interaction: Pick<InteractionRequestRecord, 'type'>): boolean {
+  return interaction.type === 'COMMAND_APPROVAL' || interaction.type === 'PERMISSION_APPROVAL';
 }
 
 function providerOptions(interaction: InteractionRequestRecord): AcpPermissionOption[] {

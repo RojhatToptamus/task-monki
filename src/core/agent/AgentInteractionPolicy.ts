@@ -502,14 +502,19 @@ export function previewInspectionReadPaths(
   return paths.filter((candidate) => {
     if (!path.isAbsolute(candidate)) return false;
     const resolved = canonicalPath(candidate);
-    if (!resolved || resolved === path.parse(resolved).root) return false;
-    // The user approves one project folder, not the home directory or its ancestors.
-    if (home && isAllowedWorkspacePath(resolved, home)) return false;
+    if (!resolved) return false;
+    let folder: string;
     try {
-      return statSync(resolved).isDirectory();
+      const stats = statSync(resolved);
+      // One file is narrower than its folder, so it qualifies exactly when that folder does.
+      if (stats.isDirectory()) folder = resolved;
+      else if (stats.isFile()) folder = path.dirname(resolved);
+      else return false;
     } catch {
       return false;
     }
+    // The user approves one project folder, not the home directory or its ancestors.
+    return folder !== path.parse(folder).root && !(home && isAllowedWorkspacePath(folder, home));
   });
 }
 

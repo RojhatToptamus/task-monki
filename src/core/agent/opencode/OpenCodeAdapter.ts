@@ -83,6 +83,8 @@ import {
   mapOpenCodePermission,
   mapOpenCodeQuestion,
   openCodePermissionRules,
+  isOpenCodeInteractiveReadOnlySettings,
+  openCodeInteractiveReadOnlySettings,
   openCodeReadOnlyPermissionRules,
   openCodePermissionRulesEndWith,
   assertOpenCodeExecutionSettings,
@@ -457,7 +459,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               approvalsReviewer: 'user',
               networkAccess: true
             }
-          : input.settings
+          : isProviderNeutralInteractiveReadOnlySettings(input.settings)
+            ? openCodeInteractiveReadOnlySettings(input.settings)
+            : input.settings
       },
       models,
       'application OpenCode catalog',
@@ -4275,7 +4279,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     await this.materializeInteraction(
       session,
       permission.id,
-      mapOpenCodePermission(permission, session.worktreePath),
+      mapOpenCodePermission(
+        permission,
+        session.worktreePath,
+        isOpenCodeInteractiveReadOnlySettings(session.requestedSettings)
+      ),
       raw,
       serverId,
       permission.source?.messageID ?? permission.tool?.messageID
@@ -5000,7 +5008,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         .filter((permission) => permission.sessionID === session.providerSessionId)
         .map((permission) => ({
           id: permission.id,
-          mapped: mapOpenCodePermission(permission, session.worktreePath),
+          mapped: mapOpenCodePermission(
+            permission,
+            session.worktreePath,
+            isOpenCodeInteractiveReadOnlySettings(session.requestedSettings)
+          ),
           raw: permissionsRaw,
           messageId: permission.source?.messageID ?? permission.tool?.messageID
         })),
@@ -6438,6 +6450,13 @@ function isOpenCodeReadOnlyRuntimeSession(
 function isProviderNeutralReadOnlySettings(settings: AgentExecutionSettings): boolean {
   return settings.sandbox === 'READ_ONLY' &&
     settings.approvalPolicy?.toLowerCase() === 'never' &&
+    settings.networkAccess === false;
+}
+
+/** Read-only work that keeps questions and consent requests, such as the Preview agent. */
+function isProviderNeutralInteractiveReadOnlySettings(settings: AgentExecutionSettings): boolean {
+  return settings.sandbox === 'READ_ONLY' &&
+    settings.approvalPolicy === 'on-request' &&
     settings.networkAccess === false;
 }
 

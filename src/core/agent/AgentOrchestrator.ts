@@ -2342,13 +2342,23 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
     if (!(await this.claimTaskTurnSubmission(run.id))) return false;
     if (input.mode === 'PREVIEW') {
-      const runtimeRun = (await this.runtimeStore.getRun(run.id))!;
       const runtimeSession = (await this.runtimeStore.getSession(session.id))!;
       const beforeFingerprint = await inspectReadOnlyRepositoryState(runtimeSession.executionContext);
       if (!beforeFingerprint) throw new Error('The Preview analysis has no verifiable repository.');
-      await this.runtimeStore.updateRun(run.id, runtimeRun.recordRevision, {
-        repositoryIntegrity: { status: 'PENDING', beforeFingerprint }
-      }, `preview-repository-before:${run.id}`);
+      // A resumed provider session can record activity for this run while the repository is
+      // inspected; the baseline is independent of that, so it is written to the latest revision.
+      for (let attempt = 1; ; attempt++) {
+        const runtimeRun = (await this.runtimeStore.getRun(run.id))!;
+        try {
+          await this.runtimeStore.updateRun(run.id, runtimeRun.recordRevision, {
+            repositoryIntegrity: { status: 'PENDING', beforeFingerprint }
+          }, `preview-repository-before:${run.id}`);
+          break;
+        } catch (error) {
+          const latest = await this.runtimeStore.getRun(run.id);
+          if (attempt >= 3 || !latest || latest.recordRevision === runtimeRun.recordRevision) throw error;
+        }
+      }
     }
     await adapter.startTurn({
       localRunId: run.id,

@@ -2198,6 +2198,9 @@ export class TaskManagerService {
       return updates.withExclusiveAccess(input.designId, async () => {
         const detail = await this.store.getDesignDetail(input.designId);
         if (!detail.actions.canArchive) throw new Error('Stop the current Design update before archiving.');
+        if ((await this.store.snapshot()).runs.some((run) => run.taskId === input.designId && run.mode === 'PREVIEW' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
+          throw new Error('Stop the Preview agent before archiving.');
+        }
         await this.designPreviews.stopTask(input.designId);
         await this.agents.releaseTask(input.designId);
         await this.store.archiveDesign(input.designId);
@@ -3850,7 +3853,11 @@ export class TaskManagerService {
     this.assertAgentProviderAvailable();
     return this.withTaskAction(input.taskId, 'Preview agent message', () =>
       this.withRuntimeOperation(async () => {
-        await this.requireNormalTask(input.taskId, 'Preview agent');
+        const task = await this.requireRepositoryPreviewTask(input.taskId, 'Preview agent');
+        // A Design turn edits the workspace the read-only analysis compares against.
+        if (task.kind === 'DESIGN' && designRunActive(task.currentRunId ? await this.store.getRun(task.currentRunId) : undefined)) {
+          throw new Error('Wait for the Design turn to finish.');
+        }
         return this.previewAgent.send(input);
       })
     );
@@ -3947,9 +3954,9 @@ export class TaskManagerService {
     };
   }
 
-  /** The verified worktree of a normal task; Design previews are published, never conversed about. */
+  /** The verified worktree of a task, or of a repository Design, that the Preview conversation reads. */
   private async requireTaskPreviewContext(taskId: string) {
-    await this.requireNormalTask(taskId, 'Preview agent');
+    await this.requireRepositoryPreviewTask(taskId, 'Preview agent');
     return this.requirePreviewContext(taskId);
   }
 

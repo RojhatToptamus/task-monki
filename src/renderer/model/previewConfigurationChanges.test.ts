@@ -29,6 +29,16 @@ it('lists service-level changes with values for fields and only names for enviro
   expect(JSON.stringify(previewConfigurationChanges(running, next))).not.toContain('8002');
 });
 
+it('names a change to the primary service, which reroutes the preview, instead of reporting no changes', () => {
+  const twoServers = running + '  api: {type: command, cwd: ., command: [node, api.js], readyPath: /health}\n';
+  expect(previewConfigurationChanges(twoServers, twoServers.replace('primary: web', 'primary: api'))).toEqual([
+    { service: 'preview.yaml', change: 'primary service api, was web' }
+  ]);
+  expect(previewConfigurationChanges(running, 'name: app\ntype: command\ncwd: .\ncommand: [npm, start]\n')).toEqual([
+    { service: 'preview.yaml', change: 'type command, was environment' }
+  ]);
+});
+
 it('reports removed services and gives up on invalid YAML', () => {
   expect(previewConfigurationChanges(running, running.replace(/  install:.*\n/, ''))).toEqual([{ service: 'install', change: 'removed' }]);
   expect(previewConfigurationChanges(running, 'services: [')).toBeUndefined();

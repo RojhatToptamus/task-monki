@@ -29,6 +29,7 @@ import type {
   DuplicateDesignRequest,
   DesignConversationEntry,
   DesignDetailSnapshot,
+  PreviewAgentConversationRecords,
   DesignConversationPage,
   DesignListItem,
   DesignReference,
@@ -929,10 +930,13 @@ export class SqliteTaskStore {
       (left, right) => left.turn.order - right.turn.order
     );
     const turns = conversation.map((entry) => entry.turn);
+    const previewAgent = projectDesignPreviewConversation(state, designId);
+    const previewRunIds = new Set(previewAgent.runs.map((run) => run.id));
     const interactions = state.interactionRequests
       .filter(
         (interaction) =>
           interaction.taskId === designId &&
+          !previewRunIds.has(interaction.runId) &&
           (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
       )
       .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
@@ -999,6 +1003,7 @@ export class SqliteTaskStore {
             }
           : undefined,
       currentPreview,
+      previewAgent,
       canvas: projectDesignCanvas(state, task, revisions, currentPreview),
       actions: projectDesignActions(state, task, revisions.at(-1), currentPreview)
     });
@@ -1332,6 +1337,7 @@ export class SqliteTaskStore {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === input.taskId);
     if (!task) throw new Error('Task not found.');
+    if (task.kind === 'DESIGN' && input.mode === 'PREVIEW') return [];
     if (input.mode !== 'DESIGN') {
       const records = await this.getTaskAttachments(input.taskId);
       const message = input.runId ? this.state.taskInstructions.find((item) => item.runId === input.runId && item.taskId === task.id) : undefined;
@@ -2477,11 +2483,14 @@ export class SqliteTaskStore {
     clearDraft?: string, attachmentDraftId?: string): Promise<T> {
     return this.serializeMutation(async () => {
       await this.init();
-      const task = this.state.tasks.find((task) => task.id === taskId && task.kind === 'NORMAL');
+      const task = this.state.tasks.find((task) => task.id === taskId);
       if (!task) throw new Error('Task not found.');
       return this.withMessageAttachments(taskId, attachmentDraftId, (addedIds) => {
         const records = clone(this.state.taskInstructions.filter((record) => record.taskId === taskId));
         const result = update(records, addedIds);
+        if (task.kind === 'DESIGN' && records.some((record) => record.role !== 'PREVIEW')) {
+          throw new Error('A Design holds only Preview agent messages.');
+        }
         const availableIds = new Set(this.state.attachments.filter((file) => file.taskId === taskId).map((file) => file.id));
         for (const record of records) {
           if (record.attachmentIds?.some((id) => !availableIds.has(id))) throw new Error('A message attachment does not belong to this task.');
@@ -4050,7 +4059,7 @@ export class SqliteTaskStore {
       ) {
         throw new Error('Agent run session ownership is inconsistent.');
       }
-      if ((task.kind === 'DESIGN') !== (run.mode === 'DESIGN')) {
+      if ((task.kind === 'DESIGN') !== (run.mode === 'DESIGN') && !(task.kind === 'DESIGN' && run.mode === 'PREVIEW')) {
         throw new Error('DESIGN runs and Design tasks must use each other exclusively.');
       }
       if (run.mode === 'DESIGN') {
@@ -5898,9 +5907,10 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
 /** Reviews and Preview conversations may run on another runtime than the task; their subagents inherit that. */
 function belongsToDetachedLineage(
   session: AgentSessionRecord,
-  sessions: ReadonlyMap<string, AgentSessionRecord>
+  sessions: ReadonlyMap<string, AgentSessionRecord>,
+  detached: (role: AgentSessionRecord['role']) => boolean = isDetachedSessionRole
 ): boolean {
-  if (isDetachedSessionRole(session.role)) return true;
+  if (detached(session.role)) return true;
   if (session.role !== 'SUBAGENT') return false;
 
   const visited = new Set<string>([session.id]);
@@ -5917,7 +5927,7 @@ function belongsToDetachedLineage(
     ) {
       return false;
     }
-    if (isDetachedSessionRole(parent.role)) return true;
+    if (detached(parent.role)) return true;
     visited.add(parent.id);
     child = parent;
   }
@@ -6109,10 +6119,15 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     }
   }
 
+  // A Design's only detached work is its Preview conversation, which may use another runtime and model.
+  const sessionsById = new Map(state.agentSessions.map((session) => [session.id, session]));
+  const designPreviewLineage = (session: AgentSessionRecord | undefined) =>
+    session !== undefined && belongsToDetachedLineage(session, sessionsById, (role) => role === 'PREVIEW');
   for (const session of state.agentSessions) {
     const task = tasks.get(session.taskId);
     if (
       task?.kind === 'DESIGN' &&
+      !designPreviewLineage(session) &&
       (!hasDesignRuntimeSettings(task.runtimeId, session.requestedSettings) ||
         hasContradictoryDesignRuntime(task.runtimeId, session.observedSettings))
     ) {
@@ -6123,8 +6138,10 @@ function validatePersistedDesignRelationships(state: StoreState): void {
   for (const run of state.runs) {
     const task = tasks.get(run.taskId);
     if (!task) continue;
+    const runSession = sessionsById.get(run.sessionId);
     if (
       task.kind === 'DESIGN' &&
+      !designPreviewLineage(runSession) &&
       (!hasDesignRuntimeSettings(task.runtimeId, run.requestedSettings) ||
         hasContradictoryDesignRuntime(task.runtimeId, run.observedSettings))
     ) {
@@ -6143,7 +6160,8 @@ function validatePersistedDesignRelationships(state: StoreState): void {
       const generationRuns = designRunsByGeneration.get(key) ?? [];
       generationRuns.push(run);
       designRunsByGeneration.set(key, generationRuns);
-    } else if (task.kind === 'DESIGN' && run.origin !== 'PROVIDER_SUBAGENT') {
+    } else if (task.kind === 'DESIGN' && run.origin !== 'PROVIDER_SUBAGENT' &&
+        !(run.mode === 'PREVIEW' && runSession?.role === 'PREVIEW')) {
       invalidPersistedRelationship('Design Run mode');
     }
   }
@@ -6420,6 +6438,31 @@ function validatePersistedDesignRelationships(state: StoreState): void {
     }
   }
 }
+
+/**
+ * A Design's Preview conversation, kept apart from its Design turns like a task's Preview tab.
+ * Only its most recent turns are projected, matching the Design detail's bounded history.
+ */
+function projectDesignPreviewConversation(state: StoreState, designId: string): PreviewAgentConversationRecords {
+  const runs = state.runs
+    .filter((run) => run.taskId === designId && run.mode === 'PREVIEW')
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+    .slice(-DESIGN_PREVIEW_AGENT_RUN_LIMIT);
+  const runIds = new Set(runs.map((run) => run.id));
+  const ofRuns = <T extends { taskId: string; runId?: string }>(records: readonly T[]) =>
+    records.filter((record) => record.taskId === designId && runIds.has(record.runId ?? ''));
+  return {
+    runs,
+    items: ofRuns(state.agentItems),
+    instructions: state.taskInstructions.filter((item) =>
+      item.taskId === designId && item.role === 'PREVIEW' && (!item.runId || runIds.has(item.runId) || item.status !== 'SUBMITTED')),
+    interactions: ofRuns(state.interactionRequests),
+    sessions: state.agentSessions.filter((session) => session.taskId === designId && session.role === 'PREVIEW'),
+    plans: ofRuns(state.agentPlanRevisions)
+  };
+}
+
+const DESIGN_PREVIEW_AGENT_RUN_LIMIT = 20;
 
 function hasDesignRuntimeSettings(
   runtimeId: string,

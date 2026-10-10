@@ -70,6 +70,23 @@ describe('projectAgentExecutionSupport', () => {
     });
   });
 
+  it('refuses the Preview agent only where the runtime reports it cannot hold the conversation', () => {
+    // Grok Build's read-only turns run in a dedicated process that denies Task Monki tools.
+    const capabilities = supportedCapabilities();
+    const refused = {
+      ...capabilities,
+      extensions: {
+        ...capabilities.extensions,
+        'task-monki.preview-agent': { maturity: 'unsupported' as const, detail: 'Read-only work runs in a separate process.' }
+      }
+    };
+    expect(projectAgentExecutionSupport(refused, 'PREVIEW_AGENT')).toEqual({
+      supported: false,
+      reason: 'Read-only work runs in a separate process.'
+    });
+    expect(projectAgentExecutionSupport(refused, 'REVIEW')).toEqual({ supported: true });
+  });
+
   it('requires the complete current Design contract and uses the read-only turn capability for Discourse', () => {
     const capabilities = supportedCapabilities();
 

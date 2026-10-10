@@ -21,42 +21,38 @@ const FIELD_NAMES: Record<string, string> = {
   url: 'connection',
   image: 'image',
   ports: 'ports',
-  type: 'type'
+  type: 'type',
+  primary: 'primary service',
+  name: 'name'
 };
 
 type Node = Record<string, unknown>;
 
-/** Service-level differences between the configuration a run started with and the file now, for the restart review. */
+/** The row that names a change to the file as a whole, such as which service receives the preview's traffic. */
+const FILE = 'preview.yaml';
+
+/**
+ * Every execution-affecting difference between the configuration a run started with and the file
+ * now, for the restart review: file-level fields first (type, primary service), then each service.
+ * An empty list means the two files run the same configuration.
+ */
 export function previewConfigurationChanges(previousText: string, nextText: string): PreviewConfigurationChange[] | undefined {
-  const previous = services(previousText);
-  const next = services(nextText);
-  if (!previous || !next) return undefined;
-  const changes: PreviewConfigurationChange[] = [];
+  const before = configuration(previousText);
+  const after = configuration(nextText);
+  if (!before || !after) return undefined;
+  if (before.type !== after.type) return [{ service: FILE, change: `type ${text(after.type)}, was ${text(before.type)}` }];
+  const changes: PreviewConfigurationChange[] =
+    after.type === 'environment' ? fieldChanges(FILE, omit(before, 'services'), omit(after, 'services')) : [];
+  const previous = services(before);
+  const next = services(after);
   for (const [id, node] of Object.entries(next)) {
-    const before = previous[id];
-    if (!before) {
+    const was = previous[id];
+    if (!was) {
       changes.push({ service: id, change: `new ${String(node.type ?? 'service')}` });
       continue;
     }
-    for (const key of new Set([...Object.keys(before), ...Object.keys(node)])) {
-      if (key === 'env') continue;
-      if (same(before[key], node[key])) continue;
-      const name = FIELD_NAMES[key] ?? key;
-      if (key === 'url' || hasEnvironment(before[key]) || hasEnvironment(node[key])) {
-        changes.push({ service: id, change: `${name} ${node[key] === undefined ? 'removed' : before[key] === undefined ? 'added' : 'changed'}`, concealed: true });
-        continue;
-      }
-      changes.push({
-        service: id,
-        change:
-          node[key] === undefined
-            ? `${name} removed, was ${text(before[key])}`
-            : before[key] === undefined
-              ? `${name} ${text(node[key])}`
-              : `${name} ${text(node[key])}, was ${text(before[key])}`
-      });
-    }
-    const beforeEnv = (before.env as Node | undefined) ?? {};
+    changes.push(...fieldChanges(id, omit(was, 'env'), omit(node, 'env')));
+    const beforeEnv = (was.env as Node | undefined) ?? {};
     const nextEnv = (node.env as Node | undefined) ?? {};
     for (const key of new Set([...Object.keys(beforeEnv), ...Object.keys(nextEnv)])) {
       if (same(beforeEnv[key], nextEnv[key])) continue;
@@ -71,17 +67,45 @@ export function previewConfigurationChanges(previousText: string, nextText: stri
   return changes;
 }
 
-function services(yamlText: string): Record<string, Node> | undefined {
+function configuration(yamlText: string): Node | undefined {
   const document = parseDocument(yamlText);
   if (document.errors.length) return undefined;
   let config: Node | null;
   try { config = document.toJS({ maxAliasCount: 0 }) as Node | null; } catch { return undefined; }
-  if (!config || typeof config !== 'object') return undefined;
-  if (config.type === 'environment') {
-    const entries = Object.entries((config.services as Record<string, Node>) ?? {}).filter(([, node]) => !!node && typeof node === 'object');
-    return Object.fromEntries(entries);
+  return config && typeof config === 'object' && !Array.isArray(config) ? config : undefined;
+}
+
+function services(config: Node): Record<string, Node> {
+  if (config.type !== 'environment') return { Application: config };
+  return Object.fromEntries(Object.entries((config.services as Record<string, Node>) ?? {}).filter(([, node]) => !!node && typeof node === 'object'));
+}
+
+/** One row per changed field; values that can carry environment or connection secrets are named, never shown. */
+function fieldChanges(owner: string, before: Node, after: Node): PreviewConfigurationChange[] {
+  const changes: PreviewConfigurationChange[] = [];
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (same(before[key], after[key])) continue;
+    const name = FIELD_NAMES[key] ?? key;
+    if (key === 'url' || hasEnvironment(before[key]) || hasEnvironment(after[key])) {
+      changes.push({ service: owner, change: `${name} ${after[key] === undefined ? 'removed' : before[key] === undefined ? 'added' : 'changed'}`, concealed: true });
+      continue;
+    }
+    changes.push({
+      service: owner,
+      change:
+        after[key] === undefined
+          ? `${name} removed, was ${text(before[key])}`
+          : before[key] === undefined
+            ? `${name} ${text(after[key])}`
+            : `${name} ${text(after[key])}, was ${text(before[key])}`
+    });
   }
-  return { Application: config };
+  return changes;
+}
+
+function omit(node: Node, key: string): Node {
+  const { [key]: _omitted, ...rest } = node;
+  return rest;
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);

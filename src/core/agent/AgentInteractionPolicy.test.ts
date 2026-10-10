@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentSessionRecord,
   AgentUserInputDecision,
@@ -42,6 +42,30 @@ describe('Agent interaction policy', () => {
       expect(buildInteractionPolicy({ type: 'FILE_CHANGE_APPROVAL', request: { startedAtMs: 1 }, session, run }).allowedActions).toEqual(['DECLINE', 'CANCEL']);
       expect(buildInteractionPolicy({ type: 'PERMISSION_APPROVAL', request, session, run: runFixture() }).allowedActions).toEqual(['DECLINE']);
     } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('offers a Preview read of one external file only when its folder could be approved', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-file-inspection-'));
+    const home = vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    try {
+      await fs.mkdir(path.join(directory, 'backend'));
+      await fs.writeFile(path.join(directory, 'backend', 'package.json'), '{}');
+      await fs.writeFile(path.join(directory, '.npmrc'), 'token');
+      const session = sessionFixture({ role: 'PREVIEW', worktreePath: path.join(directory, 'frontend') });
+      const run = { ...runFixture(), mode: 'PREVIEW' as const };
+      const read = (file: string) => buildInteractionPolicy({
+        type: 'PERMISSION_APPROVAL',
+        request: { startedAtMs: 1, cwd: session.worktreePath, permissions: { fileSystem: { entries: [{ path: { type: 'path', path: file }, access: 'read' }] } } },
+        session,
+        run
+      }).allowedActions;
+      expect(read(path.join(directory, 'backend', 'package.json'))).toContain('GRANT_TURN');
+      // A file directly in the home directory is as broad as approving home itself.
+      expect(read(path.join(directory, '.npmrc'))).toEqual(['DECLINE']);
+    } finally {
+      home.mockRestore();
       await fs.rm(directory, { recursive: true, force: true });
     }
   });

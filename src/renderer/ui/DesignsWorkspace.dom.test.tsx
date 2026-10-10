@@ -82,6 +82,91 @@ describe('mounted Design workspace', () => {
     view.unmount();
   });
 
+  it('drafts and saves preview.yaml for a repository Design through the shared Preview agent without starting it', async () => {
+    onTestFinished(() => { vi.restoreAllMocks(); });
+    const at = '2026-08-20T10:00:00.000Z';
+    const worktree = {
+      id: 'worktree-1', taskId: 'design-1', iterationId: 'iteration-1', repositoryId: 'repository-1', ownership: 'MANAGED',
+      worktreePath: '/fixture/design', branchName: 'design/fixture', baseRef: 'main', baseSha: 'abcdef1234567890', status: 'PRESENT',
+      createdAt: at, updatedAt: at
+    } as NonNullable<DesignProjectDetail['currentWorktree']>;
+    const message = {
+      id: 'message-1', taskId: 'design-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sourceRunId: 'preview-run', sessionId: 'preview-session',
+      order: 1, text: 'Which backend does this app need?', mode: 'FOLLOW_UP', status: 'SUBMITTED', role: 'PREVIEW', runId: 'preview-run', createdAt: at, updatedAt: at
+    } as const;
+    const project = designProject({
+      design: designListItem({ status: 'NEEDS_ATTENTION' }),
+      task: { ...designProject().task, workflowPhase: 'IN_PROGRESS', projection: createInitialProjection(at) },
+      repository: { ...designProject().repository, kind: 'USER_REGISTERED', name: 'storefront' },
+      currentWorktree: worktree,
+      repositorySetup: { blocker: 'Save a preview.yaml configuration before starting Design.' },
+      revisions: [],
+      conversation: [{ ...designProject().conversation[0]!, turn: { ...designProject().conversation[0]!.turn, outcome: undefined }, assistantMessage: undefined, runStatus: undefined }],
+      canvas: { state: 'EMPTY' } as DesignProjectDetail['canvas'],
+      previewAgent: {
+        runs: [{ id: 'preview-run', runtimeId: 'codex', taskId: 'design-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sessionId: 'preview-session',
+          mode: 'PREVIEW', origin: 'USER', status: 'COMPLETED', recoveryState: 'NONE', requestedSettings: { runtimeId: 'codex', model: 'gpt-5.6-luna' },
+          startedAt: at, eventCount: 1, attachmentSelection: [] } as unknown as NonNullable<DesignProjectDetail['previewAgent']>['runs'][number]],
+        items: [], instructions: [message], interactions: [], sessions: [], plans: []
+      }
+    });
+    project.turns = project.conversation.map((entry) => entry.turn);
+    let update!: (event: AppUpdateEvent) => void;
+    vi.spyOn(taskManagerApi, 'onUpdate').mockImplementation((listener) => {
+      update = listener;
+      return () => undefined;
+    });
+    vi.spyOn(taskManagerApi, 'getBoardSnapshot').mockResolvedValue({
+      schemaVersion: TASK_STORE_SCHEMA_VERSION, repositories: [], boards: [], tasks: [], interactionRequests: []
+    });
+    vi.spyOn(taskManagerApi, 'getAppSettings').mockResolvedValue(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+    vi.spyOn(taskManagerApi, 'getExternalToolStatus').mockResolvedValue({ tools: {} as ExternalToolStatusReport['tools'], refreshedAt: at });
+    vi.spyOn(taskManagerApi, 'getAgentRuntimeCatalog').mockResolvedValue({
+      defaultRuntimeId: 'codex', runtimes: [designRuntime], models: [designModel], refreshedAt: at
+    });
+    vi.spyOn(taskManagerApi, 'listDiscourseConversations').mockResolvedValue({ conversations: [] });
+    vi.spyOn(taskManagerApi, 'listDesigns').mockResolvedValue([project.design]);
+    const getDesign = vi.spyOn(taskManagerApi, 'getDesign').mockResolvedValue(project);
+    vi.spyOn(taskManagerApi, 'getDesignDraft').mockResolvedValue(null);
+    vi.spyOn(taskManagerApi, 'getApplicationPreview').mockResolvedValue({ name: 'storefront', projectDirectory: worktree.worktreePath, hasConfigurationFile: false });
+    vi.spyOn(taskManagerApi, 'inspectApplicationPreviewSetup').mockResolvedValue({ projectDirectory: worktree.worktreePath, recommendations: [], facts: [] } as never);
+    vi.spyOn(taskManagerApi, 'readApplicationPreviewFile').mockResolvedValue({} as never);
+    const send = vi.spyOn(taskManagerApi, 'sendPreviewAgentMessage').mockImplementation(async (input) => ({ ...message, id: input.id, text: input.text }));
+    const accept = vi.spyOn(taskManagerApi, 'acceptPreviewRecipeDraft').mockResolvedValue({ recipePath: 'preview.yaml' });
+    vi.spyOn(taskManagerApi, 'validatePreviewRecipeDraft').mockResolvedValue({ status: 'VALID' });
+    const start = vi.spyOn(taskManagerApi, 'startApplicationPreview');
+    const approve = vi.spyOn(taskManagerApi, 'approveApplicationPreview');
+
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 1_440, height: 900, top: 0, left: 0, right: 1_440, bottom: 900, toJSON: () => ({})
+    });
+    const view = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Designs' }));
+    const setup = await screen.findByRole('region', { name: 'Preview configuration' });
+    // The Design's own Preview conversation is shown beside its setup, apart from the Design chat.
+    fireEvent.click(await within(setup).findByRole('button', { name: 'Draft with Preview agent' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'design-1', settings: expect.objectContaining({ runtimeId: 'codex' }) })));
+    expect((await within(setup).findByRole('complementary', { name: 'Preview agent conversation' })).textContent).toContain('Which backend does this app need?');
+
+    // A proposal for this Design opens for review; saving writes it and never starts or approves the application.
+    act(() => update({
+      type: 'preview.recipe-generation.updated', scope: { kind: 'TASK' }, taskId: 'design-1', at,
+      payload: { taskId: 'design-1', status: 'READY', draft: {
+        id: 'draft-1', taskId: 'design-1', fileName: 'preview.yaml', replacesExistingFile: false,
+        yaml: 'name: storefront\ntype: static\ndirectory: .\n', generatedAt: at, validation: { status: 'VALID' },
+        report: { summary: 'Serve the storefront.', notes: [] }
+      } }
+    } as AppUpdateEvent));
+    expect(await within(setup).findByText('Proposal ready')).toBeTruthy();
+    const reads = getDesign.mock.calls.length;
+    fireEvent.click(within(setup).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(accept).toHaveBeenCalledWith({ taskId: 'design-1', draftId: 'draft-1', yaml: 'name: storefront\ntype: static\ndirectory: .\n' }));
+    await waitFor(() => expect(getDesign.mock.calls.length).toBeGreaterThan(reads));
+    expect(start).not.toHaveBeenCalled();
+    expect(approve).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('keeps Design history on its own title-aligned control', () => {
     const onHistoryCollapsedChange = vi.fn();
     const view = render(

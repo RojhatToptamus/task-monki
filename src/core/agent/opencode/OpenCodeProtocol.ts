@@ -17,8 +17,12 @@ export const OPENCODE_DESIGN_TOOL_NAME =
   `${DESIGN_CLIENT_TOOLS.openCodeServerName}_${INSPECT_DESIGN_TOOL_NAME}`;
 
 /** OpenCode names an MCP tool `<server>_<tool>`; Task Monki's servers define which names are its own. */
+export const OPENCODE_CLIENT_TOOL_NAMES: readonly string[] = CLIENT_TOOL_SETS.flatMap((set) =>
+  set.tools.map((name) => `${set.openCodeServerName}_${name}`)
+);
+
 export function isOpenCodeClientToolName(tool: string): boolean {
-  return CLIENT_TOOL_SETS.some((set) => set.tools.some((name) => tool === `${set.openCodeServerName}_${name}`));
+  return OPENCODE_CLIENT_TOOL_NAMES.includes(tool);
 }
 
 export interface OpenCodeHealth {

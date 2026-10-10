@@ -1,3 +1,4 @@
+import { PREVIEW_AGENT_EXTENSION } from '../../../shared/agentExecutionSupport';
 import type {
   AgentCapability,
   AgentDesignCapability,
@@ -518,7 +519,16 @@ export function acpCapabilities(
       'task-monki.design-skill-access': {
         maturity: 'unsupported',
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
-      }
+      },
+      // Read-only work in a separate process cannot carry the task session's Task Monki tools.
+      ...(configuredReadOnlyPolicy?.kind === 'DEDICATED_PROCESS'
+        ? {
+            [PREVIEW_AGENT_EXTENSION]: {
+              maturity: 'unsupported' as const,
+              detail: `${profile.descriptor.displayName} runs read-only work in a separate process that denies Task Monki tools, so it cannot hold the Preview conversation.`
+            }
+          }
+        : {})
     }
   };
 }

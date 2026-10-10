@@ -423,7 +423,8 @@ function RunLogs({
   }
   function navigateMatch(direction: number) {
     if (!matches.length) return;
-    const index = (matchIndex + direction + matches.length) % matches.length;
+    // Before any match is current, Next starts at the first and Previous at the last.
+    const index = matchIndex < 0 ? (direction > 0 ? 0 : matches.length - 1) : (matchIndex + direction + matches.length) % matches.length;
     setMatchIndex(index);
     follow(side ? matches[index]!.source : 'all', false);
   }

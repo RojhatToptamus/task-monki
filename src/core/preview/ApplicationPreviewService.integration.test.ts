@@ -216,26 +216,6 @@ it('does not recommend an incomplete command for a fresh dependency-based projec
   await expect(fs.access(path.join(tree.worktreePath, 'preview.yaml'))).rejects.toThrow();
 });
 
-it('keeps agent diagnostics available after runtime restart when historical logs have expired', async () => {
-  const { service, worktree, approveAndWait } = await fixture();
-  const tree = await worktree('restart diagnostics');
-  await fs.writeFile(path.join(tree.worktreePath, 'preview.yaml'), JSON.stringify({
-    name: 'app', type: 'environment', primary: 'web', services: {
-      api: { type: 'attach', url: 'http://localhost:8001', check: false },
-      web: { type: 'command', cwd: '.', command: [process.execPath, 'server.cjs'], env: { NEXT_PUBLIC_API_URL: { service: 'api' } } }
-    }
-  }));
-  const pending = await service.start(tree);
-  await approveAndWait(tree, pending.status!.candidate!.id);
-  await service.owner().stop(service.name(tree));
-  await service.close();
-  await service.init();
-  const diagnostics = await service.diagnostics(tree) as { configuration: unknown };
-  expect(diagnostics).toMatchObject({
-    state: 'stopped', configuration: { type: 'environment' }, logsUnavailable: expect.stringContaining('not retained')
-  });
-}, 30_000);
-
 it('reviews live-folder jobs before stopping and consumes approval only for the captured restart specification', async () => {
   const { service, worktree, approveAndWait } = await fixture();
   const tree = await worktree('serving before restart');

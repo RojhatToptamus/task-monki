@@ -5,7 +5,6 @@ export type FocusedPanel =
   | 'design-conversation'
   | 'discourse-history'
   | 'discourse-inspector'
-  | 'preview-logs' | 'preview-logs-secondary'
   | 'preview-agent';
 export type SavedDesignLayout = 'chat' | 'split' | 'canvas';
 
@@ -50,7 +49,7 @@ function readPreferences(storage: LayoutStorage | undefined): WorkspaceLayoutPre
       panelWidths: Object.fromEntries(
         Object.entries(parsed.panelWidths ?? {}).filter(
           (entry): entry is [FocusedPanel, number] =>
-            ['app-navigation', 'design-history', 'design-conversation', 'discourse-history', 'discourse-inspector', 'preview-logs', 'preview-logs-secondary', 'preview-agent']
+            ['app-navigation', 'design-history', 'design-conversation', 'discourse-history', 'discourse-inspector', 'preview-agent']
               .includes(entry[0]) &&
             typeof entry[1] === 'number' &&
             Number.isFinite(entry[1])
