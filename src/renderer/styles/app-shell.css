@@ -208,9 +208,10 @@ and a hair seam that keeps the corner legible
   color: var(--text-soft);
 }
 
+/* The current destination is a raised fill, clearly apart from a hover. */
 .tm-rail__item--active,
 .tm-rail__item--active:hover {
-  background: var(--sel);
+  background: var(--card);
   color: var(--text);
 }
 
@@ -226,7 +227,7 @@ and a hair seam that keeps the corner legible
 }
 
 .tm-rail__item--active .tm-rail__dot {
-  box-shadow: 0 0 0 2px var(--sel);
+  box-shadow: 0 0 0 2px var(--card);
 }
 
 .tm-rail__update[data-tone='failed'] {
@@ -251,7 +252,7 @@ and a hair seam that keeps the corner legible
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 20px 24px 12px 28px;
+  padding: 20px var(--tm-gutter) 12px;
   flex: 0 0 auto;
 }
 
@@ -288,7 +289,7 @@ then one control that
   align-items: center;
   flex: 0 0 auto;
   min-width: 0;
-  padding: 0 20px 0 28px;
+  padding: 0 var(--tm-gutter);
   border-bottom: 1px solid var(--hair);
 }
 
@@ -342,7 +343,7 @@ then one control that
   grid-template-columns: repeat(4, minmax(188px, 1fr));
   align-items: start;
   gap: 12px;
-  padding: 6px 24px 24px;
+  padding: 6px var(--tm-gutter) 24px;
   overflow-x: auto;
 }
 
@@ -415,7 +416,7 @@ at full width. */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 24px 24px;
+  padding: 6px var(--tm-gutter) 24px;
   scrollbar-gutter: stable;
 }
 
@@ -781,7 +782,7 @@ then
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 24px 28px 28px;
+  padding: 4px var(--tm-gutter) 28px;
 }
 
 .tm-inbox__inner {
@@ -1019,7 +1020,7 @@ its answer in place. */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 24px 32px 28px;
+  padding: 12px var(--tm-gutter) 32px;
 }
 
 /* The page's reading column, under its title like every other page. */
@@ -1265,7 +1266,8 @@ the section in an 880px reading column on the right. */
   flex: 0 0 212px;
   flex-direction: column;
   gap: 2px;
-  padding: 20px 12px;
+  /* Item text starts on the page gutter: the items carry 10px of their own. */
+  padding: 20px 12px 20px calc(var(--tm-gutter) - 10px);
   overflow-y: auto;
   box-shadow: inset -1px 0 0 var(--hair);
 }
@@ -1667,7 +1669,7 @@ so it
   justify-content: space-between;
   padding: 8px 8px 8px 10px;
   border-radius: var(--r-sm);
-  background: var(--field);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--placeholder);
   font-size: var(--t-meta);

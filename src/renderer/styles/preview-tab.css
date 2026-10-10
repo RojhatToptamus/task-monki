@@ -17,7 +17,7 @@ in the compact icon-button style of the rows they sit in. */
 
 /*
  * Preview is a workspace: one scroll owner (__main) whose sticky head holds the status row and the
- * sections, content full width on the task header's gutter. The Preview agent opens in the
+ * sections, content full width on the page gutter. The Preview agent opens in the
  * task page's side sheet (TaskDetail). __main is positioned so visually hidden labels inside it
  * scroll with it instead of extending the document (see .tm-app in app-shell.css).
  */
@@ -26,13 +26,13 @@ in the compact icon-button style of the rows they sit in. */
 .tm-application-preview__main { position: relative; container: application-preview / inline-size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 /* The top padding gives the status row's controls the same space above as below,
 before the sections. */
-.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) var(--tm-gutter, 24px) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) var(--tm-gutter) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-preview-statusrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: var(--preview-statusrow); min-width: 0; }
 .tm-preview-statusrow__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .tm-preview-statusrow__actions :is(.primary-button, .outline-button) { height: var(--h-toolbar); padding: 0 12px; }
 .tm-preview-statusrow__actions .tm-action-menu__trigger { width: var(--h-toolbar); }
 .tm-preview-sections { height: var(--preview-sections); }
-.tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px var(--tm-gutter, 24px) 32px; }
+.tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px var(--tm-gutter) 32px; }
 .tm-preview-attention { min-width: 0; border-radius: var(--r-md); outline: 0; }
 .app-shell[data-input-modality='keyboard'] .tm-preview-attention:focus { box-shadow: 0 0 0 3px var(--focus-ring); }
 .tm-application-preview [role='tabpanel']:not([hidden]) { display: grid; gap: 24px; min-width: 0; }

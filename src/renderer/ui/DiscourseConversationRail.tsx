@@ -56,14 +56,14 @@ export function DiscourseConversationRail({
         role={modalOpen ? 'dialog' : undefined}
         tabIndex={modalOpen ? -1 : undefined}
       >
-        <div className="tm-discourse-rail__head">
+        <div className="tm-listrail__head">
           <div>
             <h2 id="discourse-rail-title">Discourse</h2>
           </div>
-          <div className="tm-discourse-rail__head-actions">
+          <div className="tm-listrail__head-actions">
             <button
               type="button"
-              className="tm-discourse-new"
+              className="tm-listrail__new"
               disabled={sending}
               onClick={onNewConversation}
             >
@@ -83,7 +83,7 @@ export function DiscourseConversationRail({
             ) : null}
           </div>
         </div>
-        <label className="tm-discourse-search">
+        <label className="tm-listrail__search">
           <SearchIcon />
           <span className="tm-visually-hidden">Search conversation titles</span>
           <input
@@ -94,7 +94,7 @@ export function DiscourseConversationRail({
             onChange={(event) => onQueryChange(event.target.value)}
           />
         </label>
-        <div className="segmented segmented--fill tm-discourse-rail__filter" role="group" aria-label="Conversation status">
+        <div className="segmented segmented--fill tm-listrail__filter" role="group" aria-label="Conversation status">
           <button
             type="button"
             className="segmented__btn"
@@ -112,11 +112,11 @@ export function DiscourseConversationRail({
             Archive
           </button>
         </div>
-        <div className="tm-discourse-rail__list">
+        <div className="tm-listrail__list">
           {newConversation && !archived ? (
-            <div className="tm-discourse-thread tm-discourse-thread--active" aria-current="page">
-              <span className="tm-discourse-thread__title">New conversation</span>
-              <small>Draft</small>
+            <div className="tm-listrail__item tm-listrail__item--active" aria-current="page">
+              <span className="tm-listrail__item-title">New conversation</span>
+              <span className="tm-listrail__item-meta">Draft</span>
             </div>
           ) : null}
           {conversations.map((conversation) => (
@@ -124,21 +124,21 @@ export function DiscourseConversationRail({
               type="button"
               key={conversation.id}
               disabled={sending}
-              className={`tm-discourse-thread ${
-                conversation.id === selectedConversationId ? 'tm-discourse-thread--active' : ''
+              className={`tm-listrail__item ${
+                conversation.id === selectedConversationId ? 'tm-listrail__item--active' : ''
               }`}
               title={conversation.title}
               aria-current={conversation.id === selectedConversationId ? 'page' : undefined}
               onClick={() => onSelectConversation(conversation.id)}
             >
-              <span className="tm-discourse-thread__title">{conversation.title}</span>
-              <span className="tm-discourse-thread__meta">
+              <span className="tm-listrail__item-title">{conversation.title}</span>
+              <span className="tm-listrail__item-meta">
                 {conversation.needsAttention ? (
-                  <span className="tm-discourse-attention">Needs attention</span>
+                  <span data-tone="blocked">Needs attention</span>
                 ) : null}
                 {conversation.unreadCount > 0 ? (
                   <span
-                    className="tm-discourse-unread"
+                    className="tm-listrail__count"
                     aria-label={`${conversation.unreadCount} unread`}
                   >
                     {conversation.unreadCount}
@@ -151,22 +151,9 @@ export function DiscourseConversationRail({
             </button>
           ))}
           {conversations.length === 0 && !newConversation ? (
-            <div className="tm-discourse-rail__empty">
-              <strong>
-                {query
-                  ? 'No conversations match'
-                  : archived
-                    ? 'Archive is empty'
-                    : 'No conversations yet'}
-              </strong>
-              <span>
-                {query
-                  ? 'Try a different conversation title.'
-                  : archived
-                    ? 'Archived conversations will appear here.'
-                    : 'Start a conversation to keep technical decisions together.'}
-              </span>
-            </div>
+            <p className="tm-listrail__empty">
+              {query ? 'No conversations match' : archived ? 'Archive is empty' : 'No conversations yet'}
+            </p>
           ) : null}
         </div>
       </aside>

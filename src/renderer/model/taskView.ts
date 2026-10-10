@@ -329,7 +329,8 @@ function describeReviewGateStatus(
         ? { label: 'In review', tone: 'neutral' }
         : { label: 'Review passed', tone: 'success' };
     case 'NEEDS_CHANGES':
-      return { label: 'Needs changes', tone: 'error' };
+      // The user owes the next step, so it carries the waiting tone, not the failure one.
+      return { label: 'Needs changes', tone: 'action' };
     case 'INCONCLUSIVE':
       return { label: 'Inconclusive', tone: 'action' };
     case 'FAILED':

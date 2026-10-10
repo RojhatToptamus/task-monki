@@ -395,12 +395,12 @@ export function DesignsWorkspace({
         role={historyModalOpen ? 'dialog' : undefined}
         tabIndex={historyModalOpen ? -1 : undefined}
       >
-        <header className="tm-designs-rail__head">
+        <header className="tm-listrail__head">
           <h2>Designs</h2>
-          <div className="tm-designs-rail__head-actions">
+          <div className="tm-listrail__head-actions">
             <button
               type="button"
-              className="tm-designs-rail__new"
+              className="tm-listrail__new"
               onClick={() => {
                 setCreatingBlank(true);
                 if (historyModalOpen) onHistoryCollapsedChange?.(true);
@@ -423,7 +423,7 @@ export function DesignsWorkspace({
           </div>
         </header>
 
-        <label className="tm-designs-rail__search">
+        <label className="tm-listrail__search">
           <UiSearchIcon />
           <span className="tm-visually-hidden">Search Designs</span>
           <input
@@ -434,7 +434,7 @@ export function DesignsWorkspace({
             onChange={(event) => setHistoryQuery(event.target.value)}
           />
         </label>
-        <div className="segmented segmented--fill tm-designs-rail__filter" role="group" aria-label="Design status">
+        <div className="segmented segmented--fill tm-listrail__filter" role="group" aria-label="Design status">
           {(['active', 'all', 'archived'] as const).map((filter) => (
             <button
               type="button"
@@ -448,9 +448,9 @@ export function DesignsWorkspace({
           ))}
         </div>
 
-        <nav className="tm-designs-rail__list" aria-label="Recent Designs">
+        <nav className="tm-listrail__list" aria-label="Recent Designs">
           {visibleDesigns.length === 0 ? (
-            <p className="tm-designs-rail__empty">
+            <p className="tm-listrail__empty">
               {designs.length === 0 ? 'No Designs yet' : 'No Designs match this view'}
             </p>
           ) : (
@@ -462,7 +462,7 @@ export function DesignsWorkspace({
               return (
                 <button
                   type="button"
-                  className={`tm-designs-rail__item ${selected ? 'tm-designs-rail__item--active' : ''}`}
+                  className={`tm-listrail__item ${selected ? 'tm-listrail__item--active' : ''}`}
                   aria-current={selected ? 'page' : undefined}
                   key={design.id}
                   onClick={() => {
@@ -471,8 +471,8 @@ export function DesignsWorkspace({
                     if (historyModalOpen) onHistoryCollapsedChange?.(true);
                   }}
                 >
-                  <span className="tm-designs-rail__item-title">{design.title}</span>
-                  <span className="tm-designs-rail__item-meta">
+                  <span className="tm-listrail__item-title">{design.title}</span>
+                  <span className="tm-listrail__item-meta">
                     <span data-tone={status.tone}>{status.label}</span>
                     <time dateTime={design.updatedAt}>
                       {formatDesignUpdatedAt(design.updatedAt)}
@@ -669,6 +669,7 @@ export function DesignsWorkspace({
                         onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
                         onModalOpenChange={setPreviewSetupModalOpen} />
                     ) : undefined}
+                    conversationVisible={renderedLayout === 'split'}
                     setupRequired={Boolean(project.repositorySetup?.blocker) || (project.revisions.length === 0 && project.turns.some((turn) => !turn.runId && !turn.outcome))}
                     desktopAvailable={desktopCanvasAvailable}
                     occluded={projectMenuOpen || canvasOccluded || historyModalOpen || deleteOpen || renameOpen || previewSetupModalOpen || attachmentPreviewOpen}
@@ -785,6 +786,7 @@ function DesignHeader({
 }) {
   const status = designStatusView(designProjectStatus(project));
   const revision = project.revisions.at(-1)?.ordinal;
+  const activeReferenceCount = project.references.filter((reference) => reference.state === 'ACTIVE').length;
   return (
     <header className="tm-designs-header">
       <div className="tm-designs-header__leading">
@@ -826,7 +828,7 @@ function DesignHeader({
         >
           <UiFolderIcon />
           References
-          <span>{project.references.filter((reference) => reference.state === 'ACTIVE').length}</span>
+          {activeReferenceCount ? <span>{activeReferenceCount}</span> : null}
         </button>
         <DesignProjectMenu
           title={project.design.title}

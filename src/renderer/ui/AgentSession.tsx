@@ -17,7 +17,7 @@ import { InteractionPanel } from './InteractionPanel';
 import { MessageQueue } from './MessageQueue';
 import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
 import { StatusGlyph } from './StatusBadge';
-import { ArrowUp, ChevronDown, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
+import { ArrowUp, ChevronDown, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
 import { AgentMark } from './UiIcons';
 
 export interface AgentSessionProps {
@@ -295,7 +295,7 @@ export function AgentSession(props: AgentSessionProps) {
         </div>
       </div>
     </Conversation>
-    {run ? <div className="tm-agent-session__footer">
+    {run ? <div className="tm-agent-session__dock"><div className="tm-agent-session__footer">
       <form className="tm-agent-session__composer" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); if (editing) saveEdit(); else void submit(); }}>
         <AttachmentComposerShell compact={questionPending} attachments={composerFiles} attachmentLabel="Message attachments"
           hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
@@ -357,7 +357,7 @@ export function AgentSession(props: AgentSessionProps) {
         </AttachmentComposerShell>
       </form>
       {currentError || props.draftError || fileError ? <p className="tm-error" role="alert">{currentError ?? props.draftError ?? fileError}</p> : null}
-    </div> : null}
+    </div></div> : null}
   </section>;
 }
 
@@ -371,7 +371,7 @@ function ReviewTurn({ turn, review, onShowReview }: {
     <AgentMark size={13} />
     <span>Agent review</span>
     {outcome ? <span className="tm-turn__review-state">{outcome}</span> : null}
-    <button type="button" className="ghost-button" onClick={onShowReview}>View review</button>
+    <button type="button" className="ghost-button" onClick={onShowReview}>Open review</button>
   </div>;
 }
 
@@ -382,7 +382,7 @@ function sendUsesIcon(mode: SendMode, followUp: boolean): boolean {
 function sendControl(mode: SendMode, followUp: boolean) {
   if (mode === 'RETRY') return <><RotateCcw size={13} aria-hidden="true" />Retry</>;
   if (mode === 'CONTINUE' && !followUp) return <><Play size={13} aria-hidden="true" />Continue</>;
-  if (mode === 'QUEUE') return <CornerDownRight size={16} aria-hidden="true" />;
+  // Send, queue and steer are one arrow; the tooltip and the delivery menu say which.
   return <ArrowUp size={16} aria-hidden="true" />;
 }
 

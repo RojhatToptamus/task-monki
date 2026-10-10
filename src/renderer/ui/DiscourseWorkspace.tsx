@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react';
-import { ArrowUp, Check, Square, X } from 'lucide-react';
+import { ArrowUp, Square, X } from 'lucide-react';
 import type {
   ConversationContextReferenceSnapshot,
   DiscourseConversationAggregateRecord,
@@ -2157,14 +2157,14 @@ export function DiscourseWorkspace({
                 ) : null}
                 <button
                   type="button"
-                  className={`tm-discourse-send tm-composer-action ${activeWave ? 'tm-discourse-send--stop' : ''}`}
+                  className={`${activeWave ? 'outline-button' : 'primary-button'} tm-composer-action`}
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : files.busy || files.hasErrors || Boolean(files.modelError) || files.interactionBlocked || !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                  aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
-                  title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Save note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
+                  aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Post note' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
+                  title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
                   aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
-                  {activeWave ? <Square size={14} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
+                  {activeWave ? <Square size={14} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
                 </button>
               </div>
             )}
@@ -2186,7 +2186,7 @@ export function DiscourseWorkspace({
                   ? 'Resume or cancel the interrupted response first'
                 : aggregate?.conversation.status === 'ARCHIVED'
                   ? 'Restore this conversation to add a message'
-                  : 'Write a message… Type @ to add context or address an agent'}
+                  : 'Write a message, or type @ for context and agents'}
               onPaste={files.paste}
               onChange={updateComposer}
               onSubmit={(state) => { if (!activeWave) void send(state, files); }}
@@ -2251,7 +2251,7 @@ export function DiscourseWorkspace({
               />
             </InspectorSection>
           ) : null}
-          <InspectorSection title="Pinned context" count={pinned.length}>
+          <InspectorSection title="Pinned context" count={pinned.length || undefined}>
             {pinned.length === 0 ? (
               <p className="tm-discourse-inspector__empty">Nothing pinned.</p>
             ) : (

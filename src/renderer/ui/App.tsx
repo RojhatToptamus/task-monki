@@ -2695,7 +2695,7 @@ export function App() {
               <RailItem
                 label="Tasks"
                 icon={<BoardIcon />}
-                active={!showDetail && isTasksView(view)}
+                active={showDetail || isTasksView(view)}
                 onClick={showTasks}
               />
               <RailItem

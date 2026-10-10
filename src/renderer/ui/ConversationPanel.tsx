@@ -130,7 +130,8 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
         />
         <div className="tm-composer__toolbar">
           {tools ? <div className="tm-side-conversation__tools">{tools}</div> : null}
-          {error || composer.hint ? <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span> : null}
+          {/* Always rendered: it takes the free width, so the actions sit at the right. */}
+          <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span>
           {composer.secondary ? (
             <button type="button" className="outline-button tm-composer__secondary" disabled={composer.secondary.disabled || sending} title={composer.secondary.title}
               onClick={() => void composer.secondary!.onClick().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>

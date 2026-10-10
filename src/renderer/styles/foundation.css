@@ -13,6 +13,9 @@
   --w-title: 500;
   --w-medium: 500;
 
+  /* The page gutter: every page's title, tabs and content start here. */
+  --tm-gutter: 32px;
+
   /* Icons draw one line weight at every size (DESIGN.md 3.3). */
   --icon-stroke: 1.25px;
 
@@ -47,6 +50,12 @@
   color: var(--text);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+@media (max-width: 1279px) {
+  :root {
+    --tm-gutter: 24px;
+  }
 }
 
 :root[data-mode='light'] {
@@ -123,7 +132,8 @@ body {
   opacity: 0.4;
 }
 
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -196,6 +206,14 @@ button {
   color: var(--text-disabled);
 }
 
+/* A disabled primary keeps its place but not its fill (DESIGN.md A.4), so it
+   matches the disabled half of a split send control beside it. */
+.app-shell :where(.primary-button):disabled {
+  background: var(--primary-disabled);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--text-disabled);
+}
+
 /* The token overlay preserves each control family's rest fill and geometry.
    Ink-filled controls (the primary family) cannot take an ink overlay,
 so they
@@ -239,8 +257,7 @@ so they
    is the most reported dark-theme complaint in the product. */
 .app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea:not(.tm-composer textarea), select):focus,
 .app-shell :where(
-  .tm-composer:has(textarea:focus),
-  .tm-discourse-search,
+  .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
 ):focus-within,
@@ -263,8 +280,7 @@ so they
   .tm-repository-select__trigger
 ):focus,
 .app-shell[data-input-modality='keyboard'] :where(
-  .tm-composer:has(textarea:focus),
-  .tm-discourse-search,
+  .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
 ):focus-within {

@@ -92,6 +92,8 @@ export function PreRunSetup({
     if (action && !action.disabled) action.onClick();
   };
   const availableRuntimes = runtimes.filter((runtime) => runtime.preflight.runtime.id === runtimeId);
+  const readiness = availableRuntimes[0]?.preflight.readiness;
+  const runtimeReason = readiness && !readiness.canStart ? readiness.detail ?? readiness.summary : undefined;
   const presets = availableRuntimes[0]?.preflight.capabilities.executionPolicy.presets ?? [];
   const preset = matchingExecutionPolicyPreset(presets, settings);
   const fileError = files.draftError ?? files.modelError ?? files.overflowError;
@@ -104,7 +106,7 @@ export function PreRunSetup({
         className="tm-prerun__composer"
         attachments={files}
         attachmentLabel="Prompt attachments"
-        hint={saveError ?? fileError}
+        hint={saveError ?? fileError ?? runtimeReason}
         toolbarStart={<>
           <AgentModelSelector
             label="Model"
@@ -116,7 +118,6 @@ export function PreRunSetup({
             runtimes={availableRuntimes}
             disabled={disabled}
             fallbackSummary={settings.model}
-            runtimeUnavailableReason={(runtime) => runtime.preflight.readiness.canStart ? undefined : (runtime.preflight.readiness.detail ?? runtime.preflight.readiness.summary)}
             onDiscoverModels={onDiscoverModels}
             onSelectionChange={(nextRuntimeId, nextModelId) => {
               const model = selectModel(models, nextModelId, nextRuntimeId);

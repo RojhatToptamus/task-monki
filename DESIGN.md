@@ -111,9 +111,9 @@ announces itself with a border.
 | `--panel` | rail inside a sheet: the Review index, the Settings section list, folded code | |
 | `--surface` | the content sheet, side panels, modals | |
 | `--well` | code and read-only payload blocks | recessed from the sheet |
-| `--field` | inputs, composers, secondary buttons | control plane |
+| `--field` | inputs, secondary buttons, the user's messages | control plane |
 | `--sel` | selected row, active tab | |
-| `--card` | a raised unit on the sheet; menus and popovers | |
+| `--card` | a raised unit on the sheet; composers, menus and popovers | |
 | `--overlay` | tooltips and toasts only | top |
 
 **A floating layer is lifted by its edge and shadow, not by a brighter fill.**
@@ -129,7 +129,7 @@ nothing near black:
 - Adjacent planes are **1.5–3 L*** apart. Ground → overlay spans ~15 L* in dark
   and ~6 L* in light; the whole ladder is deliberately narrow.
 - **A control is never less than 2.5 L* from any plane it can sit on.** `--field`
-  is checked against both `--surface` and `--card`, because a composer appears on
+  is checked against both `--surface` and `--card`, because a field appears on
   each.
 - **Every state step is smaller than the smallest structural step.** If hovering a
   thing moves it further than the thing is separated from its background, the
@@ -607,11 +607,23 @@ mouse is the noisiest thing a quiet app can do.
 **Conversations.** Keep messages chronological and readable. Distinguish authors
 through consistent placement and treatment. Show identity labels when they resolve
 ambiguity. Keep tools, plans, and diagnostics subordinate to the exchange.
-Collapse verbose supporting detail, not entire messages.
+Collapse verbose supporting detail, not entire messages. A finished answer's
+footer is its time, and a duration when the work took one; never the word
+"Completed", and never "Failed" under a notice that already says the run failed.
+A tool step expands only to show something its row does not: a command it ran
+in place of the row's text, an error, output. The command, error and output are
+one `--well` block divided by hairlines.
+
+**Requests.** Every request card ends the same way: actions at the right,
+declining first and the primary action last, and cancelling the whole request
+apart at the left. A provider's own options are put in that order too. A
+multi-question request says how many are answered beside a disabled Submit.
 
 **Composers.** Present text, attachments, pending messages, and delivery controls
 as one interaction. Use the shared composer surface without another input-shaped
-container inside it. Separate mode selection from actions. Make delivery timing
+container inside it. The composer is raised on the card plane and the user's
+messages use the field fill, so the place to type never looks like something
+already sent. Separate mode selection from actions. Make delivery timing
 and held states clear where the user sends or edits a message. Preserve the draft
 and selected files through supported navigation, failure, and restart paths.
 
@@ -797,6 +809,16 @@ state, not a label). Labels don't change on hover.
 **Empty state.** One sentence naming what the surface is waiting for, plus the
 single action that resolves it. No illustration, no second button.
 
+**Links to another tab** ("Open conversation", "Open review", "View diff",
+"Full history") are `tm-osection__link`: accent ink, no fill, at the right of
+the header of the section they belong to.
+
+**List rails** (the Designs and Discourse history) share `.tm-listrail`: the
+heading centred on a 30px New, a 30px search field, the status filter, then
+50px rows that overhang the fields by 4px on each side. A row is the title and
+one meta line — a status word in its tone, a neutral unread count, the time at
+the right. An empty rail is one line.
+
 ### 5.1 Interaction behaviour
 
 - **Single click selects, Enter or double-click opens.** A click never mutates
@@ -873,7 +895,9 @@ single action that resolves it. No illustration, no second button.
   shown no longer matches the current diff, and here is the one action that
   refreshes it. A ribbon or a state word — never both.
 - Present each status or error once within the interaction. State what happened
-  and the available next action. Keep raw diagnostics available through secondary
+  and the available next action. A failed Design update is stated by its turn;
+  the canvas repeats the reason only while the conversation is hidden, and no
+  footer repeats the header's status. Keep raw diagnostics available through secondary
   details. Add explanatory copy only when it changes the user's decision or
   prevents a likely mistake.
 
@@ -1097,7 +1121,7 @@ correct answer far more often than a border is).
 | Review finding, earlier review | `--panel` | `--hair` | — |
 | User's line comment | `--field` | `--field-edge` | — |
 | Code / payload block | `--well` | — | — |
-| Composer surface | `--field` | — | — |
+| Composer surface | `--card` | `--field-edge`; focused: `--field-edge-focus` | — |
 | Empty state container | — | — | — |
 
 ### A.4 Controls
@@ -1125,7 +1149,7 @@ correct answer far more often than a border is).
 | Input, error | `--field` | `--text` | `--blocked` inset 1px |
 | Input, disabled | `--field-disabled` | `--text-disabled` | — |
 | Placeholder | — | `--placeholder` | — |
-| Composer surface | `--field` | `--text` | as input, no hover |
+| Composer surface | `--card` | `--text` | edge as input, no hover |
 | Composer hint / affordance row | — | `--muted` | — |
 | Segmented track | `--field` | — | — |
 | Segmented item, inactive | — | `--muted` | — |

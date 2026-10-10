@@ -93,7 +93,7 @@ describe('CompletedChangeSummaryCard', () => {
 
     expect(html).toContain('Incomplete captured diff · 4 observed files');
     expect(html).toContain('Other files or changes may be missing.');
-    expect(html).toContain('Historical capture — the worktree changed later.');
+    expect(html).toContain('Earlier snapshot. The worktree has changed since.');
     expect(html).not.toMatch(/out of scope|violation|owned by/i);
   });
 });

@@ -140,7 +140,7 @@ function describeDeliveryAttention(
     projection.merge === 'MERGED' &&
     task.workflowPhase !== 'DONE'
   ) {
-    return { label: 'Waiting for Mark done', kind: 'finish', tone: 'info' };
+    return { label: 'Ready to mark done', kind: 'finish', tone: 'info' };
   }
   if (
     projection.githubPullRequest === 'CLOSED_UNMERGED' ||

@@ -120,7 +120,7 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
         </figure> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}
-    {live ? null : <TurnFooter turn={turn} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
+    {live ? null : <TurnFooter turn={turn} noticeShown={Boolean(failure)} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
   </div>;
 }
 
@@ -138,11 +138,16 @@ export function UserMessage({ text, time, status, attachments, onReadAttachment 
   </Message>;
 }
 
-function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
-  turn: SessionTurn; onReadArtifact?: (id: string) => Promise<string>; onShowDebug?(): void;
+function TurnFooter({ turn, noticeShown, onReadArtifact, onShowDebug }: {
+  turn: SessionTurn;
+  /** The notice above already names how the run ended; only a duration adds to it. */
+  noticeShown: boolean;
+  onReadArtifact?: (id: string) => Promise<string>;
+  onShowDebug?(): void;
 }) {
   const [prompt, setPrompt] = useState<{ open: boolean; text?: string; error?: string }>({ open: false });
   const end = turn.run.endedAt ?? turn.run.lastEventAt;
+  const outcome = noticeShown && (turn.durationMs ?? 0) < 1000 ? undefined : turnOutcomeLabel(turn);
   const promptArtifactId = turn.run.promptArtifactId;
   const showPrompt = () => {
     if (prompt.open) { setPrompt((current) => ({ ...current, open: false })); return; }
@@ -158,7 +163,7 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
   ];
   return <>
     <div className="tm-turn__footer">
-      <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
+      {outcome ? <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{outcome}</span> : null}
       {end ? <MessageTime value={end} /> : null}
       {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
       {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={details} /> : null}

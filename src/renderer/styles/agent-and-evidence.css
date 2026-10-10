@@ -61,6 +61,8 @@ shared by the conversation and Overview. */
 /* Composer — the queue,
 the draft and the delivery controls are one field. */
 /* A grid track of minmax(0, 1fr): a long hint in the composer never widens it past the conversation. */
+/* The footer reserves the same right-hand gutter as the log above it, so the composer centres on the conversation's axis. */
+.tm-agent-session__dock { flex: 0 0 auto; overflow: hidden; scrollbar-gutter: stable; }
 .tm-agent-session__footer { flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; max-width: 760px; margin: 0 auto; padding: 0 24px 16px; }
 .tm-agent-session__editing { display: flex; align-items: center; gap: 8px; padding: 6px 8px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-agent-session__editing > button { margin-left: auto; }

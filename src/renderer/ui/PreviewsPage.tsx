@@ -120,7 +120,7 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
         </div>
         <label className="field field--search">
           <Search size={16} aria-hidden="true" />
-          <input ref={search} type="search" aria-label="Search previews" placeholder="Search previews…"
+          <input ref={search} type="search" aria-label="Search previews" placeholder="Search previews"
             value={state.query} onChange={(event) => onStateChange({ ...state, query: event.target.value })} />
         </label>
       </div>

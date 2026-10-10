@@ -43,15 +43,6 @@
   box-shadow: inset 0 -1px 0 var(--hair);
 }
 
-.tm-detail {
-  --tm-gutter: 32px;
-}
-
-@media (max-width: 1279px) {
-  .tm-detail {
-    --tm-gutter: 24px;
-  }
-}
 
 .tm-detail--agent,
 .tm-detail--review { overflow: hidden; }
@@ -277,7 +268,6 @@ in ink rather than accent. */
   grid-template-columns: minmax(0, 1fr) 300px;
   gap: 48px;
   align-items: start;
-  max-width: 1180px;
 }
 
 @media (max-width: 1279px) {
@@ -960,7 +950,8 @@ beside the control that observes it again. */
 
 .tm-prchecks__head span:last-child {
   color: var(--muted);
-  font: 500 var(--t-meta)/1 var(--font-mono);
+  font-size: var(--t-meta);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-prchecks__rows {

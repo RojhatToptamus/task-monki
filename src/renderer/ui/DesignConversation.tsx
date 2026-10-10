@@ -31,7 +31,7 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
-import { ArrowUp, CornerDownRight, RotateCcw, Square } from 'lucide-react';
+import { ArrowUp, RotateCcw, Square } from 'lucide-react';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -447,7 +447,7 @@ export function DesignConversation({
               {project.actions.canStop && project.actions.stopTurnId ? (
                 <button
                   type="button"
-                  className="ghost-button tm-composer-action"
+                  className="outline-button tm-composer-action"
                   aria-label={stopping ? 'Stopping' : 'Stop'} title="Stop response"
                   disabled={stopping}
                   onClick={() => {
@@ -467,7 +467,7 @@ export function DesignConversation({
                 aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
                 title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
                 {submissionOutcomeUnknown ? <RotateCcw size={16} aria-hidden="true" />
-                  : activeWork ? <CornerDownRight size={16} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
+                  : <ArrowUp size={16} aria-hidden="true" />}
               </button> : null}
             </>
           }
@@ -503,7 +503,7 @@ export function DesignConversation({
             rows={3}
             readOnly={questionPending}
             aria-disabled={questionPending || undefined}
-            placeholder={questionPending ? questionPrompt : activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
+            placeholder={questionPending ? questionPrompt : activeWork ? 'Queue a message for after this response' : 'Describe the next change'}
             disabled={
               !canRefine ||
               submitting ||
@@ -595,9 +595,6 @@ function DesignTurnMessages({
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
         ) : null}
-        {view.detail ? (
-          <p className="tm-design-message__detail">{view.detail}</p>
-        ) : null}
         <MessageMeta className="tm-design-message__ready-actions">
           <span className="tm-design-message__turn-status" data-tone={view.tone}>
             {entry.readyRevision ? `Ready state ${entry.readyRevision.ordinal}` : view.statusLabel}
@@ -613,6 +610,9 @@ function DesignTurnMessages({
             />
           ) : null}
         </MessageMeta>
+        {view.detail ? (
+          <p className="tm-design-message__detail">{view.detail}</p>
+        ) : null}
       </Message>
     </article>
   );

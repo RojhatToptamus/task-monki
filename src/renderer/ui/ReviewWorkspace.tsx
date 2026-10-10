@@ -76,7 +76,7 @@ function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: nu
     // A run after the review makes it out of date, whether or not files changed.
     case 'STALE': return 'Review out of date';
     case 'PASSED': return 'Review passed';
-    case 'NEEDS_CHANGES': return openCount > 0 ? 'Changes requested' : 'No open findings';
+    case 'NEEDS_CHANGES': return openCount > 0 ? 'Needs changes' : 'No open findings';
     case 'INCONCLUSIVE': return 'Review inconclusive';
     case 'FAILED': return 'Review failed';
     case 'CANCELED': return 'Review stopped';

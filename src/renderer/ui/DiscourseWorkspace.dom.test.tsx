@@ -95,7 +95,7 @@ describe('Discourse conversation loading', () => {
     vi.mocked(taskManagerApi.saveDiscourseDraft).mockResolvedValue(draft);
     render(<DiscourseWorkspace onNotify={vi.fn()} onError={vi.fn()} />);
     await screen.findByRole('button', { name: 'reference.png' });
-    const send = screen.getByRole('button', { name: policy === 'NONE' ? 'Save' : 'Send' }) as HTMLButtonElement;
+    const send = screen.getByRole('button', { name: policy === 'NONE' ? 'Post note' : 'Send' }) as HTMLButtonElement;
     await waitFor(() => expect(send.disabled).toBe(!enabled));
     if (enabled) expect(screen.queryByText(/image-capable|does not support image/)).toBeNull();
     else expect(screen.getByRole('alert').textContent).toMatch(/does not support image/);
@@ -144,13 +144,13 @@ describe('Discourse conversation loading', () => {
     Object.defineProperty(file, 'arrayBuffer', { value: async () => new TextEncoder().encode('notes').buffer });
     fireEvent.paste(input, { clipboardData: { getData: () => '', items: [{ kind: 'file', getAsFile: () => file }] } });
     await screen.findByRole('button', { name: 'Remove notes.txt' });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Post note' })).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getByRole('button', { name: 'Post note' }));
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toHaveProperty('value', ''));
     expect(screen.queryByRole('button', { name: 'Remove notes.txt' })).toBeNull();
     expect(messages).toHaveLength(1);
     fireEvent.change(screen.getByRole('combobox', { name: 'Message' }), { target: { value: 'A separate note.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Post note' }));
     await waitFor(() => expect(messages).toHaveLength(2));
     expect(taskManagerApi.sendDiscourseMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       body: 'A separate note.', attachmentDraftId: undefined

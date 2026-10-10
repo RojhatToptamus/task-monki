@@ -164,18 +164,19 @@ export function CompletedChangeSummaryCard({
     if (captureStatus === 'NO_CHANGES') return <p className="tm-changes__none">No file changes</p>;
     if (!summary) return <CaptureStatusMessage status={captureStatus} incomplete={incomplete} />;
     const note = [
-      historical ? 'Historical capture' : undefined,
+      historical ? 'Earlier snapshot' : undefined,
       incomplete ? 'Incomplete' : undefined
     ].filter(Boolean).join(', ');
     return <section className="tm-changes" aria-label="Changed files">
       <header className="tm-changes__head">
         <FilePlus2 size={13} aria-hidden="true" />
         <span className="tm-changes__title">{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
-        <DiffStat additions={summary.additions} deletions={summary.deletions} />
+        {/* One file's row already carries its counts. */}
+        {summary.fileCount > 1 ? <DiffStat additions={summary.additions} deletions={summary.deletions} /> : null}
         {note ? <span className="tm-changes__note" title={historical
           ? `Captured ${snapshot ? formatCaptureTime(snapshot.capturedAt) : ''}; the worktree changed later.`.replace(' ;', ';')
           : undefined}>{note}</span> : null}
-        {onViewDiff ? <button type="button" className="ghost-button tm-changes__action" onClick={onViewDiff}>View diff</button> : null}
+        {onViewDiff ? <button type="button" className="tm-osection__link tm-changes__action" onClick={onViewDiff}>View diff</button> : null}
       </header>
       <div className="tm-changes__files">
         {summary.previewFiles.map((file) => <ChangeFileRow key={file.path} file={file} />)}
@@ -219,7 +220,7 @@ export function CompletedChangeSummaryCard({
       ) : null}
       {historical ? (
         <p className="tm-change-summary__notice">
-          Historical capture — the worktree changed later.
+          Earlier snapshot. The worktree has changed since.
         </p>
       ) : null}
       {incomplete ? (

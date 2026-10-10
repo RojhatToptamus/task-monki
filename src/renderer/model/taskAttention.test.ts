@@ -69,7 +69,7 @@ describe('describeTaskAttention', () => {
         workflowPhase: 'IN_REVIEW',
         projection: { githubPullRequest: 'MERGED', merge: 'MERGED' }
       }),
-      expected: { label: 'Waiting for Mark done', tone: 'info' }
+      expected: { label: 'Ready to mark done', tone: 'info' }
     },
     {
       name: 'generic delivery error',

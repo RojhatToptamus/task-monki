@@ -10,7 +10,8 @@
 /* One line of state,
 the scope menu,
 and the review action. */
-.tm-review__bar { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; min-height: 44px; padding: 0 12px 0 var(--tm-gutter); border-bottom: 1px solid var(--hair); }
+/* The bar spans the page gutter on both sides and reserves the header's scrollbar gutter, so its ends line up with the tab bar's. */
+.tm-review__bar { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; min-height: 44px; padding: 0 var(--tm-gutter); overflow: hidden; scrollbar-gutter: stable; border-bottom: 1px solid var(--hair); }
 .tm-review__headline { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--t-body); font-weight: 500; }
 .tm-review__meta { display: inline-flex; align-items: center; gap: 8px; color: var(--faint); font-size: var(--t-help); }
 .tm-review__meta code { font-family: var(--font-mono); }

@@ -144,9 +144,8 @@ quieter than prose. */
 .tm-step__copy { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
 .tm-step__label { flex: 0 0 auto; color: var(--text-soft); white-space: nowrap; }
 .tm-step__detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-step__detail--mono,
-.tm-step__metric { font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
-.tm-step__metric { flex: 0 0 auto; color: var(--faint); }
+.tm-step__detail--mono { font: var(--t-meta) var(--font-mono); }
+.tm-step__metric { flex: 0 0 auto; color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-step--failed .tm-step__label,
 .tm-step__failed { color: var(--blocked-ink); }
 .tm-step__failed { font-size: var(--t-meta); }
@@ -155,13 +154,15 @@ quieter than prose. */
 .tm-step__body { display: grid; gap: 6px; min-width: 0; padding: 2px 0 8px 22px; }
 .tm-steps__list .tm-step__body { padding-left: 22px; }
 .tm-step__reasoning .tm-message-markdown { color: var(--muted); font-size: var(--t-help); line-height: 1.55; }
-.tm-step__execution { display: grid; gap: 6px; min-width: 0; }
+/* The command, any error and the output are one block, divided by hairlines. */
+.tm-step__execution { display: grid; min-width: 0; overflow: hidden; border-radius: var(--r-sm); background: var(--well); }
+.tm-step__execution > * + * { border-top: 1px solid var(--hair); }
 .tm-step__execution pre {
-  max-height: 240px; margin: 0; padding: 8px 10px; overflow: auto; border-radius: var(--r-sm); background: var(--well);
+  max-height: 240px; margin: 0; padding: 8px 10px; overflow: auto;
   color: var(--text-soft); font: var(--t-meta)/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .tm-step__execution .tm-step__command { color: var(--text); }
-.tm-step__error { margin: 0; color: var(--blocked-ink); font-size: var(--t-help); line-height: 1.45; }
+.tm-step__error { margin: 0; padding: 8px 10px; color: var(--blocked-ink); font-size: var(--t-help); line-height: 1.45; }
 .tm-step__children { display: grid; }
 .tm-step__child { display: flex; align-items: center; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }
 
@@ -183,7 +184,7 @@ quieter than prose. */
 .tm-queue ol { max-height: min(152px, 20vh); margin: 0; padding: 0; overflow: auto; list-style: none; }
 .tm-queue__item { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--h-icon); border-radius: var(--r-xs); font-size: var(--t-help); }
 .tm-queue__item[aria-current] { background: var(--sel); }
-.tm-queue__order { flex: 0 0 16px; color: var(--faint); font: var(--t-meta)/1.5 var(--font-mono); text-align: center; }
+.tm-queue__order { flex: 0 0 16px; color: var(--faint); font: var(--t-meta)/1.5 var(--font-ui); font-variant-numeric: tabular-nums; text-align: center; }
 .tm-queue__message { flex: 1; min-width: 0; display: grid; color: var(--text-soft); }
 .tm-queue__text { min-width: 0; overflow: hidden; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .tm-queue__item .tm-iconbtn { flex: 0 0 auto; width: var(--h-icon); height: var(--h-icon); color: var(--muted); }

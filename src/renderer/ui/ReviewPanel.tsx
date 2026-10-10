@@ -113,6 +113,9 @@ export function ReviewPanel({
           {showVerdict ? (
             <span className={`tm-reviewcard__status tm-reviewcard__status--${ui.tone}`}>{ui.label}</span>
           ) : null}
+          {onOpenReview && findings.length > 0 ? (
+            <button type="button" className="tm-osection__link" onClick={onOpenReview}>Open review</button>
+          ) : null}
         </div>
       )}
 
@@ -149,9 +152,6 @@ export function ReviewPanel({
             {findings.length > 0 ? (
               <p className="tm-reviewcard__findings">
                 <SeverityDistribution findings={findings} earlier={effectiveStatus === 'STALE'} />
-                {onOpenReview ? (
-                  <button type="button" className="tm-osection__link" onClick={onOpenReview}>Open review</button>
-                ) : null}
               </p>
             ) : hasRawReviewOutput ? (
                 <RawReviewOutput

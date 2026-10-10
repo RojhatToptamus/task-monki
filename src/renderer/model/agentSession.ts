@@ -233,11 +233,12 @@ function plainProse(text: string): string {
     .join('\n');
 }
 
-export function turnOutcomeLabel(turn: Pick<SessionTurn, 'state' | 'durationMs'>): string {
-  // Under a second says nothing about the work; the outcome alone does.
+export function turnOutcomeLabel(turn: Pick<SessionTurn, 'state' | 'durationMs'>): string | undefined {
+  // Under a second says nothing about the work; the outcome alone does, and a
+  // finished answer needs no word at all.
   const elapsed = turn.durationMs === undefined || turn.durationMs < 1000 ? undefined : formatElapsed(turn.durationMs);
   switch (turn.state) {
-    case 'completed': return elapsed ? `Worked for ${elapsed}` : 'Completed';
+    case 'completed': return elapsed ? `Worked for ${elapsed}` : undefined;
     case 'stopped': return elapsed ? `Stopped after ${elapsed}` : 'Stopped';
     case 'failed': return elapsed ? `Failed after ${elapsed}` : 'Failed';
     case 'interrupted': return elapsed ? `Interrupted after ${elapsed}` : 'Interrupted';
@@ -259,7 +260,7 @@ export function reviewTurnOutcome(
   if (review?.runId === turn.run.id) {
     switch (review.result?.verdict) {
       case 'PASSED': return 'Passed';
-      case 'NEEDS_CHANGES': return 'Requested changes';
+      case 'NEEDS_CHANGES': return 'Needs changes';
       case 'INCONCLUSIVE': return 'Inconclusive';
     }
   }

@@ -44,6 +44,8 @@ export interface DesignCanvasProps {
   occluded?: boolean;
   setup?: ReactNode;
   setupRequired?: boolean;
+  /** The conversation beside the canvas already states why an update failed. */
+  conversationVisible?: boolean;
   onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRefresh(request: DesignCanvasRefreshRequest): Promise<void>;
@@ -67,6 +69,7 @@ export function DesignCanvas({
   occluded = false,
   setup,
   setupRequired = false,
+  conversationVisible = false,
   onShowCanvas,
   onHideCanvas,
   onRefresh,
@@ -241,7 +244,7 @@ export function DesignCanvas({
   ) : (
     <div className="tm-design-canvas__placeholder" aria-live="polite">
       <strong>{presentation.title}</strong>
-      <span>{presentation.detail}</span>
+      {presentation.kind === 'PLACEHOLDER' && presentation.failed && conversationVisible ? null : <span>{presentation.detail}</span>}
       {presentation.kind === 'PLACEHOLDER' && presentation.restart ? (
         <button
           type="button"
@@ -415,10 +418,10 @@ export function DesignCanvas({
       </div>}
 
       <footer className="tm-design-canvas__footer">
-        <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
+        {canvasStatus ? <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
           <StatusGlyph kind={canvasStatus.tone} />
           {canvasStatus.label}
-        </span>
+        </span> : null}
         {displayedTarget ? <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
           {displayedTarget.routeId}{displayedTarget.entryPath}
         </span> : sourceFile && !viewingEarlierRevision ? (
@@ -440,7 +443,7 @@ function canvasStatusView(
   project: DesignProjectDetail,
   ordinal: number,
   viewedOrdinal?: number
-): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' | 'blocked' } {
+): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' } | undefined {
   if (viewedOrdinal !== undefined) {
     return { label: `v${viewedOrdinal} preview`, tone: 'idle' };
   }
@@ -461,8 +464,7 @@ function canvasStatusView(
   if (status === 'NEEDS_INPUT') {
     return { label: 'Waiting for input', tone: 'waiting' };
   }
-  if (status === 'NEEDS_ATTENTION') {
-    return { label: 'Preview needs attention', tone: 'blocked' };
-  }
+  // The Design's own status already says it needs attention.
+  if (status === 'NEEDS_ATTENTION') return undefined;
   return { label: `v${ordinal} archived`, tone: 'idle' };
 }

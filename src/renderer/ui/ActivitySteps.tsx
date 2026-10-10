@@ -62,7 +62,10 @@ function ReasoningStep({ text, label, active, live }: { text: string; label: str
 
 function ToolStep({ row, live = false }: { row: OverviewActivityRow; live?: boolean }) {
   const execution = row.execution;
-  const hasExecution = Boolean(execution?.command || execution?.output || execution?.error);
+  // A short command the row already shows in full adds nothing when expanded.
+  const command = execution?.command && (execution.command !== row.detail || execution.command.length > 80 || execution.command.includes('\n'))
+    ? execution.command : undefined;
+  const hasExecution = Boolean(command || execution?.output || execution?.error);
   const children = row.children?.length ? row.children : undefined;
   const icon = <StepIcon icon={row.icon} />;
   const copy = <StepCopy row={row} live={live && row.status === 'active'} />;
@@ -75,7 +78,7 @@ function ToolStep({ row, live = false }: { row: OverviewActivityRow; live?: bool
       {children.map((child) => <div key={child.key} className="tm-step__child"><StepCopy row={child} /></div>)}
     </div> : null}
     {hasExecution ? <div className="tm-step__execution">
-      {execution?.command ? <pre className="tm-step__command">{execution.command}</pre> : null}
+      {command ? <pre className="tm-step__command">{command}</pre> : null}
       {execution?.error ? <p className="tm-step__error">{execution.error}</p> : null}
       {execution?.output ? <pre>{execution.output}</pre> : null}
     </div> : null}

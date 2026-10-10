@@ -299,19 +299,6 @@ function CommandRequest({
         <div className="interaction-actions interaction-actions--command">
           {providerNativeRequest ? (
             <>
-              {providerOptions.map((option) => (
-                <ActionButton
-                  key={option.id}
-                  label={option.label}
-                  variant={
-                    option.action === 'ACCEPT' && !option.providerRemembersChoice
-                      ? 'primary'
-                      : 'secondary'
-                  }
-                  disabled={disabled}
-                  onClick={() => onRespond(option.decision)}
-                />
-              ))}
               {hasAction(interaction, 'CANCEL') ? (
                 <ActionButton
                   label="Cancel request"
@@ -325,6 +312,19 @@ function CommandRequest({
                   }
                 />
               ) : null}
+              {providerOptionsInOrder(providerOptions).map((option) => (
+                <ActionButton
+                  key={option.id}
+                  label={option.label}
+                  variant={
+                    option.action === 'ACCEPT' && !option.providerRemembersChoice
+                      ? 'primary'
+                      : 'secondary'
+                  }
+                  disabled={disabled}
+                  onClick={() => onRespond(option.decision)}
+                />
+              ))}
             </>
           ) : (
             <>
@@ -336,18 +336,6 @@ function CommandRequest({
                 showCancel={false}
                 onRespond={onRespond}
               />
-              {hasAction(interaction, 'ACCEPT') ? (
-                <ActionButton
-                  label="Allow once"
-                  disabled={disabled}
-                  onClick={() =>
-                    onRespond({
-                      interactionType: 'COMMAND_APPROVAL',
-                      action: 'ACCEPT'
-                    })
-                  }
-                />
-              ) : null}
               {canAllowForSession || canRememberCommand ? (
                 <ActionButton
                   label={
@@ -358,6 +346,18 @@ function CommandRequest({
                   variant="secondary"
                   disabled={disabled}
                   onClick={submitPersistentChoice}
+                />
+              ) : null}
+              {hasAction(interaction, 'ACCEPT') ? (
+                <ActionButton
+                  label="Allow once"
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'ACCEPT'
+                    })
+                  }
                 />
               ) : null}
             </>
@@ -477,18 +477,12 @@ function FileChangeRequest({
         ) : null}
       </dl>
       <div className="interaction-actions">
-        {hasAction(interaction, 'ACCEPT') ? (
-          <ActionButton
-            label="Apply once"
-            disabled={disabled}
-            onClick={() =>
-              onRespond({
-                interactionType: 'FILE_CHANGE_APPROVAL',
-                action: 'ACCEPT'
-              })
-            }
-          />
-        ) : null}
+        <RejectButtons
+          interaction={interaction}
+          interactionType="FILE_CHANGE_APPROVAL"
+          disabled={disabled}
+          onRespond={onRespond}
+        />
         {hasAction(interaction, 'ACCEPT_FOR_SESSION') ? (
           <ActionButton
             label="Allow root for session"
@@ -502,12 +496,18 @@ function FileChangeRequest({
             }
           />
         ) : null}
-        <RejectButtons
-          interaction={interaction}
-          interactionType="FILE_CHANGE_APPROVAL"
-          disabled={disabled}
-          onRespond={onRespond}
-        />
+        {hasAction(interaction, 'ACCEPT') ? (
+          <ActionButton
+            label="Apply once"
+            disabled={disabled}
+            onClick={() =>
+              onRespond({
+                interactionType: 'FILE_CHANGE_APPROVAL',
+                action: 'ACCEPT'
+              })
+            }
+          />
+        ) : null}
       </div>
     </>
   );
@@ -555,18 +555,20 @@ function PermissionRequest({
         ) : null}
       </dl>
       <div className="interaction-actions">
-        {hasAction(interaction, 'GRANT_TURN') ? (
-          <ActionButton
-            label="Grant for turn"
+        {hasAction(interaction, 'DECLINE') ? (
+          <button
+            type="button"
+            className="outline-button"
             disabled={disabled}
             onClick={() =>
-              onRespond({
+              void onRespond({
                 interactionType: 'PERMISSION_APPROVAL',
-                action: 'GRANT_TURN',
-                permissions: request.permissions
+                action: 'DECLINE'
               })
             }
-          />
+          >
+            Decline
+          </button>
         ) : null}
         {hasAction(interaction, 'GRANT_SESSION') ? (
           <ActionButton
@@ -582,20 +584,18 @@ function PermissionRequest({
             }
           />
         ) : null}
-        {hasAction(interaction, 'DECLINE') ? (
-          <button
-            type="button"
-            className="outline-button"
+        {hasAction(interaction, 'GRANT_TURN') ? (
+          <ActionButton
+            label="Grant for turn"
             disabled={disabled}
             onClick={() =>
-              void onRespond({
+              onRespond({
                 interactionType: 'PERMISSION_APPROVAL',
-                action: 'DECLINE'
+                action: 'GRANT_TURN',
+                permissions: request.permissions
               })
             }
-          >
-            Decline
-          </button>
+          />
         ) : null}
       </div>
     </>
@@ -647,6 +647,12 @@ function McpRequest({
         />
       ) : null}
       <div className="interaction-actions">
+        <RejectButtons
+          interaction={interaction}
+          interactionType="MCP_ELICITATION"
+          disabled={disabled}
+          onRespond={onRespond}
+        />
         {hasAction(interaction, 'ACCEPT') ? (
           <ActionButton
             label="Accept"
@@ -660,12 +666,6 @@ function McpRequest({
             }
           />
         ) : null}
-        <RejectButtons
-          interaction={interaction}
-          interactionType="MCP_ELICITATION"
-          disabled={disabled}
-          onRespond={onRespond}
-        />
       </div>
     </>
   );
@@ -714,6 +714,11 @@ function UserInputRequest({
       </div>
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
+          {request.questions.length > 1 && !canSubmit ? (
+            <span className="interaction-actions__hint">
+              {request.questions.length - unanswered.length} of {request.questions.length} answered
+            </span>
+          ) : null}
           {canDelegate ? (
             <ActionButton
               label={unanswered.length < request.questions.length ? 'Decide the rest' : 'Decide for me'}
@@ -836,7 +841,7 @@ function UserInputQuestion({
                 onChange={(event) => chooseCustom(event.target.checked)}
               />
               <ChoiceMark kind={inputType} />
-              <span className="interaction-choice__text"><strong>Other…</strong></span>
+              <span className="interaction-choice__text"><strong>Other</strong></span>
             </label>
             {choice.customSelected ? <textarea
               className="interaction-question__input"
@@ -1000,6 +1005,12 @@ interface UserInputChoiceValue {
   selected: string[];
   customSelected: boolean;
   custom: string;
+}
+
+/** Declining first and the one-time accept, the primary action, last. */
+function providerOptionsInOrder<T extends { action: string; providerRemembersChoice: boolean }>(options: readonly T[]): T[] {
+  const rank = (option: T) => option.action !== 'ACCEPT' ? 0 : option.providerRemembersChoice ? 1 : 2;
+  return [...options].sort((left, right) => rank(left) - rank(right));
 }
 
 function RejectButtons({
