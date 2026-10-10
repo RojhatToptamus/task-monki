@@ -6,6 +6,7 @@ interface DesignMenuItem {
   disabled?: boolean;
   disabledReason?: string;
   danger?: boolean;
+  separated?: boolean;
   action(): void;
 }
 
@@ -43,7 +44,7 @@ export function DesignProjectMenu({
         { label: 'Duplicate current', disabled: !canDuplicate, action: onDuplicate },
         { label: 'Rename…', action: onRename },
         { label: 'Archive', disabled: !canArchive, action: onArchive },
-        { label: 'Delete…', disabled: !canDelete, danger: true, action: onDelete }
+        { label: 'Delete…', disabled: !canDelete, danger: true, separated: true, action: onDelete }
       ]}
     />
   );

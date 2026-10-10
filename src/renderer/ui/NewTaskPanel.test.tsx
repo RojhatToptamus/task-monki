@@ -347,7 +347,7 @@ describe('NewTaskPanel', () => {
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
-    expect(html).toContain('aria-label="Access: Restricted"');
+    expect(html).toContain('aria-label="Access: Auto review"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');

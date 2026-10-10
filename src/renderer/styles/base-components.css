@@ -208,12 +208,17 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   outline: 0;
 }
 
+/* The boundary's own hairline is the handle; hover and focus brighten that
+   line rather than painting a band over the panels. */
 .tm-panel-resize::before {
   content: '';
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
   background: transparent;
-  transition: background var(--motion-fast) ease;
+  transition: background var(--motion-fast) var(--ease-out);
 }
 
 .tm-panel-resize span {
@@ -242,8 +247,10 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   cursor: row-resize;
 }
 
-.tm-panel-resize--horizontal span {
+.tm-panel-resize--horizontal span,
+.tm-panel-resize--horizontal::before {
   top: 2px;
+  bottom: auto;
   left: 0;
   width: 100%;
   height: 1px;
@@ -268,12 +275,15 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   text-align: center;
 }
 
+/* One segmented control for every switch (text or icons): a field track, items
+   that change ink on hover, and the chosen item raised on the card plane. The
+   weight never changes, so nothing shifts. */
 .segmented {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   padding: 2px;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
@@ -282,25 +292,23 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   height: var(--h-toolbar);
   padding: 0 12px;
   border: 0;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
   background: transparent;
-  color: var(--text);
+  color: var(--muted);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: 400;
   white-space: nowrap;
+  transition: color var(--motion-fast) var(--ease-out);
 }
 
 .segmented__btn:not(:disabled):not([aria-pressed='true']):hover {
-  background: var(--hover);
-}
-
-.segmented__btn[aria-pressed='true'] {
-  font-weight: 500;
+  color: var(--text-soft);
 }
 
 .segmented__btn[aria-pressed='true']:where(:not(:disabled)) {
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge-raised);
+  color: var(--text);
 }
 
 /* A list filter spans its column; each option takes an equal share. */
@@ -969,7 +977,11 @@ so keyboard focus is keyed on the document. */
 .tm-action-menu__copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
 .tm-action-menu__copy small { color: var(--muted); font-size: var(--t-meta); line-height: 1.4; overflow-wrap: anywhere; }
 .tm-action-menu__check { display: grid; flex: 0 0 16px; place-items: center; }
-.tm-action-menu__danger { color: var(--blocked-ink); }
+/* A destructive item keeps its red ink under the pointer and the keyboard, on
+   the same neutral highlight as its neighbours; it is set apart by a separator,
+   never by a red fill. */
+.tm-action-menu__danger,
+.tm-action-menu__danger[data-highlighted] { color: var(--blocked-ink); }
 .tm-action-menu__line { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .tm-action-menu__line > span:first-child { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
 .tm-action-menu__meta { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
@@ -1039,13 +1051,14 @@ a 36px
 /* List rail: the Designs and Discourse history. A heading with New, search, a
    status filter, then rows that overhang the fields by 4px on each side; the
    list's 9px scrollbar gutter makes up its right padding. */
-.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 14px 10px; }
+/* The head shares the 48px line of the workspace head beside it. */
+.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 6px 14px; margin-bottom: 4px; }
 .tm-listrail__head h2 { margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: 500; letter-spacing: -0.01em; }
 .tm-listrail__head-actions { display: flex; align-items: center; gap: 4px; }
-.tm-listrail__new { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 10px; border: 0; border-radius: var(--r-xs); background: var(--field); color: var(--text); font-size: var(--t-help); font-weight: 500; }
+.tm-listrail__new { display: inline-flex; align-items: center; gap: 4px; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); color: var(--text); font-size: var(--t-help); font-weight: 500; }
 .tm-listrail__new:hover { background: var(--field-hover); }
 .tm-listrail__new svg { width: 13px; height: 13px; }
-.tm-listrail__search { display: flex; align-items: center; gap: 7px; height: 30px; margin: 0 14px 9px; padding: 0 9px; border-radius: var(--r-xs); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--muted); }
+.tm-listrail__search { display: flex; align-items: center; gap: 7px; height: var(--h-control); margin: 0 14px 8px; padding: 0 10px; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--muted); }
 .tm-listrail__search svg { flex: 0 0 auto; width: 14px; height: 14px; }
 .app-shell .tm-listrail__search input,
 .app-shell .tm-listrail__search input:focus { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font: var(--t-help) var(--font-ui); }

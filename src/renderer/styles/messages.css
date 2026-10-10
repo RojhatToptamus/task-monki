@@ -107,9 +107,13 @@ and from
 .tm-conversation__viewport:focus { outline: none; }
 .app-shell[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); }
 .tm-conversation__content { min-width: 0; }
-.tm-conversation__header { position: sticky; top: 0; z-index: 2; background: var(--surface); transition: transform var(--motion-fast) ease; }
-.tm-conversation__header[data-visible='false'] { transform: translateY(-100%); }
-.tm-conversation__header:focus-within { transform: translateY(0); }
+/* The page head rides above a long conversation: its title area slides away
+   while the reader scrolls down and returns on the way up, leaving a little
+   faster than it arrives, and the tabs stay pinned. Only keyboard focus inside
+   it holds it in place; a clicked tab keeps focus and must not pin it. */
+.tm-conversation__header { position: sticky; top: 0; z-index: 2; background: var(--surface); transition: transform 240ms var(--ease-drawer); }
+.tm-conversation__header[data-visible='false'] { transform: translateY(calc(-1 * var(--conversation-header-hide, 100%))); transition-duration: 200ms; }
+.app-shell[data-input-modality='keyboard'] .tm-conversation__header:focus-within { transform: translateY(0); }
 .tm-conversation__latest {
   position: absolute; bottom: 12px; left: 50%; translate: -50% 0;
   display: grid; place-items: center; width: var(--h-icon); height: var(--h-icon);
@@ -220,5 +224,7 @@ the composer. */
 /* The sheet clips its overflow, so the handle lies along its inside edge; the sheet's own seam is the line. */
 .tm-side-sheet__resize { position: absolute; top: 0; bottom: 0; left: 0; width: 8px; margin: 0; z-index: var(--layer-handle); }
 .tm-side-sheet__resize span { background: transparent; }
+/* Hover and focus draw a 2px line on the sheet's own edge, not a band. */
+.tm-side-sheet__resize::before { left: 0; width: 2px; }
 .tm-side-sheet--floating { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: var(--layer-overlay); display: flex; width: min(380px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
 @keyframes tm-panel-in { from { opacity: 0; transform: translateX(8%); } }

@@ -5,8 +5,8 @@ import {
   Inbox,
   MessagesSquare,
   Monitor,
+  Palette,
   PanelLeft,
-  PanelsTopLeft,
   Plus,
   Settings2
 } from 'lucide-react';
@@ -84,7 +84,7 @@ export function BoardIcon() {
 }
 
 export function DesignIcon() {
-  return <UiLucideIcon component={PanelsTopLeft} />;
+  return <UiLucideIcon component={Palette} />;
 }
 
 export function PreviewIcon() {

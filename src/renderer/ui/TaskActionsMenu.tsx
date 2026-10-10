@@ -183,6 +183,7 @@ export function TaskActionsMenu({
           >
             Archive
           </button>
+          <div className="tm-pathmenu__separator" role="separator" />
           <button
             type="button"
             role="menuitem"

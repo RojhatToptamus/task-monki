@@ -220,7 +220,7 @@ where
   background: none;
   color: var(--muted);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: 400;
   white-space: nowrap;
   transition: color var(--motion-fast) var(--ease-out);
 }
@@ -240,16 +240,15 @@ where
   color: var(--text);
 }
 
-/* The selected page tab sits on the bar's baseline,
-in ink rather than accent. */
+/* The selected tab changes ink, never weight, and takes the bar's 1px baseline
+   in that ink: the underline covers the hairline rather than sitting on it. */
 .tm-tab--active::after {
   content: '';
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
-  height: 2px;
-  border-radius: var(--r-pill) var(--r-pill) 0 0;
+  height: 1px;
   background: var(--text);
 }
 
@@ -297,10 +296,10 @@ in ink rather than accent. */
   gap: 12px;
   min-width: 0;
   padding: 18px 20px;
-  border: 1px solid var(--edge-raised);
+  border: 0;
   border-radius: var(--r-md);
   background: var(--card);
-  box-shadow: var(--shadow-card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
 }
 
 .tm-slot__headline {
@@ -730,10 +729,10 @@ the value in the interface face unless it is a string to copy. */
 /* generic panel card */
 .tm-panel {
   min-width: 0;
-  border: 1px solid var(--edge-raised);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
   padding: 14px;
 }
 
@@ -1188,10 +1187,10 @@ no marks. */
 
 /* Agent review gate */
 .tm-reviewcard {
-  border: 1px solid var(--edge-raised);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
   overflow: hidden;
 }
 
@@ -1652,7 +1651,7 @@ never a brighter fill.
   height: 30px;
   flex: 0 0 auto;
   border: 1px solid transparent;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   cursor: pointer;
 }
 
@@ -1682,7 +1681,7 @@ never a brighter fill.
 .tm-board-editor__swatch .tm-board-color {
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
 }
 
 .tm-board-editor__filter {
@@ -2308,11 +2307,11 @@ a word only where a run stopped. */
   font-variant-numeric: tabular-nums;
 }
 
-.tm-diffstat span:first-child {
+.tm-diffstat__added {
   color: var(--verified-ink);
 }
 
-.tm-diffstat span:last-child {
+.tm-diffstat__removed {
   color: var(--blocked-ink);
 }
 

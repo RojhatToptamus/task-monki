@@ -333,7 +333,7 @@ export function TaskDetail(props: TaskDetailProps) {
     try { persistPreviewAgentOpen(open); } catch { /* the preference is lost; the panel still works */ }
   }, []);
   // The Review tab keeps its 248px index and a 560px diff before the panel floats.
-  const sidePanelLayout = useTaskSidePanelLayout(808);
+  const sidePanelLayout = useTaskSidePanelLayout(560);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<{ taskId: string; settings: AgentExecutionSettings }>();
@@ -1316,6 +1316,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const taskMasthead = (
       <div
         className={detailHeadClassName}
+        data-conversation-collapse=""
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >

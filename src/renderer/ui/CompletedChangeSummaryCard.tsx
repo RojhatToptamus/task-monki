@@ -311,8 +311,8 @@ function ChangeFileRow({ file }: { file: CompletedChangeFile }) {
 function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
   return (
     <span className="tm-diffstat">
-      {additions || !deletions ? <span>+{additions}</span> : null}
-      {deletions ? <span>-{deletions}</span> : null}
+      {additions || !deletions ? <span className="tm-diffstat__added">+{additions}</span> : null}
+      {deletions ? <span className="tm-diffstat__removed">-{deletions}</span> : null}
     </span>
   );
 }

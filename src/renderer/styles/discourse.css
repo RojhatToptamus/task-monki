@@ -76,7 +76,7 @@
   align-items: center;
   justify-content: space-between;
   min-width: 0;
-  min-height: 44px;
+  min-height: 48px;
   padding: 6px 16px;
   border-bottom: 1px solid var(--hair);
   background: var(--surface);
@@ -95,10 +95,9 @@
 }
 
 .tm-discourse-header__title h1 {
-  font-size: var(--t-label);
+  font-size: var(--t-heading);
   font-weight: 500;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
+  line-height: 1.3;
 }
 
 .tm-discourse-title-form h1 {
@@ -865,10 +864,10 @@ not the legacy review label/value grid. */
   max-height: 320px;
   overflow-y: auto;
   padding: 6px;
-  border: 1px solid var(--edge);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   scrollbar-gutter: stable;
 }
 
@@ -1043,7 +1042,7 @@ not the legacy review label/value grid. */
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 44px;
+  min-height: 48px;
   padding: 6px 16px;
   border-bottom: 1px solid var(--hair);
   background: var(--panel);

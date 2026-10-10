@@ -290,7 +290,7 @@ then one control that
   flex: 0 0 auto;
   min-width: 0;
   padding: 0 var(--tm-gutter);
-  border-bottom: 1px solid var(--hair);
+  box-shadow: inset 0 -1px 0 var(--hair);
 }
 
 .tm-main__tabbar .tm-tabs {
@@ -664,10 +664,10 @@ then
   flex-direction: column;
   gap: 1px;
   padding: 4px;
-  border: 1px solid var(--edge);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -721,10 +721,10 @@ then
   flex-direction: column;
   gap: 1px;
   padding: 4px;
-  border: 1px solid var(--edge);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
 }
 
 .tm-pathmenu__item {
@@ -1473,8 +1473,8 @@ the section in an 880px reading column on the right. */
   padding: 6px;
   border-radius: var(--r);
   background: var(--card);
-  border: 1px solid var(--edge);
-  box-shadow: var(--shadow-pop);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   scrollbar-gutter: stable;
 }
 

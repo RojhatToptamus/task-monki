@@ -9,7 +9,7 @@
   --t-meta: 11.5px;
   --t-group: 12px;
 
-  /* Weights — 600 is the page title alone; everything else is 500 or 400. */
+  /* Weights — the interface uses two: 500 for titles and emphasis, 400 for everything else. */
   --w-title: 500;
   --w-medium: 500;
 

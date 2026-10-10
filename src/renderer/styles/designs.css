@@ -59,13 +59,11 @@
 .tm-design-layout button {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 28px;
+  width: var(--h-toolbar);
+  height: var(--h-toolbar);
   padding: 0;
   border-radius: var(--r-xs);
   color: var(--muted);
-  font-size: var(--t-meta);
-  font-weight: 500;
 }
 
 .tm-design-layout button svg {
@@ -80,6 +78,7 @@
 
 .tm-design-layout button[aria-pressed='true'] {
   background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
   color: var(--text);
 }
 
@@ -95,19 +94,24 @@
   background: var(--surface);
 }
 
+/* A workspace head (Designs, New Design, Discourse) is one 48px line: the panel
+   toggle, a 15px title with its state beside it, then the actions. */
 .tm-designs-header {
-  min-height: 57px;
+  min-height: 48px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 8px 14px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--hair);
   background: var(--surface);
 }
 
 .tm-designs-header__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -120,23 +124,23 @@
 }
 
 .tm-designs-header__identity h1 {
+  min-width: 0;
   margin: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: var(--t-title);
+  font-size: var(--t-heading);
   font-weight: var(--w-title);
-  letter-spacing: -0.02em;
-  line-height: 1.25;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tm-designs-header__identity p {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 660px;
-  margin: 4px 0 0;
+  margin: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: var(--t-meta);
@@ -424,8 +428,7 @@
   margin-left: auto;
 }
 
-.tm-design-composer textarea,
-.tm-design-create textarea {
+.tm-design-composer textarea {
   width: 100%;
   resize: none;
   border: 0;
@@ -687,7 +690,8 @@ never opacity (DESIGN §2.4). */
   height: 15px;
   display: grid;
   place-items: center;
-  border: 1.5px solid var(--edge);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--control-edge);
   border-radius: var(--r-2xs);
   color: var(--on-primary);
 }
@@ -985,34 +989,34 @@ never opacity (DESIGN §2.4). */
   gap: 2px;
   padding: 2px;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-design-canvas__devices button {
-  width: 28px;
-  height: 28px;
+  width: var(--h-toolbar);
+  height: var(--h-toolbar);
   display: grid;
   place-items: center;
-  border-radius: var(--r-2xs);
+  border-radius: var(--r-xs);
   color: var(--muted);
 }
 
 .tm-design-canvas__devices button:hover {
-  background: var(--hover);
   color: var(--text-soft);
 }
 
 .tm-design-canvas__devices button[aria-pressed='true'] {
   background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
   color: var(--text);
 }
 
 .tm-design-canvas__devices svg,
 .tm-design-canvas__tool svg {
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
 }
 
 .tm-design-canvas__device-size {
@@ -1192,12 +1196,12 @@ never opacity (DESIGN §2.4). */
 
 .tm-design-create__intro {
   display: flex;
-  min-height: 44px;
+  min-height: 48px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 8px 16px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--hair);
 }
 
@@ -1218,21 +1222,38 @@ never opacity (DESIGN §2.4). */
   stroke: currentColor;
 }
 
+/* The form is one column at the Agent conversation's width, centred in the
+   page and sitting a little above the middle, like the Agent tab before its
+   first run. */
 .tm-design-create__body {
   display: flex;
   min-height: 0;
   flex: 1;
+  flex-direction: column;
+  align-items: center;
   overflow-y: auto;
-  padding: 24px;
-  scrollbar-gutter: stable;
+  padding: 32px var(--tm-gutter) 12vh;
+  scrollbar-gutter: stable both-edges;
 }
 
 .tm-design-create__content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  width: min(640px, 100%);
+  gap: 12px;
+  width: min(712px, 100%);
   min-width: 0;
+  margin-block: auto;
+}
+
+.tm-design-create__composer .tm-composer__input {
+  min-height: 180px;
+  max-height: min(420px, 50vh);
+}
+
+.tm-design-create__repository {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
 }
 
 .tm-design-create .segmented {
@@ -1245,28 +1266,6 @@ never opacity (DESIGN §2.4). */
 
 .tm-design-create .task-attachment-message {
   margin-top: 7px;
-}
-
-.tm-design-create__runtime {
-  padding: 14px 0;
-  border-top: 1px solid var(--hair);
-  border-bottom: 1px solid var(--hair);
-}
-
-.tm-design-create__runtime > .tm-agent-console {
-  width: 100%;
-}
-
-.tm-design-create__actions {
-  display: flex;
-  min-height: 58px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 24px;
-  border-top: 1px solid var(--hair);
-  background: var(--surface);
 }
 
 /* Loading,

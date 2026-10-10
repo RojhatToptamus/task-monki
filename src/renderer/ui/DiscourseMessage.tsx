@@ -133,7 +133,7 @@ export function DiscourseMessage({
                   ? [{ label: 'Correct message', onSelect: onCorrect }]
                   : []),
                 ...(user
-                  ? [{ label: 'Delete message', danger: true, onSelect: onDelete }]
+                  ? [{ label: 'Delete message', danger: true, separated: true, onSelect: onDelete }]
                   : [])
               ]}
             />

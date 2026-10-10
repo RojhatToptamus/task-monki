@@ -178,10 +178,10 @@
   display: grid;
   gap: 4px;
   padding: 5px;
-  border: 1px solid var(--edge);
+  border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
 }
 
 .tm-repository-select__popover .tm-repository-picker__search {
@@ -769,7 +769,7 @@ and
   left: 6px;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--overlay);
   box-shadow: var(--shadow-card);
   transition: left var(--motion-standard) var(--ease-out), background-color var(--motion-standard) var(--ease-out);
@@ -921,8 +921,8 @@ so the active option's ring is drawn inside the row. */
 .import-work__radio {
   width: 14px;
   height: 14px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px var(--control-edge);
+  border-radius: var(--r-pill);
+  box-shadow: inset 0 0 0 1px var(--control-edge);
 }
 
 .import-work__checkout[aria-selected='true'] .import-work__radio {

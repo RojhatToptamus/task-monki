@@ -116,13 +116,14 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   reset?: boolean;
 }
 
+/** Seeded tasks use the runtime's default access, auto review. */
 const DEFAULT_AGENT_SETTINGS: AgentExecutionSettings = {
   model: 'scenario-model',
   reasoningEffort: 'low',
   sandbox: 'WORKSPACE_WRITE',
   networkAccess: false,
-  approvalPolicy: 'never',
-  approvalsReviewer: 'user'
+  approvalPolicy: 'on-request',
+  approvalsReviewer: 'auto_review'
 };
 
 interface SeedPaths {

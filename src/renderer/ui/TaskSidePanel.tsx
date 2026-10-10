@@ -9,9 +9,11 @@ const PANEL_MAX_WIDTH = 560;
 const SHELL_CHROME_WIDTH = 56 + 8 + 8;
 
 /**
- * Where a task's assistant panel sits (DESIGN.md 5, side panels): docked as its
- * own sheet while the page keeps `minContentWidth`, floating over the page
- * below that. The width is the person's and persists.
+ * Where a task's assistant panel sits (DESIGN.md 5, side panels): its own sheet
+ * beside the page, narrowing toward its minimum before the page drops below
+ * `minContentWidth`, and floating over the page only when even that does not
+ * fit. The chosen width is the person's and persists; a narrow window lends
+ * the panel less without changing it.
  */
 export function useTaskSidePanelLayout(minContentWidth: number): {
   docked: boolean;
@@ -25,9 +27,10 @@ export function useTaskSidePanelLayout(minContentWidth: number): {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+  const room = viewport - SHELL_CHROME_WIDTH - minContentWidth;
   return {
-    docked: viewport - SHELL_CHROME_WIDTH - width >= minContentWidth,
-    width,
+    docked: room >= PANEL_MIN_WIDTH,
+    width: Math.max(PANEL_MIN_WIDTH, Math.min(width, room)),
     setWidth: (next) => {
       setWidthState(next);
       persistFocusedPanelWidth('task-side-panel', next);

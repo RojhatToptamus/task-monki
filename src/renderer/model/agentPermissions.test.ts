@@ -113,7 +113,7 @@ describe('agent permission settings', () => {
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       })
-    ).toBe('Approve for me');
+    ).toBe('Auto review');
     expect(
       formatAgentNetworkAccess({
         sandbox: 'DANGER_FULL_ACCESS',

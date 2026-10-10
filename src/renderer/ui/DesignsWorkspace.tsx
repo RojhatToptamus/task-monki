@@ -1073,31 +1073,28 @@ function NewDesignForm({
 
         <div className="tm-design-create__body">
           <div className="tm-design-create__content">
-            <div className="field">
-              <span>Source</span>
-              <div className="segmented" role="group" aria-label="Design source" onKeyDown={(event) => {
-                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-                event.preventDefault();
-                const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
-                next?.focus();
-                next?.click();
-              }}>
-                {(['BLANK', 'EXISTING_REPOSITORY'] as const).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    className="segmented__btn"
-                    aria-pressed={sourceKind === kind}
-                    disabled={composerLocked}
-                    onClick={() => setSourceKind(kind)}
-                  >
-                    {kind === 'BLANK' ? 'Blank' : 'Existing repository'}
-                  </button>
-                ))}
-              </div>
+            <div className="segmented tm-design-create__source" role="group" aria-label="Design source" onKeyDown={(event) => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+              event.preventDefault();
+              const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
+              next?.focus();
+              next?.click();
+            }}>
+              {(['BLANK', 'EXISTING_REPOSITORY'] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  className="segmented__btn"
+                  aria-pressed={sourceKind === kind}
+                  disabled={composerLocked}
+                  onClick={() => setSourceKind(kind)}
+                >
+                  {kind === 'BLANK' ? 'Blank' : 'Existing repository'}
+                </button>
+              ))}
             </div>
             {sourceKind === 'EXISTING_REPOSITORY' ? (
-              <>
+              <div className="tm-design-create__repository">
                 <div className="field">
                   <span>Repository</span>
                   <RepositorySelect
@@ -1115,124 +1112,120 @@ function NewDesignForm({
                     {!inspection && !inspecting ? <option value="">Select a repository first</option> : null}
                     {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} · {item.sha.slice(0, 8)}</option>)}
                   </select>
-                  <small id="design-base-help">Creates a separate worktree. Uncommitted changes are not included.</small>
+                  <small id="design-base-help">Uncommitted changes are not included.</small>
                 </div>
-              </>
+              </div>
             ) : null}
 
-            <div className="field field--prompt">
-              <label className="field__label" htmlFor="new-design-brief">Brief</label>
-              <AttachmentComposerShell
-                attachments={attachments}
-                className="tm-design-create__composer"
-                attachmentLabel="Design references"
-                toolbarAction={
-                  <AgentProfileSelect
-                    profiles={agentProfiles}
-                    value={agentProfileId}
-                    disabled={composerLocked}
-                    onChange={setAgentProfileId}
-                  />
-                }
-                removeDisabled={composerLocked}
-                hint={
-                  !attachmentsEnabled
-                    ? 'Files are unavailable for this runtime'
-                    : attachments.isReadingClipboardImage ? 'Reading clipboard image…' : undefined
-                }
-              >
-                <textarea
-                  id="new-design-brief"
-                  value={brief}
-                  rows={7}
-                  placeholder="Describe what you want to design or change…"
+            {/* The brief, the agent and the step are one composer, as on the
+                Agent tab before its first run. */}
+            <AttachmentComposerShell
+              attachments={attachments}
+              className="tm-design-create__composer"
+              attachmentLabel="Design references"
+              removeDisabled={composerLocked}
+              toolbarStart={<>
+                <AgentModelSelector
+                  label="Model"
+                  runtimeId={selectedRuntimeId}
+                  modelId={selectedModelId}
+                  reasoningEffort={selectedReasoningEffort}
+                  models={models}
+                  runtimes={runtimes}
                   disabled={composerLocked}
-                  onChange={(event) => setBrief(event.target.value)}
-                  onPaste={attachments.paste}
+                  presentation="compact"
+                  showSelectionError={false}
+                  selectionUnavailable={
+                    !selectedRuntimeId ||
+                    !selectedModelId ||
+                    Boolean(selectedRuntimeUnavailableReason)
+                  }
+                  runtimeUnavailableReason={(runtime) =>
+                    designRuntimeUnavailableReason(runtime, models)
+                  }
+                  modelUnavailableReason={(model, runtime) =>
+                    designModelUnavailableReason(runtime, model)
+                  }
+                  onDiscoverModels={onDiscoverAgentRuntimeModels}
+                  onSelectionChange={(nextRuntimeId, nextModelId) => {
+                    setRuntimeId(nextRuntimeId);
+                    setModelId(nextModelId);
+                    const nextModel = selectableModels.find(
+                      (model) =>
+                        model.runtimeId === nextRuntimeId && model.id === nextModelId
+                    );
+                    setReasoningEffort(
+                      nextModel?.designSupport?.defaultReasoningEffort ??
+                        nextModel?.defaultReasoningEffort ??
+                        ''
+                    );
+                  }}
+                  onReasoningEffortChange={setReasoningEffort}
                 />
-              </AttachmentComposerShell>
-            </div>
+                <AgentProfileSelect
+                  profiles={agentProfiles}
+                  value={agentProfileId}
+                  disabled={composerLocked}
+                  onChange={setAgentProfileId}
+                />
+              </>}
+              hint={
+                selectedRuntimeUnavailableReason ??
+                (!selectedRuntimeId || !selectedModelId ? 'No ready agent supports Design Mode.' : undefined) ??
+                (attachments.isReadingClipboardImage ? 'Reading clipboard image…' : undefined) ??
+                (!attachmentsEnabled ? 'Files are unavailable for this runtime' : undefined)
+              }
+              toolbarAction={
+                <button
+                  type="submit"
+                  className="primary-button button--sm"
+                  disabled={
+                    submitting ||
+                    brief.trim().length === 0 ||
+                    (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
+                    !selectedRuntimeId ||
+                    !selectedModelId ||
+                    Boolean(selectedRuntimeUnavailableReason) ||
+                    attachments.busy ||
+                    attachments.hasErrors ||
+                    Boolean(attachments.modelError)
+                  }
+                >
+                  {submitting
+                    ? 'Creating…'
+                    : creationOutcomeUnknown
+                      ? 'Retry creation'
+                      : 'Create Design'}
+                </button>
+              }
+            >
+              <label className="tm-visually-hidden" htmlFor="new-design-brief">Brief</label>
+              <textarea
+                id="new-design-brief"
+                className="tm-composer__input"
+                value={brief}
+                rows={8}
+                placeholder="Describe what you want to design or change"
+                disabled={composerLocked}
+                onChange={(event) => setBrief(event.target.value)}
+                onPaste={attachments.paste}
+                onKeyDown={(event) => {
+                  if (!event.nativeEvent.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+              />
+            </AttachmentComposerShell>
 
             {attachments.overflowError || attachments.modelError ? (
               <p className="task-attachment-message task-attachment-message--error" role="alert">
                 {attachments.overflowError ?? attachments.modelError}
               </p>
             ) : null}
-
-            <div className="tm-design-create__runtime" aria-label="Design agent settings">
-              <AgentModelSelector
-                label="Design"
-                runtimeId={selectedRuntimeId}
-                modelId={selectedModelId}
-                reasoningEffort={selectedReasoningEffort}
-                models={models}
-                runtimes={runtimes}
-                disabled={composerLocked}
-                presentation="compact"
-                selectionUnavailable={
-                  !selectedRuntimeId ||
-                  !selectedModelId ||
-                  Boolean(selectedRuntimeUnavailableReason)
-                }
-                selectionUnavailableMessage={
-                  selectedRuntimeUnavailableReason ??
-                  'No ready agent supports Design Mode.'
-                }
-                runtimeUnavailableReason={(runtime) =>
-                  designRuntimeUnavailableReason(runtime, models)
-                }
-                modelUnavailableReason={(model, runtime) =>
-                  designModelUnavailableReason(runtime, model)
-                }
-                onDiscoverModels={onDiscoverAgentRuntimeModels}
-                onSelectionChange={(nextRuntimeId, nextModelId) => {
-                  setRuntimeId(nextRuntimeId);
-                  setModelId(nextModelId);
-                  const nextModel = selectableModels.find(
-                    (model) =>
-                      model.runtimeId === nextRuntimeId && model.id === nextModelId
-                  );
-                  setReasoningEffort(
-                    nextModel?.designSupport?.defaultReasoningEffort ??
-                      nextModel?.defaultReasoningEffort ??
-                      ''
-                  );
-                }}
-                onReasoningEffortChange={setReasoningEffort}
-              />
-            </div>
-
             {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
           </div>
         </div>
-        <footer className="tm-design-create__actions">
-          {canCancel ? (
-            <button type="button" className="outline-button" disabled={submitting} onClick={onCancel}>
-              {creationOutcomeUnknown ? 'Close' : 'Cancel'}
-            </button>
-          ) : null}
-          <button
-            type="submit"
-            className="primary-button"
-            disabled={
-              submitting ||
-              brief.trim().length === 0 ||
-              (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
-              !selectedRuntimeId ||
-              !selectedModelId ||
-              Boolean(selectedRuntimeUnavailableReason) ||
-              attachments.busy ||
-              attachments.hasErrors ||
-              Boolean(attachments.modelError)
-            }
-          >
-            {submitting
-              ? 'Creating…'
-              : creationOutcomeUnknown
-                ? 'Retry creation'
-                : 'Create Design'}
-          </button>
-        </footer>
       </form>
     </div>
   );

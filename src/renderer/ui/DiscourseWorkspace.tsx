@@ -1915,6 +1915,7 @@ export function DiscourseWorkspace({
                   {
                     label: 'Delete conversation',
                     danger: true,
+                    separated: true,
                     disabled: conversationActionsDisabled,
                     disabledReason: conversationActionsDisabledReason,
                     onSelect: () => setConfirmAction({ type: 'delete-conversation' })

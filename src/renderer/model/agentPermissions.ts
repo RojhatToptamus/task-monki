@@ -145,7 +145,7 @@ export function formatAgentPermissionMode(
     case 'AUTO_ACCEPT_EDITS':
       return 'Auto-accept edits';
     case 'APPROVE_FOR_ME':
-      return 'Approve for me';
+      return 'Auto review';
     case 'FULL_ACCESS':
       return 'Full access';
     case 'CUSTOM':

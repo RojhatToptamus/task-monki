@@ -600,7 +600,7 @@ unambiguous where the two planes are close. Single-line controls are
 `--h-control` tall with `--r-sm`. Hover lifts to `--field-hover`; focus per §2.6
 — `--field-focus` fill and the same rim swapped to the neutral
 `--field-edge-focus`, never an accent border; placeholder is
-`--placeholder` (= `--muted`). Label above at `--t-label`/600, help text below at
+`--placeholder` (= `--muted`). Label above at `--t-label`/500, help text below at
 `--t-help` `--muted`, error text replaces help text and carries `--blocked-ink`.
 Never rely on placeholder as the label.
 
@@ -681,7 +681,7 @@ closes, arrow keys move, focus returns to the trigger. A new menu uses
 **Settings row.** A setting is a row, not a card: label left, control right,
 optional one-line description under the label (`SettingsRow`). Rows are
 separated by `--hair` inside one `tm-settings__list`, the table container
-with no fill of its own. The label is `--t-label`/600 and the description
+with no fill of its own. The label is `--t-label`/500 and the description
 `--t-help` `--muted` on every pane; controls in a row share `--h-control`, so
 a button beside a select is a full-height button. Never wrap each setting in
 its own card. A pane that is unavailable says so in one muted line where its
@@ -735,7 +735,7 @@ a More menu, each keeping its disabled reason inline.
 Provider text is quoted, never set as Task Monki's own: under a title or caption
 that names the agent, with a 2px `--edge-raised` rule along its left edge.
 
-Everything else on the page is a flat section: a quiet label (`--t-help`/600,
+Everything else on the page is a flat section: a quiet label (`--t-help`/500,
 `--muted`), then content. Space separates sections; no rule runs under a label,
 no card, no fill. The panel's primary is the page's primary; actions in a
 section stay secondary. A disabled action keeps its place, and its reason is
@@ -772,8 +772,11 @@ files, N/P between findings, V marks the file viewed.
 **Side panels.** An assistant panel (Ask reviewer on Review, Side question on
 Agent, Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable
 from 320 to 560, toggled from the right end of the tab bar with the agent mark.
-It docks while the page keeps 808px (the Review index and a 560px diff) and
-floats over it below that, sliding in 8% with the drawer curve. Its head is
+It stays a separate sheet in every window that can hold it: a narrow window
+lends it less width, down to 320, before the page would drop below 560px, and
+only below that does it float over the page, sliding in 8% with the drawer
+curve. Its resize edge is the sheet's own left edge; hover and focus draw a 2px
+line there. Its head is
 48px: mark, name, the runtime that answers, close. Escape closes it and focus
 returns to the toggle. An empty panel says in one muted sentence what it is
 for; each answer it can act on carries that action under it ("Use in
@@ -924,7 +927,7 @@ the right. An empty rail is one line.
    artefact holds the centre at full height, context collapses, and nothing about
    the shell changes when you enter or leave.
 
-Every page has exactly one header: title at `--t-title`/600, at most one line of
+Every page has exactly one header: title at `--t-title`/500, at most one line of
 context under it in `--muted` (only when it says something the page does not),
 actions right-aligned on the title line. A collection's views are tabs under
 its title — the Tasks page shows All, Running, In review, Done, then saved
@@ -932,8 +935,22 @@ views with their marker and a control that adds one. No breadcrumbs (the
 rail is the location), no duplicate title inside the body, no tab bar that
 repeats what the rail already says. A task's context line is its lifecycle track,
 then its repository and branch, each marked by an icon instead of a separator.
-Page tabs are words on the bar's baseline; the selected one carries a 2px
-`--text` underline, and a tab never carries a count.
+Page tabs are 13/400 words on the bar's baseline, a 1px `--hair` inset line;
+the selected one changes only its ink to `--text` and takes that baseline in
+`--text`, 1px with square ends, so it covers the hairline rather than sitting on
+it. A tab's weight never changes and a tab never carries a count.
+
+On the Agent tab the page head rides above the conversation: its title and
+lifecycle slide away (200ms, `--ease-drawer`) once the first message has passed
+beneath and the reader keeps scrolling down, and return on the way up (240ms);
+the tab bar stays pinned. Only keyboard focus inside the head holds it.
+
+A list-detail workspace (Designs, New Design, Discourse) has a 48px head: the
+panel toggle, a 15/500 title with its state beside it on the same line, then the
+actions. Side panels and the Discourse settings share that 48px line, so every
+hairline under a head lines up. New Design is one centred column at the Agent
+conversation's width: the source switch, then a single composer holding the
+brief, the model and profile chips, the reason a run cannot start, and Create.
 
 ### 7.2 Shell invariants
 
@@ -952,8 +969,9 @@ Page tabs are words on the bar's baseline; the selected one carries a 2px
   clipping containers and remain within the window.
 - Related tabs share the same shell geometry. Switching tabs must not introduce
   unexplained gutters, background seams, or header movement.
-- Every boundary between two panels is a resize handle: 5px hit area, visible
-  only on hover, with a keyboard-reachable equivalent. A handle on the edge of a
+- Every boundary between two panels is a resize handle: a 5px hit area on the
+  boundary's hairline, which brightens to `--edge` on hover and focus, with a
+  keyboard-reachable equivalent. A handle on the edge of a
   sheet that clips its overflow lies inside that edge, or nothing can grab it.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
   collapses to a toggle and the primary task keeps its size and order. Semantic
@@ -1117,7 +1135,7 @@ correct answer far more often than a border is).
 | Modal | `--surface` | `--edge` | `--shadow-modal` |
 | Modal scrim | `--scrim` | — | — |
 | Now panel | `--card` | `--edge-raised` | `--shadow-card` |
-| Flat section label | — | — | — (text `--muted`, `--t-help`/600) |
+| Flat section label | — | — | — (text `--muted`, `--t-help`/500) |
 | Side panel, docked | `--surface` (its own sheet) | `--hair` seam | — |
 | Side panel, floating | `--surface` | `--edge` | `--shadow-pop` |
 | Tooltip, toast | `--overlay` | `--edge` | `--shadow-pop` |
@@ -1141,6 +1159,7 @@ correct answer far more often than a border is).
 | Ghost / icon button, hover | `--hover` | `--text` | — |
 | Destructive button, rest | `--blocked-bg` | `--blocked-ink` | — |
 | Destructive button, hover | `--blocked-bg-hover` | `--blocked-ink` | — |
+| Destructive menu item, rest and highlighted | the menu's own (none, then `--hover`) | `--blocked-ink` | a hairline separator above it |
 | Primary button, active | `--primary-press` | `--on-primary` | — |
 | Any other button, active | `--press` over its rest fill | unchanged | — |
 | Any button, focus (pointer) | unchanged | unchanged | — |
@@ -1156,9 +1175,9 @@ correct answer far more often than a border is).
 | Placeholder | — | `--placeholder` | — |
 | Composer surface | `--card` | `--text` | edge as input, no hover |
 | Composer hint / affordance row | — | `--muted` | — |
-| Segmented track | `--field` | — | — |
+| Segmented track | `--field`, `--r-sm` | — | `--field-edge` inset |
 | Segmented item, inactive | — | `--muted` | — |
-| Segmented item, active | `--card` | `--text` (600) | — |
+| Segmented item, active | `--card`, `--r-xs` | `--text` (weight unchanged) | `--edge-raised` inset |
 | Select trigger | `--field` | `--text`, chevron `--muted` | as input |
 | Checkbox / radio, unchecked | `--field` | — | `--control-edge` inset 1px |
 | Checkbox / radio, checked | `--accent` | `--on-primary` | — |
@@ -1170,7 +1189,7 @@ correct answer far more often than a border is).
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
 | Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |
-| Tab, inactive / active | — | `--muted` / `--text`, active underline 2px `--text` | — |
+| Tab, inactive / active | — | `--muted` / `--text` (400 both), active underline 1px `--text` over the 1px `--hair` baseline | — |
 | Keyboard hint (⌘↵) | `--field` | `--faint` | — |
 
 ### A.5 Rows and tables
@@ -1205,7 +1224,7 @@ inside it reads as a second fact.
 | Neutral count badge | `--field` | `--muted` |
 | Progress track / fill | `--field` / `--accent` | — |
 | Progress step, done / active / pending | `--verified` / `--accent` / `--idle` | `--muted` label |
-| Lifecycle stage, done / current / upcoming | — | `--muted` / `--text` 600 / `--faint`; current glyph per status |
+| Lifecycle stage, done / current / upcoming | — | `--muted` / `--text` 500 / `--faint`; current glyph per status |
 | Task state badge (card) | the tone's `-bg` (`--accent-soft` while running) | the tone's `-ink` |
 | Inbox reason and tile | tile: the tone's `-bg` | `--waiting-ink` / `--blocked-ink`; neutral reasons `--muted` |
 | Plan step, done / current / pending | — | label `--muted` / `--text` 500 / `--text-soft`; mark `--muted` / `--text` / `--faint` (check / dot / ring) |

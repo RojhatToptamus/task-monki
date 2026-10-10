@@ -40,6 +40,24 @@ export function Conversation({ instance, label, className = '', header, children
   onScroll?(scroller: HTMLElement): void;
 }) {
   const [headerVisible, setHeaderVisible] = useState(true);
+  const headerRef = useRef<HTMLDivElement>(null);
+  // The part of the header marked data-conversation-collapse slides away; the
+  // rest (the tabs) stays. The header never hides before the first message has
+  // passed beneath it, so hiding never opens an empty band at the top.
+  const headerHeight = useRef(0);
+  useLayoutEffect(() => {
+    const element = headerRef.current;
+    if (!element) return;
+    const collapsible = element.querySelector<HTMLElement>('[data-conversation-collapse]');
+    const measure = () => {
+      headerHeight.current = element.offsetHeight;
+      element.style.setProperty('--conversation-header-hide', `${collapsible?.offsetHeight ?? element.offsetHeight}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [header]);
   const scrollDirection = useRef({ top: 0, direction: 0, distance: 0 });
   // Only the reader's own scrolling moves the header. Following new output,
   // restoring a reading position and Jump to latest are programmatic.
@@ -55,7 +73,7 @@ export function Conversation({ instance, label, className = '', header, children
         const distance = direction === previous.direction ? previous.distance + Math.abs(delta) : Math.abs(delta);
         scrollDirection.current = { top, direction, distance };
         const byReader = readerIntent.current.dragging || performance.now() < readerIntent.current.until;
-        if (top < 16) setHeaderVisible(true);
+        if (top < headerHeight.current) setHeaderVisible(true);
         else if (byReader && distance >= 12) setHeaderVisible(direction < 0);
       }
     }
@@ -74,7 +92,7 @@ export function Conversation({ instance, label, className = '', header, children
         if ((event.target as HTMLElement).closest('[data-disclosure]')) instance.stopScroll();
       }}>
       <div ref={instance.contentRef} className="tm-conversation__content">
-        {header ? <div className="tm-conversation__header" data-visible={headerVisible}>{header}</div> : null}
+        {header ? <div ref={headerRef} className="tm-conversation__header" data-visible={headerVisible}>{header}</div> : null}
         {children}
       </div>
     </div>
