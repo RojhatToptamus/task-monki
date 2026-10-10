@@ -159,12 +159,14 @@ export function CompletedChangeSummaryCard({
   onViewDiff?(): void;
 }) {
   if (compact) {
-    if (captureStatus === 'NO_CHANGES' || captureStatus === 'NOT_CAPTURED') return null;
+    if (captureStatus === 'NOT_CAPTURED') return null;
+    // A finished run that changed nothing is worth saying, not an empty list.
+    if (captureStatus === 'NO_CHANGES') return <p className="tm-changes__none">No file changes</p>;
     if (!summary) return <CaptureStatusMessage status={captureStatus} incomplete={incomplete} />;
     const note = [
       historical ? 'Historical capture' : undefined,
       incomplete ? 'Incomplete' : undefined
-    ].filter(Boolean).join(' · ');
+    ].filter(Boolean).join(', ');
     return <section className="tm-changes" aria-label="Changed files">
       <header className="tm-changes__head">
         <FilePlus2 size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
@@ -212,7 +214,6 @@ export function CompletedChangeSummaryCard({
           <span title={snapshot.headSha ?? 'HEAD was not observed'}>
             {snapshot.headSha ? `Head ${snapshot.headSha.slice(0, 12)}` : 'Head Unknown'}
           </span>
-          <span aria-hidden="true">·</span>
           <time dateTime={snapshot.capturedAt}>{formatCaptureTime(snapshot.capturedAt)}</time>
         </p>
       ) : null}

@@ -1,4 +1,4 @@
-import type { AgentItemRecord, AgentPlanRevisionRecord, RunRecord, TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
+import type { AgentItemRecord, AgentPlanRevisionRecord, AgentReviewGateProjection, RunRecord, TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { buildRunActivityProjection } from './runActivity';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
 
@@ -201,25 +201,73 @@ export function reasoningLabel(seconds: number | undefined, active: boolean): st
   return seconds < 1 ? 'Thought briefly' : `Thought for ${formatElapsed(seconds * 1000)}`;
 }
 
-/** One line of the latest agent answer for Overview — never user or generated prompt text. */
+/** The agent's latest words as one plain line for the Overview; never user or generated prompt text. */
 export function conversationPreview(turn: SessionTurn, limit = 140): string | undefined {
   const latest = turn.state === 'active'
     ? [...turn.entries].reverse().find((entry) => entry.kind === 'message' && entry.author === 'Agent')
     : undefined;
   const text = latest?.kind === 'message' ? latest.text : turn.answer;
-  const compact = text?.replace(/\s+/gu, ' ').trim();
+  const compact = text ? plainProse(text).replace(/\n/gu, ' ') : undefined;
   if (!compact) return undefined;
   return compact.length <= limit ? compact : `${compact.slice(0, limit - 1).trimEnd()}…`;
 }
 
+/** A finished turn's answer as plain lines: what the agent reported, without markdown markers. */
+export function conversationAnswer(turn: SessionTurn): string | undefined {
+  if (turn.state === 'active' || !turn.answer) return undefined;
+  return plainProse(turn.answer) || undefined;
+}
+
+function plainProse(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/gu, '')
+    .split('\n')
+    .map((line) => line
+      .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/u, '')
+      .replace(/`([^`]*)`/gu, '$1')
+      .replace(/(\*\*|__)(.+?)\1/gu, '$2')
+      .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
+      .replace(/\s+/gu, ' ')
+      .trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 export function turnOutcomeLabel(turn: Pick<SessionTurn, 'state' | 'durationMs'>): string {
-  const elapsed = turn.durationMs === undefined ? undefined : formatElapsed(turn.durationMs);
+  // Under a second says nothing about the work; the outcome alone does.
+  const elapsed = turn.durationMs === undefined || turn.durationMs < 1000 ? undefined : formatElapsed(turn.durationMs);
   switch (turn.state) {
     case 'completed': return elapsed ? `Worked for ${elapsed}` : 'Completed';
     case 'stopped': return elapsed ? `Stopped after ${elapsed}` : 'Stopped';
     case 'failed': return elapsed ? `Failed after ${elapsed}` : 'Failed';
     case 'interrupted': return elapsed ? `Interrupted after ${elapsed}` : 'Interrupted';
     default: return 'Working';
+  }
+}
+
+/**
+ * How an agent review turn ended, as the conversation states it. The latest
+ * review names its verdict; an earlier one only how its run ended, because
+ * its verdict is no longer recorded. A live review has no word here: the
+ * working line beneath already says it.
+ */
+export function reviewTurnOutcome(
+  turn: Pick<SessionTurn, 'state'> & { run: Pick<RunRecord, 'id'> },
+  review: Pick<AgentReviewGateProjection, 'runId' | 'status' | 'result'> | undefined
+): string | undefined {
+  if (turn.state === 'active') return undefined;
+  if (review?.runId === turn.run.id) {
+    switch (review.result?.verdict) {
+      case 'PASSED': return 'Passed';
+      case 'NEEDS_CHANGES': return 'Requested changes';
+      case 'INCONCLUSIVE': return 'Inconclusive';
+    }
+  }
+  switch (turn.state) {
+    case 'stopped': return 'Stopped';
+    case 'failed': return 'Failed';
+    case 'interrupted': return 'Interrupted';
+    default: return undefined;
   }
 }
 

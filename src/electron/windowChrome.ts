@@ -1,6 +1,6 @@
 import type { BrowserWindowConstructorOptions } from 'electron';
 
-export const TITLEBAR_HEIGHT = 52;
+export const TITLEBAR_HEIGHT = 44;
 const MAC_TRAFFIC_LIGHT_X = 18;
 const MAC_TRAFFIC_LIGHT_HEIGHT = 14;
 

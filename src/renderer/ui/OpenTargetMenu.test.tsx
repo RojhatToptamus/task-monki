@@ -15,7 +15,7 @@ describe('OpenTargetContextMenu', () => {
     expect(html).toContain('role="menu"');
     expect(html).toContain('tabindex="-1"');
     expect(html).toContain('role="menuitem" aria-disabled="true"');
-    expect(html).toContain('Loading...');
+    expect(html).toContain('Loading…');
     expect(html).not.toContain('role="status"');
     expect(html).not.toContain('role="alert"');
   });

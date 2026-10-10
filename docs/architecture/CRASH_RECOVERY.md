@@ -46,6 +46,11 @@ external state in this order:
    interactions.
 5. Normal post-run and workflow evidence repair continues through the existing
    service paths.
+6. Side question snapshots left by an earlier process are removed: write
+   permission is restored, the worktree registration is removed, and Git prunes
+   only when a registration survives. Shutdown runs the same sweep. A side
+   question that read the live worktree and is left `RECOVERY_REQUIRED` keeps
+   holding other agent work until the person stops it.
 
 Failures are isolated to the affected task or runtime. One unavailable
 repository, remote, provider, or GitHub account does not permit Task Monki to

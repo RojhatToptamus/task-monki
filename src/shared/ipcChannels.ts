@@ -5,10 +5,14 @@
  * TaskManagerApi and the focused shared contracts it references.
  */
 export const IPC_INVOKE_CHANNELS = [
+  'agent:askReviewer',
+  'agent:askSideQuestion',
   'agent:cancelRun',
   'agent:continueRun',
+  'agent:decideReviewFinding',
   'agent:discoverRuntimeModels',
   'agent:editTaskInstruction',
+  'agent:endSideThread',
   'agent:queueTaskInstruction',
   'agent:readProtocolMessage',
   'agent:respondToInteraction',
@@ -19,6 +23,8 @@ export const IPC_INVOKE_CHANNELS = [
   'agent:startReview',
   'agent:startRun',
   'agent:steerRun',
+  'agent:stopReviewerQuestion',
+  'agent:stopSideQuestion',
   'agent:syncGoal',
   'agent:updateNativeSession',
   'application:approveApplicationPreview',

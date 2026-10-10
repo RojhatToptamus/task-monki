@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
 import type { AgentReviewFinding, RunRecord, Task } from '../../shared/contracts';
-import type { FinishEvidenceState, FinishRequirement } from './taskFinish';
+import type { FinishEvidenceState } from './taskFinish';
 import {
   findCompletedCurrentImplementationRun,
   isActiveNonReviewRun,
   isCompletedCurrentImplementationRun,
   selectNextAction,
-  shouldShowOverviewNextAction,
   type NextActionInput
 } from './nextAction';
 
@@ -43,7 +42,6 @@ function baseInput(overrides: Partial<NextActionInput> = {}): NextActionInput {
     task: createTask(),
     reviewStatus: 'NOT_RUN',
     finishEvidence: clean(),
-    requirements: [],
     hasReviewSource: true,
     reviewHasActionableFindings: false,
     canCommit: false,
@@ -62,11 +60,62 @@ describe('selectNextAction', () => {
     expect(selectNextAction(baseInput({ runInFlight: true })).primary).toBeUndefined();
     const running = selectNextAction(baseInput({ reviewStatus: 'RUNNING' }));
     expect(running.primary).toBeUndefined();
-    expect(running.sentence).toMatch(/reviewing/i);
+    expect(running.title).toBe('Reviewing');
   });
 
   it('recommends running review when none has run', () => {
     expect(selectNextAction(baseInput()).primary?.id).toBe('run-review');
+  });
+
+  it('lets the owner finish without running the agent review', () => {
+    const override: FinishEvidenceState = {
+      mode: 'override',
+      warnings: [{ title: 'No passing review is recorded.', detail: 'x' }]
+    };
+    const ids = (input: Partial<NextActionInput>) =>
+      selectNextAction(baseInput(input)).secondaries.map((choice) => choice.id);
+
+    // The review is a detached gate: Commit and Mark done anyway stay reachable.
+    expect(ids({ finishEvidence: override, canCommit: true })).toEqual(['commit', 'mark-done-anyway']);
+    expect(ids({ reviewStatus: 'STALE', finishEvidence: override })).toEqual(['mark-done-anyway']);
+    expect(ids({ reviewStatus: 'NEEDS_CHANGES', reviewHasActionableFindings: true, finishEvidence: override }))
+      .toEqual(['run-review-again', 'mark-done-anyway']);
+    // A policy that still needs merge evidence blocks Mark done, not Commit.
+    expect(ids({ finishEvidence: { mode: 'blocked', warnings: [] }, canCommit: true })).toEqual(['commit']);
+    // Nothing to finish yet, and nothing while work is in flight.
+    expect(ids({ hasReviewSource: false, finishEvidence: override })).toEqual([]);
+    expect(ids({ runInFlight: true, finishEvidence: override })).toEqual([]);
+  });
+
+  it('leads with finishing once the pull request is merged', () => {
+    const merged = (finishEvidence: FinishEvidenceState) => selectNextAction(baseInput({
+      task: createTask({ projection: { ...createInitialProjection(now), githubPullRequest: 'MERGED', merge: 'MERGED' } }),
+      finishEvidence
+    }));
+
+    // The agent review no longer leads after delivery; the policy decides how to finish.
+    expect(merged({ mode: 'clean', warnings: [] }).primary?.id).toBe('mark-done');
+    // Marking done despite open evidence is offered as the owner's override, never the lead.
+    const override = merged({ mode: 'override', warnings: [{ title: 'No passing review is recorded.', detail: 'x' }] });
+    expect(override.primary).toBeUndefined();
+    expect(override.secondaries.map((choice) => choice.id)).toEqual(['mark-done-anyway']);
+    // A policy still waiting on verified checks leaves nothing to press, only requirements.
+    const blocked = merged({ mode: 'blocked', warnings: [] });
+    expect(blocked.primary).toBeUndefined();
+    expect(blocked.title).toBe('Merged');
+  });
+
+  it('keeps finishing to the Review phases', () => {
+    const inProgress = selectNextAction(baseInput({
+      task: createTask({ workflowPhase: 'IN_PROGRESS' }),
+      finishEvidence: { mode: 'override', warnings: [{ title: 'No passing review is recorded.', detail: 'x' }] },
+      canCommit: true
+    }));
+
+    expect(inProgress.primary?.id).toBe('run-review');
+    expect(inProgress.secondaries).toEqual([]);
+    // Outside the Review phases a review source with nothing completed is imported work.
+    expect(inProgress.title).toBe('No agent run yet');
   });
 
   it('has no primary review action without a review source', () => {
@@ -83,8 +132,7 @@ describe('selectNextAction', () => {
 
     expect(model.primary).toBeUndefined();
     expect(model.secondaries).toEqual([]);
-    expect(model.sentence).toMatch(/retry.*continue/i);
-    expect(model.sentence).not.toMatch(/ready for review/i);
+    expect(model.title).toBe('Run failed');
   });
 
   it('keeps a locally blocked completed implementation ahead of the review gate', () => {
@@ -98,8 +146,7 @@ describe('selectNextAction', () => {
     );
 
     expect(model.primary).toBeUndefined();
-    expect(model.sentence).toMatch(/retry.*continue/i);
-    expect(model.sentence).not.toMatch(/ready for review/i);
+    expect(model.title).toBe('Needs retry');
   });
 
   it('does not offer review from an older completed run while the current run is interrupting', () => {
@@ -116,7 +163,7 @@ describe('selectNextAction', () => {
     expect(isActiveNonReviewRun(currentRun)).toBe(true);
     expect(model.primary).toBeUndefined();
     expect(model.secondaries).toEqual([]);
-    expect(model.sentence).toMatch(/agent is working/i);
+    expect(model.title).toBe('Running');
   });
 
   it('recommends request-changes when review needs changes with findings', () => {
@@ -143,13 +190,14 @@ describe('selectNextAction', () => {
     );
     expect(model.primary?.id).toBe('request-changes');
     expect(model.secondaries.map((s) => s.id)).toContain('run-review-again');
-    expect(model.sentence).toContain('1 finding');
+    // The title is the review's verdict, so the review section need not repeat it.
+    expect(model.title).toBe('Needs changes');
   });
 
   it('recommends re-running a stale review', () => {
     const model = selectNextAction(baseInput({ reviewStatus: 'STALE' }));
     expect(model.primary?.id).toBe('run-review-again');
-    expect(model.sentence).toMatch(/re-run/i);
+    expect(model.title).toBe('Needs re-review');
   });
 
   it.each(['ANALYSIS', 'COMPACTION'] as const)(
@@ -180,7 +228,7 @@ describe('selectNextAction', () => {
       expect(actionableSource).toBeUndefined();
       expect(model.primary).toBeUndefined();
       expect(model.secondaries).toEqual([]);
-      expect(model.sentence).toMatch(/historical/i);
+      expect(model.title).toBe('Review is from an earlier run');
     }
   );
 
@@ -212,36 +260,36 @@ describe('selectNextAction', () => {
     expect(model.primary?.id).toBe('mark-done');
   });
 
+  it('never leads with the mark-done override when there is nothing to commit', () => {
+    const model = selectNextAction(
+      baseInput({ reviewStatus: 'PASSED', finishEvidence: { mode: 'override', warnings: [] }, canCommit: false })
+    );
+    expect(model.primary).toBeUndefined();
+    expect(model.secondaries.map((choice) => choice.id)).toEqual(['mark-done-anyway']);
+  });
+
   it('leads with commit and offers mark-done-anyway on an override', () => {
-    const requirements: FinishRequirement[] = [
-      { label: 'Tree', detail: '3 dirty', tone: 'action', unresolved: true }
-    ];
     const model = selectNextAction(
       baseInput({
         reviewStatus: 'PASSED',
         finishEvidence: { mode: 'override', warnings: [] },
-        requirements,
         canCommit: true
       })
     );
     expect(model.primary?.id).toBe('commit');
     expect(model.secondaries.map((s) => s.id)).toContain('mark-done-anyway');
-    expect(model.sentence).toContain('Tree 3 dirty');
+    expect(model.title).toBe('Review passed');
   });
 
-  it('offers no primary but names the gate when blocked from finishing', () => {
-    const requirements: FinishRequirement[] = [
-      { label: 'Merge', detail: 'not merged', tone: 'action', unresolved: true }
-    ];
+  it('offers no primary when blocked from finishing; the requirements name the gate', () => {
     const model = selectNextAction(
       baseInput({
         reviewStatus: 'PASSED',
-        finishEvidence: { mode: 'blocked', warnings: [] },
-        requirements
+        finishEvidence: { mode: 'blocked', warnings: [] }
       })
     );
     expect(model.primary).toBeUndefined();
-    expect(model.sentence).toMatch(/blocked/i);
+    expect(model.title).toBe('Review passed');
   });
 
   it('recommends moving a completed current implementation to review', () => {
@@ -280,7 +328,7 @@ describe('selectNextAction', () => {
 
       expect(reviewReady).toBe(false);
       expect(model.primary).toBeUndefined();
-      expect(model.sentence).not.toMatch(/move.*review/i);
+      expect(model.title).not.toMatch(/move.*review/i);
     }
   );
 
@@ -289,16 +337,7 @@ describe('selectNextAction', () => {
       baseInput({ task: createTask({ workflowPhase: 'DONE' }) })
     );
     expect(model.primary).toBeUndefined();
-    expect(model.sentence).toMatch(/done/i);
-  });
-});
-
-describe('shouldShowOverviewNextAction', () => {
-  it('keeps the task-level transition exclusive from the Overview rail', () => {
-    expect(shouldShowOverviewNextAction(true, false)).toBe(true);
-    expect(shouldShowOverviewNextAction(true, true)).toBe(false);
-    expect(shouldShowOverviewNextAction(false, true)).toBe(false);
-    expect(shouldShowOverviewNextAction(false, false)).toBe(false);
+    expect(model.title).toBe('Done');
   });
 });
 

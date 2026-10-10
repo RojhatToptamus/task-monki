@@ -14,7 +14,7 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
     {result.responses.map((response) => <section key={response.pointId}>
       <h3>{comparison?.points.find((point) => point.id === response.pointId)?.question ?? responseLabel(response.stance)}</h3>
       <MessageMarkdown text={response.answer} />
-      <details><summary>Reason and sources</summary>
+      <details><summary><span className="tm-disclosure__label"><DisclosureChevron />Reason and sources</span></summary>
         <MessageMarkdown text={response.reason} />
         {response.evidence.length ? <ul>{response.evidence.map((evidence, index) => <li key={index}>{evidence}</li>)}</ul> : null}
       </details>
@@ -25,7 +25,7 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
   </div>;
   return <div className="tm-discourse-team">
     <MessageMarkdown text={result.summary} />
-    <details className="tm-discourse-team__details"><summary>Comparison details</summary>
+    <details className="tm-discourse-team__details"><summary><span className="tm-disclosure__label"><DisclosureChevron />Comparison details</span></summary>
     <div className="tm-discourse-response__concerns">
       {result.points.map((point) => <details key={point.id}>
         <summary><DisclosureChevron className="tm-discourse-response__chevron" />
@@ -44,7 +44,7 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
         <small>{label(point.confidence)} confidence · C’s assessment</small>
       </details>)}
     </div><MessageMarkdown text={result.reason} /></details>
-    {result.actions.length ? <details><summary>Next questions</summary>
+    {result.actions.length ? <details><summary><span className="tm-disclosure__label"><DisclosureChevron />Next questions</span></summary>
       <ul>{result.actions.map((action) => <li key={`${action.pointId}:${action.participantId}`}>{action.task}</li>)}</ul>
     </details> : null}
   </div>;

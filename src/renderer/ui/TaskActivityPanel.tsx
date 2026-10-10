@@ -8,6 +8,7 @@ import type {
 } from '../model/taskActivity';
 import { summarizeEvent } from '../model/eventSummary';
 import { DisclosureChevron } from './DisclosureChevron';
+import { OverviewSection } from './TaskOverview';
 
 interface TaskActivityPanelProps {
   view: TaskActivityViewModel;
@@ -31,6 +32,12 @@ export function TaskActivityPanel({
   return <DebugTaskActivity view={view} rawEvents={rawEvents} rootRef={rootRef} />;
 }
 
+/**
+ * The Overview's History: the latest consequential entries, in order, each as
+ * what happened, who recorded it and when. The evidence behind each entry, and
+ * the raw audit, stay in the full ledger in Debug, so the Overview never repeats
+ * what its Now panel already says.
+ */
 function OverviewTaskActivity({
   view,
   onViewAll
@@ -41,34 +48,20 @@ function OverviewTaskActivity({
   if (!view.items.length) {
     return null;
   }
-  const latest = view.items.at(-1);
-  if (!latest) {
-    return null;
-  }
-  const earlierCount = view.hiddenCount + view.items.length - 1;
-
   return (
-    <details className="tm-taskactivity-panel tm-taskactivity-panel--overview">
-      <summary className="tm-taskactivity__head">
-        <span className="tm-disclosure__label">
-          <DisclosureChevron />
-          <span>Activity</span>
-        </span>
-        <span className="tm-taskactivity__count">
-          {earlierCount > 0
-            ? `${earlierCount + 1} events · latest ${latest.title}`
-            : `Latest ${latest.title}`}
-        </span>
-      </summary>
-      <div className="tm-taskactivity__overview-body">
-        <TaskActivityList items={[latest]} />
-        {onViewAll && earlierCount > 0 ? (
-          <button type="button" className="tm-taskactivity__viewall" onClick={onViewAll}>
-            View full activity
+    <OverviewSection
+      title="History"
+      className="tm-taskactivity-panel tm-taskactivity-panel--overview"
+      aside={
+        onViewAll ? (
+          <button type="button" className="tm-osection__link" onClick={onViewAll}>
+            Full history
           </button>
-        ) : null}
-      </div>
-    </details>
+        ) : undefined
+      }
+    >
+      <TaskActivityList items={view.items} evidence={false} />
+    </OverviewSection>
   );
 }
 
@@ -104,31 +97,29 @@ function DebugTaskActivity({
   );
 }
 
-function TaskActivityList({ items }: { items: TaskActivityItem[] }) {
+function TaskActivityList({ items, evidence = true }: { items: TaskActivityItem[]; evidence?: boolean }) {
   return (
     <div className="tm-taskactivity__list">
       {items.map((item) => (
-        <TaskActivityRow key={item.id} item={item} />
+        <TaskActivityRow key={item.id} item={item} evidence={evidence} />
       ))}
     </div>
   );
 }
 
-function TaskActivityRow({ item }: { item: TaskActivityItem }) {
+/** What happened first; who recorded it and when, beneath. */
+function TaskActivityRow({ item, evidence }: { item: TaskActivityItem; evidence: boolean }) {
   const timestamp = formatTaskActivityTimestamp(item.at);
   return (
-    <article className={`tm-taskactivity__item tm-taskactivity__item--${item.tone}`}>
-      <time className="tm-taskactivity__time" dateTime={item.at} title={timestamp.full}>
-        <span>{timestamp.date}</span>
-        <span>{timestamp.time}</span>
-      </time>
-      <div className="tm-taskactivity__body">
-        <div className="tm-taskactivity__line">
-          <span className="tm-taskactivity__actor">{item.actor}</span>
-          <strong>{item.title}</strong>
-        </div>
-        {item.evidence ? <TimelineEvidence evidence={item.evidence} /> : null}
+    <article className="tm-taskactivity__item">
+      <strong className="tm-taskactivity__title">{item.title}</strong>
+      <div className="tm-taskactivity__meta">
+        <span className="tm-taskactivity__actor">{item.actor}</span>
+        <time className="tm-taskactivity__time" dateTime={item.at} title={timestamp.full}>
+          {timestamp.label}
+        </time>
       </div>
+      {evidence && item.evidence ? <TimelineEvidence evidence={item.evidence} /> : null}
     </article>
   );
 }
@@ -201,7 +192,26 @@ export interface TaskActivityTimestamp {
   date: string;
   time: string;
   full: string;
+  /** Compact but absolute, e.g. "Jul 2, 10:05"; never relative to now. */
+  label: string;
 }
+
+const ACTIVITY_LABEL_FORMAT = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23'
+});
+
+const ACTIVITY_LABEL_FORMAT_WITH_YEAR = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23'
+});
 
 export function formatTaskActivityTimestamp(value: string): TaskActivityTimestamp {
   const date = new Date(value);
@@ -209,7 +219,8 @@ export function formatTaskActivityTimestamp(value: string): TaskActivityTimestam
     return {
       date: 'Unknown',
       time: '',
-      full: 'Unknown time'
+      full: 'Unknown time',
+      label: 'Unknown time'
     };
   }
   const year = date.getFullYear();
@@ -219,10 +230,15 @@ export function formatTaskActivityTimestamp(value: string): TaskActivityTimestam
   const minutes = pad2(date.getMinutes());
   const dateLabel = `${year}-${month}-${day}`;
   const timeLabel = `${hours}:${minutes}`;
+  const label = (year === new Date().getFullYear()
+    ? ACTIVITY_LABEL_FORMAT
+    : ACTIVITY_LABEL_FORMAT_WITH_YEAR
+  ).format(date);
   return {
     date: dateLabel,
     time: timeLabel,
-    full: `${dateLabel} ${timeLabel}`
+    full: `${dateLabel} ${timeLabel}`,
+    label
   };
 }
 

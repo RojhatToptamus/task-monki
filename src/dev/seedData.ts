@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
+  AgentInteractionRequestPayload,
   AgentProtocolMessageReference,
   AgentRunMode,
   BranchPublicationStatus,
@@ -26,6 +27,7 @@ import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
 import { git } from '../core/git/gitCli';
 import type { TaskAgentRuntimeAccess } from '../core/agent/AgentRuntimeStore';
+import { buildInteractionPolicy } from '../core/agent/AgentInteractionPolicy';
 import { SqliteAgentRuntimeStore } from '../core/storage/SqliteAgentRuntimeStore';
 import { SqliteTaskStore } from '../core/storage/SqliteTaskStore';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
@@ -1565,6 +1567,8 @@ async function seedScenario(
       return { task: (await createAgentScenario(ctx, definition, 'running')).task };
     case 'agent-awaiting-approval':
       return { task: (await createAgentScenario(ctx, definition, 'approval')).task };
+    case 'agent-awaiting-approval-warning':
+      return { task: (await createAgentScenario(ctx, definition, 'approval-warning')).task };
     case 'agent-awaiting-user-input':
       return { task: (await createAgentScenario(ctx, definition, 'user-input')).task };
     case 'agent-interrupted':
@@ -1583,6 +1587,7 @@ async function seedScenario(
     case 'review-running':
     case 'review-passed':
     case 'review-needs-changes':
+    case 'review-questions':
     case 'review-inconclusive':
     case 'review-failed':
     case 'review-canceled':
@@ -1787,6 +1792,7 @@ async function createAgentScenario(
   variant:
     | 'running'
     | 'approval'
+    | 'approval-warning'
     | 'user-input'
     | 'interrupted'
     | 'failed'
@@ -1801,9 +1807,20 @@ async function createAgentScenario(
     await seedActiveRunProgress(ctx, run);
     return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, run.id) };
   }
-  if (variant === 'approval' || variant === 'user-input' || variant === 'interaction-stale') {
-    const request = await createInteraction(ctx, run, variant === 'user-input' ? 'USER_INPUT' : 'COMMAND_APPROVAL');
-    if (variant === 'approval' || variant === 'user-input') {
+  if (
+    variant === 'approval' ||
+    variant === 'approval-warning' ||
+    variant === 'user-input' ||
+    variant === 'interaction-stale'
+  ) {
+    const request = await createInteraction(
+      ctx,
+      run,
+      variant === 'user-input' ? 'USER_INPUT' : 'COMMAND_APPROVAL',
+      // The main checkout is outside the task worktree, which policy flags.
+      variant === 'approval-warning' ? { commandCwd: ctx.repositoryPath } : {}
+    );
+    if (variant !== 'interaction-stale') {
       await seedActiveRunProgress(ctx, await requireRun(ctx, run.id), {
         steps: [
           { step: 'Prepare interaction request', status: 'COMPLETED' },
@@ -2066,6 +2083,10 @@ async function createReviewScenario(
     return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, review.id) };
   }
 
+  if (definition.slug === 'review-questions') {
+    return createReviewQuestionsScenario(ctx, state);
+  }
+
   const result = reviewResultFor(definition.slug);
   const finalMessage =
     definition.slug === 'review-needs-changes'
@@ -2091,6 +2112,106 @@ async function createReviewScenario(
   }
 
   return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, review.id) };
+}
+
+const SEED_RATE_LIMIT_SOURCE = [
+  "import type { RequestHandler } from 'express';",
+  "import { fresh, refill, msUntilNextToken, type Limits } from './tokens';",
+  '',
+  'const buckets = new Map<string, ReturnType<typeof fresh>>();',
+  '',
+  'export function rateLimit(options: Limits): RequestHandler {',
+  '  return (req, res, next) => {',
+  "    const key = req.header('x-api-key');",
+  '    if (!key) return next();',
+  '    const now = Date.now();',
+  '    const bucket = buckets.get(key) ?? fresh(options, now);',
+  '    const updated = refill(bucket, options, now);',
+  '    buckets.set(key, updated);',
+  '    if (updated.tokens >= 1) {',
+  '      updated.tokens -= 1;',
+  '      return next();',
+  '    }',
+  '    res.status(429);',
+  "    res.setHeader('Retry-After', String(msUntilNextToken(updated, options)));",
+  "    res.json({ error: 'rate_limited' });",
+  '  };',
+  '}',
+  ''
+].join('\n');
+
+/**
+ * A review whose findings sit on real diff lines, with one question answered:
+ * the reviewer withdrew a finding through its revision block, and the person
+ * dismissed another with a note.
+ */
+async function createReviewQuestionsScenario(ctx: SeedContext, state: SeededTaskState): Promise<SeededTaskState> {
+  await writeWorktreeFile(state.worktree, 'src/middleware/rateLimit.ts', SEED_RATE_LIMIT_SOURCE);
+  const gitSnapshot = await captureGitSnapshot(ctx, state.worktree);
+  const review = await createRun(ctx, { ...state, gitSnapshot }, 'REVIEW', 'Review review-questions.', {
+    role: 'REVIEW',
+    continuedFromRunId: state.run?.id,
+    beforeGitSnapshotId: gitSnapshot.id
+  });
+  const result: AgentReviewResult = {
+    schemaVersion: 'agent-review/v1',
+    verdict: 'NEEDS_CHANGES',
+    summary: 'The limiter keeps its buckets in process memory, so replicas each allow the full rate.',
+    findings: [
+      {
+        id: 'limiter-per-process', severity: 'MAJOR', title: 'Limiter state is per process',
+        explanation: 'Buckets live in process memory, so each of the four API replicas allows its own 60 requests a minute.',
+        path: 'src/middleware/rateLimit.ts', line: 11, endLine: 13,
+        recommendation: 'Keep buckets in the shared Redis client with a one-window expiry.'
+      },
+      {
+        id: 'retry-after-ms', severity: 'MINOR', title: 'Retry-After is in milliseconds',
+        explanation: 'The header expects seconds; msUntilNextToken looks like it returns milliseconds.',
+        path: 'src/middleware/rateLimit.ts', line: 19
+      },
+      {
+        id: 'missing-key-test', severity: 'MINOR', title: 'No test for a missing API key',
+        explanation: 'Nothing checks that a request without a key passes through.',
+        path: 'src/middleware/rateLimit.ts', line: 9
+      }
+    ]
+  };
+  await completeRun(ctx, review, result.summary, gitSnapshot.id, { agentReviewResult: result });
+
+  const question = await createRun(ctx, { ...state, gitSnapshot }, 'REVIEW_QUESTION', 'Seeded reviewer question.', {
+    role: 'REVIEW',
+    continuedFromRunId: review.id
+  });
+  const asked = new Date().toISOString();
+  await ctx.store.updateTaskInstructions(state.task.id, (records) => {
+    records.push({
+      id: randomUUID(), taskId: state.task.id, iterationId: state.iteration.id, worktreeId: state.worktree.id,
+      sourceRunId: review.id, sessionId: question.sessionId, order: records.length + 1,
+      text: 'msUntilNextToken already returns seconds; it divides by 1000.',
+      mode: 'FOLLOW_UP', status: 'SUBMITTED', role: 'REVIEW', reviewRunId: review.id, findingId: 'retry-after-ms',
+      runId: question.id, createdAt: asked, updatedAt: asked
+    });
+  });
+  const answer = [
+    "You're right. `msUntilNextToken` in `src/middleware/tokens.ts` divides by 1000 before returning, so the header is already in seconds. I withdrew the finding.",
+    '',
+    '```task-monki-revisions',
+    '[{ "finding": "retry-after-ms", "action": "withdraw", "reason": "msUntilNextToken returns seconds." }]',
+    '```'
+  ].join('\n');
+  await seedAgentMessage(ctx, question, answer, 'reviewer-answer');
+  const decided = new Date().toISOString();
+  const decisions = await ctx.store.recordReviewFindingDecisions(state.task.id, () => [
+    { id: randomUUID(), reviewRunId: review.id, findingId: 'retry-after-ms', kind: 'WITHDRAW', actor: 'REVIEWER',
+      reason: 'msUntilNextToken returns seconds.', questionRunId: question.id, createdAt: decided },
+    { id: randomUUID(), reviewRunId: review.id, findingId: 'missing-key-test', kind: 'DISMISS', actor: 'USER',
+      note: 'Covered by the auth tests', createdAt: decided }
+  ]);
+  await completeRun(ctx, question, answer, undefined, {
+    mode: 'REVIEW_QUESTION',
+    reviewerRevisions: { status: 'APPLIED', decisionIds: decisions.filter((decision) => decision.actor === 'REVIEWER').map((decision) => decision.id) }
+  });
+  return { ...state, gitSnapshot, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, review.id) };
 }
 
 async function createNoPrScenario(
@@ -2455,10 +2576,63 @@ async function completeRun(
 async function createInteraction(
   ctx: SeedContext,
   run: RunRecord,
-  type: InteractionRequestType
+  type: InteractionRequestType,
+  options: { commandCwd?: string } = {}
 ): Promise<InteractionRequestRecord> {
   const requestRawMessage = await rawMessage(ctx, 'INBOUND', { type, runId: run.id });
   const providerRequestId = `seed-request-${++ctx.protocolCounter}`;
+  const session = await ctx.taskRuntime.getAgentSession(run.sessionId);
+  if (!session) {
+    throw new Error(`Seed run ${run.id} has no agent session.`);
+  }
+  const request: AgentInteractionRequestPayload =
+    type === 'USER_INPUT'
+      ? {
+        questions: [
+          {
+            id: 'seed_choice',
+            header: 'Choice',
+            question: 'Choose how the seeded task should proceed.',
+            isOther: true,
+            isSecret: false,
+            options: [
+              { label: 'Proceed', description: 'Continue the seeded flow.' },
+              { label: 'Pause', description: 'Leave the seeded flow paused.' }
+            ]
+          },
+          {
+            id: 'seed_checks',
+            header: 'Checks',
+            question: 'Which checks should run before the agent hands this task back for review?',
+            isOther: true,
+            isSecret: false,
+            allowsMultiple: true,
+            options: [
+              { label: 'Focused tests', description: 'Check the affected behavior.' },
+              { label: 'Desktop walkthrough', description: 'Exercise keyboard navigation, long answers, and recovery in the running desktop app.' }
+            ]
+          },
+          {
+            id: 'seed_detail',
+            header: 'Details',
+            question: 'What should the agent preserve while it continues?',
+            isOther: false,
+            isSecret: false
+          }
+        ],
+        autoResolutionMs: 120_000
+        }
+      : {
+        startedAtMs: Date.now(),
+        approvalId: `seed-approval-${ctx.protocolCounter}`,
+        reason: 'Seeded command approval.',
+        command: 'npm test',
+        cwd: options.commandCwd ?? session.worktreePath,
+        commandActions: [{ type: 'unknown', command: 'npm test' }]
+        };
+  // Allowed actions and warnings come from the policy a live provider request
+  // passes through, so a seeded request can never offer what production cannot.
+  const policy = buildInteractionPolicy({ type, request, session, run });
   const interaction = await ctx.taskRuntime.createInteractionRequest(
     {
       runtimeId: run.runtimeId,
@@ -2470,56 +2644,9 @@ async function createInteraction(
       sessionId: run.sessionId,
       providerTurnId: run.providerTurnId,
       type,
-      request:
-        type === 'USER_INPUT'
-          ? {
-            questions: [
-              {
-                id: 'seed_choice',
-                header: 'Choice',
-                question: 'Choose how the seeded task should proceed.',
-                isOther: true,
-                isSecret: false,
-                options: [
-                  { label: 'Proceed', description: 'Continue the seeded flow.' },
-                  { label: 'Pause', description: 'Leave the seeded flow paused.' }
-                ]
-              },
-              {
-                id: 'seed_checks',
-                header: 'Checks',
-                question: 'Which checks should run before the agent hands this task back for review?',
-                isOther: true,
-                isSecret: false,
-                allowsMultiple: true,
-                options: [
-                  { label: 'Focused tests', description: 'Check the affected behavior.' },
-                  { label: 'Desktop walkthrough', description: 'Exercise keyboard navigation, long answers, and recovery in the running desktop app.' }
-                ]
-              },
-              {
-                id: 'seed_detail',
-                header: 'Details',
-                question: 'What should the agent preserve while it continues?',
-                isOther: false,
-                isSecret: false
-              }
-            ],
-            autoResolutionMs: 120_000
-            }
-          : {
-            startedAtMs: Date.now(),
-            approvalId: `seed-approval-${ctx.protocolCounter}`,
-            reason: 'Seeded command approval.',
-            command: 'npm test',
-            cwd: ctx.repositoryPath,
-            commandActions: [{ type: 'unknown', command: 'npm test' }]
-            },
-      allowedActions:
-        type === 'USER_INPUT'
-          ? ['ANSWER']
-          : ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL'],
-      policyWarnings: type === 'USER_INPUT' ? [] : ['Seeded approval warning.'],
+      request,
+      allowedActions: policy.allowedActions,
+      policyWarnings: policy.warnings,
       requestRawMessage
     },
     `seed-interaction:${providerRequestId}`

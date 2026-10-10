@@ -1,8 +1,11 @@
 import { validateAgentProfile } from '../../shared/agentProfiles';
 import {
+  AGENT_REVIEW_FINDING_SEVERITIES,
   ARTIFACT_KINDS,
   ATTACHMENT_MAX_COUNT,
   DOMAIN_EVENT_TYPES,
+  REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_FINDING_TEXT_MAX_LENGTH,
   TASK_STORE_SCHEMA_VERSION,
   isTaskCreationToken
 } from '../../shared/contracts';
@@ -19,7 +22,7 @@ const COMPLETION_POLICIES = [
   'ARTIFACT_ACCEPTANCE', 'LOCAL_ACCEPTANCE', 'MERGED', 'MERGED_AND_VERIFIED', 'MANUAL'
 ] as const;
 const RUN_MODES = [
-  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'DESIGN',
+  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'REVIEW_QUESTION', 'SIDE_QUESTION', 'DESIGN',
   'COMPACTION', 'SUBAGENT'
 ] as const;
 const RUN_STATUSES = [
@@ -32,7 +35,7 @@ const RECOVERY_STATES = [
 const SERVER_STATUSES = [
   'STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'
 ] as const;
-const SESSION_ROLES = ['PRIMARY', 'ALTERNATIVE', 'REVIEW', 'SUBAGENT'] as const;
+const SESSION_ROLES = ['PRIMARY', 'ALTERNATIVE', 'REVIEW', 'SIDE', 'SUBAGENT'] as const;
 const SESSION_STATUSES = [
   'NOT_MATERIALIZED', 'NOT_LOADED', 'IDLE', 'ACTIVE', 'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT', 'SYSTEM_ERROR', 'ARCHIVED', 'DELETED', 'UNKNOWN'
@@ -191,6 +194,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     enumField(instruction, 'mode', ['QUEUE', 'FOLLOW_UP', 'RETRY', 'STEER'], 'taskInstructions');
     enumField(instruction, 'status', ['QUEUED', 'HELD', 'SENDING', 'SUBMITTED', 'FAILED', 'UNCERTAIN'], 'taskInstructions');
     optionalStrings(instruction, 'taskInstructions', ['detail']);
+    validateTaskInstructionConversation(instruction);
     timestamp(instruction, 'createdAt', 'taskInstructions');
     timestamp(instruction, 'updatedAt', 'taskInstructions');
     // A Design's messages belong only to its Preview conversation.
@@ -1090,6 +1094,9 @@ function validateEvents(state: StoreState): void {
     enumField(event, 'source', DOMAIN_EVENT_SOURCES, 'events');
     timestamp(event, 'occurredAt', 'events');
     timestamp(event, 'receivedAt', 'events');
+    if (event.type === 'AGENT_REVIEW_FINDING_DECIDED') {
+      validateReviewFindingDecision(persistedRecord(event.payload, 'events').decision, 'events');
+    }
   });
 }
 
@@ -1245,6 +1252,15 @@ function projection(value: unknown): void {
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
     if (review.result !== undefined) reviewResult(review.result);
+    if (review.findingDecisions !== undefined) {
+      if (
+        !Array.isArray(review.findingDecisions) ||
+        review.findingDecisions.length > REVIEW_FINDING_DECISION_LIMIT
+      ) invalid('tasks.projection');
+      for (const decision of review.findingDecisions) {
+        validateReviewFindingDecision(decision, 'tasks.projection');
+      }
+    }
   }
 }
 
@@ -1259,18 +1275,79 @@ function reviewResult(value: unknown): void {
   );
   stringField(record, 'summary', 'tasks.projection', true);
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
-  for (const finding of record.findings) {
-    const item = persistedRecord(finding, 'tasks.projection');
-    strings(item, 'tasks.projection', ['id', 'title', 'explanation']);
-    enumField(
-      item,
-      'severity',
-      ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'] as const,
-      'tasks.projection'
-    );
-    optionalStrings(item, 'tasks.projection', ['path', 'recommendation']);
-    optionalInteger(item, 'line', 'tasks.projection', 1);
-    optionalInteger(item, 'endLine', 'tasks.projection', 1);
+  for (const finding of record.findings) reviewFinding(finding, 'tasks.projection');
+}
+
+function reviewFinding(value: unknown, collection: string): Record<string, unknown> {
+  const item = persistedRecord(value, collection);
+  strings(item, collection, ['id', 'title', 'explanation']);
+  enumField(item, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
+  optionalStrings(item, collection, ['path', 'recommendation']);
+  optionalInteger(item, 'line', collection, 1);
+  optionalInteger(item, 'endLine', collection, 1);
+  return item;
+}
+
+/**
+ * A person's decision carries only its dismissal note; a reviewer's revision
+ * carries its reason, its question run, and exactly the fields its kind needs.
+ */
+export function validateReviewFindingDecision(value: unknown, collection: string): void {
+  const decision = persistedRecord(value, collection);
+  uuidFields(decision, collection, ['id', 'reviewRunId']);
+  stringField(decision, 'findingId', collection);
+  enumField(decision, 'actor', ['USER', 'REVIEWER'] as const, collection);
+  timestamp(decision, 'createdAt', collection);
+  for (const key of ['note', 'reason'] as const) {
+    if (decision[key] === undefined) continue;
+    stringField(decision, key, collection);
+    if ((decision[key] as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
+  }
+  const has = (key: string) => decision[key] !== undefined;
+  if (decision.actor === 'USER') {
+    enumField(decision, 'kind', ['DISMISS', 'RESTORE'] as const, collection);
+    if (
+      has('reason') || has('severity') || has('finding') || has('questionRunId') ||
+      (decision.kind === 'RESTORE' && has('note'))
+    ) invalid(collection);
+    return;
+  }
+  enumField(decision, 'kind', ['WITHDRAW', 'CHANGE_SEVERITY', 'ADD'] as const, collection);
+  uuidField(decision, 'questionRunId', collection);
+  if (!has('reason') || has('note')) invalid(collection);
+  if ((decision.kind === 'CHANGE_SEVERITY') !== has('severity')) invalid(collection);
+  if (has('severity')) enumField(decision, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
+  if ((decision.kind === 'ADD') !== has('finding')) invalid(collection);
+  if (has('finding') && reviewFinding(decision.finding, collection).id !== decision.findingId) {
+    invalid(collection);
+  }
+}
+
+/**
+ * Only a reviewer question names its review and, optionally, its finding. Only a side
+ * question names its thread and, when it read one, its worktree snapshot.
+ */
+export function validateTaskInstructionConversation(instruction: Record<string, unknown>): void {
+  optionalEnumField(instruction, 'role', ['PREVIEW', 'REVIEW', 'SIDE'] as const, 'taskInstructions');
+  if (instruction.role === 'REVIEW') {
+    uuidField(instruction, 'reviewRunId', 'taskInstructions');
+    optionalStrings(instruction, 'taskInstructions', ['findingId']);
+  } else if (instruction.reviewRunId !== undefined || instruction.findingId !== undefined) {
+    invalid('taskInstructions');
+  }
+  if (instruction.role === 'SIDE') {
+    uuidField(instruction, 'threadId', 'taskInstructions');
+    optionalTimestamp(instruction, 'snapshotTakenAt', 'taskInstructions');
+    optionalInteger(instruction, 'snapshotOmittedFileCount', 'taskInstructions', 1);
+    if (instruction.snapshotOmittedFileCount !== undefined && instruction.snapshotTakenAt === undefined) {
+      invalid('taskInstructions');
+    }
+  } else if (
+    instruction.threadId !== undefined ||
+    instruction.snapshotTakenAt !== undefined ||
+    instruction.snapshotOmittedFileCount !== undefined
+  ) {
+    invalid('taskInstructions');
   }
 }
 

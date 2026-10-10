@@ -1019,6 +1019,54 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/review/decide-finding') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.decideReviewFinding((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/review/ask') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.askReviewer((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/review/stop-question') {
+        await options.service.stopReviewerQuestion((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/ask') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.askSideQuestion((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/stop') {
+        await options.service.stopSideQuestion((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/end-thread') {
+        await options.service.endSideThread((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/agent/goal/sync') {
         sendJson(
           response,

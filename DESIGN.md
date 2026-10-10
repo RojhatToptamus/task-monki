@@ -50,6 +50,11 @@ follow this document and flag the divergence rather than propagating it.
 8. **Native desktop, not web page.** No hero sections, no marketing gradients, no
    full-width centred columns, no bouncy easing. The reference points are Linear,
    Codex and macOS system apps.
+9. **Facts, not instructions.** A title states what is true ("Ready for review",
+   "Codex wants to run a command"); a button says what it does. Never a sentence
+   that restates the buttons beside it, never a "state — do this" headline, never
+   metadata strung together with middle dots. A sentence earns its place only when
+   it changes the decision in front of the user.
 
 ---
 
@@ -102,14 +107,21 @@ announces itself with a border.
 
 | Token | Role | Position |
 |---|---|---|
-| `--ground` | window and sidebar rail; the plane everything sits on | bottom |
-| `--panel` | secondary rail, inspector, list column | |
-| `--surface` | the content sheet | |
+| `--ground` | window frame: titlebar and icon rail; the plane everything sits on | bottom |
+| `--panel` | rail inside a sheet: the Review index, the Settings section list, folded code | |
+| `--surface` | the content sheet, side panels, modals | |
 | `--well` | code and read-only payload blocks | recessed from the sheet |
-| `--field` | inputs, composers | control plane |
+| `--field` | inputs, composers, secondary buttons | control plane |
 | `--sel` | selected row, active tab | |
-| `--card` | a raised unit on the sheet | |
-| `--overlay` | menus, popovers, modals | top |
+| `--card` | a raised unit on the sheet; menus and popovers | |
+| `--overlay` | tooltips and toasts only | top |
+
+**A floating layer is lifted by its edge and shadow, not by a brighter fill.**
+A modal is the surface plane with the `--edge` ring, `--shadow-modal` and the
+scrim behind it; a menu is the card plane with the `--edge` ring and
+`--shadow-pop`. Painting a modal with `--overlay` makes the largest layer the
+brightest object on screen, which is the opposite of focus. Overlay stays for
+the two smallest floating things, tooltips and toasts.
 
 Rules, all measured in **CIE L*** — not in mix fractions, which collapse to
 nothing near black:
@@ -263,7 +275,9 @@ planes.
   2. `:focus-visible` — keyboard traversal — adds the 3px `--focus-ring` halo,
      where the job is to *find* the caret rather than confirm it. This is the
      only place the accent hue appears in a focus state, it sits **outside** the
-     control, and a pointer click must never produce it.
+     control, and a pointer click must never produce it. Like a line, the halo
+     is accent at an alpha solved per theme and mode to clear 3:1 over every
+     plane (§8); an accent seed that cannot carry it fails the build.
 
   **The accent hue is not a focus cue on a resting control.** A coloured rim
   around whatever the caret happens to be in reads as an alert, not as focus: it
@@ -332,7 +346,7 @@ pure functions — the ladder, the ink solver and the measurement pass — so th
 be read and tested on their own. Together they emit two generated files:
 `themes.css` (what the app loads) and `theme-tokens.json` (the same data plus
 seeds, floors, ladder offsets and measurements, for tooling).
-**16 themes × 2 modes × 68 tokens**, every set complete.
+**16 themes × 2 modes × 63 tokens**, every set complete.
 
 Both files live in the repository. A derivation that exists only on one machine
 makes the committed output the de-facto rule, and the output is the one artefact
@@ -365,12 +379,14 @@ Rules that follow:
   set · a ladder that is not monotonic in either mode · a `--field` closer than
   2.5 L* to a host plane · a state step larger than the smallest structural step ·
   any ink under its floor, including a status ink on its own tint over `--card`,
-  `--well` and `--overlay` · an accent and waiting hue closer than 24° and 8 L*.
+  `--well` and `--overlay` · an accent and waiting hue closer than 24° and 8 L* ·
+  a `--focus-ring` under 3:1 over any plane.
   These are precisely the things review cannot see.
 
-Measured worst case across all 32 sets: `--text` 11.40:1, `--text-soft` 6.02,
-`--muted` and `--placeholder` 4.71, status inks 4.63 (including on their own
-tints), `--text-disabled` 3.66, `--faint`/`--idle` 3.13, `--id-*` 3.18.
+Measured worst case across all 32 sets: `--text` 9.63:1, `--text-soft` 5.48,
+`--muted` and `--placeholder` 4.68, status inks 4.68 (including on their own
+tints), `--text-disabled` 3.63, `--faint` 3.13, `--idle` 3.12, `--id-*` 3.52,
+`--focus-ring` 3.00. `theme-tokens.json` records the current values.
 
 ### 2.10 Necessary distinction vs. noise
 
@@ -418,22 +434,28 @@ Interface type is one sans; machine values are one mono. No third family.
 
 | Role | Token | Size / weight |
 |---|---|---|
-| Page title | `--t-title` | 24 / 600 · `-0.02em` |
+| Page title | `--t-title` | 22 / 600 · `-0.02em` |
 | Section heading | `--t-heading` | 15 / 600 |
 | Panel title, control label | `--t-label` | 13 / 600 |
 | Body, prose | `--t-body` | 13 / 400 |
 | Secondary, helper | `--t-help` | 12 / 400 `--text-soft` |
 | Metadata, counts | `--t-meta` | 11.5 / 400 `--muted` |
-| Group label | `--t-group` | 9.5 / 600 caps · `0.10em` `--faint` |
+| Group label | `--t-group` | 12 / 500 `--muted` |
+
+Every label is sentence case. Nothing is set in capitals with added tracking: an
+eyebrow in caps reads as a web template, and a group label is quiet because it is
+small and `--muted`, not because it shouts.
 
 **Seven sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
 and never a literal. A size that is not on this list does not exist: the reason
 to name them is that an unnamed scale is not a scale, and the renderer had
 drifted to 22 distinct sizes against these seven.
 
-**Mono is for machine values only** — paths, hashes, branches, models, counts,
-times, payloads, token names. It never sets prose, labels or buttons. This split
-is what makes a scan legible: prose is the sentence, mono is the fact.
+**Mono is for strings the user copies or compares character for character** —
+branches, commit hashes, paths, commands, payloads, token names. Model names,
+counts, dates, durations and setting values ("Restricted", "Low") are set in the
+interface face: a column of monospace values reads as a terminal, not as an app.
+Mono never sets prose, labels or buttons.
 
 Never use size alone to build hierarchy where weight and colour will do it.
 Never centre a paragraph. `text-wrap: pretty` on prose. Truncate with ellipsis
@@ -451,8 +473,15 @@ proportionally. `stroke="currentColor"`, `fill="none"` — an icon inherits ink
 from its row so it dims with `--muted` automatically and needs no colour of its
 own. Never a coloured icon where a status word or dot would do.
 
+**One agent mark.** Every agent in the app — the implementation agent's side
+question, the reviewer, the Preview agent, prompt refinement — is marked with
+`AgentMark` (Lucide `Sparkles`) and nothing else. Agents never get a chat
+bubble, a robot or a comment icon; the same mark everywhere is how a user
+learns "an agent answers here".
+
 Icons are decoration next to a label and information when alone: an icon-only
-control carries an `aria-label` and a tooltip. Optically centre against text
+control carries an `aria-label` and a `Tooltip`; a native `title` is not a
+tooltip. Optically centre against text
 rather than aligning boxes, and keep 8–9px between icon and label.
 
 ---
@@ -475,15 +504,24 @@ meaningful grouping or boundary.
 | Between cards | 10–12 |
 | Section separation | 24–32 |
 
-Radii are tokens, not literals: `--r-xs` 6 chips and dots · `--r-sm` 8 buttons,
-rows, small fields · `--r` 10 and `--r-md` 12 cards, composers, popovers ·
-`--r-lg` 14 and `--r-xl` 16 the shell and full-height sheets · `--r-pill` for
-dots and pills. Concentric things step inward by 2–3px; never nest equal radii.
+Radii are tokens, not literals, and each step has one job:
 
-Control heights are tokens too: `--h-control` 34 decision surface · `--h-toolbar`
-30 toolbar · `--h-compact` 26 compact and inline · `--h-icon` 28 icon button.
-Never mix two heights in one row. Hit targets never below 28px on desktop, 44px
-on touch.
+| Token | Radius | Used for |
+|---|---|---|
+| `--r-2xs` | 4 | keyboard keys, tiny inline marks |
+| `--r-xs` | 6 | badges, menu items, list and index rows |
+| `--r-sm` | 8 | buttons, fields, icon buttons, rail items |
+| `--r` | 10 | menus, finding threads, comments |
+| `--r-md` | 12 | sheets, side panels, cards, composers, tables |
+| `--r-lg` | 14 | modals |
+| `--r-pill` | 999 | counts and dots |
+
+Concentric things step inward; never nest equal radii.
+
+Control heights are tokens too: `--h-control` 32 decision surface ·
+`--h-toolbar` 28 toolbar and compact buttons · `--h-compact` 24 inline ·
+`--h-icon` 28 icon button. Never mix two heights in one row. Hit targets never
+below 24px on desktop, 44px on touch.
 
 Writing `border-radius: 9px` or `height: 36px` is the same class of error as
 writing a hex colour: it is a value the system already has an answer for.
@@ -494,19 +532,23 @@ These are settled. Use the value, don't re-derive it.
 
 | | |
 |---|---|
-| Sidebar rail | 56 collapsed · 224 expanded |
+| Titlebar | 44 tall (`TITLEBAR_HEIGHT`), shares the ground with the rail |
+| Rail | 56 wide, icon-only, permanent; 36px items |
+| Content sheet | inset 8px from the window's right and bottom edges, `--r-md` |
 | Secondary list column | 280 min · 360 default |
 | Toolbar / panel header | 44 tall |
 | Page gutter | 24 at minimum width · 32 wide |
 | Reading column (settings, prose) | 880 max; tables and lists go full width |
 | List row | 26 compact · 30 default · 36 two-line |
-| Button | 34/30/26 tall, 12–15 horizontal pad, 64 min width |
+| Button | 32 tall (28 with `button--sm`), 12 horizontal pad, 64 min width |
 | Icon button | 28 square (26 compact), 16 glyph |
-| Single-line field | 34 tall, 12 horizontal pad |
+| Single-line field | 32 tall, 12 horizontal pad |
 | Textarea / composer | 88 min body, 96 min total, 10–12 pad |
-| Popover / menu | 220–280 wide, 6 pad, 30 rows |
-| Modal | 440 confirm · 560 form · 720 payload |
-| Drawer | 380 narrow · 480 default · 640 wide, full height |
+| Popover / menu | 220–280 wide, 4 pad, 28 rows |
+| Modal | 440 confirm · 560 form · 640 creation · 720 payload |
+| Side panel | 380 docked, resizable 320–560; floats over the content below a 560px content floor |
+| Settings section list | 212 |
+| Review index | 248 (208 below 1100) |
 
 Widths are the design intent, not a hard cap: a panel may be resized by the user,
 but it opens at these values and never below the minimum.
@@ -523,11 +565,15 @@ to Task Monki's tokens and behavior. Adopting UI primitives does not require
 replacing the runtime.
 
 **Buttons — four families, no fifth.** Primary (`--primary` fill, `--on-primary`
-ink; one per surface), secondary (`--field` fill), ghost (transparent, `--hover`
-on hover), destructive (soft tint, never a filled red block). Primary and
-secondary share geometry so a pair aligns. Choose button emphasis by action
-priority, not by whether the button contains an icon or a label. Icon-only buttons use a
-16px glyph and always carry an `aria-label`.
+ink; one per surface), secondary (`--field` fill with the `--field-edge` rim),
+ghost (transparent, `--hover` on hover; the compact toolbar family, 28 tall),
+destructive (soft tint, never a filled red block). Labels are 13/500. Primary,
+secondary and destructive share the decision geometry so a pair aligns;
+`button--sm` puts any of them on the toolbar height. Choose button emphasis by
+action priority, not by whether the button contains an icon or a label.
+Icon-only buttons (`tm-iconbtn`, 28 square) use a 16px glyph and always carry an
+`aria-label` and a `Tooltip`. Every button settles to `scale(0.97)` while
+pressed (§9).
 
 Primary and secondary are **one geometry with different fills** — same height,
 same padding, same radius, same minimum width — so a pair aligns to the pixel. A
@@ -565,38 +611,159 @@ container inside it. Separate mode selection from actions. Make delivery timing
 and held states clear where the user sends or edits a message. Preserve the draft
 and selected files through supported navigation, failure, and restart paths.
 
+**Badges.** A state word on a 12–14% tint of its tone (`status-pill`, the
+`Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, no border, no dot. A
+spinner leads it only while work is in flight. One size everywhere.
+
+**Tables and comparable lists.** One container (`tm-table`, and the Inbox list):
+the `--edge-raised` ring drawn over the rows, `--r-md`, no fill of its own,
+`--hair` dividers, a 36px header in `--muted` `--t-help`, 48px rows that take
+`--hover` on hover, row actions in a menu revealed on hover and focus. Settings
+lists use the same container; a settings row is never a card.
+
+**Tooltips.** The `Tooltip` component (Radix) on `--overlay` with the `--edge`
+ring: 500ms before the first, instant between neighbours, the name and an
+optional shortcut, never information the decision needs.
+
 **Segmented vs menu.** Segmented for 2–4 options whose labels fit on one line at
 the narrowest width the container reaches; a dropdown for anything longer or
-open-ended. A wrapping segmented control is a bug.
+open-ended. A wrapping segmented control is a bug. There is one segmented
+control (`.segmented`); a list column's status filter (Designs, Discourse) adds
+`.segmented--fill` so its options share the column's width.
 
-**Menus and popovers.** `--overlay` + `--shadow-pop`, r12, 6px pad, 30px rows,
+**Selects.** A native `<select>` draws the same chevron as the custom pickers —
+two 1.5px `--muted` strokes, 10px from the right edge — from one rule in
+`base-components.css`. A rule that colours a select sets `background-color`,
+never the `background` shorthand, which would erase the chevron.
+
+**Menus and popovers.** `ActionMenu` (Radix): `--card` + `--edge` ring +
+`--shadow-pop`, `--r`, 4px pad, 28px rows with `--r-xs` items in `--text`,
 group labels per §3. Destructive item last, separated by a `--hair`. Escape
-closes, arrow keys move, focus returns to the trigger.
+closes, arrow keys move, focus returns to the trigger. A new menu uses
+`ActionMenu`; hand-built menus are legacy.
 
 **Settings row.** A setting is a row, not a card: label left, control right,
-optional one-line description under the label. Rows are separated by `--hair`
-inside one panel. Never wrap each setting in its own card.
+optional one-line description under the label (`SettingsRow`). Rows are
+separated by `--hair` inside one `tm-settings__list`, the table container
+with no fill of its own. The label is `--t-label`/600 and the description
+`--t-help` `--muted` on every pane; controls in a row share `--h-control`, so
+a button beside a select is a full-height button. Never wrap each setting in
+its own card. A pane that is unavailable says so in one muted line where its
+rows would be.
 
-**Task collection cards — fixed content order.** Machine context and status on
-the first line (context left in mono `--muted`, status pill right), then the title at 12–12.5/600
-over at most two lines, then a `--hair`, then a metadata footer in mono `--faint`.
-Actions live in the footer or a hover-revealed ghost button — never a row of
-buttons in the header. No card inside a card. If the whole card is clickable, the
-whole card carries the hover fill and there is no separate "Open" link.
+**Task collection cards — fixed content order.** The top line holds the
+repository in `--muted` sans on the left, only when the view spans repositories,
+and the state badge on the right, only when it refines the lane (a Ready task
+in Backlog / Ready has none); then the title at `--t-body`/500, with the actions
+menu revealed on hover beside it; then, when there is one, a fork's lineage or
+the In review view's finding count as one quiet line; then the pull request:
+GitHub's icon for its state and its number, plus delivery progress only when the
+badge does not already say it, so "Checks failed" never sits beside "checks
+failing". No rule inside the card, no card inside a card. The whole card
+carries the hover fill and there is no separate "Open" link.
+
+**Inbox rows.** The Inbox is one list in the table container. Each row leads
+with a 28px tile: the glyph for the kind of decision (approval, question, retry,
+failure, checkout, Git, delivery, finish) on a tint of its tone; then the title
+with what it needs beneath it — the reason in its tone ink, then one recorded
+fact, the agent's question or the command; the repository when it
+distinguishes; the age; and, for a plain command approval only, its decisions
+in place. The whole row opens the task; there is no "Open task" button.
 
 Use a card when a unit has mixed content types (status + prose + metadata) and
 stands alone. Use a row when items are compared against each other. A list of
 cards is almost always a list of rows wearing costumes.
 
+**The Now panel.** A single sheet that asks the user for a step has exactly one
+raised element: the Now panel, at the top of the work column. It holds the step
+the subject needs now, and its owner follows the UI priority in
+`docs/PRODUCT_WORKFLOW.md` — a pending request, the checkout, recovery, running
+work, an unmerged pull request, finishing, setup, or how a closed subject ended.
+Each owner brings the controls it already has; the panel only decides which one
+leads, so the next step never moves between cards. When the board card's word
+for the task is the agent review asking for action, finishing holds the panel
+even while a pull request is open: the next step is the review's. A review asks
+for action only while a finding is open; once the user dismisses the last one,
+the pull request leads again. Its anatomy
+is fixed: a factual title, at most one line of facts or of quoted provider text,
+then the actions. The title is the board card's word for the task, unless that
+would only repeat the lifecycle stage. An owner with something more specific to
+say keeps its own words: "Codex wants to run a command", "Codex is working".
+While no pull request exists and finishing holds the panel, opening one is a
+finishing action here; otherwise PR Status offers it as a section, so it appears
+exactly once on the page. Marking done despite open evidence is the owner's
+override: never the filled primary, always last. Three actions sit side by
+side; past three, the first two stay and the rest — the overrides — move under
+a More menu, each keeping its disabled reason inline.
+
+Provider text is quoted, never set as Task Monki's own: under a title or caption
+that names the agent, with a 2px `--edge-raised` rule along its left edge.
+
+Everything else on the page is a flat section: a quiet label (`--t-help`/600,
+`--muted`), then content. Space separates sections; no rule runs under a label,
+no card, no fill. The panel's primary is the page's primary; actions in a
+section stay secondary. A disabled action keeps its place, and its reason is
+stated once beside the actions and tied with `aria-describedby` (a disabled
+button cannot take focus, so a tooltip alone never reaches the keyboard).
+
+**A task page reads in lifecycle order.** The work column is the story: the Now
+panel, the request (omitted when it only repeats the title), the result (what
+the agent reported, attributed, above the files Task Monki captured, or "No file
+changes"), the agent review once one exists, and the pull request. A fixed
+300px record column beside it holds Details (one label and value per row), the
+preview, and History: what happened, who recorded it and when, with each
+entry's evidence left to the full ledger in Debug. An empty section is never
+rendered: the Now panel offers what has not happened yet.
+
+**The Review tab.** Findings are read on the code. A 248px index on `--panel`
+lists files in diff order with each finding nested under its file (findings
+without a location under General); the diff shows each finding as a thread
+under the last line of its range, on `--card` with the `--edge-raised` ring and
+`--r`, its severity as a word in ink (blocker and major in `--blocked-ink`).
+Ask (the agent mark) and Dismiss sit on the thread's title line, revealed on
+hover and focus. Dismissing takes an optional one-line note and folds the
+thread to one line with Undo; a withdrawn finding folds with the reviewer's
+reason. The user can comment on any new-side line; comments sit on `--field`
+under the line. Files can be marked viewed and fold until their change
+changes. The bar on top states the review in one phrase, then the scope menu
+(All changes, Committed, Uncommitted, and Since the review once the review is
+stale), then the review action. While the review is current, a request bar at
+the foot says what will be sent ("2 findings and 1 comment"), takes a note, and
+holds Request changes, the tab's one primary. A stale review keeps its threads
+as earlier context, without Ask, Dismiss or the request bar. J/K move between
+files, N/P between findings, V marks the file viewed.
+
+**Side panels.** An assistant panel (Ask reviewer on Review, Side question on
+Agent) is its own sheet beside the task page, 380px by default and resizable
+from 320 to 560, toggled from the right end of the tab bar with the agent mark.
+It docks while the page keeps 808px (the Review index and a 560px diff) and
+floats over it below that, sliding in 8% with the drawer curve. Its head is
+48px: mark, name, the runtime that answers, close. Escape closes it and focus
+returns to the toggle. An empty panel says in one muted sentence what it is
+for; each answer it can act on carries that action under it ("Use in
+follow-up"). The Preview agent predates this and docks inside the Preview tab.
+
+A side question goes to the task's own runtime and model in a fresh read-only
+session, so the implementation keeps working; while it works, the question
+reads a snapshot taken when it was asked. Closing the panel ends the thread and
+removes the snapshot. Nothing reaches the main conversation unless the user
+uses an answer in a follow-up, which puts it in the composer under the question
+it answers.
+
 **Drawers, modals, sheets — pick by interruption cost.** A drawer for detail and
 editing alongside the list (right edge, full height, dismissed by Escape, a click
 outside, or the same control that opened it; the list stays live behind it and
-selection follows). A modal only when the app genuinely cannot proceed —
-confirmation of something destructive, or a short blocking form. A page for
-anything a user might link to, bookmark, or spend minutes in. Never stack two
-modals; never open a drawer from a modal. Drawer anatomy is fixed: 44 header with
-title left and close right, scrolling body, pinned footer holding the primary
-action bottom-right.
+selection follows). A modal when the app genuinely cannot proceed —
+confirmation of something destructive, a short blocking form — or for focused
+creation such as New task: 640 wide, anchored near the top so a changing height
+never moves its header, dismissed by Escape, its close button or a click
+outside, with the draft text kept. A page for anything a user might link to,
+bookmark, or spend minutes in. Never stack two
+modals; never open a drawer from a modal. A modal is the surface plane with the
+`--edge` ring and `--shadow-modal` over the scrim, `--r-lg`, and enters with
+the modal motion (§9). Its anatomy is a title, at most one paragraph, the
+content, and the actions; no icon tile beside the title, because the title
+already names the act. A character count appears only near the limit.
 
 **Destructive actions.** Prefer undo over confirm. Confirm only when the action
 is unrecoverable, and then name the object in the button ("Delete branch", not
@@ -621,7 +788,13 @@ single action that resolves it. No illustration, no second button.
   control shows the pending state on itself, not a global overlay, and stays
   disabled until it resolves.
 - **Autosave settings, submit forms.** A settings row applies on change with no
-  Save button. A form with interdependent fields submits explicitly.
+  Save button and no toast. A form with interdependent fields submits explicitly.
+- **Feedback lands where the action happened.** A sent message appears in the
+  conversation, Stop becomes "Stopping…", an answered request closes its card;
+  none of these also raises a toast. A success toast is for an outcome the user
+  cannot see from where they are — a commit or pull request created, a
+  repository added, a worktree restored, something archived — and an error
+  toast for a failure with no surface of its own.
 - **Selection survives** a refresh, a filter change, and a drawer opening; it is
   cleared only by the user. Scroll position is restored when returning to a list.
 - **Tooltips are for names and shortcuts**, delayed ~400ms, never for information
@@ -634,10 +807,37 @@ single action that resolves it. No illustration, no second button.
 
 ## 6. Status and progress
 
-- **In a collection, state is a word, not a mark.** A column of coloured dots is
-  unreadable; a column of words is scannable. Marks belong on a detail surface.
+- **In a collection, state is a word, never a bare mark.** A column of coloured
+  dots is unreadable; words are scannable. On task cards the word is a badge in
+  the card's top-right corner; in the Inbox it is the reason line beside the
+  tile; elsewhere it is ink. A spinner leads a word only while work is in
+  flight. Attention outranks motion: a task that needs an approval never spins.
+- **A checklist is read by its marks.** An agent's plan is the one collection
+  whose state is a mark, because every checklist reads that way: shapes, not
+  colours — a check for done, a dot for the current step, a ring for what is
+  left. A word appears only on the step where a run failed or stopped. The plan
+  never spins; the running command and the live working line carry the motion.
 - **One tone per unit, carried by one element.** Never tint the mark, the heading
-  and the border of the same card. A tinted pill is the usual carrier.
+  and the border of the same card. The badge or the status word carries it: the
+  waiting tone when the user owes a step, the blocked tone when something
+  failed, the accent while work runs, neutral otherwise.
+- **One state, one word.** Task cards, the task page and every Tasks view read
+  the same status function, so a state never has a second name on another
+  surface.
+- **The task page shows its lifecycle, not a pill.** Under the title, the board's
+  four lanes read as a track in fixed words — Ready › In progress › Review ›
+  Done — except where the task's phase is not its lane's stage: a backlog item
+  reads Backlog, a canceled or archived task reads Canceled or Archived. Past
+  stages are `--muted`, future ones `--faint`, and the task's stage is
+  `--text`/600 with a glyph only when it needs the user or has failed; the glyph
+  spins only while an agent run or review is actually working. Its status word
+  is announced to assistive technology and stated in words by the Now panel. The
+  track never repeats that word. The order is a decision the user owes, a broken checkout and
+  recovery (an interrupted run included), work in flight, verified local and
+  delivery evidence (a pull request's own progress among it), the agent review
+  gate, then the phase.
+  "Reviewing" means a review is running; once a pull request carries delivery,
+  an absent or passed agent review is not the task's state — the phase is.
 - Place current activity beside the work it describes. Distinguish execution
   status, provider-exposed reasoning, plans, and final results. Derive progress
   from observed state; never invent steps, percentages, or reasoning.
@@ -659,25 +859,37 @@ single action that resolves it. No illustration, no second button.
    pane or drawer. The list keeps its own scroll and selection.
 2. **Single sheet** — one subject, full remaining width, own header. For a task,
    a run, a document.
-3. **Settings** — 880 reading column of `--hair`-separated rows inside one panel
-   (§5, settings row).
+3. **Settings** — the sheet holds its own section list (212px, title on top)
+   beside an 880 reading column of tables and `--hair`-separated rows (§5).
 4. **Workspace** — a persistent working surface with its own toolbar and one
    focused artefact; side panels are collapsible and their state persists per
    user. Discourse and design review are this archetype: the conversation or
    artefact holds the centre at full height, context collapses, and nothing about
    the shell changes when you enter or leave.
 
-Every page has exactly one header: title at 22–24/600, one line of context under
-it in `--muted`, actions right-aligned on the title line. No breadcrumbs (the
+Every page has exactly one header: title at `--t-title`/600, at most one line of
+context under it in `--muted` (only when it says something the page does not),
+actions right-aligned on the title line. A collection's views are tabs under
+its title — the Tasks page shows All, Running, In review, Done, then saved
+views with their marker and a control that adds one. No breadcrumbs (the
 rail is the location), no duplicate title inside the body, no tab bar that
-repeats what the rail already says.
+repeats what the rail already says. A task's context line is its lifecycle track,
+then its repository and branch, each marked by an icon instead of a separator.
+Page tabs are words on the bar's baseline; the selected one carries a 2px
+`--text` underline, and a tab never carries a count.
 
 ### 7.2 Shell invariants
 
-- **The rail is permanent** and always `--ground`; because it never leaves,
-  focused modes need no "Exit" control and no breadcrumb.
-- **The sidebar is one surface at two widths** — icons collapsed, icons plus
-  labels expanded. Not two components.
+- **The frame is the ground.** The 44px titlebar (Back, Forward, New task) and the
+  56px rail share `--ground` with nothing between them, so they read as one
+  L-shaped frame. Every page is one sheet inset 8px from the window's right and
+  bottom edges, on `--surface` with `--r-md` corners and a `--hair` seam.
+- **The rail is permanent and icon-only:** Inbox, Tasks, Designs, Previews,
+  Discourse, then the update control and Settings at the foot. It never
+  expands; names are tooltips. A count appears only when it waits on the user —
+  a `--waiting-bg` pill with `--waiting-ink` — and every other count belongs to
+  the page it opens. Repositories are managed in Settings; New task opens on the
+  repository used last.
 - Give each workspace a clear scroll owner. Keep navigation and actions reachable
   without unnecessarily reducing the reading area. Menus and popovers must escape
   clipping containers and remain within the window.
@@ -687,12 +899,12 @@ repeats what the rail already says.
   only on hover, with a keyboard-reachable equivalent.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
   collapses to a toggle and the primary task keeps its size and order. Semantic
-  order never changes across widths. Nothing below the app's minimum width
-  (1024) may hide a primary action.
+  order never changes across widths. Nothing at the app's minimum window
+  (1100 × 720) may hide a primary action.
 - Content extremes are part of the design: test with a 120-character title, a
   4-digit count, an empty list, and 500 rows.
-- **Layer order** is fixed: content → pinned headers → drawer → popover → modal →
-  toast. Escape closes the topmost only. A popover never survives the scroll of
+- **Layer order** is fixed: content → pinned headers → side panel → popover →
+  tooltip → modal → toast. Escape closes the topmost only. A popover never survives the scroll of
   the surface it is anchored to.
 - Panel widths, collapse state and the active theme persist per user and restore
   on load. Nothing the user arranged is reset by a navigation.
@@ -708,6 +920,11 @@ repeats what the rail already says.
   wrap (§5).
 - Cards reflow by column count, never by shrinking below their minimum: 3 → 2 →
   1, and a one-column card is full width.
+- The board is not a card grid: its four phase lanes stay side by side at every
+  supported window width, with a 188px lane floor. When a wide rail leaves less
+  than that floor, the lanes scroll horizontally; phases never stack inside the
+  app's minimum window. A card's status keeps its whole word; in a lane too
+  narrow for both, the pull request wraps beneath it rather than clipping either.
 - Tables drop the lowest-priority columns first, in a documented order; they do
   not scroll horizontally inside a panel.
 
@@ -755,10 +972,26 @@ Before adding a component, token, hue, or surface, answer all five:
 If any answer is "unclear", the design isn't finished. Ship the existing pattern
 and raise the gap.
 
-**Motion**: 120ms for state feedback, 180ms for surfaces entering, 240ms for
-layout; ease-out entering, ease-in leaving. Motion communicates continuity,
-causality or genuinely active work — never decoration. Nothing loops unless work
-is actually running.
+**Motion.** Small and fast. Motion communicates continuity, causality or
+genuinely active work — never decoration. Animate `transform` and `opacity`
+only (fills and ink may transition on hover); enter with ease-out, never ease
+in; leave faster than you arrive. Keyboard actions and anything done many times
+an hour are instant. Nothing loops unless work is actually running.
+
+| Element | From | Duration | Easing token |
+|---|---|---|---|
+| Hover and state feedback | — | `--motion-fast` 120ms | `--ease-out` |
+| Button press | scale 0.97 | 120ms | `--ease-out` |
+| Tooltip | scale 0.97, after 500ms; instant between neighbours | 125ms | `--ease-out` |
+| Menu | scale 0.96 from its trigger; leaves at 120ms | `--motion-standard` 180ms | `--ease-out` |
+| Modal | scale 0.97; the scrim fades over 200ms | `--motion-modal` 220ms | `--ease-out` |
+| Floating side panel | 8% from its edge | `--motion-slow` 280ms | `--ease-drawer` |
+| Toast | 8px up | 240ms | `--ease-out` |
+| Something moving on screen | its current position | 200ms | `--ease-in-out` |
+
+`--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
+`cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer` `cubic-bezier(0.32, 0.72, 0, 1)`.
+Under `prefers-reduced-motion` movement collapses to nothing and fades remain.
 
 ---
 
@@ -781,17 +1014,15 @@ correct answer far more often than a border is).
 
 | Element | Background | Text | Border / divider | Shadow |
 |---|---|---|---|---|
-| Window / app root | `--ground` | `--text` | — | — |
-| Sidebar rail | `--ground` | — | — | — |
-| Rail app title, logo mark | `--primary` fill, `--on-primary` glyph | `--text` | — | — |
-| Rail nav item, rest | — | `--muted` | — | — |
-| Rail nav item, hover | `--hover` | `--text-soft` | — | — |
-| Rail nav item, selected | `--sel` | `--text` (600) | — | — |
-| Rail group label | — | `--faint` | — | — |
-| Rail count / badge | — | `--faint` | — | — |
-| Rail section divider | — | — | `--hair` | — |
-| Content sheet | `--surface` | `--text` | — | — |
-| Secondary list column / inspector | `--panel` | `--text` | — | — |
+| Window / app root, titlebar | `--ground` | `--text` | — | — |
+| Rail | `--ground` | — | — | — |
+| Rail item, rest | — | `--muted` | — | — |
+| Rail item, hover | `--hover` | `--text-soft` | — | — |
+| Rail item, selected | `--sel` | `--text` | — | — |
+| Rail count, waiting on you | `--waiting-bg` | `--waiting-ink` | 2px `--ground` ring | — |
+| Rail update dot | `--accent` | — | 2px `--ground` ring | — |
+| Content sheet | `--surface` | `--text` | `--hair` seam (outset) | — |
+| Rail inside a sheet (Review index, Settings sections) | `--panel` or none | `--text-soft` | `--hair` on the attached edge | — |
 | Panel header / toolbar | inherits parent | `--text` | `--hair` below | — |
 | Panel boundary, structural | — | — | `--edge` | — |
 | Resize handle, hover | `--edge` | — | — | — |
@@ -803,8 +1034,8 @@ correct answer far more often than a border is).
 |---|---|
 | Page title, section heading, card title | `--text` |
 | Body prose, secondary sentence | `--text-soft` |
-| Helper text, metadata, timestamps, counts | `--muted` |
-| Group labels, placeholders, inactive counts, disabled meta | `--faint` |
+| Helper text, metadata, timestamps, counts, group labels | `--muted` |
+| Placeholders, inactive counts, disabled meta | `--faint` |
 | Link, rest | `--accent-ink` |
 | Link, hover | `--accent` |
 | Machine values (paths, hashes, branches) | `--muted`, or `--faint` when secondary |
@@ -819,17 +1050,23 @@ correct answer far more often than a border is).
 | Card | `--card` | `--edge-raised` | `--shadow-card` |
 | Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card-hover` |
 | Card internal divider | — | `--hair` | — |
-| Settings panel / large settings group | `--card` | `--edge-raised` | `--shadow-panel` (light only) |
+| Settings panel / large settings group | — | `--edge-raised` ring, as `tm-table` | — |
 | Settings row separator | — | `--hair` | — |
-| Popover, dropdown, context menu | `--overlay` | `--edge` | `--shadow-pop` |
+| Popover, dropdown, context menu | `--card` | `--edge` | `--shadow-pop` |
 | Menu item, hover | `--hover` | — | — |
 | Menu item, selected | `--sel` | — | — |
 | Menu separator | — | `--hair` | — |
-| Modal | `--overlay` | `--edge` | `--shadow-modal` |
+| Modal | `--surface` | `--edge` | `--shadow-modal` |
 | Modal scrim | `--scrim` | — | — |
-| Drawer | `--surface` | `--edge` on the attached edge | `--shadow-pop` |
-| Drawer footer | `--surface` | `--hair` above | — |
-| Tooltip | `--overlay` | `--edge` | `--shadow-pop` |
+| Now panel | `--card` | `--edge-raised` | `--shadow-card` |
+| Flat section label | — | — | — (text `--muted`, `--t-help`/600) |
+| Side panel, docked | `--surface` (its own sheet) | `--hair` seam | — |
+| Side panel, floating | `--surface` | `--edge` | `--shadow-pop` |
+| Tooltip, toast | `--overlay` | `--edge` | `--shadow-pop` |
+| Table / comparable list | — | `--edge-raised` ring over the rows; `--hair` between rows | — |
+| Review finding thread | `--card` | `--edge-raised`; focused: `--focus-ring` | `--shadow-card` |
+| Review finding, earlier review | `--panel` | `--hair` | — |
+| User's line comment | `--field` | `--field-edge` | — |
 | Code / payload block | `--well` | — | — |
 | Composer surface | `--field` | — | — |
 | Empty state container | — | — | — |
@@ -850,7 +1087,7 @@ correct answer far more often than a border is).
 | Any other button, active | `--press` over its rest fill | unchanged | — |
 | Any button, focus (pointer) | unchanged | unchanged | — |
 | Any button, focus-visible | unchanged | unchanged | `--focus-ring` 3px |
-| Primary button, disabled | `--primary-disabled` | `--text-disabled` | — |
+| Primary button, disabled | `--primary-disabled` | `--text-disabled` | `--field-edge` inset 1px — the fill alone reads absent on its host |
 | Any other button, disabled | `--field-disabled` | `--text-disabled` | — |
 | Input / textarea, rest | `--field` | `--text` | `--field-edge` inset 1px |
 | Input, hover (single-line only) | `--field-hover` | `--text` | — |
@@ -871,11 +1108,11 @@ correct answer far more often than a border is).
 | Toggle track, on | `--accent` | — (the fill is unmistakable) | — |
 | Toggle track, disabled | `--field-disabled` | `--control-edge` inset 1px | — |
 | Toggle knob, off / disabled | `--overlay` | `--edge-raised` inset 1px | `--shadow-card` |
-| Toggle knob, on | `--on-primary` | `--edge-raised` inset 1px | `--shadow-card` |
+| Toggle knob, on | `--control-knob-on` | `--edge-raised` inset 1px | `--shadow-card` |
 | Slider track / fill / knob | `--field` / `--accent` / `--card` | — | — |
 | Search field | `--field` | `--text`, icon `--faint` | as input |
 | Filter chip, rest / active | `--field` / `--sel` | `--muted` / `--text` | — |
-| Tab, inactive / active | — / `--sel` | `--muted` / `--text` | — |
+| Tab, inactive / active | — | `--muted` / `--text`, active underline 2px `--text` | — |
 | Keyboard hint (⌘↵) | `--field` | `--faint` | — |
 
 ### A.5 Rows and tables
@@ -910,6 +1147,11 @@ inside it reads as a second fact.
 | Neutral count badge | `--field` | `--muted` |
 | Progress track / fill | `--field` / `--accent` | — |
 | Progress step, done / active / pending | `--verified` / `--accent` / `--idle` | `--muted` label |
+| Lifecycle stage, done / current / upcoming | — | `--muted` / `--text` 600 / `--faint`; current glyph per status |
+| Task state badge (card) | the tone's `-bg` (`--accent-soft` while running) | the tone's `-ink` |
+| Inbox reason and tile | tile: the tone's `-bg` | `--waiting-ink` / `--blocked-ink`; neutral reasons `--muted` |
+| Plan step, done / current / pending | — | label `--muted` / `--text` 500 / `--text-soft`; mark `--muted` / `--text` / `--faint` (check / dot / ring) |
+| History row | — | title `--text`, source `--text-soft`, time `--muted`; no mark |
 | Stale ribbon | `--waiting-bg` | `--waiting-ink` |
 | Skeleton / loading placeholder | `--field-disabled` | — |
 | Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |

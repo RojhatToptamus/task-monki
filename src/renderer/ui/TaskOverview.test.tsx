@@ -1,9 +1,9 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
-import { RequestCard } from './TaskDetail';
+import { OverviewRequest } from './TaskOverview';
 
-describe('RequestCard attachments', () => {
+describe('Overview request', () => {
   it('shows durable attachment metadata without active or internal-path previews', () => {
     const attachments: TaskAttachmentRecord[] = [
       attachment({
@@ -25,20 +25,15 @@ describe('RequestCard attachments', () => {
     ];
 
     const html = renderToStaticMarkup(
-      <RequestCard
-        prompt="Implement the task."
-        attachments={attachments}
-        summaryLine="Model · 2 attachments"
-        config={<span>Configuration</span>}
-        hasRun={false}
-      />
+      <OverviewRequest prompt="Implement the task." attachments={attachments} />
     );
 
-    expect(html).toContain('Attachments');
+    expect(html).toContain('aria-label="Task attachments"');
     expect(html).toContain('reference.png');
     expect(html).toContain('&lt;unsafe&gt;.svg');
-    expect(html).toContain('Image · 1 MB');
-    expect(html).toContain('Text · 42 KB');
+    // Kind and size are separate facts, not a dot-joined label.
+    expect(html).toContain('<span>Image</span><span>1 MB</span>');
+    expect(html).toContain('<span>Text</span><span>42 KB</span>');
     expect(html).toContain('Implement the task.');
     expect(html).not.toContain('<img');
     expect(html).not.toContain('<object');

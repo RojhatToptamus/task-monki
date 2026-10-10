@@ -4054,8 +4054,25 @@ function taskSessionCwdMatches(session: AgentRuntimeSessionRecord): boolean {
   const { primaryCwd, repositoryAccess } = session.executionContext;
   if (worktreePath === primaryCwd) return true;
   if (!worktreePath || repositoryAccess !== 'READ_ONLY') return false;
+  if (readsTaskWorktreeSnapshot(session)) return true;
   const canonicalWorktree = canonicalPath(worktreePath);
   return canonicalWorktree !== undefined && canonicalWorktree === canonicalPath(primaryCwd);
+}
+
+/**
+ * A side question can read a disposable read-only snapshot of its task worktree instead of
+ * the live checkout. Its only read root names that snapshot and the task worktree it copies;
+ * provider subagents inherit that context. The comparison is lexical: the snapshot is
+ * removed when its thread ends.
+ */
+function readsTaskWorktreeSnapshot(session: AgentRuntimeSessionRecord): boolean {
+  const roots = session.executionContext.readRoots;
+  return (
+    roots.length === 1 &&
+    roots[0]!.kind === 'WORKTREE_SNAPSHOT' &&
+    roots[0]!.entityId === session.taskContext?.worktreeId &&
+    path.resolve(roots[0]!.canonicalPath) === path.resolve(session.executionContext.primaryCwd)
+  );
 }
 
 function validateState(state: AgentRuntimeStoreState): void {
@@ -5012,6 +5029,8 @@ function taskPurposeFromMode(mode: AgentRunMode): AgentRuntimeRunRecord['purpose
     case 'FOLLOW_UP': return 'TASK_FOLLOW_UP';
     case 'RETRY': return 'TASK_RETRY';
     case 'REVIEW': return 'TASK_REVIEW';
+    case 'REVIEW_QUESTION': return 'TASK_REVIEW_QUESTION';
+    case 'SIDE_QUESTION': return 'TASK_SIDE_QUESTION';
     case 'DESIGN': return 'TASK_DESIGN';
     case 'PREVIEW': return 'TASK_PREVIEW';
     case 'COMPACTION': return 'TASK_COMPACTION';
@@ -5028,6 +5047,8 @@ function taskModeFromPurpose(
     case 'TASK_FOLLOW_UP': return 'FOLLOW_UP';
     case 'TASK_RETRY': return 'RETRY';
     case 'TASK_REVIEW': return 'REVIEW';
+    case 'TASK_REVIEW_QUESTION': return 'REVIEW_QUESTION';
+    case 'TASK_SIDE_QUESTION': return 'SIDE_QUESTION';
     case 'TASK_DESIGN': return 'DESIGN';
     case 'TASK_PREVIEW': return 'PREVIEW';
     case 'TASK_COMPACTION': return 'COMPACTION';

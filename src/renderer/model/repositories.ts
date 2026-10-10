@@ -24,6 +24,11 @@ export function repositoryDisplayPath(repositoryPath: string): string {
   return suffix && parts.length > 2 ? `…/${suffix}` : normalized.replace(/\\/g, '/');
 }
 
+/** A full path with the user's home folder written as `~`, for display only. */
+export function abbreviateHomePath(repositoryPath: string): string {
+  return repositoryPath.replace(/^(?:\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=[\\/]|$)/, '~');
+}
+
 export function filterRepositoryOptions(
   options: readonly RepositoryOption[],
   query: string

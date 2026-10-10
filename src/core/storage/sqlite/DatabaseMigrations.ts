@@ -1527,6 +1527,21 @@ CREATE INDEX preview_generations_task_state_idx ON preview_generations(task_id, 
 CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_key, routing_state, updated_at DESC, id);
 `
 
+  },
+  {
+    version: 11,
+    name: 'review-finding-decisions',
+    // Task payloads carry review finding decisions, reviewer question runs and
+    // their messages. The version prevents older clients from opening them.
+    sql: 'SELECT 1;'
+  },
+  {
+    version: 12,
+    name: 'side-questions',
+    // Task payloads carry side questions and runtime payloads carry their
+    // SIDE sessions, snapshot read roots and runs. The version prevents older
+    // clients from opening them.
+    sql: 'SELECT 1;'
   }
 ] as const;
 

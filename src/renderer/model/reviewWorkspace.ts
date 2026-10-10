@@ -1,0 +1,153 @@
+import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
+import type { DiffFile, DiffLine } from './diffEvidence';
+
+/** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
+export type ReviewFindingView = EffectiveReviewFinding;
+
+/** Where each finding sits in the diff: after a line, at the top of its file, or in General. */
+export interface AnchoredFindings {
+  /** Findings shown under a diff line, keyed by `lineAnchorKey`. */
+  byLine: Map<string, ReviewFindingView[]>;
+  /** Findings about a file whose line is not in the diff, shown at the file's top. */
+  byFile: Map<string, ReviewFindingView[]>;
+  /** Findings without a location, or about a file the diff does not contain. */
+  general: ReviewFindingView[];
+}
+
+export function lineAnchorKey(fileId: string, blockId: string, lineIndex: number): string {
+  return `${fileId}\u0000${blockId}\u0000${lineIndex}`;
+}
+
+export function normalizeReviewPath(path: string): string {
+  return path.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[ab]\//, '');
+}
+
+/**
+ * Anchors each finding to the diff the user is reading. A finding attaches
+ * after the last displayed line of its range on the new side, preferring the
+ * latest block (unstaged over staged over committed), because that is the code
+ * the review read. A line outside the diff falls back to the file's top.
+ */
+export function anchorReviewFindings(files: readonly DiffFile[], findings: readonly ReviewFindingView[]): AnchoredFindings {
+  const byLine = new Map<string, ReviewFindingView[]>();
+  const byFile = new Map<string, ReviewFindingView[]>();
+  const general: ReviewFindingView[] = [];
+  const filesByPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
+  const push = <K>(map: Map<K, ReviewFindingView[]>, key: K, finding: ReviewFindingView) => {
+    const current = map.get(key);
+    if (current) current.push(finding);
+    else map.set(key, [finding]);
+  };
+
+  for (const finding of findings) {
+    const file = finding.path ? filesByPath.get(normalizeReviewPath(finding.path)) : undefined;
+    if (!file) {
+      general.push(finding);
+      continue;
+    }
+    const anchor = finding.line ? findLineAnchor(file, finding.line, finding.endLine) : undefined;
+    if (anchor) push(byLine, anchor, finding);
+    else push(byFile, file.id, finding);
+  }
+  return { byLine, byFile, general };
+}
+
+function findLineAnchor(file: DiffFile, line: number, endLine?: number): string | undefined {
+  const last = endLine && endLine >= line ? endLine : line;
+  for (let blockIndex = file.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+    const block = file.blocks[blockIndex]!;
+    let anchor: number | undefined;
+    block.lines.forEach((candidate, index) => {
+      if (candidate.newLine !== undefined && candidate.newLine >= line && candidate.newLine <= last) anchor = index;
+    });
+    if (anchor !== undefined) return lineAnchorKey(file.id, block.id, anchor);
+  }
+  return undefined;
+}
+
+export interface ReviewIndexFile {
+  file: DiffFile;
+  findings: ReviewFindingView[];
+}
+
+/** The rail: files in diff order, each with the findings anchored anywhere in it. */
+export function buildReviewIndex(files: readonly DiffFile[], anchored: AnchoredFindings): ReviewIndexFile[] {
+  return files.map((file) => {
+    const findings = [...(anchored.byFile.get(file.id) ?? [])];
+    for (const block of file.blocks) {
+      block.lines.forEach((_, index) => {
+        findings.push(...(anchored.byLine.get(lineAnchorKey(file.id, block.id, index)) ?? []));
+      });
+    }
+    return { file, findings };
+  });
+}
+
+/** A stable signature of a file's displayed change, so "viewed" resets when the file changes. */
+export function diffFileSignature(file: DiffFile): string {
+  let hash = 2166136261;
+  for (const block of file.blocks) {
+    for (const line of block.lines) {
+      const text = `${line.kind}:${line.content}\n`;
+      for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+    }
+  }
+  return `${file.additions}.${file.deletions}.${(hash >>> 0).toString(36)}`;
+}
+
+/**
+ * Files whose change differs between the reviewed capture and the current one:
+ * what a re-review must read. A file that appeared or disappeared counts.
+ */
+export function filesChangedSinceReview(reviewed: readonly DiffFile[], current: readonly DiffFile[]): Set<string> {
+  const reviewedSignatures = new Map(reviewed.map((file) => [normalizeReviewPath(file.path), diffFileSignature(file)]));
+  const changed = new Set<string>();
+  for (const file of current) {
+    const path = normalizeReviewPath(file.path);
+    if (reviewedSignatures.get(path) !== diffFileSignature(file)) changed.add(path);
+    reviewedSignatures.delete(path);
+  }
+  for (const path of reviewedSignatures.keys()) changed.add(path);
+  return changed;
+}
+
+/**
+ * The rows of one diff block as the Review tab draws them. A hunk header
+ * becomes a quiet gap row that says how many unchanged lines it skips and keeps
+ * the enclosing symbol Git reports; changed and context lines keep their index
+ * so findings and comments can anchor to them.
+ */
+export type ReviewDiffRow =
+  | { kind: 'gap'; hidden: number; heading?: string; raw: string }
+  | { kind: 'line'; line: DiffLine; index: number };
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
+
+export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
+  const rows: ReviewDiffRow[] = [];
+  let lastNewLine = 0;
+  lines.forEach((line, index) => {
+    if (line.kind === 'meta') return;
+    if (line.kind === 'hunk') {
+      const match = HUNK_HEADER.exec(line.content);
+      const start = match ? Number(match[3]) : undefined;
+      const hidden = start !== undefined ? Math.max(0, start - lastNewLine - 1) : 0;
+      rows.push({ kind: 'gap', hidden, heading: match?.[5]?.trim() || undefined, raw: line.content });
+      return;
+    }
+    if (line.newLine !== undefined) lastNewLine = line.newLine;
+    rows.push({ kind: 'line', line, index });
+  });
+  return rows;
+}
+
+/** The text the implementation agent receives for the user's own line comments. */
+export interface ReviewLineComment {
+  id: string;
+  path: string;
+  line?: number;
+  text: string;
+}

@@ -12,6 +12,7 @@ import type {
   InteractionRequestRecord
 } from '../../shared/contracts';
 import { availableProviderCommandOptions } from '../model/agentPermissions';
+import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { StructuredData } from './display';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
@@ -143,6 +144,7 @@ function InteractionBody({
         <CommandRequest
           interaction={interaction}
           disabled={disabled}
+          worktreePath={sourceSession?.worktreePath}
           onRespond={respond}
         />
       ) : interaction.type === 'FILE_CHANGE_APPROVAL' ? (
@@ -223,10 +225,11 @@ function InteractionWaiting({ requestedAt, count }: { requestedAt: string; count
 function CommandRequest({
   interaction,
   disabled,
+  worktreePath,
   onRespond
-}: InteractionSectionProps) {
+}: InteractionSectionProps & { worktreePath?: string }) {
   const request = interaction.request as AgentCommandApprovalRequest;
-  const displayCommand = unwrapShellCommand(request.command);
+  const displayCommand = displayApprovalCommand(request.command);
   const providerOptions = availableProviderCommandOptions(interaction, request);
   const providerNativeRequest = request.providerOptions !== undefined;
   const canRememberCommand =
@@ -263,9 +266,12 @@ function CommandRequest({
 
   return (
     <>
-      {providerNativeRequest ? (
-        <ProviderCommandContext request={request} displayCommand={displayCommand} />
-      ) : null}
+      <CommandContext
+        request={request}
+        displayCommand={displayCommand}
+        worktreePath={worktreePath}
+        providerNative={providerNativeRequest}
+      />
       {displayCommand ? (
         <pre className="interaction-command">
           <code>{displayCommand}</code>
@@ -362,19 +368,31 @@ function CommandRequest({
   );
 }
 
-function ProviderCommandContext({
+/**
+ * Everything besides the command that the decision approves. A provider-native
+ * request also states its reason; any request shows the network host, extra
+ * paths, and a working directory outside the task worktree, because those widen
+ * what "Allow" grants. A directory inside the worktree was already checked by
+ * policy and stays out of the way.
+ */
+function CommandContext({
   request,
-  displayCommand
+  displayCommand,
+  worktreePath,
+  providerNative
 }: {
   request: AgentCommandApprovalRequest;
   displayCommand?: string;
+  worktreePath?: string;
+  providerNative: boolean;
 }) {
   const network = formatProviderNetworkContext(request.networkApprovalContext);
-  const reason = providerReason(request.reason, displayCommand);
+  const reason = providerNative ? providerReason(request.reason, displayCommand) : undefined;
+  const cwd = request.cwd && (providerNative || !isWithinWorktree(request.cwd, worktreePath)) ? request.cwd : undefined;
   const hasDetails =
     Boolean(reason) ||
     Boolean(request.paths?.length) ||
-    Boolean(request.cwd) ||
+    Boolean(cwd) ||
     Boolean(network);
 
   if (!hasDetails) {
@@ -395,10 +413,10 @@ function ProviderCommandContext({
           <dd><pre>{request.paths.join('\n')}</pre></dd>
         </>
       ) : null}
-      {request.cwd ? (
+      {cwd ? (
         <>
           <dt>Working directory</dt>
-          <dd><code>{request.cwd}</code></dd>
+          <dd><code>{cwd}</code></dd>
         </>
       ) : null}
       {network ? (
@@ -799,11 +817,11 @@ function UserInputQuestion({
               checked={choice.selected.includes(option.label)}
               onChange={(event) => chooseOption(option.label, event.target.checked)}
             />
-            <span>
+            <ChoiceMark kind={inputType} />
+            <span className="interaction-choice__text">
               <strong>{option.label}</strong>
               {option.description ? <small>{option.description}</small> : null}
             </span>
-            <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
           </label>
         ))}
         {question.isOther ? (
@@ -817,8 +835,8 @@ function UserInputQuestion({
                 checked={choice.customSelected}
                 onChange={(event) => chooseCustom(event.target.checked)}
               />
-              <span><strong>Other…</strong></span>
-              <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
+              <ChoiceMark kind={inputType} />
+              <span className="interaction-choice__text"><strong>Other…</strong></span>
             </label>
             {choice.customSelected ? <textarea
               className="interaction-question__input"
@@ -1129,12 +1147,13 @@ function InteractionTechnicalDetails({
   );
 }
 
-function unwrapShellCommand(command: string | undefined): string | undefined {
-  if (!command) {
-    return undefined;
-  }
-  const match = command.match(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/);
-  return match?.[2] ?? command;
+/** The visible radio or checkbox for a choice row; the native input stays for semantics. */
+function ChoiceMark({ kind }: { kind: 'radio' | 'checkbox' }) {
+  return (
+    <span className="interaction-choice__mark" data-kind={kind} aria-hidden="true">
+      {kind === 'checkbox' ? <Check size={12} strokeWidth={2} /> : null}
+    </span>
+  );
 }
 
 function buildMcpContent(

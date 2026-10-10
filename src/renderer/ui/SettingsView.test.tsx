@@ -28,6 +28,17 @@ const softwareUpdateState: SoftwareUpdateState = {
   errorMessage: null
 };
 
+const repositoryProps = {
+  repositories: [],
+  addingRepository: false,
+  revealLabel: 'Reveal in Finder',
+  onAddRepository: async () => false,
+  onRefreshRepository: async () => undefined,
+  onReconnectRepository: async () => undefined,
+  onDisconnectRepository: async () => undefined,
+  onRevealRepository: async () => undefined
+};
+
 const softwareUpdateProps = {
   softwareUpdateState,
   onCheckForSoftwareUpdates: async () => undefined,
@@ -84,6 +95,8 @@ describe('SettingsView', () => {
         onSaveAgentProfile={async () => undefined}
         onDeleteAgentProfile={async () => undefined}
         {...softwareUpdateProps}
+        {...repositoryProps}
+        initialSection="agents"
         theme="device"
         onSetTheme={() => undefined}
         appSettings={{
@@ -105,11 +118,9 @@ describe('SettingsView', () => {
       />
     );
 
-    expect(html).toContain('aria-label="Settings sections"');
-    expect(html).toContain('role="tablist"');
-    expect(html).toContain('role="tab" aria-selected="true"');
-    expect(html).toContain('aria-controls="settings-panel-agents"');
-    expect(html).toContain('role="tabpanel" aria-labelledby="settings-tab-agents"');
+    expect(html).toContain('<nav class="tm-settings__nav" aria-label="Settings">');
+    expect(html).toContain('aria-current="page">Agents</button>');
+    expect(html).toContain('aria-labelledby="settings-heading-agents"');
     expect(html).toContain('>Agents<');
     expect(html).toContain('>Models<');
     expect(html).toContain('>Tools<');
@@ -527,6 +538,8 @@ describe('SettingsView', () => {
           onSaveAgentProfile={async () => undefined}
           onDeleteAgentProfile={async () => undefined}
           {...softwareUpdateProps}
+          {...repositoryProps}
+          initialSection="agents"
           theme="device"
           onSetTheme={() => undefined}
           appSettings={DEFAULT_TASK_MANAGER_APP_SETTINGS}

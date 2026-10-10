@@ -10,7 +10,7 @@ export {
 
 export interface FindingRowProps {
   tone: Tone;
-  /** Severity word (e.g. "Blocker"). Rendered uppercase in the severity chip. */
+  /** Severity word (e.g. "Blocker"), in its tone beside the title. */
   severityLabel: string;
   title: string;
   /** Mono file:line (or other value) reference. */
@@ -41,7 +41,7 @@ export function FindingRow({
   const head = (
     <>
       <span className="tm-finding__severity">
-        <span>{severityLabel.toUpperCase()}</span>
+        <span>{severityLabel}</span>
       </span>
       <span className="tm-finding__main">
         <span className="tm-finding__title">{title}</span>

@@ -1,6 +1,13 @@
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
+  AskReviewerRequest,
+  DecideReviewFindingRequest,
+  ReviewFindingDecision,
+  StopReviewerQuestionRequest,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   AppUpdateEvent,
   Board,
   BoardSnapshot,
@@ -478,6 +485,18 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/retry', input),
     startReview: (input: StartReviewRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/review', input),
+    decideReviewFinding: (input: DecideReviewFindingRequest) =>
+      post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    askReviewer: (input: AskReviewerRequest) =>
+      post<TaskInstruction>(baseUrl, '/api/review/ask', input),
+    stopReviewerQuestion: (input: StopReviewerQuestionRequest) =>
+      post<void>(baseUrl, '/api/review/stop-question', input),
+    askSideQuestion: (input: AskSideQuestionRequest) =>
+      post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
+    stopSideQuestion: (input: StopSideQuestionRequest) =>
+      post<void>(baseUrl, '/api/side-question/stop', input),
+    endSideThread: (input: EndSideThreadRequest) =>
+      post<void>(baseUrl, '/api/side-question/end-thread', input),
     syncAgentGoal: (input: SyncAgentGoalRequest) =>
       post(baseUrl, '/api/agent/goal/sync', input),
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),

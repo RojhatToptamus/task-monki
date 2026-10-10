@@ -422,12 +422,9 @@ export function DesignCanvas({
         {displayedTarget ? <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
           {displayedTarget.routeId}{displayedTarget.entryPath}
         </span> : sourceFile && !viewingEarlierRevision ? (
-          <>
-            <span aria-hidden="true">·</span>
-            <span className="tm-design-canvas__source" title={sourceFile.path}>
-              {sourceFile.path} · {formatAttachmentBytes(sourceFile.byteCount)}
-            </span>
-          </>
+          <span className="tm-design-canvas__source" title={`${sourceFile.path}, ${formatAttachmentBytes(sourceFile.byteCount)}`}>
+            {sourceFile.path}
+          </span>
         ) : null}
         <span className="tm-design-canvas__footer-spacer" />
         <time dateTime={selectedRevision?.createdAt ?? project.design.updatedAt}>
@@ -449,23 +446,23 @@ function canvasStatusView(
   }
   if (project.canvas.state === 'PREVIEWING') {
     const candidateOrdinal = project.revisions.length === 0 ? 1 : ordinal + 1;
-    return { label: `checking v${candidateOrdinal}`, tone: 'working' };
+    return { label: `Checking v${candidateOrdinal}`, tone: 'working' };
   }
   const status = designProjectStatus(project);
   if (status === 'STARTING' || status === 'RUNNING') {
-    return { label: `building v${ordinal}`, tone: 'working' };
+    return { label: `Building v${ordinal}`, tone: 'working' };
   }
   if (status === 'UPDATING') {
-    return { label: `rebuilding v${ordinal + 1}`, tone: 'working' };
+    return { label: `Rebuilding v${ordinal + 1}`, tone: 'working' };
   }
   if (status === 'READY') {
     return { label: `v${ordinal} ready`, tone: 'verified' };
   }
   if (status === 'NEEDS_INPUT') {
-    return { label: 'waiting for input', tone: 'waiting' };
+    return { label: 'Waiting for input', tone: 'waiting' };
   }
   if (status === 'NEEDS_ATTENTION') {
-    return { label: 'preview needs attention', tone: 'blocked' };
+    return { label: 'Preview needs attention', tone: 'blocked' };
   }
   return { label: `v${ordinal} archived`, tone: 'idle' };
 }

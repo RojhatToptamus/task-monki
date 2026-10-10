@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { Trash2 } from 'lucide-react';
 import {
   BOARD_COLORS,
   type Board,
@@ -712,18 +711,11 @@ export function DeleteTaskModal({
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
       <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
-        <div className="tm-delete-modal__head">
-          <span className="tm-delete-modal__mark" aria-hidden="true">
-            <TrashIcon />
-          </span>
-          <div>
-            <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
-            <p>
-              Removes this task, its Task Monki records, and managed attachments. Provider
-              history and external protocol-journal traces may remain.
-            </p>
-          </div>
-        </div>
+        <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
+        <p>
+          Removes this task, its Task Monki records, and managed attachments. Provider
+          history and external protocol-journal traces may remain.
+        </p>
 
         <ImpactList
           ariaLabel="Task deletion impact"
@@ -835,8 +827,4 @@ function describeWorktreeRemoval(
     status: 'available',
     detail: `${worktree.worktreePath} will be removed from disk.`
   };
-}
-
-function TrashIcon() {
-  return <Trash2 aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

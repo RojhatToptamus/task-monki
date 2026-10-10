@@ -9,9 +9,18 @@ export type TaskAttentionSource = Task | BoardTaskSummary;
 
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
+/** What the user is asked for, so a surface can mark it with one glyph. */
+export type TaskAttentionKind = 'approval' | 'question' | 'retry' | 'failure' | 'checkout' | 'git' | 'delivery' | 'finish';
+
 export interface TaskAttentionDescriptor {
   label: string;
-  detail: string;
+  kind: TaskAttentionKind;
+  /**
+   * A recorded fact the label does not already say: a retry reason or Task
+   * Monki's own summary of a blocked task. Never an instruction; the task's
+   * actions say what to do.
+   */
+  detail?: string;
   tone: TaskAttentionTone;
 }
 
@@ -24,6 +33,8 @@ const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
   'INTERRUPTING'
 ]);
 
+const FINISHED_PHASES = new Set<TaskAttentionSource['workflowPhase']>(['DONE', 'CANCELED', 'ARCHIVED']);
+
 /**
  * The most urgent child state for a task, used to drive the "Needs you" inbox,
  * decision banners, and card chips. Returns undefined when nothing is blocked.
@@ -31,54 +42,49 @@ const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
 export function describeTaskAttention(
   task: TaskAttentionSource
 ): TaskAttentionDescriptor | undefined {
+  if (FINISHED_PHASES.has(task.workflowPhase)) {
+    return undefined;
+  }
+  switch (task.projection.agentRun) {
+    case 'AWAITING_APPROVAL':
+      return { label: 'Needs approval', kind: 'approval', tone: 'warning' };
+    case 'AWAITING_USER_INPUT':
+      return { label: 'Needs input', kind: 'question', tone: 'warning' };
+  }
+  // Retry and Continue run in the checkout, so a broken one comes first.
+  const checkoutAttention = describeCheckoutAttention(task);
+  if (checkoutAttention) {
+    return checkoutAttention;
+  }
   if (isImplementationOutcomeBlocked(task)) {
     return {
       label: 'Needs retry',
-      detail:
-        getImplementationRetryReason(task) ??
-        'Retry the implementation or continue unfinished work before review.',
+      kind: 'retry',
+      detail: getImplementationRetryReason(task),
       tone: 'warning'
     };
   }
   switch (task.projection.agentRun) {
-    case 'AWAITING_APPROVAL':
-      return {
-        label: 'Needs approval',
-        detail: 'Provider is blocked on a permission decision.',
-        tone: 'warning'
-      };
-    case 'AWAITING_USER_INPUT':
-      return {
-        label: 'Needs input',
-        detail: 'Provider is waiting for answers from you.',
-        tone: 'warning'
-      };
     case 'RECOVERY_REQUIRED':
-      return {
-        label: 'Recovery required',
-        detail: 'Runtime state is ambiguous; inspect recovery details.',
-        tone: 'error'
-      };
+      return { label: 'Recovery required', kind: 'failure', tone: 'error' };
     case 'LOST':
-      return {
-        label: 'Runtime lost',
-        detail: 'Task Monki cannot prove the final provider state.',
-        tone: 'error'
-      };
+      return { label: 'Runtime lost', kind: 'failure', tone: 'error' };
     case 'FAILED':
-      return {
-        label: 'Run failed',
-        detail: 'Retry the implementation or continue unfinished work before review.',
-        tone: 'error'
-      };
+      return { label: 'Run failed', kind: 'failure', tone: 'error' };
   }
 
   if (task.workflowPhase === 'BLOCKED' || task.projection.health === 'BLOCKED') {
     return {
       label: 'Blocked',
+      kind: 'failure',
       detail: task.projection.summary,
       tone: 'error'
     };
+  }
+
+  const gitAttention = describeGitAttention(task);
+  if (gitAttention) {
+    return gitAttention;
   }
 
   const deliveryAttention = describeDeliveryAttention(task);
@@ -88,12 +94,40 @@ export function describeTaskAttention(
 
   if (task.projection.health === 'ERROR') {
     return {
-      label: 'Error',
+      label: 'Needs attention',
+      kind: 'failure',
       detail: task.projection.summary,
       tone: 'error'
     };
   }
 
+  return undefined;
+}
+
+/** Worktree and Git problems belong to the task's checkout, not to GitHub delivery. */
+function describeCheckoutAttention(
+  task: TaskAttentionSource
+): TaskAttentionDescriptor | undefined {
+  switch (task.projection.worktree) {
+    case 'ERROR':
+      return { label: 'Worktree setup failed', kind: 'checkout', tone: 'error' };
+    case 'MISSING':
+    case 'PRUNABLE':
+      // A task worktree and an imported checkout both read as the checkout.
+      return { label: 'Checkout missing', kind: 'checkout', tone: 'error' };
+  }
+  return undefined;
+}
+
+function describeGitAttention(
+  task: TaskAttentionSource
+): TaskAttentionDescriptor | undefined {
+  switch (task.projection.git) {
+    case 'CONFLICTED':
+      return { label: 'Git conflicts', kind: 'git', tone: 'error' };
+    case 'UNAVAILABLE':
+      return { label: 'Git unavailable', kind: 'git', tone: 'error' };
+  }
   return undefined;
 }
 
@@ -106,56 +140,45 @@ function describeDeliveryAttention(
     projection.merge === 'MERGED' &&
     task.workflowPhase !== 'DONE'
   ) {
-    return {
-      label: 'Waiting for Mark done',
-      detail: 'The pull request is merged; this task requires manual completion.',
-      tone: 'info'
-    };
+    return { label: 'Waiting for Mark done', kind: 'finish', tone: 'info' };
   }
   if (
     projection.githubPullRequest === 'CLOSED_UNMERGED' ||
     projection.merge === 'CLOSED_UNMERGED'
   ) {
-    return {
-      label: 'PR closed without merge',
-      detail: 'The pull request was closed without merging.',
-      tone: 'error'
-    };
+    return { label: 'PR closed without merge', kind: 'delivery', tone: 'error' };
   }
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
-    return {
-      label: 'Checks failed',
-      detail: 'GitHub checks need attention.',
-      tone: 'error'
-    };
+    return { label: 'Checks failed', kind: 'delivery', tone: 'error' };
   }
   if (projection.reviews === 'CHANGES_REQUESTED') {
-    return {
-      label: 'Changes requested',
-      detail: 'GitHub review requested changes.',
-      tone: 'warning'
-    };
+    return { label: 'GitHub changes requested', kind: 'delivery', tone: 'warning' };
   }
   if (projection.merge === 'BLOCKED') {
-    return {
-      label: 'Merge blocked',
-      detail: 'The pull request is not currently mergeable.',
-      tone: 'error'
-    };
+    return { label: 'Merge blocked', kind: 'delivery', tone: 'error' };
   }
+  // UNLINKED is the initial value of every task: it is not delivery evidence.
   const hasDeliveryEvidence =
-    projection.githubPullRequest !== 'NOT_CREATED' ||
+    !['NOT_CREATED', 'UNLINKED'].includes(projection.githubPullRequest) ||
     projection.ciChecks !== 'NOT_APPLICABLE' ||
     projection.reviews !== 'NOT_APPLICABLE' ||
     projection.merge !== 'NOT_APPLICABLE';
   if (projection.health === 'ERROR' && hasDeliveryEvidence) {
-    return {
-      label: 'Delivery needs attention',
-      detail: 'Open the task to review the current GitHub evidence.',
-      tone: 'error'
-    };
+    // The summary here can carry raw GitHub states; the label is the fact.
+    return { label: 'Delivery needs attention', kind: 'delivery', tone: 'error' };
   }
   return undefined;
+}
+
+/**
+ * The status word for an attention state, as the board card, the task header
+ * and the Inbox all show it: failures in error ink, everything else the user
+ * owes in action ink.
+ */
+export function describeAttentionStatus(
+  attention: TaskAttentionDescriptor
+): { label: string; tone: 'action' | 'error' } {
+  return { label: attention.label, tone: attention.tone === 'error' ? 'error' : 'action' };
 }
 
 export function isAttentionTask(task: TaskAttentionSource): boolean {

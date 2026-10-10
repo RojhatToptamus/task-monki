@@ -10,7 +10,6 @@ import {
   type Task
 } from '../../shared/contracts';
 import {
-  buildBoardDeliveryLine,
   buildFailingChecksInvestigationPrompt,
   buildPrStatusActionState,
   buildPrStatusCreateOrPushTitle,
@@ -130,7 +129,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view.headline).toBe('Checks failed');
     expect(view.prTitle).toBe('Odd Minute Check');
     expect(view.prIdentityLine).toBe('#82 Odd Minute Check');
-    expect(view.checkSummaryLine).toBe('2 failed · 1 skipped · 3 passed');
+    expect(view.checkSummaryLine).toBe('2 failed, 1 skipped, 3 passed');
     expect(view.evidenceLine).toBeUndefined();
     expect(view.guidanceLine).toBeUndefined();
     expect(view.canInvestigateFailure).toBe(true);
@@ -193,8 +192,8 @@ describe('buildPrStatusViewModel', () => {
 
     expect(view.headline).toBe('Checks pending');
     expect(view.checkGroups).toEqual([]);
-    expect(view.checkSummaryLine).toBe('2 pending · 1 passed');
-    expect(view.evidenceLine).toBe('2 pending · 1 passed');
+    expect(view.checkSummaryLine).toBe('2 pending, 1 passed');
+    expect(view.evidenceLine).toBe('2 pending, 1 passed');
   });
 
   it('uses the spec copy for refreshed time and ready evidence', () => {
@@ -211,7 +210,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view.checkSummaryLine).toBeUndefined();
     expect(view.reviewLine).toBe('Approved');
     expect(view.mergeLine).toBe('Mergeable');
-    expect(view.evidenceLine).toBe('3 checks passed for head abc123 · Approved · Mergeable');
+    expect(view.evidenceLine).toBe('3 checks passed for head abc123, approved, mergeable');
   });
 
   it('shows passing checks only when they match the current PR identity', () => {
@@ -266,9 +265,32 @@ describe('buildPrStatusViewModel', () => {
 
     expect(missing.evidenceLine).toBe('Checks not observed');
     expect(expected.headline).toBe('Expected checks not reported');
-    expect(none.headline).toBe('No checks reported');
     expect(skipped.headline).toBe('Checks skipped');
-    expect(unknown.headline).toBe('Checks unknown');
+    // No checks at all, or unknown checks, is evidence to state — not a headline
+    // that outranks the pull request's own state (PR_STATUS_CARD_FLOW priority).
+    expect(none.headline).toBe('Open PR');
+    expect(none.evidenceLine).toBe('No checks reported');
+    expect(unknown.headline).toBe('Open PR');
+    expect(unknown.evidenceLine).toBe('Checks unknown');
+  });
+
+  it('keeps GitHub review and draft state visible in a repository without CI', () => {
+    const changesRequested = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({ status: 'NO_CHECKS' }),
+      reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED' })
+    });
+    const draft = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ isDraft: true }),
+      ciRollup: ciFixture({ status: 'NOT_APPLICABLE' })
+    });
+
+    expect(changesRequested.headline).toBe('GitHub changes requested');
+    expect(changesRequested.evidenceLine).toBe('No checks reported');
+    expect(draft.headline).toBe('Draft PR');
+    expect(draft.evidenceLine).toBe('Checks not applicable');
   });
 
   it('does not apply delivery records without the current PR identity', () => {
@@ -971,39 +993,6 @@ describe('shouldShowPrStatusOnOverview', () => {
     ]) {
       expect(shouldShowPrStatusOnOverview(view)).toBe(true);
     }
-  });
-});
-
-describe('buildBoardDeliveryLine', () => {
-  it('shows one compact PR delivery line', () => {
-    expect(
-      buildBoardDeliveryLine(
-        taskFixture({
-          projection: {
-            ...createInitialProjection(now),
-            githubPullRequest: 'OPEN_READY',
-            githubPullRequestNumber: 82,
-            ciChecks: 'FAILING'
-          }
-        })
-      )
-    ).toBe('PR #82 | checks failing');
-  });
-
-  it('does not infer ready-to-merge from projection scalars alone', () => {
-    expect(
-      buildBoardDeliveryLine(
-        taskFixture({
-          projection: {
-            ...createInitialProjection(now),
-            githubPullRequest: 'OPEN_READY',
-            githubPullRequestNumber: 82,
-            ciChecks: 'PASSING',
-            merge: 'MERGEABLE'
-          }
-        })
-      )
-    ).toBe('PR #82 | checks passing · mergeable');
   });
 });
 

@@ -18,6 +18,8 @@ interface TaskActionsMenuProps {
   openTarget?: OpenTargetRef;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
+  /** On the task page: opens the raw run, event and provider records. */
+  onOpenDebug?(): void;
   className?: string;
   align?: 'start' | 'end';
 }
@@ -29,6 +31,7 @@ export function TaskActionsMenu({
   openTarget,
   onArchive,
   onRequestDelete,
+  onOpenDebug,
   className,
   align = 'end'
 }: TaskActionsMenuProps) {
@@ -46,7 +49,7 @@ export function TaskActionsMenu({
     setGeometry(taskMenuGeometry(
       trigger.getBoundingClientRect(),
       { width: window.innerWidth, height: window.innerHeight },
-      hasOpenTarget ? 214 : 152,
+      hasOpenTarget ? 214 : 168,
       align
     ));
   };
@@ -150,6 +153,23 @@ export function TaskActionsMenu({
               <div className="tm-pathmenu__separator" role="separator" />
             </>
           ) : null}
+          {onOpenDebug ? (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                className="tm-taskmenu__item"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenDebug();
+                }}
+              >
+                Debug
+              </button>
+              <div className="tm-pathmenu__separator" role="separator" />
+            </>
+          ) : null}
           <button
             type="button"
             role="menuitem"
@@ -174,7 +194,7 @@ export function TaskActionsMenu({
               onRequestDelete(taskId);
             }}
           >
-            Delete...
+            Delete…
           </button>
         </div>,
         rootRef.current?.closest('.app-shell') ?? document.body
@@ -199,7 +219,7 @@ export function taskMenuGeometry(
 ): TaskMenuGeometry {
   const edgeGap = 12;
   const anchorGap = 6;
-  const maxMenuHeight = 420;
+  const maxMenuHeight = 560;
   const width = Math.min(menuWidth, Math.max(0, viewport.width - edgeGap * 2));
   const spaceAbove = Math.max(0, trigger.top - anchorGap - edgeGap);
   const spaceBelow = Math.max(0, viewport.height - trigger.bottom - anchorGap - edgeGap);

@@ -40,7 +40,17 @@ function DiffLineRow({
     >
       <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
       <span className="tm-diffline__num">{line.newLine ?? ''}</span>
-      <code>{code || ' '}</code>
+      <span className="tm-diffline__marker" aria-hidden="true">
+        {line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ''}
+      </span>
+      <code>
+        {line.kind === 'addition' || line.kind === 'deletion' ? (
+          <span className="tm-diffline__change tm-visually-hidden">
+            {line.kind === 'addition' ? 'Added: ' : 'Removed: '}
+          </span>
+        ) : null}
+        {code || ' '}
+      </code>
     </div>
   );
 }

@@ -13,7 +13,7 @@ mutations against task deletion and Design operations. The renderer receives
 Previewhost's structured status through the application-preview IPC contract.
 It does not maintain another persisted runtime state machine.
 
-The Previews sidebar page joins the runtime inventory with Task Monki's tasks,
+The Previews page joins the runtime inventory with Task Monki's tasks,
 repositories, and worktrees. It keeps only navigation state in the renderer.
 Opening an application rechecks task/worktree ownership and the serving attempt;
 Design openings also preserve the selected Design route.

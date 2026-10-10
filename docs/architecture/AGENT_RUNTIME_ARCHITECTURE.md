@@ -168,6 +168,35 @@ selection in the panel; another selection starts another session.
 `inspect_preview` and `propose_preview_configuration` tools served through the
 generic client-tool bridge. See `docs/architecture/PREVIEW_RECIPE_GENERATION.md`.
 
+### Review and side questions
+
+Two task-bound question lanes use the shared read-only turn path with a fresh
+session per question and approval policy never. Their runs are detached: they
+never change the workflow phase, `currentRunId`, `projection.agentRun`,
+attention, delivery, or in-flight state, and the renderer keeps them out of the
+main conversation.
+
+- `REVIEW_QUESTION` (purpose `TASK_REVIEW_QUESTION`, session role `REVIEW`)
+  answers a question about one review on the reviewing runtime. The answer may
+  end with a `task-monki-revisions` block; the reducer turns each valid entry
+  into an `AGENT_REVIEW_FINDING_DECIDED` event with actor `REVIEWER`.
+- `SIDE_QUESTION` (purpose `TASK_SIDE_QUESTION`, session role `SIDE`) answers a
+  question about the task on its own runtime and model, one at a time per task.
+  `SideQuestionCoordinator` owns it. While a run that may write the worktree is
+  active, the question reads a read-only snapshot from
+  `ReadOnlySnapshotService` (read-root kind `WORKTREE_SNAPSHOT`) and blocks
+  nothing; otherwise it reads the live worktree and holds other agent work and
+  Git actions until it settles. The answer streams into one `AGENT_MESSAGE`
+  item; the full text is in the run's artifacts.
+
+A snapshot is a detached Git worktree at the live `HEAD` with the staged,
+unstaged and untracked changes applied (untracked files capped at 5 MiB each and
+256 MiB in total), every file read-only, at most one per task. It is reused
+while `HEAD` and the dirty fingerprint are unchanged and removed when its thread
+ends, when the task is archived or deleted, and by the startup and shutdown
+sweeps. Snapshots live under the worktree root in a per-profile directory, so
+hosts sharing a root never remove each other's.
+
 ### Design
 
 `DesignUpdateCoordinator` owns the Design run and Ready lifecycle.

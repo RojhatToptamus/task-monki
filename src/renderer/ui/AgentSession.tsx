@@ -7,7 +7,7 @@ import { TASK_INSTRUCTION_MAX_LENGTH, isImplementationRunMode } from '../../shar
 import { getPostRunActionState } from '../model/postRunActions';
 import { canStopTaskRun } from '../model/runProgress';
 import type { RunFailureBannerViewModel } from '../model/taskView';
-import { clampClip, earlierHistory, isActiveRunStatus, type HistoryWindow, type SessionTurn } from '../model/agentSession';
+import { clampClip, earlierHistory, isActiveRunStatus, reviewTurnOutcome, type HistoryWindow, type SessionTurn } from '../model/agentSession';
 import { ActionMenu } from './ActionMenu';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
@@ -17,7 +17,8 @@ import { InteractionPanel } from './InteractionPanel';
 import { MessageQueue } from './MessageQueue';
 import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
 import { StatusGlyph } from './StatusBadge';
-import { ArrowUp, ChevronDown, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw, ShieldCheck } from 'lucide-react';
+import { ArrowUp, ChevronDown, CornerDownRight, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
+import { AgentMark } from './UiIcons';
 
 export interface AgentSessionProps {
   task: Task;
@@ -36,6 +37,8 @@ export interface AgentSessionProps {
   requiresRecovery: boolean;
   steeringSupported: boolean;
   runtimeUnavailable?: string;
+  /** Another conversation holds the live worktree, such as a side question reading it. */
+  worktreeHeld?: string;
   /** Curated explanation of why the current implementation needs attention. */
   failure?: RunFailureBannerViewModel;
   draft: string;
@@ -125,6 +128,7 @@ export function AgentSession(props: AgentSessionProps) {
     RETRY: { label: 'Retry', description: 'Start the implementation again from the current worktree', placeholder: 'Add guidance for the retry (optional)' }
   };
   const sessionBlocked = activeReview ? 'Wait for the review to finish.'
+    : props.worktreeHeld ? props.worktreeHeld
     : answerPending ? 'Answer the agent request before sending an instruction.'
     : attentionPending ? 'Waiting for confirmation before sending an instruction.'
     : run?.status === 'INTERRUPTING' ? 'Waiting for the agent to stop.'
@@ -265,11 +269,12 @@ export function AgentSession(props: AgentSessionProps) {
           ? <button type="button" className="ghost-button tm-agent-session__earlier" data-disclosure="" onClick={loadEarlier}>Load earlier messages</button>
           : null}
         {visibleTurns.map((turn, index) => turn.run.mode === 'REVIEW'
-          ? <ReviewTurn key={turn.key} turn={turn} onShowReview={props.onShowReview} />
+          ? <ReviewTurn key={turn.key} turn={turn} review={task.projection.agentReview} onShowReview={props.onShowReview} />
           : <Turn key={turn.key} turn={turn} clip={index === 0 ? historyWindow.clip : 0}
             attachments={props.attachments.filter((file) => (props.instructions.find((item) => item.id === turn.opener?.key)?.attachmentIds ?? (turn.opener?.key === `${turn.run.id}:prompt` ? task.initialAttachmentIds : []))?.includes(file.id))}
             onReadAttachment={props.onReadAttachment}
             failure={turn === lastImplementation && turn.state !== 'active' ? props.failure : undefined}
+            sourceName={props.runtimeName}
             capture={turn.state === 'completed' ? props.capture(turn.run) : null}
             onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} />)}
         {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
@@ -356,12 +361,16 @@ export function AgentSession(props: AgentSessionProps) {
   </section>;
 }
 
-function ReviewTurn({ turn, onShowReview }: { turn: SessionTurn; onShowReview(): void }) {
-  const state = { active: 'In progress', completed: 'Completed', stopped: 'Stopped', failed: 'Failed', interrupted: 'Interrupted' }[turn.state];
+function ReviewTurn({ turn, review, onShowReview }: {
+  turn: SessionTurn;
+  review: Task['projection']['agentReview'];
+  onShowReview(): void;
+}) {
+  const outcome = reviewTurnOutcome(turn, review);
   return <div className="tm-turn tm-turn--review">
-    <ShieldCheck size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+    <AgentMark size={13} />
     <span>Agent review</span>
-    <span className="tm-turn__review-state">{state}</span>
+    {outcome ? <span className="tm-turn__review-state">{outcome}</span> : null}
     <button type="button" className="ghost-button" onClick={onShowReview}>View review</button>
   </div>;
 }

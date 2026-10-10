@@ -24,7 +24,10 @@ import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
-import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
+import {
+  buildAgentReviewPrompt,
+  type PreviousReviewContext
+} from '../../shared/promptTemplates';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
@@ -72,9 +75,28 @@ import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
 } from '../review/AgentReviewContract';
+import { parseReviewedDiff } from '../review/ReviewedDiff';
+import {
+  reviewerRevisionDecisions,
+  reviewerRevisionsFromReply
+} from '../review/ReviewerRevisions';
+import {
+  REVIEW_FINDING_DECISION_LIMIT,
+  effectiveReviewFindings,
+  reviewAcceptsDecisions,
+  type ReviewFindingDecision,
+  type ReviewerRevisionsOutcome
+} from '../../shared/agentReviewFindings';
 import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
+/** The single item that carries a side question's answer. */
+const SIDE_ANSWER_ITEM_ID = 'task-monki:side-answer';
+const SIDE_ANSWER_FLUSH_MS = 300;
+// Keeps the item inside the runtime store's telemetry payload limit; the final
+// artifact keeps the complete answer.
+const SIDE_ANSWER_ITEM_MAX_CHARS = 60_000;
+const SIDE_ANSWER_ITEM_MAX_BYTES = 200 * 1024;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -98,7 +120,7 @@ function isReadOnlyRuntimePurpose(
   purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
 ): boolean {
   return (
-    purpose === 'TASK_REVIEW' ||
+    isTaskReadOnlyTurnPurpose(purpose) ||
     purpose === 'TASK_PREVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
     purpose === 'PREVIEW_RECIPE_GENERATION' ||
@@ -106,11 +128,34 @@ function isReadOnlyRuntimePurpose(
   );
 }
 
+/**
+ * A review, the questions to its reviewer and side questions to the task's agent share
+ * the Task read-only turn projection on the shared runtime-turn lane.
+ */
+function isTaskReadOnlyTurnPurpose(
+  purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
+): boolean {
+  return (
+    purpose === 'TASK_REVIEW' ||
+    purpose === 'TASK_REVIEW_QUESTION' ||
+    purpose === 'TASK_SIDE_QUESTION'
+  );
+}
+
+class ReviewerRevisionsRejected extends Error {}
+
+/** Read roots whose working tree a read-only turn must leave unchanged. */
+function repositoryReadRoots(
+  context: import('../../shared/agentRuntime').AgentExecutionContext
+): import('../../shared/agentRuntime').AgentAttestedReadRoot[] {
+  return context.readRoots.filter((root) =>
+    root.kind === 'WORKTREE' || root.kind === 'WORKTREE_SNAPSHOT' || root.kind === 'REPOSITORY');
+}
+
 async function inspectReadOnlyRepositoryState(
   context: import('../../shared/agentRuntime').AgentExecutionContext
 ): Promise<string | undefined> {
-  const roots = context.readRoots
-    .filter((root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY')
+  const roots = repositoryReadRoots(context)
     .map((root) => root.canonicalPath)
     .sort();
   if (roots.length === 0) return undefined;
@@ -245,6 +290,34 @@ export interface StartOrchestratedReview {
   settings: AgentExecutionSettings;
   generationKey?: string;
   beforeGitSnapshotId?: string;
+  /** The earlier review's findings and decisions, so the new review does not re-raise settled ones without reason. */
+  previousReview?: PreviousReviewContext;
+}
+
+export interface StartOrchestratedReviewQuestion {
+  /** Reserved by the caller's message receipt before admission, with the fresh session it creates. */
+  runId: string;
+  sessionId: string;
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  reviewRun: RunRecord;
+  settings: AgentExecutionSettings;
+  prompt: string;
+}
+
+export interface StartOrchestratedSideQuestion {
+  /** Reserved by the caller's message receipt before admission, with the fresh session it creates. */
+  runId: string;
+  sessionId: string;
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  /** The task's runtime, model and settings; the turn runs read-only with approval policy never. */
+  settings: AgentExecutionSettings;
+  prompt: string;
+  /** A read-only snapshot of the worktree to read instead of the live checkout. */
+  snapshotPath?: string;
 }
 
 export class AgentOrchestrator implements AgentRuntimeCoordinator {
@@ -258,6 +331,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   >();
   private readonly disposeRuntimeTurnListeners: Array<() => void> = [];
   private runtimeTurnEventQueue: Promise<void> = Promise.resolve();
+  /** Side questions this process started and has not settled; only their answers stream into items. */
+  private readonly sideAnswerRuns = new Set<string>();
+  private readonly sideAnswerStreams = new Map<
+    string,
+    { text: string; flushedText: string; timer?: NodeJS.Timeout }
+  >();
 
   constructor(
     private readonly store: SqliteTaskStore,
@@ -1073,9 +1152,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     const session = await this.runtimeStore.getSession(run.sessionId);
     if (!session) return event;
-    const repositoryRoots = session.executionContext.readRoots.filter(
-      (root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY'
-    );
+    const repositoryRoots = repositoryReadRoots(session.executionContext);
     const boundaryAt =
       event.type === 'TERMINAL' ? event.completedAt : event.observedAt;
     if (repositoryRoots.length === 0) {
@@ -1153,18 +1230,27 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   private async projectTaskReadOnlyRuntimeEvent(
     event: AgentRuntimeTurnEvent
   ): Promise<void> {
-    if (event.type === 'DELTA') return;
+    if (event.type === 'DELTA') {
+      await this.bufferSideAnswer(event);
+      return;
+    }
     const runtimeRun = await this.runtimeStore.getRun(event.runId);
     if (
       !runtimeRun ||
       runtimeRun.owner.kind !== 'TASK' ||
-      runtimeRun.purpose !== 'TASK_REVIEW'
+      !isTaskReadOnlyTurnPurpose(runtimeRun.purpose)
     ) {
       return;
     }
+    const question = runtimeRun.purpose === 'TASK_REVIEW_QUESTION';
+    const side = runtimeRun.purpose === 'TASK_SIDE_QUESTION';
     const run = await this.taskRuntime.getRun(runtimeRun.id);
     if (!run) return;
+    const streamedAnswer = side ? this.takeSideAnswerStream(run.id) : '';
     if (event.type === 'RECOVERY_REQUIRED') {
+      if (streamedAnswer.trim()) {
+        await this.upsertSideAnswerItem(run, streamedAnswer, 'IN_PROGRESS');
+      }
       await this.taskRuntime.applyTaskRuntimeEvent(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
@@ -1192,10 +1278,20 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
 
     const output = await this.runtimeStore.readArtifact(runtimeRun.outputArtifactId);
+    if (side) {
+      this.sideAnswerRuns.delete(run.id);
+      await this.settleSideAnswer(run, output, event.status, streamedAnswer);
+    }
     const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       run.taskId,
       run.id,
-      output.trim() || event.error || 'The review returned no final response.',
+      output.trim() ||
+        event.error ||
+        (question
+          ? 'The reviewer returned no answer.'
+          : side
+            ? 'The agent returned no answer.'
+            : 'The review returned no final response.'),
       `shared-review-final:${run.id}`
     );
     await this.taskRuntime.applyTaskRuntimeEvent(
@@ -1215,15 +1311,30 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       }),
       `shared-review-final-link:${run.id}`
     );
-    const reviewResult =
-      event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
-    const reviewStatus = agentReviewStatusFromResult(reviewResult);
     const type =
       event.status === 'completed'
         ? 'AGENT_RUN_COMPLETED'
         : event.status === 'interrupted'
           ? 'AGENT_RUN_INTERRUPTED'
           : 'AGENT_RUN_FAILED';
+    let outcome: Record<string, unknown>;
+    if (question) {
+      outcome = {
+        mode: 'REVIEW_QUESTION',
+        ...(event.status === 'completed'
+          ? { reviewerRevisions: await this.applyReviewerRevisions(run, output) }
+          : {})
+      };
+    } else if (side) {
+      outcome = { mode: 'SIDE_QUESTION' };
+    } else {
+      const reviewResult =
+        event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
+      outcome = {
+        agentReviewStatus: agentReviewStatusFromResult(reviewResult),
+        agentReviewResult: reviewResult
+      };
+    }
     await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type,
@@ -1239,8 +1350,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           error: event.error,
           terminalReason: event.error,
           finalArtifactId: finalArtifact.id,
-          agentReviewStatus: reviewStatus,
-          agentReviewResult: reviewResult
+          ...outcome
         },
         occurredAt: event.completedAt
       }),
@@ -1262,9 +1372,216 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     });
   }
 
+  /**
+   * The shared read-only lane streams text, not provider items. A side question's
+   * answer is projected as one AGENT_MESSAGE item, updated at most every
+   * SIDE_ANSWER_FLUSH_MS while it streams and settled with the run.
+   */
+  private async bufferSideAnswer(
+    event: Extract<AgentRuntimeTurnEvent, { type: 'DELTA' }>
+  ): Promise<void> {
+    // Other read-only workflows stream through their own listeners; skip them without a lookup.
+    if (!this.sideAnswerRuns.has(event.runId)) return;
+    let stream = this.sideAnswerStreams.get(event.runId);
+    if (!stream) {
+      stream = { text: '', flushedText: '' };
+      this.sideAnswerStreams.set(event.runId, stream);
+    }
+    if (stream.text.length < SIDE_ANSWER_ITEM_MAX_CHARS) {
+      stream.text = `${stream.text}${event.text}`.slice(0, SIDE_ANSWER_ITEM_MAX_CHARS);
+    }
+    if (stream.timer) return;
+    const runId = event.runId;
+    stream.timer = setTimeout(() => {
+      const current = this.sideAnswerStreams.get(runId);
+      if (current) current.timer = undefined;
+      // Flushes stay ordered with the run's other runtime events.
+      const flush = this.runtimeTurnEventQueue.then(() => this.flushSideAnswer(runId));
+      this.runtimeTurnEventQueue = flush.catch(() => undefined);
+    }, SIDE_ANSWER_FLUSH_MS);
+    stream.timer.unref?.();
+  }
+
+  private async flushSideAnswer(runId: string): Promise<void> {
+    const stream = this.sideAnswerStreams.get(runId);
+    if (!stream || !stream.text.trim() || stream.text === stream.flushedText) return;
+    const run = await this.taskRuntime.getRun(runId);
+    if (!run || isTerminalRuntimeRun(run.status)) return;
+    await this.upsertSideAnswerItem(run, stream.text, 'IN_PROGRESS');
+    stream.flushedText = stream.text;
+  }
+
+  /** Ends the answer's stream and returns everything it received. */
+  private takeSideAnswerStream(runId: string): string {
+    const stream = this.sideAnswerStreams.get(runId);
+    if (!stream) return '';
+    if (stream.timer) clearTimeout(stream.timer);
+    this.sideAnswerStreams.delete(runId);
+    return stream.text;
+  }
+
+  /** Settles the answer item with the run: its final text, or what streamed before it ended. */
+  private async settleSideAnswer(
+    run: RunRecord,
+    output: string,
+    status: Extract<AgentRuntimeTurnEvent, { type: 'TERMINAL' }>['status'],
+    streamedText: string
+  ): Promise<void> {
+    const items = await this.taskRuntime.getAgentItemsForRun(run.id);
+    const recorded = items.find((item) => item.providerItemId === SIDE_ANSWER_ITEM_ID);
+    // A replayed terminal event finds the answer it already settled.
+    if (recorded && recorded.status !== 'IN_PROGRESS') return;
+    const recordedText = (recorded?.payload as { text?: unknown } | undefined)?.text;
+    const text = output.trim() || streamedText.trim() ||
+      (typeof recordedText === 'string' ? recordedText.trim() : '');
+    if (!text) return;
+    await this.upsertSideAnswerItem(
+      run,
+      text,
+      status === 'completed' ? 'COMPLETED' : status === 'interrupted' ? 'INTERRUPTED' : 'FAILED'
+    );
+  }
+
+  private async upsertSideAnswerItem(
+    run: RunRecord,
+    value: string,
+    status: 'IN_PROGRESS' | 'COMPLETED' | 'INTERRUPTED' | 'FAILED'
+  ): Promise<void> {
+    let text = value.length > SIDE_ANSWER_ITEM_MAX_CHARS
+      ? `${value.slice(0, SIDE_ANSWER_ITEM_MAX_CHARS - 1)}…`
+      : value;
+    while (Buffer.byteLength(JSON.stringify(text), 'utf8') > SIDE_ANSWER_ITEM_MAX_BYTES) {
+      text = `${text.slice(0, Math.floor(text.length * 0.8))}…`;
+    }
+    const at = new Date().toISOString();
+    await this.taskRuntime.upsertAgentItem(
+      {
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        sessionId: run.sessionId,
+        providerItemId: SIDE_ANSWER_ITEM_ID,
+        type: 'AGENT_MESSAGE',
+        status,
+        payload: { text },
+        ...(status === 'IN_PROGRESS' ? {} : { providerCompletedAt: at })
+      },
+      `side-answer:${run.id}:${status}:${createHash('sha256').update(text).digest('hex')}`
+    );
+    this.events.emit({
+      type: 'run.activity',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: { itemType: 'agentMessage', itemId: SIDE_ANSWER_ITEM_ID, status },
+      at
+    });
+  }
+
+  /**
+   * Applies the revision block that ends a reviewer's answer when it is valid for
+   * the still-current review. A defective block or a changed review applies
+   * nothing: the answer still completes, and the reason is kept on the run.
+   */
+  private async applyReviewerRevisions(
+    run: RunRecord,
+    output: string
+  ): Promise<ReviewerRevisionsOutcome> {
+    if (reviewerRevisionsFromReply(output, { findings: [], diffPaths: new Set() }).status === 'NONE') {
+      return { status: 'NONE' };
+    }
+    let record: ReviewerRevisionsOutcome;
+    try {
+      record = await this.recordReviewerRevisions(run, output);
+    } catch (error) {
+      record = {
+        status: 'REJECTED',
+        reason: error instanceof ReviewerRevisionsRejected
+          ? error.message
+          : `Task Monki could not apply the revisions: ${errorMessage(error)}`
+      };
+    }
+    if (record.status === 'REJECTED') {
+      const runtimeRun = await this.runtimeStore.getRun(run.id);
+      if (runtimeRun) {
+        await this.appendRuntimeDiagnostic(
+          runtimeRun,
+          `Task Monki ignored the reviewer's revision block: ${record.reason}`,
+          `reviewer-revisions-diagnostic:${run.id}`
+        ).catch(() => undefined);
+      }
+    }
+    return record;
+  }
+
+  private async recordReviewerRevisions(
+    run: RunRecord,
+    output: string
+  ): Promise<ReviewerRevisionsOutcome> {
+    const reviewRunId = run.continuedFromRunId;
+    const changed = 'The review changed before the reviewer answered, so its revisions were not applied.';
+    const detail = await this.store.getTaskDetail(run.taskId);
+    const gate = detail.task.projection.agentReview;
+    if (!reviewRunId || !reviewAcceptsDecisions(gate, reviewRunId)) {
+      throw new ReviewerRevisionsRejected(changed);
+    }
+    const diffPaths = await this.reviewedDiffPaths(detail.gitSnapshots, gate?.reviewedGitSnapshotId);
+    let decisions: ReviewFindingDecision[] = [];
+    await this.store.recordReviewFindingDecisions(run.taskId, (task) => {
+      const current = task.projection.agentReview;
+      if (!reviewAcceptsDecisions(current, reviewRunId)) throw new ReviewerRevisionsRejected(changed);
+      const recorded = current?.findingDecisions ?? [];
+      // A replayed terminal event finds the revisions this answer already applied.
+      const applied = recorded.filter((decision) => decision.questionRunId === run.id);
+      if (applied.length > 0) {
+        decisions = applied;
+        return [];
+      }
+      const findings = effectiveReviewFindings(current?.result, recorded);
+      const outcome = reviewerRevisionsFromReply(output, { findings, diffPaths });
+      if (outcome.status === 'REJECTED') throw new ReviewerRevisionsRejected(outcome.reason);
+      if (outcome.status === 'NONE') return [];
+      if (recorded.length + outcome.revisions.length > REVIEW_FINDING_DECISION_LIMIT) {
+        throw new ReviewerRevisionsRejected('This review has reached its decision limit. Run the review again.');
+      }
+      decisions = reviewerRevisionDecisions(outcome.revisions, {
+        reviewRunId,
+        questionRunId: run.id,
+        findings,
+        createdAt: new Date().toISOString(),
+        createId: randomUUID
+      });
+      return decisions;
+    });
+    if (decisions.length === 0) return { status: 'NONE' };
+    this.events.emit({
+      type: 'task.updated',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: { reviewFindingsDecided: true },
+      at: new Date().toISOString()
+    });
+    return { status: 'APPLIED', decisionIds: decisions.map((decision) => decision.id) };
+  }
+
+  /** File paths of the reviewed snapshot's diff evidence; empty when it is unavailable. */
+  private async reviewedDiffPaths(
+    snapshots: readonly import('../../shared/contracts').GitSnapshotRecord[],
+    snapshotId: string | undefined
+  ): Promise<Set<string>> {
+    const artifactId = snapshots.find((snapshot) => snapshot.id === snapshotId)?.diffArtifactId;
+    if (!artifactId) return new Set();
+    const diff = await this.store.readArtifact(artifactId).catch(() => '');
+    return new Set(parseReviewedDiff(diff).map((file) => file.path));
+  }
+
   private async appendRuntimeDiagnostic(
     run: import('../../shared/agentRuntime').AgentRuntimeRunRecord,
-    message: string
+    message: string,
+    clientOperationId = `repository-integrity-diagnostic:${run.id}`
   ): Promise<void> {
     const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
     if (!artifact) return;
@@ -1272,7 +1589,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     await this.runtimeStore.updateArtifact({
       artifactId: artifact.id,
       expectedRevision: artifact.recordRevision,
-      clientOperationId: `repository-integrity-diagnostic:${run.id}`,
+      clientOperationId,
       content: `${current}${current ? '\n' : ''}${message}`
     });
   }
@@ -1484,7 +1801,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         : `shared-review-recovery:${run.id}:${observedAt}`;
       const taskProjectionNeedsReconciliation =
         run.owner.kind === 'TASK' &&
-        run.purpose === 'TASK_REVIEW' &&
+        isTaskReadOnlyTurnPurpose(run.purpose) &&
         !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
       const transientTurnNeedsCleanup =
         terminal &&
@@ -1552,7 +1869,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
         ) {
           await this.finishRuntimeTurn(run.id);
-        } else if (run.owner.kind === 'TASK' && run.purpose === 'TASK_REVIEW') {
+        } else if (run.owner.kind === 'TASK' && isTaskReadOnlyTurnPurpose(run.purpose)) {
           if (!needsEventProcessing && terminalQueueNeedsSettlement) {
             await this.finishRuntimeTurn(run.id);
           }
@@ -1944,7 +2261,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       userContext: await readTaskUserContext(this.store, input.task.id),
       task: input.task,
       worktree: input.worktree,
-      target: input.target
+      target: input.target,
+      previousReview: input.previousReview
     });
     const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
       sessionId: reviewSessionId,
@@ -1995,23 +2313,210 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       taskReviewTarget: input.target,
       attachmentSelection: toAgentAttachmentSelection(preflightAttachments)
     });
-    const reviewSession = await this.taskRuntime.getAgentSession(prepared.session.id);
-    const reviewRun = await this.taskRuntime.getRun(prepared.run.id);
-    if (!reviewSession || !reviewRun) {
-      throw new Error('Prepared review did not project into its Task owner.');
-    }
-    await this.store.recordAgentSessionCreated(reviewSession);
-    await this.store.recordAgentRunStarted(reviewRun);
-    try {
-      const attachments = toAgentTurnAttachments(
+    return this.startPreparedTaskReadOnlyTurn(prepared, {
+      startOperationId: `review-start:${prepared.run.id}`,
+      unconfirmedReason: 'Task Monki could not confirm whether the review started.',
+      attachments: async () => toAgentTurnAttachments(
         await this.store.prepareRunAttachments(prepared.run.id, input.task.id)
-      );
+      )
+    });
+  }
+
+  /**
+   * Starts one question to a review's reviewer on the review's read-only lane:
+   * a fresh REVIEW session on the review's runtime and model, so the repository
+   * comparison applies and no provider memory carries between questions.
+   */
+  startReviewQuestion(input: StartOrchestratedReviewQuestion): Promise<RunRecord> {
+    const operation = this.startQueue.then(() => this.startReviewQuestionSerially(input));
+    this.startQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
+  private async startReviewQuestionSerially(
+    input: StartOrchestratedReviewQuestion
+  ): Promise<RunRecord> {
+    this.assertProviderStartupAvailable();
+    if (input.reviewRun.mode !== 'REVIEW' || input.reviewRun.taskId !== input.task.id) {
+      throw new Error('A reviewer question requires the review it asks about.');
+    }
+    const runtimeId = input.settings.runtimeId ?? input.reviewRun.runtimeId;
+    const adapter = this.runtimes.require(runtimeId);
+    const support = projectAgentExecutionSupport(await adapter.capabilities(), 'REVIEW_QUESTION');
+    if (!support.supported) throw new Error(support.reason);
+    const settings = await this.validateSettings(adapter, { ...input.settings, runtimeId });
+    await this.assertCapacity();
+    const sessionId = input.sessionId;
+    if (await this.runtimeStore.getSession(sessionId)) {
+      throw new Error('Each reviewer question needs a new session.');
+    }
+    const executionContext = await this.buildExecutionContext(runtimeId, {
+      sessionId,
+      primaryCwd: input.worktree.worktreePath,
+      readRoots: [
+        {
+          canonicalPath: input.worktree.worktreePath,
+          kind: 'WORKTREE',
+          entityId: input.worktree.id
+        }
+      ],
+      modelSettings: settings,
+      clientOperationId: `review-question-session:${input.task.id}:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await this.prepareTurn({
+      sessionId,
+      runId: input.runId,
+      owner: { kind: 'TASK', taskId: input.task.id },
+      scope: {
+        kind: 'TASK',
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id
+      },
+      runtimeId,
+      model: settings.model ?? runtimeId,
+      purpose: 'TASK_REVIEW_QUESTION',
+      generationKey: input.reviewRun.id,
+      executionContext,
+      prompt: input.prompt,
+      priority: 'TASK_FOREGROUND',
+      clientOperationId: `review-question-run:${input.task.id}:${input.runId}`,
+      createdAt: new Date().toISOString(),
+      role: 'REVIEW',
+      parentSessionId: input.reviewRun.sessionId,
+      taskContext: {
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath
+      },
+      taskDetails: { continuedFromRunId: input.reviewRun.id, eventCount: 0 },
+      attachmentSelection: []
+    });
+    return this.startPreparedTaskReadOnlyTurn(prepared, {
+      startOperationId: `review-question-start:${prepared.run.id}`,
+      unconfirmedReason: 'Task Monki could not confirm whether the reviewer question started.',
+      attachments: async () => []
+    });
+  }
+
+  /**
+   * Starts one side question on the shared read-only lane: a fresh SIDE session on the
+   * task's own runtime and model, reading either the live worktree or a read-only
+   * snapshot of it, so the repository comparison applies to the checkout it reads.
+   */
+  startSideQuestion(input: StartOrchestratedSideQuestion): Promise<RunRecord> {
+    const operation = this.startQueue.then(() => this.startSideQuestionSerially(input));
+    this.startQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
+  private async startSideQuestionSerially(
+    input: StartOrchestratedSideQuestion
+  ): Promise<RunRecord> {
+    this.assertProviderStartupAvailable();
+    if (input.task.kind !== 'NORMAL' || input.worktree.taskId !== input.task.id) {
+      throw new Error('A side question requires its task worktree.');
+    }
+    const runtimeId = input.task.runtimeId;
+    if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
+      throw new Error('A side question uses the task runtime.');
+    }
+    const adapter = this.runtimes.require(runtimeId);
+    const support = projectAgentExecutionSupport(await adapter.capabilities(), 'SIDE_QUESTION');
+    if (!support.supported) throw new Error(support.reason);
+    const settings = await this.validateSettings(adapter, { ...input.settings, runtimeId });
+    await this.assertCapacity();
+    const sessionId = input.sessionId;
+    if (await this.runtimeStore.getSession(sessionId)) {
+      throw new Error('Each side question needs a new session.');
+    }
+    const checkout = input.snapshotPath ?? input.worktree.worktreePath;
+    const executionContext = await this.buildExecutionContext(runtimeId, {
+      sessionId,
+      primaryCwd: checkout,
+      readRoots: [
+        {
+          canonicalPath: checkout,
+          kind: input.snapshotPath ? 'WORKTREE_SNAPSHOT' : 'WORKTREE',
+          entityId: input.worktree.id
+        }
+      ],
+      modelSettings: settings,
+      clientOperationId: `side-question-session:${input.task.id}:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await this.prepareTurn({
+      sessionId,
+      runId: input.runId,
+      owner: { kind: 'TASK', taskId: input.task.id },
+      scope: {
+        kind: 'TASK',
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id
+      },
+      runtimeId,
+      model: settings.model ?? runtimeId,
+      purpose: 'TASK_SIDE_QUESTION',
+      generationKey: input.runId,
+      executionContext,
+      prompt: input.prompt,
+      priority: 'TASK_FOREGROUND',
+      clientOperationId: `side-question-run:${input.task.id}:${input.runId}`,
+      createdAt: new Date().toISOString(),
+      role: 'SIDE',
+      taskContext: {
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath
+      },
+      taskDetails: { eventCount: 0 },
+      attachmentSelection: []
+    });
+    this.sideAnswerRuns.add(prepared.run.id);
+    try {
+      return await this.startPreparedTaskReadOnlyTurn(prepared, {
+        startOperationId: `side-question-start:${prepared.run.id}`,
+        unconfirmedReason: 'Task Monki could not confirm whether the side question started.',
+        attachments: async () => []
+      });
+    } catch (error) {
+      this.sideAnswerRuns.delete(prepared.run.id);
+      this.takeSideAnswerStream(prepared.run.id);
+      throw error;
+    }
+  }
+
+  /** Publishes a prepared read-only Task turn to its Task owner, then delivers it. */
+  private async startPreparedTaskReadOnlyTurn(
+    prepared: PreparedAgentRuntimeTurn,
+    options: {
+      startOperationId: string;
+      unconfirmedReason: string;
+      attachments: () => Promise<AgentTurnAttachment[]>;
+    }
+  ): Promise<RunRecord> {
+    const session = await this.taskRuntime.getAgentSession(prepared.session.id);
+    const run = await this.taskRuntime.getRun(prepared.run.id);
+    if (!session || !run) {
+      throw new Error('The prepared read-only turn did not project into its Task owner.');
+    }
+    await this.store.recordAgentSessionCreated(session);
+    await this.store.recordAgentRunStarted(run);
+    try {
       await this.startPreparedTurnNow(
         prepared.queueEntry.id,
-        `review-start:${prepared.run.id}`,
-        attachments
+        options.startOperationId,
+        await options.attachments()
       );
-      return (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+      return (await this.taskRuntime.getRun(prepared.run.id)) ?? run;
     } catch (error) {
       await this.runtimeTurnEventQueue;
       const canonical = await this.runtimeStore.getRun(prepared.run.id);
@@ -2022,14 +2527,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           ...(canonical.providerTurnId
             ? { providerTurnId: canonical.providerTurnId }
             : {}),
-          reason:
-            canonical.terminalReason ??
-            'Task Monki could not confirm whether the review started.',
+          reason: canonical.terminalReason ?? options.unconfirmedReason,
           observedAt: canonical.lastEventAt ?? new Date().toISOString()
         });
         throw error;
       }
-      const projected = (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+      const projected = (await this.taskRuntime.getRun(prepared.run.id)) ?? run;
       await this.recordStartFailure(projected, error);
       if (canonical && isTerminalRuntimeRun(canonical.status)) {
         await this.finishRuntimeTurn(canonical.id);
@@ -2091,10 +2594,14 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       return;
     }
     const canonical = await this.runtimeStore.getRun(run.id);
-    if (canonical?.purpose === 'TASK_REVIEW') {
+    if (canonical && isTaskReadOnlyTurnPurpose(canonical.purpose)) {
       const interrupted = await this.interruptTurn(
         run.id,
-        'The review was canceled.',
+        canonical.purpose === 'TASK_REVIEW_QUESTION'
+          ? 'The reviewer question was stopped.'
+          : canonical.purpose === 'TASK_SIDE_QUESTION'
+            ? 'The side question was stopped.'
+            : 'The review was canceled.',
         `cancel-shared-review:${run.id}`
       );
       if (interrupted.status === 'RECOVERY_REQUIRED') {
@@ -2304,6 +2811,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   async shutdown(): Promise<void> {
     for (const dispose of this.disposeRuntimeTurnListeners.splice(0)) dispose();
     this.runtimeTurnListeners.clear();
+    this.sideAnswerRuns.clear();
+    for (const runId of [...this.sideAnswerStreams.keys()]) this.takeSideAnswerStream(runId);
     await this.runtimeTurnEventQueue;
     await this.runtimes.shutdownAll();
   }

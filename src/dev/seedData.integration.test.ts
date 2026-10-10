@@ -263,7 +263,22 @@ describe('Task Monki development seed data', () => {
       snapshot.interactionRequests.find(
         (request) => request.taskId === approvalTask.id && request.status === 'PENDING'
       )
-    ).toMatchObject({ type: 'COMMAND_APPROVAL' });
+    ).toMatchObject({
+      type: 'COMMAND_APPROVAL',
+      allowedActions: expect.arrayContaining(['ACCEPT', 'DECLINE']),
+      policyWarnings: []
+    });
+    // Seeded requests pass through production policy: a warned command cannot be accepted.
+    const warnedApprovalTask = taskForScenario(manifest, snapshot, 'agent-awaiting-approval-warning');
+    expect(
+      snapshot.interactionRequests.find(
+        (request) => request.taskId === warnedApprovalTask.id && request.status === 'PENDING'
+      )
+    ).toMatchObject({
+      type: 'COMMAND_APPROVAL',
+      allowedActions: ['DECLINE', 'CANCEL'],
+      policyWarnings: ['The command working directory is outside the task worktree.']
+    });
     expect(
       snapshot.events.some(
         (event) => event.taskId === approvalTask.id && event.type === 'AGENT_INTERACTION_REQUESTED'
@@ -320,7 +335,7 @@ describe('Task Monki development seed data', () => {
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
-      label: 'Searching review · src/renderer.'
+      label: 'Searching review in src/renderer.'
     });
 
     const runningTask = taskForScenario(manifest, snapshot, 'agent-running');

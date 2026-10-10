@@ -13,12 +13,12 @@ const baseState: SoftwareUpdateState = {
 };
 
 describe('SoftwareUpdateNotice', () => {
-  it('stays out of the sidebar until there is an actionable update', () => {
+  it('stays off the rail until there is an actionable update', () => {
     expect(buildSoftwareUpdateNotice(baseState)).toBeNull();
     expect(buildSoftwareUpdateNotice({ ...baseState, status: 'error' })).toBeNull();
   });
 
-  it('renders download progress as an accessible stable row', () => {
+  it('reports download progress accessibly without offering an action', () => {
     const html = renderToStaticMarkup(
       <SoftwareUpdateNotice
         state={{
@@ -27,30 +27,28 @@ describe('SoftwareUpdateNotice', () => {
           availableVersion: '0.2.1',
           progress: { percent: 29.6, transferred: 296, total: 1_000, bytesPerSecond: 20 }
         }}
-        collapsed={false}
         onDownload={() => undefined}
         onInstall={() => undefined}
       />
     );
 
-    expect(html).toContain('Downloading 0.2.1');
+    expect(html).toContain('aria-label="Downloading 0.2.1, 30%"');
     expect(html).toContain('aria-valuenow="30"');
     expect(html).not.toContain('<button');
   });
 
-  it('keeps the collapsed action labeled and marks attention with one dot', () => {
+  it('keeps the rail action labeled and marks attention with one dot', () => {
     const html = renderToStaticMarkup(
       <SoftwareUpdateNotice
         state={{ ...baseState, status: 'available', availableVersion: '0.2.1' }}
-        collapsed
         onDownload={() => undefined}
         onInstall={() => undefined}
       />
     );
 
     expect(html).toContain('aria-label="Update to 0.2.1"');
-    expect(html).toContain('data-tip="Update to 0.2.1"');
-    expect(html).toContain('tm-software-update__dot');
+    expect(html).toContain('<button');
+    expect(html).toContain('tm-rail__dot');
   });
 
   it('maps completed and failed downloads to the correct actions', () => {

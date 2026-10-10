@@ -46,53 +46,8 @@
   padding: 24px;
 }
 
-.tm-discourse-loading-rail {
-  display: grid;
-  align-content: start;
-  gap: 12px;
-  padding: 24px 18px;
-  border-right: 1px solid var(--hair);
-}
-
-.tm-discourse-loading-rail span,
-.tm-discourse-loading-conversation span {
-  display: block;
-  border-radius: 7px;
-  background: var(--field);
-}
-
-.tm-discourse-loading-rail span:first-child {
-  width: 38%;
-  height: 18px;
-  margin-bottom: 36px;
-}
-
-.tm-discourse-loading-rail span:not(:first-child) {
-  height: 44px;
-}
-
-.tm-discourse-loading-conversation {
-  display: grid;
-  align-content: center;
-  gap: 18px;
-  padding: 80px clamp(24px, 8vw, 140px) 160px;
-}
-
-.tm-discourse-loading-conversation span {
-  height: 54px;
-}
-
-.tm-discourse-loading-conversation span:nth-child(2) {
-  width: 72%;
-}
-
-.tm-discourse-loading-conversation span:nth-child(3) {
-  width: 86%;
-}
-
 .tm-discourse-rail,
-.tm-discourse-inspector,
-.tm-discourse-loading-rail {
+.tm-discourse-inspector {
   min-width: 0;
   min-height: 0;
   background: var(--panel);
@@ -123,7 +78,7 @@
 
 .tm-discourse-rail__head h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--t-heading);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -132,7 +87,7 @@
   margin: 4px 0 0;
   color: var(--muted);
   max-width: 190px;
-  font-size: 11.5px;
+  font-size: var(--t-meta);
   line-height: 1.35;
 }
 
@@ -143,10 +98,10 @@
   height: 30px;
   padding: 0 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   background: var(--field);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--t-help);
   font-weight: 500;
 }
 
@@ -162,7 +117,7 @@
   margin: 0 14px 9px;
   padding: 0 9px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--muted);
@@ -189,7 +144,7 @@
   outline: 0;
   background: transparent;
   color: var(--text);
-  font: 12px var(--font-ui);
+  font: var(--t-help) var(--font-ui);
 }
 
 .tm-discourse-search input:focus,
@@ -199,28 +154,7 @@
 }
 
 .tm-discourse-rail__filter {
-  display: flex;
-  gap: 2px;
   margin: 0 14px 10px;
-  padding: 2px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-}
-
-.tm-discourse-rail__filter button {
-  flex: 1;
-  height: 28px;
-  border-radius: 6px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.tm-discourse-rail__filter button[aria-pressed='true'] {
-  background: var(--card);
-  color: var(--text);
 }
 
 .tm-discourse-rail__list {
@@ -241,7 +175,7 @@
   margin: 1px 0;
   padding: 8px 10px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   text-align: left;
   color: var(--text-soft);
 }
@@ -260,13 +194,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: var(--t-help);
   font-weight: 500;
 }
 
 .tm-discourse-thread small {
   color: var(--muted);
-  font: 10px var(--font-ui);
+  font: var(--t-meta) var(--font-ui);
 }
 
 .tm-discourse-thread__meta {
@@ -276,23 +210,22 @@
   justify-content: flex-start;
   gap: 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-thread__meta time {
   margin-left: auto;
-  font: 10px var(--font-mono);
-}
+  font: var(--t-meta) var(--font-ui); font-variant-numeric: tabular-nums; }
 
 .tm-discourse-unread {
   min-width: 17px;
   height: 17px;
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 0;
-  background: var(--amber-bg);
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font: 600 9.5px/17px var(--font-mono);
+  font: 600 var(--t-meta)/17px var(--font-mono);
   text-align: center;
 }
 
@@ -306,14 +239,14 @@
   gap: 4px;
   margin: 28px 12px;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
   line-height: 1.5;
   text-align: center;
 }
 
 .tm-discourse-rail__empty strong {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .tm-discourse-conversation {
@@ -381,11 +314,11 @@
   width: min(520px, 56vw);
   height: 31px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   padding: 0 8px;
   background: var(--field-focus);
   color: var(--text);
-  font: 600 15px var(--font-ui);
+  font: 600 var(--t-heading) var(--font-ui);
   outline: 0;
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
@@ -402,7 +335,7 @@
   gap: 7px;
   margin-top: 4px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-header__meta span + span::before {
@@ -438,26 +371,12 @@
   scrollbar-gutter: stable;
 }
 
-.tm-discourse-transcript__loading {
-  position: sticky;
-  top: 2px;
-  z-index: var(--layer-sticky);
-  width: max-content;
-  margin: 0 auto;
-  padding: 4px 9px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--overlay);
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .tm-discourse-load-older {
   display: block;
   min-height: 28px;
   margin: 4px auto 16px;
-  color: var(--working-ink);
-  font-size: 11px;
+  color: var(--accent-ink);
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -473,15 +392,15 @@
   margin: 0 auto 10px;
   padding: 9px 11px;
   border: 0;
-  border-radius: 9px;
-  background: var(--amber-bg);
+  border-radius: var(--r-sm);
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   line-height: 1.4;
 }
 
 .tm-discourse-status-banner--error {
-  background: var(--error-bg);
+  background: var(--blocked-bg);
   color: var(--blocked-ink);
 }
 
@@ -495,10 +414,10 @@
   min-height: 28px;
   padding: 0 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: inherit;
-  font-size: 11px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -513,8 +432,8 @@
 }
 
 .tm-discourse-status-banner button:disabled {
+  color: var(--text-disabled);
   cursor: wait;
-  opacity: 0.56;
 }
 
 .tm-discourse-workspace-error {
@@ -529,7 +448,7 @@
 
 .tm-discourse-workspace-error span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
   line-height: 1.5;
 }
 
@@ -547,19 +466,9 @@
   text-align: center;
 }
 
-.tm-discourse-empty__mark {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-}
-
 .tm-discourse-empty h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--t-heading);
   letter-spacing: -0.018em;
 }
 
@@ -567,12 +476,12 @@
   max-width: 420px;
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
   line-height: 1.5;
 }
 
 .tm-discourse-empty kbd {
-  font: 500 9px var(--font-mono);
+  font: 500 var(--t-meta) var(--font-mono);
 }
 
 .tm-discourse-messages {
@@ -603,7 +512,7 @@
 }
 
 .tm-discourse-message--highlight {
-  background: var(--ctx-bg);
+  background: var(--accent-soft);
 }
 
 .tm-discourse-message article {
@@ -611,15 +520,8 @@
 }
 
 .tm-discourse-message__state {
-  padding: 2px 5px;
-  border-radius: 999px;
-  background: var(--field);
-}
-
-.tm-discourse-message__metadata {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-message__body {
@@ -638,7 +540,7 @@
 .tm-discourse-message__tombstone {
   margin: 5px 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
   font-style: italic;
 }
 
@@ -646,10 +548,10 @@
   margin: 7px 0 2px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 7px;
-  background: var(--amber-bg);
+  border-radius: var(--r-xs);
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   line-height: 1.4;
 }
 
@@ -702,20 +604,31 @@
   padding: 0 7px;
   overflow: hidden;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: var(--field);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Message actions keep their space but appear only while the message is
+   hovered or holds focus (DESIGN.md 5.1),
+so a long transcript reads as text. */
 .tm-discourse-message footer {
   display: flex;
   align-items: center;
   gap: 4px;
   min-height: 28px;
   margin-top: 8px;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.tm-discourse-message:hover footer,
+.tm-discourse-message:focus-within footer,
+.tm-discourse-message footer:has([aria-expanded='true'], [data-state='open']) {
+  opacity: 1;
 }
 
 .tm-discourse-message footer > button,
@@ -726,7 +639,7 @@
   place-items: center;
   min-height: 28px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   color: var(--muted);
 }
 
@@ -736,7 +649,6 @@
   background: var(--hover);
   color: var(--text);
 }
-
 
 .tm-discourse-message-action svg,
 .tm-discourse-message-menu__trigger svg {
@@ -761,11 +673,11 @@
   height: 29px;
   padding: 0 11px;
   border: 1px solid var(--edge);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--overlay);
-  color: var(--working-ink);
+  color: var(--accent-ink);
   box-shadow: var(--shadow-pop);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -789,7 +701,7 @@
   min-height: 32px;
   list-style: none;
   color: var(--text-soft);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   cursor: pointer;
 }
 
@@ -808,9 +720,8 @@
 
 .tm-discourse-response__concerns summary > span {
   color: var(--waiting-ink);
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: uppercase;
+  font-size: var(--t-group);
+  font-weight: 500;
 }
 
 .tm-discourse-response__concerns p {
@@ -819,17 +730,29 @@
   gap: 8px;
   margin: 7px 0 3px;
   color: var(--text-soft);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   line-height: 1.45;
 }
 
 .tm-discourse-response__concerns p strong {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
-/* Comparison explanations are prose, not the legacy review label/value grid. */
+/* Comparison explanations are prose,
+not the legacy review label/value grid. */
+.tm-discourse-team__details > summary {
+  width: fit-content;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.tm-discourse-team__details > summary:hover {
+  color: var(--text-soft);
+}
+
 .tm-discourse-team .tm-message-markdown p {
   display: block;
   font-size: inherit;
@@ -873,10 +796,10 @@
   gap: 10px;
   padding: 7px 10px;
   border: 0;
-  border-radius: 9px 9px 0 0;
-  background: var(--ctx-bg);
-  color: var(--working-ink);
-  font-size: 11px;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -889,10 +812,10 @@
   height: 28px;
   padding: 0 7px;
   border: 0;
-  background: var(--ctx-bg);
-  border-radius: 6px;
-  color: var(--working-ink);
-  font-size: 11px;
+  background: var(--accent-soft);
+  border-radius: var(--r-xs);
+  color: var(--accent-ink);
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -920,20 +843,20 @@
 }
 
 .tm-discourse-composer-target strong {
-  font-size: 10.5px;
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-composer-target small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tm-discourse-composer-target button {
   color: var(--muted);
-  font-size: 16px;
+  font-size: var(--t-heading);
 }
 
 .tm-discourse-agent-config {
@@ -972,12 +895,12 @@
 }
 
 .tm-discourse-agent-config__identity strong {
-  font-size: 13px;
+  font-size: var(--t-body);
 }
 
 .tm-discourse-agent-config__identity small {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-agent-config .tm-agent-console--compact {
@@ -996,7 +919,7 @@
 }
 
 .tm-discourse-agent-config .tm-agent-console--compact .tm-agent-console__summary {
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning {
@@ -1004,7 +927,7 @@
   gap: 2px;
   padding: 2px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--field);
 }
 
@@ -1017,7 +940,7 @@
   min-height: 28px;
   place-items: center;
   padding: 0 2px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning button > span {
@@ -1029,7 +952,7 @@
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning small {
-  font-size: 10px;
+  font-size: var(--t-meta);
 }
 
 .discourse-mention-input {
@@ -1057,7 +980,7 @@
   outline: 0;
   background: transparent;
   color: var(--text);
-  font: 13.5px/1.5 var(--font-ui);
+  font: var(--t-body)/1.5 var(--font-ui);
   scrollbar-gutter: stable;
 }
 
@@ -1066,10 +989,6 @@
   outline: 0;
   background: transparent;
   box-shadow: none;
-}
-
-.discourse-mention-input__textarea::placeholder {
-  color: var(--placeholder);
 }
 
 .discourse-mention-input__tokens {
@@ -1083,10 +1002,8 @@
   flex: 0 0 38px;
   padding-top: 4px;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.045em;
+  font-size: var(--t-group);
+  font-weight: 500;
 }
 
 .discourse-mention-input__tokens ul {
@@ -1108,10 +1025,10 @@
   padding: 0 7px;
   overflow: hidden;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: var(--sel);
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1123,7 +1040,7 @@
 
 .discourse-mention-input__tokens button span {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--t-body);
 }
 
 .discourse-mention-input__listbox {
@@ -1136,8 +1053,8 @@
   overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--edge);
-  border-radius: 11px;
-  background: var(--overlay);
+  border-radius: var(--r);
+  background: var(--card);
   box-shadow: var(--shadow-pop);
   scrollbar-gutter: stable;
 }
@@ -1149,10 +1066,8 @@
 .discourse-mention-input__group-label {
   padding: 7px 8px 4px;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+  font-size: var(--t-group);
+  font-weight: 500;
 }
 
 .discourse-mention-input__option {
@@ -1163,7 +1078,7 @@
   width: 100%;
   padding: 6px 8px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-soft);
   text-align: left;
@@ -1186,7 +1101,7 @@
 
 .discourse-mention-input__option strong {
   overflow: hidden;
-  font-size: 11.5px;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1195,7 +1110,7 @@
   grid-column: 1;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1210,7 +1125,7 @@
 .discourse-mention-input__empty {
   padding: 22px 10px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   text-align: center;
 }
 
@@ -1227,8 +1142,8 @@
   gap: 4px;
   min-height: 28px;
   padding: 0 5px;
-  color: var(--working-ink);
-  font-size: 9.5px;
+  color: var(--accent-ink);
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -1243,7 +1158,7 @@
   gap: 10px;
   margin: 7px 2px 0;
   color: var(--waiting-ink);
-  font-size: 11px;
+  font-size: var(--t-meta);
   line-height: 1.4;
 }
 
@@ -1251,10 +1166,10 @@
   flex: 0 0 auto;
   min-height: 28px;
   padding: 0 7px;
-  border-radius: 6px;
-  background: var(--amber-bg);
+  border-radius: var(--r-xs);
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -1272,7 +1187,7 @@
   height: 30px;
   padding: 0 9px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -1348,7 +1263,7 @@
 
 .tm-discourse-inspector__head h2 {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--t-body);
 }
 
 .tm-discourse-inspector__section {
@@ -1360,22 +1275,21 @@
   align-items: center;
   justify-content: space-between;
   margin: 0 0 10px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 600;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
+  font-weight: 500;
 }
 
 .tm-discourse-inspector__section > h3 span {
   color: var(--muted);
-  font: 600 11px var(--font-mono);
+  font-size: var(--t-meta);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-discourse-inspector__empty {
   margin: 0;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
   line-height: 1.48;
 }
 
@@ -1400,14 +1314,14 @@
   place-items: center;
   width: 25px;
   height: 25px;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   background: var(--field);
   color: var(--muted);
 }
 
 .tm-discourse-context-kind--task {
-  color: var(--working-ink);
-  background: var(--ctx-bg);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
 }
 
 .tm-discourse-context-list li > span:nth-child(2) {
@@ -1432,7 +1346,7 @@
   min-width: 28px;
   min-height: 28px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--t-body);
 }
 
 .tm-discourse-access-policy {
@@ -1446,7 +1360,7 @@
   justify-content: space-between;
   gap: 12px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
 }
 
 .tm-discourse-access-policy dd {
@@ -1464,8 +1378,8 @@
   max-height: min(480px, calc(100vh - 100px));
   overflow-y: auto;
   padding: 12px;
-  border-radius: var(--r-md);
-  background: var(--overlay);
+  border-radius: var(--r);
+  background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
 }
 
@@ -1481,8 +1395,8 @@
 .tm-discourse-preview__exclusions { margin-top: 12px; color: var(--muted); font-size: var(--t-meta); }
 .tm-discourse-preview__exclusions ul { margin: 8px 0 0; padding-left: 16px; line-height: 1.5; }
 .tm-discourse-preview__exclusions li + li { margin-top: 4px; }
-.tm-discourse-confirm h2 { margin: 0; font-size: 16px; }
-.tm-discourse-confirm > p { margin: 4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.tm-discourse-confirm h2 { margin: 0; font-size: var(--t-heading); }
+.tm-discourse-confirm > p { margin: 4px 0 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
 
 @keyframes tm-discourse-drawer-in {
   from { transform: translateX(16px); opacity: 0; }
@@ -1511,10 +1425,6 @@
 
 .tm-discourse.tm-discourse--compact.tm-discourse--inspector-open {
   grid-template-columns: minmax(0, 1fr) 1px min(var(--discourse-inspector-width, 320px), 42cqw);
-}
-
-.tm-discourse--compact .tm-discourse-loading-rail {
-  display: none;
 }
 
 .tm-discourse--compact .tm-discourse-rail {
@@ -1577,11 +1487,6 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .tm-discourse-message__rail > span {
-    width: 23px;
-    height: 23px;
-  }
-
   .tm-discourse-response {
     margin-left: 31px;
   }
@@ -1594,7 +1499,6 @@
   .tm-discourse-status-banner__actions {
     width: 100%;
   }
-
 
   .tm-discourse-preview-button {
     width: 30px;
@@ -1634,20 +1538,15 @@
   }
 
   .tm-discourse-message,
-  .tm-discourse-message footer,
-  .tm-discourse-rail,
-  .tm-discourse-inspector,
-  .tm-discourse-drawer-scrim {
+.tm-discourse-message footer,
+.tm-discourse-rail,
+.tm-discourse-inspector,
+.tm-discourse-drawer-scrim {
     transition: none;
     animation: none;
   }
 
   .tm-discourse-context-popover {
-    animation: none;
-  }
-
-  .tm-discourse-loading-rail span,
-  .tm-discourse-loading-conversation span {
     animation: none;
   }
 }
@@ -1660,7 +1559,7 @@
   }
 
   .interaction-actions--command .primary-button,
-  .interaction-actions--command .outline-button {
+.interaction-actions--command .outline-button {
     width: 100%;
     padding-inline: 8px;
   }
@@ -1694,7 +1593,7 @@
 .tm-discourse-peer-request { color: var(--muted); font-size: var(--t-help); }
 .tm-discourse-peer-request summary { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .tm-discourse-peer-request summary > span { flex: 1; }
-.tm-discourse-peer-request time { font: var(--t-meta) var(--font-mono); }
+.tm-discourse-peer-request time { font: var(--t-meta) var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-discourse-peer-request p { white-space: pre-wrap; }
 
 .tm-discourse-message--user > article { display: flex; flex-direction: column; align-items: flex-end; }

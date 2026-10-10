@@ -196,6 +196,16 @@ preserving other preferences. It retains Design source history and refuses to
 discard unresolved process ownership. The pre-upgrade backup preserves the
 previous records.
 
+SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
+version fences with no table change. Task store schema 29 adds review finding
+decisions (`AgentReviewGateProjection.findingDecisions`), the `REVIEW` message
+role with `reviewRunId` and `findingId`, and the `REVIEW_QUESTION` run mode.
+Schema 30 adds the `SIDE` message role with `threadId`, `snapshotTakenAt` and
+`snapshotOmittedFileCount`, the `SIDE_QUESTION` run mode, the `SIDE` session
+role, and the `WORKTREE_SNAPSHOT` read-root kind. Older stores load unchanged:
+every new field is optional. A side question's snapshot is not durable state;
+it is owned by `ReadOnlySnapshotService` and swept at startup.
+
 `WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
 external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;
 new imports store `EXTERNAL` in the same payload. No separate import table exists.

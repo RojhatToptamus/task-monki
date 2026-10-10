@@ -4,13 +4,13 @@ import {
   useCallback,
   useEffect,
   useId,
-  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
   type RefObject
 } from 'react';
-import { Check, ChevronDown, Sparkles, X } from 'lucide-react';
+import { Check, ChevronDown, X } from 'lucide-react';
+import { AgentMark } from './UiIcons';
 import type {
   AgentExecutionSettings,
   AgentExecutionPolicyPreset,
@@ -48,12 +48,6 @@ import {
 } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import {
-  clampNewTaskPanelWidth,
-  DEFAULT_NEW_TASK_PANEL_WIDTH,
-  getNewTaskPanelWidthBounds,
-  MAX_NEW_TASK_PANEL_WIDTH
-} from '../model/newTaskPanel';
-import {
   buildRepositoryOptions,
   resolveSelectedRepositoryId
 } from '../model/repositories';
@@ -65,7 +59,6 @@ import {
 } from './AgentModelSelector';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
-import { PanelResizeHandle } from './PanelResizeHandle';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
@@ -113,7 +106,6 @@ interface NewTaskPanelProps {
   onTextDraftChange?(draft: NewTaskTextDraft): void;
   returnFocusRef?: RefObject<HTMLElement | null>;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-  onResize?(): void;
   onClose(): void;
 }
 
@@ -246,7 +238,6 @@ export function NewTaskPanel({
   onTextDraftChange,
   returnFocusRef,
   fallbackReturnFocusRef,
-  onResize,
   onClose
 }: NewTaskPanelProps) {
   const [agentProfileId, setAgentProfileId] = useState(initialTextDraft?.agentProfileId);
@@ -296,18 +287,6 @@ export function NewTaskPanel({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
-  const slideoverRef = useRef<HTMLDivElement>(null);
-  const [panelWidth, setPanelWidth] = useState(() =>
-    clampNewTaskPanelWidth(
-      DEFAULT_NEW_TASK_PANEL_WIDTH,
-      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
-    )
-  );
-  const [panelWidthBounds, setPanelWidthBounds] = useState(() =>
-    getNewTaskPanelWidthBounds(
-      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
-    )
-  );
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
@@ -515,23 +494,6 @@ export function NewTaskPanel({
       activeAttachmentItems.length === 0
   );
 
-  useEffect(() => {
-    const resizePanelForViewport = () => {
-      const nextBounds = getNewTaskPanelWidthBounds(window.innerWidth);
-      setPanelWidthBounds(nextBounds);
-      setPanelWidth((current) =>
-        Math.min(nextBounds.max, Math.max(nextBounds.min, current))
-      );
-      onResize?.();
-    };
-    window.addEventListener('resize', resizePanelForViewport);
-    return () => window.removeEventListener('resize', resizePanelForViewport);
-  }, [onResize]);
-
-  useLayoutEffect(() => {
-    slideoverRef.current?.style.setProperty('--slideover-width', `${panelWidth}px`);
-  }, [panelWidth]);
-
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
     setIsClosing(true);
@@ -551,24 +513,16 @@ export function NewTaskPanel({
     onClose();
   }, [closeAttachments, onCancelPromptRefinement, onClose, panelClosedRef]);
 
+  // Creating a task is a short, focused form: a modal keeps focus inside it.
   useDialogFocusBoundary({
     dialogRef: panelRef,
     initialFocusRef: titleInputRef,
     fallbackReturnFocusRef,
     busy: isSubmitting,
-    trapFocus: false,
     onClose: closePanel,
     returnFocus: returnFocusRef?.current,
     shouldReturnFocus: () => returnFocusAfterCloseRef.current
   });
-
-  const resizePanel = useCallback(
-    (nextWidth: number) => {
-      setPanelWidth(Math.min(panelWidthBounds.max, Math.max(panelWidthBounds.min, nextWidth)));
-      onResize?.();
-    },
-    [onResize, panelWidthBounds.max, panelWidthBounds.min]
-  );
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -796,18 +750,25 @@ export function NewTaskPanel({
     selectedRuntimeRejectsAttachments ||
     selectedModelRejectsImages;
   return (
-    <div
-      ref={slideoverRef}
-      className={`slideover ${isClosing ? 'slideover--closing' : ''}`}
-      onDragEnter={enterAttachmentDrag}
-      onDragOver={continueAttachmentDrag}
-      onDragLeave={leaveAttachmentDrag}
-      onDrop={dropAttachments}
-    >
+    <div className={`tm-modal tm-modal--top newtask-modal${isClosing ? ' newtask-modal--closing' : ''}`} role="presentation">
+      <button
+        type="button"
+        className="tm-modal__scrim"
+        aria-label="Close new task"
+        tabIndex={-1}
+        disabled={isSubmitting}
+        onClick={closePanel}
+      />
       <form
         id="new-task-panel-content"
         ref={panelRef}
-        className="slideover__panel"
+        className="newtask-modal__panel"
+        role="dialog"
+        aria-modal="true"
+        onDragEnter={enterAttachmentDrag}
+        onDragOver={continueAttachmentDrag}
+        onDragLeave={leaveAttachmentDrag}
+        onDrop={dropAttachments}
         onSubmit={submit}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && importing && checkoutQuery) {
@@ -832,18 +793,7 @@ export function NewTaskPanel({
         aria-label="New task"
         tabIndex={-1}
       >
-        <PanelResizeHandle
-          className="slideover__resize"
-          label="Resize new task panel"
-          value={panelWidth}
-          min={panelWidthBounds.min}
-          max={panelWidthBounds.max}
-          defaultValue={DEFAULT_NEW_TASK_PANEL_WIDTH}
-          direction={-1}
-          controls="new-task-panel-content"
-          onChange={resizePanel}
-        />
-        <header className="slideover__header">
+        <header className="newtask-modal__header">
           {onImport ? (
             <div className="segmented" role="group" aria-label="Task source" onKeyDown={(event) => {
               if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
@@ -864,12 +814,12 @@ export function NewTaskPanel({
                 </button>
               ))}
             </div>
-          ) : <div className="slideover__heading">
+          ) : <div className="newtask-modal__heading">
             <strong>New task</strong>
           </div>}
           <button
             type="button"
-            className="slideover__close"
+            className="newtask-modal__close"
             aria-label="Close"
             disabled={isSubmitting}
             onClick={closePanel}
@@ -878,7 +828,7 @@ export function NewTaskPanel({
           </button>
         </header>
 
-        <div className="slideover__body">
+        <div className="newtask-modal__body">
           <section className="newtask-section" aria-label="Task essentials">
             {!(importing && selectedCheckout?.existingTaskId) ? <fieldset className="field tm-newtask-repository">
               <legend>Repository</legend>
@@ -961,7 +911,7 @@ export function NewTaskPanel({
                     title={refineDisabledReason}
                     onClick={() => void refine()}
                   >
-                    {isRefining ? <StatusGlyph kind="working" /> : <SparkleIcon />}
+                    {isRefining ? <StatusGlyph kind="working" /> : <AgentMark size={13} />}
                     <span className="field__refine-label">
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
@@ -1061,11 +1011,11 @@ export function NewTaskPanel({
             <summary>
               <span className="newtask-settings__title">Run configuration{importing ? <small>Applies when you start an agent</small> : null}</span>
               <span className="newtask-settings__summary">
-                {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
-                {selectedModel ? ` · ${selectedModel.displayName}` : ''}
-                {effectiveReasoningEffort
-                  ? ` · ${formatReasoningEffort(effectiveReasoningEffort)}`
-                  : ''}
+                {[
+                  selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime',
+                  selectedModel?.displayName,
+                  effectiveReasoningEffort ? formatReasoningEffort(effectiveReasoningEffort) : undefined
+                ].filter(Boolean).join(', ')}
               </span>
               <DisclosureChevron />
             </summary>
@@ -1146,8 +1096,9 @@ export function NewTaskPanel({
           {currentRefinementWarning ? (
             <p className="form-warning">{currentRefinementWarning}</p>
           ) : null}
+          {/* Creating still works; only starting waits for the runtime, so this is a warning. */}
           {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
-            <p className="form-error">
+            <p className="form-warning">
               {selectedRuntimeReadiness.detail}
               {selectedRuntimeReadiness.nextAction
                 ? ` ${selectedRuntimeReadiness.nextAction}.`
@@ -1165,14 +1116,16 @@ export function NewTaskPanel({
           ))}
         </div>
 
-        <footer className="slideover__footer">
+        <footer className="newtask-modal__footer">
           {importing ? <p className="import-work__footer-note" role="status">
-            {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'In progress · No files move. No agent starts.')}
-          </p> : null}
-          <div className="slideover__footer-actions">
+            {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'Imports as In progress. No files move and no agent starts.')}
+          </p> : (
+            <span className="newtask-modal__hint" aria-hidden="true"><kbd>{CREATE_SHORTCUT}</kbd> to create</span>
+          )}
+          <div className="newtask-modal__footer-actions">
             <button
               type="button"
-              className={importing ? 'ghost-button' : 'outline-button'}
+              className="outline-button"
               disabled={isSubmitting}
               onClick={closePanel}
             >
@@ -1202,6 +1155,9 @@ export function NewTaskPanel({
     </div>
   );
 }
+
+const CREATE_SHORTCUT =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/u.test(navigator.userAgent) ? '⌘↵' : 'Ctrl+Enter';
 
 export function refinementInputFingerprint(input: {
   repositoryId: string;
@@ -1235,10 +1191,6 @@ function SelectChevronIcon({ open }: { open: boolean }) {
 
 function SelectCheckIcon() {
   return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
-}
-
-function SparkleIcon() {
-  return <Sparkles aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
 }
 
 function CloseIcon() {

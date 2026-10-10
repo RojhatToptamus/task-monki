@@ -12,7 +12,7 @@ import {
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
-import type { RepositorySetupState } from '../model/repositories';
+import { abbreviateHomePath, type RepositorySetupState } from '../model/repositories';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { AgentModelSetting } from './AgentModelSelector';
 import {
@@ -33,10 +33,7 @@ interface FirstLaunchSetupProps {
   onGoToDesigns(): void;
   onRefreshExternalTools(): Promise<void>;
   onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
-  onSetAppSettings(
-    settings: UpdateAppSettingsRequest,
-    successMessage?: string
-  ): void | Promise<unknown>;
+  onSetAppSettings(settings: UpdateAppSettingsRequest): void | Promise<unknown>;
 }
 
 export function FirstLaunchSetup({
@@ -72,7 +69,7 @@ export function FirstLaunchSetup({
     !isRefreshingTools &&
     !isFinishingSetup;
   const repositoryLabel = hasRepository
-    ? compactSettingsText(activeRepositoryPath, 72)
+    ? activeRepositoryPath.split(/[\\/]/).filter(Boolean).at(-1) ?? activeRepositoryPath
     : 'No repository yet';
   const repositoryStepTone = isLoading
     ? 'pending'
@@ -119,14 +116,14 @@ export function FirstLaunchSetup({
               title={isLoading ? 'Checking repositories' : repositoryLabel}
               detail={
                 hasRepository
-                  ? activeRepositoryPath
+                  ? abbreviateHomePath(activeRepositoryPath)
                   : 'Coding tasks branch and commit here. Blank Designs use storage that Task Monki manages, so they do not need a repository.'
               }
               tone={repositoryStepTone}
               actions={
                 <button
                   type="button"
-                  className="tm-settings__button tm-setup__primary"
+                  className="outline-button"
                   disabled={addRepositoryDisabled}
                   aria-busy={addingRepository}
                   onClick={() => void onAddRepository()}
@@ -206,14 +203,14 @@ export function FirstLaunchSetup({
             <div className="tm-setup-finish__actions">
               <button
                 type="button"
-                className="tm-settings__button"
+                className="outline-button"
                 onClick={onGoToDesigns}
               >
                 Go to Designs
               </button>
               <button
                 type="button"
-                className="tm-settings__button tm-settings__button--primary"
+                className="primary-button"
                 disabled={!canFinishSetup}
                 aria-busy={isFinishingSetup}
                 title={canFinishSetup ? undefined : statusSentence}
@@ -238,10 +235,7 @@ function SetupSection({
 }) {
   return (
     <section className="tm-setup-section">
-      <div className="tm-setup-section__head">
-        <h2>{title}</h2>
-        <span />
-      </div>
+      <h2 className="tm-setup-section__head">{title}</h2>
       {children}
     </section>
   );
@@ -294,6 +288,8 @@ function SetupToolList({
     hint: string;
     state: string;
     detail: string;
+    /** A version or path, set in mono; anything else is a sentence. */
+    detailIsValue: boolean;
     detailTitle?: string;
   }> = [
     {
@@ -306,7 +302,8 @@ function SetupToolList({
         selectedRuntime.preflight.readiness.status === 'READY'
           ? selectedRuntime.preflight.runtimeVersion
           : runtimeReadiness.detail,
-      detailTitle: selectedRuntime?.preflight.runtimeVersion
+      detailIsValue: Boolean(selectedRuntime?.preflight.runtimeVersion && selectedRuntime.preflight.readiness.status === 'READY'),
+      detailTitle: selectedRuntime?.preflight.runtimeVersion ?? runtimeReadiness.detail
     },
     {
       key: 'git',
@@ -314,6 +311,7 @@ function SetupToolList({
       hint: 'Required for coding tasks',
       state: describeExternalToolAvailability(externalToolStatus?.tools.git).label,
       detail: describeToolStatusDetail(externalToolStatus?.tools.git),
+      detailIsValue: externalToolStatus?.tools.git.status === 'ok',
       detailTitle: externalToolStatus?.tools.git.version ?? undefined
     },
     {
@@ -322,6 +320,7 @@ function SetupToolList({
       hint: 'Optional for PR delivery',
       state: describeExternalToolAvailability(externalToolStatus?.tools.gh).label,
       detail: describeToolStatusDetail(externalToolStatus?.tools.gh),
+      detailIsValue: externalToolStatus?.tools.gh.status === 'ok',
       detailTitle: externalToolStatus?.tools.gh.version ?? undefined
     }
   ];
@@ -341,6 +340,7 @@ function ToolStatusRow({
     hint: string;
     state: string;
     detail: string;
+    detailIsValue: boolean;
     detailTitle?: string;
   };
 }) {
@@ -351,7 +351,7 @@ function ToolStatusRow({
         <span>{row.hint}</span>
       </div>
       <div className="tm-setup-tools__meta">
-        <span title={row.detailTitle}>{row.detail}</span>
+        <span className={row.detailIsValue ? 'tm-setup-tools__value' : undefined} title={row.detailTitle}>{row.detail}</span>
         <strong>{row.state}</strong>
       </div>
     </div>
@@ -375,13 +375,13 @@ function compactSettingsText(value: string, maxLength = 72): string {
   if (value.length <= maxLength) return value;
   const headLength = 24;
   const tailLength = Math.max(12, maxLength - headLength - 3);
-  return `${value.slice(0, headLength)}...${value.slice(-tailLength)}`;
+  return `${value.slice(0, headLength)}…${value.slice(-tailLength)}`;
 }
 
 function formatSettingsTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'recently';
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 function formatList(values: readonly string[]): string {

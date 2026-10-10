@@ -76,6 +76,78 @@ describe('projection reducer', () => {
     expect(completed.runs[0].status).toBe('COMPLETED');
   });
 
+  it.each(['REVIEW_QUESTION', 'SIDE_QUESTION'] as const)(
+    'keeps a %s run beside the task without staling its review',
+    (mode) => {
+      const task = createTask({
+        workflowPhase: 'REVIEW',
+        currentRunId: 'implementation-run',
+        projection: {
+          ...createInitialProjection(now),
+          agentRun: 'COMPLETED',
+          agentReview: { status: 'NEEDS_CHANGES', runId: 'review-run', findingDecisions: [] }
+        }
+      });
+      const question = createRun({ id: 'question-run', mode, status: 'RUNNING' });
+      const state = {
+        ...createEmptyState(),
+        tasks: [task],
+        runs: [createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }), question]
+      };
+      const started = applyEventToState(state, { ...createEvent('AGENT_RUN_STARTED', { mode }), runId: question.id });
+      const lost = applyEventToState(started, { ...createEvent('AGENT_RUNTIME_LOST', { reason: 'Provider exited.' }), runId: question.id });
+      const completed = applyEventToState(started, { ...createEvent('AGENT_RUN_COMPLETED', { terminalStatus: 'completed' }), runId: question.id });
+      for (const next of [started, lost, completed]) {
+        expect(next.tasks[0]).toMatchObject({ workflowPhase: 'REVIEW', currentRunId: 'implementation-run' });
+        expect(next.tasks[0].projection).toEqual(task.projection);
+      }
+      expect(completed.runs[1].status).toBe('COMPLETED');
+    }
+  );
+
+  it('records finding decisions only for the current review and resets them for a new review', () => {
+    const decision = (id: string, reviewRunId: string) => ({
+      id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, actor: 'USER' as const, createdAt: now
+    });
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      projection: {
+        ...createInitialProjection(now),
+        agentReview: { status: 'NEEDS_CHANGES', runId: 'review-run', updatedAt: now }
+      }
+    });
+    const state = {
+      ...createEmptyState(),
+      tasks: [task],
+      runs: [createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })]
+    };
+    const decided = applyEventToState(state, {
+      ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('first', 'review-run') }),
+      id: 'decided-first', runId: undefined, receivedAt: '2026-06-20T11:00:00.000Z'
+    });
+    const ignored = applyEventToState(decided, {
+      ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('other', 'older-review') }),
+      id: 'decided-other', runId: undefined
+    });
+    expect(ignored.tasks[0].projection.agentReview).toEqual({
+      status: 'NEEDS_CHANGES',
+      runId: 'review-run',
+      updatedAt: now,
+      findingDecisions: [decision('first', 'review-run')]
+    });
+
+    const rerun = createRun({ id: 'next-review', mode: 'REVIEW', status: 'RUNNING' });
+    const restarted = applyEventToState(
+      { ...ignored, runs: [...ignored.runs, rerun] },
+      { ...createEvent('AGENT_RUN_STARTED', { mode: 'REVIEW' }), runId: rerun.id }
+    );
+    expect(restarted.tasks[0].projection.agentReview).toMatchObject({
+      status: 'RUNNING',
+      runId: 'next-review',
+      findingDecisions: []
+    });
+  });
+
   it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();

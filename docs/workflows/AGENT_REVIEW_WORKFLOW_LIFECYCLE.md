@@ -1,6 +1,6 @@
 # Agent Review Workflow Lifecycle
 
-Date: 2026-08-29
+Date: 2026-10-10
 
 Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
@@ -46,9 +46,15 @@ The important product rule is:
   - The local review gate projection for the last agent review.
   - Includes the review run id, source run id, reviewed head/dirty fingerprint,
     summary, final artifact id, and structured findings when available.
+  - `findingDecisions`: the append-only decisions on this review's findings
+    (`src/shared/agentReviewFindings.ts`). Absent in stored projections from
+    before decisions existed, which means none.
 - `RunRecord.mode`
   - `IMPLEMENTATION`, `FOLLOW_UP`, and `RETRY` modify the task worktree.
   - `REVIEW` inspects a diff and must use read-only settings.
+  - `REVIEW_QUESTION` answers one question about the current review, on the
+    same read-only lane. It never changes workflow, `currentRunId`,
+    `projection.agentRun` or the review gate, and never makes a review stale.
 - `AgentSessionRecord`
   - Primary sessions back implementation/follow-up/retry runs.
   - Review sessions use `role: "REVIEW"` and one ordinary read-only turn.
@@ -104,7 +110,7 @@ Imported-work review includes committed and dirty changes against the selected
 comparison. A comparison change or external edit makes the review stale.
 The read-only integrity check still rejects changed or unreadable input, but
 Task Monki does not attribute another editor's changes to the review provider.
-Address findings starts the first implementation when no source coding run
+Request changes starts the first implementation when no source coding run
 exists. Otherwise it continues the current eligible implementation run.
 
 Before a Codex review turn starts, the adapter resolves the selected repository
@@ -145,7 +151,7 @@ Codex sends this value in its ordinary thread and turn settings.
 Expected UI:
 
 - Board column: Review.
-- Card chip: AI reviewing.
+- Card chip: Reviewing.
 - Review panel: running indicator, concise current review activity, and Stop review.
 - Finish actions: paused.
 - Review actions: paused except Stop review.
@@ -184,14 +190,19 @@ When the review run emits a terminal event:
 Expected UI:
 
 - `PASSED`
-  - Primary path: create draft PR.
+  - Primary path follows the completion policy. Under local acceptance it is
+    Mark done (or Commit while the tree is dirty), with Create draft PR among the
+    finishing actions until a pull request exists. Once a pull request is open,
+    PR Status holds the Overview's Now panel.
   - Secondary/local paths: commit or mark done.
-  - Optional path: run review again.
 - `NEEDS_CHANGES`
-  - Show structured findings by severity.
-  - Primary path: Request changes.
+  - The Review tab shows each finding on the code it is about.
+  - Primary path: Request changes, from the Review tab.
   - Secondary path: run review again or use the finish-panel Mark done anyway
     owner override.
+  - Once every finding is dismissed or withdrawn, the review no longer asks for
+    changes (`reviewAsksForChanges`): finishing is clean without an override and
+    the card stops saying Needs changes.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
   - Allow request changes only because the output is current to this reviewed
@@ -200,10 +211,53 @@ Expected UI:
   - Prefer re-run or inspect debug details.
   - Request changes is only valid if current review output exists and is useful.
 
+### Finding decisions
+
+The person and the reviewer can change what a current review asks for. Every
+change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
+`findingDecisions`; the review result itself is never rewritten, and
+`effectiveReviewFindings` derives each finding's state (`OPEN`, `DISMISSED`,
+`WITHDRAWN`) and current severity.
+
+- The person dismisses an open finding with an optional note of at most 500
+  characters, and can restore it (`decideReviewFinding`). Dismissing is how a
+  finding is left out of Request changes; there is no selection step.
+- Decisions are accepted only for the task's current, finished review. A stale,
+  running, or replaced review rejects them.
+- A new review starts with no decisions. Its prompt lists the earlier review's
+  findings with their states, notes and reasons, and asks the reviewer not to
+  raise a dismissed or withdrawn finding again without saying why.
+
+### Asking the reviewer
+
+1. From the Review tab the person asks a question about the review or about one
+   finding (`askReviewer`, idempotent by message id). It is stored as a
+   `TaskInstruction` with `role: "REVIEW"`, `reviewRunId` and an optional
+   `findingId`.
+2. A `REVIEW_QUESTION` run answers it in a fresh read-only session on the
+   review's runtime and settings, through the same read-only lane and Git
+   fingerprint check as the review. Every question rebuilds its context: the
+   findings with their decisions, the focused finding's reviewed diff, a diff
+   stat, and the last six exchanges.
+3. One question runs at a time. While it runs, follow-up, new runs, reviews,
+   commits, publishing, pull requests and phase transitions wait for it, or for
+   the person to stop it (`stopReviewerQuestion`).
+4. The reviewer revises findings only through one fenced
+   `task-monki-revisions` block that ends its answer: withdraw a finding, change
+   its severity, or add one inside the reviewed diff, each with a reason, at
+   most eight. Task Monki validates the block strictly against the review as it
+   is when the answer completes and records one reviewer decision per entry.
+   An invalid block changes nothing; the reason is written to the run's
+   diagnostics and the prose still shows. Prose alone never changes a finding.
+5. A stale review keeps its conversation readable and takes no new questions.
+
 ### Requesting changes after review
 
-1. User clicks Request changes from a current actionable review result.
-2. The drawer lets the user select findings and edit the instruction.
+1. The Review tab's request bar says what will be sent: every open finding and
+   the person's own line comments, with an optional note. Comments can be sent
+   on their own, even without an actionable review.
+2. `buildReviewRequestInstruction` lists the open findings, the comments, and
+   the dismissed findings as context the agent must leave alone.
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run.
 4. Reducer moves the task to `IN_PROGRESS`.
@@ -223,8 +277,8 @@ Expected UI while follow-up is active:
   - no Commit
   - no Create draft PR
 - When the review gate is `NOT_RUN` but another task action pauses review
-  actions, keep `Run agent review` visible and disabled with the pause reason
-  on hover instead of replacing it with inline explanatory text.
+  actions, keep `Run agent review` visible and disabled, with the pause reason
+  stated once beside the actions instead of replacing the button.
 - Header and evidence-side delivery actions are also disabled while review
   actions are paused, so Commit/Create PR cannot bypass the active follow-up.
 - Active agent controls remain available:
@@ -247,8 +301,10 @@ Expected UI:
 
 - Board column: Review.
 - Card chip: Needs re-review.
-- Review panel: stale/needs re-review.
-- Old findings: still visible as context, not as current actionable verdict.
+- Review tab: Review out of date, scoped to the files that changed since the
+  reviewed capture; the earlier findings stay on the code as context without
+  Ask or Dismiss, and the reviewer panel keeps earlier answers but takes no new
+  question.
 - Primary next action: Run review again.
 
 If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
@@ -348,7 +404,7 @@ Use these as invariants:
 - Running agent review:
   - `agentReview.status: RUNNING`
   - board: Review, even if workflow data is stale
-  - card: AI reviewing
+  - card: Reviewing
 - Successfully completed implementation/follow-up/retry from In Progress:
   - `workflowPhase: REVIEW`
   - board: Review
@@ -405,7 +461,12 @@ When the UI shows the wrong state:
 
 ## UI rules
 
-- Do not show Request changes for a stale review.
+- Do not show Request changes, Dismiss or Ask for a stale review.
+- Keep `REVIEW_QUESTION` runs, their sessions and `REVIEW` messages out of the
+  Agent tab and the task's run selection (`partitionAgentRecords`); they belong
+  to the reviewer panel and to Debug.
+- Show a reviewer answer as prose only (`reviewerProse`); each recorded revision
+  is one line under the answer.
 - Derive every review entry action from the exact current completed
   implementation-side run. Never fall back to the source of a historical
   review or another completed run in the iteration.
@@ -413,9 +474,11 @@ When the UI shows the wrong state:
   active.
 - Apply that pause consistently across review cards, finish panels, header
   buttons, and evidence-side delivery controls.
-- Disabled workflow actions should keep their normal button position and expose
-  pause/blocker reasons through the existing hover-title style, not dangling
-  helper text.
+- Disabled workflow actions keep their normal button position. On a decision
+  surface (the Overview's Now panel, a dialog) the pause or blocker reason
+  is stated once beside the actions and tied to them with `aria-describedby`:
+  a disabled button cannot take focus, so a hover title alone is unreachable
+  from the keyboard. Icon-only toolbar controls keep hover titles.
 - Do not move a task to Review while requested changes are still being
   implemented.
 - Do not hide the previous review completely during follow-up work. It is useful

@@ -162,7 +162,25 @@ projection, or provider state inconsistent.
 
 ## UI implementation and verification
 
-`DESIGN.md` owns visual and interaction rules. Before a material UI change,
+`DESIGN.md` owns visual and interaction rules. Before writing UI, reuse the
+shared primitives instead of building a local variant:
+
+- Buttons: `primary-button`, `outline-button`, `ghost-button`, `danger-button`,
+  `tm-iconbtn`, sized with `button--sm`; icon-only controls wrap in `Tooltip`.
+- Menus: `ActionMenu`. Badges: `Chip`. Comparable lists: the `tm-table`
+  container. Modals: `tm-modal` with `useDialogFocusBoundary`.
+- Choices: `.segmented` (`.segmented--fill` in a list column); native selects
+  take the shared chevron, so colour them with `background-color`.
+- Settings: `SettingsPane` and `SettingsRow` inside `tm-settings__list`.
+- Side conversations: `ConversationPanel` in `DockedSidePanel` or
+  `FloatingSidePanel` from `useTaskSidePanelLayout`.
+- Agents: `AgentMark` is the only icon for any agent.
+- Values: colours, radii, font sizes, control heights, durations and easing are
+  tokens (`themes.css`, `src/renderer/styles/foundation.css`); a literal is a
+  defect, and `npm run check:themes` rejects literal sizes and radii. Theme
+  tokens change only through `tools/build-themes.mjs`.
+
+Before a material UI change,
 inspect the running workflow and its closest shared implementations. Identify the
 primary content, next action, supporting information, and state owner before
 editing.

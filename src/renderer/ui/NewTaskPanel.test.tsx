@@ -15,38 +15,10 @@ import {
   reserveClipboardAttachmentRead,
   shouldPreventDefaultAttachmentPaste
 } from '../model/taskAttachmentComposer';
-import {
-  clampNewTaskPanelWidth,
-  dragNewTaskCanvas,
-  getNewTaskPanelWidthBounds,
-  newTaskCanvasPanPosition,
-  shouldInterruptNewTaskCanvasPanForWheel
-} from '../model/newTaskPanel';
 import { AttachmentChip } from './AttachmentChip';
 import { NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
-  it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
-    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 380, max: 720 });
-    expect(clampNewTaskPanelWidth(320, 1440)).toBe(380);
-    expect(clampNewTaskPanelWidth(820, 1440)).toBe(720);
-    expect(getNewTaskPanelWidthBounds(360)).toEqual({ min: 360, max: 360 });
-    expect(clampNewTaskPanelWidth(660, 360)).toBe(360);
-    expect(newTaskCanvasPanPosition(0, 520, 0)).toBe(0);
-    expect(newTaskCanvasPanPosition(0, 520, 180)).toBe(260);
-    expect(newTaskCanvasPanPosition(0, 520, 360)).toBe(520);
-    expect(dragNewTaskCanvas(0, 600, 450, 520)).toBe(150);
-    expect(dragNewTaskCanvas(520, 450, 600, 520)).toBe(370);
-  });
-
-  it('only interrupts an automatic canvas pan for intentional horizontal wheel input', () => {
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 160, false)).toBe(false);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(2, 160, false)).toBe(false);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(80, 12, false)).toBe(true);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 80, true)).toBe(true);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0.2, 0.1, false)).toBe(false);
-  });
-
   it('reuses one task creation token across response-loss retries', () => {
     const holder: { current: string | undefined } = { current: undefined };
     let generated = 0;
@@ -375,7 +347,6 @@ describe('NewTaskPanel', () => {
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
-    expect(html).not.toContain('role="dialog"');
     expect(html).toContain('Execution policy: Restricted');
     expect(html).toContain('Restricted');
     expect(html).toContain('aria-expanded="false"');
@@ -405,9 +376,10 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('aria-label="Models by provider"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
-    expect(html).toContain('role="separator"');
-    expect(html).toContain('aria-label="Resize new task panel"');
-    expect(html).not.toContain('slideover__scrim');
+    // New Task is a focused modal: a dialog over the app, not a resizable side panel.
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="true"');
+    expect(html).not.toContain('Resize new task panel');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
     expect(html).toContain('Provider commands run outside a Task Monki sandbox.');

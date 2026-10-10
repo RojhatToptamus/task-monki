@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, GitCompareArrows, Search, X } from 'lucide-react';
 import type { ExistingWorktree, ImportPreview } from '../../shared/contracts';
+import { abbreviateHomePath } from '../model/repositories';
 import { formatStatusValue } from './display';
 
 export function branchTaskTitle(branch?: string): string {
@@ -47,7 +48,7 @@ export function ImportWorkFields({
     const list = listRef.current;
     if (!list || !selected) return;
     const revealSelection = () => {
-      const row = list.querySelector<HTMLElement>('[aria-checked="true"]');
+      const row = list.querySelector<HTMLElement>('[aria-selected="true"]');
       if (!row) return;
       const bounds = list.getBoundingClientRect();
       const selectedBounds = row.getBoundingClientRect();
@@ -69,8 +70,12 @@ export function ImportWorkFields({
     return <div className="import-work__existing">
       <span className="import-work__existing-label"><Check size={15} absoluteStrokeWidth strokeWidth={1.5} />This checkout already has a task</span>
       <strong>{selected.existingTask?.title ?? 'Existing task'}</strong>
-      <span className="import-work__meta">{selected.existingTask ? `${formatStatusValue(selected.existingTask.workflowPhase)} · ` : ''}{repositoryName}</span>
-      <code title={selected.worktreePath}>{selected.branchName} · {selected.worktreePath}</code>
+      <span className="import-work__meta">
+        {selected.existingTask ? <span>{formatStatusValue(selected.existingTask.workflowPhase)}</span> : null}
+        <span>{repositoryName}</span>
+      </span>
+      <code>{selected.branchName}</code>
+      <code title={selected.worktreePath}>{selected.worktreePath}</code>
       <div className="import-work__existing-actions">
         <button ref={existingButtonRef} type="submit" className="primary-button" disabled={locked}>Open existing task</button>
         <button type="button" className="ghost-button" disabled={locked}
@@ -95,7 +100,7 @@ export function ImportWorkFields({
           <input ref={searchRef} value={query} aria-label="Filter checkouts" placeholder="Filter by branch or folder"
             disabled={locked} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
               if (event.key === 'ArrowDown') {
-                event.preventDefault(); listRef.current?.querySelector<HTMLButtonElement>('[role="radio"]:not(:disabled)')?.focus();
+                event.preventDefault(); listRef.current?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)')?.focus();
               }
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -104,27 +109,30 @@ export function ImportWorkFields({
                 if (available.length === 1) onSelect(available[0]!.worktreePath);
               }
             }} />
-          {query ? <button type="button" className="slideover__close" aria-label="Clear filter" disabled={locked}
+          {query ? <button type="button" className="newtask-modal__close" aria-label="Clear filter" disabled={locked}
             onClick={() => { onQuery(''); searchRef.current?.focus(); }}><X size={14} absoluteStrokeWidth strokeWidth={1.5} /></button> : null}
         </div>
-        <div ref={listRef} className="import-work__list" role="radiogroup" aria-label="Checkout" onKeyDown={(event) => {
-          if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        {/* A listbox, not a radio group: selecting a checkout loads its
+            comparison and can open an existing task, so arrows only move focus
+            and Space, Enter or a click selects. */}
+        <div ref={listRef} className="import-work__list" role="listbox" aria-label="Checkout" onKeyDown={(event) => {
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
           event.preventDefault();
-          const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]:not(:disabled)'));
+          const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
           const index = rows.indexOf(document.activeElement as HTMLButtonElement);
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
-            : (index + (['ArrowUp', 'ArrowLeft'].includes(event.key) ? -1 : 1) + rows.length) % rows.length;
-          rows[next]?.focus(); rows[next]?.click();
+            : (index + (event.key === 'ArrowUp' ? -1 : 1) + rows.length) % rows.length;
+          rows[next]?.focus();
         }}>
-          {filtered.map((item) => <button key={item.worktreePath} type="button" role="radio"
-            className="import-work__checkout" aria-checked={selected?.worktreePath === item.worktreePath}
+          {filtered.map((item) => <button key={item.worktreePath} type="button" role="option"
+            className="import-work__checkout" aria-selected={selected?.worktreePath === item.worktreePath}
             aria-label={`${item.branchName ?? 'Detached HEAD'} · ${item.worktreePath}`}
             disabled={locked || Boolean(item.unavailableReason)}
             tabIndex={selected ? selected.worktreePath === item.worktreePath ? 0 : -1 : item.worktreePath === firstAvailablePath ? 0 : -1}
             title={item.unavailableReason ?? item.worktreePath} onClick={() => onSelect(item.worktreePath)}>
             <span className="import-work__radio" aria-hidden="true" />
-            <span className="import-work__identity"><code>{item.branchName ?? 'Detached HEAD'}</code><small>{item.worktreePath}</small></span>
-            <span className="import-work__kind">{item.unavailableReason ? 'Unavailable' : item.isPrimary ? 'primary' : 'worktree'}</span>
+            <span className="import-work__identity"><code>{item.branchName ?? 'Detached HEAD'}</code><small dir="ltr">{abbreviateHomePath(item.worktreePath)}</small></span>
+            <span className="import-work__kind">{item.unavailableReason ? 'Unavailable' : item.isPrimary ? 'Primary' : 'Worktree'}</span>
             {item.unavailableReason ? <small className="import-work__unavailable">{item.unavailableReason}</small> : null}
           </button>)}
           {!checkouts ? <p className="import-work__empty" role="status">Loading checkouts…</p> : checkouts.error ?
@@ -157,7 +165,7 @@ export function ImportWorkFields({
         <div className="import-work__preview-summary">
           <GitCompareArrows size={15} absoluteStrokeWidth strokeWidth={1.5} aria-hidden="true" />
           <div><p role={previewError || preview?.unavailableReason ? 'alert' : 'status'}>{previewMessage}</p>
-            {preview ? <code title={preview.baseSha}>{preview.baseRef.replace(/^refs\/heads\//, '')} · {preview.baseSha.slice(0, 8)} → {preview.headSha.slice(0, 8)}</code> : null}</div>
+            {preview ? <code title={preview.baseSha}>{preview.baseRef.replace(/^refs\/heads\//, '')} {preview.baseSha.slice(0, 8)} → {preview.headSha.slice(0, 8)}</code> : null}</div>
           {preview?.unavailableReason ? <button className="ghost-button" type="button" disabled={locked} onClick={onRetry}>Refresh</button> :
             preview && (preview.commitCount > 0 || preview.fileCount > 0) ? <button className="ghost-button" type="button"
             aria-expanded={expanded} aria-controls="import-change-list" onClick={() => setExpanded(!expanded)}>

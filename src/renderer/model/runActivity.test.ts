@@ -90,8 +90,8 @@ describe('run activity projection', () => {
         label: 'Searched',
         detail: '2 times',
         children: [
-          { detail: 'RunActivity · src' },
-          { detail: 'ProviderActivityPanel · src' }
+          { detail: 'RunActivity in src' },
+          { detail: 'ProviderActivityPanel in src' }
         ]
       },
       {

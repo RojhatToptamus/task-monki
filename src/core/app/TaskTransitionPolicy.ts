@@ -45,11 +45,13 @@ export function taskDeletionBlocker(
   task: Task,
   snapshot: TaskSnapshot
 ): string | undefined {
-  const activeRun = snapshot.runs.find(
+  const activeRuns = snapshot.runs.filter(
     (run) => run.taskId === task.id && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
   );
-  if (activeRun) {
-    return 'Stop or let the active agent run finish before deleting this task.';
+  if (activeRuns.length > 0) {
+    return activeRuns.every((run) => run.mode === 'SIDE_QUESTION')
+      ? 'Wait for the side question to finish, or stop it, before deleting this task.'
+      : 'Stop or let the active agent run finish before deleting this task.';
   }
 
   const activeInteraction = snapshot.interactionRequests.find(

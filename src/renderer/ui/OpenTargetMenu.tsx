@@ -208,7 +208,7 @@ export function OpenTargetMenuItems({
     return (
       <>
         <div ref={loadingItemRef} className="tm-pathmenu__message" role="menuitem" aria-disabled="true" tabIndex={-1}>
-          Loading...
+          Loading…
         </div>
         <OpenTargetLiveAnnouncement>Loading open target.</OpenTargetLiveAnnouncement>
       </>
@@ -235,6 +235,7 @@ export function OpenTargetMenuItems({
               <MenuButton
                 key={item.id}
                 item={item}
+                iconColumn
                 busy={busyAction === item.id}
                 disabled={menuBusy}
                 onRun={runAction}
@@ -296,12 +297,15 @@ function OpenTargetLiveAnnouncement({
 function MenuButton({
   buttonRef,
   item,
+  iconColumn = false,
   busy,
   disabled,
   onRun
 }: {
   buttonRef?: Ref<HTMLButtonElement>;
   item: OpenTargetMenuItem;
+  /** In a group of app items: an item without an icon keeps the column, so labels align. */
+  iconColumn?: boolean;
   busy: boolean;
   disabled: boolean;
   onRun(item: OpenTargetMenuItem): void;
@@ -318,7 +322,7 @@ function MenuButton({
       title={title}
       onClick={() => void onRun(item)}
     >
-      {item.app?.icon ? <AppIcon icon={item.app.icon} /> : null}
+      {item.app?.icon ? <AppIcon icon={item.app.icon} /> : iconColumn ? <span className="tm-pathmenu__appicon" aria-hidden="true" /> : null}
       <span>{busy ? busyLabel(item.action) : item.label}</span>
     </button>
   );
@@ -352,11 +356,11 @@ function busyLabel(action: OpenTargetAction): string {
   switch (action) {
     case 'copyPath':
     case 'copyFileContents':
-      return 'Copying...';
+      return 'Copying…';
     case 'reveal':
-      return 'Revealing...';
+      return 'Revealing…';
     case 'open':
     case 'openTerminal':
-      return 'Opening...';
+      return 'Opening…';
   }
 }

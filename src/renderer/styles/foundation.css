@@ -1,24 +1,31 @@
 :root {
   /* Type — the seven roles in DESIGN.md 3.2. A component never sets a size
      that is not one of these. */
-  --t-title: 24px;
+  --t-title: 22px;
   --t-heading: 15px;
   --t-label: 13px;
   --t-body: 13px;
   --t-help: 12px;
   --t-meta: 11.5px;
-  --t-group: 9.5px;
+  --t-group: 12px;
 
   /* Control heights — decision surface, toolbar, compact, icon button. */
-  --h-control: 34px;
-  --h-toolbar: 30px;
-  --h-compact: 26px;
+  --h-control: 32px;
+  --h-toolbar: 28px;
+  --h-compact: 24px;
   --h-icon: 28px;
 
-  /* Geometry, motion and layers. */
+  /* Motion (DESIGN.md 9). Durations by job; easing curves are the only three
+     the app uses. Entering surfaces ease out; nothing eases in. */
   --motion-fast: 120ms;
   --motion-standard: 180ms;
-  --motion-slow: 240ms;
+  --motion-modal: 220ms;
+  --motion-slow: 280ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Layers. */
   --layer-base: 0;
   --layer-sticky: 10;
   --layer-handle: 20;
@@ -81,14 +88,15 @@ body {
   max-width: 100%;
   padding: 9px 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--overlay);
   color: var(--text);
-  box-shadow: var(--shadow-pop);
-  font-size: 12px;
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
+  font-size: var(--t-help);
   font-weight: 500;
   line-height: 1.35;
   pointer-events: auto;
+  animation: tm-toast-in 240ms var(--ease-out);
 }
 
 .tm-notifier__item strong {
@@ -102,7 +110,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--edge);
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   border: 2px solid transparent;
   background-clip: content-box;
   opacity: 0.4;
@@ -112,14 +120,37 @@ body {
   background: transparent;
 }
 
-@keyframes tm-fade {
+@keyframes tm-menu-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: scale(0.96);
   }
+}
+
+@keyframes tm-menu-out {
   to {
-    opacity: 1;
-    transform: none;
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes tm-dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes tm-scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes tm-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
 }
 
@@ -148,28 +179,17 @@ button {
   color: var(--text-disabled);
 }
 
-/* Filled families keep their identity while disabled: the fill drops to the
-   disabled plane instead of the whole control fading out. */
-.app-shell :where(.primary-button, .sidebar__new-task):disabled {
-  background: var(--primary-disabled);
-  color: var(--text-disabled);
-}
-
-.app-shell :where(.outline-button, .danger-button, .segmented__btn, .overflow__trigger):disabled {
+.app-shell :where(.outline-button, .danger-button, .segmented__btn):disabled {
   background: var(--field-disabled);
   color: var(--text-disabled);
 }
 
 /* The token overlay preserves each control family's rest fill and geometry.
-   Ink-filled controls (the primary family) cannot take an ink overlay, so they
+   Ink-filled controls (the primary family) cannot take an ink overlay,
+so they
    press with their own derived fill. */
 :where(button, [role='button']):not(:disabled):active {
   background-image: linear-gradient(var(--press), var(--press));
-}
-
-:where(.primary-button, .sidebar__new-task):not(:disabled):active {
-  background-image: none;
-  background-color: var(--primary-press);
 }
 
 .tm-visually-hidden {
@@ -183,6 +203,13 @@ button {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+/* One placeholder ink everywhere: --placeholder is solved to the prose floor
+   (DESIGN §2.5); the browser default measures 3.75:1 on field fills. */
+::placeholder {
+  color: var(--placeholder);
+  opacity: 1;
 }
 
 .app-shell[data-input-modality='pointer'] :where(
@@ -212,7 +239,7 @@ button {
   .tm-repository-select__trigger
 ):focus {
   outline: 0;
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
 
@@ -232,7 +259,7 @@ button {
   .tm-agent-console__search
 ):focus-within {
   outline: 0;
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
     0 0 0 3px var(--focus-ring);
@@ -268,8 +295,8 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   *,
-  *::before,
-  *::after {
+*::before,
+*::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;

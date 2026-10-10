@@ -92,6 +92,13 @@ export type AgentRunMode =
   | 'FOLLOW_UP'
   | 'RETRY'
   | 'REVIEW'
+  /** A person's question to a review's reviewer, answered read-only in a fresh session. */
+  | 'REVIEW_QUESTION'
+  /**
+   * A person's side question to the task's implementation agent, answered read-only in a
+   * fresh session on the task's runtime and model. It never joins the main conversation.
+   */
+  | 'SIDE_QUESTION'
   | 'DESIGN'
   | 'PREVIEW'
   | 'COMPACTION'
@@ -102,7 +109,7 @@ export type AgentInstructionProfile = 'DESIGN' | 'PREVIEW';
 
 /** Modes that run beside the task's work and never bind or advance its workflow. */
 export function isDetachedRunMode(mode: AgentRunMode): boolean {
-  return mode === 'REVIEW' || mode === 'PREVIEW';
+  return mode === 'REVIEW' || mode === 'REVIEW_QUESTION' || mode === 'SIDE_QUESTION' || mode === 'PREVIEW';
 }
 
 /** Sessions that may use a runtime other than the task's own, because they never carry its implementation work. */
@@ -137,7 +144,8 @@ export type AgentServerStatus =
   | 'FAILED'
   | 'LOST';
 
-export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'PREVIEW' | 'SUBAGENT';
+/** SIDE is one read-only side question on the task's runtime; it never carries the task's work. */
+export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'PREVIEW' | 'SIDE' | 'SUBAGENT';
 export type AgentSessionRelationshipState =
   | 'ROOT'
   | 'RESOLVED'

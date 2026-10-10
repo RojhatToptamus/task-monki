@@ -83,23 +83,29 @@
 .tm-message-header__author { color: var(--muted); font-size: var(--t-help); }
 .tm-message-header__meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin-left: auto; }
 .tm-message-header__meta time {
-  color: var(--muted); font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums;
+  color: var(--muted); font: var(--t-meta) var(--font-ui); font-variant-numeric: tabular-nums;
 }
 .tm-message-header__meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-message-header__meta time { flex-shrink: 0; }
+.tm-message-header__meta time { flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .tm-message-header__status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--t-meta); }
 .tm-message-header__status[data-tone='working'] { color: var(--accent-ink); }
 .tm-message-header__status[data-tone='waiting'] { color: var(--waiting-ink); }
 .tm-message-header__status[data-tone='blocked'] { color: var(--blocked-ink); }
 
 .tm-message-content { min-width: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: var(--t-body); line-height: 1.62; }
-.tm-message-content--user, .tm-message--user > .tm-message-content { padding: 10px 14px; border-radius: var(--r-md); background: var(--field); }
+.tm-message-content--user,
+.tm-message--user > .tm-message-content { padding: 10px 14px; border-radius: var(--r-md); background: var(--field); }
 .tm-message--user > .tm-message-content { max-width: min(80%, 560px); }
 .tm-message-content > p { margin: 0; white-space: pre-wrap; }
 
 /* Conversation log — one scrolling body; the jump back sits centred above the composer. */
 .tm-conversation { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
 .tm-conversation__viewport { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable; }
+/* The history is a scroll region: it never shows the browser outline,
+and from
+   the keyboard it shows the token ring inside its own edge. */
+.tm-conversation__viewport:focus { outline: none; }
+.app-shell[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); }
 .tm-conversation__content { min-width: 0; }
 .tm-conversation__header { position: sticky; top: 0; z-index: 2; background: var(--surface); transition: transform var(--motion-fast) ease; }
 .tm-conversation__header[data-visible='false'] { transform: translateY(-100%); }
@@ -111,31 +117,38 @@
 }
 .tm-conversation__latest:hover { color: var(--text); }
 
-/* Message anatomy — the user's words in a right-aligned bubble, agent prose on the sheet. */
+/* Message anatomy — the user's words in a right-aligned bubble,
+agent prose on the sheet. */
 .tm-message { display: flex; flex-direction: column; min-width: 0; }
 .tm-message--user { align-items: flex-end; }
 .tm-message--user > .task-attachments { justify-content: flex-end; max-width: min(80%, 560px); margin-top: 8px; }
 .tm-message-content .task-attachments { margin-top: 8px; }
-.tm-message-content, .tm-message-markdown, .task-attachment-preview__content { user-select: text; }
+.tm-message-content,
+.tm-message-markdown,
+.task-attachment-preview__content { user-select: text; }
 .tm-message__meta { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-top: 4px; color: var(--muted); font-size: var(--t-meta); }
-.tm-message__meta time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-message__meta time { font-variant-numeric: tabular-nums; }
 .tm-message__action { display: inline-flex; align-items: center; gap: 6px; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }
 
-/* Steps — tool calls and reasoning between messages, quieter than prose. */
+/* Steps — tool calls and reasoning between messages,
+quieter than prose. */
 .tm-steps { display: grid; min-width: 0; }
 .tm-step { min-width: 0; }
 .tm-step__row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--h-compact); padding: 0; color: var(--muted); font-size: var(--t-help); text-align: left; }
 .tm-step__trigger { border-radius: var(--r-xs); cursor: pointer; }
-.tm-step__trigger:hover, .tm-step__trigger:hover .tm-step__label { color: var(--text); }
+.tm-step__trigger:hover,
+.tm-step__trigger:hover .tm-step__label { color: var(--text); }
 .tm-step__trigger .tm-disclosure__chevron { color: var(--faint); }
 .tm-step__trigger[data-state='open'] .tm-disclosure__chevron { transform: rotate(90deg); }
 .tm-step__icon { display: grid; flex: 0 0 14px; place-items: center; width: 14px; height: 14px; }
 .tm-step__copy { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
 .tm-step__label { flex: 0 0 auto; color: var(--text-soft); white-space: nowrap; }
 .tm-step__detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-step__detail--mono, .tm-step__metric { font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-step__detail--mono,
+.tm-step__metric { font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
 .tm-step__metric { flex: 0 0 auto; color: var(--faint); }
-.tm-step--failed .tm-step__label, .tm-step__failed { color: var(--blocked-ink); }
+.tm-step--failed .tm-step__label,
+.tm-step__failed { color: var(--blocked-ink); }
 .tm-step__failed { font-size: var(--t-meta); }
 .tm-steps__summary .tm-step__label { color: var(--muted); }
 .tm-steps__list { display: grid; min-width: 0; margin-left: 6px; padding-left: 13px; border-left: 1px solid var(--hair); }
@@ -158,8 +171,8 @@
 .tm-plan-card__head:hover { color: var(--text); }
 .tm-plan-card__head[data-state='open'] .tm-disclosure__chevron { transform: rotate(90deg); }
 .tm-plan-card__title { color: var(--text-soft); font-weight: 600; }
-.tm-plan-card__count { margin-right: auto; font: var(--t-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
-.tm-plan-card__body { padding: 0 12px 8px; border-top: 1px solid var(--hair); }
+.tm-plan-card__count { margin-right: auto; font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-plan-card__body { padding: 2px 12px 8px; }
 .tm-plan-card__body > .tm-plan__steps { max-height: 280px; overflow: auto; }
 
 /* Pending messages stay inside the shared composer surface. */
@@ -175,11 +188,15 @@
 .tm-queue__text { min-width: 0; overflow: hidden; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .tm-queue__item .tm-iconbtn { flex: 0 0 auto; width: var(--h-icon); height: var(--h-icon); color: var(--muted); }
 
-/* Side conversation — a conversation beside a working surface: 44px head, the log, the composer. */
+/* Side conversation — a conversation beside a working surface: 44px head,
+the log,
+the composer. */
 .tm-side-conversation { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); box-shadow: inset 1px 0 0 var(--edge); }
 .tm-side-conversation:focus { outline: 0; }
-.tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--hair); }
+.tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--hair); }
 .tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 600; white-space: nowrap; }
+.tm-side-conversation__mark { flex: 0 0 auto; color: var(--accent-ink); }
+.tm-side-conversation__meta { min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-side-conversation__head .tm-iconbtn { margin-left: auto; width: var(--h-icon); height: var(--h-icon); }
 .tm-side-conversation__log { flex: 1; min-height: 0; }
 .tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 14px 20px; }
@@ -188,3 +205,15 @@
 .tm-side-conversation__composer .tm-composer__input { min-height: 64px; }
 .tm-side-conversation__composer .tm-composer__toolbar { min-height: var(--h-control); padding: 4px 6px 4px 12px; }
 .tm-side-conversation__working { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
+/* One question and its answer, with what the panel adds under it. */
+.tm-side-conversation__exchange { display: flex; flex-direction: column; gap: 8px; }
+.tm-side-conversation__empty { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
+.tm-side-conversation__note { margin: 0; color: var(--muted); font-size: var(--t-meta); }
+.tm-side-conversation__exchange > .ghost-button { align-self: flex-start; }
+
+/* An assistant's own sheet beside the page (DESIGN.md 5, side panels). Docked,
+   it is a sibling of the page's sheet; floating, it slides over the page. */
+.tm-side-sheet > .tm-side-conversation { flex: 1; background: transparent; box-shadow: none; }
+.tm-side-sheet__resize { position: absolute; top: 0; bottom: 0; left: -6px; z-index: var(--layer-handle); }
+.tm-side-sheet--floating { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: var(--layer-overlay); display: flex; width: min(380px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
+@keyframes tm-panel-in { from { opacity: 0; transform: translateX(8%); } }

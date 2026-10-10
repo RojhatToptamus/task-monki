@@ -1,71 +1,51 @@
 /* ----------------------------------------------------------------------- */
-/* New-task slide-over                                                     */
+/* New task: a focused modal over the app                                  */
 /* ----------------------------------------------------------------------- */
 
-.slideover {
-  position: relative;
-  z-index: var(--layer-overlay);
-  width: min(var(--slideover-width, 560px), 100vw);
-  height: 100%;
-  flex: 0 0 auto;
-  min-width: 0;
+/* Anchored near the top so switching New work and Import never moves the
+   header under the pointer. The shared modal centres; this variant wins. */
+.tm-modal.tm-modal--top {
+  align-items: flex-start;
+  padding-top: max(48px, 10vh);
 }
 
-.slideover--resizing {
-  user-select: none;
-}
-
-.slideover__panel {
+.newtask-modal__panel {
   position: relative;
+  z-index: var(--layer-sticky);
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: 100%;
-  border-left: 1px solid var(--edge);
-  background: var(--surface);
-  box-shadow: var(--shadow-pop);
+  width: min(640px, 100%);
+  max-height: calc(100vh - max(48px, 10vh) - 48px);
   overflow: hidden;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-modal);
   font-size: var(--t-body);
+  animation: tm-dialog-in var(--motion-modal) var(--ease-out);
 }
 
-.slideover--closing .slideover__panel {
+.newtask-modal--closing .newtask-modal__panel {
   pointer-events: none;
 }
 
-.slideover__resize {
-  position: absolute;
-  inset: 0 auto 0 -2px;
-}
-
-.slideover__header {
+.newtask-modal__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  height: 44px;
+  height: 52px;
   flex: 0 0 auto;
-  padding: 0 10px 0 12px;
+  padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--hair);
 }
 
-.slideover__heading {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.slideover__heading strong {
-  font-size: 15px;
+.newtask-modal__heading strong {
+  font-size: var(--t-heading);
   font-weight: 600;
 }
 
-.slideover__heading span {
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-}
-
-.slideover__close {
+.newtask-modal__close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -73,27 +53,26 @@
   height: var(--h-icon);
   flex: 0 0 auto;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.slideover__close:hover {
+.newtask-modal__close:hover {
   color: var(--text);
   background: var(--hover);
 }
 
-.slideover__body {
+.newtask-modal__body {
   container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 16px;
   flex: 1;
   min-height: 0;
-  padding: 16px;
+  padding: 16px 16px 20px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
 }
 
 .newtask-section {
@@ -132,7 +111,7 @@
   min-height: var(--h-control);
   padding: 0 10px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
   color: var(--text);
   text-align: left;
@@ -192,10 +171,6 @@
   transition: transform 120ms ease;
 }
 
-.tm-repository-select__chevron--open {
-  transform: rotate(180deg);
-}
-
 .tm-repository-select__popover {
   position: absolute;
   inset: calc(100% + 6px) 0 auto;
@@ -204,15 +179,15 @@
   gap: 4px;
   padding: 5px;
   border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
+  border-radius: var(--r);
+  background: var(--card);
   box-shadow: var(--shadow-pop);
 }
 
 .tm-repository-select__popover .tm-repository-picker__search {
   height: 32px;
   border-color: transparent;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
 }
 
 .tm-repository-select__list {
@@ -232,7 +207,7 @@
   min-height: 44px;
   padding: 6px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-soft);
   text-align: left;
@@ -283,7 +258,7 @@
   overflow-y: auto;
   scrollbar-gutter: stable;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
 }
 
@@ -332,7 +307,7 @@
 .tm-repository-picker__identity strong {
   overflow: hidden;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--t-help);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -341,7 +316,7 @@
 .tm-repository-picker__path {
   overflow: hidden;
   color: var(--muted);
-  font: 10.5px/1.35 var(--font-mono);
+  font: var(--t-meta)/1.35 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -350,7 +325,7 @@
   display: inline-flex;
   align-items: center;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--t-meta);
 }
 
 .tm-repository-picker__availability--missing,
@@ -361,7 +336,7 @@
 .tm-repository-picker__empty {
   padding: 14px 10px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .field {
@@ -373,10 +348,6 @@
 .field-grid {
   display: grid;
   gap: 14px;
-}
-
-.field-grid--two {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .field > span,
@@ -415,7 +386,7 @@
   background: transparent;
   color: var(--accent-ink);
   padding: 0;
-  font-size: 12px;
+  font-size: var(--t-help);
   font-weight: 600;
 }
 
@@ -439,7 +410,7 @@
   background: transparent;
   padding: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
   font-weight: 500;
 }
 
@@ -455,7 +426,8 @@
   transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 
-/* Focus lives in the shared text-entry rule in foundation.css, so it also
+/* Focus lives in the shared text-entry rule in foundation.css,
+so it also
    fires for a pointer click. */
 
 .field__prompt-shell--dragging {
@@ -464,7 +436,8 @@
 }
 
 /* Refining in progress: the surface says it is busy and the text stays
-   readable, instead of the user reading through a 45% veil. */
+   readable,
+instead of the user reading through a 45% veil. */
 .field__prompt-shell--running {
   background: var(--field-disabled);
 }
@@ -487,7 +460,8 @@
   box-shadow: none;
 }
 
-/* No hover fill on a text surface: at rest it already reads as a field, and
+/* No hover fill on a text surface: at rest it already reads as a field,
+and
    the caret is the confirmation that matters. */
 
 .task-attachment-input {
@@ -514,7 +488,7 @@
   border: 0;
   border-radius: var(--r-sm);
   box-shadow: none;
-  background: transparent;
+  background-color: transparent;
   color: var(--text-soft);
   font: inherit;
   cursor: pointer;
@@ -522,7 +496,7 @@
 }
 
 .tm-composer__toolbar .tm-profile-picker select:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
 }
 
 .tm-composer__toolbar .tm-profile-picker select:disabled {
@@ -532,15 +506,17 @@
 
 .task-attachment-add {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   min-height: 30px;
   padding: 0 9px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-soft);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
   font-weight: 600;
 }
 
@@ -566,7 +542,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   white-space: nowrap;
 }
 
@@ -593,7 +569,7 @@
   min-height: 48px;
   padding: 6px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
@@ -607,7 +583,7 @@
   flex: 0 0 auto;
   overflow: hidden;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   background: var(--card);
   color: var(--muted);
 }
@@ -641,7 +617,7 @@
 .task-attachment__meta {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--t-meta);
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -660,7 +636,7 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--muted);
 }
@@ -675,7 +651,6 @@
   color: var(--text-disabled);
 }
 
-
 .task-attachment-drop {
   position: absolute;
   inset: 8px;
@@ -685,10 +660,10 @@
   justify-content: center;
   gap: 8px;
   border: 1px dashed var(--edge);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text-soft);
-  font-size: 12.5px;
+  font-size: var(--t-help);
   font-weight: 600;
   pointer-events: none;
 }
@@ -699,7 +674,7 @@
   gap: 7px;
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
   line-height: 1.4;
 }
 
@@ -711,7 +686,7 @@
 .field__proposal {
   margin-top: 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--r);
   background: var(--well);
   padding: 12px 13px;
 }
@@ -725,7 +700,7 @@
 }
 
 .field__proposal-title {
-  font-size: 12px;
+  font-size: var(--t-help);
   font-weight: 600;
   color: var(--text);
 }
@@ -736,7 +711,7 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font: 12.5px/1.5 var(--font-mono);
+  font: var(--t-help)/1.5 var(--font-mono);
   color: var(--text-soft);
 }
 
@@ -753,7 +728,7 @@
   width: 100%;
   border: 0;
   border-radius: var(--r-sm);
-  background: var(--field);
+  background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   padding: 0 12px;
@@ -785,23 +760,16 @@
   padding-left: 36px;
 }
 
-/* Keep placeholders visually distinct from entered content. */
-.field input::placeholder,
-.field textarea::placeholder {
-  color: var(--placeholder);
-  opacity: 1;
-}
-
 .field > input:not(:disabled):hover,
 .field > select:not(:disabled):hover {
-  background: var(--field-hover);
+  background-color: var(--field-hover);
 }
 
 .field > input:disabled,
 .field textarea:disabled,
 .field select:disabled {
   cursor: not-allowed;
-  background: var(--field-disabled);
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
@@ -821,7 +789,7 @@
 .field:not(.field--prompt) > input:focus,
 .field:not(.field--prompt) textarea:focus,
 .field:not(.field--prompt) select:focus {
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   outline: 0;
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
@@ -829,7 +797,7 @@
 .app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) > input:focus,
 .app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) textarea:focus,
 .app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) select:focus {
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   outline: 0;
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
@@ -861,7 +829,7 @@
 
 .newtask-settings__title {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: var(--t-help);
   font-weight: 600;
 }
 
@@ -876,8 +844,7 @@
 .newtask-settings__summary {
   overflow: hidden;
   color: var(--muted);
-  font-size: var(--t-meta);
-  font-family: var(--font-mono);
+  font-size: var(--t-help);
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -919,13 +886,13 @@
 
 .network-toggle__title {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--t-body);
   font-weight: 600;
 }
 
 .network-toggle__state {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
   line-height: 1.4;
 }
 
@@ -936,7 +903,7 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: transparent;
   cursor: pointer;
 }
@@ -944,11 +911,11 @@
 .network-toggle__switch::before {
   position: absolute;
   inset: 5px 4px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--control-edge);
   content: '';
-  transition: background 160ms ease;
+  transition: background-color var(--motion-standard) var(--ease-out);
 }
 
 .network-toggle__switch span {
@@ -961,7 +928,7 @@
   border-radius: 50%;
   background: var(--overlay);
   box-shadow: var(--shadow-card);
-  transition: left 160ms cubic-bezier(0.22, 1, 0.36, 1), background 160ms ease;
+  transition: left var(--motion-standard) var(--ease-out), background-color var(--motion-standard) var(--ease-out);
 }
 
 .network-toggle__switch span::after {
@@ -979,7 +946,7 @@
 
 .network-toggle__switch--on span {
   left: 18px;
-  background: var(--on-primary);
+  background: var(--control-knob-on);
 }
 
 .network-toggle__switch:disabled::before {
@@ -995,75 +962,7 @@
   background: var(--overlay);
 }
 
-.info-tip {
-  position: relative;
-  z-index: var(--layer-sticky);
-  display: inline-flex;
-}
-
-.info-tip__button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  border: 1px solid var(--muted);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--muted);
-  cursor: help;
-}
-
-.app-shell[data-input-modality='keyboard'] .info-tip__button:focus,
-.info-tip:hover .info-tip__button {
-  border-color: var(--text-soft);
-  background: var(--text-soft);
-  color: var(--surface);
-  outline: none;
-}
-
-.info-tip__bubble {
-  position: absolute;
-  top: calc(100% + 9px);
-  left: -2px;
-  z-index: var(--layer-tooltip);
-  width: 236px;
-  padding: 9px 11px;
-  border: 1px solid var(--edge);
-  border-radius: 9px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-  color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 1.5;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(3px);
-  transition: opacity 120ms ease, transform 120ms ease;
-  visibility: hidden;
-}
-
-.info-tip__bubble::before {
-  content: '';
-  position: absolute;
-  top: -4px;
-  left: 11px;
-  width: 8px;
-  height: 8px;
-  background: var(--overlay);
-  transform: rotate(45deg);
-}
-
-.info-tip:hover .info-tip__bubble,
-.info-tip:focus-within .info-tip__bubble {
-  opacity: 1;
-  transform: none;
-  visibility: visible;
-}
-
-.slideover__footer {
+.newtask-modal__footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1073,14 +972,32 @@
   border-top: 1px solid var(--hair);
 }
 
-.slideover__footer-actions {
+.newtask-modal__footer-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-left: auto;
 }
 
-/* Import uses the same field, selection and focus tokens as the task form. */
+/* The shortcut that submits from anywhere in the form. */
+.newtask-modal__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.newtask-modal__hint kbd {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: var(--field);
+  color: var(--muted);
+  font: inherit;
+}
+
+/* Import uses the same field,
+selection and focus tokens as the task form. */
 .import-work__picker {
   overflow: hidden;
   border-radius: var(--r);
@@ -1148,9 +1065,14 @@
 }
 
 .import-work__checkout:not(:disabled):hover { background: var(--field-hover); }
-.import-work__checkout[aria-checked='true'] { background: var(--sel); color: var(--text); }
+.import-work__checkout[aria-selected='true'] { background: var(--sel); color: var(--text); }
 .import-work__checkout:disabled { background: var(--field-disabled); color: var(--text-disabled); }
-.import-work__checkout:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+/* The list scrolls,
+so the active option's ring is drawn inside the row. */
+.app-shell[data-input-modality='keyboard'] .import-work__checkout:focus {
+  outline: 0;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
 
 .import-work__radio {
   width: 14px;
@@ -1159,7 +1081,7 @@
   box-shadow: inset 0 0 0 1.5px var(--control-edge);
 }
 
-.import-work__checkout[aria-checked='true'] .import-work__radio {
+.import-work__checkout[aria-selected='true'] .import-work__radio {
   border: 4px solid var(--accent);
   background: var(--surface);
   box-shadow: none;
@@ -1174,7 +1096,7 @@
 .import-work__empty { margin: 0; padding: 12px; font-size: var(--t-help); color: var(--muted); }
 .import-work__comparison { display: flex; }
 .import-work__comparison .segmented__btn { flex: 1; }
-.slideover .ghost-button {
+.newtask-modal .ghost-button {
   height: var(--h-control);
   padding: 0 10px;
   border-radius: var(--r-sm);
@@ -1182,7 +1104,7 @@
   font-size: var(--t-help);
   white-space: nowrap;
 }
-.slideover .ghost-button:not(:disabled):hover { background: var(--hover); color: var(--text); }
+.newtask-modal .ghost-button:not(:disabled):hover { background: var(--hover); color: var(--text); }
 .import-work__commit { font-family: var(--font-mono); }
 .import-work__preview { border-radius: var(--r-sm); background: var(--well); font-size: var(--t-help); }
 .import-work__preview-summary { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; color: var(--text-soft); }
@@ -1204,7 +1126,7 @@
 .import-work__existing-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing strong { font-size: var(--t-heading); }
 .import-work__existing code { overflow-wrap: anywhere; font-size: var(--t-meta); color: var(--muted); }
-.import-work__meta { color: var(--muted); font-size: var(--t-help); }
+.import-work__meta { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
 
@@ -1217,87 +1139,32 @@
     min-height: clamp(148px, 22vh, 180px);
   }
 
-  .field-grid--two {
-    grid-template-columns: 1fr;
-  }
-
-  .slideover__footer {
+  .newtask-modal__footer {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .slideover__footer-actions {
+  .newtask-modal__footer-actions {
     justify-content: flex-end;
   }
 
 }
 
-/* ----------------------------------------------------------------------- */
-/* Misc                                                                    */
-/* ----------------------------------------------------------------------- */
-
-.empty-state {
-  padding: 16px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--well);
-  color: var(--muted);
-}
-
-.empty-state h2 {
-  margin: 0 0 6px;
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.empty-state p {
-  margin: 0;
-  font-size: 12.5px;
-}
-
 .muted {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--t-help);
 }
 
 .form-error {
   margin: 0;
   color: var(--blocked-ink);
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .form-warning {
   margin: 0;
   color: var(--waiting-ink);
-  font-size: 12px;
-}
-
-.error-banner {
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--error-bg);
-  color: var(--blocked-ink);
-  font-size: 12.5px;
-}
-
-/* Responsive: collapse top-bar actions + grid below 1280px */
-
-@media (max-width: 1279px) {
-  .detail__header {
-    flex-wrap: wrap;
-  }
-
-  .detail__actions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .detail__grid {
-    grid-template-columns: 1fr;
-  }
+  font-size: var(--t-help);
 }
 .task-attachment__open {
   padding: 0;

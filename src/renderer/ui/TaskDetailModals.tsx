@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { X } from 'lucide-react';
 import {
   PULL_REQUEST_TITLE_MAX_LENGTH,
-  type AgentReviewFinding,
   type ExistingWorktree,
-  type Task,
   type WorktreeRecord
 } from '../../shared/contracts';
 import {
@@ -12,10 +9,6 @@ import {
   type FinishEvidenceState,
   type FinishRequirement
 } from '../model/taskFinish';
-import { findingLevel, shortFindingRef } from '../model/findings';
-import { formatShortId } from '../model/selectors';
-import { FindingRow } from './Findings';
-import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export function ExistingWorkModal({
@@ -175,7 +168,8 @@ export function CreateDraftPrModal({
             disabled={busy}
             onChange={(event) => onTitleChange(event.target.value)}
           />
-          <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small>
+          {/* The count matters only near the limit. */}
+          {cleanTitle.length > PULL_REQUEST_TITLE_MAX_LENGTH * 0.8 ? <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small> : null}
         </label>
 
         {external ? (
@@ -209,154 +203,10 @@ export function CreateDraftPrModal({
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={confirmDisabled}>
-            {busy ? 'Creating...' : 'Create draft PR'}
+            {busy ? 'Creating…' : 'Create draft PR'}
           </button>
         </div>
       </form>
-    </div>
-  );
-}
-
-export function ReviewRequestDrawer({
-  task,
-  findings,
-  selectedFindingIds,
-  note,
-  instruction,
-  busy,
-  disabled,
-  disabledReason,
-  onToggleFinding,
-  onNoteChange,
-  onInstructionChange,
-  onCancel,
-  onSubmit,
-  fallbackReturnFocusRef
-}: {
-  task: Task;
-  findings: AgentReviewFinding[];
-  selectedFindingIds: string[];
-  note: string;
-  instruction: string;
-  busy: boolean;
-  disabled: boolean;
-  disabledReason?: string;
-  onToggleFinding(findingId: string): void;
-  onNoteChange(value: string): void;
-  onInstructionChange(value: string): void;
-  onCancel(): void;
-  onSubmit(): void;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const selectedCount = selectedFindingIds.length;
-  const panelRef = useRef<HTMLElement>(null);
-  const noteRef = useRef<HTMLTextAreaElement>(null);
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: noteRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-  return (
-    <div className="tm-reviewdrawer" role="dialog" aria-modal="true" aria-label="Request changes">
-      <div className="tm-reviewdrawer__scrim" onClick={busy ? undefined : onCancel} />
-      <aside ref={panelRef} className="tm-reviewdrawer__panel" tabIndex={-1}>
-        <header className="tm-reviewdrawer__header">
-          <div>
-            <h3>Request changes</h3>
-            <p>Start a follow-up run with the selected findings for #{formatShortId(task.id)}.</p>
-          </div>
-          <button
-            type="button"
-            className="tm-reviewdrawer__close"
-            disabled={busy}
-            aria-label="Close request changes"
-            onClick={onCancel}
-          >
-            <X aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />
-          </button>
-        </header>
-
-        <div className="tm-reviewdrawer__body" inert={busy ? true : undefined}>
-          {disabledReason ? (
-            <p className="tm-reviewdrawer__empty" role="status">
-              {disabledReason}
-            </p>
-          ) : null}
-          <section className="tm-reviewdrawer__section" inert={disabled ? true : undefined}>
-            <h4>Findings to attach · {selectedCount} selected</h4>
-            {findings.length > 0 ? (
-              <div className="tm-reviewdrawer__findings tm-reviewfindings__list">
-                {findings.map((finding) => {
-                  const level = findingLevel(finding.severity);
-                  return (
-                    <FindingRow
-                      key={finding.id}
-                      tone={level.tone}
-                      severityLabel={level.label}
-                      title={finding.title}
-                      reference={shortFindingRef(finding)}
-                      selection={{
-                        checked: selectedFindingIds.includes(finding.id),
-                        onToggle: () => onToggleFinding(finding.id)
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="tm-reviewdrawer__empty">
-                No structured findings were returned. The instruction includes the review summary.
-              </p>
-            )}
-          </section>
-
-          <label className="tm-reviewdrawer__section">
-            <h4>Optional note</h4>
-            <textarea
-              ref={noteRef}
-              className="tm-reviewdrawer__note"
-              value={note}
-              disabled={busy || disabled}
-              placeholder="Add context for the follow-up"
-              onChange={(event) => onNoteChange(event.target.value)}
-              rows={3}
-            />
-          </label>
-
-          <details className="tm-reviewdrawer__instruction">
-            <summary><DisclosureChevron /><span>Full instruction</span></summary>
-            <label>
-              <span>Instruction to agent</span>
-              <textarea
-                value={instruction}
-                disabled={busy || disabled}
-                onChange={(event) => onInstructionChange(event.target.value)}
-                rows={11}
-              />
-              <small>Generated from the selected findings and optional note. Editable.</small>
-            </label>
-          </details>
-        </div>
-
-        <footer className="tm-reviewdrawer__footer">
-          <span>Returns to Review when the follow-up finishes.</span>
-          <div>
-            <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={busy || disabled || !instruction.trim()}
-              onClick={onSubmit}
-            >
-              {busy ? 'Sending...' : 'Send to agent'}
-            </button>
-          </div>
-        </footer>
-      </aside>
     </div>
   );
 }
@@ -397,19 +247,16 @@ export function MarkDoneModal({
         <h3 id="mark-done-title">{copy.title}</h3>
         <p>{copy.body}</p>
         {withIssues && requirements.length > 0 ? (
-          <div className="tm-modal__requirements">
-            <div className="tm-modal__requirements-title">Unresolved</div>
+          <ul className="tm-modal__requirements" aria-label="Unresolved">
             {requirements.map((requirement) => (
-              <div
+              <li
                 className={`tm-modal__requirement tm-modal__requirement--${requirement.tone}`}
                 key={requirement.label}
               >
-                <span>
-                  <strong>{requirement.label}</strong> — {requirement.detail}
-                </span>
-              </div>
+                {requirement.fact}
+              </li>
             ))}
-          </div>
+          </ul>
         ) : null}
         {withIssues && requirements.length === 0 ? (
           <div className="tm-modal__warning">

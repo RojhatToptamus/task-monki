@@ -6,6 +6,7 @@ import {
   DiscourseTaskIcon
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { DisclosureChevron } from './DisclosureChevron';
 
 export function InspectorSidebar({ children, returnFocus, onClose }: {
   children: ReactNode;
@@ -91,7 +92,7 @@ export function ContextPreview({
           ].filter(Boolean).join(' · ')} />)}
       </ul> : null}
       {preview.exclusions.length > 0 ? <details className="tm-discourse-preview__exclusions">
-        <summary>Context limits</summary>
+        <summary><span className="tm-disclosure__label"><DisclosureChevron />Context limits</span></summary>
         <ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
       </details> : null}
     </aside>

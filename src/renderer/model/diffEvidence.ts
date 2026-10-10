@@ -370,35 +370,54 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
   let oldLine = 0;
   let newLine = 0;
   let inHunk = false;
+  let seenHunk = false;
+  // Lines a hunk still owns, from its header counts. Text after a hunk is
+  // exhausted (such as the trailing newline of the patch) is not file content.
+  let oldRemaining = 0;
+  let newRemaining = 0;
 
   const parsedLines: DiffLine[] = [];
 
   for (const line of lines) {
-    if (line === 'new file mode') {
-      status = 'added';
-    } else if (line.startsWith('new file mode ')) {
-      status = 'added';
-    } else if (line.startsWith('deleted file mode ')) {
-      status = 'deleted';
-    } else if (line.startsWith('rename from ')) {
-      status = 'renamed';
-      oldPath = line.slice('rename from '.length);
-    } else if (line.startsWith('rename to ')) {
-      status = 'renamed';
-      newPath = line.slice('rename to '.length);
-    } else if (line.startsWith('--- ')) {
-      oldPath = parseDiffPath(line.slice(4), oldPath);
-    } else if (line.startsWith('+++ ')) {
-      newPath = parseDiffPath(line.slice(4), newPath);
+    // File headers precede the first hunk. Inside a hunk, "--- note" is a
+    // removed line whose text starts with "-- ", never a path.
+    if (!seenHunk) {
+      if (line === 'new file mode') {
+        status = 'added';
+      } else if (line.startsWith('new file mode ')) {
+        status = 'added';
+      } else if (line.startsWith('deleted file mode ')) {
+        status = 'deleted';
+      } else if (line.startsWith('rename from ')) {
+        status = 'renamed';
+        oldPath = line.slice('rename from '.length);
+      } else if (line.startsWith('rename to ')) {
+        status = 'renamed';
+        newPath = line.slice('rename to '.length);
+      } else if (line.startsWith('--- ')) {
+        oldPath = parseDiffPath(line.slice(4), oldPath);
+      } else if (line.startsWith('+++ ')) {
+        newPath = parseDiffPath(line.slice(4), newPath);
+      }
     }
 
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (hunk) {
       oldLine = Number(hunk[1]);
-      newLine = Number(hunk[2]);
+      newLine = Number(hunk[3]);
+      oldRemaining = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newRemaining = hunk[4] === undefined ? 1 : Number(hunk[4]);
       inHunk = true;
+      seenHunk = true;
       parsedLines.push({ kind: 'hunk', content: line });
       continue;
+    }
+
+    // Git prefixes every hunk line with a space, "+", "-" or "\". Anything else
+    // — a truncation marker, the patch's trailing newline — ends the hunk, even
+    // when a truncated hunk's counts were never used up.
+    if (inHunk && ((oldRemaining <= 0 && newRemaining <= 0) || !/^[ +\-\\]/.test(line))) {
+      inHunk = false;
     }
 
     if (!inHunk || line.startsWith('\\ No newline at end of file')) {
@@ -410,14 +429,18 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
       parsedLines.push({ kind: 'addition', newLine, content: line });
       additions += 1;
       newLine += 1;
+      newRemaining -= 1;
     } else if (line.startsWith('-')) {
       parsedLines.push({ kind: 'deletion', oldLine, content: line });
       deletions += 1;
       oldLine += 1;
+      oldRemaining -= 1;
     } else {
       parsedLines.push({ kind: 'context', oldLine, newLine, content: line });
       oldLine += 1;
       newLine += 1;
+      oldRemaining -= 1;
+      newRemaining -= 1;
     }
   }
 

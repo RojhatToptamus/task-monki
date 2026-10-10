@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest';
+import type { DiffFile } from './diffEvidence';
+import {
+  anchorReviewFindings,
+  buildReviewDiffRows,
+  buildReviewIndex,
+  filesChangedSinceReview,
+  lineAnchorKey,
+  type ReviewFindingView
+} from './reviewWorkspace';
+
+function file(path: string, blocks: DiffFile['blocks']): DiffFile {
+  return { id: `file:${path}`, path, status: 'modified', additions: 1, deletions: 0, blocks };
+}
+
+const rateLimit = file('src/middleware/rateLimit.ts', [
+  {
+    id: 'committed', label: 'Committed', source: 'committed', lines: [
+      { kind: 'hunk', content: '@@ -38,2 +38,4 @@ export function rateLimit(options) {' },
+      { kind: 'context', oldLine: 38, newLine: 38, content: '     if (!key) return next();' },
+      { kind: 'addition', newLine: 39, content: '+    const now = Date.now();' },
+      { kind: 'addition', newLine: 40, content: '+    buckets.set(key, refill(bucket));' },
+      { kind: 'context', oldLine: 39, newLine: 41, content: '     next();' }
+    ]
+  },
+  {
+    id: 'unstaged', label: 'Unstaged', source: 'unstaged', lines: [
+      { kind: 'hunk', content: '@@ -75,1 +75,2 @@' },
+      { kind: 'addition', newLine: 76, content: "+    res.setHeader('Retry-After', retryAfter);" }
+    ]
+  }
+]);
+
+function finding(id: string, extra: Partial<ReviewFindingView> = {}): ReviewFindingView {
+  return { id, severity: 'MAJOR', title: id, explanation: 'Why.', state: 'OPEN', addedByReviewer: false, ...extra };
+}
+
+describe('anchorReviewFindings', () => {
+  it('anchors a range after its last displayed line and keeps findings outside the diff visible', () => {
+    const anchored = anchorReviewFindings([rateLimit], [
+      finding('range', { path: './src/middleware/rateLimit.ts', line: 39, endLine: 40 }),
+      finding('latest-block', { path: 'src/middleware/rateLimit.ts', line: 76 }),
+      finding('outside-diff', { path: 'src/middleware/rateLimit.ts', line: 400 }),
+      finding('other-file', { path: 'src/server.ts', line: 3 }),
+      finding('no-location')
+    ]);
+
+    expect(anchored.byLine.get(lineAnchorKey(rateLimit.id, 'committed', 3))?.map((item) => item.id)).toEqual(['range']);
+    expect(anchored.byLine.get(lineAnchorKey(rateLimit.id, 'unstaged', 1))?.map((item) => item.id)).toEqual(['latest-block']);
+    expect(anchored.byFile.get(rateLimit.id)?.map((item) => item.id)).toEqual(['outside-diff']);
+    expect(anchored.general.map((item) => item.id)).toEqual(['other-file', 'no-location']);
+    expect(buildReviewIndex([rateLimit], anchored)[0]?.findings.map((item) => item.id)).toEqual(['outside-diff', 'range', 'latest-block']);
+  });
+});
+
+describe('buildReviewDiffRows', () => {
+  it('turns hunk headers into gap rows that count the unchanged lines they skip', () => {
+    const rows = buildReviewDiffRows(rateLimit.blocks[0]!.lines);
+    expect(rows[0]).toEqual({ kind: 'gap', hidden: 37, heading: 'export function rateLimit(options) {', raw: rateLimit.blocks[0]!.lines[0]!.content });
+    expect(rows.filter((row) => row.kind === 'line')).toHaveLength(4);
+  });
+});
+
+describe('filesChangedSinceReview', () => {
+  it('reports files whose change differs, appeared, or disappeared after the review', () => {
+    const unchanged = file('README.md', [{ id: 'c', label: 'Committed', source: 'committed', lines: [{ kind: 'addition', newLine: 1, content: '+Hello' }] }]);
+    const edited = file('src/a.ts', [{ id: 'c', label: 'Committed', source: 'committed', lines: [{ kind: 'addition', newLine: 1, content: '+a' }] }]);
+    const editedAfter = file('src/a.ts', [{ id: 'c', label: 'Committed', source: 'committed', lines: [{ kind: 'addition', newLine: 1, content: '+b' }] }]);
+    const removed = file('src/gone.ts', edited.blocks);
+    const added = file('src/new.ts', edited.blocks);
+
+    expect([...filesChangedSinceReview([unchanged, edited, removed], [unchanged, editedAfter, added])].sort())
+      .toEqual(['src/a.ts', 'src/gone.ts', 'src/new.ts']);
+  });
+});

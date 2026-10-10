@@ -2,6 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
+  AskReviewerRequest,
+  DecideReviewFindingRequest,
+  StopReviewerQuestionRequest,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   AppUpdateEvent,
   CancelRunRequest,
   CancelDesignTurnRequest,
@@ -294,6 +300,15 @@ const api: TaskManagerApi = {
   retryRun: (input: RetryRunRequest) => invokeIpc('agent:retryRun', input),
   startReview: (input: StartReviewRequest) =>
     invokeIpc('agent:startReview', input),
+  decideReviewFinding: (input: DecideReviewFindingRequest) =>
+    invokeIpc('agent:decideReviewFinding', input),
+  askReviewer: (input: AskReviewerRequest) => invokeIpc('agent:askReviewer', input),
+  stopReviewerQuestion: (input: StopReviewerQuestionRequest) =>
+    invokeIpc('agent:stopReviewerQuestion', input),
+  askSideQuestion: (input: AskSideQuestionRequest) => invokeIpc('agent:askSideQuestion', input),
+  stopSideQuestion: (input: StopSideQuestionRequest) =>
+    invokeIpc('agent:stopSideQuestion', input),
+  endSideThread: (input: EndSideThreadRequest) => invokeIpc('agent:endSideThread', input),
   syncAgentGoal: (input: SyncAgentGoalRequest) =>
     invokeIpc('agent:syncGoal', input),
   cancelRun: (input: CancelRunRequest) => invokeIpc('agent:cancelRun', input),

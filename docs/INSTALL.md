@@ -207,8 +207,8 @@ check again every six hours while the app is open. Task Monki does not download
 an update until you select **Download**.
 
 You can also open **Settings → Updates** and select **Check now**. When a newer
-release exists, the left sidebar shows the update state. Select the notice to
-download the update. Select **Restart to update** when the download completes.
+release exists, an update control appears at the foot of the left rail; its
+tooltip states the update. Select it to download the update. Select **Restart to update** when the download completes.
 
 The **Install on quit** setting is on by default. With this option on, a
 downloaded update installs when Task Monki closes normally. It does not install
@@ -220,7 +220,7 @@ package by design. macOS updates still require the app's valid Developer ID
 signature. Every platform update also uses the digest in its GitHub update
 metadata.
 
-If an update fails, select the sidebar notice or the Settings action to retry.
+If an update fails, select the rail's update control or the Settings action to retry.
 You can always install a newer release manually from GitHub Releases.
 
 The stable package identity preserves the same app data directory during a

@@ -13,6 +13,7 @@ import {
   Rows2,
   Search,
   Smartphone,
+  Sparkles,
   Tablet,
   X,
   type LucideIcon
@@ -38,6 +39,15 @@ export function UiLucideIcon({
   className?: string;
 }) {
   return <Component {...iconProps(size, className)} />;
+}
+
+/**
+ * The one mark for every agent in the app: the implementation agent's side
+ * question, the reviewer, the Preview agent and prompt refinement. Agents
+ * never get a chat or comment icon (DESIGN.md 3.3).
+ */
+export function AgentMark({ size = 14, className }: { size?: number; className?: string } = {}) {
+  return <UiLucideIcon component={Sparkles} size={size} className={className} />;
 }
 
 export function UiPlusIcon() {

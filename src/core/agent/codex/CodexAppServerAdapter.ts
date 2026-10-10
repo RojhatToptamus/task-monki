@@ -7138,6 +7138,8 @@ function isSharedReadOnlyRuntimePurpose(
 ): boolean {
   return (
     purpose === 'TASK_REVIEW' ||
+    purpose === 'TASK_REVIEW_QUESTION' ||
+    purpose === 'TASK_SIDE_QUESTION' ||
     purpose === 'PROMPT_REFINEMENT' ||
     purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')

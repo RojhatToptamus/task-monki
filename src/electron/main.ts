@@ -65,6 +65,12 @@ import type {
   ReconnectRepositoryRequest,
   StartRunRequest,
   StartReviewRequest,
+  AskReviewerRequest,
+  DecideReviewFindingRequest,
+  StopReviewerQuestionRequest,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   QueueTaskInstructionRequest,
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
@@ -779,6 +785,24 @@ function installIpcHandlers(): void {
   handleTrustedIpc('agent:startReview', async (_, input: StartReviewRequest) => {
     return service.startReview(input);
   });
+
+  handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
+    service.decideReviewFinding(input));
+
+  handleTrustedIpc('agent:askReviewer', async (_, input: AskReviewerRequest) =>
+    service.askReviewer(input));
+
+  handleTrustedIpc('agent:stopReviewerQuestion', async (_, input: StopReviewerQuestionRequest) =>
+    service.stopReviewerQuestion(input));
+
+  handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
+    service.askSideQuestion(input));
+
+  handleTrustedIpc('agent:stopSideQuestion', async (_, input: StopSideQuestionRequest) =>
+    service.stopSideQuestion(input));
+
+  handleTrustedIpc('agent:endSideThread', async (_, input: EndSideThreadRequest) =>
+    service.endSideThread(input));
 
   handleTrustedIpc('agent:syncGoal', async (_, input: SyncAgentGoalRequest) => {
     return service.syncAgentGoal(input);

@@ -5,7 +5,7 @@ Starting or stopping an application does not change the task's workflow phase.
 
 ## All previews
 
-Open **Previews** in the sidebar to see applications across tasks and Designs.
+Open **Previews** in the left rail to see applications across tasks and Designs.
 Filter by activity or attention, or search by project, task, or branch. A failed
 update can still have a serving application; **Open app** opens that exact
 worktree's serving attempt. Select a row to return to its task or Design.

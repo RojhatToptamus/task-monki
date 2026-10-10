@@ -106,7 +106,6 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
       <header className="tm-main__head">
         <div className="tm-main__head-copy">
           <h1 className="tm-main__title">Previews</h1>
-          <span className="tm-main__subtitle">Applications across tasks and Designs</span>
         </div>
         <button type="button" className="tm-preview-icon-button" aria-label="Refresh previews" title="Refresh previews"
           disabled={reading} onClick={() => refresh.current()}>
@@ -152,7 +151,7 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
                   <span className="tm-previews__project"><span title={instance.repositoryName}>{instance.repositoryName}</span><span className="tm-previews__kind">{!instance.isCurrentWorktree ? 'Earlier worktree' : instance.kind === 'design' ? 'Design' : null}</span></span>
                   <span className="tm-previews__context"><code title={instance.branch}>{instance.branch}</code><span title={instance.title}>{instance.title}</span></span>
                 </button></td>
-                <td><div className="tm-previews__status"><Chip label={status.label} tone={status.tone} showDot={false} />
+                <td><div className="tm-previews__status"><Chip label={status.label} tone={status.tone} />
                   {status.note ? <span>{status.note}</span> : null}</div></td>
                 <td><div className="tm-previews__actions">
                   {instance.status.active && instance.status.url ? <button type="button" className="outline-button"

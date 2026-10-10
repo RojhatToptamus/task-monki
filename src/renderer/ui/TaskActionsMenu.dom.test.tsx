@@ -43,12 +43,12 @@ describe('Task actions menu', () => {
     const { trigger, onArchive } = renderMenu();
     fireEvent.click(trigger);
     const menu = screen.getByRole('menu');
-    expect(within(menu).getByText('Loading...')).toBeTruthy();
+    expect(within(menu).getByText('Loading…')).toBeTruthy();
     expect(document.activeElement).toBe(menu);
 
     const archive = within(menu).getByRole('menuitem', { name: 'Archive' });
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(within(menu).getByText('Loading...'));
+    expect(document.activeElement).toBe(within(menu).getByText('Loading…'));
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(archive);
     fireEvent.pointerDown(archive);
@@ -86,7 +86,7 @@ describe('Task actions menu', () => {
     vi.spyOn(taskManagerApi, 'inspectOpenTarget').mockReturnValue(new Promise(done => { resolve = done; }));
     const { trigger } = renderMenu();
     fireEvent.keyDown(trigger, { key: 'ArrowUp' });
-    const lastItem = screen.getByRole('menuitem', { name: 'Delete...' });
+    const lastItem = screen.getByRole('menuitem', { name: 'Delete…' });
     const menu = screen.getByRole('menu');
     Object.defineProperties(menu, {
       clientHeight: { value: 100 },
@@ -110,7 +110,7 @@ describe('Task actions menu', () => {
     const { trigger } = renderMenu();
     fireEvent.click(trigger);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Loading...' }));
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Loading…' }));
     await act(async () => resolve(inspection));
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open in VS Code' }));
   });
@@ -136,7 +136,7 @@ describe('Task actions menu', () => {
     const { trigger } = renderMenu();
     fireEvent.click(trigger);
     const firstItem = await screen.findByRole('menuitem', { name: 'Open in VS Code' });
-    const lastItem = screen.getByRole('menuitem', { name: 'Delete...' });
+    const lastItem = screen.getByRole('menuitem', { name: 'Delete…' });
     const menu = screen.getByRole('menu');
     const column = screen.getByRole('region', { name: 'Task column' });
     column.scrollTop = 25;

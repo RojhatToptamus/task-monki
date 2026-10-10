@@ -23,6 +23,17 @@ const softwareUpdateState: SoftwareUpdateState = {
   errorMessage: null
 };
 
+const repositoryProps = {
+  repositories: [],
+  addingRepository: false,
+  revealLabel: 'Reveal in Finder',
+  onAddRepository: async () => false,
+  onRefreshRepository: async () => undefined,
+  onReconnectRepository: async () => undefined,
+  onDisconnectRepository: async () => undefined,
+  onRevealRepository: async () => undefined
+};
+
 function renderSettings({
   appSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS,
   onSetTheme = vi.fn(),
@@ -48,6 +59,8 @@ function renderSettings({
 } = {}) {
   const settings = (runtimeStates = runtimes) => (
     <SettingsView
+      {...repositoryProps}
+      initialSection="agents"
       onSaveAgentProfile={async () => undefined}
       onDeleteAgentProfile={async () => undefined}
       theme={appSettings.theme}
@@ -108,8 +121,8 @@ const readyCodexRuntime: AgentRuntimeState = {
 describe('Tool settings', () => {
   it('shows pending Codex settings until the runtime clears the restart warning', () => {
     const { rerenderRuntimes } = renderSettings({ runtimes: [readyCodexRuntime] });
-    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
-    const tools = screen.getByRole('tabpanel', { name: 'Tools' });
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    const tools = screen.getByRole('region', { name: 'Tools' });
     expect(within(tools).queryByRole('status')).toBeNull();
 
     const message = 'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
@@ -141,7 +154,7 @@ describe('Model settings', () => {
       runtimes: [readyCodexRuntime]
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
     fireEvent.click(
       screen.getByRole('button', {
         name: 'Preview agent: Codex · Preview model'
@@ -172,7 +185,7 @@ describe('Model settings', () => {
           checks: { ...readyCodexRuntime.preflight.readiness.checks, modelCatalog: catalog } } } }]
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
     const trigger = screen.getByRole('button', {
       name: 'Preview agent: Codex · removed-model'
@@ -208,7 +221,7 @@ describe('Model settings', () => {
       ]
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
     const previewSelector = screen.getByRole('button', {
       name: 'Preview agent: Codex · saved-model'
@@ -235,7 +248,7 @@ describe('Model settings', () => {
       runtimes: [readyCodexRuntime]
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
     const trigger = screen.getByRole('button', {
       name: 'Preview agent: removed-agent · removed-model'
@@ -254,7 +267,7 @@ describe('Update settings', () => {
     const onCheckForSoftwareUpdates = vi.fn(async () => undefined);
     renderSettings({ onCheckForSoftwareUpdates });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
 
     expect(onCheckForSoftwareUpdates).toHaveBeenCalledOnce();
@@ -272,7 +285,7 @@ describe('Update settings', () => {
       onDownloadSoftwareUpdate
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Updates' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     expect(screen.getByText('0.2.0')).toBeTruthy();
     expect(screen.getByText('Version 0.2.1')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Check now' })).toBeNull();
@@ -292,22 +305,16 @@ describe('Appearance settings', () => {
   it('selects palette and mode independently and previews the active roles', () => {
     const { onSetTheme, onSetAppSettings } = renderSettings();
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
-    expect(screen.getByText('Palette only — typeface and density are set separately.')).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Theme preview' })).toBeTruthy();
-    expect(screen.getByText('Graphite · dark')).toBeTruthy();
-    expect(screen.getByText('[seed:completion-manual-merged] Manual completion with merged PR')).toBeTruthy();
-    expect(screen.getByText('Write a message… Type @ for agents, tasks, or repositories')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Appearance' }));
+    expect(screen.getByRole('region', { name: 'Preview of Graphite, dark' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Graphite/u }));
     expect(screen.getAllByRole('option')).toHaveLength(16);
     expect(screen.getByRole('group', { name: 'Authored' })).toBeTruthy();
     expect(screen.getByRole('group', { name: 'Catalog' })).toBeTruthy();
     fireEvent.click(screen.getByRole('option', { name: 'Nocturne' }));
-    expect(onSetAppSettings).toHaveBeenCalledWith(
-      { themePreset: 'nocturne' },
-      'Theme preset updated.'
-    );
+    // The theme changes in place, so no toast repeats it.
+    expect(onSetAppSettings).toHaveBeenCalledWith({ themePreset: 'nocturne' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
     expect(onSetTheme).toHaveBeenCalledWith('dark');
@@ -315,7 +322,7 @@ describe('Appearance settings', () => {
 
   it('previews keyboard navigation and restores the persisted theme on Escape', async () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
-    fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Appearance' }));
 
     const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
@@ -326,18 +333,18 @@ describe('Appearance settings', () => {
     const umber = screen.getByRole('option', { name: 'Umber' });
     await waitFor(() => expect(document.activeElement).toBe(umber));
     expect(onPreviewThemePreset).toHaveBeenLastCalledWith('umber');
-    expect(screen.getByText('Umber · dark')).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Preview of Umber, dark' })).toBeTruthy();
 
     fireEvent.keyDown(umber, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(onPreviewThemePreset).toHaveBeenLastCalledWith(null);
-    expect(screen.getByText('Graphite · dark')).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Preview of Graphite, dark' })).toBeTruthy();
     expect(onSetAppSettings).not.toHaveBeenCalled();
   });
 
   it('commits the keyboard-previewed theme with Enter', async () => {
     const { onPreviewThemePreset, onSetAppSettings } = renderSettings();
-    fireEvent.click(screen.getByRole('tab', { name: 'Appearance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Appearance' }));
 
     const trigger = screen.getByRole('button', { name: /Graphite/u });
     fireEvent.click(trigger);
@@ -349,10 +356,7 @@ describe('Appearance settings', () => {
     fireEvent.keyDown(umber, { key: 'Enter' });
 
     await waitFor(() => {
-      expect(onSetAppSettings).toHaveBeenCalledWith(
-        { themePreset: 'umber' },
-        'Theme preset updated.'
-      );
+      expect(onSetAppSettings).toHaveBeenCalledWith({ themePreset: 'umber' });
     });
     expect(onPreviewThemePreset).toHaveBeenLastCalledWith(null);
   });

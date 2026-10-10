@@ -397,10 +397,7 @@ export function DesignsWorkspace({
         tabIndex={historyModalOpen ? -1 : undefined}
       >
         <header className="tm-designs-rail__head">
-          <div>
-            <h2>Designs</h2>
-            <p>Build and refine working previews.</p>
-          </div>
+          <h2>Designs</h2>
           <div className="tm-designs-rail__head-actions">
             <button
               type="button"
@@ -438,10 +435,11 @@ export function DesignsWorkspace({
             onChange={(event) => setHistoryQuery(event.target.value)}
           />
         </label>
-        <div className="tm-designs-rail__filter" role="group" aria-label="Design status">
+        <div className="segmented segmented--fill tm-designs-rail__filter" role="group" aria-label="Design status">
           {(['active', 'all', 'archived'] as const).map((filter) => (
             <button
               type="button"
+              className="segmented__btn"
               key={filter}
               aria-pressed={historyFilter === filter}
               onClick={() => setHistoryFilter(filter)}

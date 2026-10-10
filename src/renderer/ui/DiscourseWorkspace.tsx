@@ -84,6 +84,7 @@ import {
   InspectorSidebar,
   InspectorSection
 } from './DiscourseOverlays';
+import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { StatusGlyph } from './StatusBadge';
@@ -2281,7 +2282,7 @@ export function DiscourseWorkspace({
               <div><dt>Requested access</dt><dd>Read only</dd></div>
               <div><dt>Task Monki tools</dt><dd>Off</dd></div>
             </dl>
-            <details><summary>View details</summary>
+            <details><summary><span className="tm-disclosure__label"><DisclosureChevron />View details</span></summary>
             <p>Provider controls vary. Task Monki checks selected repositories for changes after each turn.</p>
             <dl className="tm-discourse-access-policy">
               <div><dt>Approvals</dt><dd>Never</dd></div>

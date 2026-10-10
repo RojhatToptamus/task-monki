@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 
 export function nextTabIndex(
   currentIndex: number,
@@ -43,18 +43,17 @@ export function AccessibleTab({
   id,
   panelId,
   label,
+  marker,
   selected,
-  onSelect,
-  badge,
-  badgeAccessibleLabel
+  onSelect
 }: {
   id: string;
   panelId: string;
   label: string;
+  /** A small graphic before the label, such as a saved view's colour marker. */
+  marker?: ReactNode;
   selected: boolean;
   onSelect(): void;
-  badge?: string;
-  badgeAccessibleLabel?: string;
 }) {
   return (
     <button
@@ -64,17 +63,12 @@ export function AccessibleTab({
       role="tab"
       aria-selected={selected}
       aria-controls={panelId}
-      aria-label={badgeAccessibleLabel ? `${label}, ${badgeAccessibleLabel}` : undefined}
       tabIndex={selected ? 0 : -1}
       onClick={onSelect}
       onKeyDown={activateAdjacentTab}
     >
+      {marker}
       {label}
-      {badge ? (
-        <span className="tm-tab__badge" aria-hidden="true">
-          {badge}
-        </span>
-      ) : null}
     </button>
   );
 }

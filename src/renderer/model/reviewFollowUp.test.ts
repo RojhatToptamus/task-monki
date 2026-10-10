@@ -1,80 +1,39 @@
 import { describe, expect, it } from 'vitest';
-import { makeTaskRecord } from '../../testSupport/rendererRecords';
-import { buildReviewFollowUpInstruction } from './reviewFollowUp';
+import type { AgentReviewFinding } from '../../shared/contracts';
+import { buildReviewRequestInstruction } from './reviewFollowUp';
 
-describe('buildReviewFollowUpInstruction', () => {
-  it('uses only explicitly supplied review content', () => {
-    const task = makeTaskRecord({
-      title: 'Bound review output',
-      workflowPhase: 'REVIEW',
-      projection: {
-        agentReview: {
-          status: 'INCONCLUSIVE',
-          summary: 'Review needs operator judgment.'
-        }
-      }
+const finding = (id: string, severity: AgentReviewFinding['severity'], extra: Partial<AgentReviewFinding> = {}): AgentReviewFinding => ({
+  id, severity, title: `${id} title`, explanation: `${id} explanation`, ...extra
+});
+
+describe('buildReviewRequestInstruction', () => {
+  it('sends every open finding and comment, and names dismissed findings as off limits', () => {
+    const text = buildReviewRequestInstruction({
+      taskTitle: 'Rate-limit the public API',
+      summary: 'Limiter state is per process.',
+      findings: [finding('f1', 'MAJOR', { path: 'src/rateLimit.ts', line: 41, recommendation: 'Use Redis.' })],
+      dismissed: [{ finding: finding('f2', 'MINOR'), note: 'Covered by the auth tests' }],
+      comments: [{ id: 'c1', path: 'src/rateLimit.ts', line: 77, text: 'Return seconds here.' }],
+      note: 'Keep the public signature.'
     });
 
-    const withoutAvailableContent = buildReviewFollowUpInstruction(
-      task,
-      task.projection.agentReview!,
-      undefined,
-      []
-    );
-    expect(withoutAvailableContent).not.toContain('Task Monki omitted');
-    expect(withoutAvailableContent).not.toContain('Review output:');
-
-    const availableArtifact = buildReviewFollowUpInstruction(
-      task,
-      task.projection.agentReview!,
-      'complete retained review output',
-      []
-    );
-    expect(availableArtifact).toContain('Review output:\ncomplete retained review output');
+    expect(text).toContain('1. [Major] f1 title');
+    expect(text).toContain('Location: src/rateLimit.ts:41');
+    expect(text).toContain('Fix: Use Redis.');
+    expect(text).toContain('- src/rateLimit.ts:77: Return seconds here.');
+    expect(text).toContain('- [Minor] f2 title (Covered by the auth tests)');
+    expect(text).toContain('Keep the public signature.');
+    expect(text).not.toContain('f2 explanation');
   });
 
-  it('includes only selected findings plus the operator note', () => {
-    const task = makeTaskRecord({
-      id: 'task-review',
-      title: 'Review task',
-      workflowPhase: 'REVIEW',
-      projection: {
-        agentReview: {
-          status: 'NEEDS_CHANGES',
-          result: {
-            schemaVersion: 'agent-review/v1',
-            verdict: 'NEEDS_CHANGES',
-            summary: 'Address the selected issue.',
-            findings: [
-              {
-                id: 'finding-major',
-                severity: 'MAJOR',
-                title: 'Fix the listener',
-                explanation: 'The listener leaks.',
-                recommendation: 'Remove it during cleanup.'
-              },
-              {
-                id: 'finding-info',
-                severity: 'NIT',
-                title: 'Skip the unrelated cleanup',
-                explanation: 'This is not selected.'
-              }
-            ]
-          }
-        }
-      }
+  it('falls back to the raw review output only when there is nothing structured to send', () => {
+    const raw = buildReviewRequestInstruction({ taskTitle: 'T', findings: [], dismissed: [], comments: [], reviewOutput: 'Unstructured review.' });
+    const withComment = buildReviewRequestInstruction({
+      taskTitle: 'T', findings: [], dismissed: [], comments: [{ id: 'c', path: 'a.ts', text: 'Rename this.' }], reviewOutput: 'Unstructured review.'
     });
 
-    const instruction = buildReviewFollowUpInstruction(
-      task,
-      task.projection.agentReview!,
-      undefined,
-      ['finding-major'],
-      'Keep the public API unchanged.'
-    );
-
-    expect(instruction).toContain('[Major] Fix the listener');
-    expect(instruction).not.toContain('Skip the unrelated cleanup');
-    expect(instruction).toContain('Additional note:\nKeep the public API unchanged.');
+    expect(raw).toContain('Unstructured review.');
+    expect(withComment).not.toContain('Unstructured review.');
+    expect(withComment).toContain('- a.ts: Rename this.');
   });
 });

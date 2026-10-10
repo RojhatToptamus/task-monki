@@ -9,8 +9,8 @@ import {
   computeNavCounts,
   describeRunFailureBanner,
   describeTaskCompletionEvidence,
-  describeTaskHeaderState,
-  evidenceLineForTask,
+  describeTaskStatus,
+  cardPullRequestForTask,
   reviewFindingCountLabel,
   selectTaskCardRepositoryIdentity,
   shouldShowInboxRepository,
@@ -114,7 +114,7 @@ describe('task card view model', () => {
       })
     );
 
-    expect(vm.stateLabel).toBe('Needs you');
+    expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
   });
 
@@ -136,11 +136,35 @@ describe('task card view model', () => {
     expect(computeNavCounts([task]).review).toBe(0);
     expect(columnTasks([task], reviewColumn)).toHaveLength(0);
     expect(columnTasks([task], progressColumn)).toHaveLength(1);
+    // The banner names the state in the board card's word; its actions say what to do.
     expect(describeRunFailureBanner(task)).toEqual({
       status: 'FAILED',
-      title: 'The agent run failed',
-      detail: expect.stringMatching(/retry the implementation or continue unfinished work/i)
+      title: 'Run failed'
     });
+  });
+
+  it('keeps a failed run\'s recorded reason as reported context, never the latest task event', () => {
+    const task = createTask({
+      currentRunId: 'run-1',
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'FAILED',
+        summary: 'Worktree verification completed.'
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+
+    // The provider's message is attributed context, never Task Monki's own detail.
+    expect(describeRunFailureBanner(task, { id: 'run-1', terminalReason: 'Codex exited before the turn finished' }))
+      .toEqual({
+        status: 'FAILED',
+        title: 'Run failed',
+        reportedReason: 'Codex exited before the turn finished.'
+      });
+    // Neither an older run's reason nor the latest unrelated task event explains this failure.
+    const unrelated = describeRunFailureBanner(task, { id: 'run-0', terminalReason: 'Old failure' });
+    expect(unrelated?.reportedReason).toBeUndefined();
+    expect(unrelated?.detail).toBeUndefined();
   });
 
   it('shows retry state when local evidence blocks a provider-completed implementation', () => {
@@ -161,10 +185,10 @@ describe('task card view model', () => {
 
     expect(vm.stateLabel).toBe('Needs retry');
     expect(vm.stateTone).toBe('action');
-    expect(describeTaskHeaderState(task)).toEqual({ label: 'Needs retry', tone: 'action' });
+    expect(describeTaskStatus(task)).toEqual({ label: 'Needs retry', tone: 'action' });
     expect(describeRunFailureBanner(task)).toEqual({
       status: 'NEEDS_RETRY',
-      title: 'Implementation needs another pass',
+      title: 'Needs retry',
       detail: reason
     });
   });
@@ -181,8 +205,18 @@ describe('task card view model', () => {
 
     expect(describeRunFailureBanner(task)).toEqual({
       status: 'RECOVERY_REQUIRED',
-      title: 'Task Monki cannot prove the final provider state',
-      detail: 'The turn outcome is ambiguous.'
+      title: 'Recovery required',
+      detail: 'Task Monki could not confirm how the run ended and will not resubmit it on its own.'
+    });
+    // The run's own reason is context beside Task Monki's explanation, never in place of it.
+    expect(
+      describeRunFailureBanner(
+        { ...task, currentRunId: 'run-1' },
+        { id: 'run-1', terminalReason: 'stdio transport closed' }
+      )
+    ).toMatchObject({
+      detail: expect.stringMatching(/will not resubmit it/),
+      reportedReason: 'stdio transport closed.'
     });
   });
 
@@ -199,30 +233,43 @@ describe('task card view model', () => {
     const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
     const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
 
-    expect(vm.stateLabel).toBe('Reviewing...');
+    expect(vm.stateLabel).toBe('Reviewing');
     expect(computeNavCounts([task]).review).toBe(1);
     expect(columnTasks([task], reviewColumn)).toHaveLength(1);
     expect(columnTasks([task], progressColumn)).toHaveLength(0);
   });
 
-  it('uses lifecycle language for cards in the Active runs view', () => {
-    const implementing = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        agentRun: 'RUNNING'
-      },
-      workflowPhase: 'IN_PROGRESS'
-    });
-    const waiting = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        agentRun: 'AWAITING_APPROVAL'
-      },
-      workflowPhase: 'IN_PROGRESS'
-    });
+  it('ranks recovery and a broken checkout above Git and delivery problems', () => {
+    const status = (projection: Partial<Task['projection']>, workflowPhase: Task['workflowPhase'] = 'IN_PROGRESS') =>
+      describeTaskStatus(createTask({ projection: { ...createInitialProjection(now), ...projection }, workflowPhase })).label;
 
-    expect(buildTaskCardVM(implementing, { statusContext: 'active' }).stateLabel).toBe('Implementing');
-    expect(buildTaskCardVM(waiting, { statusContext: 'active' }).stateLabel).toBe('Needs you');
+    // The decision slot offers Continue for an interrupted run, so the header says so.
+    expect(status({ agentRun: 'INTERRUPTED', git: 'CONFLICTED' })).toBe('Interrupted');
+    // Retry cannot run without the checkout, so the checkout comes first.
+    expect(status({ agentRun: 'FAILED', worktree: 'MISSING' })).toBe('Checkout missing');
+    // A request the user owes still leads.
+    expect(status({ agentRun: 'AWAITING_APPROVAL', worktree: 'MISSING' })).toBe('Needs approval');
+  });
+
+  it('names what an open or merged pull request asks for instead of a bare phase', () => {
+    const status = (projection: Partial<Task['projection']>) =>
+      describeTaskStatus(createTask({
+        projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', ...projection },
+        workflowPhase: 'IN_REVIEW'
+      })).label;
+
+    expect(status({ git: 'PUSHED' })).toBe('In review');
+    expect(status({ git: 'DIVERGED' })).toBe('Branch diverged');
+    expect(status({ git: 'COMMITTED_UNPUSHED' })).toBe('Changes not pushed');
+    expect(status({ git: 'PUSHED', ciChecks: 'STALE' })).toBe('Checks stale');
+    // A merged pull request ends delivery even before the task is done.
+    expect(status({ githubPullRequest: 'MERGED', merge: 'MERGED', ciChecks: 'STALE' })).toBe('Merged');
+    // In the Review lane, "In review" only restates the lane.
+    const vm = buildTaskCardVM(createTask({
+      projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', git: 'PUSHED' },
+      workflowPhase: 'IN_REVIEW'
+    }), { columnKey: 'review' });
+    expect(vm.showState).toBe(false);
   });
 
   it('labels inconclusive review output directly', () => {
@@ -241,44 +288,44 @@ describe('task card view model', () => {
     expect(vm.stateTone).toBe('action');
   });
 
-  it('keeps review verdicts out of the task detail header state', () => {
-    const task = createTask({
-      projection: {
-        ...createInitialProjection(now),
-        agentRun: 'COMPLETED',
-        agentReview: { status: 'NEEDS_CHANGES' }
-      },
+  it('never says a review is running unless one is', () => {
+    const inReview = (projection: Partial<Task['projection']>) => describeTaskStatus(createTask({
+      projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', ...projection },
       workflowPhase: 'REVIEW'
-    });
+    })).label;
 
-    expect(buildTaskCardVM(task).stateLabel).toBe('Needs changes');
-    expect(describeTaskHeaderState(task)).toEqual({ label: 'Reviewing', tone: 'neutral' });
+    expect(inReview({ agentReview: { status: 'NEEDS_CHANGES' } })).toBe('Needs changes');
+    expect(inReview({})).toBe('Ready for review');
+    expect(inReview({ agentReview: { status: 'RUNNING' } })).toBe('Reviewing');
+    // Once a pull request carries delivery, the optional agent review stops naming the state…
+    expect(inReview({ githubPullRequest: 'OPEN_DRAFT' })).toBe('In review');
+    // …and verified delivery evidence outranks the review gate.
+    expect(inReview({ githubPullRequest: 'OPEN_READY', ciChecks: 'FAILING' })).toBe('Checks failed');
+    expect(inReview({ worktree: 'MISSING' })).toBe('Checkout missing');
   });
 
-  it('drops the No-PR evidence line while keeping bad evidence noticeable', () => {
-    const clean = evidenceLineForTask(
-      createTask({
-        projection: {
-          ...createInitialProjection(now),
-          git: 'CLEAN',
-          githubPullRequest: 'NOT_CREATED'
-        }
-      })
-    );
-    const dirty = evidenceLineForTask(
-      createTask({
-        projection: {
-          ...createInitialProjection(now),
-          git: 'DIRTY',
-          githubPullRequest: 'OPEN_DRAFT',
-          githubPullRequestNumber: 82,
-          ciChecks: 'BLOCKED'
-        }
-      })
-    );
+  it('names a card pull request by number and state, and says delivery progress once', () => {
+    const pullRequest = (projection: Partial<Task['projection']>) =>
+      cardPullRequestForTask(createTask({
+        projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', ...projection },
+        workflowPhase: 'IN_REVIEW'
+      }));
 
-    expect(clean).toEqual([]);
-    expect(dirty).toEqual([{ value: 'PR #82', label: 'checks failing', tone: 'error' }]);
+    // No pull request is the absence of delivery state, not a footer.
+    expect(pullRequest({ git: 'CLEAN', githubPullRequest: 'NOT_CREATED' })).toBeUndefined();
+    expect(pullRequest({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 82, ciChecks: 'PENDING' }))
+      .toEqual({ number: 82, state: 'draft', note: 'checks pending' });
+    // The status word already says Checks failed, so the footer does not repeat it.
+    expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'FAILING' }))
+      .toEqual({ number: 82, state: 'open' });
+    // Scalars alone never claim ready to merge.
+    expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
+      .toEqual({ number: 82, state: 'open', note: 'checks passing, mergeable' });
+    // A merged or closed pull request says so with its state alone.
+    expect(pullRequest({ githubPullRequest: 'MERGED', githubPullRequestNumber: 82, merge: 'MERGED', ciChecks: 'FAILING' }))
+      .toEqual({ number: 82, state: 'merged' });
+    expect(pullRequest({ githubPullRequest: 'CLOSED_UNMERGED', githubPullRequestNumber: 82 }))
+      .toEqual({ number: 82, state: 'closed' });
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {
@@ -361,7 +408,7 @@ describe('task card view model', () => {
   it('shows a lineage cue for a forked task', () => {
     expect(buildTaskCardVM(createTask()).lineage).toBeUndefined();
     const forked = createTask({ forkedFromTaskId: 'src12345-6789' });
-    expect(buildTaskCardVM(forked).lineage).toBe('fork of #src12345');
+    expect(buildTaskCardVM(forked).lineage).toBe('Fork of #src12345');
   });
 
   it('summarizes review findings by severity for the review queue', () => {
@@ -384,7 +431,7 @@ describe('task card view model', () => {
         }
       }
     });
-    expect(reviewFindingCountLabel(withFindings)).toBe('1 blocker · 2 major');
+    expect(reviewFindingCountLabel(withFindings)).toBe('1 blocker, 2 major');
     expect(reviewFindingCountLabel(createTask())).toBeUndefined();
   });
 
@@ -502,6 +549,28 @@ describe('task card view model', () => {
 
 describe('task finish policy', () => {
 
+  it('stops treating a review as asking for changes once its last open finding is dismissed', () => {
+    const finding = { id: 'f1', severity: 'MAJOR' as const, title: 'Limiter state is per process', explanation: 'Each replica keeps its own buckets.' };
+    const review = (decisions: NonNullable<Task['projection']['agentReview']>['findingDecisions']) => createTask({
+      projection: {
+        ...createInitialProjection(now),
+        git: 'CLEAN',
+        agentReview: {
+          status: 'NEEDS_CHANGES', runId: 'review-1', findingDecisions: decisions,
+          result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix the limiter.', findings: [finding] }
+        }
+      },
+      workflowPhase: 'REVIEW'
+    });
+    const open = review([]);
+    const dismissed = review([{ id: 'd1', reviewRunId: 'review-1', findingId: 'f1', kind: 'DISMISS', actor: 'USER', note: 'One replica', createdAt: now }]);
+
+    expect(getFinishEvidenceState(open).mode).toBe('override');
+    expect(describeTaskStatus(open).label).toBe('Needs changes');
+    expect(getFinishEvidenceState(dismissed)).toEqual({ mode: 'clean', warnings: [] });
+    expect(describeTaskStatus(dismissed).label).not.toBe('Needs changes');
+  });
+
   it('allows clean local completion only when review and Git evidence are healthy', () => {
     const state = getFinishEvidenceState(
       createTask({
@@ -553,8 +622,8 @@ describe('task finish policy', () => {
     );
 
     expect(requirements).toEqual([
-      { label: 'Review', detail: 'needs changes', tone: 'error', unresolved: true },
-      { label: 'Tree', detail: '2 dirty', tone: 'action', unresolved: true }
+      { label: 'Review', detail: 'needs changes', fact: 'Agent review requested changes', tone: 'error', unresolved: true },
+      { label: 'Tree', detail: '2 dirty', fact: '2 uncommitted files', tone: 'action', unresolved: true }
     ]);
   });
 
@@ -580,8 +649,8 @@ describe('task finish policy', () => {
 
     expect(finishEvidence).toEqual({ mode: 'clean', warnings: [] });
     expect(requirements).toEqual([
-      { label: 'Review', detail: 'passed', tone: 'success', unresolved: false },
-      { label: 'Tree', detail: 'pushed', tone: 'success', unresolved: false }
+      { label: 'Review', detail: 'passed', fact: 'Agent review passed', tone: 'success', unresolved: false },
+      { label: 'Tree', detail: 'pushed', fact: 'Pushed', tone: 'success', unresolved: false }
     ]);
   });
 
@@ -617,6 +686,7 @@ describe('task finish policy', () => {
     expect(requirements).toContainEqual({
       label: 'Merge',
       detail: 'ready, not merged',
+      fact: 'Ready to merge',
       tone: 'action',
       unresolved: true
     });
@@ -646,6 +716,7 @@ describe('task finish policy', () => {
     expect(requirements).toContainEqual({
       label: 'Merge',
       detail: 'merged',
+      fact: 'Merged',
       tone: 'success',
       unresolved: false
     });
@@ -697,12 +768,14 @@ describe('task finish policy', () => {
     expect(requirements).toContainEqual({
       label: 'Merge',
       detail: 'ready, not merged',
+      fact: 'Ready to merge',
       tone: 'action',
       unresolved: true
     });
     expect(requirements).toContainEqual({
       label: 'Checks',
       detail: 'passing',
+      fact: 'Checks passed',
       tone: 'success',
       unresolved: false
     });
@@ -738,6 +811,7 @@ describe('task finish policy', () => {
     expect(finishRequirementsForTask(task, 'PASSED', 0, 'MERGED', 'FAILING')).toContainEqual({
       label: 'Checks',
       detail: 'failing',
+      fact: 'Checks failed',
       tone: 'error',
       unresolved: true
     });
@@ -784,6 +858,7 @@ describe('task finish policy', () => {
     ).toContainEqual({
       label: 'Checks',
       detail: 'not current',
+      fact: 'Checks passed on an older head',
       tone: 'action',
       unresolved: true
     });
@@ -821,6 +896,7 @@ describe('task finish policy', () => {
     ).toContainEqual({
       label: 'Checks',
       detail: 'passing',
+      fact: 'Checks passed',
       tone: 'success',
       unresolved: false
     });
@@ -847,7 +923,7 @@ describe('task finish policy', () => {
       body: 'Records this task as done in Task Monki. The existing PR is left unchanged, and these checks stay unresolved:',
       confirmLabel: 'Mark done anyway'
     });
-    expect(markDoneModalCopy(true, true).confirmLabel).toBe('Marking done...');
+    expect(markDoneModalCopy(true, true).confirmLabel).toBe('Marking done…');
   });
 });
 

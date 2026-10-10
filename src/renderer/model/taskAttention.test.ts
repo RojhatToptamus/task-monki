@@ -55,7 +55,7 @@ describe('describeTaskAttention', () => {
     {
       name: 'GitHub changes requested',
       task: makeTaskRecord({ projection: { reviews: 'CHANGES_REQUESTED' } }),
-      expected: { label: 'Changes requested', tone: 'warning' }
+      expected: { label: 'GitHub changes requested', tone: 'warning' }
     },
     {
       name: 'blocked merge',
@@ -106,9 +106,50 @@ describe('describeTaskAttention', () => {
 
     expect(attention).toEqual({
       label: 'Needs retry',
+      kind: 'retry',
       detail: 'The declined execution produced no Git change.',
       tone: 'warning'
     });
+  });
+
+  it('names local checkout failures by their owner instead of GitHub delivery', () => {
+    // Every task starts with githubPullRequest UNLINKED; that must not read as delivery evidence.
+    const unlinked = { githubPullRequest: 'UNLINKED' as const, health: 'ERROR' as const };
+    expect(describeTaskAttention(makeTaskRecord({
+      workflowPhase: 'READY',
+      projection: { ...unlinked, worktree: 'ERROR', summary: 'Worktree creation or verification failed.' }
+    }))).toMatchObject({ label: 'Worktree setup failed', kind: 'checkout', tone: 'error' });
+    expect(describeTaskAttention(makeTaskRecord({
+      workflowPhase: 'READY',
+      projection: { ...unlinked, worktree: 'MISSING', summary: 'Worktree verification completed.' }
+    }))).toMatchObject({ label: 'Checkout missing' });
+    expect(describeTaskAttention(makeTaskRecord({
+      workflowPhase: 'READY',
+      projection: { ...unlinked, worktree: 'PRESENT', git: 'CONFLICTED' }
+    }))).toMatchObject({ label: 'Git conflicts', kind: 'git' });
+    // A broken checkout is the actionable fact even when delivery evidence is also bad.
+    expect(describeTaskAttention(makeTaskRecord({
+      workflowPhase: 'REVIEW',
+      projection: { githubPullRequest: 'OPEN_READY', ciChecks: 'FAILING', health: 'ERROR', worktree: 'MISSING' }
+    }))).toMatchObject({ label: 'Checkout missing' });
+    expect(describeTaskAttention(makeTaskRecord({
+      workflowPhase: 'READY',
+      projection: { ...unlinked, worktree: 'PRESENT', summary: 'Branch publication failed; reconcile remote state before retry.' }
+    }))).toEqual({
+      label: 'Needs attention',
+      kind: 'failure',
+      detail: 'Branch publication failed; reconcile remote state before retry.',
+      tone: 'error'
+    });
+  });
+
+  it('never asks for attention on finished tasks', () => {
+    for (const workflowPhase of ['DONE', 'CANCELED', 'ARCHIVED'] as const) {
+      expect(describeTaskAttention(makeTaskRecord({
+        workflowPhase,
+        projection: { githubPullRequest: 'MERGED', merge: 'MERGED', health: 'ERROR', worktree: 'MISSING' }
+      }))).toBeUndefined();
+    }
   });
 
   it('sanitizes generic delivery attention and returns nothing for neutral state', () => {
@@ -123,7 +164,7 @@ describe('describeTaskAttention', () => {
       })
     );
 
-    expect(delivery?.detail).toBe('Open the task to review the current GitHub evidence.');
+    expect(delivery).toEqual({ label: 'Delivery needs attention', kind: 'delivery', tone: 'error' });
     expect(JSON.stringify(delivery)).not.toContain('NOT_MERGED');
     expect(describeTaskAttention(makeTaskRecord())).toBeUndefined();
   });

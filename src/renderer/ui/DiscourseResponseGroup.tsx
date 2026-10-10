@@ -6,6 +6,7 @@ import { discourseTerminalJobDetail } from '../model/discourse';
 import { MessageHeader } from './MessageHeader';
 import { MessageMarkdown } from './MessageMarkdown';
 import type { AgentModel } from '../../shared/contracts';
+import { DisclosureChevron } from './DisclosureChevron';
 
 interface DiscourseResponseGroupProps {
   aggregate: DiscourseConversationAggregateRecord;
@@ -74,10 +75,10 @@ export function DiscourseResponseGroup({ aggregate, wave, streamDrafts, models, 
           {reconfirm ? <button type="button" className="ghost-button" onClick={() => onStop(wave.id)}>Cancel</button> : null}
         </div> : null}
         {savedOutput?.id === artifactId && savedOutput?.error ? <p className="tm-discourse-message-notice">Saved partial output could not be loaded.</p> : null}
-        {job?.error?.message && settled ? <details className="tm-discourse-message-details"><summary>Details</summary><p>{job.error.message}</p></details> : null}
+        {job?.error?.message && settled ? <details className="tm-discourse-message-details"><summary><span className="tm-disclosure__label"><DisclosureChevron />Details</span></summary><p>{job.error.message}</p></details> : null}
       </> : null}
       {legacyConcerns.length ? <details className="tm-discourse-message-details">
-        <summary>Earlier review notes</summary>
+        <summary><span className="tm-disclosure__label"><DisclosureChevron />Earlier review notes</span></summary>
         {legacyConcerns.map((concern) => <section key={concern.id}><strong>{concern.targetClaim}</strong><p>{concern.reason}</p><p>{concern.evidence}</p><p>{concern.suggestedResolution}</p></section>)}
       </details> : null}
     </article>

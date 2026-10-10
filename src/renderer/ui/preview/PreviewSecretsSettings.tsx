@@ -83,7 +83,7 @@ export function PreviewSecretsSettings() {
           <div className="tm-application-preview__toolbar">
             <button
               ref={primaryAction}
-              className="tm-settings__button tm-settings__button--primary"
+              className="primary-button button--sm"
               disabled={busy}
               onClick={() => {
                 setError(undefined);
@@ -122,9 +122,9 @@ export function PreviewSecretsSettings() {
       }
     >
       {!api ? (
-        <p>Secret management is available in the desktop application.</p>
+        <p className="tm-settings__empty">Secret management is available in the desktop app.</p>
       ) : !status ? (
-        <p role="status">Loading secret storage…</p>
+        <p className="tm-settings__empty" role="status">Loading secret storage…</p>
       ) : status.state !== 'unlocked' ? (
         <div className="tm-settings__list">
           <div className="tm-application-secrets__empty">
@@ -175,7 +175,7 @@ export function PreviewSecretsSettings() {
                 }}
               />
             </label>
-            <button className="tm-settings__button" disabled={busy || loading}>
+            <button className="outline-button button--sm" disabled={busy || loading}>
               Search
             </button>
             <span className="tm-application-preview__muted" role="status">
@@ -208,7 +208,7 @@ export function PreviewSecretsSettings() {
                     ) : null}
                   </div>
                   <button
-                    className="tm-settings__button"
+                    className="outline-button button--sm"
                     disabled={busy}
                     onClick={() => {
                       setError(undefined);

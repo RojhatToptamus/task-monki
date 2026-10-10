@@ -28,7 +28,8 @@ describe('ReviewPanel', () => {
 
     expect(html).toContain('Agent review');
     expect(html).toContain('abc12345');
-    expect(html).toContain('Current activity');
+    // Review activity comes from the provider, so it is attributed.
+    expect(html).toContain('Reviewer reported');
     expect(html).toContain('Reading src/renderer/ui/TaskDetail.tsx.');
     expect(html).toContain('Stop');
   });
@@ -61,22 +62,23 @@ describe('ReviewPanel', () => {
         gitSnapshot={gitSnapshotFixture()}
         actionBusy={false}
         reviewPending={false}
-        onReviewAgain={() => {}}
-        action={<button type="button">Run review again</button>}
         onStopReview={() => {}}
       />
     );
 
-    expect(html).toContain('Reviewed diff no longer matches the worktree.');
-    expect(html).toContain('Reviewed diff');
-    expect(html).toContain('feedface');
-    expect(html).toContain('Request can hang');
-    expect(html).not.toContain('Run review again');
-    expect(html.match(/Re-review/gu)).toHaveLength(1);
-    expect(html).toContain('Blocker');
-    expect(html).not.toContain('Major');
-    expect(html).not.toContain('Minor');
-    expect(html).not.toContain('Nit');
+    // One state word; the old verdict is context, never the current state.
+    expect(html).toContain('Needs re-review');
+    expect(html).not.toContain('>Needs changes<');
+    expect(html).toContain('The diff changed after this review, which asked for changes on the earlier version.');
+    // The reviewed commit is named; the dirty-tree fingerprint stays in Debug.
+    expect(html).toContain('Reviewed <code>feedfac</code>');
+    expect(html).not.toContain('fingerprint-old');
+    // The Overview names what the earlier review found; the findings live in the Review tab.
+    expect(html).toContain('Earlier: ');
+    expect(html).toContain('1 blocker');
+    expect(html).not.toContain('Request can hang');
+    expect(html).not.toContain('Re-review<');
+    expect(html).not.toMatch(/major|minor|nit/i);
   });
 
   it('keeps the pending review scope without an empty result row', () => {
@@ -90,8 +92,7 @@ describe('ReviewPanel', () => {
       />
     );
 
-    expect(html).toContain('Will review');
-    expect(html).toContain('abc12345 · 3 files · dirty');
+    expect(html).toContain('Will review <code>abc1234</code>');
     expect(html).not.toContain('Run a review before marking done or shipping this diff.');
     expect(html).not.toContain('Last result');
     expect(html).not.toContain('>none<');

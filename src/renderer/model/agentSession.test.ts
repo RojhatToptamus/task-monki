@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
-import { conversationPreview, earlierHistory, sessionEntries, sessionTurn, stepsSummary, type SessionEntry, type SessionTurn } from './agentSession';
+import { conversationPreview, earlierHistory, reviewTurnOutcome, sessionEntries, sessionTurn, stepsSummary, type SessionEntry, type SessionTurn } from './agentSession';
 
 describe('agent session history', () => {
   it('shows normalized agent messages once without exposing generated user-prompt echoes', () => {
@@ -111,6 +111,23 @@ describe('agent session history', () => {
     expect(earlierHistory(turns, page)).toEqual({ first: 0, clip: 0 });
     // A page boundary that would show only an outcome keeps the turn's last entry with it.
     expect(earlierHistory([turnWith('x', 10), turnWith('y', 77)], { first: 2, clip: 0 })).toEqual({ first: 0, clip: 9 });
+  });
+
+  it('names the latest review verdict in the conversation, and never claims one for an earlier review', () => {
+    const verdict = (value: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE') => ({
+      runId: 'review-2', status: 'STALE' as const,
+      result: { schemaVersion: 'agent-review/v1' as const, verdict: value, summary: 'Summary.', findings: [] }
+    });
+    const turn = (id: string, state: SessionTurn['state']) => ({ state, run: { id } });
+
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('PASSED'))).toBe('Passed');
+    // A verdict stays the verdict after follow-up work makes the review stale.
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('NEEDS_CHANGES'))).toBe('Requested changes');
+    // An earlier review's verdict is no longer recorded, so only how it ended is said.
+    expect(reviewTurnOutcome(turn('review-1', 'completed'), verdict('PASSED'))).toBeUndefined();
+    expect(reviewTurnOutcome(turn('review-1', 'failed'), verdict('PASSED'))).toBe('Failed');
+    // A live review is announced by the working line, not twice.
+    expect(reviewTurnOutcome(turn('review-2', 'active'), verdict('PASSED'))).toBeUndefined();
   });
 });
 

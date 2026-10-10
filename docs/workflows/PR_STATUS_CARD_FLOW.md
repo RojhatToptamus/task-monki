@@ -20,10 +20,27 @@ It answers:
 - is GitHub reporting the PR mergeable, merged, or closed without merge?
 - which GitHub delivery action is currently valid?
 
-Finish remains local acceptance. It owns `Commit`, `Mark done`, and
-`Mark done anyway`. It does not render `Create draft PR` or `Push update`.
+While a linked pull request is not merged — open, or closed without merge,
+where `Create draft PR` can start a new one — PR Status holds the Overview's
+Now panel: its headline is the panel's title, and its lead action
+(`Investigate failure`, `Push update`, or `Create draft PR`) is the panel's
+primary, with any disabled reason stated beside it. The panel's title is the
+board card's word for the task; the PR's own headline follows its identity only
+when it adds something. A merged pull request hands the panel to finishing, and
+so does an agent review that asks for action, since the board card leads with
+it; PR Status then becomes a flat "Pull request" section in the work column,
+where no action competes with the panel's primary. Before any pull request
+exists, `Create draft PR` sits with the finishing actions when finishing holds
+the Now panel, together with any publish failure line, and in the PR Status
+section otherwise, under the same publish guard, so it appears exactly once.
 
-Activity Timeline may render below PR Status as supporting task context. It may
+Finish remains local acceptance. It owns `Commit`, `Mark done`, and
+`Mark done anyway`, the owner override that is never the recommended step and
+so never the filled primary. Before any pull request exists it also carries
+`Create draft PR`, as described above; it never renders `Push update`.
+
+History (the Overview's view of the Activity Timeline) renders beside PR Status
+as supporting task context. It may
 summarize meaningful delivery changes such as first PR availability, branch
 publication failure, check verdict changes, GitHub review decisions, and merge
 outcomes. It must not log `Refresh GitHub` clicks or unchanged PR/check/review
@@ -65,38 +82,33 @@ GitHub responses. It reads the current Task Monki snapshot.
 
 ## Real Render Surface
 
-The card uses the existing panel language:
+In the Now panel the headline is the title; as a section, a quiet "Pull
+request" label leads and the headline follows the PR identity:
 
 ```text
-+--------------------------------------------------+
-| PR Status                              Jul 2... |
-| o <headline>                                    |
-| #82 <PR title>                                  |
-| <reason / guidance / evidence>                  |
-| [primary action] [secondary action]             |
-| Checks 3                                        |
-|   > build        Failed       12s               |
-+--------------------------------------------------+
+<headline>                           Updated Jul 2, 10:05  ↻
+#82 <PR title>
+<freshness / lead / guidance / evidence>
+[primary action] [secondary action]
+> Checks                                                 3
+    > build        Failed       12s
 ```
 
 Real classes:
 
-- root: `tm-panel tm-prstatus tm-prstatus--<tone>`
-- title: `tm-panel__title`
-- refresh button: `tm-prstatus__refresh`
-- headline row: `tm-prstatus__headline-row`
-- status dot: `tm-prstatus__dot tm-prstatus__dot--<tone>`
-- pending animation: `tm-prstatus__dot--pulse`
-- PR identity: `tm-prstatus__identity`
-- reason/guidance: `tm-prstatus__reason`
-- evidence line: `tm-prstatus__evidence`
+- root: `tm-prstatus` (`tm-prstatus--now` inside the Now panel)
+- refresh line and button: `tm-prstatus__refreshline`, `tm-prstatus__refresh`
+- PR identity and section headline: `tm-prstatus__identity`, `tm-prstatus__state`
+- freshness problem: `tm-prstatus__freshness`
+- lead, guidance and evidence lines: `tm-prstatus__fact`
 - actions: `tm-prstatus__actions`
 - disabled action title wrapper: `tm-actiontitle`
 - check list: `tm-prchecks`, `tm-prcheck`
 
-Action blockers are not rendered as dangling inline text. Disabled PR Status,
-review, and Finish buttons keep their normal button position and expose the
-reason through the `tm-actiontitle` wrapper's HTML `title` attribute.
+Disabled buttons keep their normal button position. PR Status buttons expose
+the reason through the `tm-actiontitle` wrapper's HTML `title` attribute.
+Finish actions in the Overview's Now panel state the reason once beside the
+actions, tied with `aria-describedby`.
 
 Tones map to semantic CSS variables:
 
@@ -626,10 +638,14 @@ Remote branch has newer commits. Sync the branch before pushing again.
 PR Status                         Jul 2, 10:56
 o Draft PR
 #82 Refresh auth token
+No checks reported
 [refresh]
 ```
 
-Tone: `info`.
+Tone: `info`. When no check verdict leads, the evidence line says what is
+missing: `Checks not observed` (no rollup), `No checks reported` (zero rows, as
+in a repository without CI), `Checks not applicable`, or `Checks unknown`. None
+of these outranks GitHub review or draft state.
 
 ### OPEN
 
@@ -770,7 +786,7 @@ ready-to-merge status.
 
 ```text
 PR Status                         Jul 2, 10:56
-o No required checks ran
+o Checks skipped
 #82 Refresh auth token
 [refresh]
 Checks 2
@@ -939,40 +955,26 @@ the `tm-actiontitle` wrapper. Do not replace it with dangling explanatory text.
 The delivery `Commit` action now uses `runDeliveryAction`, so PR Status and
 Finish pause consistently during local delivery commits.
 
-## Board Delivery Line
+## Board Card Pull Request
 
-The board card uses `buildBoardDeliveryLine(task)`, not the full PR Status
-view model. It renders a compact line:
-
-```text
-No PR
-PR #82 | merged
-PR #82 | closed
-PR #82 | checks failing
-PR #82 | checks pending
-PR #82 | checks canceled
-PR #82 | changes requested
-PR #82 | review waiting
-PR #82 | ready to merge
-PR #82 | draft
-PR #82 | open
-```
-
-Tone is derived from delivery evidence:
+The board card uses `cardPullRequestForTask(task)`, not the full PR Status view
+model. A task without a linked pull request has no footer entry. Otherwise the
+card shows GitHub's icon for the pull request's state (draft, open, merged or
+closed) and its number, and, for an open pull request, one delivery note:
 
 ```text
-error:
-  closed unmerged, checks failing/blocked, changes requested
-
-action:
-  pending/canceled/stale checks, review requested/pending
-
-success:
-  merged, or passing checks plus mergeable
-
-neutral:
-  everything else
+checks failing
+checks pending
+checks canceled
+changes requested
+review waiting
+checks passing, mergeable
 ```
+
+Projection scalars alone never claim "ready to merge"; that needs delivery
+evidence for the current head. A note the card's status word already states is
+dropped, so "Checks failed" never sits beside "checks failing". The note takes
+no tone: the status word carries it.
 
 ## Evidence Updates And Projection
 

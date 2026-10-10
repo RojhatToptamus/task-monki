@@ -23,6 +23,9 @@ export function useConversationScroll({ startAtBottom = true }: { startAtBottom?
   return { ...instance, scrollToBottom: (options) => instance.scrollToBottom(options ?? motion) };
 }
 
+const READER_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+const READER_INTENT_MS = 600;
+
 /**
  * A conversation log with an unobtrusive jump back to the latest output (AI
  * Elements Conversation). Opening a disclosure is reading, so it releases the
@@ -38,6 +41,10 @@ export function Conversation({ instance, label, className = '', header, children
 }) {
   const [headerVisible, setHeaderVisible] = useState(true);
   const scrollDirection = useRef({ top: 0, direction: 0, distance: 0 });
+  // Only the reader's own scrolling moves the header. Following new output,
+  // restoring a reading position and Jump to latest are programmatic.
+  const readerIntent = useRef({ until: 0, dragging: false });
+  const noteReaderScroll = () => { readerIntent.current.until = performance.now() + READER_INTENT_MS; };
   const trackScroll = (viewport: HTMLElement) => {
     if (header) {
       const top = Math.max(0, viewport.scrollTop);
@@ -47,7 +54,9 @@ export function Conversation({ instance, label, className = '', header, children
         const direction = Math.sign(delta);
         const distance = direction === previous.direction ? previous.distance + Math.abs(delta) : Math.abs(delta);
         scrollDirection.current = { top, direction, distance };
-        if (top < 16 || distance >= 12) setHeaderVisible(top < 16 || direction < 0);
+        const byReader = readerIntent.current.dragging || performance.now() < readerIntent.current.until;
+        if (top < 16) setHeaderVisible(true);
+        else if (byReader && distance >= 12) setHeaderVisible(direction < 0);
       }
     }
     onScroll?.(viewport);
@@ -55,6 +64,12 @@ export function Conversation({ instance, label, className = '', header, children
   return <div className={`tm-conversation ${className}`.trim()}>
     <div ref={instance.scrollRef} className="tm-conversation__viewport" tabIndex={0} aria-label={label}
       onScroll={(event) => trackScroll(event.currentTarget)}
+      onWheel={noteReaderScroll}
+      onTouchMove={noteReaderScroll}
+      onKeyDown={(event) => { if (READER_SCROLL_KEYS.has(event.key)) noteReaderScroll(); }}
+      onPointerDown={(event) => { if (event.target === event.currentTarget) readerIntent.current.dragging = true; }}
+      onPointerUp={() => { readerIntent.current.dragging = false; }}
+      onPointerCancel={() => { readerIntent.current.dragging = false; }}
       onClickCapture={(event) => {
         if ((event.target as HTMLElement).closest('[data-disclosure]')) instance.stopScroll();
       }}>
@@ -64,7 +79,15 @@ export function Conversation({ instance, label, className = '', header, children
       </div>
     </div>
     {instance.isAtBottom ? null : <button type="button" className="tm-conversation__latest" aria-label="Jump to latest" title="Jump to latest"
-      onClick={() => void instance.scrollToBottom()}>
+      onClick={(event) => {
+        // The button hides itself once the view reaches the end. When it was
+        // pressed from the keyboard (a click with no pointer detail), keep focus
+        // in the conversation instead of letting it fall to the page.
+        if (event.detail === 0 && event.currentTarget === document.activeElement) {
+          instance.scrollRef.current?.focus({ preventScroll: true });
+        }
+        void instance.scrollToBottom();
+      }}>
       <ArrowDown size={16} strokeWidth={1.5} aria-hidden="true" />
     </button>}
   </div>;

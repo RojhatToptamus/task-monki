@@ -64,10 +64,10 @@ export interface TaskAttachmentController {
   closedRef: MutableRefObject<boolean>;
   selectFiles(event: ChangeEvent<HTMLInputElement>): void;
   paste(event: ClipboardEvent<HTMLElement>): void;
-  dragEnter(event: DragEvent<HTMLDivElement>): void;
-  dragOver(event: DragEvent<HTMLDivElement>): void;
-  dragLeave(event: DragEvent<HTMLDivElement>): void;
-  drop(event: DragEvent<HTMLDivElement>): void;
+  dragEnter(event: DragEvent<HTMLElement>): void;
+  dragOver(event: DragEvent<HTMLElement>): void;
+  dragLeave(event: DragEvent<HTMLElement>): void;
+  drop(event: DragEvent<HTMLElement>): void;
   remove(clientId: string): Promise<void>;
   prepareForCreate(): Promise<string | undefined>;
   acknowledgeDraftSave(draftId: string | undefined): Promise<void>;
@@ -324,7 +324,7 @@ export function useTaskAttachments(
   );
 
   const interactionBlocked = options.blocked || !options.enabled || isRestoringDraft;
-  const dragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
+  const dragEnter = useCallback((event: DragEvent<HTMLElement>) => {
     if (!dragContainsFiles(event)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = interactionBlocked ? 'none' : 'copy';
@@ -333,18 +333,18 @@ export function useTaskAttachments(
       setIsDragging(true);
     }
   }, [interactionBlocked]);
-  const dragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+  const dragOver = useCallback((event: DragEvent<HTMLElement>) => {
     if (!dragContainsFiles(event)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = interactionBlocked ? 'none' : 'copy';
   }, [interactionBlocked]);
-  const dragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+  const dragLeave = useCallback((event: DragEvent<HTMLElement>) => {
     if (dragDepthRef.current === 0) return;
     event.preventDefault();
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
     if (dragDepthRef.current === 0) setIsDragging(false);
   }, []);
-  const drop = useCallback((event: DragEvent<HTMLDivElement>) => {
+  const drop = useCallback((event: DragEvent<HTMLElement>) => {
     if (!dragContainsFiles(event)) return;
     event.preventDefault();
     dragDepthRef.current = 0;

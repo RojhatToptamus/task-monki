@@ -2,11 +2,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { InteractionRequestRecord } from '../../shared/contracts';
 import { makeRawMessage, makeTaskRecord } from '../../testSupport/rendererRecords';
-import { InboxDecisionCard, TaskCard } from './MainColumn';
+import { InboxRow, TaskCard } from './MainColumn';
 import type { TaskCardVM } from '../model/taskView';
 
 describe('TaskCard', () => {
-  it('renders the task identity, state, and local evidence supplied by its model', () => {
+  it('states a refining status once as a toned badge and names the pull request once', () => {
     const vm: TaskCardVM = {
       id: 'task-12345678',
       title: 'Review the repository change',
@@ -14,9 +14,10 @@ describe('TaskCard', () => {
       repositoryId: 'repository-a',
       stateLabel: 'Needs approval',
       stateTone: 'action',
+      stateInFlight: false,
       showState: true,
       archived: false,
-      evidence: [{ value: 'PR #42', label: 'checks failing', tone: 'error' }]
+      pullRequest: { number: 42, state: 'open', note: 'checks pending' }
     };
     const html = renderToStaticMarkup(
       <TaskCard vm={vm} onSelect={() => {}} onArchive={() => {}} onRequestDelete={() => {}} />
@@ -24,9 +25,30 @@ describe('TaskCard', () => {
 
     expect(html).toContain('Review the repository change');
     expect(html).toContain('repo-secondary');
-    expect(html).toContain('Needs approval');
-    expect(html).toContain('PR #42');
-    expect(html).toContain('checks failing');
+    // A status that needs the user is a badge in the waiting tone, stated once.
+    expect(html).toContain('status-pill--action');
+    expect(html.match(/Needs approval/g)).toHaveLength(1);
+    expect(html).toContain('#42');
+    expect(html).toContain('checks pending');
+  });
+
+  it('omits a status that restates the lane, leaving no empty footer', () => {
+    const vm: TaskCardVM = {
+      id: 'task-ready',
+      title: 'Ready task',
+      repositoryId: 'repository-a',
+      stateLabel: 'Ready',
+      stateTone: 'neutral',
+      stateInFlight: false,
+      showState: false,
+      archived: false
+    };
+    const html = renderToStaticMarkup(
+      <TaskCard vm={vm} onSelect={() => {}} onArchive={() => {}} onRequestDelete={() => {}} />
+    );
+
+    expect(html).not.toContain('>Ready<');
+    expect(html).not.toContain('tm-card__foot');
   });
 
   it('uses the heading level supplied by the owning board lane or ungrouped grid', () => {
@@ -36,9 +58,9 @@ describe('TaskCard', () => {
       repositoryId: 'repository-a',
       stateLabel: 'Ready',
       stateTone: 'neutral',
+      stateInFlight: false,
       showState: false,
-      archived: false,
-      evidence: []
+      archived: false
     };
     const boardHtml = renderToStaticMarkup(
       <TaskCard
@@ -73,9 +95,9 @@ describe('TaskCard', () => {
       repositoryId: 'repository-a',
       stateLabel: 'Ready',
       stateTone: 'neutral',
+      stateInFlight: false,
       showState: false,
-      archived: false,
-      evidence: []
+      archived: false
     };
     const html = renderToStaticMarkup(
       <TaskCard
@@ -91,11 +113,11 @@ describe('TaskCard', () => {
   });
 });
 
-describe('InboxDecisionCard', () => {
-  it('renders the attention reason with task navigation', () => {
+describe('InboxRow', () => {
+  it('says why the task waits in the board card word and opens the task from the whole row', () => {
     const task = attentionTask();
     const html = renderToStaticMarkup(
-      <InboxDecisionCard
+      <InboxRow
         task={task}
         repositoryName="repo"
         showRepository={false}
@@ -104,16 +126,18 @@ describe('InboxDecisionCard', () => {
       />
     );
 
-    expect(html).toContain('<article');
-    expect(html).toContain('<h2');
+    expect(html).toContain('<li');
+    expect(html).toContain('>Needs approval</span>');
     expect(html).toContain('>Awaiting approval</h2>');
-    expect(html).toContain('Provider is blocked on a permission decision.');
-    expect(html).toContain('>Open task</button>');
+    expect(html).toContain('aria-label="Open Awaiting approval"');
+    // No per-row "Open task" button, and no sentence restating the status.
+    expect(html).not.toContain('Open task');
+    expect(html).not.toContain('tm-inbox-row__detail');
   });
 
   it('shows repository identity when the Inbox selector requests it', () => {
     const html = renderToStaticMarkup(
-      <InboxDecisionCard
+      <InboxRow
         task={attentionTask()}
         repositoryName="Missing repository"
         showRepository
@@ -125,9 +149,9 @@ describe('InboxDecisionCard', () => {
     expect(html).toContain('Missing repository');
   });
 
-  it('offers an inline approval without hiding task navigation', () => {
+  it('shows the command beside an inline approval, in the Agent tab order', () => {
     const html = renderToStaticMarkup(
-      <InboxDecisionCard
+      <InboxRow
         task={attentionTask()}
         repositoryName="repo"
         showRepository={false}
@@ -137,9 +161,30 @@ describe('InboxDecisionCard', () => {
       />
     );
 
-    expect(html).toContain('>Approve</button>');
-    expect(html).toContain('>Deny</button>');
-    expect(html).toContain('>Open task</button>');
+    const subjectId = /<code id="([^"]+)" class="tm-inbox-row__subject">npm test<\/code>/.exec(html)?.[1];
+    expect(subjectId).toBeTruthy();
+    // Both decisions name the command they apply to.
+    expect(html).toContain(`aria-describedby="${subjectId}">Deny</button>`);
+    expect(html).toContain(`aria-describedby="${subjectId}">Allow once</button>`);
+    expect(html.indexOf('>Deny</button>')).toBeLessThan(html.indexOf('>Allow once</button>'));
+  });
+
+  it('quotes what the agent asks when it waits for answers', () => {
+    const html = renderToStaticMarkup(
+      <InboxRow
+        task={{ ...attentionTask(), projection: { ...attentionTask().projection, agentRun: 'AWAITING_USER_INPUT' } }}
+        repositoryName="repo"
+        showRepository={false}
+        interaction={userInputInteraction()}
+        onSelect={() => {}}
+        onRespondToInteraction={async () => {}}
+      />
+    );
+
+    expect(html).toContain('>Needs input</span>');
+    expect(html).toContain('Which checks should run?');
+    expect(html).toContain('1 more question<');
+    expect(html).not.toContain('<button type="button" class="primary-button"');
   });
 });
 
@@ -178,5 +223,20 @@ function approvalInteraction(): InteractionRequestRecord {
     policyWarnings: [],
     requestRawMessage: makeRawMessage({ sha256: 'seed' }),
     requestedAt: '2026-07-19T12:00:00.000Z'
+  };
+}
+
+function userInputInteraction(): InteractionRequestRecord {
+  return {
+    ...approvalInteraction(),
+    id: 'interaction-2',
+    type: 'USER_INPUT',
+    request: {
+      questions: [
+        { id: 'checks', header: 'Checks', question: 'Which checks should run?', isOther: false, isSecret: false },
+        { id: 'scope', header: 'Scope', question: 'What should stay unchanged?', isOther: false, isSecret: false }
+      ]
+    },
+    allowedActions: ['ANSWER']
   };
 }

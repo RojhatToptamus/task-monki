@@ -1,74 +1,54 @@
-import { Download, RefreshCw, Sparkles, TriangleAlert } from 'lucide-react';
+import { CircleArrowUp, Download, RefreshCw, TriangleAlert } from 'lucide-react';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+import { Tooltip } from './Tooltip';
 import { UiLucideIcon } from './UiIcons';
 
 export interface SoftwareUpdateNoticeProps {
   state: SoftwareUpdateState;
-  collapsed: boolean;
   onDownload(): void;
   onInstall(): void;
 }
 
-export function SoftwareUpdateNotice({
-  state,
-  collapsed,
-  onDownload,
-  onInstall
-}: SoftwareUpdateNoticeProps) {
+/** The rail's update control: one icon, a dot while it needs the user, and the state in its tooltip. */
+export function SoftwareUpdateNotice({ state, onDownload, onInstall }: SoftwareUpdateNoticeProps) {
   const notice = buildSoftwareUpdateNotice(state);
   if (!notice) return null;
+  const label = notice.tone === 'downloading' ? `${notice.label}, ${notice.percent}%` : notice.label;
+  const icon = <>
+    <NoticeIcon tone={notice.tone} />
+    {notice.showDot ? <span className="tm-rail__dot" aria-hidden="true" /> : null}
+  </>;
 
-  const content = (
-    <>
-      <span className="tm-software-update__icon" aria-hidden="true">
-        <NoticeIcon tone={notice.tone} />
-        {collapsed && notice.showDot ? <span className="tm-software-update__dot" /> : null}
-      </span>
-      <span className="tm-software-update__body">
-        <span className="tm-software-update__label">{notice.label}</span>
-        {notice.tone === 'downloading' ? (
+  if (notice.action === 'none') {
+    return (
+      <Tooltip label={label} side="right">
+        <div className="tm-rail__item tm-rail__update" data-tone={notice.tone} tabIndex={0} aria-label={label}>
+          {icon}
           <span
-            className="tm-software-update__progress"
+            className="tm-visually-hidden"
             role="progressbar"
             aria-label="Update download progress"
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={notice.percent}
-          >
-            <span style={{ width: `${notice.percent}%` }} />
-          </span>
-        ) : null}
-      </span>
-      {notice.tone === 'downloading' ? (
-        <span className="tm-software-update__percent">{notice.percent}%</span>
-      ) : null}
-    </>
-  );
-
-  if (notice.action === 'none') {
-    return (
-      <div
-        className={`tm-software-update tm-software-update--${notice.tone}`}
-        aria-live="polite"
-        aria-label={notice.label}
-        data-tip={collapsed ? notice.label : undefined}
-      >
-        {content}
-      </div>
+          />
+        </div>
+      </Tooltip>
     );
   }
 
   return (
-    <button
-      type="button"
-      className={`tm-software-update tm-software-update--${notice.tone}`}
-      aria-label={notice.label}
-      title={notice.title}
-      data-tip={collapsed ? notice.label : undefined}
-      onClick={notice.action === 'install' ? onInstall : onDownload}
-    >
-      {content}
-    </button>
+    <Tooltip label={notice.title} side="right">
+      <button
+        type="button"
+        className="tm-rail__item tm-rail__update"
+        data-tone={notice.tone}
+        aria-label={notice.label}
+        onClick={notice.action === 'install' ? onInstall : onDownload}
+      >
+        {icon}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -129,5 +109,5 @@ function NoticeIcon({ tone }: { tone: 'available' | 'downloading' | 'ready' | 'f
   if (tone === 'ready') return <UiLucideIcon component={RefreshCw} />;
   if (tone === 'failed') return <UiLucideIcon component={TriangleAlert} />;
   if (tone === 'downloading') return <UiLucideIcon component={Download} />;
-  return <UiLucideIcon component={Sparkles} />;
+  return <UiLucideIcon component={CircleArrowUp} />;
 }

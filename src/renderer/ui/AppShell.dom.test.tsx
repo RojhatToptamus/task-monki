@@ -1,21 +1,19 @@
 import { createRef } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { NavItem } from './AppNavigation';
+import { RailItem } from './AppNavigation';
 import { BoardEditorModal, DesignExternalLinkModal } from './AppOverlays';
 
 describe('mounted application shell behavior', () => {
   it('dispatches navigation without duplicating its count in the accessible name', () => {
     const onClick = vi.fn();
     render(
-      <NavItem
+      <RailItem
         label="Inbox"
         icon={<span aria-hidden="true">icon</span>}
         count={2}
         countNoun="decision"
-        urgent
         active={false}
-        collapsed
         onClick={onClick}
       />
     );
@@ -25,7 +23,7 @@ describe('mounted application shell behavior', () => {
 
     expect(onClick).toHaveBeenCalledOnce();
     expect(item.getAttribute('aria-describedby')).toBeTruthy();
-    expect(screen.getByText('2 decisions')).toBeTruthy();
+    expect(screen.getByText('2 decisions waiting')).toBeTruthy();
   });
 
   it('focuses the saved-view name and closes the modal on Escape', () => {

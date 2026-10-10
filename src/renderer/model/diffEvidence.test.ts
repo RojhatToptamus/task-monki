@@ -115,6 +115,82 @@ diff --git "a/src/quoted name.ts" "b/src/quoted name.ts"
     expect(inspected.completeness).toBe('INCOMPLETE');
   });
 
+  it('keeps trailing patch text out of a file once its hunk counts are used up', () => {
+    // Git ends every patch with a newline and evidence sections are separated by
+    // blank lines; neither may become a context row with invented line numbers.
+    const files = parseGitDiffEvidence([
+      '## Committed diff',
+      'diff --git a/scenarios/review-passed.txt b/scenarios/review-passed.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/scenarios/review-passed.txt',
+      '@@ -0,0 +1 @@',
+      '+Committed seed change.',
+      '',
+      '',
+      '## Unstaged diff',
+      'diff --git a/a.txt b/a.txt',
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,2 +1,2 @@',
+      ' ',
+      '-old',
+      '+new',
+      ''
+    ].join('\n'));
+
+    const rows = (path: string) => files
+      .find((file) => file.path === path)!
+      .blocks.flatMap((block) => block.lines)
+      .filter((line) => line.kind !== 'meta');
+    expect(rows('scenarios/review-passed.txt')).toEqual([
+      { kind: 'hunk', content: '@@ -0,0 +1 @@' },
+      { kind: 'addition', newLine: 1, content: '+Committed seed change.' }
+    ]);
+    // A real blank context line keeps its single-space prefix and its numbers.
+    expect(rows('a.txt').map((line) => [line.kind, line.oldLine, line.newLine])).toEqual([
+      ['hunk', undefined, undefined],
+      ['context', 1, 1],
+      ['deletion', 2, undefined],
+      ['addition', undefined, 2]
+    ]);
+  });
+
+  it('reads hunk lines by their prefix, not by what their text looks like', () => {
+    const files = parseGitDiffEvidence([
+      'diff --git a/db/schema.sql b/db/schema.sql',
+      '--- a/db/schema.sql',
+      '+++ b/db/schema.sql',
+      '@@ -1,2 +1,2 @@',
+      // Removed and added lines whose text starts with "-- " and "++ ".
+      '--- legacy index',
+      ' CREATE TABLE tasks (id TEXT);',
+      '\\ No newline at end of file',
+      '+++ counter',
+      '@@ -10 +10 @@',
+      '-old',
+      '+new',
+      'diff --git a/notes.txt b/notes.txt',
+      '--- a/notes.txt',
+      '+++ b/notes.txt',
+      '@@ -1,5 +1,5 @@',
+      ' kept',
+      '[Task Monki truncated unstaged diff after 4096 retained bytes.]',
+      ''
+    ].join('\n'));
+
+    const schema = files.find((file) => file.path === 'db/schema.sql');
+    expect(files.map((file) => file.path)).toEqual(['db/schema.sql', 'notes.txt']);
+    expect(schema?.oldPath).toBeUndefined();
+    expect(schema?.deletions).toBe(2);
+    expect(schema?.additions).toBe(2);
+    // A truncated hunk stops at the marker; neither it nor the trailing blank gets numbers.
+    const notes = files.find((file) => file.path === 'notes.txt')!
+      .blocks.flatMap((block) => block.lines)
+      .filter((line) => line.kind !== 'meta' && line.kind !== 'hunk');
+    expect(notes).toEqual([{ kind: 'context', oldLine: 1, newLine: 1, content: ' kept' }]);
+  });
+
   it('groups files by directory with root files first', () => {
     const groups = groupDiffFiles(
       parseGitDiffEvidence(`diff --git a/README.md b/README.md

@@ -421,7 +421,7 @@ App-level user preferences are separate from `SqliteTaskStore`. The Electron
 and development hosts receive the same SQLite-backed `AppSettingsStore` from
 `ApplicationPersistence`. These settings include:
 
-- theme, sidebar, and mascot preferences;
+- theme preferences;
 - first-launch setup completion;
 - default implementation, prompt-refinement, Preview-generation, and review models;
 - selected repository ID for the new-task default;

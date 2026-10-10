@@ -11,6 +11,8 @@ export type AgentExecutionOperation =
   | 'PROMPT_REFINEMENT'
   | 'PREVIEW_AGENT'
   | 'REVIEW'
+  | 'REVIEW_QUESTION'
+  | 'SIDE_QUESTION'
   | 'DESIGN'
   | 'DISCOURSE';
 
@@ -71,6 +73,8 @@ export function projectAgentExecutionSupport(
     }
 
     case 'REVIEW':
+    case 'REVIEW_QUESTION':
+    case 'SIDE_QUESTION':
       return supported();
 
     case 'DESIGN': {

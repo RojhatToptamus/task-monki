@@ -33,7 +33,8 @@ export function ActivitySteps({ steps, live = false }: { steps: SessionStep[]; l
       <span className="tm-step__icon" aria-hidden="true"><DisclosureChevron /></span>
       <span className="tm-step__label">{stepsSummary(steps)}</span>
       {failed ? <span className="tm-step__failed">{failed} failed</span> : null}
-      {active ? <StatusGlyph kind="working" /> : null}
+      {/* Open, the running step shows its own motion; collapsed, the group carries it. */}
+      {active && !open ? <StatusGlyph kind="working" /> : null}
     </Collapsible.Trigger>
     <Collapsible.Content className="tm-steps__list">
       {steps.map((step) => <Step key={step.key} step={step} />)}

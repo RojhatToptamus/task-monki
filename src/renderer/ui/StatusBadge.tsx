@@ -38,28 +38,49 @@ export function StatusChip({ label, value, tone = 'neutral', muted = false }: St
 
 export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
-export function Chip({
-  tone,
-  label,
-  compact = false,
-  showDot = true
-}: {
-  tone: StatusPillTone;
-  label: string;
-  compact?: boolean;
-  showDot?: boolean;
-}) {
-  const classes = [
-    'status-pill',
-    `status-pill--${tone}`,
-    !showDot ? 'status-pill--word-only' : '',
-    compact ? 'status-pill--compact' : ''
-  ].filter(Boolean);
-
+/** A badge: the state word on a tint of its tone. A spinner leads it only while work is in flight. */
+export function Chip({ tone, label, running = false }: { tone: StatusPillTone; label: string; running?: boolean }) {
   return (
-    <span className={classes.join(' ')}>
-      {showDot ? <StatusGlyph kind={statusKindForTone(tone, false)} /> : null}
+    <span className={`status-pill status-pill--${tone}`}>
+      {running ? <StatusGlyph kind="working" /> : null}
       <span className="status-pill__label">{label}</span>
+    </span>
+  );
+}
+
+/**
+ * The glyph beside a task's status word. A state that needs the user or has
+ * failed takes a still mark, and it outranks motion: a task that needs an
+ * approval never spins. Only work in flight moves. Anything else is a word alone.
+ */
+export function taskStatusGlyph(tone: StatusPillTone, inFlight: boolean): StatusGlyphKind | undefined {
+  if (tone === 'action') return 'waiting';
+  if (tone === 'error') return 'blocked';
+  return inFlight ? 'working' : undefined;
+}
+
+/**
+ * A task's status as plain words: ink only when it needs the user or failed,
+ * never a tinted fill. The same anatomy on board cards, Inbox rows and the
+ * lifecycle track, so one state reads the same everywhere.
+ */
+export function TaskStatusWord({
+  label,
+  tone,
+  inFlight,
+  className = ''
+}: {
+  label: string;
+  tone: StatusPillTone;
+  inFlight: boolean;
+  className?: string;
+}) {
+  const glyph = taskStatusGlyph(tone, inFlight);
+  const ink = tone === 'action' || tone === 'error' ? tone : 'plain';
+  return (
+    <span className={`tm-status-word tm-status-word--${ink}${className ? ` ${className}` : ''}`}>
+      {glyph ? <StatusGlyph kind={glyph} /> : null}
+      <span className="tm-status-word__label">{label}</span>
     </span>
   );
 }

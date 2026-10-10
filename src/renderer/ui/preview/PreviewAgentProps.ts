@@ -8,7 +8,7 @@ import type {
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation
 } from '../../../shared/contracts';
-import type { AgentConversationRecords } from '../../model/previewAgentRecords';
+import type { AgentConversationRecords } from '../../model/agentRecords';
 import type { PreviewAgentDefaults } from '../../model/previewAgentSelection';
 
 /** The proposal the Preview agent left for review: validate, save, or discard it. */

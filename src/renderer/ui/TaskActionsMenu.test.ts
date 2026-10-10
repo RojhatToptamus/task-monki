@@ -9,7 +9,7 @@ describe('taskMenuGeometry', () => {
       left: 254,
       top: 214,
       width: 214,
-      maxHeight: 420
+      maxHeight: 494
     });
     expect(taskMenuGeometry({ top: 560, bottom: 588, left: 440, right: 468 }, {
       width: 1280, height: 720
@@ -17,7 +17,7 @@ describe('taskMenuGeometry', () => {
       left: 254,
       bottom: 166,
       width: 214,
-      maxHeight: 420
+      maxHeight: 542
     });
   });
 

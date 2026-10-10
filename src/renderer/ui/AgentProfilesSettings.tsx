@@ -70,7 +70,7 @@ export function AgentProfilesSettings({
         {!draft ? (
           <button
             type="button"
-            className="tm-settings__button tm-settings__button--primary"
+            className="primary-button button--sm"
             disabled={profiles.length >= AGENT_PROFILE_LIMITS.maxProfiles}
             title={
               profiles.length >= AGENT_PROFILE_LIMITS.maxProfiles
@@ -203,14 +203,14 @@ export function AgentProfilesSettings({
         <div className="tm-settings__list">
           {profiles.map((profile) => (
             <div className="tm-settings__row" key={profile.id}>
-              <div className="tm-profile-row__description">
-                <strong>{profile.name}</strong>
-                <p>{profile.description}</p>
+              <div className="tm-settings__label">
+                <span className="tm-settings__k">{profile.name}</span>
+                {profile.description ? <span className="tm-settings__description">{profile.description}</span> : null}
               </div>
               <div className="tm-profile-row__actions">
                 <button
                   type="button"
-                  className="tm-settings__button"
+                  className="outline-button button--sm"
                   onClick={() => edit({ ...profile })}
                   aria-label={`Edit ${profile.name}`}
                 >
@@ -218,7 +218,7 @@ export function AgentProfilesSettings({
                 </button>
                 <button
                   type="button"
-                  className="tm-settings__button"
+                  className="outline-button button--sm"
                   disabled={profiles.length >= AGENT_PROFILE_LIMITS.maxProfiles}
                   onClick={() =>
                     edit({

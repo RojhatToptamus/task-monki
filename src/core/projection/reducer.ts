@@ -2,6 +2,7 @@ import type {
   DomainEvent,
   AgentReviewFinding,
   AgentReviewResult,
+  ReviewFindingDecision,
   Finding,
   HealthStatus,
   RunRecord,
@@ -11,6 +12,7 @@ import type {
   PullRequestSnapshotRecord
 } from '../../shared/contracts';
 import {
+  REVIEW_FINDING_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
   isDetachedRunMode,
@@ -131,8 +133,9 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     ) {
       return next;
     }
-    // A Preview conversation is telemetry beside the task: it never changes the task's run projection.
-    if (isPreviewRunEvent(event, currentRun)) {
+    // A Preview conversation, a reviewer question or a side question is telemetry beside
+    // the task: it never changes the task's workflow, run projection, or review gate.
+    if (isConversationRunEvent(event, currentRun)) {
       return next;
     }
 
@@ -351,17 +354,23 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
   }
 }
 
-function isPreviewRunEvent(event: DomainEvent, run?: RunRecord): boolean {
-  return run?.mode === 'PREVIEW' || getString(event.payload, 'mode') === 'PREVIEW';
+const CONVERSATION_RUN_MODES: ReadonlySet<string> = new Set(['PREVIEW', 'REVIEW_QUESTION', 'SIDE_QUESTION']);
+
+function isConversationRunEvent(event: DomainEvent, run?: RunRecord): boolean {
+  const eventMode = getString(event.payload, 'mode');
+  return (
+    (run !== undefined && CONVERSATION_RUN_MODES.has(run.mode)) ||
+    (eventMode !== undefined && CONVERSATION_RUN_MODES.has(eventMode))
+  );
 }
 
-/** Reviews and Preview agent turns run beside the task; their events never move its workflow phase. */
+/** Reviews, reviewer and side questions, and Preview agent turns run beside the task; their events never move its workflow phase. */
 function isDetachedRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
   const eventMode = getString(event.payload, 'mode');
   return (
     (run !== undefined && isDetachedRunMode(run.mode)) ||
     eventMode === 'REVIEW' ||
-    eventMode === 'PREVIEW' ||
+    (eventMode !== undefined && CONVERSATION_RUN_MODES.has(eventMode)) ||
     Boolean(event.runId && task.projection.agentReview?.runId === event.runId)
   );
 }
@@ -793,6 +802,13 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'AGENT_REVIEW_FINDING_DECIDED':
+      return {
+        ...base,
+        agentReview: reduceAgentReview(base.agentReview, event, run),
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'AGENT_REVIEW_POLICY_VIOLATION':
       return {
         ...base,
@@ -980,6 +996,7 @@ function reduceAgentReview(
           reviewedHeadSha: getString(event.payload, 'reviewedHeadSha'),
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
           summary: 'An agent is reviewing the current diff.',
+          findingDecisions: [],
           updatedAt: event.receivedAt
         };
       }
@@ -1072,6 +1089,21 @@ function reduceAgentReview(
         summary: 'The current diff changed after this agent review.',
         updatedAt: event.receivedAt
       };
+    case 'AGENT_REVIEW_FINDING_DECIDED': {
+      // Decisions belong to exactly one review; a decision for another review changes nothing.
+      const decision = getReviewFindingDecision(event.payload);
+      const decisions = base.findingDecisions ?? [];
+      if (
+        !decision ||
+        !base.runId ||
+        decision.reviewRunId !== base.runId ||
+        decisions.length >= REVIEW_FINDING_DECISION_LIMIT ||
+        decisions.some((candidate) => candidate.id === decision.id)
+      ) {
+        return base;
+      }
+      return { ...base, findingDecisions: [...decisions, decision] };
+    }
     case 'DELIVERY_COMMIT_CREATED': {
       const headSha = getString(event.payload, 'headSha');
       if (!isTerminalReviewGate(base) || !headSha) {
@@ -1185,6 +1217,18 @@ function reviewGateStatusFromResult(
     return 'PASSED';
   }
   return 'INCONCLUSIVE';
+}
+
+function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).decision;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const decision = value as ReviewFindingDecision;
+  return typeof decision.id === 'string' &&
+    typeof decision.reviewRunId === 'string' &&
+    typeof decision.findingId === 'string'
+    ? structuredClone(decision)
+    : undefined;
 }
 
 function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {

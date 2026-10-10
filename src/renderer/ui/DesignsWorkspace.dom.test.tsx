@@ -2063,7 +2063,7 @@ describe('mounted Design workspace', () => {
       generationId: 'candidate-1',
       routeId: 'route-1'
     }));
-    expect(screen.getByText('checking v2')).toBeTruthy();
+    expect(screen.getByText('Checking v2')).toBeTruthy();
     expect(screen.getByText('v2').getAttribute('aria-current')).toBe('true');
     expect(
       (screen.getByRole('button', { name: 'Open preview in browser' }) as HTMLButtonElement)

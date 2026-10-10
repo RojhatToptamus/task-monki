@@ -8,15 +8,13 @@ import {
   getImplementationRetryReason,
   isImplementationRunMode
 } from '../../shared/contracts';
-import type { FinishEvidenceState, FinishRequirement } from './taskFinish';
+import type { FinishEvidenceState } from './taskFinish';
 
 /**
- * The single "what should I do next?" answer for a task. The audit (§04) found
- * this scattered across the header, card footers, and Overview rail; this
- * selector centralizes it so one surface can render a status sentence plus
- * exactly one recommended action, with escape hatches demoted to quiet buttons.
- * It decides *which* action leads and *what to say* — the UI owns click handlers
- * and disabled reasons.
+ * The single "what should I do next?" answer for a task: a short factual title
+ * for the step, one recommended action, and the other choices as quiet buttons.
+ * The buttons carry the ask, so the title states what is true rather than
+ * repeating it. The UI owns click handlers and disabled reasons.
  */
 
 export type NextActionId =
@@ -34,8 +32,8 @@ export interface NextActionChoice {
 }
 
 export interface NextActionModel {
-  /** One sentence answering "where is this task and what's the ask?". */
-  sentence: string;
+  /** What is true at this step, e.g. "Ready for review". Never an instruction. */
+  title: string;
   /** The recommended action (undefined while busy or idle). */
   primary?: NextActionChoice;
   /** Escape hatches — quiet buttons offered alongside the primary. */
@@ -46,7 +44,6 @@ export interface NextActionInput {
   task: Task;
   reviewStatus: AgentReviewGateStatus;
   finishEvidence: FinishEvidenceState;
-  requirements: FinishRequirement[];
   /** A completed non-review run exists to review / attach findings to. */
   hasReviewSource: boolean;
   /** Findings the current review recorded (drives request-changes availability). */
@@ -63,15 +60,8 @@ export interface NextActionInput {
   implementationRetryRequired?: boolean;
 }
 
-export function shouldShowOverviewNextAction(
-  reviewPhaseVisible: boolean,
-  awaitingMoveToReview: boolean
-): boolean {
-  return reviewPhaseVisible && !awaitingMoveToReview;
-}
-
-const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Address findings' };
-const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run review' };
+const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
+const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run agent review' };
 const RUN_REVIEW_AGAIN: NextActionChoice = { id: 'run-review-again', label: 'Run review again' };
 const COMMIT: NextActionChoice = { id: 'commit', label: 'Commit' };
 const MOVE_TO_REVIEW: NextActionChoice = { id: 'move-to-review', label: 'Move to review' };
@@ -82,14 +72,31 @@ function markDone(withIssues: boolean): NextActionChoice {
     : { id: 'mark-done', label: 'Mark done' };
 }
 
-/** The first unresolved requirement's phrase, e.g. "Tree 3 dirty". */
-function firstUnresolved(requirements: FinishRequirement[]): string | undefined {
-  const unresolved = requirements.find((requirement) => requirement.unresolved);
-  return unresolved ? `${unresolved.label} ${unresolved.detail}` : undefined;
+/**
+ * The agent review is a detached gate, so finishing never waits on it: with no
+ * run or review in flight, the owner can commit or mark the current result
+ * done as an explicit override (PRODUCT_WORKFLOW, Review). A completion policy
+ * that still needs merge evidence blocks Mark done; Commit stays available.
+ */
+function finishOverrides(input: NextActionInput): NextActionChoice[] {
+  if (!input.hasReviewSource || !inReviewPhase(input.task)) {
+    return [];
+  }
+  return [
+    ...(input.canCommit ? [COMMIT] : []),
+    ...(input.finishEvidence.mode === 'blocked'
+      ? []
+      : [markDone(input.finishEvidence.mode !== 'clean')])
+  ];
 }
 
-function countActionableFindings(task: Task): number {
-  return task.projection.agentReview?.result?.findings?.length ?? 0;
+/** Finishing belongs to the Review phases; In Progress work is not finished. */
+function inReviewPhase(task: Task): boolean {
+  return task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW';
+}
+
+function isMerged(task: Task): boolean {
+  return task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED';
 }
 
 export function isActiveNonReviewRun(
@@ -148,7 +155,6 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     task,
     reviewStatus,
     finishEvidence,
-    requirements,
     hasReviewSource,
     reviewHasActionableFindings,
     canCommit,
@@ -159,17 +165,14 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
   } = input;
 
   if (task.workflowPhase === 'DONE') {
-    return { sentence: 'This task is done.', secondaries: [] };
+    return { title: 'Done', secondaries: [] };
   }
 
   // While something is running, the run surface carries the live state and the
   // Stop control — Next action just names what we're waiting for.
   if (runInFlight || reviewStatus === 'RUNNING') {
     return {
-      sentence:
-        reviewStatus === 'RUNNING'
-          ? 'Reviewing the current diff.'
-          : 'The agent is working — follow progress above.',
+      title: reviewStatus === 'RUNNING' ? 'Reviewing' : 'Running',
       secondaries: []
     };
   }
@@ -182,98 +185,102 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
       ))
   ) {
     return {
-      sentence:
-        implementationRetryRequired
-          ? 'The implementation needs another pass — retry it or continue unfinished work before starting review.'
-          : implementationRunStatus === 'FAILED'
-            ? 'The run failed — retry the implementation or continue unfinished work from the current state.'
-            : 'The run did not complete — continue unfinished work or retry the implementation before starting review.',
+      title: implementationRetryRequired
+        ? 'Needs retry'
+        : implementationRunStatus === 'FAILED'
+          ? 'Run failed'
+          : implementationRunStatus === 'LOST'
+            ? 'Runtime lost'
+            : implementationRunStatus === 'RECOVERY_REQUIRED'
+              ? 'Recovery required'
+              : 'Interrupted',
       secondaries: []
     };
   }
 
   if (awaitingMoveToReview) {
     return {
-      sentence: 'Implementation finished. Move it to review to run the quality gate.',
+      title: 'Completed',
       primary: MOVE_TO_REVIEW,
       secondaries: []
     };
   }
 
+  // A merged pull request has delivered the work. The review gate no longer
+  // leads; what remains is finishing under the task's completion policy.
+  // Marking done despite open evidence is an owner override, never the
+  // recommended step, so it is offered but never leads.
+  if (isMerged(task)) {
+    return finishEvidence.mode === 'clean'
+      ? { title: 'Merged', primary: markDone(false), secondaries: [] }
+      : { title: 'Merged', secondaries: finishEvidence.mode === 'override' ? [markDone(true)] : [] };
+  }
+
   switch (reviewStatus) {
-    case 'NOT_RUN':
+    case 'NOT_RUN': {
       return {
-        sentence: hasReviewSource
-          ? 'Ready for review — run a review against the current diff.'
-          : 'Run an implementation before reviewing.',
+        // Outside the Review phases, a review source with nothing completed is imported work.
+        title: !hasReviewSource ? 'No completed implementation' : inReviewPhase(task) ? 'Ready for review' : 'No agent run yet',
         primary: hasReviewSource ? RUN_REVIEW : undefined,
-        secondaries: []
+        secondaries: finishOverrides(input)
       };
+    }
     case 'NEEDS_CHANGES':
     case 'INCONCLUSIVE': {
       if (!hasReviewSource) {
-        return {
-          sentence:
-            'The previous review is historical — complete the current implementation before reviewing again.',
-          secondaries: []
-        };
+        return { title: 'Review is from an earlier run', secondaries: [] };
       }
-      const count = countActionableFindings(task);
-      const sentence =
-        count > 0
-          ? `Review found ${count} finding${count === 1 ? '' : 's'} — fix before delivery.`
-          : 'Review requested changes — address them before delivery.';
+      const title = reviewStatus === 'INCONCLUSIVE' ? 'Review inconclusive' : 'Needs changes';
       return {
-        sentence,
+        title,
         primary: reviewHasActionableFindings ? REQUEST_CHANGES : RUN_REVIEW_AGAIN,
-        secondaries: reviewHasActionableFindings ? [RUN_REVIEW_AGAIN] : []
+        secondaries: [
+          ...(reviewHasActionableFindings ? [RUN_REVIEW_AGAIN] : []),
+          ...finishOverrides(input)
+        ]
       };
     }
     case 'FAILED':
     case 'CANCELED':
     case 'STALE': {
       if (!hasReviewSource) {
-        return {
-          sentence:
-            'The previous review is historical — complete the current implementation before reviewing again.',
-          secondaries: []
-        };
+        return { title: 'Review is from an earlier run', secondaries: [] };
       }
-      const staleNote =
+      const title =
         reviewStatus === 'STALE'
-          ? 'The diff changed since the last review — re-run it before finishing cleanly.'
-          : `The last review is ${reviewStatus.toLowerCase()} — run it again.`;
-      const secondaries = reviewHasActionableFindings ? [REQUEST_CHANGES] : [];
-      return { sentence: staleNote, primary: RUN_REVIEW_AGAIN, secondaries };
+          ? 'Needs re-review'
+          : reviewStatus === 'FAILED'
+            ? 'Review failed'
+            : 'Review stopped';
+      const secondaries = [
+        ...(reviewHasActionableFindings ? [REQUEST_CHANGES] : []),
+        ...finishOverrides(input)
+      ];
+      return { title, primary: RUN_REVIEW_AGAIN, secondaries };
     }
     case 'PASSED':
       break;
   }
 
-  // Review passed (or is not gating): the task is toward delivery. Lead with the
-  // first thing still standing between the task and done.
-  const gate = firstUnresolved(requirements);
+  // Review passed: the task is toward delivery. What still stands between it
+  // and done is listed beside the actions, not folded into the title.
   if (finishEvidence.mode === 'blocked') {
     return {
-      sentence: gate
-        ? `Blocked from finishing: ${gate}.`
-        : 'This task cannot be marked done yet.',
+      title: 'Review passed',
       secondaries: canCommit ? [COMMIT] : []
     };
   }
 
   if (finishEvidence.mode === 'override') {
     return {
-      sentence: gate
-        ? `Review passed. ${gate} — commit it or mark done anyway.`
-        : 'Review passed with unresolved checks — commit or mark done anyway.',
-      primary: canCommit ? COMMIT : markDone(true),
-      secondaries: canCommit ? [markDone(true)] : []
+      title: 'Review passed',
+      primary: canCommit ? COMMIT : undefined,
+      secondaries: [markDone(true)]
     };
   }
 
   return {
-    sentence: 'Review passed and the tree is clean — mark the task done.',
+    title: 'Review passed',
     primary: markDone(false),
     secondaries: canCommit ? [COMMIT] : []
   };

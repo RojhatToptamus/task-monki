@@ -706,7 +706,7 @@ function searchActivityDetail(
   const compactQuery = query ? compactValue(query, 56) : undefined;
   const compactPath = shortPath(path, cwd);
   if (compactQuery && compactPath) {
-    return `${compactQuery} · ${compactPath}`;
+    return `${compactQuery} in ${compactPath}`;
   }
   return compactQuery ?? compactPath ?? 'project';
 }

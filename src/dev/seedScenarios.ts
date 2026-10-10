@@ -52,8 +52,15 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
     'agent-awaiting-approval',
     'agent',
     'Awaiting approval',
-    'Agent turn is blocked on a command approval request.',
+    'Agent turn is blocked on a command approval request inside the task worktree.',
     ['agent:AWAITING_APPROVAL', 'interaction:COMMAND_APPROVAL']
+  ),
+  scenario(
+    'agent-awaiting-approval-warning',
+    'agent',
+    'Approval with policy warning',
+    'A command approval targets a directory outside the task worktree, so policy only allows declining it.',
+    ['agent:AWAITING_APPROVAL', 'interaction:COMMAND_APPROVAL', 'interaction:POLICY_WARNING']
   ),
   scenario(
     'agent-awaiting-user-input',
@@ -105,6 +112,13 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
     'Review needs changes',
     'Agent review found actionable issues.',
     ['agent-review:NEEDS_CHANGES']
+  ),
+  scenario(
+    'review-questions',
+    'review',
+    'Review with questions and decisions',
+    'Findings on the diff; the reviewer withdrew one in answer to a question and one is dismissed with a note.',
+    ['agent-review:NEEDS_CHANGES', 'review-question:COMPLETED', 'finding-decisions:2']
   ),
   scenario(
     'review-inconclusive',

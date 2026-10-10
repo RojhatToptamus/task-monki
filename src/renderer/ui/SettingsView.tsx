@@ -1,4 +1,5 @@
-import { SettingsPane } from './SettingsPane';
+import { Columns3, Inbox, Monitor, PanelsTopLeft } from 'lucide-react';
+import { SettingsPane, SettingsRow } from './SettingsPane';
 import { PreviewSecretsSettings } from './preview/PreviewSecretsSettings';
 import { AgentProfilesSettings, type AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import {
@@ -34,7 +35,8 @@ import {
   runtimeExecutionUnavailableReason,
   runtimeReadinessView
 } from '../model/runtimeReadiness';
-import { AccessibleTab } from './AccessibleTabs';
+import { RepositorySettings, type RepositorySettingsActions } from './RepositorySettings';
+import type { RepositoryOption } from '../model/repositories';
 import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
 import {
@@ -50,27 +52,28 @@ import { DisclosureChevron } from './DisclosureChevron';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
-type SettingsSection = 'profiles' | 'agents' | 'models' | 'tools' | 'updates' | 'appearance' | 'secrets';
+export type SettingsSection = 'repositories' | 'agents' | 'models' | 'profiles' | 'secrets' | 'tools' | 'appearance' | 'updates';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
+  { id: 'repositories', label: 'Repositories' },
   { id: 'agents', label: 'Agents' },
-  { id: 'profiles', label: 'Profiles' },
   { id: 'models', label: 'Models' },
+  { id: 'profiles', label: 'Profiles' },
+  { id: 'secrets', label: 'Secrets' },
   { id: 'tools', label: 'Tools' },
-  { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' },
-  { id: 'secrets', label: 'Secrets' }
+  { id: 'updates', label: 'Updates' }
 ];
 
-export interface SettingsViewProps extends AgentProfilesSettingsActions {
+export interface SettingsViewProps extends AgentProfilesSettingsActions, RepositorySettingsActions {
+  repositories: RepositoryOption[];
+  /** The section shown first, for links that open Settings at a specific place. */
+  initialSection?: SettingsSection;
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   onPreviewThemePreset?(themePreset: ThemePreset | null): void;
   appSettings: TaskManagerAppSettings;
-  onSetAppSettings(
-    settings: UpdateAppSettingsRequest,
-    successMessage?: string
-  ): void | Promise<unknown>;
+  onSetAppSettings(settings: UpdateAppSettingsRequest): void | Promise<unknown>;
   softwareUpdateState: SoftwareUpdateState;
   onCheckForSoftwareUpdates(): Promise<void>;
   onDownloadSoftwareUpdate(): Promise<void>;
@@ -85,29 +88,39 @@ export interface SettingsViewProps extends AgentProfilesSettingsActions {
   runtimes: AgentRuntimeState[];
 }
 
+/** Settings is one sheet with its own section list (DESIGN.md 7.1, settings archetype). */
 export function SettingsView(props: SettingsViewProps) {
-  const [section, setSection] = useState<SettingsSection>('agents');
+  const [section, setSection] = useState<SettingsSection>(props.initialSection ?? 'repositories');
 
   return (
     <div className="tm-settings">
+      <nav className="tm-settings__nav" aria-label="Settings">
+        <h1 className="tm-settings__title">Settings</h1>
+        {SETTINGS_SECTIONS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`tm-settings__nav-item${section === item.id ? ' tm-settings__nav-item--active' : ''}`}
+            aria-current={section === item.id ? 'page' : undefined}
+            onClick={() => setSection(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
       <div className="tm-settings__inner">
-        <nav
-          className="tm-settings__nav tm-tabs"
-          aria-label="Settings sections"
-          role="tablist"
-        >
-          {SETTINGS_SECTIONS.map((item) => (
-            <AccessibleTab
-              key={item.id}
-              id={`settings-tab-${item.id}`}
-              panelId={`settings-panel-${item.id}`}
-              label={item.label}
-              selected={section === item.id}
-              onSelect={() => setSection(item.id)}
-            />
-          ))}
-        </nav>
-
+        {section === 'repositories' ? (
+          <RepositorySettings
+            repositories={props.repositories}
+            addingRepository={props.addingRepository}
+            revealLabel={props.revealLabel}
+            onAddRepository={props.onAddRepository}
+            onRefreshRepository={props.onRefreshRepository}
+            onReconnectRepository={props.onReconnectRepository}
+            onDisconnectRepository={props.onDisconnectRepository}
+            onRevealRepository={props.onRevealRepository}
+          />
+        ) : null}
         {section === 'profiles' ? (
           <AgentProfilesSettings
             profiles={props.appSettings.agentProfiles}
@@ -172,7 +185,7 @@ function AgentSettings({
       action={
         <button
           type="button"
-          className="tm-settings__button"
+          className="outline-button button--sm"
           disabled={refreshing}
           aria-busy={refreshing}
           onClick={() => void refresh()}
@@ -341,7 +354,7 @@ function ModelSettings({
       title="Models"
       detail="Defaults for implementation, prompt refinement, the Preview agent, and review."
     >
-      <div className="tm-model-defaults">
+      <div className="tm-settings__list tm-model-defaults">
         <AgentModelSetting
           label="Implementation"
           runtimeId={selected.defaultRuntimeId}
@@ -616,7 +629,7 @@ function ToolSettings({
       action={
         <button
           type="button"
-          className="tm-settings__button"
+          className="outline-button button--sm"
           disabled={refreshing}
           aria-busy={refreshing}
           onClick={() => void refresh()}
@@ -724,7 +737,7 @@ function UpdateSettings({
       action={canCheck ? (
         <button
           type="button"
-          className="tm-settings__button"
+          className="outline-button button--sm"
           disabled={busy}
           aria-busy={softwareUpdateState.status === 'checking'}
           onClick={() => void onCheckForSoftwareUpdates()}
@@ -733,26 +746,18 @@ function UpdateSettings({
         </button>
       ) : undefined}
     >
-      <div className="tm-settings__list tm-update-settings" aria-live="polite">
-        <div className="tm-settings__row tm-update-settings__row">
-          <div className="tm-update-settings__label">
-            <span className="tm-settings__k">Installed version</span>
-            <span>{updateStatusText(softwareUpdateState)}</span>
-          </div>
+      <div className="tm-settings__list" aria-live="polite">
+        <SettingsRow label="Installed version" description={updateStatusText(softwareUpdateState)}>
           <div className="tm-update-settings__value">
             {softwareUpdateState.currentVersion || 'Development build'}
           </div>
-        </div>
+        </SettingsRow>
         {version && softwareUpdateState.status !== 'up-to-date' ? (
-          <div className="tm-settings__row tm-update-settings__row">
-            <div className="tm-update-settings__label">
-              <span className="tm-settings__k">Version {version}</span>
-              <span>{updateAvailableDetail(softwareUpdateState)}</span>
-            </div>
+          <SettingsRow label={`Version ${version}`} description={updateAvailableDetail(softwareUpdateState)}>
             {updateAction ? (
               <button
                 type="button"
-                className="tm-settings__button tm-settings__button--primary"
+                className="primary-button"
                 onClick={() => void updateAction.run()}
               >
                 {updateAction.label}
@@ -762,13 +767,9 @@ function UpdateSettings({
                 {Math.round(softwareUpdateState.progress?.percent ?? 0)}%
               </span>
             ) : null}
-          </div>
+          </SettingsRow>
         ) : null}
-        <div className="tm-settings__row tm-update-settings__row">
-          <div className="tm-update-settings__label">
-            <span className="tm-settings__k">Install on quit</span>
-            <span>Install a downloaded update when Task Monki closes normally.</span>
-          </div>
+        <SettingsRow label="Install on quit" description="Install a downloaded update when Task Monki closes normally.">
           <SettingsSwitch
             label="Automatically install downloaded updates when Task Monki quits"
             checked={appSettings.autoInstallUpdatesOnQuit}
@@ -776,7 +777,7 @@ function UpdateSettings({
               void onSetAppSettings({ autoInstallUpdatesOnQuit })
             }
           />
-        </div>
+        </SettingsRow>
       </div>
     </SettingsPane>
   );
@@ -831,40 +832,24 @@ function AppearanceSettings({
     onPreviewThemePreset?.(themePreset);
   }, [onPreviewThemePreset]);
   return (
-    <SettingsPane
-      id="appearance"
-      title="Appearance"
-      detail="Visual preferences for this device."
-    >
+    <SettingsPane id="appearance" title="Appearance">
       <>
         <div className="tm-settings__list tm-appearance">
-          <div className="tm-settings__row tm-appearance__row">
-            <div className="tm-appearance__label">
-              <span className="tm-settings__k">Theme preset</span>
-              <span>Palette only — typeface and density are set separately.</span>
-            </div>
+          <SettingsRow label="Theme">
             <ThemePresetPicker
               value={persistedThemePreset}
               mode={resolvedPreviewMode}
               onPreview={previewTheme}
-              onChange={(themePreset) => onSetAppSettings({ themePreset }, 'Theme preset updated.')}
+              onChange={(themePreset) => onSetAppSettings({ themePreset })}
             />
-          </div>
-          <div className="tm-settings__row tm-appearance__row">
-            <div className="tm-appearance__label">
-              <span className="tm-settings__k">Mode</span>
-              <span>
-                {theme === 'device'
-                  ? `Following the system — currently ${resolvedPreviewMode}.`
-                  : 'Fixed for this device.'}
-              </span>
-            </div>
-            <div className="tm-segtoggle" role="group" aria-label="Theme mode">
+          </SettingsRow>
+          <SettingsRow label="Mode" description={theme === 'device' ? `Follows the system, now ${resolvedPreviewMode}` : undefined}>
+            <div className="segmented" role="group" aria-label="Theme mode">
               {(['light', 'dark', 'device'] as const).map((option) => (
                 <button
                   key={option}
                   type="button"
-                  className={`tm-segtoggle__btn ${theme === option ? 'tm-segtoggle__btn--active' : ''}`}
+                  className="segmented__btn"
                   aria-pressed={theme === option}
                   onClick={() => onSetTheme(option)}
                 >
@@ -872,18 +857,9 @@ function AppearanceSettings({
                 </button>
               ))}
             </div>
-          </div>
-          <SettingsSwitchRow
-            label="Mascot animation"
-            checked={appSettings.showMascot}
-            onChange={(showMascot) => onSetAppSettings({ showMascot })}
-          />
+          </SettingsRow>
           <ThemePreview preset={themePresetDefinition(activeThemePreset).label} mode={resolvedPreviewMode} />
         </div>
-        <p className="tm-appearance__note">
-          Each preset replaces the shared role tokens, so surfaces, hairlines, and shadows stay
-          consistent without per-screen overrides.
-        </p>
       </>
     </SettingsPane>
   );
@@ -1043,52 +1019,33 @@ function ThemePresetPicker({
   );
 }
 
+/** A miniature of the app in the chosen theme: the frame, the rail, a sheet with cards and a composer. */
 function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark' }) {
   return (
-    <section className="tm-theme-preview" aria-label="Theme preview">
-      <div className="tm-theme-preview__label">
-        <strong>Preview</strong>
-        <span>{preset} · {mode}</span>
-      </div>
-      <div className="tm-theme-preview__window">
-        <aside className="tm-theme-preview__rail">
-          <div className="tm-theme-preview__brand-row">
-            <span className="tm-theme-preview__brand">M</span>
-            <strong>Task Monki</strong>
+    <section className="tm-theme-preview" aria-label={`Preview of ${preset}, ${mode}`}>
+      <div className="tm-theme-preview__window" aria-hidden="true">
+        <div className="tm-theme-preview__titlebar"><span className="tm-theme-preview__new">New task</span></div>
+        <div className="tm-theme-preview__body">
+          <div className="tm-theme-preview__rail">
+            <span className="tm-theme-preview__rail-item"><Inbox size={12} strokeWidth={1.5} /><i /></span>
+            <span className="tm-theme-preview__rail-item tm-theme-preview__rail-item--active"><Columns3 size={12} strokeWidth={1.5} /></span>
+            <span className="tm-theme-preview__rail-item"><PanelsTopLeft size={12} strokeWidth={1.5} /></span>
+            <span className="tm-theme-preview__rail-item"><Monitor size={12} strokeWidth={1.5} /></span>
           </div>
-          <div className="tm-theme-preview__nav-row">
-            <span>Inbox</span><small>18</small>
-          </div>
-          <div className="tm-theme-preview__nav-row tm-theme-preview__nav-row--selected">All tasks</div>
-          <div className="tm-theme-preview__nav-row">Designs</div>
-          <div className="tm-theme-preview__nav-row tm-theme-preview__nav-row--hover">
-            <span>Discourse</span><small>5</small>
-          </div>
-          <div className="tm-theme-preview__rail-divider" />
-          <div className="tm-theme-preview__nav-row tm-theme-preview__saved-view">
-            <i aria-hidden="true" /> <span>Review across</span>
-          </div>
-        </aside>
-        <div className="tm-theme-preview__content">
-          <div className="tm-theme-preview__heading">
-            <strong>All tasks</strong>
-            <span>74 tasks across the pipeline</span>
-          </div>
-          <article className="tm-theme-preview__card">
-            <div><span>repo</span><em>Ready for review</em></div>
-            <strong>[seed:completion-manual-merged] Manual completion with merged PR</strong>
-            <hr />
-            <div className="tm-theme-preview__evidence">
-              <i /><i /><i />
-              <small>PR #119 merged</small>
+          <div className="tm-theme-preview__sheet">
+            <strong className="tm-theme-preview__title">Tasks</strong>
+            <div className="tm-theme-preview__tabs"><span className="tm-theme-preview__tab--active">All</span><span>Running</span><span>In review</span></div>
+            <div className="tm-theme-preview__cards">
+              <div className="tm-theme-preview__card">
+                <span className="tm-theme-preview__card-top"><span>acme-api</span><span className="status-pill status-pill--action">Needs approval</span></span>
+                <strong>Rate-limit the public API</strong>
+              </div>
+              <div className="tm-theme-preview__card">
+                <span className="tm-theme-preview__card-top"><span>cedar-notes</span><span className="status-pill status-pill--info">Running</span></span>
+                <strong>Add Focus Mode for long notes</strong>
+              </div>
             </div>
-          </article>
-          <div className="tm-theme-preview__composer">
-            <span>Write a message… Type @ for agents, tasks, or repositories</span>
-            <div>
-              <small>Chat</small>
-              <span className="tm-theme-preview__send">Send</span>
-            </div>
+            <div className="tm-theme-preview__composer"><span>Ask for follow-up changes</span><span className="tm-theme-preview__send" /></div>
           </div>
         </div>
       </div>
@@ -1116,10 +1073,9 @@ function SettingsSwitchRow({
   onChange(checked: boolean): void;
 }) {
   return (
-    <div className="tm-settings__row">
-      <span className="tm-settings__k">{label}</span>
+    <SettingsRow label={label}>
       <SettingsSwitch label={label} checked={checked} onChange={onChange} />
-    </div>
+    </SettingsRow>
   );
 }
 
@@ -1167,7 +1123,7 @@ function ChoiceSettingRow<Value extends string>({
 }) {
   return (
     <label className="tm-settings__row">
-      <span>
+      <span className="tm-settings__label">
         <span className="tm-settings__k">{label}</span>
         {description ? <span className="tm-settings__description">{description}</span> : null}
       </span>
@@ -1329,7 +1285,7 @@ export function ExecutablePathEditor({
           {canSave ? (
             <button
               type="button"
-              className="tm-settings__button tm-settings__button--primary"
+              className="primary-button"
               onClick={() => onSetPath(pendingPath)}
             >
               Save
@@ -1338,7 +1294,7 @@ export function ExecutablePathEditor({
           {tool ? (
             <button
               type="button"
-              className="tm-settings__button"
+              className="outline-button"
               disabled={testing}
               aria-busy={testing}
               onClick={() => void runTest()}

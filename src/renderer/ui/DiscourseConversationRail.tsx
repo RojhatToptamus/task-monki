@@ -94,9 +94,10 @@ export function DiscourseConversationRail({
             onChange={(event) => onQueryChange(event.target.value)}
           />
         </label>
-        <div className="tm-discourse-rail__filter" role="group" aria-label="Conversation status">
+        <div className="segmented segmented--fill tm-discourse-rail__filter" role="group" aria-label="Conversation status">
           <button
             type="button"
+            className="segmented__btn"
             aria-pressed={!archived}
             onClick={() => onArchivedChange(false)}
           >
@@ -104,6 +105,7 @@ export function DiscourseConversationRail({
           </button>
           <button
             type="button"
+            className="segmented__btn"
             aria-pressed={archived}
             onClick={() => onArchivedChange(true)}
           >

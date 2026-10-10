@@ -1,6 +1,7 @@
 import { isActiveRunStatus } from '../../model/agentSession';
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
-import { BotMessageSquare, Ellipsis } from 'lucide-react';
+import { Ellipsis } from 'lucide-react';
+import { AgentMark } from '../UiIcons';
 import type { AttemptSummary } from 'previewhost';
 import type { ApplicationPreviewSnapshot, PreviewConfigurationFile } from '../../../shared/applicationPreview';
 import type { WorktreeRecord } from '../../../shared/contracts';
@@ -781,7 +782,7 @@ export function ApplicationPreviewPanel({
                 disabled={!agent}
                 onClick={() => (agentOpen ? closeAgent() : openAgent(true))}
               >
-                <BotMessageSquare size={16} strokeWidth={1.5} aria-hidden="true" />
+                <AgentMark />
                 <span className="tm-preview-agent-toggle__label">Agent</span>
                 {agentSignal ? <span className="tm-preview-agent-toggle__dot" data-signal={agentSignal} aria-hidden="true" /> : null}
               </button>

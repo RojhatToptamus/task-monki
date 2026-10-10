@@ -3,6 +3,8 @@ import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { StatusGlyph } from './StatusBadge';
+import { Tooltip } from './Tooltip';
+import { AgentMark } from './UiIcons';
 
 export interface ConversationPanelComposer {
   placeholder: string;
@@ -30,8 +32,10 @@ export interface ConversationPanelComposer {
  * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
  * The caller owns the thread and what sending means.
  */
-export function ConversationPanel({ title, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, children }: {
+export function ConversationPanel({ title, meta, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, children }: {
   title: string;
+  /** Who answers here, such as the runtime's name, beside the title. */
+  meta?: string;
   /** Controls below the input, such as the model selector. */
   tools?: ReactNode;
   label: string;
@@ -90,10 +94,14 @@ export function ConversationPanel({ title, tools, label, onClose, composer, retu
   return (
     <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={closeFromInside}>
       <header className="tm-side-conversation__head">
+        <AgentMark className="tm-side-conversation__mark" />
         <strong>{title}</strong>
-        <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} title="Close · Esc" onClick={onClose}>
-          <X size={16} strokeWidth={1.5} aria-hidden="true" />
-        </button>
+        {meta ? <span className="tm-side-conversation__meta">{meta}</span> : null}
+        <Tooltip label="Close" shortcut="Esc">
+          <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} onClick={onClose}>
+            <X size={16} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+        </Tooltip>
       </header>
       <Conversation instance={scroller} label={label} className="tm-side-conversation__log">
         <div className="tm-side-conversation__thread">{children}</div>

@@ -435,6 +435,7 @@ function initializeRuntimeLifecycle(service: TaskManagerService): void {
   Object.assign(service as unknown as Record<string, unknown>, {
     runtimeOperations: new RuntimeOperationGate(),
     designPreviews: { shutdown: () => Promise.resolve() },
+    snapshots: { sweep: () => Promise.resolve() },
     agentRuntimeStore: {
       init: () => Promise.resolve(),
       snapshot: () => Promise.resolve({ sessions: [], runs: [] }),

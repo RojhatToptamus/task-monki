@@ -10,7 +10,8 @@ function interaction(
   type: InteractionRequestType,
   allowedActions: AgentInteractionAction[],
   request: unknown = {},
-  status: InteractionRequestRecord['status'] = 'PENDING'
+  status: InteractionRequestRecord['status'] = 'PENDING',
+  policyWarnings: string[] = []
 ): InteractionRequestRecord {
   return {
     id: 'i1',
@@ -25,7 +26,7 @@ function interaction(
     status,
     request: request as InteractionRequestRecord['request'],
     allowedActions,
-    policyWarnings: [],
+    policyWarnings,
     requestRawMessage: {
       serverInstanceId: 's',
       sequence: 0,
@@ -39,19 +40,38 @@ function interaction(
   };
 }
 
+const COMMAND = { startedAtMs: 1, command: "/bin/zsh -lc 'npm test -- shortlist'" };
+
 describe('inboxInteractionDecisions', () => {
-  it('offers Approve + Deny for a command approval', () => {
+  it('offers Allow once and Deny for a plain command approval and names the command', () => {
     const d = inboxInteractionDecisions(
-      interaction('COMMAND_APPROVAL', ['ACCEPT', 'DECLINE'])
+      interaction('COMMAND_APPROVAL', ['ACCEPT', 'DECLINE'], COMMAND)
     );
-    expect(d.approve?.decision).toEqual({
-      interactionType: 'COMMAND_APPROVAL',
-      action: 'ACCEPT'
+    expect(d.subject).toBe('npm test -- shortlist');
+    expect(d.approve).toEqual({
+      label: 'Allow once',
+      decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
     });
-    expect(d.deny?.decision).toEqual({
-      interactionType: 'COMMAND_APPROVAL',
-      action: 'DECLINE'
+    expect(d.deny).toEqual({
+      label: 'Deny',
+      decision: { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE' }
     });
+  });
+
+  it('never offers an inline decision whose subject the row cannot show', () => {
+    const inline = (request: unknown, warnings: string[] = []) =>
+      inboxInteractionDecisions(
+        interaction('COMMAND_APPROVAL', ['ACCEPT', 'DECLINE'], request, 'PENDING', warnings)
+      );
+    expect(inline({ startedAtMs: 1 })).toEqual({});
+    expect(inline(COMMAND, ['Writes outside the worktree.'])).toEqual({});
+    // A second line or a long tail would hide part of what "Allow once" runs.
+    expect(inline({ startedAtMs: 1, command: "/bin/zsh -lc 'npm test\nrm -rf build'" })).toEqual({});
+    expect(inline({ startedAtMs: 1, command: `npm test && ${'x'.repeat(120)}` })).toEqual({});
+    // A host or extra paths widen the grant beyond the command text.
+    expect(inline({ ...COMMAND, networkApprovalContext: { protocol: 'https', host: 'registry.npmjs.org' } })).toEqual({});
+    expect(inline({ ...COMMAND, paths: ['/etc/hosts'] })).toEqual({});
+    expect(inline({ startedAtMs: 1, command: "bash -c 'npm run lint'" }).subject).toBe('npm run lint');
   });
 
   it('requires opening the task for provider-native choices and their context', () => {
@@ -60,26 +80,11 @@ describe('inboxInteractionDecisions', () => {
         'COMMAND_APPROVAL',
         ['ACCEPT', 'DECLINE', 'CANCEL'],
         {
-          startedAtMs: 1,
+          ...COMMAND,
           providerOptions: [
-            {
-              id: 'allow-once',
-              label: 'Allow once',
-              action: 'ACCEPT',
-              providerRemembersChoice: false
-            },
-            {
-              id: 'allow-always',
-              label: 'Allow always',
-              action: 'ACCEPT',
-              providerRemembersChoice: true
-            },
-            {
-              id: 'reject-once',
-              label: 'Reject',
-              action: 'DECLINE',
-              providerRemembersChoice: false
-            }
+            { id: 'allow-once', label: 'Allow once', action: 'ACCEPT', providerRemembersChoice: false },
+            { id: 'allow-always', label: 'Allow always', action: 'ACCEPT', providerRemembersChoice: true },
+            { id: 'reject-once', label: 'Reject', action: 'DECLINE', providerRemembersChoice: false }
           ]
         }
       )
@@ -88,61 +93,23 @@ describe('inboxInteractionDecisions', () => {
     expect(d).toEqual({});
   });
 
-  it('does not fall back to generic actions for an empty provider-native choice list', () => {
-    const d = inboxInteractionDecisions(
-      interaction(
-        'COMMAND_APPROVAL',
-        ['ACCEPT', 'DECLINE', 'CANCEL'],
-        { startedAtMs: 1, providerOptions: [] }
-      )
-    );
-
-    expect(d).toEqual({});
-  });
-
-  it('grants the current turn for a permission approval, carrying its permissions', () => {
-    const d = inboxInteractionDecisions(
-      interaction('PERMISSION_APPROVAL', ['GRANT_TURN', 'DECLINE'], {
-        permissions: ['fs.write']
-      })
-    );
-    expect(d.approve?.decision).toEqual({
-      interactionType: 'PERMISSION_APPROVAL',
-      action: 'GRANT_TURN',
-      permissions: ['fs.write']
-    });
-    expect(d.deny?.decision.action).toBe('DECLINE');
-  });
-
-  it('offers no inline action for user input because answers must be typed', () => {
-    const d = inboxInteractionDecisions(interaction('USER_INPUT', ['ANSWER', 'CANCEL']));
-    expect(d.approve).toBeUndefined();
-    expect(d.deny).toBeUndefined();
-  });
-
-  it('falls back to Cancel when Decline is unavailable', () => {
-    const d = inboxInteractionDecisions(interaction('FILE_CHANGE_APPROVAL', ['ACCEPT', 'CANCEL']));
-    expect(d.approve?.decision.action).toBe('ACCEPT');
-    expect(d.deny?.label).toBe('Cancel');
-    expect(d.deny?.decision.action).toBe('CANCEL');
+  it('requires opening the task for file changes, permission profiles, forms and typed answers', () => {
+    expect(inboxInteractionDecisions(
+      interaction('FILE_CHANGE_APPROVAL', ['ACCEPT', 'DECLINE'], { startedAtMs: 1, changes: [{ path: 'a.ts', kind: 'update', diff: '' }] })
+    )).toEqual({});
+    expect(inboxInteractionDecisions(
+      interaction('PERMISSION_APPROVAL', ['GRANT_TURN', 'DECLINE'], { permissions: ['fs.write'] })
+    )).toEqual({});
+    expect(inboxInteractionDecisions(
+      interaction('MCP_ELICITATION', ['ACCEPT', 'DECLINE', 'CANCEL'])
+    )).toEqual({});
+    expect(inboxInteractionDecisions(interaction('USER_INPUT', ['ANSWER', 'CANCEL']))).toEqual({});
   });
 
   it('offers no inline action once the request is already responding', () => {
     const d = inboxInteractionDecisions(
-      interaction('COMMAND_APPROVAL', ['ACCEPT', 'DECLINE'], {}, 'RESPONDING')
+      interaction('COMMAND_APPROVAL', ['ACCEPT', 'DECLINE'], COMMAND, 'RESPONDING')
     );
-    expect(d.approve).toBeUndefined();
-    expect(d.deny).toBeUndefined();
-  });
-
-  it('allows declining MCP elicitations but still requires opening the task to accept form data', () => {
-    const d = inboxInteractionDecisions(
-      interaction('MCP_ELICITATION', ['ACCEPT', 'DECLINE', 'CANCEL'])
-    );
-    expect(d.approve).toBeUndefined();
-    expect(d.deny?.decision).toEqual({
-      interactionType: 'MCP_ELICITATION',
-      action: 'DECLINE'
-    });
+    expect(d).toEqual({});
   });
 });

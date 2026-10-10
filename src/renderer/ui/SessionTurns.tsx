@@ -80,10 +80,12 @@ function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]
 type ReadAttachment = (id: string) => Promise<AttachmentContent>;
 
 /** One run as the person sees it: the opener, the agent's messages and steps, then the outcome. */
-export function Turn({ turn, clip = 0, failure, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment }: {
+export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment }: {
   turn: SessionTurn;
   clip?: number;
   failure?: RunFailureBannerViewModel;
+  /** Who recorded the run's own reason, so it is quoted under that name. */
+  sourceName?: string;
   capture?: ReactNode;
   onReadArtifact?: (id: string) => Promise<string>;
   onShowDebug?(): void;
@@ -111,7 +113,11 @@ export function Turn({ turn, clip = 0, failure, capture, onReadArtifact, onShowD
     })}
     {failure ? <div className="tm-turn__notice" data-status={failure.status}>
       <CircleAlert size={16} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
-      <div><strong>{failure.title}</strong><p>{failure.detail}</p></div>
+      <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
+        {failure.reportedReason ? <figure className="tm-turn__reported">
+          <figcaption>{sourceName ?? 'Agent'}</figcaption>
+          <blockquote>{failure.reportedReason}</blockquote>
+        </figure> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}
     {live ? null : <TurnFooter turn={turn} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
@@ -153,7 +159,7 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
   return <>
     <div className="tm-turn__footer">
       <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
-      {end ? <><span aria-hidden="true">·</span><MessageTime value={end} /></> : null}
+      {end ? <MessageTime value={end} /> : null}
       {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
       {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />} items={details} /> : null}
     </div>
