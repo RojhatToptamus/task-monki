@@ -26,6 +26,12 @@ Codex owns:
 - provider items, approvals, plans, settings, usage, and subagent events;
 - model catalog and supported reasoning efforts.
 
+Each session update has its own operation identity, retained across retries of
+that update. Re-entering a previous status is a new observation, not a replay of
+the earlier transition. If an inbound request cannot be materialized, Task Monki
+returns a protocol error so the provider does not wait indefinitely for a UI
+interaction that was never created.
+
 ## Process topology
 
 Task Monki uses one Codex App Server process per running app process.
@@ -458,7 +464,8 @@ extension.
 
 Automatic discovery does not fail on the first stale binary. Each candidate is
 probed with `--version`, `codex app-server --help`, an isolated temporary
-`CODEX_HOME`, `initialize`, and the JSON-RPC methods Task Monki needs. The
+`CODEX_HOME` and working directory, `initialize`, and the JSON-RPC methods Task Monki needs.
+The probe does not load project instructions or grant access to a user repository. The
 newest compatible automatically discovered runtime is selected. An explicit
 configured runtime is treated as intentional and must itself be compatible.
 `CODEX_HOME` belongs to the versioned Codex child-environment contract; it is

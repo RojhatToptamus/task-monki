@@ -9,16 +9,18 @@ const hasLogs = (service: Pick<ServiceStatus, 'type'>) => ['command', 'worker', 
  * data kept across stops, and the runs themselves. The table keeps one shape in every state so
  * nothing jumps when a run becomes ready.
  */
-export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun }: {
+export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onConfigureLogs }: {
   status?: PreviewStatus;
   restoredRun?: boolean;
   onLogs(attemptId: string, source?: string, failure?: boolean): void;
   onAsRun(attempt: AttemptSummary): void;
+  onConfigureLogs?(services: string[]): void;
 }) {
   const attempt = status?.candidate ?? status?.latest ?? status?.active;
   if (!attempt) return <p className="tm-application-preview__empty">No runs yet.</p>;
   const entries = Object.entries(attempt.services ?? {});
   const services = entries.filter(([, service]) => service.type !== 'job');
+  const external = entries.filter(([, service]) => service.type === 'attach' || service.type.startsWith('external-')).map(([id]) => id);
   const jobs = entries.filter(([, service]) => service.type === 'job');
   const serving = status?.active?.id === attempt.id;
   const retained = (name: string) => status?.data?.resources.some((resource) => resource.name === name);
@@ -69,6 +71,12 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun }: {
               </tbody>
             </table>
           </div>
+          {external.length ? (
+            <p className="tm-preview-help">
+              {external.join(', ')} {external.length === 1 ? 'runs' : 'run'} outside Preview. Logs stay with the process that started each service.
+              {onConfigureLogs ? <> <button className="ghost-button" onClick={() => onConfigureLogs(external)}>Ask agent to enable logs</button></> : null}
+            </p>
+          ) : null}
         </section>
       ) : null}
       {jobs.length ? (
@@ -107,8 +115,8 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun }: {
                     Logs
                   </button>
                 ) : null}
-                <button className="ghost-button" aria-label={`Configuration as run at ${run.time}`} onClick={() => onAsRun(run.attempt)}>
-                  As run
+                <button className="ghost-button" aria-label={`Run configuration at ${run.time}`} onClick={() => onAsRun(run.attempt)}>
+                  Run configuration
                 </button>
               </span>
             </div>

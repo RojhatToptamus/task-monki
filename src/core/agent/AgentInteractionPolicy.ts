@@ -1,4 +1,6 @@
 import path from 'node:path';
+import os from 'node:os';
+import { statSync } from 'node:fs';
 import { canonicalPath } from '../filesystem/secureFilesystem';
 import { isAgentProviderPermissionAction } from '../../shared/contracts';
 import type {
@@ -37,6 +39,15 @@ export function buildInteractionPolicy(input: {
   /** Exact additional files allowed by the caller's policy. */
   additionalReadOnlyPaths?: readonly string[];
 }): AgentInteractionPolicy {
+  if (
+    input.run.mode === 'PREVIEW' &&
+    (input.type === 'COMMAND_APPROVAL' || input.type === 'FILE_CHANGE_APPROVAL')
+  ) {
+    return {
+      allowedActions: ['DECLINE', 'CANCEL'],
+      warnings: ['The Preview agent can inspect files and propose configuration, but cannot approve commands or file changes.']
+    };
+  }
   switch (input.type) {
     case 'COMMAND_APPROVAL':
       return commandPolicy(
@@ -131,6 +142,13 @@ export function validateInteractionDecision(
     throw new Error(
       `Decision type ${decision.interactionType} does not match ${interaction.type}.`
     );
+  }
+  if (
+    run.mode === 'PREVIEW' &&
+    (interaction.type === 'COMMAND_APPROVAL' || interaction.type === 'FILE_CHANGE_APPROVAL') &&
+    decision.action !== 'DECLINE' && decision.action !== 'CANCEL'
+  ) {
+    throw new Error('The Preview agent cannot approve commands or file changes.');
   }
   if (
     decision.action !== 'REJECT_UNREGISTERED' &&
@@ -282,8 +300,9 @@ function permissionPolicy(
   const warnings = permissionPolicyWarnings(
     request.permissions,
     session.worktreePath,
-    run.requestedSettings.networkAccess === true,
-    additionalReadOnlyPaths
+    run.mode !== 'PREVIEW' && run.requestedSettings.networkAccess === true,
+    [...additionalReadOnlyPaths, ...previewInspectionReadPaths(request, run)],
+    run.mode === 'PREVIEW'
   );
   const hasGrantablePermission = hasAnyPermission(request.permissions) && warnings.length === 0;
   return {
@@ -360,8 +379,9 @@ function validatePermissionDecision(
   const warnings = permissionPolicyWarnings(
     decision.permissions,
     session.worktreePath,
-    run.requestedSettings.networkAccess === true,
-    additionalReadOnlyPaths
+    run.mode !== 'PREVIEW' && run.requestedSettings.networkAccess === true,
+    [...additionalReadOnlyPaths, ...previewInspectionReadPaths(request, run)],
+    run.mode === 'PREVIEW'
   );
   if (warnings.length > 0) {
     throw new Error(warnings.join(' '));
@@ -418,7 +438,8 @@ function permissionPolicyWarnings(
   permissions: AgentPermissionProfile,
   worktreePath: string,
   networkAllowed: boolean,
-  additionalReadOnlyPaths: readonly string[]
+  additionalReadOnlyPaths: readonly string[],
+  readOnly = false
 ): string[] {
   const warnings: string[] = [];
   if (permissions.network?.enabled && !networkAllowed) {
@@ -432,8 +453,10 @@ function permissionPolicyWarnings(
     }
   }
   for (const candidate of permissions.fileSystem?.write ?? []) {
-    if (!isAllowedWorkspacePath(worktreePath, candidate)) {
-      warnings.push(`Filesystem write permission is outside the task worktree: ${candidate}`);
+    if (readOnly || !isAllowedWorkspacePath(worktreePath, candidate)) {
+      warnings.push(readOnly
+        ? 'The Preview agent cannot receive write access.'
+        : `Filesystem write permission is outside the task worktree: ${candidate}`);
     }
   }
   for (const entry of permissions.fileSystem?.entries ?? []) {
@@ -451,14 +474,43 @@ function permissionPolicyWarnings(
     }
     if (
       entry.access === 'write' &&
-      !isAllowedWorkspacePath(worktreePath, entry.path.path)
+      (readOnly || !isAllowedWorkspacePath(worktreePath, entry.path.path))
     ) {
       warnings.push(
-        `Filesystem write permission is outside the task worktree: ${entry.path.path}`
+        readOnly
+          ? 'The Preview agent cannot receive write access.'
+          : `Filesystem write permission is outside the task worktree: ${entry.path.path}`
       );
     }
   }
   return [...new Set(warnings)];
+}
+
+/** Paths eligible for an explicit read-only Preview inspection approval, never an automatic grant. */
+export function previewInspectionReadPaths(
+  request: AgentPermissionApprovalRequest,
+  run: Pick<RunRecord, 'mode'>
+): string[] {
+  if (run.mode !== 'PREVIEW') return [];
+  const files = request.permissions.fileSystem;
+  const paths = [
+    ...(files?.read ?? []),
+    ...(files?.entries ?? []).flatMap((entry) =>
+      entry.access === 'read' && isConcretePathEntry(entry.path) ? [entry.path.path] : [])
+  ];
+  const home = canonicalPath(os.homedir());
+  return paths.filter((candidate) => {
+    if (!path.isAbsolute(candidate)) return false;
+    const resolved = canonicalPath(candidate);
+    if (!resolved || resolved === path.parse(resolved).root) return false;
+    // The user approves one project folder, not the home directory or its ancestors.
+    if (home && isAllowedWorkspacePath(resolved, home)) return false;
+    try {
+      return statSync(resolved).isDirectory();
+    } catch {
+      return false;
+    }
+  });
 }
 
 function isPermissionSubset(

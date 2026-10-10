@@ -38,7 +38,7 @@ export interface PreviewAgentContext {
 }
 
 export interface PreviewAgentCoordinatorOptions {
-  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions'>;
+  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions' | 'getBoardSnapshot'>;
   agents: Pick<AgentOrchestrator, 'startTurn' | 'interruptRun' | 'assertPreviewRepositoryUnchanged'>;
   runtimes: Pick<AgentRuntimeRegistry, 'require'>;
   events: Pick<AppEventBus, 'emit'>;
@@ -154,7 +154,8 @@ export class PreviewAgentCoordinator {
           const { context, snapshot } = await this.previewFor(runId);
           if (request.what === 'status') {
             const file = await this.options.applications.readFile(context.worktree);
-            return { text: previewStatusReport({ snapshot, configurationFile: file.file?.name, proposal: this.options.proposals.get(context.task.id).draft }) };
+            const { repositories } = await this.options.store.getBoardSnapshot();
+            return { text: previewStatusReport({ snapshot, repositories, configurationFile: file.file?.name, proposal: this.options.proposals.get(context.task.id).draft }) };
           }
           const attempt = snapshot.status?.candidate ?? snapshot.status?.latest ?? snapshot.status?.active;
           if (!attempt) return { text: 'There are no runs yet, so there are no logs. Read the configuration and project files instead.' };
@@ -365,7 +366,7 @@ function now(): string {
 }
 
 /**
- * Resolves the runtime's analysis execution for the Preview agent, with no approval prompts,
+ * Resolves read-only analysis execution, allowing explicit folder inspection requests,
  * and never a silently substituted model. Settings validation and every turn use the same rule.
  */
 export async function resolvePreviewAgentExecution(
@@ -376,7 +377,10 @@ export async function resolvePreviewAgentExecution(
     throw new Error('Agent runtime and execution settings runtime must match.');
   }
   const resolved = await adapter.resolveExecution({
-    settings: mergeRunSettings({ readOnly: true, settings: [{ ...requested, runtimeId: adapter.descriptor.id }] }),
+    settings: {
+      ...mergeRunSettings({ readOnly: true, settings: [{ ...requested, runtimeId: adapter.descriptor.id }] }),
+      approvalPolicy: 'on-request'
+    },
     attachments: []
   });
   if (resolved.settings.runtimeId !== adapter.descriptor.id || resolved.model.runtimeId !== adapter.descriptor.id) {

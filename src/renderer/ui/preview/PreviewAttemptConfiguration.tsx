@@ -36,10 +36,10 @@ export function PreviewAttemptConfiguration({ taskId, attempt, status, projectDi
     attempt.sources.map((source, sourceIndex): [string, OpenTargetRef] => [source, { type: 'previewSource', taskId, attemptId: attempt.id, sourceIndex }])
   );
   return (
-    <div className="tm-preview-configuration" aria-label="Configuration as run">
+    <div className="tm-preview-configuration" aria-label="Configuration used for this run">
       <div className="tm-preview-configuration__toolbar">
         <span className="tm-preview-configuration__file">
-          <strong>As run</strong>
+          <strong>Run configuration</strong>
           {run ? ` · ${run.time} · ${run.outcome.toLowerCase()}` : ''} · read-only
         </span>
         <button type="button" className="ghost-button" onClick={onBack}>Back to preview.yaml</button>

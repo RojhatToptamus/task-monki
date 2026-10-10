@@ -13,7 +13,7 @@ const MAX_NOTES = 20;
 export const INSPECT_PREVIEW_TOOL_DEFINITION: ClientToolDefinition = {
   name: INSPECT_PREVIEW_TOOL_NAME,
   description:
-    'Read the current Preview state of this task: the configuration file, each run with its services and outcome, the requirements that block a start, the failure diagnosis, and bounded logs with secrets concealed. Read-only.',
+    'Read the current Preview state, registered repository checkouts, required secret references and their services, failure diagnosis, and bounded logs with secrets concealed. Read-only; listing a repository does not grant file access.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,

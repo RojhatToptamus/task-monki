@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
+import { ArrowDown } from 'lucide-react';
 import {
   markerWord,
   type ApplicationLogLine
@@ -215,12 +216,13 @@ export function ApplicationLogStream({
             </div>
           ))}
       </div>
-      {!follow ? (
+      {!follow && newLines > 0 ? (
         <button
           className="tm-preview-follow outline-button"
           onClick={() => onFollow(true)}
         >
-          {newLines ? `${newLines} new ${newLines === 1 ? 'line' : 'lines'} · ` : ''}Resume follow
+          <ArrowDown size={14} aria-hidden="true" />
+          {newLines} new {newLines === 1 ? 'line' : 'lines'}
         </button>
       ) : null}
     </div>

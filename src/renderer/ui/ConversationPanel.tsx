@@ -30,7 +30,7 @@ export interface ConversationPanelComposer {
  */
 export function ConversationPanel({ title, tools, label, onClose, composer, children }: {
   title: string;
-  /** Controls beside the title, such as the model selector. */
+  /** Controls below the input, such as the model selector. */
   tools?: ReactNode;
   label: string;
   onClose(): void;
@@ -72,7 +72,6 @@ export function ConversationPanel({ title, tools, label, onClose, composer, chil
     <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1}>
       <header className="tm-side-conversation__head">
         <strong>{title}</strong>
-        {tools ? <div className="tm-side-conversation__tools">{tools}</div> : null}
         <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} title="Close · Esc" onClick={onClose}>
           <X size={16} strokeWidth={1.5} aria-hidden="true" />
         </button>
@@ -99,12 +98,13 @@ export function ConversationPanel({ title, tools, label, onClose, composer, chil
           placeholder={composer.placeholder}
           disabled={composer.disabled}
           readOnly={sending}
-          aria-describedby={hintId}
+          aria-describedby={error || composer.hint ? hintId : undefined}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={onKeyDown}
         />
         <div className="tm-composer__toolbar">
-          <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span>
+          {tools ? <div className="tm-side-conversation__tools">{tools}</div> : null}
+          {error || composer.hint ? <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span> : null}
           {composer.secondary ? (
             <button type="button" className="outline-button tm-composer__secondary" disabled={composer.secondary.disabled || sending} title={composer.secondary.title}
               onClick={() => void composer.secondary!.onClick().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>

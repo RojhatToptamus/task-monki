@@ -1,7 +1,5 @@
 import {
-  Fragment,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState
@@ -11,7 +9,7 @@ import type {
   PreviewDescription,
   PreviewStatus
 } from 'previewhost';
-import { Search } from 'lucide-react';
+import { ChevronDown, Columns2, Copy, Pause, Play, Search } from 'lucide-react';
 import { taskManagerApi as api } from '../../api/taskManagerClient';
 import {
   appendLogBuffer,
@@ -20,13 +18,8 @@ import {
   type ApplicationLogBuffer,
   type ApplicationLogLine
 } from '../../model/applicationPreviewLogs';
-import {
-  focusedPanelWidth,
-  persistFocusedPanelWidth
-} from '../../model/workspaceLayout';
-import { PanelResizeHandle } from '../PanelResizeHandle';
-import { nextTabIndex } from '../AccessibleTabs';
-import { applicationAttempts, previewRunRows } from '../../model/applicationPreviewRuns';
+import { ActionMenu } from '../ActionMenu';
+import { applicationAttempts, previewRunRows, runTime } from '../../model/applicationPreviewRuns';
 import { ApplicationLogStream } from './ApplicationLogStream';
 import { message } from './previewPresentation';
 import { failureWord, markerText } from '../../model/applicationPreviewLogs';
@@ -104,7 +97,6 @@ function RunLogs({
     selection?.source ? [selection.source] : []
   );
   const [sideBySide, setSideBySide] = useState(false);
-  const [linkFollow, setLinkFollow] = useState(false);
   const [paused, setPaused] = useState<string[]>(
     selection?.failure
       ? ['all', ...(selection.source ? [selection.source] : [])]
@@ -113,23 +105,14 @@ function RunLogs({
   const [query, setQuery] = useState('');
   const [matchesOnly, setMatchesOnly] = useState(false);
   const [matchIndex, setMatchIndex] = useState(-1);
-  const [narrow, setNarrow] = useState(false);
-  const [paneWidth, setPaneWidth] = useState(() =>
-    focusedPanelWidth('preview-logs', 360, 160, 800)
-  );
-  const [secondWidth, setSecondWidth] = useState(() =>
-    focusedPanelWidth('preview-logs-secondary', 280, 160, 800)
-  );
+  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
   const [markers, setMarkers] = useState<ApplicationLogLine[]>([]);
   const panel = useRef<HTMLDivElement>(null);
-  const strip = useRef<HTMLDivElement>(null);
-  const checklist = useRef<HTMLDetailsElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const activeRef = useRef(active);
   const readNow = useRef<() => void>(() => undefined);
   const stateRef = useRef<Record<string, string>>({});
   const bufferRef = useRef(buffer);
-  const runningRef = useRef<string | undefined>(undefined);
   activeRef.current = active;
   bufferRef.current = buffer;
   const fallbackSources = Object.entries(attempt.services ?? {})
@@ -275,21 +258,6 @@ function RunLogs({
         : []
     );
   }, [selection]);
-  useLayoutEffect(() => {
-    if (
-      !panel.current ||
-      !strip.current ||
-      typeof ResizeObserver === 'undefined'
-    )
-      return;
-    const measure = () =>
-      setNarrow(strip.current!.scrollWidth > panel.current!.clientWidth - 8);
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel.current);
-    observer.observe(strip.current);
-    measure();
-    return () => observer.disconnect();
-  }, [sources.join('\0'), active]);
   useEffect(() => {
     const updates: ApplicationLogLine[] = [];
     const previous = stateRef.current;
@@ -331,16 +299,6 @@ function RunLogs({
     }
     if (updates.length)
       setMarkers((value) => [...value, ...updates].slice(-128));
-    const running = sourcesRef.current.find(
-      (source) => attempt.services?.[source]?.state === 'starting'
-    );
-    if (running && running !== runningRef.current) {
-      const former = runningRef.current;
-      setSelected((value) =>
-        value.length === 1 && value[0] === former ? [running] : value
-      );
-    }
-    runningRef.current = running;
   }, [attempt, status?.name]);
   const lines = useMemo(() => {
     const rows = splitApplicationLogs(
@@ -400,11 +358,10 @@ function RunLogs({
     return result;
   }, [query, lines, chosen.join('\0'), side]);
   function follow(source: string, value: boolean) {
-    const targets = linkFollow && side ? chosen : [source];
     setPaused((current) =>
       value
-        ? current.filter((item) => !targets.includes(item))
-        : [...new Set([...current, ...targets])]
+        ? current.filter((item) => item !== source)
+        : [...new Set([...current, source])]
     );
   }
   function navigateMatch(direction: number) {
@@ -413,30 +370,18 @@ function RunLogs({
     setMatchIndex(index);
     follow(side ? matches[index]!.source : 'all', false);
   }
-  function toggle(source?: string, multi = false) {
+  function toggleSource(source: string) {
     setMatchIndex(-1);
-    setSelected((value) =>
-      !source
-        ? []
-        : !multi
-          ? [source]
-          : value.includes(source)
-            ? value.filter((item) => item !== source)
-            : [...value, source]
-    );
+    const next = chosen.includes(source)
+      ? chosen.filter((item) => item !== source)
+      : [...chosen, source];
+    if (next.length) setSelected(next.length === sources.length ? [] : next);
   }
-  const pausedPanes = paused.filter((source) => side ? chosen.includes(source) : source === 'all');
   const singleFailed =
     chosen.length === 1 && sourceState(chosen[0]!) === 'failed';
   const laneWidth = Math.min(
     16,
     Math.max(4, ...chosen.map((source) => displayName(source).length))
-  );
-  const counts = new Map(
-    sources.map((source) => [
-      source,
-      lines.filter((line) => !line.marker && line.source === source).length
-    ])
   );
   return (
     <div
@@ -453,109 +398,76 @@ function RunLogs({
       }}
     >
       <div className="tm-preview-logs__toolbar">
-        <label className="field">
-          <span className="tm-visually-hidden">Log run</span>
-          <select
-            value={attempt.id}
-            onChange={(event) => onSelect({ attemptId: event.target.value })}
-          >
-            {attempts.map((item) => (
-              <option key={item.id} value={item.id}>
-                {runLabel(item.id)}
-              </option>
-            ))}
-          </select>
-        </label>
-        {narrow && sources.length > 1 ? (
-          <details
-            ref={checklist}
-            className="tm-preview-log-checklist"
+        <label className="field field--search tm-preview-log-search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={search}
+            type="search"
+            aria-label="Search logs"
+            placeholder="Search logs"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setMatchesOnly(false);
+              setMatchIndex(-1);
+            }}
             onKeyDown={(event) => {
-              if (
-                event.key === 'Escape' ||
-                (event.key === 'Enter' &&
-                  event.target instanceof HTMLInputElement)
-              ) {
+              if (event.key === 'Enter') {
                 event.preventDefault();
-                checklist.current!.open = false;
-                checklist.current?.querySelector('summary')?.focus();
+                navigateMatch(event.shiftKey ? -1 : 1);
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                setQuery('');
+                setMatchesOnly(false);
+                panel.current
+                  ?.querySelector<HTMLElement>('.tm-preview-stream')
+                  ?.focus();
               }
             }}
-          >
-            <summary>
-              {selected.length === 1
-                ? displayName(selected[0]!)
-                : selected.length
-                  ? `${selected.length} sources`
-                  : 'All sources'}
-            </summary>
-            <div role="group" aria-label="Log sources">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={!selected.length}
-                  onChange={() => toggle()}
-                />
-                All sources
-                <span>{lines.filter((line) => !line.marker).length}</span>
-              </label>
-              {sources.map((source) => (
-                <label key={source}>
-                  <input
-                    type="checkbox"
-                    checked={!selected.length || selected.includes(source)}
-                    onChange={() => toggle(source, true)}
-                  />
-                  {displayName(source)}
-                  <span>
-                    {stateWord(source)} · {counts.get(source)}
-                  </span>
-                </label>
-              ))}
-              <button
-                className="ghost-button"
-                disabled={!sources.some((source) => sourceState(source) === 'failed')}
-                onClick={() =>
-                  setSelected(
-                    sources.filter((source) => sourceState(source) === 'failed')
-                  )
-                }
-              >
-                Only sources with a failure
-              </button>
-            </div>
-          </details>
+          />
+        </label>
+        {attempts.length > 1 ? (
+          <ActionMenu
+            label="Log run"
+            selection="single"
+            align="start"
+            trigger={<>{attempt.id === status?.active?.id ? 'Current run' : runTime(attempt.startedAt)}<ChevronDown size={14} aria-hidden="true" /></>}
+            items={attempts.map((item) => ({
+              id: item.id,
+              label: runTime(item.startedAt),
+              description: runLabel(item.id),
+              pressed: item.id === attempt.id,
+              onSelect: () => onSelect({ attemptId: item.id })
+            }))}
+          />
+        ) : null}
+        {sources.length > 1 ? (
+          <ActionMenu
+            label="Log sources"
+            align="start"
+            open={sourceMenuOpen}
+            onOpenChange={setSourceMenuOpen}
+            closeOnSelect={false}
+            trigger={<>{chosen.length === sources.length ? 'All sources' : chosen.length === 1 ? displayName(chosen[0]!) : `${chosen.length} sources`}<ChevronDown size={14} aria-hidden="true" /></>}
+            items={[
+              { label: 'All sources', pressed: chosen.length === sources.length, onSelect: () => {
+                setSelected([]);
+                setMatchIndex(-1);
+                if (sources.length > 4) setSideBySide(false);
+              } },
+              ...sources.map((source) => ({
+                label: displayName(source),
+                description: stateWord(source),
+                pressed: chosen.includes(source),
+                disabled: chosen.includes(source) ? chosen.length === 1 : sideBySide && chosen.length >= 4,
+                disabledReason: chosen.includes(source) ? 'Keep at least one source selected.' : 'Show up to four sources side by side.',
+                onSelect: () => toggleSource(source)
+              }))
+            ]}
+          />
         ) : null}
         <div className="tm-preview-logs__right">
-          <label className="field field--search tm-preview-log-search">
-            <Search size={14} aria-hidden="true" />
-            <input
-              ref={search}
-              type="search"
-              aria-label="Search logs"
-              placeholder="Search logs"
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setMatchesOnly(false);
-                setMatchIndex(-1);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  navigateMatch(event.shiftKey ? -1 : 1);
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  setQuery('');
-                  setMatchesOnly(false);
-                  panel.current
-                    ?.querySelector<HTMLElement>('.tm-preview-stream')
-                    ?.focus();
-                }
-              }}
-            />
-          </label>
           {query ? (
             <>
               <span className="tm-preview-log-count" aria-live="polite">
@@ -591,106 +503,38 @@ function RunLogs({
           {sources.length > 1 ? (
             <button
               className="ghost-button"
-              aria-pressed={side}
-              disabled={chosen.length < 2 || chosen.length > 4}
-              title={
-                chosen.length < 2
-                  ? 'Select two to four sources to show them side by side.'
-                  : chosen.length > 4
-                    ? 'Select at most four sources to show them side by side.'
-                    : undefined
-              }
-              onClick={() => setSideBySide((value) => !value)}
-            >
-              Side by side
-            </button>
-          ) : null}
-          {side ? (
-            <button
-              className="ghost-button"
-              aria-pressed={linkFollow}
-              title="Pause and resume every pane together"
-              onClick={() => setLinkFollow((value) => !value)}
-            >
-              Link follow
-            </button>
-          ) : (
-            <button
-              className="ghost-button"
-              aria-pressed={!paused.includes('all')}
-              onClick={() => follow('all', paused.includes('all'))}
-            >
-              {paused.includes('all') ? 'Resume follow' : 'Pause follow'}
-            </button>
-          )}
-        </div>
-      </div>
-      {sources.length > 1 ? (
-        <div
-          ref={strip}
-          className={`tm-preview-log-steps ${narrow ? 'tm-preview-log-steps--measuring' : ''}`}
-          role="group"
-          aria-label="Log sources"
-          aria-hidden={narrow || undefined}
-        >
-          {[undefined, ...sources].map((source, index) => (
-            <Fragment key={source ?? 'all'}>
-            {index > 1 ? (
-              <span className="tm-preview-log-steps__sep" aria-hidden="true">
-                ›
-              </span>
-            ) : null}
-            <button
-              className="ghost-button"
-              tabIndex={
-                narrow
-                  ? -1
-                  : !selected.length
-                    ? index === 0
-                      ? 0
-                      : -1
-                    : selected[0] === source
-                      ? 0
-                      : -1
-              }
-              aria-pressed={
-                source ? selected.includes(source) : !selected.length
-              }
-              onClick={(event) =>
-                toggle(source, event.metaKey || event.ctrlKey)
-              }
-              onKeyDown={(event) => {
-                const buttons = Array.from(
-                  strip.current!.querySelectorAll<HTMLButtonElement>('button')
-                );
-                const next = nextTabIndex(index, buttons.length, event.key);
-                if (next !== undefined) {
-                  event.preventDefault();
-                  buttons.forEach((button, i) => {
-                    button.tabIndex = i === next ? 0 : -1;
-                  });
-                  buttons[next]?.focus();
-                }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  toggle(source, true);
-                }
+              aria-pressed={sideBySide}
+              aria-label="Side by side"
+              title="Side by side"
+              onClick={() => {
+                setSideBySide(!sideBySide);
+                if (!sideBySide) setSourceMenuOpen(true);
               }}
             >
-              {source ? (
-                <>
-                  {displayName(source)}
-                  <span data-state={sourceState(source)}>
-                    {stateWord(source)}
-                  </span>
-                </>
-              ) : (
-                'All'
-              )}
+              <Columns2 size={16} aria-hidden="true" />
             </button>
-            </Fragment>
-          ))}
+          ) : null}
+          {!side ? (
+            <button
+              className="ghost-button"
+              aria-label={paused.includes('all') ? 'Resume logs' : 'Pause logs'}
+              title={paused.includes('all') ? 'Resume logs' : 'Pause logs'}
+              onClick={() => follow('all', paused.includes('all'))}
+            >
+              {paused.includes('all') ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
+            </button>
+          ) : null}
+          <button className="ghost-button" aria-label="Copy visible logs" title="Copy visible logs"
+            onClick={() => void navigator.clipboard.writeText(
+              visible.filter((line) => !matchesOnly || line.marker || line.text.toLowerCase().includes(query.toLowerCase()))
+                .map((line) => `[${displayName(line.source)}] ${line.marker ? markerText(line) : line.text}`).join('\n')
+            )}>
+            <Copy size={16} aria-hidden="true" />
+          </button>
         </div>
+      </div>
+      {sideBySide && !side ? (
+        <p className="tm-preview-help" role="status">Choose two to four sources in Log sources to show separate panes.</p>
       ) : null}
       {error ? (
         <p role="alert" className="form-error">
@@ -705,19 +549,9 @@ function RunLogs({
       ) : null}
       <div
         className={`tm-preview-log-panes ${side ? `tm-preview-log-panes--${chosen.length}` : ''}`}
-        style={{
-          ['--lane' as string]: `${laneWidth}ch`,
-          ...(side
-            ? {
-                gridTemplateColumns:
-                  chosen.length === 3
-                    ? `minmax(160px, min(${paneWidth}px, 40%)) 5px minmax(160px, min(${secondWidth}px, 40%)) 5px minmax(160px, 1fr)`
-                    : `minmax(160px, min(${paneWidth}px, 70%)) 5px minmax(160px, 1fr)`
-              }
-            : {})
-        }}
+        style={{ ['--lane' as string]: `${laneWidth}ch` }}
       >
-        {(side ? chosen : ['all']).map((source, index) => {
+        {(side ? chosen : ['all']).map((source) => {
           const paneLines = side
             ? visible.filter((line) => line.source === source)
             : visible;
@@ -729,125 +563,72 @@ function RunLogs({
                 ? `${displayName(chosen[0]!)} has not started.`
                 : 'No output yet.';
           return (
-            <div className="tm-preview-log-pane-pair" key={source}>
-              {side && (chosen.length === 4 ? index % 2 === 1 : index > 0) ? (
-                <PanelResizeHandle
-                  label={`Resize ${displayName(source)} log pane`}
-                  value={index === 2 ? secondWidth : paneWidth}
-                  min={160}
-                  max={800}
-                  defaultValue={index === 2 ? 280 : 360}
-                  onChange={(width) => {
-                    if (index === 2) setSecondWidth(width);
-                    else setPaneWidth(width);
-                    persistFocusedPanelWidth(
-                      index === 2 ? 'preview-logs-secondary' : 'preview-logs',
-                      width
-                    );
-                  }}
-                />
+            <section
+              key={source}
+              className="tm-preview-log-pane"
+              aria-label={
+                side ? `${displayName(source)} log pane` : 'Combined log pane'
+              }
+            >
+              {side ? (
+                <header>
+                  {displayName(source)}
+                  <span data-state={sourceState(source)}>
+                    {stateWord(source)}
+                  </span>
+                  <button className="ghost-button" aria-label={`${paused.includes(source) ? 'Resume' : 'Pause'} ${displayName(source)} logs`}
+                    title={paused.includes(source) ? 'Resume logs' : 'Pause logs'}
+                    onClick={() => follow(source, paused.includes(source))}>
+                    {paused.includes(source) ? <Play size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />}
+                  </button>
+                </header>
               ) : null}
-              <section
-                className="tm-preview-log-pane"
-                aria-label={
-                  side ? `${displayName(source)} log pane` : 'Combined log pane'
+              <ApplicationLogStream
+                name={side ? displayName(source) : 'Application'}
+                lines={paneLines.map((line) => ({
+                  ...line,
+                  source: displayName(line.source)
+                }))}
+                lanes={!side && chosen.length > 1}
+                query={query}
+                matchesOnly={matchesOnly}
+                currentMatch={
+                  matchIndex >= 0
+                    ? matches[matchIndex % matches.length]
+                    : undefined
                 }
-              >
-                {side ? (
-                  <header>
-                    {displayName(source)}
-                    <span data-state={sourceState(source)}>
-                      {stateWord(source)}
-                    </span>
-                    {paused.includes(source) ? (
-                      <span className="tm-preview-log-pane__paused">paused</span>
-                    ) : null}
-                  </header>
-                ) : null}
-                <ApplicationLogStream
-                  name={side ? displayName(source) : 'Application'}
-                  lines={paneLines.map((line) => ({
-                    ...line,
-                    source: displayName(line.source)
-                  }))}
-                  lanes={!side && chosen.length > 1}
-                  query={query}
-                  matchesOnly={matchesOnly}
-                  currentMatch={
-                    matchIndex >= 0
-                      ? matches[matchIndex % matches.length]
-                      : undefined
-                  }
-                  follow={!paused.includes(source)}
-                  onFollow={(value) => follow(source, value)}
-                  truncated={buffer.truncated}
-                  expired={expired}
-                  empty={empty}
-                  failureTarget={
-                    selection?.failure
-                      ? `${selection.attemptId}:${selection.source}`
-                      : undefined
-                  }
-                  active={active}
-                />
-              </section>
-            </div>
+                follow={!paused.includes(source)}
+                onFollow={(value) => follow(source, value)}
+                truncated={buffer.truncated}
+                expired={expired}
+                empty={empty}
+                failureTarget={
+                  selection?.failure
+                    ? `${selection.attemptId}:${selection.source}`
+                    : undefined
+                }
+                active={active}
+              />
+            </section>
           );
         })}
       </div>
-      <footer className="tm-preview-log-footer">
-        <span>
-          {expired
-            ? 'Expired'
-            : pausedPanes.length
-              ? `Follow paused${
-                  side
-                    ? ` · ${pausedPanes
-                        .map(displayName)
-                        .join(', ')}`
-                    : ''
-                }`
-              : 'Following'}
-        </span>
+      {singleFailed && onTaskAgent ? (
         <button
           className="ghost-button"
           onClick={() =>
-            void navigator.clipboard.writeText(
-              visible
-                .filter(
-                  (line) =>
-                    !matchesOnly ||
-                    line.marker ||
-                    line.text.toLowerCase().includes(query.toLowerCase())
-                )
-                .map((line) =>
-                  line.marker
-                    ? `[${displayName(line.source)}] ${markerText(line)}`
-                    : `[${displayName(line.source)}] ${line.text}`
-                )
-                .join('\n')
+            onTaskAgent(
+              `Investigate Preview run ${runLabel(attempt.id)}, service ${displayName(chosen[0]!)}. Review before making changes.\n${visible
+                .filter((line) => line.source === chosen[0])
+                .slice(-40)
+                .map((line) => line.text)
+                .join('\n')}`
             )
           }
         >
-          Copy visible
+          Send last 40 lines to task agent
         </button>
-        {singleFailed && onTaskAgent ? (
-          <button
-            className="ghost-button"
-            onClick={() =>
-              onTaskAgent(
-                `Investigate Preview run ${runLabel(attempt.id)}, service ${displayName(chosen[0]!)}. Review before making changes.\n${visible
-                  .filter((line) => line.source === chosen[0])
-                  .slice(-40)
-                  .map((line) => line.text)
-                  .join('\n')}`
-              )
-            }
-          >
-            Send last 40 lines to task agent
-          </button>
-        ) : null}
-      </footer>
+      ) : null}
     </div>
   );
 }

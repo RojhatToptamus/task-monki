@@ -168,6 +168,7 @@ import {
 } from './CodexInteractionMapper';
 import {
   buildInteractionPolicy,
+  previewInspectionReadPaths,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
 import {
@@ -2617,7 +2618,20 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       );
     });
     client.events.on('serverRequest', (request, raw) => {
-      this.enqueueInbound(() => this.handleServerRequest(client, request, raw));
+      this.enqueueInbound(async () => {
+        try {
+          await this.handleServerRequest(client, request, raw);
+        } catch (error) {
+          // A provider is waiting for this response. A health diagnostic alone
+          // leaves it blocked forever when the interaction cannot be stored.
+          await client.respondError(request.id, {
+            code: -32603,
+            message: 'Task Monki could not display this request. Explain the failure to the user before asking again.'
+          });
+          await this.handleServerRequestResolved(request.id);
+          throw error;
+        }
+      });
     });
     client.events.on('unsupportedServerRequest', (request, raw) => {
       this.enqueueInbound(() => this.handleUnsupportedServerRequest(client, request, raw));
@@ -3128,7 +3142,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         );
         return;
       case 'thread/status/changed':
-        await this.handleThreadStatus(notification.params.threadId, notification.params.status);
+        await this.handleThreadStatus(notification.params.threadId, notification.params.status, raw);
         return;
       case 'thread/closed': {
         await this.handleThreadClosed(notification.params.threadId);
@@ -3585,7 +3599,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       mapped.type === 'PERMISSION_APPROVAL'
         ? redactExternalPermissionPaths(
             mapped.request as AgentPermissionApprovalRequest,
-            session.worktreePath
+            session.worktreePath,
+            previewInspectionReadPaths(mapped.request as AgentPermissionApprovalRequest, run)
           )
         : mapped.request;
     const interactionRequest = withProviderItemContext(
@@ -4592,7 +4607,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private async handleThreadStatus(
     threadId: string,
-    status: ThreadStatus
+    status: ThreadStatus,
+    raw: AgentProtocolMessageReference
   ): Promise<void> {
     const runtimeSession = await this.runtimeStore.getSessionByProviderId(
       threadId,
@@ -4606,7 +4622,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           runtimeSession.id,
           runtimeSession.recordRevision,
           { status: mapped },
-          `codex-runtime-thread-status:${threadId}:${status.type}`
+          codexRuntimeOperationId('thread/status', threadId, raw)
         );
       }
       return;
@@ -6510,17 +6526,25 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       repositoryPath: repository.path,
       worktreePath: worktree.worktreePath
     });
+    const config = codexPermissionProfileConfig({
+      sessionId: session.id,
+      settings,
+      worktreePath: session.worktreePath,
+      attachmentPaths,
+      additionalReadOnlyPaths: [
+        metadata.gitCommonDir,
+        ...(designPack ? [designPack.rootPath] : [])
+      ]
+    });
+    if (session.role === 'PREVIEW') {
+      // Request narrow folder access through the existing native approval flow.
+      config.features = {
+        ...(config.features as Record<string, JsonValue>),
+        request_permissions_tool: true
+      };
+    }
     return {
-      ...codexPermissionProfileConfig({
-        sessionId: session.id,
-        settings,
-        worktreePath: session.worktreePath,
-        attachmentPaths,
-        additionalReadOnlyPaths: [
-          metadata.gitCommonDir,
-          ...(designPack ? [designPack.rootPath] : [])
-        ]
-      }),
+      ...config,
       ...codexGitSubprocessConfig({
         worktreePath: session.worktreePath,
         isolateHome: session.role === 'REVIEW'
@@ -6704,7 +6728,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     sessionId: string,
     update: Parameters<TaskAgentRuntimeAccess['updateAgentSession']>[1]
   ) {
-    const operationId = codexRuntimeOperationId('session/update', sessionId, update);
+    // A session can enter the same state many times. Only retries of this
+    // invocation are duplicates; an earlier identical state is a new event.
+    const operationId = `codex:session/update:${sessionId}:${randomUUID()}`;
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await this.taskRuntime.updateAgentSession(sessionId, update, operationId);

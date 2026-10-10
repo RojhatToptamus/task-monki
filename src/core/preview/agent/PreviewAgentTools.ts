@@ -1,6 +1,6 @@
 import type { AttemptSummary, PreviewStatus } from 'previewhost';
 import type { ApplicationPreviewSnapshot } from '../../../shared/applicationPreview';
-import type { PreviewRecipeGenerationDraft, PreviewRecipeValidationIssue } from '../../../shared/contracts';
+import type { PreviewRecipeGenerationDraft, PreviewRecipeValidationIssue, Repository } from '../../../shared/contracts';
 import { CLIENT_TOOL_MAX_TEXT_BYTES } from '../../agent/clientTools/ClientToolContract';
 
 const MAX_RUNS = 5;
@@ -32,6 +32,7 @@ export function previewStatusReport(input: {
   snapshot: ApplicationPreviewSnapshot;
   configurationFile?: string;
   proposal?: PreviewRecipeGenerationDraft;
+  repositories: Repository[];
 }): string {
   const { snapshot } = input;
   const status = snapshot.status;
@@ -52,6 +53,9 @@ export function previewStatusReport(input: {
       : undefined
   }));
   const report = {
+    repositories: input.repositories.slice(0, 50).map(({ name, path, branch, status }) => ({ name, path, branch, status })),
+    repositoryAccess: 'These are registered checkouts, not read grants. Ask which checkout to use, then request read-only access before inspecting it. Do not switch branches or create worktrees.',
+    repositoriesTruncated: input.repositories.length > 50 || undefined,
     configurationFile: input.configurationFile
       ? { name: input.configurationFile, note: 'Read it with your file tools; its contents are not repeated here.' }
       : null,
@@ -65,7 +69,7 @@ export function previewStatusReport(input: {
         : null,
     requirements: snapshot.requirements
       ? {
-          secrets: snapshot.requirements.secrets.map((secret) => ({ reference: secret.id, availability: secret.availability })),
+          secrets: snapshot.requirements.secrets.map((secret) => ({ reference: secret.id, availability: secret.availability, bindings: secret.bindings })),
           connections: snapshot.requirements.connections,
           sources: snapshot.requirements.sources.map((source) => ({ service: source.service, directory: source.directory, connected: source.connected, missing: source.missing })),
           storage: snapshot.requirements.storage?.state,

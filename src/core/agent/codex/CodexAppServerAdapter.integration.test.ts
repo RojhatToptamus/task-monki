@@ -4230,9 +4230,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 
-  it('answers a typed mid-turn question once and resumes the same Codex run', async () => {
+  it.each(['user-input', 'user-input-after-permission'] as const)('answers questions and resumes the same Codex run (%s)', async (mode) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-user-input-'));
-    const executable = await writeFakeCodexExecutable(dir, 'user-input');
+    const executable = await writeFakeCodexExecutable(dir, mode);
     const store = await openCodexTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = createCodexAdapter(store, events, {
@@ -4299,10 +4299,24 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     await orchestrator.respondToInteraction(input);
     await waitForInteraction(store, 'RESOLVED');
-    await waitForRunStatus(store, run.id, 'RUNNING');
-    expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({
-      status: 'ACTIVE'
-    });
+    if (mode === 'user-input-after-permission') {
+      const permission = await waitForInteraction(store, 'PENDING');
+      expect(permission.type).toBe('PERMISSION_APPROVAL');
+      await orchestrator.respondToInteraction({
+        taskId: task.id, runId: run.id, interactionRequestId: permission.id,
+        decision: { interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: { fileSystem: { read: [worktree.worktreePath] } } }
+      });
+      const followUp = await waitForInteraction(store, 'PENDING');
+      expect(followUp).toMatchObject({ type: 'USER_INPUT', providerRequestId: 83 });
+      expect(await store.getRun(run.id)).toMatchObject({ status: 'AWAITING_USER_INPUT' });
+      await orchestrator.respondToInteraction({
+        taskId: task.id, runId: run.id, interactionRequestId: followUp.id,
+        decision: { interactionType: 'USER_INPUT', action: 'ANSWER', answers: { database: ['Local database'] } }
+      });
+    } else {
+      await waitForRunStatus(store, run.id, 'RUNNING');
+      expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({ status: 'ACTIVE' });
+    }
     await expect(orchestrator.respondToInteraction(input)).rejects.toThrow(
       'expected PENDING'
     );
@@ -4344,6 +4358,30 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       outboundMessages.filter((message) => message.id === 81)
     ).toHaveLength(1);
     await orchestrator.shutdown();
+  });
+
+  it('returns a provider error when a question cannot be stored instead of stranding the turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-question-storage-'));
+    const executable = await writeFakeCodexExecutable(dir, 'user-input');
+    const store = await openCodexTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = createCodexAdapter(store, events, { cwd: dir, executable, restartDelaysMs: [] });
+    const orchestrator = createAgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    vi.spyOn(runtimeForTaskStore(store), 'createInteraction').mockRejectedValueOnce(new Error('simulated write failure'));
+    try {
+      const run = await orchestrator.startTurn({ task, iteration, worktree, mode: 'IMPLEMENTATION', prompt: task.prompt, settings: task.agentSettings });
+      await waitForRunStatus(store, run.id, 'COMPLETED');
+      const snapshot = await store.snapshot();
+      expect(snapshot.interactionRequests).toHaveLength(0);
+      const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
+      expect(readOutboundMessages(journal).find((message) => message.id === 81)).toMatchObject({
+        error: { code: -32603 }
+      });
+    } finally {
+      await orchestrator.shutdown();
+    }
   });
 
   it('clears a canceled typed question without accepting a late answer', async () => {
@@ -6559,6 +6597,7 @@ function fakeCodexScript(
     | 'turn-start-ambiguous-late'
     | 'approval'
     | 'user-input'
+    | 'user-input-after-permission'
     | 'user-input-answer-exit'
     | 'user-input-clear'
     | 'user-input-exit'
@@ -6633,7 +6672,8 @@ const mode = ${JSON.stringify(mode)};
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
 const scopedMode = mode === 'scoped' || mode === 'scoped-ephemeral-rejected' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' || mode === 'scoped-interrupt-model-reroute' || mode === 'scoped-model-reroute' || mode === 'scoped-model-reroute-before-ack' || mode.startsWith('scoped-unexpected-request-');
 const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
-const userInputMode = mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
+let inputCwd;
+const userInputMode = mode === 'user-input-after-permission' || mode === 'user-input' || mode === 'user-input-answer-exit' || mode === 'user-input-clear' || mode === 'user-input-exit';
 let goalContinuationStarted = false;
 const deletedThreadIds = new Set();
 const turn = (status, error = null) => ({
@@ -6783,7 +6823,25 @@ rl.on('line', (line) => {
       } });
       return;
     }
-    if (((mode === 'user-input' || mode === 'user-input-answer-exit') && message.id === 81) || (mode === 'recovery-user-input' && message.id === 91)) {
+    if (mode === 'user-input-after-permission' && [81, 82].includes(message.id)) {
+      send({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: message.id } });
+      send({ method: 'thread/status/changed', params: { threadId: 'thread-1', status: { type: 'active', activeFlags: [] } } });
+      if (message.id === 81) {
+        send({ method: 'thread/status/changed', params: { threadId: 'thread-1', status: { type: 'active', activeFlags: ['waitingOnApproval'] } } });
+        send({ method: 'item/permissions/requestApproval', id: 82, params: {
+          threadId: 'thread-1', turnId: 'turn-1', itemId: 'folder-read', cwd: inputCwd, startedAtMs: Date.now(),
+          permissions: { fileSystem: { read: [inputCwd] } }
+        } });
+      } else {
+        send({ method: 'thread/status/changed', params: { threadId: 'thread-1', status: { type: 'active', activeFlags: ['waitingOnUserInput'] } } });
+        send({ method: 'item/tool/requestUserInput', id: 83, params: {
+          threadId: 'thread-1', turnId: 'turn-1', itemId: 'database-question', autoResolutionMs: null,
+          questions: [{ id: 'database', header: 'Database', question: 'Which database should Preview use?', isOther: true, isSecret: false, options: null }]
+        } });
+      }
+      return;
+    }
+    if ((mode === 'user-input-after-permission' && message.id === 83) || ((mode === 'user-input' || mode === 'user-input-answer-exit') && message.id === 81) || (mode === 'recovery-user-input' && message.id === 91)) {
       const requestId = message.id;
       send({ method: 'serverRequest/resolved', params: {
         threadId: 'thread-1',
@@ -7607,6 +7665,8 @@ rl.on('line', (line) => {
           return;
         }
         if (userInputMode) {
+          inputCwd = message.params.cwd;
+          send({ method: 'thread/status/changed', params: { threadId: 'thread-1', status: { type: 'active', activeFlags: ['waitingOnUserInput'] } } });
           send({ method: 'item/tool/requestUserInput', id: 81, params: {
             threadId: 'thread-1',
             turnId: 'turn-1',

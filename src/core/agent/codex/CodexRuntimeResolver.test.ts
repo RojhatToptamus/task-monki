@@ -135,8 +135,10 @@ describe('Codex runtime resolution', () => {
 
   it('accepts a newer compatible runtime without a maximum-tested warning gate', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-newer-'));
+    const probeRecord = path.join(dir, 'probe.json');
     const codex = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
-      version: '0.999.0'
+      version: '0.999.0',
+      probeRecord
     });
 
     const runtime = await resolveCodexRuntime({
@@ -150,6 +152,13 @@ describe('Codex runtime resolution', () => {
 
     expect(runtime.version).toBe('0.999.0');
     expect(runtime.compatibility.launch.argv).toEqual(['app-server', '--stdio']);
+    // Compatibility must not load project instructions outside the probe's grants.
+    const probe = JSON.parse(await fs.readFile(probeRecord, 'utf8'));
+    expect(probe.cwd).not.toBe(dir);
+    expect(probe.processCwd).toBe(probe.realCwd);
+    expect(probe.ephemeral).toBe(true);
+    expect(probe.filesystem).toEqual({ ':minimal': 'read', [probe.cwd]: 'read' });
+    await expect(fs.access(probe.cwd)).rejects.toThrow();
   });
 
   it('rejects a runtime that launches App Server but lacks a required JSON-RPC method', async () => {
@@ -238,6 +247,7 @@ async function writeFakeCodex(
     appServer?: 'stdio' | 'listen' | 'default' | 'none';
     missingMethods?: TaskMonkiCodexAppServerMethod[];
     invalidPermissionProfileEvidence?: boolean;
+    probeRecord?: string;
   } = {}
 ): Promise<string> {
   return writeNodeExecutable(directory, name, fakeCodexScript(options));
@@ -247,17 +257,20 @@ function fakeCodexScript({
   version = '0.141.0',
   appServer = 'stdio',
   missingMethods = [],
-  invalidPermissionProfileEvidence = false
+  invalidPermissionProfileEvidence = false,
+  probeRecord
 }: {
   version?: string;
   appServer?: 'stdio' | 'listen' | 'default' | 'none';
   missingMethods?: TaskMonkiCodexAppServerMethod[];
   invalidPermissionProfileEvidence?: boolean;
+  probeRecord?: string;
 }): string {
   return `#!/usr/bin/env node
 const appServer = ${JSON.stringify(appServer)};
 const missingMethods = new Set(${JSON.stringify(missingMethods)});
 const invalidPermissionProfileEvidence = ${JSON.stringify(invalidPermissionProfileEvidence)};
+const probeRecord = ${JSON.stringify(probeRecord)};
 
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli ${version}\\n');
@@ -316,6 +329,11 @@ rl.on('line', (line) => {
   }
   if (message.method === 'thread/start') {
     const cwd = message.params.cwd;
+    if (probeRecord) require('node:fs').writeFileSync(probeRecord, JSON.stringify({
+      cwd, realCwd: require('node:fs').realpathSync(cwd),
+      processCwd: process.cwd(), ephemeral: message.params.ephemeral,
+      filesystem: message.params.config.permissions.task_monki_capability_probe.filesystem
+    }));
     send({ id: message.id, result: {
       activePermissionProfile: {
         id: invalidPermissionProfileEvidence

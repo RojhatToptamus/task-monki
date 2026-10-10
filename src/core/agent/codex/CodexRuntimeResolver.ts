@@ -226,7 +226,6 @@ export async function probeCodexRuntime(
   let lastDetail = '';
   for (const launch of launchForms) {
     const capabilityResult = await probeJsonRpcCapabilities(candidate.executable, launch, {
-      cwd: options.cwd,
       environment: options.environment,
       requestTimeoutMs: options.requestTimeoutMs
     });
@@ -335,7 +334,7 @@ function hasAppServerHelp(help: string): boolean {
 async function probeJsonRpcCapabilities(
   executable: string,
   launch: CodexAppServerLaunch,
-  options: Pick<CodexRuntimeResolverOptions, 'cwd' | 'environment' | 'requestTimeoutMs'>
+  options: Pick<CodexRuntimeResolverOptions, 'environment' | 'requestTimeoutMs'>
 ): Promise<
   | { ok: true }
   | {
@@ -346,8 +345,9 @@ async function probeJsonRpcCapabilities(
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
+  // Probe capabilities without loading a user's project instructions or configuration.
   const child = spawnOwnedPortable(executable, launch.argv, {
-    cwd: options.cwd,
+    cwd: codexHome,
     env: {
       ...sanitizeEnvironment(
         options.environment ?? process.env,
@@ -452,7 +452,7 @@ async function probeJsonRpcCapabilities(
       TASK_MONKI_REQUIRED_CODEX_APP_SERVER_METHODS.map(async (method) => {
         const response = await request(
           method,
-          capabilityProbeParams(method, options.cwd)
+          capabilityProbeParams(method, codexHome)
         );
         if (response.error) {
           if (isMethodNotFound(response.error)) {
@@ -463,7 +463,7 @@ async function probeJsonRpcCapabilities(
             }`;
           }
         } else if (method === 'thread/start') {
-          permissionProfileProblem = permissionProfileProbeProblem(response.result, options.cwd);
+          permissionProfileProblem = permissionProfileProbeProblem(response.result, codexHome);
         }
       })
     );

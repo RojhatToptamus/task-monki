@@ -1577,6 +1577,9 @@ details[open] > summary .tm-disclosure__chevron {
 .tm-composer-action svg { width: 16px; height: 16px; }
 
 .interaction-permission { display: contents; }
+.interaction-details--permissions { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.interaction-details--permissions dd + dt { margin-top: 8px; }
+.interaction-permission + .interaction-permission dt { margin-top: 8px; }
 .interaction-card__reason { margin: 0 0 12px; color: var(--text-soft); font-size: var(--t-body); line-height: 1.5; }
 .interaction-card__error { margin-top: 12px; }
 .interaction-card__error .form-error { margin: 0 0 4px; }

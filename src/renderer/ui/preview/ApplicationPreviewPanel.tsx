@@ -663,6 +663,10 @@ export function ApplicationPreviewPanel({
                   status={status}
                   restoredRun={snapshot?.restoredRun}
                   onLogs={showLogs}
+                  onConfigureLogs={agent ? (services) => {
+                    setAgentDraft((current) => `${current ? `${current}\n\n` : ''}I need logs for ${services.join(', ')} inside Preview. Inspect their current external connections and project startup requirements. Propose managed services in preview.yaml so Preview captures their output. Explain folder access, dependencies, secrets and any port conflicts. Do not stop existing processes or save or run changes without my review.`);
+                    openAgent();
+                  } : undefined}
                   onAsRun={(attempt) => {
                     setAsRun(attempt);
                     setSection('Configuration');

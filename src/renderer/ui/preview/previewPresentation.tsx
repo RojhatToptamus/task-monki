@@ -44,11 +44,11 @@ export function serviceTypeLabel(type: string): string {
   if (type === 'command') return 'Server';
   if (type === 'job') return 'Step';
   if (type === 'worker') return 'Worker';
-  if (type === 'attach') return 'Local server';
+  if (type === 'attach') return 'External HTTP';
   if (type === 'static') return 'Static files';
   if (type === 'postgres' || type === 'external-postgres') return 'PostgreSQL';
   if (type === 'redis' || type === 'external-redis') return 'Redis';
-  if (type === 'external-tcp') return 'TCP service';
+  if (type === 'external-tcp') return 'External TCP';
   if (type === 'compose') return 'Compose service';
   return label(type);
 }

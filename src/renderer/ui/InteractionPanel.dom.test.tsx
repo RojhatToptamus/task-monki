@@ -53,7 +53,10 @@ describe('mounted agent user-input interaction', () => {
     const interaction = { ...userInputInteraction(), type: 'PERMISSION_APPROVAL' as const,
       allowedActions: ['GRANT_TURN', 'DECLINE'] as InteractionRequestRecord['allowedActions'],
       request: { startedAtMs: 0, cwd: '/work/project', permissions: {
-        fileSystem: { entries: [{ path: { type: 'path', path: '/work/project/src' }, access: 'write' as const }] }
+        fileSystem: {
+          write: ['/work/project/src'],
+          entries: [{ path: { type: 'path', path: '/work/project/src' }, access: 'write' as const }]
+        }
       } } };
     const onRespond = vi.fn().mockRejectedValueOnce(new Error('Transport failed: internal-request-123')).mockResolvedValue(undefined);
     render(<InteractionPanel interactions={[interaction]} sessions={[]} onRespond={onRespond} />);

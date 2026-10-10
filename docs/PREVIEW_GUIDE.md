@@ -79,8 +79,9 @@ opens it in the file manager. The folder menu offers installed editors, includin
 VS Code, and **Copy path** for the full location.
 
 **Logs** selects one run and one or more sources. Search highlights text; it does not infer severity.
-Select two to four sources for side-by-side panes. Four sources use a two-by-two layout.
-Scrolling up pauses following without stopping collection. **Resume follow** returns to the latest output.
+**Log sources** opens a checkbox menu. **Side by side** opens the same menu so you can choose two to four sources for separate panes. Four sources use a two-by-two layout.
+External HTTP and TCP connections check services started outside Preview; they cannot capture those processes’ output. **Ask agent to enable logs** drafts a request for managed services. Review the commands, folder access and secrets before saving or starting.
+Logs follow new output automatically. Each stream has a pause/play control. Scrolling up also pauses following without stopping collection; the **new lines** button returns to the latest output. Separate panes follow independently.
 The shared buffer retains at most 64 KiB. Logs expire when the runtime restarts.
 
 **Configuration** edits the portable file. Field edits preserve unrelated YAML and comments.
@@ -148,7 +149,7 @@ with the recorded commit and branch, and **Restore worktree** is its only action
 Restoration checks the branch out again at that commit; uncommitted files,
 including a preview configuration file in that folder, cannot be recovered. The
 task, retained run configuration, data, and secrets are kept. An external checkout
-uses **Reconnect checkout** instead. The runs list stays readable; **As run** opens
+uses **Reconnect checkout** instead. The runs list stays readable; **Run configuration** opens
 the configuration each run started with.
 
 Use a failed service or job's **Logs** action to inspect that exact attempt.

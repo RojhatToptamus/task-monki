@@ -73,7 +73,7 @@ it('pauses on upward scrolling, retains incoming lines, and resumes explicitly',
   expect(stream.scrollTop).toBe(100);
   expect(screen.getByText('request received')).toBeTruthy();
   fireEvent.click(
-    screen.getByRole('button', { name: '1 new line · Resume follow' })
+    screen.getByRole('button', { name: '1 new line' })
   );
   expect(onFollow).toHaveBeenLastCalledWith(true);
   fireEvent.keyDown(stream, { key: 'Home' });

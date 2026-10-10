@@ -39,11 +39,17 @@ state (`buildPreviewAgentTurnPrompt`); the agent's permanent instructions are
 `PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS`. Codex receives them as plan-mode
 developer instructions, ACP agents as a prompt prefix, OpenCode as the system
 prompt. Turns use the existing provider-specific read-only analysis policy,
-with command approvals disabled. Codex enforces a read-only, offline sandbox;
+with command and file-change approvals rejected. Codex can request explicit read-only
+access to another project folder through the existing permission interaction. The exact
+folder is shown before consent; home directories, their ancestors, writes and network
+access cannot be granted. These inspection grants belong to the provider turn/session,
+not to Previewhost's separate permission to run a service. Codex otherwise enforces a read-only, offline sandbox;
 Claude ACP uses its provider plan mode, which allows file reads and read-only
 shell commands and does not provide an OS sandbox or offline guarantee. The
 exact model selected must resolve or the message is refused before a record
 is written.
+
+Before proposing a backend connection, the agent asks whether to use an external URL or a local backend repository, unless the person has already chosen. Project examples, a running port and earlier runs do not decide that preference. External services do not provide process logs; Preview-managed services do. The agent reads project facts before asking and keeps questions and summaries short.
 
 Questions use each runtime's native structured question tool (Codex
 `request_user_input`, ACP form elicitation, OpenCode questions). They arrive as
@@ -60,7 +66,12 @@ and OpenCode agents register a stdio MCP server (`task-monki-preview-tools`,
 
 - `inspect_preview` with `what: "status"` returns the configuration file name,
   each run with its services and outcome, the requirements that block a start,
-  the failure diagnosis and the proposal under review. `what: "logs"` returns
+  the failure diagnosis and the proposal under review. It also lists registered
+  repository checkouts with observed branches so the agent can offer concrete
+  choices. This inventory grants no file access and never switches branches.
+  Secret requirements include their service bindings, never values. The agent
+  proposes references; the person supplies values through Preview's concealed
+  requirements dialog before execution approval. `what: "logs"` returns
   the last lines of a run's output, optionally for one service. Logs are
   Previewhost's redacted output; file contents are not repeated because the
   agent reads the worktree directly.

@@ -72,7 +72,7 @@ describe('TaskManagerService Preview agent', () => {
     expect(started).toMatchObject({ mode: 'PREVIEW', instructionProfile: 'PREVIEW' });
     expect(started.prompt).toContain('Draft a preview configuration.');
     expect(started.prompt).toContain('[Preview state: no configuration file; never run]');
-    expect(started.settings).toMatchObject({ sandbox: 'READ_ONLY', networkAccess: false, approvalPolicy: 'never' });
+    expect(started.settings).toMatchObject({ sandbox: 'READ_ONLY', networkAccess: false, approvalPolicy: 'on-request' });
 
     const detail = await scenario.store.getTaskDetail(task.id);
     const run = detail.runs.find((candidate) => candidate.id === message.runId)!;
@@ -83,7 +83,11 @@ describe('TaskManagerService Preview agent', () => {
 
     // The agent reads state and proposes through the app-owned tools of its run.
     const status = await bridgeOf(scenario).invoke({ tool: 'inspect_preview', runId: run.id, arguments: { what: 'status' } });
-    expect(JSON.parse(status.text)).toMatchObject({ configurationFile: null, runs: [] });
+    expect(JSON.parse(status.text)).toMatchObject({
+      configurationFile: null,
+      runs: [],
+      repositories: [expect.objectContaining({ path: await fs.realpath(scenario.repositoryPath), status: 'AVAILABLE' })]
+    });
     const rejected = await bridgeOf(scenario).invoke({
       tool: 'propose_preview_configuration', runId: run.id,
       arguments: { yaml: 'name: application\ntype: static\n', summary: 'Serves the site.' }

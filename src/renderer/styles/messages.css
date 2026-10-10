@@ -180,7 +180,6 @@
 .tm-side-conversation:focus { outline: 0; }
 .tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--hair); }
 .tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 600; white-space: nowrap; }
-.tm-side-conversation__head span { min-width: 0; overflow: hidden; color: var(--muted); font: var(--t-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .tm-side-conversation__head .tm-iconbtn { margin-left: auto; width: var(--h-icon); height: var(--h-icon); }
 .tm-side-conversation__log { flex: 1; min-height: 0; }
 .tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 14px 20px; }

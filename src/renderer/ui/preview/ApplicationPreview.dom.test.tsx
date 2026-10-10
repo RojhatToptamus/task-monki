@@ -141,8 +141,12 @@ it('opens the conversation for a pending question, answers it in place, and neve
   expect(panel.textContent).toContain('Draft a preview configuration for this project.');
   expect(panel.textContent).toContain('Which application should run: Alpha or Beta?');
   expect((screen.getByRole('button', { name: 'Preview agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
-  expect(panel.textContent).toContain('Waiting for your answer');
   expect((screen.getByRole('button', { name: 'Queue' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(screen.getByRole('textbox', { name: 'Which application should run: Alpha or Beta?' }), { target: { value: 'Alpha' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));
+  await waitFor(() => expect(agent.respond).toHaveBeenCalledWith(question, {
+    interactionType: 'USER_INPUT', action: 'ANSWER', answers: { app: ['Alpha'] }
+  }));
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
   expect(screen.queryByRole('tab', { name: 'Configuration' })).toBeNull();
@@ -312,7 +316,23 @@ it('shows current retained data after restart and deletion without duplicating s
     />
   );
   expect(screen.queryByText('Data kept')).toBeNull();
-  expect(screen.getByRole('button', { name: /Configuration as run at/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /Run configuration at/ })).toBeTruthy();
+});
+
+it('explains external service log ownership and offers a reviewed configuration change', () => {
+  const onConfigureLogs = vi.fn();
+  const onLogs = vi.fn();
+  render(<ApplicationActivity status={{ ...initial, active: { ...initial.active!, type: 'environment', services: {
+    backend: { type: 'external-tcp', state: 'ready' }, app: { type: 'command', state: 'ready' }
+  } } }} onLogs={onLogs} onAsRun={() => undefined} onConfigureLogs={onConfigureLogs} />);
+  expect(screen.getByText('External TCP')).toBeTruthy();
+  expect(screen.getByText(/backend runs outside Preview/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Logs for backend' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Ask agent to enable logs' }));
+  expect(onConfigureLogs).toHaveBeenCalledWith(['backend']);
+  expect(onLogs).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Logs for app' }));
+  expect(onLogs).toHaveBeenCalledWith('serving', 'app', false);
 });
 
 it('edits the file draft while preserving comments and unrelated secret references', async () => {
@@ -427,6 +447,40 @@ it('ignores late logs, preserves the cursor across hidden tabs, and releases its
   expect(api.readApplicationPreviewLogs).toHaveBeenCalledTimes(3);
 });
 
+it('lets a single-source log view choose separate panes through a persistent checkbox menu', async () => {
+  api.inspectApplicationPreviewConfiguration.mockRejectedValue(new Error('unavailable'));
+  api.readApplicationPreviewLogs.mockResolvedValue({ text: '[backend] API ready\n[app] Frontend ready\n[install] Installed\n', cursor: 60, truncated: false });
+  const services = { backend: { type: 'command' as const, state: 'ready' as const }, app: { type: 'command' as const, state: 'starting' as const }, install: { type: 'job' as const, state: 'succeeded' as const } };
+  const selection = { attemptId: 'serving', source: 'app' };
+  const view = render(<ApplicationLogs taskId="task" status={{ ...initial, active: { ...initial.active!, type: 'environment', services } }}
+    selection={selection} onSelect={() => undefined} />);
+  await screen.findByText('Frontend ready');
+  fireEvent.click(screen.getByRole('button', { name: 'Side by side' }));
+  const backend = screen.getByRole('menuitemcheckbox', { name: 'backend' });
+  fireEvent.click(backend);
+  expect(screen.getByRole('menuitemcheckbox', { name: 'backend' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('region', { name: 'backend log pane' }).textContent).toContain('API ready');
+  expect(screen.getByRole('region', { name: 'app log pane' }).textContent).not.toContain('API ready');
+  fireEvent.keyDown(backend, { key: 'Escape' });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Log sources' })));
+  fireEvent.click(screen.getByRole('button', { name: 'Pause backend logs' }));
+  expect(screen.getByRole('button', { name: 'Resume backend logs' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Pause app logs' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Resume backend logs' }));
+  expect(screen.getByRole('button', { name: 'Pause backend logs' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Side by side' }));
+  expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).toContain('API ready');
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Log sources' }), { key: 'ArrowDown' });
+  fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'backend' }));
+  expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).not.toContain('API ready');
+  expect(screen.getByRole('menuitemcheckbox', { name: 'app' }).getAttribute('aria-disabled')).toBe('true');
+  view.rerender(<ApplicationLogs taskId="task" status={{ ...initial, active: { ...initial.active!, type: 'environment', services: {
+    ...services, app: { ...services.app, state: 'ready' }, backend: { ...services.backend, state: 'starting' }
+  } } }} selection={selection} onSelect={() => undefined} />);
+  expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).toContain('Frontend ready');
+  expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).not.toContain('API ready');
+});
+
 it('places a terminal marker after final service output and resumes the visible pane consistently', async () => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
   api.readApplicationPreviewLogs.mockResolvedValueOnce({ text: '[check] starting\n', cursor: 17, truncated: false });
@@ -443,9 +497,8 @@ it('places a terminal marker after final service output and resumes the visible 
   expect(text).not.toContain('Static service canceled');
   view.rerender(<ApplicationLogs {...props} selection={{ attemptId: initial.active!.id, source: 'check', failure: true }}
     status={{ ...initial, active: undefined, latest: { ...initial.active!, type: 'environment', state: 'failed', services: { check: { ...services.check, state: 'failed' }, web: { ...services.web, state: 'canceled' } } } }} />);
-  fireEvent.click(screen.getAllByRole('button', { name: 'Resume follow' })[0]!);
-  expect(screen.getByText('Following')).toBeTruthy();
-  expect(screen.queryByText('Follow paused')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Resume logs' }));
+  expect(screen.getByRole('button', { name: 'Pause logs' })).toBeTruthy();
 
 });
 
@@ -549,7 +602,7 @@ it('opens the selected source through desktop actions and keeps a failed open re
   const attempt = { ...initial.active!, id: 'attempt', type: 'environment' as const, state: 'failed' as const, sources: ['/project/frontend', '/other/repository/backend'],
     services: { web: { type: 'command' as const, state: 'skipped' as const }, api: { type: 'command' as const, state: 'failed' as const, error: { code: 'START_FAILED', message: 'api exited with code 127' } as never } } };
   render(<PreviewAttemptConfiguration taskId="task" attempt={attempt} status={{ ...initial, active: undefined, latest: attempt }} projectDirectory="/project" onBack={() => undefined} />);
-  expect((await screen.findByLabelText('Configuration as run')).textContent).toContain('read-only');
+  expect((await screen.findByLabelText('Configuration used for this run')).textContent).toContain('read-only');
   expect(screen.getByText('Failed').parentElement?.textContent).toContain('exit 127');
   expect(screen.getByText('Not started')).toBeTruthy();
   const target = { type: 'previewSource', taskId: 'task', attemptId: 'attempt', sourceIndex: 1 };
@@ -582,7 +635,7 @@ it('opens the selected source through desktop actions and keeps a failed open re
   await screen.findByRole('menuitem', { name: 'Copy path' });
   fireEvent.scroll(screen.getByRole('menu'));
   expect(screen.getByRole('menu')).toBeTruthy();
-  fireEvent.scroll(screen.getByLabelText('Configuration as run'));
+  fireEvent.scroll(screen.getByLabelText('Configuration used for this run'));
   expect(screen.queryByRole('menu')).toBeNull();
   fireEvent.click(trigger);
   await screen.findByRole('menuitem', { name: 'Copy path' });
@@ -681,8 +734,8 @@ it('opens a past run’s configuration read-only from the runs list and returns 
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
   api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text: 'name: fixture\ntype: command\ncwd: .\ncommand: [node, server.js]\n' } });
   render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
-  fireEvent.click(await screen.findByRole('button', { name: /Configuration as run at/ }));
-  const view = await screen.findByLabelText('Configuration as run');
+  fireEvent.click(await screen.findByRole('button', { name: /Run configuration at/ }));
+  const view = await screen.findByLabelText('Configuration used for this run');
   expect(view.textContent).toContain('read-only');
   expect(await screen.findByText('What ran')).toBeTruthy();
   expect(view.querySelector('textarea')).toBeNull();
@@ -690,7 +743,7 @@ it('opens a past run’s configuration read-only from the runs list and returns 
   fireEvent.click(screen.getByRole('button', { name: 'Back to preview.yaml' }));
   await waitFor(() => expect(api.readApplicationPreviewFile).toHaveBeenCalledWith({ taskId: 'task' }));
   expect(await screen.findByText('preview.yaml')).toBeTruthy();
-  expect(screen.queryByLabelText('Configuration as run')).toBeNull();
+  expect(screen.queryByLabelText('Configuration used for this run')).toBeNull();
 });
 
 it('opens the Preview agent from its own button, sends with the selected model, queues behind a turn, and stops it', async () => {
@@ -739,7 +792,7 @@ it('offers the retained run as the primary when the file is gone and shows its c
   expect(screen.getByRole('button', { name: 'Start from last run' }).className).toContain('primary-button');
   expect(screen.getByRole('button', { name: 'Draft with Preview agent' }).className).not.toContain('primary-button');
   fireEvent.click(block.querySelector('button')!);
-  expect((await screen.findByLabelText('Configuration as run')).textContent).toContain('read-only');
+  expect((await screen.findByLabelText('Configuration used for this run')).textContent).toContain('read-only');
   fireEvent.click(screen.getByRole('button', { name: 'Start from last run' }));
   await waitFor(() => expect(api.startRetainedApplicationPreview).toHaveBeenCalledWith({ taskId: 'task' }));
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
@@ -757,4 +810,16 @@ it('continues the saved Preview model before its catalog loads and leaves provid
   await waitFor(() => expect(agent.send).toHaveBeenCalledWith('Continue our previous conversation.', expect.any(String), expect.objectContaining({ model: 'scenario-model', modelProvider: 'openai' })));
   view.rerender(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={{ ...agent, runtimes: [{ ...codexRuntime, preflight: { ...codexRuntime.preflight, readiness: createRuntimeReadiness('DISABLED', 'Connection unavailable.') } }] }} />);
   expect((screen.getByRole('button', { name: /Preview agent model:/ }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+
+it('selects the exact log run when two attempts have the same displayed time', async () => {
+  api.readApplicationPreviewLogs.mockResolvedValue({ text: '', cursor: 0, truncated: false });
+  const onSelect = vi.fn();
+  render(<ApplicationLogs taskId="task" status={{ ...initial, latest: { ...initial.active!, id: 'failed', state: 'failed' } }} onSelect={onSelect} />);
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Log run' }), { key: 'ArrowDown' });
+  const runs = screen.getAllByRole('menuitemradio');
+  expect(runs.map((run) => run.getAttribute('aria-checked')).sort()).toEqual(['false', 'true']);
+  fireEvent.click(runs.find((run) => run.getAttribute('aria-checked') === 'false')!);
+  expect(onSelect).toHaveBeenCalledWith({ attemptId: 'failed' });
 });

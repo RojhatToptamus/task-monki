@@ -50,7 +50,6 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
   const lastLiveEntry = lastTurn?.state === 'active' ? lastTurn.entries.at(-1) : undefined;
   const liveWorkVisible = lastLiveEntry?.kind === 'steps' && lastLiveEntry.steps.some((step) => (step.kind === 'reasoning' ? step.active : step.row.status === 'active'));
   const workingLabel = active?.status === 'INTERRUPTING' ? 'Stopping…'
-    : questionPending ? 'Waiting for your answer'
     : active?.status === 'STARTING' || active?.status === 'QUEUED' ? 'Starting…' : 'Working…';
   const model = agent.models.find((candidate) => candidate.model === selection.model && candidate.runtimeId === selection.runtimeId && (!selection.modelProvider || candidate.modelProvider === selection.modelProvider));
   const disabledReason = agent.disabledReason ?? previewAgentUnavailableReason(selection, agent.runtimes);
@@ -71,8 +70,6 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
         setEditing(undefined);
       })
     : agent.send(text, crypto.randomUUID(), selection);
-  const hint = disabledReason
-    ?? (editing ? 'Saves the queued message' : questionPending ? 'Answer the question above to continue' : active ? (pending.length ? '' : 'Sends after this response') : 'Changes come back as a proposal to review');
   return (
     <ConversationPanel
       title="Preview agent"
@@ -102,7 +99,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       }
       composer={{
         placeholder: editing ? 'Edit the queued message' : active ? 'Queue a message for after this response' : turns.length ? 'Ask for a change or an explanation…' : 'Ask about the preview or request a configuration…',
-        hint,
+        hint: disabledReason ?? '',
         sendLabel: editing ? 'Save' : active ? 'Queue' : 'Send',
         disabled: !!disabledReason || (!editing && questionPending),
         draft: editing?.text ?? draft,
@@ -143,7 +140,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
     >
       {turns.length === 0 && unattached.length === 0 ? (
         <p className="tm-preview-agent__intro">
-          Inspects project files and Preview logs. Configuration changes come back for review; you control what runs.
+          Set up your preview, change how it runs, or investigate a failure.
         </p>
       ) : null}
       {turns.map((turn) => (
@@ -152,9 +149,9 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       {unattached.map((item) => (
         <UserMessage key={item.id} text={item.text} time={item.createdAt} status={statusLabel(item)} />
       ))}
-      {active && (questionPending || active.status === 'INTERRUPTING' || active.status === 'STARTING' || active.status === 'QUEUED' || !liveWorkVisible) ? (
+      {active && !questionPending && (active.status === 'INTERRUPTING' || active.status === 'STARTING' || active.status === 'QUEUED' || !liveWorkVisible) ? (
         <div className="tm-side-conversation__working">
-          <StatusGlyph kind={questionPending ? 'waiting' : 'working'} />
+          <StatusGlyph kind="working" />
           <span role="status">{workingLabel}</span>
           <Elapsed since={active.startedAt} />
         </div>
