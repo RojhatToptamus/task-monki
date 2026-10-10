@@ -19,6 +19,7 @@ import type {
   RunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
+import { DiffLines } from './DiffLines';
 import { DisclosureChevron } from './DisclosureChevron';
 import {
   buildDiffFileTree,
@@ -968,22 +969,7 @@ function DiffFileView({
               <strong>{blockTitle(block.source)}</strong>
               <span>{diffBlockLineCount(block.lines)}</span>
             </div>
-            <div className="tm-difflines">
-              {block.lines
-                .filter((line) => line.kind !== 'meta')
-                .map((line, index) =>
-                  line.kind === 'hunk' ? (
-                    <DiffHunkRow key={`${block.id}:${index}`} line={line} />
-                  ) : (
-                    <DiffLineRow
-                      key={`${block.id}:${index}`}
-                      line={line}
-                      file={file}
-                      onOpenPathMenu={onOpenPathMenu}
-                    />
-                  )
-                )}
-            </div>
+            <DiffLines lines={block.lines} path={file.path} onOpenPathMenu={onOpenPathMenu} />
           </section>
         ))}
       </div>
@@ -1053,50 +1039,6 @@ function DiffStat({ additions, deletions }: { additions: number; deletions: numb
       <span>-{deletions}</span>
     </span>
   );
-}
-
-function DiffHunkRow({ line }: { line: DiffLine }) {
-  return (
-    <div className="tm-diffhunk">
-      <code>{line.content}</code>
-    </div>
-  );
-}
-
-function DiffLineRow({
-  line,
-  file,
-  onOpenPathMenu
-}: {
-  line: DiffLine;
-  file: DiffFile;
-  onOpenPathMenu?(relativePath: string, event: MouseEvent, line?: number): void;
-}) {
-  const code = diffLineCode(line);
-  const targetLine = line.newLine ?? line.oldLine;
-  return (
-    <div
-      className={`tm-diffline tm-diffline--${line.kind}`}
-      onContextMenu={(event) => onOpenPathMenu?.(file.path, event, targetLine)}
-    >
-      <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
-      <span className="tm-diffline__num">{line.newLine ?? ''}</span>
-      <code>{code || ' '}</code>
-    </div>
-  );
-}
-
-function diffLineCode(line: DiffLine): string {
-  if (line.kind === 'addition' && line.content.startsWith('+')) {
-    return line.content.slice(1);
-  }
-  if (line.kind === 'deletion' && line.content.startsWith('-')) {
-    return line.content.slice(1);
-  }
-  if (line.kind === 'context' && line.content.startsWith(' ')) {
-    return line.content.slice(1);
-  }
-  return line.content;
 }
 
 function fileCountLabel(total: number, visible: number, filterActive: boolean): string {

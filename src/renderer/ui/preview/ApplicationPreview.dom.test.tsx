@@ -152,7 +152,7 @@ it('opens the conversation for a pending question, answers it in place, and neve
   expect(screen.queryByRole('tab', { name: 'Configuration' })).toBeNull();
 });
 
-it('preserves a reviewed draft across a stale-save rejection and saves without starting', async () => {
+it.each(['header', 'chat'] as const)('preserves edits across a stale-save rejection and uses the shared save flow from %s', async (source) => {
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
   const proposals = proposalActions(proposal);
   vi.mocked(proposals.accept).mockRejectedValueOnce(new Error('Configuration changed. Reload before replacing it.'));
@@ -162,13 +162,17 @@ it('preserves a reviewed draft across a stale-save rejection and saves without s
   fireEvent.click(screen.getByRole('tab', { name: 'YAML' }));
   const edited = proposal.draft!.yaml + '# Keep this edit\n';
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: edited } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
+  fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   expect((await screen.findByRole('alert')).textContent).toContain('Configuration changed');
+  expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect((screen.getByRole('textbox', { name: 'Preview YAML' }) as HTMLTextAreaElement).value).toBe(edited);
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
+  fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   await waitFor(() => expect(proposals.accept).toHaveBeenCalledTimes(2));
   expect(proposals.accept).toHaveBeenLastCalledWith('task', 'draft', edited);
-  expect(api.startApplicationPreview).not.toHaveBeenCalled();
+  if (source === 'chat') await waitFor(() => expect(api.startApplicationPreview).toHaveBeenCalledWith({ taskId: 'task' }));
+  else expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
 });
 
@@ -676,7 +680,7 @@ it('saves and replaces a concealed value under the required reference without st
   const reference = 'competitions/dev/api-token';
   const missing: ApplicationPreviewSnapshot = {
     name: 'fixture', hasConfigurationFile: true,
-    requirements: { sources: [], connections: [], secrets: [{ id: reference, selected: false, bindings: [{ service: 'api', key: 'TOKEN' }], availability: 'missing' }] }
+    requirements: { sources: [], connections: [], secrets: [reference, 'competitions/dev/other-token'].map(id => ({ id, selected: false, bindings: [{ service: 'api', key: 'TOKEN' }], availability: 'missing' as const })) }
   };
   api.getApplicationPreview.mockResolvedValue(missing);
   const create = vi.fn(async () => {
@@ -685,7 +689,13 @@ it('saves and replaces a concealed value under the required reference without st
   });
   window.previewSecrets = { status: vi.fn(async () => ({ state: 'unlocked' })), has: vi.fn(async () => false), create } as unknown as PreviewSecretsApi;
   render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Add value' }));
+  const addButtons = await screen.findAllByRole('button', { name: /Add value/ });
+  fireEvent.click(addButtons[1]!);
+  await screen.findByRole('form', { name: 'Add missing secret' });
+  fireEvent.change(screen.getByLabelText('Secret value'), { target: { value: 'discard-this-unsaved-value' } });
+  fireEvent.click(addButtons[0]!);
+  await waitFor(() => expect(screen.getByLabelText('Secret reference')).toHaveProperty('value', reference));
+  expect(screen.getByLabelText('Secret value')).toHaveProperty('value', '');
   const form = await screen.findByRole('form', { name: 'Add missing secret' });
   expect(screen.queryByRole('dialog')).toBeNull();
   const input = form.querySelector<HTMLInputElement>('input[type="password"]')!;
@@ -697,7 +707,7 @@ it('saves and replaces a concealed value under the required reference without st
   fireEvent.keyDown(screen.getByRole('button', { name: 'More preview actions' }), { key: 'ArrowDown' });
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Manage required secrets' }));
   await screen.findByRole('form', { name: 'Replace secret value' });
-  expect(screen.getByRole('textbox', { name: 'Secret reference' })).toHaveProperty('value', reference);
+  expect(screen.getByLabelText('Secret reference')).toHaveProperty('value', reference);
   const update = vi.fn(async () => true);
   window.previewSecrets!.update = update;
   fireEvent.change(screen.getByLabelText('Secret value'), { target: { value: 'SYNTHETIC_replacement_with_at_least_32_characters' } });

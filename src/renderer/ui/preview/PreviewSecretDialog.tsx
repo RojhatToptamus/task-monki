@@ -183,7 +183,7 @@ export function PreviewSecretDialog({
             disabled={busy}
             onClick={onClose}
           >
-            {inPreview ? 'Back to Preview' : 'Cancel'}
+            {inline ? 'Cancel' : inPreview ? 'Back to Preview' : 'Cancel'}
           </button>
           <button
             className={inline ? 'outline-button' : 'primary-button'}
@@ -251,12 +251,12 @@ export function PreviewSecretDialog({
       {recipients?.[reference]?.length ? (
         <p>Used by {recipients[reference].join(', ')}.</p>
       ) : null}
-      <p>
+      {!inline ? <p>
         Saving or unlocking does not approve or start a preview.
         {inPreview
           ? ' Return to review before starting.'
           : ' Changes apply on the next approved start.'}
-      </p>
+      </p> : null}
       {status?.warning ? <p role="status">{status.warning}</p> : null}
       {!status ? (
         <p role="status">Loading secret storage…</p>
@@ -340,7 +340,7 @@ export function PreviewSecretDialog({
           <p>
             {multiline
               ? 'Multiline value pasted. Paste again to replace it, or clear it to type a new value.'
-              : 'The value stays concealed. Pasting multiple lines replaces the entire value and preserves every line.'}
+              : 'Values stay concealed. You can paste a multiline value.'}
           </p>
           {multiline ? (
             <button

@@ -84,12 +84,31 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   const unverified = prerequisites.filter((item) => item.status !== 'missing');
   const recipients = (secret: (typeof requirements.secrets)[number]) =>
     secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ');
+  const inlineSecret = secretReferences && (secretReferences.length === 0
+    ? storageNeeded
+    : secretReferences.length === 1 && missingSecrets.some(secret => secret.id === secretReferences[0]));
+  const secretForm = secretReferences ? (
+    <PreviewSecretDialog
+      key={secretReferences.join('\0')}
+      inline
+      references={secretReferences}
+      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`)]))}
+      onClose={() => {
+        onSecretReferences(undefined);
+        refresh();
+      }}
+      onSaved={() => {
+        onSecretReferences(undefined);
+        refresh();
+      }}
+    />
+  ) : null;
   return (
     <DecisionBlock kind="Before this runs" tone="action">
       {folders.size ? (
         <>
           <GroupLabel>Folders</GroupLabel>
-          <div className="tm-preview-rows">
+          <div className="tm-preview-rows tm-preview-source-rows">
             {[...folders.values()].map(({ source, services }) => {
               const key = `${source.service}:${source.declaration}`;
               const directory = chosenFolders[key] ?? source.directory;
@@ -99,13 +118,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                   key={key}
                   name={services.join(', ')}
                   title={services.join(', ')}
-                  detail={
-                    <>
-                      <code>{source.declaration}</code>
-
-                    </>
-                  }
-                  expansion={<span className="tm-preview-path">{missing ? 'Not found: ' : ''}{directory}</span>}
+                  detail={<span className="tm-preview-path">{missing ? 'Not found: ' : ''}{directory}</span>}
                   end={
                     missing ? (
                       <button
@@ -137,17 +150,18 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
             })}
           </div>
           <p className="tm-preview-help">
-            Connect lets these steps use the folder until Task Monki quits, for every task. Commands run with your account and are not sandboxed.
+            Read/write access lasts until Task Monki quits, across tasks. Commands run as you, without a sandbox.
           </p>
         </>
       ) : null}
       {storageNeeded || missingSecrets.length ? (
         <>
           <GroupLabel>Secrets</GroupLabel>
-          <div className="tm-preview-rows">
+          <div className="tm-preview-rows tm-preview-secret-rows">
             {storageNeeded ? (
               <Row
                 name="Secret storage"
+                expansion={secretReferences?.length === 0 ? secretForm : undefined}
                 detail={storage?.state === 'new' ? 'Not set up on this Mac yet' : 'Locked'}
                 end={
                   <button className="outline-button" onClick={() => onSecretReferences([])}>
@@ -163,28 +177,15 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                 key={secret.id}
                 name={<code title={secret.id}>{secret.id}</code>}
                 detail={`Used by ${recipients(secret)}`}
-                end={<button className="outline-button" onClick={() => onSecretReferences([secret.id])}>Add value</button>}
+                end={<button className="outline-button" aria-label={`Add value for ${secret.id}`} aria-expanded={secretReferences?.length === 1 && secretReferences[0] === secret.id} onClick={() => onSecretReferences([secret.id])}>Add value</button>}
+                expansion={secretReferences?.length === 1 && secretReferences[0] === secret.id ? secretForm : undefined}
               />
             ))}
           </div>
           <p className="tm-preview-help">Values stay in secret storage on this Mac and are never written to the file.</p>
         </>
       ) : null}
-      {secretReferences ? (
-        <PreviewSecretDialog
-          inline
-          references={secretReferences}
-          recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`)]))}
-          onClose={() => {
-            onSecretReferences(undefined);
-            refresh();
-          }}
-          onSaved={() => {
-            onSecretReferences(undefined);
-            refresh();
-          }}
-        />
-      ) : null}
+      {secretReferences && !inlineSecret ? secretForm : null}
       {requirements.connections.length ? (
         <>
           <GroupLabel>Connections</GroupLabel>

@@ -16,10 +16,10 @@ import type { PreviewAgentConversation } from './PreviewAgentProps';
 /**
  * The Preview conversation: the same turns, steps, questions and queue as the task agent, on a
  * detached read-only session the person can point at any runtime and model. Every change the
- * agent wants comes back as a proposal reviewed in Configuration; saving, starting and approving
- * stay in the status row.
+ * agent wants comes back as a proposal. Chat and Configuration use the same save and review
+ * flow; approval stays in the Preview controls.
  */
-export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposal, worktreePath, draft, onDraftChange, onReviewProposal, onClose }: {
+export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposal, worktreePath, draft, onDraftChange, onReviewProposal, onSaveAndReview, savingProposal, onClose }: {
   agent: PreviewAgentConversation;
   selection: PreviewAgentSelection;
   onSelectionChange(selection: PreviewAgentSelection): void;
@@ -28,6 +28,8 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
   draft: string;
   onDraftChange(text: string): void;
   onReviewProposal(): void;
+  onSaveAndReview(): void;
+  savingProposal: boolean;
   onClose(): void;
 }) {
   const [editing, setEditing] = useState<{ id: string; text: string }>();
@@ -161,7 +163,10 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
         <div className="tm-preview-agent__proposal" role="status">
           <strong>{proposal.replacesExistingFile ? `Proposed changes to ${proposal.fileName}` : `Proposed ${proposal.fileName}`}</strong>
           {proposalSummary(proposal.yaml) ? <span>{proposalSummary(proposal.yaml)}</span> : null}
-          <button type="button" className="ghost-button" onClick={onReviewProposal}>Review in Configuration</button>
+          <div className="tm-preview-agent__proposal-actions">
+            <button type="button" className="ghost-button" onClick={onReviewProposal}>View changes</button>
+            <button type="button" className="primary-button" disabled={savingProposal || !!active} title={active ? 'Wait for the agent to finish before saving.' : undefined} onClick={onSaveAndReview}>Save and review</button>
+          </div>
         </div>
       ) : null}
     </ConversationPanel>

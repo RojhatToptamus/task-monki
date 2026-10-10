@@ -208,8 +208,8 @@ export function ApplicationPreviewPanel({
     blockers,
     busy
   });
-  // An action error stays visible until the runtime state it described moves on.
-  const stateKey = [status?.active?.id, status?.candidate?.id, status?.latest?.id, status?.latest?.state, !!snapshot?.approval, !!snapshot?.restartReview].join('|');
+  // An action error stays visible until the Preview or agent result it described moves on.
+  const stateKey = [status?.active?.id, status?.candidate?.id, status?.latest?.id, status?.latest?.state, !!snapshot?.approval, !!snapshot?.restartReview, proposal?.id].join('|');
   const error = actionError && actionError.state === stateKey ? actionError.message : undefined;
   const setError = (value: string | undefined) => setActionError(value ? { message: value, state: stateKey } : undefined);
 
@@ -476,6 +476,8 @@ export function ApplicationPreviewPanel({
       selection={selection}
       onSelectionChange={setAgentSelection}
       proposal={proposal}
+      onSaveAndReview={actions['save-and-review']}
+      savingProposal={busy || !draft || draft.draftId !== proposal?.id}
       worktreePath={projectDirectory}
       draft={agentDraft}
       onDraftChange={setAgentDraft}

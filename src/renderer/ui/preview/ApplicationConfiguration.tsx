@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { parseDocument } from 'yaml';
 import type { PreviewConfigurationFile } from '../../../shared/applicationPreview';
+import { DiffLines } from '../DiffLines';
+import type { DiffLine } from '../../model/diffEvidence';
 import { AccessibleTab } from '../AccessibleTabs';
 import { Row, serviceTypeLabel } from './previewPresentation';
 
@@ -70,12 +72,19 @@ export function ApplicationConfiguration({ draft, previous, view, onView, onChan
     draft.draftId || draft.text !== draft.original?.text
       ? (draft.original?.text ?? '')
       : (previous?.text ?? draft.original?.text ?? '');
-  const before = original.split('\n');
-  const after = draft.text.split('\n');
+  const before = original ? original.replace(/\n$/, '').split('\n') : [];
+  const after = draft.text ? draft.text.replace(/\n$/, '').split('\n') : [];
   let first = 0;
   while (first < before.length && first < after.length && before[first] === after[first]) first++;
   let last = 0;
   while (last < before.length - first && last < after.length - first && before[before.length - last - 1] === after[after.length - last - 1]) last++;
+  const contextStart = Math.max(0, first - 3);
+  const changes: DiffLine[] = [
+    ...before.slice(contextStart, first).map((line, i) => ({ kind: 'context' as const, content: ` ${line}`, oldLine: contextStart + i + 1, newLine: contextStart + i + 1 })),
+    ...before.slice(first, before.length - last).map((line, i) => ({ kind: 'deletion' as const, content: `-${line}`, oldLine: first + i + 1 })),
+    ...after.slice(first, after.length - last).map((line, i) => ({ kind: 'addition' as const, content: `+${line}`, newLine: first + i + 1 })),
+    ...after.slice(after.length - last, after.length - last + Math.min(last, 3)).map((line, i) => ({ kind: 'context' as const, content: ` ${line}`, oldLine: before.length - last + i + 1, newLine: after.length - last + i + 1 }))
+  ];
   const state = draft.draftId
     ? draft.original ? 'proposed' : 'proposed · new file'
     : draft.text !== draft.original?.text ? (draft.original ? 'unsaved' : 'new file') : undefined;
@@ -183,12 +192,7 @@ export function ApplicationConfiguration({ draft, previous, view, onView, onChan
             {original === draft.text ? (
               <p>No changes.</p>
             ) : (
-              <pre>
-                {before.slice(0, first).slice(-3).map((line, i) => <div key={`context-${i}`}> {line}</div>)}
-                {before.slice(first, before.length - last).map((line, i) => <div className="tm-preview-diff__removed" key={`before-${i}`}>− {line}</div>)}
-                {after.slice(first, after.length - last).map((line, i) => <div className="tm-preview-diff__added" key={`after-${i}`}>+ {line}</div>)}
-                {after.slice(after.length - last).slice(0, 3).map((line, i) => <div key={`after-context-${i}`}> {line}</div>)}
-              </pre>
+              <DiffLines lines={changes} />
             )}
           </div>
         ) : !config ? (
