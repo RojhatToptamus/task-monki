@@ -60,6 +60,7 @@ export interface AgentSessionProps {
   capture(run: RunRecord): ReactNode;
   attentionRequested: number;
   header?: ReactNode;
+  onHeaderVisibleChange?(visible: boolean): void;
 }
 
 type SendMode = 'QUEUE' | 'STEER' | 'CONTINUE' | 'RETRY';
@@ -261,7 +262,7 @@ export function AgentSession(props: AgentSessionProps) {
   const model = displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model;
 
   return <section className="tm-agent-session" aria-label="Agent session">
-    <Conversation instance={scroller} label="Session history" className="tm-agent-session__conversation" header={props.header}>
+    <Conversation instance={scroller} label="Session history" className="tm-agent-session__conversation" header={props.header} onHeaderVisibleChange={props.onHeaderVisibleChange}>
       <div className="tm-agent-session__column">
         {!run ? props.preRun : null}
         {historyWindow.first > 0 || historyWindow.clip > 0

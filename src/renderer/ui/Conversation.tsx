@@ -31,13 +31,15 @@ const READER_INTENT_MS = 600;
  * Elements Conversation). Opening a disclosure is reading, so it releases the
  * lock instead of pulling the view back to the end.
  */
-export function Conversation({ instance, label, className = '', header, children, onScroll }: {
+export function Conversation({ instance, label, className = '', header, children, onScroll, onHeaderVisibleChange }: {
   instance: StickToBottomInstance;
   label: string;
   className?: string;
   header?: ReactNode;
   children: ReactNode;
   onScroll?(scroller: HTMLElement): void;
+  /** Whether the collapsible part of the header is in view. */
+  onHeaderVisibleChange?(visible: boolean): void;
 }) {
   const [headerVisible, setHeaderVisible] = useState(true);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -45,19 +47,25 @@ export function Conversation({ instance, label, className = '', header, children
   // rest (the tabs) stays. The header never hides before the first message has
   // passed beneath it, so hiding never opens an empty band at the top.
   const headerHeight = useRef(0);
+  const canCollapse = useRef(false);
   useLayoutEffect(() => {
     const element = headerRef.current;
     if (!element) return;
     const collapsible = element.querySelector<HTMLElement>('[data-conversation-collapse]');
+    canCollapse.current = Boolean(collapsible);
+    if (!collapsible) setHeaderVisible(true);
     const measure = () => {
       headerHeight.current = element.offsetHeight;
-      element.style.setProperty('--conversation-header-hide', `${collapsible?.offsetHeight ?? element.offsetHeight}px`);
+      element.style.setProperty('--conversation-header-hide', `${collapsible?.offsetHeight ?? 0}px`);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
   }, [header]);
+  const reportHeader = useRef(onHeaderVisibleChange);
+  reportHeader.current = onHeaderVisibleChange;
+  useLayoutEffect(() => { reportHeader.current?.(headerVisible); }, [headerVisible]);
   const scrollDirection = useRef({ top: 0, direction: 0, distance: 0 });
   // Only the reader's own scrolling moves the header. Following new output,
   // restoring a reading position and Jump to latest are programmatic.
@@ -73,7 +81,7 @@ export function Conversation({ instance, label, className = '', header, children
         const distance = direction === previous.direction ? previous.distance + Math.abs(delta) : Math.abs(delta);
         scrollDirection.current = { top, direction, distance };
         const byReader = readerIntent.current.dragging || performance.now() < readerIntent.current.until;
-        if (top < headerHeight.current) setHeaderVisible(true);
+        if (top < headerHeight.current || !canCollapse.current) setHeaderVisible(true);
         else if (byReader && distance >= 12) setHeaderVisible(direction < 0);
       }
     }

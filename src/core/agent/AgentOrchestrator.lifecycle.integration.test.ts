@@ -676,6 +676,56 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect(adapter.runtimeInterruptCount).toBe(1);
   });
 
+  it('hands the reviewer the canonical checkout of a worktree reached through a symlink', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-symlink-'));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    await initializeRepository(repositoryDir);
+    // A worktree root under a symlinked folder, as the macOS temporary folder is.
+    const linkedDir = path.join(dir, 'linked');
+    await fs.symlink(dir, linkedDir);
+    const linkedWorktree = path.join(linkedDir, 'repository');
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review through a symlink',
+      prompt: 'Implement the change.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-symlink',
+      worktreePath: linkedWorktree,
+      baseSha: 'base'
+    });
+    const implemented = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(runtime.task, implemented, 'AGENT_RUN_COMPLETED');
+
+    const reviewed = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: (await store.getRun(implemented.id))!,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+    });
+    const canonical = await fs.realpath(repositoryDir);
+    expect(adapter.lastExecutionContextInput?.primaryCwd).toBe(canonical);
+    expect(adapter.lastExecutionContextInput?.readRoots[0]?.canonicalPath).toBe(canonical);
+    // The session keeps the worktree's recorded path, which the store requires.
+    expect((await store.getAgentSession(reviewed.sessionId))?.worktreePath).toBe(linkedWorktree);
+  });
+
   it('recreates a missing provider session and retries the same follow-up run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -2130,6 +2180,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
     settings: AgentExecutionSettings;
   };
   lastStart?: StartAgentTurn;
+  lastExecutionContextInput?: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0];
   startCount = 0;
   runtimeStartCount = 0;
   runtimeInterruptCount = 0;
@@ -2217,6 +2268,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   buildExecutionContext(
     input: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0]
   ) {
+    this.lastExecutionContextInput = input;
     return Promise.resolve({
       attestation: { status: 'ATTESTED' as const },
       repositoryAccess: 'READ_ONLY' as const,

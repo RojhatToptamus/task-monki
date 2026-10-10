@@ -419,8 +419,10 @@ better-aimed steps.
 
 ### 3.1 Families
 
-Two families, both named in the token layer as `--font-ui` and `--font-mono`.
-A component references those tokens and never a family name. Weights: **400 and
+Two families, both named in the token layer as `--font-ui` and `--font-mono`:
+the platform's own faces (SF Pro and SF Mono on macOS), which need no download
+and render best on the platform. A component references those tokens and never
+a family name; a webfont is adopted only by bundling it with the app. Weights: **400 and
 500** only (`--w-medium`; the page title takes `--w-title`, also 500). Semibold
 reads heavy in the system face the app falls back to, so the hierarchy comes
 from size and ink, not weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
@@ -776,7 +778,15 @@ It stays a separate sheet in every window that can hold it: a narrow window
 lends it less width, down to 320, before the page would drop below 560px, and
 only below that does it float over the page, sliding in 8% with the drawer
 curve. Its resize edge is the sheet's own left edge; hover and focus draw a 2px
-line there. Its head is
+line there.
+
+With a panel docked, the two sheets read as one layout: the task page keeps only
+its 48px tab bar, which shares the panel head's line and hairline, and the
+task's title moves to the window's top bar beside the back and forward arrows
+(it does the same when the title scrolls away on the Agent tab). The panel's
+content keeps a 16px inset; its composer has the main composer's height and
+ends 16px above the sheet, as the main composer and the Review request bar do,
+so every input box shares one bottom line. Its head is
 48px: mark, name, the runtime that answers, close. Escape closes it and focus
 returns to the toggle. An empty panel says in one muted sentence what it is
 for; each answer it can act on carries that action under it ("Use in

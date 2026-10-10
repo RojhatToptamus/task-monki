@@ -118,8 +118,8 @@ export const SECTIONS = [
 
 const INVARIANTS = [
   ':root {',
-  "  --font-ui: 'Instrument Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;",
-  "  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;",
+  "  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+  "  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;",
   '  --r-2xs: 4px; --r-xs: 6px; --r-sm: 8px; --r: 10px; --r-md: 12px; --r-lg: 14px; --r-pill: 999px;',
   '  color-scheme: light dark;',
   '}'

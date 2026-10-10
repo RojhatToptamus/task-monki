@@ -174,6 +174,8 @@ interface TaskDetailProps {
   onEditInstruction: AgentSessionProps['onEditQueue'];
   onSendInstruction: AgentSessionProps['onSendQueue'];
   headingRef?: RefObject<HTMLHeadingElement | null>;
+  /** The task's title while the page's own title area is out of view, for the window's top bar. */
+  onCompactTitleChange?(title: string | undefined): void;
   error?: string;
   task?: Task;
   repository?: Repository;
@@ -334,6 +336,7 @@ export function TaskDetail(props: TaskDetailProps) {
   }, []);
   // The Review tab keeps its 248px index and a 560px diff before the panel floats.
   const sidePanelLayout = useTaskSidePanelLayout(560);
+  const [agentHeaderVisible, setAgentHeaderVisible] = useState(true);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<{ taskId: string; settings: AgentExecutionSettings }>();
@@ -1452,6 +1455,15 @@ export function TaskDetail(props: TaskDetailProps) {
     ? { label: 'Reviewer', element: reviewerPanel }
     : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
     : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
+  // With a side panel docked, the page keeps only its tab bar, which then shares
+  // the panel head's 48px line; the title moves to the window's top bar.
+  const headCollapsed = Boolean(sidePanel) && sidePanelLayout.docked;
+  const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
+  const onCompactTitleChange = props.onCompactTitleChange;
+  useEffect(() => {
+    onCompactTitleChange?.(titleOutOfView ? task.title : undefined);
+  }, [onCompactTitleChange, task.title, titleOutOfView]);
+  useEffect(() => () => onCompactTitleChange?.(undefined), [onCompactTitleChange]);
 
   const taskNav = (
         <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
@@ -1540,7 +1552,7 @@ export function TaskDetail(props: TaskDetailProps) {
   return (
     <>
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
-      {tab !== 'agent' ? <div className="tm-detail__chrome">{taskMasthead}{taskNav}</div> : null}
+      {tab !== 'agent' ? <div className="tm-detail__chrome">{headCollapsed ? null : taskMasthead}{taskNav}</div> : null}
 
       <div
         id="task-detail-panel"
@@ -1645,7 +1657,8 @@ export function TaskDetail(props: TaskDetailProps) {
           onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('review')}
-          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskMasthead}{taskNav}</div>}
+          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{headCollapsed ? null : taskMasthead}{taskNav}</div>}
+          onHeaderVisibleChange={setAgentHeaderVisible}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
             promptDraft={task.promptDraft}

@@ -84,6 +84,19 @@ so nothing separates them. */
   flex: 1;
 }
 
+/* The task's title stands in for the page's own while that is out of view. */
+.tm-titlebar__title {
+  min-width: 0;
+  max-width: 48vw;
+  margin-left: 6px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: var(--t-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: tm-scrim-in var(--motion-standard) var(--ease-out);
+}
+
 .tm-newtask {
   display: inline-flex;
   align-items: center;

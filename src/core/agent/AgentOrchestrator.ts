@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
 import type {
   AgentExecutionSettings,
@@ -2264,12 +2266,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       target: input.target,
       previousReview: input.previousReview
     });
+    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
     const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
       sessionId: reviewSessionId,
-      primaryCwd: input.worktree.worktreePath,
+      primaryCwd: worktreePath,
       readRoots: [
         {
-          canonicalPath: input.worktree.worktreePath,
+          canonicalPath: worktreePath,
           kind: 'WORKTREE',
           entityId: input.worktree.id
         }
@@ -2353,12 +2356,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (await this.runtimeStore.getSession(sessionId)) {
       throw new Error('Each reviewer question needs a new session.');
     }
+    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
     const executionContext = await this.buildExecutionContext(runtimeId, {
       sessionId,
-      primaryCwd: input.worktree.worktreePath,
+      primaryCwd: worktreePath,
       readRoots: [
         {
-          canonicalPath: input.worktree.worktreePath,
+          canonicalPath: worktreePath,
           kind: 'WORKTREE',
           entityId: input.worktree.id
         }
@@ -2437,7 +2441,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (await this.runtimeStore.getSession(sessionId)) {
       throw new Error('Each side question needs a new session.');
     }
-    const checkout = input.snapshotPath ?? input.worktree.worktreePath;
+    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
+    const checkout = input.snapshotPath ? await canonicalCheckoutPath(input.snapshotPath) : worktreePath;
     const executionContext = await this.buildExecutionContext(runtimeId, {
       sessionId,
       primaryCwd: checkout,
@@ -3508,4 +3513,14 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       at: new Date().toISOString()
     });
   }
+}
+
+/**
+ * The path a read-only lane (agent review, reviewer questions, side questions)
+ * hands the runtime and records on its session. Worktrees can sit under a
+ * symlinked folder (on macOS the temporary folder is /var, a link to
+ * /private/var), and the runtime only accepts a canonical directory.
+ */
+async function canonicalCheckoutPath(value: string): Promise<string> {
+  return realpath(value).catch(() => path.resolve(value));
 }

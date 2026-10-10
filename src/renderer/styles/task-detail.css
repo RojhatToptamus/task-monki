@@ -32,15 +32,21 @@
 .tm-detail__masthead {
   position: relative;
   flex: 0 0 auto;
-  padding: 22px var(--tm-gutter) 14px;
+  padding: 22px var(--tm-gutter) 4px;
   background: var(--surface);
 }
 
+/* The task's tab bar is the same 48px line as an open side panel's head, so the
+   two titles and the hairlines under them meet. */
 .tm-detail__nav {
   flex: 0 0 auto;
   padding: 0 var(--tm-gutter);
   background: var(--surface);
   box-shadow: inset 0 -1px 0 var(--hair);
+}
+
+.tm-detail__nav .tm-tab {
+  height: 48px;
 }
 
 

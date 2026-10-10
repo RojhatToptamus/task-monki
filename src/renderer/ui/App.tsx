@@ -258,6 +258,8 @@ export function App() {
   const [designDetail, setDesignDetail] = useState<DesignDetailSnapshot>();
   const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
   const [designsLoading, setDesignsLoading] = useState(false);
+  // The open task's title while its page shows only the tab bar.
+  const [compactTaskTitle, setCompactTaskTitle] = useState<string>();
   const [designsError, setDesignsError] = useState<string | undefined>();
   const [designExternalLinkRequest, setDesignExternalLinkRequest] =
     useState<DesignCanvasExternalLinkRequest>();
@@ -2663,6 +2665,7 @@ export function App() {
                   </button>
                 </Tooltip>
               </div>
+              {compactTaskTitle && showDetail ? <span className="tm-titlebar__title" title={compactTaskTitle}>{compactTaskTitle}</span> : null}
               <div className="tm-titlebar__spacer" />
               <button
                 ref={newTaskButtonRef}
@@ -2787,6 +2790,7 @@ export function App() {
             }}
             initialTab={view === 'previews' ? previewDetailTab : undefined}
             headingRef={taskDetailHeadingRef}
+            onCompactTitleChange={setCompactTaskTitle}
             error={error}
             task={selectedTask}
             repository={taskDetail.repository}

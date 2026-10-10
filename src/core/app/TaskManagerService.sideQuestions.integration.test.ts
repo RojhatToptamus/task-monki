@@ -56,7 +56,8 @@ describe('TaskManagerService side questions', () => {
       readRoots: [{ canonicalPath: snapshotPath, kind: 'WORKTREE_SNAPSHOT', entityId: worktree.id }],
       modelSettings: { sandbox: 'READ_ONLY', approvalPolicy: 'NEVER' }
     });
-    expect(snapshotPath.startsWith(path.join(s.worktreeRoot, 'snapshots'))).toBe(true);
+    // The runtime receives canonical paths; the temporary folder can be a symlink.
+    expect(snapshotPath.startsWith(path.join(await fs.realpath(s.worktreeRoot), 'snapshots'))).toBe(true);
     expect(await fs.readFile(path.join(snapshotPath, 'feature.ts'), 'utf8')).toBe('export const value = 1;\n');
     const prompt = await s.runtimeStore.readArtifact(turn.run.promptArtifactId);
     expect(prompt).toContain('You are working read-only.');
@@ -160,9 +161,10 @@ describe('TaskManagerService side questions', () => {
     });
     expect(question.snapshotTakenAt).toBeUndefined();
     const turn = s.agent.startedRuntimeTurns.at(-1)!;
-    expect(turn.executionContext.primaryCwd).toBe(worktree.worktreePath);
+    const canonicalWorktree = await fs.realpath(worktree.worktreePath);
+    expect(turn.executionContext.primaryCwd).toBe(canonicalWorktree);
     expect(turn.executionContext.readRoots).toEqual([
-      { canonicalPath: worktree.worktreePath, kind: 'WORKTREE', entityId: worktree.id }
+      { canonicalPath: canonicalWorktree, kind: 'WORKTREE', entityId: worktree.id }
     ]);
 
     const answered = await s.waitForSnapshot((state) =>

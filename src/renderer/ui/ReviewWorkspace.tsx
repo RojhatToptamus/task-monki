@@ -234,7 +234,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const requestSummary = [
     openFindings.length ? `${openFindings.length} finding${openFindings.length === 1 ? '' : 's'}` : '',
     commentCount ? `${commentCount} comment${commentCount === 1 ? '' : 's'}` : ''
-  ].filter(Boolean).join(' and ') || "The review's notes";
+  ].filter(Boolean).join(' and ') || 'Review notes';
   const showRequestBar = Boolean(props.requestChanges) && (openFindings.length > 0 || commentCount > 0 || Boolean(props.requestChanges?.reviewNotes));
 
   const renderThreads = (items: ReviewFindingView[] | undefined) => items?.map((finding) => (

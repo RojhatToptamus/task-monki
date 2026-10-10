@@ -60,7 +60,7 @@ never a badge: blockers and majors must be fixed. */
 .tm-review-file__viewed input { margin: 0; accent-color: var(--accent); }
 
 .tm-review-block__label { padding: 6px 20px; color: var(--faint); font-size: var(--t-meta); }
-.tm-review-gap { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 20px 0 24px; background: var(--panel); color: var(--faint); font-size: var(--t-help); }
+.tm-review-gap { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 20px 0 24px; background: var(--panel); color: var(--faint); font-size: var(--t-help); white-space: nowrap; }
 .tm-review-gap code { overflow: hidden; color: var(--muted); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 
 .tm-review-line-group { position: relative; }
@@ -105,7 +105,8 @@ not a card. */
 /* The request bar: what will be sent,
 a note,
 and the action. */
-.tm-review__request { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; padding: 10px 12px 10px var(--tm-gutter); border-top: 1px solid var(--hair); background: var(--surface); animation: tm-toast-in var(--motion-standard) var(--ease-out); }
+/* The request bar's controls end 16px above the sheet, on the same line as an open side panel's composer. */
+.tm-review__request { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; padding: 16px var(--tm-gutter); border-top: 1px solid var(--hair); background: var(--surface); animation: tm-toast-in var(--motion-standard) var(--ease-out); }
 .tm-review__request-summary { color: var(--text-soft); font-size: var(--t-body); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .tm-review__note { display: flex; flex: 1; min-width: 0; }
 .tm-review__note input { flex: 1; min-width: 0; height: var(--h-control); padding: 0 12px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-body); }
