@@ -1,34 +1,33 @@
 #!/usr/bin/env node
 
+// Stdio MCP server launched by an agent provider. It forwards tool listing and
+// tool calls to the Task Monki client-tool bridge over loopback HTTP, carrying
+// the session credential and the current turn grant.
+
 import fs from 'node:fs/promises';
 import http from 'node:http';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_BRIDGE_RESPONSE_BYTES = 8 * 1024 * 1024;
-const SUPPORTED_PROTOCOL_VERSIONS = new Set([
-  '2024-11-05',
-  '2025-03-26',
-  '2025-06-18'
-]);
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
 const LATEST_PROTOCOL_VERSION = '2025-06-18';
-const endpoint = requiredEnvironment('TASK_MONKI_DESIGN_TOOL_ENDPOINT');
-const sessionCredential = requiredEnvironment(
-  'TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL'
-);
-const grantFile = requiredEnvironment('TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE');
+const endpoint = requiredEnvironment('TASK_MONKI_CLIENT_TOOL_ENDPOINT');
+const sessionCredential = requiredEnvironment('TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL');
+const grantFile = requiredEnvironment('TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE');
 const endpointUrl = new URL(endpoint);
 if (
   endpointUrl.protocol !== 'http:' ||
   endpointUrl.hostname !== '127.0.0.1' ||
-  endpointUrl.pathname !== '/design-tool' ||
+  endpointUrl.pathname !== '/client-tool' ||
   endpointUrl.username ||
   endpointUrl.password
 ) {
-  throw new Error('The Task Monki Design tool endpoint is invalid.');
+  throw new Error('The Task Monki client-tool endpoint is invalid.');
 }
 
 let input = Buffer.alloc(0);
 let queue = Promise.resolve();
+let toolNames = new Set();
 
 process.stdin.on('data', (chunk) => {
   input = Buffer.concat([input, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
@@ -85,7 +84,7 @@ async function handleLine(line) {
             ? requested
             : LATEST_PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: 'task-monki-design-tools', version: '1.0.0' }
+        serverInfo: { name: 'task-monki-tools', version: '2.0.0' }
       });
       return;
     }
@@ -94,44 +93,41 @@ async function handleLine(line) {
       return;
     case 'tools/list': {
       try {
-        const bridge = await callBridge({ method: 'definition' });
-        if (!bridge.ok || !bridge.definition) {
-          throw new Error(bridge.error || 'The Design tool definition is unavailable.');
+        const bridge = await callBridge({ method: 'definitions' });
+        if (!bridge.ok || !Array.isArray(bridge.definitions)) {
+          throw new Error(bridge.error || 'The tool definitions are unavailable.');
         }
-        await writeResult(request.id, { tools: [bridge.definition] });
+        toolNames = new Set(bridge.definitions.map((definition) => definition.name));
+        await writeResult(request.id, { tools: bridge.definitions });
       } catch (error) {
         await writeError(request.id, -32603, safeMessage(error));
       }
       return;
     }
     case 'tools/call': {
+      const name = request.params?.name;
       if (
-        !request.params ||
-        request.params.name !== 'inspect_design' ||
+        typeof name !== 'string' ||
+        (toolNames.size > 0 && !toolNames.has(name)) ||
         !Object.prototype.hasOwnProperty.call(request.params, 'arguments')
       ) {
         await writeResult(request.id, {
-          content: [{ type: 'text', text: 'Only inspect_design is available.' }],
+          content: [{ type: 'text', text: 'Only the listed Task Monki tools are available.' }],
           isError: true
         });
         return;
       }
       try {
         const bridge = await callBridge(
-          { method: 'call', arguments: request.params.arguments },
-          await readTurnCredential()
+          { method: 'call', name, arguments: request.params.arguments },
+          await readTurnCredential(name)
         );
         await writeResult(request.id, {
-          content: bridge.content ?? [
-            { type: 'text', text: bridge.error || 'The Design browser operation failed.' }
-          ],
+          content: bridge.content ?? [{ type: 'text', text: bridge.error || 'The tool operation failed.' }],
           ...(bridge.ok ? {} : { isError: true })
         });
       } catch (error) {
-        await writeResult(request.id, {
-          content: [{ type: 'text', text: safeMessage(error) }],
-          isError: true
-        });
+        await writeResult(request.id, { content: [{ type: 'text', text: safeMessage(error) }], isError: true });
       }
       return;
     }
@@ -151,9 +147,7 @@ async function callBridge(body, turnCredential) {
           authorization: `Bearer ${sessionCredential}`,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
-          ...(turnCredential
-            ? { 'x-task-monki-design-grant': turnCredential }
-            : {})
+          ...(turnCredential ? { 'x-task-monki-client-tool-grant': turnCredential } : {})
         }
       },
       (response) => {
@@ -163,7 +157,7 @@ async function callBridge(body, turnCredential) {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           size += bytes.byteLength;
           if (size > MAX_BRIDGE_RESPONSE_BYTES) {
-            response.destroy(new Error('The Design tool response is too large.'));
+            response.destroy(new Error('The tool response is too large.'));
             return;
           }
           chunks.push(bytes);
@@ -183,19 +177,19 @@ async function callBridge(body, turnCredential) {
   });
 }
 
-async function readTurnCredential() {
+async function readTurnCredential(name) {
   let value;
   try {
     value = await fs.readFile(grantFile, 'utf8');
   } catch (error) {
     if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      throw new Error('inspect_design is available only in the current active Design Run.');
+      throw new Error(`${name} is available only in the current active run.`);
     }
     throw error;
   }
   const credential = value.trim();
   if (!/^[A-Za-z0-9_-]{43}$/u.test(credential)) {
-    throw new Error('The active Design tool grant is invalid.');
+    throw new Error('The active tool grant is invalid.');
   }
   return credential;
 }
@@ -207,9 +201,7 @@ function isRequest(value) {
       !Array.isArray(value) &&
       value.jsonrpc === '2.0' &&
       typeof value.method === 'string' &&
-      (typeof value.id === 'string' ||
-        typeof value.id === 'number' ||
-        value.id === undefined)
+      (typeof value.id === 'string' || typeof value.id === 'number' || value.id === undefined)
   );
 }
 
@@ -235,13 +227,7 @@ function requiredEnvironment(name) {
 
 function safeMessage(error) {
   const message = (error instanceof Error ? error.message : String(error)).trim();
-  if (
-    message.length > 0 &&
-    message.length <= 1_000 &&
-    !message.includes('/') &&
-    !message.includes('\\')
-  ) {
-    return message;
-  }
-  return 'The Design browser operation failed.';
+  return message.length > 0 && message.length <= 1_000 && !message.includes('/') && !message.includes('\\')
+    ? message
+    : 'The tool operation failed.';
 }

@@ -46,7 +46,9 @@ import {
   type DesignCanvasRefreshRequest,
   type DesignCanvasShowRequest
 } from './DesignCanvas';
+import type { NotificationTone } from './AppOverlays';
 import { DesignRepositorySetup } from './DesignRepositorySetup';
+import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { DesignConversation } from './DesignConversation';
 import { DesignFilesDrawer } from './DesignFilesDrawer';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
@@ -103,6 +105,11 @@ export interface DesignsWorkspaceProps {
   designs: readonly DesignProjectSummary[];
   selectedDesignId?: string;
   project?: DesignProjectDetail;
+  /** The selected repository Design's Preview conversation and proposal review, shared with tasks. */
+  previewAgent?: PreviewAgentConversation;
+  previewProposals?: PreviewProposalActions;
+  /** Confirms completed Preview actions, such as a saved preview.yaml. */
+  onNotify?(message: string, tone?: NotificationTone): void;
   draft?: DesignDraftRecord | null;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
@@ -170,6 +177,9 @@ export function DesignsWorkspace({
   designs,
   selectedDesignId,
   project,
+  previewAgent,
+  previewProposals,
+  onNotify,
   draft = null,
   models,
   runtimes,
@@ -659,7 +669,7 @@ export function DesignsWorkspace({
                     key={project.design.id}
                     project={project}
                     setup={project.repository.kind === 'USER_REGISTERED' && project.task.workflowPhase !== 'ARCHIVED' && onUpdateProject ? (
-                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject}
+                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject} agent={previewAgent} proposals={previewProposals} onNotify={onNotify}
                         onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
                         onModalOpenChange={setPreviewSetupModalOpen} />
                     ) : undefined}

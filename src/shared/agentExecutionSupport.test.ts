@@ -13,7 +13,7 @@ describe('projectAgentExecutionSupport', () => {
       supported: true
     });
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT')
     ).toEqual({ supported: true });
     expect(projectAgentExecutionSupport(capabilities, 'DISCOURSE')).toEqual({
       supported: true
@@ -47,23 +47,19 @@ describe('projectAgentExecutionSupport', () => {
     }
   });
 
-  it('does not use runtime or model allowlists for Preview generation', () => {
+  it('does not use runtime or model allowlists for the Preview agent', () => {
     const capabilities = supportedCapabilities({
       readOnlyTurns: {
         maturity: 'unsupported',
         detail: 'This profile can still mutate a repository.'
-      },
-      extensions: {
-        ...supportedCapabilities().extensions,
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
       }
     });
 
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION')
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT')
     ).toEqual({ supported: true });
     expect(
-      projectAgentExecutionSupport(capabilities, 'PREVIEW_RECIPE_GENERATION', {
+      projectAgentExecutionSupport(capabilities, 'PREVIEW_AGENT', {
         model: {
           inputModalities: ['text']
         }
@@ -72,6 +68,23 @@ describe('projectAgentExecutionSupport', () => {
     expect(projectAgentExecutionSupport(capabilities, 'REVIEW')).toEqual({
       supported: true
     });
+  });
+
+  it('refuses the Preview agent only where the runtime reports it cannot hold the conversation', () => {
+    // Grok Build's read-only turns run in a dedicated process that denies Task Monki tools.
+    const capabilities = supportedCapabilities();
+    const refused = {
+      ...capabilities,
+      extensions: {
+        ...capabilities.extensions,
+        'task-monki.preview-agent': { maturity: 'unsupported' as const, detail: 'Read-only work runs in a separate process.' }
+      }
+    };
+    expect(projectAgentExecutionSupport(refused, 'PREVIEW_AGENT')).toEqual({
+      supported: false,
+      reason: 'Read-only work runs in a separate process.'
+    });
+    expect(projectAgentExecutionSupport(refused, 'REVIEW')).toEqual({ supported: true });
   });
 
   it('requires the complete current Design contract and uses the read-only turn capability for Discourse', () => {

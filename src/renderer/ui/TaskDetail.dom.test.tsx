@@ -1,4 +1,4 @@
-import type { ComponentProps } from 'react';
+import { useState, type ComponentProps } from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
@@ -8,25 +8,41 @@ import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '
 import { TaskDetail } from './TaskDetail';
 
 vi.mock('../api/taskManagerClient', () => ({
-  taskManagerApi: { readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n') }
+  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n') }
 }));
 
 function detailProps(): ComponentProps<typeof TaskDetail> {
   return {
     attachmentOptions: { enabled: true, onStageBatch: vi.fn(), onDiscard: vi.fn() },
-    agentInstructions: [], agentDraft: '', onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
+    agentInstructions: [], agentDraft: '', onPrepareTaskAgent: vi.fn(), onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1', projection: { worktree: 'PRESENT', git: 'DIRTY' } }),
     repository: { id: 'repository-1', kind: 'USER_REGISTERED', name: 'Project', path: '/tmp/project', status: 'AVAILABLE', remotes: [], createdAt: TEST_NOW, updatedAt: TEST_NOW },
     worktree: { id: 'worktree-1', taskId: 'task-1', repositoryId: 'repository-1', iterationId: 'iteration-1', ownership: 'EXTERNAL', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'main', baseSha: 'abc123', status: 'PRESENT', createdAt: TEST_NOW, updatedAt: TEST_NOW },
     gitSnapshot: makeGitSnapshotRecord({ status: 'DIRTY', untrackedCount: 1 }),
     gitSnapshots: [], events: [], runs: [], sessions: [], items: [], goalSnapshots: [], planRevisions: [], usageSnapshots: [], settingsObservations: [], subagentObservations: [], artifacts: [], attachments: [], interactions: [],
     showMascot: false,
-    onPrepareWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onGetPreviewRecipeGeneration: vi.fn(), onGeneratePreviewRecipe: vi.fn(), onValidatePreviewRecipeDraft: vi.fn(), onAcceptPreviewRecipeDraft: vi.fn(), onDiscardPreviewRecipeDraft: vi.fn(), onWritePreviewRecipeManually: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
+    onPrepareWorktree: vi.fn(), onRestoreWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
     onListExistingWorktrees: vi.fn(async () => []), onReconnectWorktree: vi.fn(), onUpdateWorktreeComparison: vi.fn(), onRefreshEvidence: vi.fn()
   };
 }
 
 describe('imported task actions', () => {
+  it('keeps the detached Preview conversation out of implementation activity', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = detailProps();
+    const previewRun = makeRunRecord({ id: 'preview-run', mode: 'PREVIEW', status: 'COMPLETED' });
+    props.events = [{ id: 'preview-complete', type: 'AGENT_RUN_COMPLETED', taskId: props.task!.id,
+      runId: previewRun.id, source: 'provider', sourceEventId: 'preview-complete',
+      occurredAt: TEST_NOW, receivedAt: TEST_NOW, payload: {} }];
+    props.previewAgent = {
+      runs: [previewRun], items: [], instructions: [], interactions: [], sessions: [], plans: [],
+      models: [], runtimes: [], defaults: { runtimeId: 'codex' },
+      send: vi.fn(), stop: vi.fn(), editQueued: vi.fn(), respond: vi.fn()
+    };
+    render(<TaskDetail {...props} />);
+    expect(screen.queryByText(/latest Implementation completed/i)).toBeNull();
+  });
+
   it('does not replace a missing historical capture with current Git evidence', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();
@@ -195,6 +211,42 @@ describe('imported task actions', () => {
 });
 
 describe('Agent pre-run setup', () => {
+  it('reviews a Preview handoff in the initial prompt and stays in Preview if the draft cannot be saved', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    Object.assign(props, readyRuntime());
+    let failSave = true;
+    const prepare = vi.fn(async (text: string) => {
+      if (failSave) throw new Error('Draft storage unavailable');
+      return `${props.task!.prompt}\n\n${text}`;
+    });
+    function Harness() {
+      const [task, setTask] = useState(props.task!);
+      return <TaskDetail {...props} task={task} {...{ onPrepareTaskAgent: async (text: string) => {
+        const promptDraft = await prepare(text);
+        setTask({ ...task, promptDraft });
+      } }} />;
+    }
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+    fireEvent.keyDown(await screen.findByRole('button', { name: 'More preview actions' }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Send to task agent' }));
+    await screen.findByText('Draft storage unavailable');
+    expect(screen.getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')).toBe('true');
+    failSave = false;
+    fireEvent.keyDown(screen.getByRole('button', { name: 'More preview actions' }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Send to task agent' }));
+    const editor = await screen.findByRole('textbox', { name: 'Task prompt' });
+    expect((editor as HTMLTextAreaElement).value).toContain('Inspect preview.yaml');
+    expect((editor as HTMLTextAreaElement).value).toContain(props.task!.prompt);
+    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: 'Start implementation' })).toHaveProperty('disabled', true);
+    expect(props.onStart).not.toHaveBeenCalled();
+    expect(props.onAgentDraftChange).not.toHaveBeenCalled();
+  });
+
   it('keeps an edited prompt and prevents preparation until an explicit save succeeds', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });

@@ -4,7 +4,8 @@ export type FocusedPanel =
   | 'design-history'
   | 'design-conversation'
   | 'discourse-history'
-  | 'discourse-inspector';
+  | 'discourse-inspector'
+  | 'preview-agent';
 export type SavedDesignLayout = 'chat' | 'split' | 'canvas';
 
 interface WorkspaceLayoutPreferences {
@@ -12,6 +13,8 @@ interface WorkspaceLayoutPreferences {
   historyCollapsed: Partial<Record<FocusedWorkspace, boolean>>;
   panelWidths: Partial<Record<FocusedPanel, number>>;
   designLayout?: SavedDesignLayout;
+  /** Whether the docked Preview agent panel is open. */
+  previewAgentOpen?: boolean;
 }
 
 interface LayoutStorage {
@@ -46,7 +49,7 @@ function readPreferences(storage: LayoutStorage | undefined): WorkspaceLayoutPre
       panelWidths: Object.fromEntries(
         Object.entries(parsed.panelWidths ?? {}).filter(
           (entry): entry is [FocusedPanel, number] =>
-            ['app-navigation', 'design-history', 'design-conversation', 'discourse-history', 'discourse-inspector']
+            ['app-navigation', 'design-history', 'design-conversation', 'discourse-history', 'discourse-inspector', 'preview-agent']
               .includes(entry[0]) &&
             typeof entry[1] === 'number' &&
             Number.isFinite(entry[1])
@@ -54,7 +57,8 @@ function readPreferences(storage: LayoutStorage | undefined): WorkspaceLayoutPre
       ),
       ...(['chat', 'split', 'canvas'].includes(parsed.designLayout ?? '')
         ? { designLayout: parsed.designLayout as SavedDesignLayout }
-        : {})
+        : {}),
+      ...(typeof parsed.previewAgentOpen === 'boolean' ? { previewAgentOpen: parsed.previewAgentOpen } : {})
     };
   } catch {
     return { version: 1, historyCollapsed: {}, panelWidths: {} };
@@ -81,13 +85,11 @@ export function persistFocusedWorkspaceHistoryCollapsed(
   if (!storage) return;
   const current = readPreferences(storage);
   storage.setItem(LAYOUT_PREFERENCES_KEY, JSON.stringify({
-    version: 1,
+    ...current,
     historyCollapsed: {
       ...current.historyCollapsed,
       [workspace]: collapsed
-    },
-    panelWidths: current.panelWidths,
-    ...(current.designLayout ? { designLayout: current.designLayout } : {})
+    }
   } satisfies WorkspaceLayoutPreferences));
 }
 
@@ -130,5 +132,21 @@ export function persistDesignLayout(
   storage.setItem(LAYOUT_PREFERENCES_KEY, JSON.stringify({
     ...current,
     designLayout: layout
+  } satisfies WorkspaceLayoutPreferences));
+}
+
+export function previewAgentOpen(storage: LayoutStorage | undefined = browserStorage()): boolean {
+  return readPreferences(storage).previewAgentOpen ?? false;
+}
+
+export function persistPreviewAgentOpen(
+  open: boolean,
+  storage: LayoutStorage | undefined = browserStorage()
+): void {
+  if (!storage) return;
+  const current = readPreferences(storage);
+  storage.setItem(LAYOUT_PREFERENCES_KEY, JSON.stringify({
+    ...current,
+    previewAgentOpen: open
   } satisfies WorkspaceLayoutPreferences));
 }

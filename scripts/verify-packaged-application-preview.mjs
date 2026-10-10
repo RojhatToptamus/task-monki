@@ -49,7 +49,7 @@ async function approve(service,tree,id) {
     const password='SYNTHETIC_packaged_password';
     const secret='SYNTHETIC_packaged_value';
     await service.secrets.unlock({password,confirmation:password,create:true});
-    const initial=await service.start(tree,'file');
+    const initial=await service.start(tree);
     while(!(await service.read(tree)).approval) await new Promise(resolve=>setTimeout(resolve,25));
     await assert.rejects(service.approve(tree,initial.status.candidate.id), error => error.message.includes('fixture/dev/token'));
     assert.equal((await service.read(tree)).approval.secrets[0].availability,'missing');
@@ -59,11 +59,15 @@ async function approve(service,tree,id) {
     const ready=await approve(service,tree,initial.status.candidate.id);
     assert.equal(await(await fetch(ready.url)).text(),'packaged');
     assert.ok(!(await service.owner().logs(service.name(tree),ready.id)).text.includes(secret));
-    const update=await service.start(tree,'file');
+    await service.secrets.lock();
+    const update=await service.start(tree);
+    while(!(await service.read(tree)).approval) await new Promise(resolve=>setTimeout(resolve,25));
+    await assert.rejects(service.approve(tree,update.status.candidate.id),/locked/);
+    await service.secrets.unlock({password});
     await service.owner().cancel(service.name(tree),update.status.candidate.id);
     assert.equal(await(await fetch(ready.url)).text(),'packaged');
     await fs.writeFile(path.join(source,'preview.yaml'),JSON.stringify({name:'packaged',type:'command',cwd:'.',command:[${JSON.stringify(process.execPath)},'-e',"console.error('fixture command failed');process.exit(2)"]}));
-    const failedUpdate=await service.start(tree,'file');
+    const failedUpdate=await service.start(tree);
     while(!(await service.read(tree)).approval) await new Promise(resolve=>setTimeout(resolve,25));
     await service.approve(tree,failedUpdate.status.candidate.id);
     const failed=await service.owner().wait(service.name(tree),failedUpdate.status.candidate.id);
@@ -71,7 +75,7 @@ async function approve(service,tree,id) {
     assert.match((await service.owner().logs(service.name(tree),failed.id)).text,/fixture command failed/);
     assert.equal(await(await fetch(ready.url)).text(),'packaged');
     await fs.writeFile(path.join(source,'preview.yaml'),JSON.stringify({name:'packaged',type:'command',cwd:'.',command:[${JSON.stringify(process.execPath)},'app.cjs'],env:{TOKEN:{secret:'fixture/dev/token'}}}));
-    const restored=await service.start(tree,'file');
+    const restored=await service.start(tree);
     await approve(service,tree,restored.status.candidate.id);
     await service.close();
     await assert.rejects(fetch(ready.url));
@@ -81,7 +85,7 @@ async function approve(service,tree,id) {
     assert.equal(stopped.status.active,undefined);
     assert.equal(stopped.status.latest.state,'stopped');
     await service.secrets.unlock({password});
-    const restarted=await service.start(tree,'retained');
+    const restarted=await service.start(tree);
     const second=await approve(service,tree,restarted.status.candidate.id);
     assert.equal(await(await fetch(second.url)).text(),'packaged');
     await service.retireWorktree(tree);
@@ -91,10 +95,10 @@ async function approve(service,tree,id) {
     await fs.writeFile(path.join(setupSource,'index.html'),'first setup');
     const setupTree={id:'first-setup',worktreePath:setupSource};
     assert.equal((await service.inspectSetup(setupTree)).recommendations[0].type,'static');
-    await service.createConfiguration(setupTree,{taskId:'setup',type:'static',directory:'.'});
+    await service.saveFile(setupTree,undefined,JSON.stringify({name:'application',type:'static',directory:'.'}));
     assert.equal((await service.read(setupTree)).status,undefined);
-    await assert.rejects(service.createConfiguration(setupTree,{taskId:'setup',type:'static',directory:'.'}),/already exists/);
-    const setupPending=await service.start(setupTree,'file');
+    await assert.rejects(service.saveFile(setupTree,undefined,JSON.stringify({name:'application',type:'static',directory:'.'})),/already exists|changed/);
+    const setupPending=await service.start(setupTree);
     const setupReady=await approve(service,setupTree,setupPending.status.candidate.id);
     assert.equal(await(await fetch(setupReady.url)).text(),'first setup');
     await service.retireWorktree(setupTree);
@@ -106,10 +110,73 @@ async function approve(service,tree,id) {
     assert.equal(before.fileSources[0].connected,false);
     await service.connectSource(setupTree,{taskId:'setup',service:'web',directory:external,expected:{active:null,candidate:null,latest:null}});
     assert.equal((await service.read(setupTree)).status,undefined);
-    const connected=await service.start(setupTree,'file');
+    const otherFolder=path.join(root,'unconnected external folder');
+    await fs.mkdir(otherFolder);
+    await fs.rename(external,external+' original');
+    await fs.symlink(otherFolder,external);
+    try {
+      assert.equal((await service.read(setupTree)).fileSources[0].connected,false);
+      await assert.rejects(service.start(setupTree),/Connect/);
+    } finally {
+      await fs.unlink(external);
+      await fs.rename(external+' original',external);
+    }
+    const connected=await service.start(setupTree);
     const externalReady=await approve(service,setupTree,connected.status.candidate.id);
     assert.equal(await(await fetch(externalReady.url)).text(),'external folder');
     await service.retireWorktree(setupTree);
+    const fresh=path.join(root,'fresh dependency project');
+    await fs.mkdir(path.join(fresh,'server-package'),{recursive:true});
+    const manifest={name:'preview-fixture',version:'1.0.0',dependencies:{'fixture-server':'file:./server-package'}};
+    await fs.writeFile(path.join(fresh,'package.json'),JSON.stringify(manifest));
+    await fs.writeFile(path.join(fresh,'package-lock.json'),JSON.stringify({name:'preview-fixture',version:'1.0.0',lockfileVersion:3,requires:true,packages:{'':manifest,'node_modules/fixture-server':{resolved:'server-package',link:true},'server-package':{name:'fixture-server',version:'1.0.0',bin:{'fixture-server':'server.cjs'}}}}));
+    await fs.writeFile(path.join(fresh,'server-package/package.json'),JSON.stringify({name:'fixture-server',version:'1.0.0',bin:{'fixture-server':'server.cjs'}}));
+    await fs.writeFile(path.join(fresh,'server-package/server.cjs'),"#!/usr/bin/env node\\nrequire('http').createServer((q,r)=>r.end('installed dependency')).listen(Number(process.env.PORT),'127.0.0.1');");
+    const freshSpec={name:'portable-project',type:'environment',primary:'web',services:{install:{type:'job',cwd:'.',command:['npm','ci','--offline','--no-audit','--no-fund']},web:{type:'command',cwd:'.',command:['./node_modules/.bin/fixture-server'],dependsOn:['install']}}};
+    const freshTree={id:'fresh-dependencies',worktreePath:fresh};
+    await service.saveFile(freshTree,undefined,JSON.stringify(freshSpec));
+    await assert.rejects(fs.access(path.join(fresh,'node_modules')));
+    const freshPending=await service.start(freshTree);
+    const freshReady=await approve(service,freshTree,freshPending.status.candidate.id);
+    assert.equal(await(await fetch(freshReady.url)).text(),'installed dependency');
+    const review=await service.start(freshTree);
+    assert.ok(review.restartReview);
+    await service.cancel(freshTree,review.restartReview.id);
+    assert.equal(await(await fetch(freshReady.url)).text(),'installed dependency');
+    const restartReview=await service.start(freshTree);
+    await service.approve(freshTree,restartReview.restartReview.id);
+    let newId;
+    const restartDeadline=Date.now()+10000;
+    while(!newId){const next=await service.read(freshTree);newId=next.status.candidate?.id??(next.status.latest?.id!==freshReady.id?next.status.latest?.id:undefined);if(Date.now()>restartDeadline)throw Error('Restart candidate did not arrive');if(!newId)await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.equal((await service.owner().wait(service.name(freshTree),newId)).state,'ready');
+    assert.equal((await service.read(freshTree)).approval,undefined);
+    const deniedRestart=await service.start(freshTree);
+    const moved=fresh+' original';
+    const unexpected=path.join(root,'unconnected replacement');
+    await fs.mkdir(unexpected);
+    await fs.writeFile(path.join(unexpected,'preview.yaml'),JSON.stringify(freshSpec));
+    await fs.rename(fresh,moved);
+    await fs.symlink(unexpected,fresh);
+    try {
+      await assert.rejects(service.approve(freshTree,deniedRestart.restartReview.id),/source folder changed/);
+      assert.equal((await service.owner().get(service.name(freshTree))).active.id,newId);
+    } finally {
+      await fs.unlink(fresh);
+      await fs.rename(moved,fresh);
+    }
+    const refusedReview=await service.start(freshTree);
+    const originalStart=service.owner().start;
+    service.owner().start=async()=>{throw Error('Synthetic pre-admission failure');};
+    try {
+      await assert.rejects(service.approve(freshTree,refusedReview.restartReview.id),/previous preview stopped.*replacement could not start/);
+      const refused=await service.owner().get(service.name(freshTree));
+      assert.equal(refused.active,undefined);
+      assert.equal(refused.candidate,undefined);
+    } finally { service.owner().start=originalStart; }
+    const corrected=await service.start(freshTree);
+    const correctedReady=await approve(service,freshTree,corrected.status.candidate.id);
+    assert.equal(await(await fetch(correctedReady.url)).text(),'installed dependency');
+    await service.retireWorktree(freshTree);
     const brokenModule=path.join(root,'broken-supervisor.mjs');
     await fs.writeFile(brokenModule,"process.stderr.write('bootstrap diagnostic');await import('task-monki-fixture-missing-module');");
     const broken=new ApplicationPreviewService({...options,root:path.join(root,'broken-profile'),supervisor:{...options.supervisor,module:brokenModule}});
@@ -117,21 +184,21 @@ async function approve(service,tree,id) {
     try {
       await broken.secrets.unlock({password,confirmation:password,create:true});
       await broken.secrets.create({id:'fixture/dev/token',value:secret});
-      const attempt=await broken.start(tree,'file');
+      const attempt=await broken.start(tree);
       while(!(await broken.read(tree)).approval) await new Promise(resolve=>setTimeout(resolve,25));
       await broken.approve(tree,attempt.status.candidate.id);
       const result=await broken.owner().wait(broken.name(tree),attempt.status.candidate.id);
       assert.equal(result.error.code,'SUPERVISOR_FAILED');
       assert.match((await broken.owner().logs(broken.name(tree),result.id)).text,/task-monki-fixture-missing-module/);
     } finally {await broken.close();}
-    process.stdout.write(JSON.stringify({status:'passed',checks:['packaged CommonJS consumer','Electron supervisor','profile SQLite keystore','synthetic secret redaction','cancellation preserves serving app','stop and restart persistence','paths with spaces','owned cleanup','missing secret blocks approval','saving does not approve','failed replacement preserves serving app','first-time save and start','explicit external folder connection','supervisor startup diagnostics']})+'\\n');
+    process.stdout.write(JSON.stringify({status:'passed',checks:['packaged CommonJS consumer','Electron supervisor','profile SQLite keystore','synthetic secret redaction','cancellation preserves serving app','stop and restart persistence','paths with spaces','owned cleanup','missing secret blocks approval','saving does not approve','failed replacement preserves serving app','first-time save and start','explicit external folder connection','supervisor startup diagnostics','locked storage blocks approval','fresh dependency installation','restart review cancel and approve','source identity change requires reconnection','source identity change cancels restart before stopping','forced pre-admission failure leaves stopped preview','corrected file starts after refused restart']})+'\\n');
   } finally {await service.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
 `);
 let verified = false;
 try {
   const child = spawn(executable, [fixture], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: 'inherit' });
-  const timer = setTimeout(() => child.kill('SIGTERM'), 45_000);
+  const timer = setTimeout(() => child.kill('SIGTERM'), 90_000);
   try {
     const [code, signal] = await once(child, 'exit');
     assert.equal(signal, null, `Packaged verification interrupted by ${signal}`);

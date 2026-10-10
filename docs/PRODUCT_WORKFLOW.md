@@ -92,7 +92,8 @@ A moved base requires a new selection.
 
 The queued brief waits for a valid `preview.yaml`, an application
 route and entry path, Preview approval, and required private inputs. Preview
-setup uses the same controls as task Preview in the Design canvas. Configuration
+setup uses the same controls as task Preview in the Design canvas, including the
+Preview agent, which can draft `preview.yaml` for review. Configuration
 and approval open there when required; Preview setup remains available from the
 canvas toolbar. The conversation panel contains chat.
 The agent can diagnose startup failures after these prerequisites are met.
@@ -123,9 +124,8 @@ untracked, or ignored files. The repository and branch remain available.
 First-launch defaults, New Task, and Settings use the same runtime/model
 selector. Implementation defaults can use every enabled runtime.
 Prompt refinement, review, and Discourse use one shared read-only support projection.
-All ready runtimes and models can use this path. Preview recipe generation normally
-uses that path. An adapter can instead use the app-owned disposable
-evidence copy, which contains no source repository path.
+All ready runtimes and models can use this path. The Preview agent is a
+task-bound read-only conversation that every enabled runtime and model can run.
 An unavailable or unauthenticated runtime remains visible with its exact readiness reason.
 Reasoning choices come from the selected model's native catalog.
 

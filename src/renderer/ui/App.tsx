@@ -17,6 +17,7 @@ import {
   type Board,
   type BoardSnapshot,
   type AgentExecutionSettings,
+  type RunRecord,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
@@ -46,6 +47,7 @@ import type {
 } from '../../shared/designCanvas';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { partitionPreviewAgentRecords, type AgentConversationRecords } from '../model/previewAgentRecords';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   selectActiveRun,
@@ -114,6 +116,7 @@ import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
+import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { PreviewsPage, type PreviewsPageState } from './PreviewsPage';
 import { PanelResizeHandle } from './PanelResizeHandle';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
@@ -183,6 +186,9 @@ function retainTaskEntries<T>(
     : Object.fromEntries(retainedEntries);
 }
 
+const EMPTY_RUNS: RunRecord[] = [];
+const EMPTY_PREVIEW_AGENT_RECORDS: AgentConversationRecords = { runs: [], items: [], instructions: [], interactions: [], sessions: [], plans: [] };
+
 function isPreviewRecipeGenerationSnapshot(
   value: unknown
 ): value is PreviewRecipeGenerationSnapshot {
@@ -190,7 +196,7 @@ function isPreviewRecipeGenerationSnapshot(
   const candidate = value as { taskId?: unknown; status?: unknown };
   return (
     typeof candidate.taskId === 'string' &&
-    ['EMPTY', 'GENERATING', 'READY', 'NEEDS_INPUT', 'FAILED'].includes(
+    ['EMPTY', 'READY'].includes(
       String(candidate.status)
     )
   );
@@ -544,8 +550,10 @@ export function App() {
       readTaskDetail: (taskId) => taskManagerApi.getTaskDetail(taskId),
       applyBoard: (next) => {
         setSnapshot(next);
+        // The board lists tasks only; the selected Design keeps its proposal under review.
+        const designId = selectedDesignIdRef.current;
         setPreviewRecipeGenerations((current) =>
-          retainTaskEntries(current, next.tasks)
+          retainTaskEntries(current, designId ? [...next.tasks, { id: designId }] : next.tasks)
         );
       },
       applyTaskDetail: (detail) => {
@@ -1514,6 +1522,16 @@ export function App() {
         return;
       }
       const selectedDesignId = selectedDesignIdRef.current;
+      if (
+        event.type === 'preview.recipe-generation.updated' &&
+        isPreviewRecipeGenerationSnapshot(event.payload)
+      ) {
+        const recipeGeneration = event.payload;
+        setPreviewRecipeGenerations((current) => ({
+          ...current,
+          [event.taskId]: recipeGeneration
+        }));
+      }
       const canvasEvent = designCanvasClientEvent(event);
       if (
         canvasEvent?.kind === 'EXTERNAL_LINK_REQUESTED' &&
@@ -1562,16 +1580,6 @@ export function App() {
       }
       if (event.type === 'runtime.updated') {
         runtimeCatalogRefresh.request();
-      }
-      if (
-        event.type === 'preview.recipe-generation.updated' &&
-        isPreviewRecipeGenerationSnapshot(event.payload)
-      ) {
-        const recipeGeneration = event.payload;
-        setPreviewRecipeGenerations((current) => ({
-          ...current,
-          [event.taskId]: recipeGeneration
-        }));
       }
       const refreshPlan = taskDataRefreshPlan(event, {
         open: Boolean(taskDataCoordinator.selectedTaskId()),
@@ -1688,13 +1696,22 @@ export function App() {
     setTaskDetail(undefined);
     taskDataCoordinator.closeTask();
   }, [isLoading, selectedTaskId, snapshot.tasks, taskDataCoordinator]);
-  const selectedRuns = useMemo(
+  // The Preview conversation's runs and records render in the Preview tab, never as the task's run.
+  const selectedRecords = useMemo(
     () =>
       selectedTask && taskDetail
-        ? selectTaskRuns(taskDetail, selectedTask.id)
-        : [],
+        ? partitionPreviewAgentRecords({
+            runs: selectTaskRuns(taskDetail, selectedTask.id),
+            items: taskDetail.agentItems,
+            instructions: taskDetail.taskInstructions,
+            interactions: taskDetail.interactionRequests,
+            sessions: taskDetail.agentSessions,
+            plans: taskDetail.agentPlanRevisions
+          })
+        : undefined,
     [selectedTask, taskDetail]
   );
+  const selectedRuns = selectedRecords?.task.runs ?? EMPTY_RUNS;
   const selectedRun = selectedTask ? selectActiveRun(selectedTask, selectedRuns) : undefined;
   const selectedEvents = useMemo(
     () =>
@@ -1703,11 +1720,11 @@ export function App() {
         : [],
     [selectedTask, taskDetail]
   );
-  const selectedInteractions = selectedTask ? taskDetail?.interactionRequests ?? [] : [];
-  const selectedSessions = selectedTask ? taskDetail?.agentSessions ?? [] : [];
-  const selectedItems = selectedTask ? taskDetail?.agentItems ?? [] : [];
+  const selectedInteractions = selectedRecords?.task.interactions ?? [];
+  const selectedSessions = selectedRecords?.task.sessions ?? [];
+  const selectedItems = selectedRecords?.task.items ?? [];
   const selectedGoals = selectedTask ? taskDetail?.agentGoalSnapshots ?? [] : [];
-  const selectedPlans = selectedTask ? taskDetail?.agentPlanRevisions ?? [] : [];
+  const selectedPlans = selectedRecords?.task.plans ?? [];
   const selectedUsage = selectedTask ? taskDetail?.agentUsageSnapshots ?? [] : [];
   const selectedSettings = selectedTask
     ? taskDetail?.agentSettingsObservations ?? []
@@ -1815,37 +1832,6 @@ export function App() {
   const promptRefinementRuntime = promptRefinementSelection.runtime;
   const configuredPreviewRecipeGenerationRuntimeId =
     appSettings.previewRecipeGenerationRuntimeId ?? appSettings.defaultRuntimeId;
-  const configuredPreviewRecipeGenerationModel = appSettings.previewRecipeGenerationModel
-    ? enabledRuntimeModels.find(
-        (model) =>
-          model.runtimeId === configuredPreviewRecipeGenerationRuntimeId &&
-          (model.id === appSettings.previewRecipeGenerationModel ||
-            model.model === appSettings.previewRecipeGenerationModel) &&
-          (!appSettings.previewRecipeGenerationModelProvider ||
-            model.modelProvider === appSettings.previewRecipeGenerationModelProvider)
-      )
-    : selectModel(
-        enabledRuntimeModels,
-        undefined,
-        configuredPreviewRecipeGenerationRuntimeId,
-        appSettings.previewRecipeGenerationModelProvider
-      );
-  const previewRuntimeSelection = selectConfiguredRuntimeForOperation(
-    enabledRuntimes,
-    configuredPreviewRecipeGenerationRuntimeId,
-    'PREVIEW_RECIPE_GENERATION',
-    { model: configuredPreviewRecipeGenerationModel }
-  );
-  const previewRecipeGenerationSelection =
-    (appSettings.previewRecipeGenerationModel ||
-      appSettings.previewRecipeGenerationModelProvider) &&
-    !configuredPreviewRecipeGenerationModel &&
-    previewRuntimeSelection.runtime
-      ? {
-          unavailableReason:
-            'The selected Preview agent or model is no longer available. Choose another selection.'
-        }
-      : previewRuntimeSelection;
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
   const reviewSelection = selectConfiguredRuntimeForOperation(
@@ -2068,6 +2054,34 @@ export function App() {
     }
   };
 
+  /** Restores a missing managed worktree at its recorded commit. The Preview block states the consent the dialog used to ask for. */
+  const restoreWorktree = async (taskId: string) => {
+    if (worktreePreparationActionRef.current) return;
+    const generation = ++worktreePreparationGenerationRef.current;
+    worktreePreparationActionRef.current = { taskId, generation };
+    setWorktreePreparationActionTaskId(taskId);
+    setError(undefined);
+    try {
+      const result = await withAppAction(() => taskManagerApi.prepareWorktree({ taskId, intent: 'RECOVER' }));
+      if (result.outcome === 'PREPARED') {
+        notify('Worktree restored.', 'success');
+        await refresh();
+      } else if (result.outcome === 'BASE_ALREADY_BOUND') {
+        notify('The worktree base was already set.', 'info');
+        await refresh();
+      } else {
+        reportActionError(new Error('The recorded base moved. Prepare the worktree from the Overview to choose a base.'), 'Failed to restore the worktree.');
+      }
+    } catch (caught) {
+      reportActionError(caught, 'Failed to restore the worktree.');
+    } finally {
+      if (worktreePreparationActionRef.current?.taskId === taskId && worktreePreparationActionRef.current.generation === generation) {
+        worktreePreparationActionRef.current = undefined;
+        setWorktreePreparationActionTaskId(undefined);
+      }
+    }
+  };
+
   const confirmWorktreePreparation = async () => {
     const pending = worktreePreparation;
     if (!pending || pending.busy || worktreePreparationSubmissionRef.current) return;
@@ -2176,10 +2190,12 @@ export function App() {
     return state;
   };
 
-  const generatePreviewRecipe = async (taskId: string, clarification?: string) => {
-    const state = await withAppAction(() => taskManagerApi.generatePreviewRecipe({ taskId, clarification }));
-    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
-    return state;
+  const sendPreviewAgentMessage = async (taskId: string, text: string, id: string, settings?: AgentExecutionSettings) => {
+    await withAppAction(() => taskManagerApi.sendPreviewAgentMessage({ taskId, id, text, settings }));
+  };
+
+  const stopPreviewAgent = async (taskId: string) => {
+    await withAppAction(() => taskManagerApi.stopPreviewAgent({ taskId }));
   };
 
   const validatePreviewRecipeDraft = (
@@ -2200,7 +2216,7 @@ export function App() {
       [taskId]: { taskId, status: 'EMPTY' }
     }));
     await refresh();
-    notify('Preview configuration saved. Start to review and approve it.', 'success');
+    // The Preview panel confirms the save once, the same way for proposals and manual edits.
     return result;
   };
 
@@ -2208,20 +2224,6 @@ export function App() {
     const state = await withAppAction(() => taskManagerApi.discardPreviewRecipeDraft({ taskId }));
     setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
     return state;
-  };
-
-  const writePreviewRecipeManually = async (taskId: string, worktreeId: string) => {
-    try {
-      const result = await taskManagerApi.executeOpenTargetAction({
-        target: { type: 'worktree', worktreeId, taskId },
-        action: 'open'
-      });
-      if (!result.ok) throw new Error(result.message ?? 'Could not open the task worktree.');
-      notify('Worktree opened. Create preview.yaml, then load it in Preview.', 'info');
-    } catch (caught) {
-      reportActionError(caught, 'Could not open the task worktree.');
-      throw caught;
-    }
   };
 
   const readArtifact = async (artifactId: string) => {
@@ -2232,6 +2234,38 @@ export function App() {
       throw caught;
     }
   };
+
+  /** One task's Preview conversation, for a task's Preview tab or a repository Design's setup. */
+  const previewAgentConversation = (
+    taskId: string,
+    records: AgentConversationRecords,
+    respond: PreviewAgentConversation['respond']
+  ): PreviewAgentConversation => ({
+    ...records,
+    models: runtimeModels,
+    runtimes: runtimeCatalog?.runtimes ?? [],
+    defaults: {
+      runtimeId: configuredPreviewRecipeGenerationRuntimeId,
+      model: appSettings.previewRecipeGenerationModel,
+      modelProvider: appSettings.previewRecipeGenerationModelProvider
+    },
+    onDiscoverModels: discoverAgentRuntimeModels,
+    send: (text, id, settings) => sendPreviewAgentMessage(taskId, text, id, settings),
+    stop: () => stopPreviewAgent(taskId),
+    editQueued: async (id, instruction) => {
+      await withAppAction(() => taskManagerApi.editTaskInstruction({ taskId, id, instruction }));
+    },
+    respond,
+    readArtifact
+  });
+
+  const previewProposalActions = (taskId: string): PreviewProposalActions => ({
+    state: previewRecipeGenerations[taskId],
+    get: getPreviewRecipeGeneration,
+    validate: validatePreviewRecipeDraft,
+    accept: acceptPreviewRecipeDraft,
+    discard: discardPreviewRecipeDraft
+  });
 
   const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
     setError(undefined);
@@ -3042,11 +3076,23 @@ export function App() {
               }
             }}
             onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
+            onNotify={notify}
+            onPrepareTaskAgent={async (text) => {
+              if (taskDetail.runs.length) {
+                const draft = agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? '';
+                saveAgentDraft(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
+                await agentDraftWrites.current.get(selectedTask.id)?.work;
+              } else {
+                const prompt = selectedTask.promptDraft ?? selectedTask.prompt;
+                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: `${prompt}\n\n${text}`, draftOnly: true });
+                await refresh();
+              }
+            }}
             onSavePrompt={async (prompt, draftOnly, files) => {
               await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt, draftOnly, ...files });
               if (!draftOnly) await refresh();
             }}
-            agentInstructions={taskDetail.taskInstructions}
+            agentInstructions={selectedRecords?.task.instructions ?? []}
             agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
             agentDraftError={agentDraftErrors[selectedTask.id]}
             onAgentDraftChange={(text) => saveAgentDraft(selectedTask.id, text)}
@@ -3096,9 +3142,6 @@ export function App() {
             runtimes={runtimeCatalog?.runtimes ?? []}
             onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             reviewDisabledReason={reviewDisabledReason}
-            previewRecipeGenerationDisabledReason={
-              previewRecipeGenerationSelection.unavailableReason
-            }
             server={taskDetail.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}
@@ -3107,12 +3150,14 @@ export function App() {
             postRunEvidencePendingRunIds={taskDetail.postRunEvidencePendingRunIds}
             attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
-            previewRecipeGeneration={selectedTask
-              ? previewRecipeGenerations[selectedTask.id]
+            previewAgent={selectedTask && selectedRecords
+              ? previewAgentConversation(selectedTask.id, selectedRecords.preview, respondToInteraction)
               : undefined}
+            previewProposals={selectedTask ? previewProposalActions(selectedTask.id) : undefined}
             showMascot={appSettings.showMascot}
             worktreePreparationPending={worktreePreparationActionTaskId === selectedTask?.id}
             onPrepareWorktree={prepareWorktree}
+            onRestoreWorktree={restoreWorktree}
             onStart={startRun}
             onCancel={cancelRun}
             onSteer={steerRun}
@@ -3129,12 +3174,6 @@ export function App() {
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
-            onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
-            onGeneratePreviewRecipe={generatePreviewRecipe}
-            onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
-            onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
-            onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
-            onWritePreviewRecipeManually={writePreviewRecipeManually}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}
@@ -3192,6 +3231,11 @@ export function App() {
                 ? designDetail
                 : undefined
             }
+            previewAgent={designDetail?.design.id === selectedDesignId && designDetail
+              ? previewAgentConversation(designDetail.design.id, designDetail.previewAgent ?? EMPTY_PREVIEW_AGENT_RECORDS, respondToDesignInteraction)
+              : undefined}
+            previewProposals={selectedDesignId ? previewProposalActions(selectedDesignId) : undefined}
+            onNotify={notify}
             draft={designDraft}
             models={designRuntimeCatalog?.models ?? []}
             runtimes={designRuntimeCatalog?.runtimes ?? []}

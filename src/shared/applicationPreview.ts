@@ -1,6 +1,5 @@
 import type {
   ConfigurationBindingChange,
-  DependencyBinding,
   ConfigurationBindingsInspection,
   LogOptions,
   LogResult,
@@ -11,14 +10,82 @@ import type {
   StopOptions
 } from 'previewhost';
 
+export interface PreviewConfigurationFile {
+  name: 'preview.yaml' | 'preview.yml';
+  text: string;
+}
+export interface PreviewSourceRequirement {
+  service: string;
+  declaration: string;
+  directory: string;
+  connected: boolean;
+  missing?: boolean;
+}
+export type PreviewSecretAvailability = SecretRequirement & {
+  availability: 'available' | 'missing' | 'locked' | 'new' | 'unavailable';
+};
+export interface PreviewFolderImpact {
+  job: string;
+  directory: string;
+  previews: string[];
+}
+export interface PreviewRequirements {
+  storage?: { services: string[]; state: 'new' | 'locked' | 'unlocked' };
+  description?: PreviewDescription;
+  secrets: PreviewSecretAvailability[];
+  connections: string[];
+  sources: PreviewSourceRequirement[];
+}
+export interface PreviewDiagnosis {
+  attemptId: string;
+  service?: string;
+  title: string;
+  summary: string;
+  action:
+    | 'agent'
+    | 'task-agent'
+    | 'install'
+    | 'command'
+    | 'readiness'
+    | 'secrets'
+    | 'source'
+    | 'docker'
+    | 'cleanup'
+    | 'image'
+    | 'logs';
+  actionLabel: string;
+  observed: string;
+  unknown: string;
+  guarantee: string;
+  excerpt?: string;
+  command?: string;
+}
+
 export interface ApplicationPreviewSnapshot {
   name: string;
+  /** Canonical worktree root, matching runtime-resolved source paths in review. */
+  projectDirectory?: string;
   hasConfigurationFile: boolean;
+  configurationChanged?: boolean;
   /** Exact-source attempts belong to Design publication and cannot be edited in place. */
   designAttempts?: string[];
   status?: PreviewStatus;
-  approval?: { attemptId: string; description: PreviewDescription; secrets: Array<SecretRequirement & { availability: 'available' | 'missing' | 'locked' | 'unavailable' }> };
-  fileSources?: Array<{ service: string; directory: string; connected: boolean }>;
+  approval?: {
+    attemptId: string;
+    description: PreviewDescription;
+    secrets: PreviewSecretAvailability[];
+    affected?: PreviewFolderImpact[];
+  };
+  restartReview?: {
+    id: string;
+    description: PreviewDescription;
+    affected: PreviewFolderImpact[];
+  };
+  requirements?: PreviewRequirements;
+  fileSources?: PreviewSourceRequirement[];
+  diagnosis?: PreviewDiagnosis;
+  canRestore?: boolean;
+  restoredRun?: boolean;
   configurationError?: string;
 }
 export interface ApplicationPreviewInstance {
@@ -45,29 +112,50 @@ export interface ApplicationPreviewConfigurationRequest
   changes: ConfigurationBindingChange[];
 }
 export interface ApplicationPreviewRecommendation {
-  type: 'command' | 'static';
+  type: 'static';
   directory: string;
-  command?: string;
   explanation: string;
 }
+/** One thing the project files say about running it; `source` is the file it came from. */
+export interface PreviewProjectFact {
+  label: 'Application' | 'Dependencies' | 'Environment' | 'Services';
+  detail: string;
+  source: string;
+}
 export interface ApplicationPreviewApi {
-  inspectApplicationPreviewSetup(input: ApplicationPreviewRequest): Promise<{ projectDirectory: string; recommendations: ApplicationPreviewRecommendation[] }>;
+  readApplicationPreviewFile(
+    input: ApplicationPreviewRequest & { draftId?: string }
+  ): Promise<{
+    original?: PreviewConfigurationFile;
+    file?: PreviewConfigurationFile;
+    files?: PreviewConfigurationFile[];
+    previous?: PreviewConfigurationFile;
+    reconciliation?: {
+      text: string;
+      changes: string[];
+      concealedKeys: string[];
+    };
+  }>;
+  saveApplicationPreviewFile(
+    input: ApplicationPreviewRequest & {
+      original?: PreviewConfigurationFile;
+      text: string;
+    }
+  ): Promise<ApplicationPreviewSnapshot>;
+  chooseApplicationPreviewFile(
+    input: ApplicationPreviewRequest & {
+      keep: PreviewConfigurationFile['name'];
+      files: PreviewConfigurationFile[];
+    }
+  ): Promise<ApplicationPreviewSnapshot>;
+  inspectApplicationPreviewSetup(input: ApplicationPreviewRequest): Promise<{
+    projectDirectory: string;
+    recommendations: ApplicationPreviewRecommendation[];
+    facts: PreviewProjectFact[];
+  }>;
 
   listApplicationPreviews(): Promise<ApplicationPreviewInstance[]>;
-  connectApplicationPreviewDependency(
-    input: ApplicationPreviewAttemptRequest & {
-      service: string;
-      binding: DependencyBinding;
-      expected: NonNullable<StopOptions['expected']>;
-    }
-  ): Promise<ApplicationPreviewSnapshot>;
-  createApplicationPreviewConfiguration(
-    input: ApplicationPreviewRequest & {
-      type: 'command' | 'static';
-      command?: string;
-      directory: string;
-    }
-  ): Promise<ApplicationPreviewSnapshot>;
+
   connectApplicationPreviewSource(
     input: ApplicationPreviewRequest & {
       attemptId?: string;
@@ -80,7 +168,10 @@ export interface ApplicationPreviewApi {
     input: ApplicationPreviewRequest
   ): Promise<ApplicationPreviewSnapshot>;
   startApplicationPreview(
-    input: ApplicationPreviewRequest & { source: 'file' | 'retained' }
+    input: ApplicationPreviewRequest
+  ): Promise<ApplicationPreviewSnapshot>;
+  startRetainedApplicationPreview(
+    input: ApplicationPreviewRequest
   ): Promise<ApplicationPreviewSnapshot>;
   approveApplicationPreview(
     input: ApplicationPreviewAttemptRequest
@@ -94,7 +185,10 @@ export interface ApplicationPreviewApi {
     input: ApplicationPreviewAttemptRequest
   ): Promise<ApplicationPreviewSnapshot>;
   openApplicationPreview(
-    input: ApplicationPreviewAttemptRequest & { service?: string; worktreeId?: string }
+    input: ApplicationPreviewAttemptRequest & {
+      service?: string;
+      worktreeId?: string;
+    }
   ): Promise<{ url: string; opened: boolean }>;
   readApplicationPreviewLogs(
     input: ApplicationPreviewAttemptRequest & LogOptions
@@ -102,14 +196,7 @@ export interface ApplicationPreviewApi {
   inspectApplicationPreviewConfiguration(
     input: ApplicationPreviewConfigurationRequest
   ): Promise<ConfigurationBindingsInspection>;
-  applyApplicationPreviewConfiguration(
-    input: ApplicationPreviewConfigurationRequest & {
-      expected: NonNullable<StopOptions['expected']>;
-    }
-  ): Promise<ApplicationPreviewSnapshot>;
-  saveApplicationPreviewConfiguration(
-    input: ApplicationPreviewConfigurationRequest
-  ): Promise<{ file: string; externalSources: string[] }>;
+
   rerunApplicationPreviewJob(
     input: ApplicationPreviewAttemptRequest & { job: string }
   ): Promise<ApplicationPreviewSnapshot>;

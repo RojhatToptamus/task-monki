@@ -51,7 +51,8 @@ import type {
   DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
@@ -203,11 +204,11 @@ import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
 import type { DesignPreviewContext } from '../design/DesignPreviewService';
 import type { DesignCanvasCutoverFence } from '../preview/DesignCanvasCutoverFence';
+import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
 import {
-  PreviewRecipeGenerationRunError,
-  PreviewRecipeGenerationService,
-  type PreviewRecipeGenerationRunRequest
-} from '../preview/generation/PreviewRecipeGenerationService';
+  PreviewAgentCoordinator,
+  resolvePreviewAgentExecution
+} from '../preview/agent/PreviewAgentCoordinator';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -253,7 +254,13 @@ import {
   AgentBrowserRuntime,
   type DesignBrowserOwner
 } from '../design/AgentBrowserRuntime';
-import { DesignClientToolBridge } from '../design/DesignClientToolBridge';
+import { ClientToolBridge } from '../agent/clientTools/ClientToolBridge';
+import { resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
+import {
+  INSPECT_DESIGN_TOOL_DEFINITION,
+  safeDesignClientToolFailure
+} from '../design/DesignClientToolContract';
+import { parseInspectDesignOperation } from '../design/AgentBrowserRuntime';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -293,7 +300,8 @@ export class TaskManagerService {
   private readonly designSource?: DesignSourceService;
   private readonly designUpdates?: DesignUpdateCoordinator;
   private readonly designBrowser?: DesignBrowserOwner;
-  private readonly designToolBridge?: DesignClientToolBridge;
+  private readonly clientToolBridge: ClientToolBridge;
+  private readonly previewAgent: PreviewAgentCoordinator;
   private readonly designDrafts?: DesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
@@ -357,9 +365,9 @@ export class TaskManagerService {
       designBrowserScratchRoot?: string;
       designBrowserSocketRoot?: string;
       designBrowserRequireCodeSignature?: boolean;
-      designToolMcpExecutablePath?: string;
-      designToolMcpServerPath?: string;
-      designToolCredentialRoot?: string;
+      clientToolMcpExecutablePath?: string;
+      clientToolMcpServerPath?: string;
+      clientToolCredentialRoot?: string;
       /** Development qualification only; tests an unqualified model and its image-result path. */
       allowCandidateDesignModels?: boolean;
     }
@@ -393,6 +401,12 @@ export class TaskManagerService {
         env: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : undefined
       },
       openHost: options.previewOpenHost,
+      repositoryPath: async worktree => (await this.requireRepository(worktree.repositoryId)).path,
+      previewTitle: async name => {
+        const snapshot = await store.snapshot();
+        const worktree = snapshot.worktrees.find(item => `tm-${item.id}` === name);
+        return snapshot.tasks.find(task => task.id === worktree?.taskId)?.title ?? 'another preview';
+      },
       authorizeDesign: spec => this.designPreviews.authorizes(spec),
       onApproval: async name => {
         const worktree = (await store.snapshot()).worktrees.find(item => `tm-${item.id}` === name);
@@ -426,23 +440,50 @@ export class TaskManagerService {
         'Design Mode requires managed repository, worktree, and canvas owners together.'
       );
     }
-    this.designToolBridge =
-      designOwners && !options.agentRuntimeAdapters
-        ? new DesignClientToolBridge({
-            executablePath: options.designToolMcpExecutablePath ?? process.execPath,
-            serverPath:
-              options.designToolMcpServerPath ??
-              path.join(
-                process.cwd(),
-                'src/core/design/runtime/design-tool-mcp-server.mjs'
-              ),
-            scratchRoot:
-              options.designToolCredentialRoot ??
-              path.join(store.getStorageRoot(), 'design-tool-credentials'),
-            runtimeStore: this.agentRuntimeStore,
-            handler: (input) => this.inspectDesignForAgent(input)
-          })
-        : undefined;
+    this.previewRecipeGenerator =
+      options.previewRecipeGenerator ?? new PreviewRecipeGenerationService();
+    // The coordinator and the bridge are wired before the orchestrator exists; they reach it lazily.
+    this.previewAgent = new PreviewAgentCoordinator({
+      store,
+      agents: {
+        startTurn: (input) => this.agents.startTurn(input),
+        interruptRun: (runId) => this.agents.interruptRun(runId),
+        assertPreviewRepositoryUnchanged: (runId) => this.agents.assertPreviewRepositoryUnchanged(runId)
+      },
+      runtimes: { require: (runtimeId) => this.runtimeRegistry.require(runtimeId) },
+      events,
+      applications: this.applications,
+      proposals: this.previewRecipeGenerator,
+      requireContext: (taskId) => this.requireTaskPreviewContext(taskId),
+      defaultSettings: () => this.previewAgentDefaultSettings(),
+      assertRuntimeUsable: async (adapter) => {
+        this.assertRuntimeEnabled(adapter.descriptor.id);
+        await this.assertRuntimeAllowedInCurrentSurface(adapter);
+      }
+    });
+    this.clientToolBridge = new ClientToolBridge({
+      executablePath: options.clientToolMcpExecutablePath ?? process.execPath,
+      serverPath:
+        options.clientToolMcpServerPath ??
+        resolveClientToolMcpServerPath({ isPackaged: false, resourcesPath: '', appPath: process.cwd() }),
+      scratchRoot:
+        options.clientToolCredentialRoot ??
+        path.join(store.getStorageRoot(), 'client-tool-credentials'),
+      runtimeStore: this.agentRuntimeStore,
+      handlers: [
+        {
+          definition: INSPECT_DESIGN_TOOL_DEFINITION,
+          call: async ({ runId, arguments: value }) => {
+            try {
+              return await this.inspectDesignForAgent({ runId, operation: parseInspectDesignOperation(value) });
+            } catch (error) {
+              throw new Error(safeDesignClientToolFailure(error));
+            }
+          }
+        },
+        ...this.previewAgent.handlers()
+      ]
+    });
     const runtimeAdapters = options.agentRuntimeAdapters ??
       createBuiltInAgentRuntimes(store, taskRuntime, this.agentRuntimeStore, events, {
         cwd: agentCwd,
@@ -452,7 +493,7 @@ export class TaskManagerService {
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools,
         designSkillRoot: options.designSkillRoot,
-        designToolBridge: this.designToolBridge
+        clientToolBridge: this.clientToolBridge
       });
     this.codexAdapter = findCodexRuntimeAdapter(runtimeAdapters);
     this.runtimeRegistry = new AgentRuntimeRegistry(
@@ -470,12 +511,6 @@ export class TaskManagerService {
         allowCandidateDesignModels: this.allowCandidateDesignModels
       }
     );
-    this.previewRecipeGenerator =
-      options.previewRecipeGenerator ??
-      new PreviewRecipeGenerationService(
-        (request) => this.startPreviewRecipeGenerationRuntimeTurn(request),
-        path.join(store.getStorageRoot(), 'preview-recipe-evidence')
-      );
     this.promptRefiner = new PromptRefinementService((request) =>
       this.startPromptRefinementRuntimeTurn(request)
     );
@@ -537,6 +572,7 @@ export class TaskManagerService {
       if (event.type === 'run.terminal' && event.runId) {
         this.trackPostRunEvidence(event.runId);
         void this.designUpdates?.handleRunTerminal(event.runId).catch(() => undefined);
+        void this.dispatchPreviewAgentQueue(event.runId);
         this.scheduleDeferredCodexRuntimeRestart(event.runId);
       }
     });
@@ -583,7 +619,7 @@ export class TaskManagerService {
     if (attachmentDraftIds.length > 0) this.store.retainAttachmentDrafts(attachmentDraftIds);
     await this.agentRuntimeStore.init();
     this.assertInitializing();
-    await this.designToolBridge?.recover();
+    await this.clientToolBridge.recover();
     this.assertInitializing();
     await this.store.init();
     this.assertInitializing();
@@ -605,12 +641,8 @@ export class TaskManagerService {
       this.assertInitializing();
       await this.designBrowser.recover();
       this.assertInitializing();
-      if (this.codexAdapter && this.designUpdates) {
-        this.codexAdapter.setDesignBrowserToolHandler((input) =>
-          this.inspectDesignForAgent(input)
-        );
-      }
     }
+    this.codexAdapter?.setClientToolHandler((input) => this.clientToolBridge.invoke(input));
     this.appSettings = await this.loadBoundarySafeAppSettings();
     this.assertInitializing();
     await this.assertRuntimeEnablementValid(this.appSettings);
@@ -637,19 +669,6 @@ export class TaskManagerService {
       new Set(this.appSettings.disabledRuntimeIds)
     );
     this.assertInitializing();
-    if (this.previewEnabled) {
-      const runtimeState = await this.agentRuntimeStore.snapshot();
-      await this.previewRecipeGenerator.recoverEvidence(
-        new Set(
-          runtimeState.runs.flatMap((run) =>
-            run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
-              ? [run.owner.generationId]
-              : []
-          )
-        )
-      );
-      this.assertInitializing();
-    }
     await this.discourseHost?.initialize();
     this.assertInitializing();
     if (this.agentProviderStartupDisabledReason) return;
@@ -1022,15 +1041,10 @@ export class TaskManagerService {
     ) {
       const runtimeId =
         prospective.previewRecipeGenerationRuntimeId ?? prospective.defaultRuntimeId;
-      const adapter = this.runtimeRegistry.require(runtimeId);
-      await preparePreviewRecipeGenerationExecution(adapter, {
+      await resolvePreviewAgentExecution(this.runtimeRegistry.require(runtimeId), {
         runtimeId,
-        model: prospective.previewRecipeGenerationModel,
-        modelProvider: prospective.previewRecipeGenerationModelProvider,
-        sandbox: 'READ_ONLY',
-        networkAccess: false,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
+        model: prospective.previewRecipeGenerationModel ?? undefined,
+        modelProvider: prospective.previewRecipeGenerationModelProvider ?? undefined
       });
     }
     const newlyDisabledRuntimeIds = prospective.disabledRuntimeIds.filter(
@@ -2184,6 +2198,9 @@ export class TaskManagerService {
       return updates.withExclusiveAccess(input.designId, async () => {
         const detail = await this.store.getDesignDetail(input.designId);
         if (!detail.actions.canArchive) throw new Error('Stop the current Design update before archiving.');
+        if ((await this.store.snapshot()).runs.some((run) => run.taskId === input.designId && run.mode === 'PREVIEW' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
+          throw new Error('Stop the Preview agent before archiving.');
+        }
         await this.designPreviews.stopTask(input.designId);
         await this.agents.releaseTask(input.designId);
         await this.store.archiveDesign(input.designId);
@@ -2287,86 +2304,6 @@ export class TaskManagerService {
       isTerminationError: (cause) =>
         cause instanceof PromptRefinementTerminationUnconfirmedError
     });
-  }
-
-  private async startPreviewRecipeGenerationRuntimeTurn(
-    input: PreviewRecipeGenerationRunRequest
-  ) {
-    this.assertAgentProviderAvailable();
-    const runtimeId =
-      this.appSettings.previewRecipeGenerationRuntimeId ??
-      this.appSettings.defaultRuntimeId;
-    this.assertRuntimeEnabled(runtimeId);
-    const adapter = this.runtimeRegistry.require(runtimeId);
-    await this.assertRuntimeAllowedInCurrentSurface(adapter);
-    let execution;
-    try {
-      execution = await preparePreviewRecipeGenerationExecution(adapter, {
-        runtimeId,
-        model: this.appSettings.previewRecipeGenerationModel,
-        modelProvider: this.appSettings.previewRecipeGenerationModelProvider,
-        sandbox: 'READ_ONLY',
-        networkAccess: false,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      });
-    } catch (cause) {
-      throw new PreviewRecipeGenerationRunError(
-        'UNAVAILABLE',
-        cause instanceof Error ? cause.message : 'The selected Preview agent is unavailable.',
-        { cause }
-      );
-    }
-    const turn = await this.startTransientReadOnlyRuntimeTurn({
-      owner: {
-        kind: 'PREVIEW_RECIPE_GENERATION',
-        taskId: input.taskId,
-        generationId: input.generationId
-      },
-      scope: {
-        kind: 'PREVIEW_RECIPE_GENERATION',
-        taskId: input.taskId,
-        generationId: input.generationId
-      },
-      runtimeId,
-      model: execution.model.model,
-      settings: execution.settings,
-      primaryCwd: input.cwd,
-      readRootKind: 'EMPTY_MANAGED',
-      purpose: 'PREVIEW_RECIPE_GENERATION',
-      generationKey: input.generationId,
-      operationId: `preview-recipe-generation:${input.taskId}:${input.generationId}`,
-      instruction: input.instruction,
-      attachments: [],
-      timeoutMs: 120_000,
-      label: 'Preview recipe generation',
-      terminationError: (cause) =>
-        new PreviewRecipeGenerationRunError(
-          'TERMINATION_UNCONFIRMED',
-          'Task Monki could not confirm that Preview recipe generation stopped.',
-          { cause }
-        ),
-      isTerminationError: (cause) =>
-        cause instanceof PreviewRecipeGenerationRunError &&
-        cause.code === 'TERMINATION_UNCONFIRMED'
-    });
-    return {
-      result: turn.result.then(({ output }) => output).catch((cause) => {
-        if (cause instanceof PreviewRecipeGenerationRunError) throw cause;
-        const timedOut =
-          cause instanceof Error && /timed out/iu.test(cause.message);
-        throw new PreviewRecipeGenerationRunError(
-          timedOut ? 'TIMED_OUT' : 'UNAVAILABLE',
-          timedOut
-            ? 'The selected Preview agent did not finish within two minutes.'
-            : cause instanceof Error
-              ? cause.message
-              : 'The selected Preview agent could not produce a draft.',
-          { cause }
-        );
-      }),
-      cancel: turn.cancel
-    };
   }
 
   private async startTransientReadOnlyRuntimeTurn(input: {
@@ -3043,10 +2980,10 @@ export class TaskManagerService {
   }
 
   private async holdTaskQueue(taskId: string, detail: string): Promise<void> {
-    const pending = (await this.store.getTaskDetail(taskId)).taskInstructions.some((item) => item.status === 'QUEUED');
+    const pending = (await this.store.getTaskDetail(taskId)).taskInstructions.some((item) => item.role !== 'PREVIEW' && item.status === 'QUEUED');
     if (!pending) return;
     await this.store.updateTaskInstructions(taskId, (records) => {
-      for (const record of records) if (record.status === 'QUEUED') {
+      for (const record of records) if (record.role !== 'PREVIEW' && record.status === 'QUEUED') {
         Object.assign(record, { status: 'HELD', detail, updatedAt: new Date().toISOString() });
       }
     });
@@ -3475,7 +3412,7 @@ export class TaskManagerService {
     for (const [purpose, runtimeId] of [
       ['default task', prospective.defaultRuntimeId],
       ['prompt refinement', prospective.promptRefinementRuntimeId],
-      ['preview recipe generation', prospective.previewRecipeGenerationRuntimeId],
+      ['Preview agent', prospective.previewRecipeGenerationRuntimeId],
       ['review', prospective.reviewRuntimeId]
     ] as const) {
       if (!runtimeId) continue;
@@ -3664,7 +3601,7 @@ export class TaskManagerService {
     this.lifecycleState = 'SHUTTING_DOWN';
     const runtimeDrain = this.runtimeOperations.close();
     const promptRefinementShutdown = this.promptRefiner.beginShutdown();
-    const previewRecipeGenerationShutdown = this.previewRecipeGenerator.shutdown();
+    this.previewRecipeGenerator.shutdown();
     const pendingInitialization = this.initWork;
     const pendingTaskActions = [...this.taskActionLocks.values()].map(
       ({ work }) => work
@@ -3678,8 +3615,7 @@ export class TaskManagerService {
       pendingControlActions,
       pendingRuntimeLifecycle,
       pendingRuntimeOperations,
-      promptRefinementShutdown,
-      previewRecipeGenerationShutdown
+      promptRefinementShutdown
     )
       .finally(() => {
         this.lifecycleState = 'STOPPED';
@@ -3695,28 +3631,23 @@ export class TaskManagerService {
     pendingControlActions: Promise<unknown>[],
     pendingRuntimeLifecycle: Promise<void>,
     pendingRuntimeOperations: Promise<void>[],
-    promptRefinementShutdown: Promise<void>,
-    previewRecipeGenerationShutdown: Promise<void>
+    promptRefinementShutdown: Promise<void>
   ): Promise<void> {
     const promptRefinementDrain = settleOwnedWork(promptRefinementShutdown);
-    const previewGenerationDrain = settleOwnedWork(
-      previewRecipeGenerationShutdown
-    );
     await Promise.allSettled([
       pendingInitialization ?? Promise.resolve(),
       ...pendingTaskActions,
       ...pendingControlActions,
       pendingRuntimeLifecycle,
       ...pendingRuntimeOperations,
-      promptRefinementDrain,
-      previewGenerationDrain
+      promptRefinementDrain
     ]);
 
     const cleanupResults = [
       await settleOwnedWork(this.discourseHost?.beginShutdown()),
       await settleOwnedWork(this.designUpdates?.beginShutdown()),
       await settleOwnedWork(this.agents.shutdown()),
-      await settleOwnedWork(this.designToolBridge?.shutdown()),
+      await settleOwnedWork(this.clientToolBridge.shutdown()),
       await settleOwnedWork(this.drainPostRunEvidence()),
       await settleOwnedWork(this.previewEnabled ? this.designPreviews.shutdown() : undefined),
       await settleOwnedWork(this.applications.close())
@@ -3729,10 +3660,7 @@ export class TaskManagerService {
         settleOwnedWork(this.store.close())
       ]))
     );
-    cleanupResults.push(
-      await promptRefinementDrain,
-      await previewGenerationDrain
-    );
+    cleanupResults.push(await promptRefinementDrain);
     const failed = cleanupResults.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected'
     );
@@ -3810,14 +3738,19 @@ export class TaskManagerService {
     }
   }
 
-  connectApplicationPreviewDependency: ApplicationPreviewApi['connectApplicationPreviewDependency'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    await this.applications.owner().configureDependency(this.applications.name(worktree), input.attemptId, input.service, input.binding,
-      { operation: 'apply', expected: input.expected });
-    return this.applications.read(worktree);
+  readApplicationPreviewFile: ApplicationPreviewApi['readApplicationPreviewFile'] = async input => ({
+    ...await this.applications.readFile(await this.applicationWorktree(input.taskId)),
+    ...(input.draftId ? { original: this.previewRecipeGenerator.reviewedFile(input.taskId, input.draftId) } : {})
   });
+
+  saveApplicationPreviewFile: ApplicationPreviewApi['saveApplicationPreviewFile'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.saveFile(await this.applicationWorktree(input.taskId), input.original, input.text));
+
+  chooseApplicationPreviewFile: ApplicationPreviewApi['chooseApplicationPreviewFile'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.chooseFile(await this.applicationWorktree(input.taskId), input.keep, input.files));
+
+  startRetainedApplicationPreview: ApplicationPreviewApi['startRetainedApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
+    this.applications.startRetained(await this.applicationWorktree(input.taskId)));
 
   inspectApplicationPreviewSetup: ApplicationPreviewApi['inspectApplicationPreviewSetup'] = async input =>
     this.applications.inspectSetup(await this.applicationWorktree(input.taskId));
@@ -3827,21 +3760,15 @@ export class TaskManagerService {
     return this.applications.connectSource(await this.applicationWorktree(input.taskId), input);
   });
 
-  createApplicationPreviewConfiguration: ApplicationPreviewApi['createApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    const context = await this.requirePreviewContext(input.taskId);
-    await this.applicationWorktree(input.taskId);
-    return this.applications.createConfiguration(context.worktree, input);
-  });
-
   startApplicationPreview: ApplicationPreviewApi['startApplicationPreview'] = input =>
     this.withApplicationMutation(input.taskId, 'configure', async () => {
       await this.applicationWorktree(input.taskId);
       const context = await this.requirePreviewContext(input.taskId);
-      return this.applications.start(context.worktree, context.task.kind === 'DESIGN' ? 'file' : input.source);
+      return this.applications.start(context.worktree);
     });
 
-  approveApplicationPreview: ApplicationPreviewApi['approveApplicationPreview'] = async input =>
-    this.applications.approve(await this.applicationWorktree(input.taskId), input.attemptId);
+  approveApplicationPreview: ApplicationPreviewApi['approveApplicationPreview'] = input => this.withControlAction(async () =>
+    this.applications.approve(await this.applicationWorktree(input.taskId), input.attemptId));
 
   stopApplicationPreview: ApplicationPreviewApi['stopApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'cleanup', async () => {
     const worktree = await this.applicationWorktree(input.taskId);
@@ -3852,8 +3779,7 @@ export class TaskManagerService {
 
   cancelApplicationPreview: ApplicationPreviewApi['cancelApplicationPreview'] = input => this.withControlAction(async () => {
     const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.owner().cancel(this.applications.name(worktree), input.attemptId);
-    return this.applications.read(worktree);
+    return this.applications.cancel(worktree, input.attemptId);
  });
 
   openApplicationPreview: ApplicationPreviewApi['openApplicationPreview'] = async input => {
@@ -3884,23 +3810,6 @@ export class TaskManagerService {
     await this.applications.allowWorktree(worktree);
     return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes, { operation: 'inspect' });
   };
-
-  applyApplicationPreviewConfiguration: ApplicationPreviewApi['applyApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    await this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
-      { operation: 'apply', expected: input.expected });
-    return this.applications.read(worktree);
- });
-
-  saveApplicationPreviewConfiguration: ApplicationPreviewApi['saveApplicationPreviewConfiguration'] = input => this.withApplicationMutation(input.taskId, 'configure', async () => {
-    await this.assertEditableApplicationAttempt(input.taskId, input.attemptId);
-    const worktree = await this.applicationWorktree(input.taskId);
-    await this.applications.allowWorktree(worktree);
-    return this.applications.owner().configureBindings(this.applications.name(worktree), input.attemptId, input.changes,
-      { operation: 'save' }, { projectDirectory: worktree.worktreePath });
- });
 
   rerunApplicationPreviewJob: ApplicationPreviewApi['rerunApplicationPreviewJob'] = input => this.withApplicationMutation(input.taskId, 'repair', async () => {
     const worktree = await this.applicationWorktree(input.taskId);
@@ -3939,28 +3848,52 @@ export class TaskManagerService {
     return this.previewRecipeGenerator.get(input.taskId);
   }
 
-  async generatePreviewRecipe(
-    input: GeneratePreviewRecipeRequest
-  ): Promise<PreviewRecipeGenerationSnapshot> {
+  sendPreviewAgentMessage(input: SendPreviewAgentMessageRequest): Promise<TaskInstruction> {
     this.assertPreviewEnabled();
     this.assertAgentProviderAvailable();
-    await this.requireRepositoryPreviewTask(input.taskId, 'Preview recipe generation');
-    const context = await this.withTaskAction(
-      input.taskId,
-      'Preview recipe generation preparation',
-      () => this.requirePreviewContext(input.taskId)
+    return this.withTaskAction(input.taskId, 'Preview agent message', () =>
+      this.withRuntimeOperation(async () => {
+        const task = await this.requireRepositoryPreviewTask(input.taskId, 'Preview agent');
+        // A Design turn edits the workspace the read-only analysis compares against.
+        if (task.kind === 'DESIGN' && designRunActive(task.currentRunId ? await this.store.getRun(task.currentRunId) : undefined)) {
+          throw new Error('Wait for the Design turn to finish.');
+        }
+        return this.previewAgent.send(input);
+      })
     );
-    return this.withControlAction(async () => {
-      if (this.previewRecipeGenerator.get(input.taskId).status !== 'GENERATING') {
-        await this.assertNoUnsettledPreviewRecipeGeneration(input.taskId);
-      }
-      return this.previewRecipeGenerator.generate({
-        taskId: input.taskId,
-        worktreePath: context.worktree.worktreePath,
-        clarification: input.clarification,
-        onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
+  }
+
+  stopPreviewAgent(input: StopPreviewAgentRequest): Promise<void> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview agent stop', () =>
+      this.withRuntimeOperation(() => this.previewAgent.stop(input.taskId))
+    );
+  }
+
+  /** Sends the next queued Preview message once its turn has ended; the coordinator holds the queue on any problem. */
+  private async dispatchPreviewAgentQueue(runId: string): Promise<void> {
+    const run = await this.store.getRun(runId).catch(() => undefined);
+    if (!run || run.mode !== 'PREVIEW') return;
+    try {
+      await this.withRuntimeOperation(async () => {
+        while (this.taskActionLocks.has(run.taskId)) {
+          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
+        }
+        await this.withTaskAction(run.taskId, 'Preview agent completion', async () => {
+          await this.agents.verifyPreviewRepositoryBoundary(runId);
+          const verified = await this.agentRuntimeStore.getRun(runId);
+          if (verified?.repositoryIntegrity?.status !== 'UNCHANGED') {
+            this.previewRecipeGenerator.discard(run.taskId);
+            this.events.emit({ type: 'preview.recipe-generation.updated', taskId: run.taskId,
+              payload: this.previewRecipeGenerator.get(run.taskId), at: new Date().toISOString() });
+          }
+          await this.previewAgent.dispatch(runId);
+          this.events.emit({ type: 'run.state.updated', taskId: run.taskId, runId, payload: {}, at: new Date().toISOString() });
+        });
       });
-    });
+    } catch {
+      // The queue is held with the reason; the person sends the next message when ready.
+    }
   }
 
   async validatePreviewRecipeDraft(
@@ -3975,36 +3908,29 @@ export class TaskManagerService {
     input: AcceptPreviewRecipeDraftRequest
   ): Promise<AcceptPreviewRecipeDraftResult> {
     this.assertPreviewEnabled();
-    return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+    return this.withApplicationMutation(input.taskId, 'configure', async () => {
       await this.requireRepositoryPreviewTask(input.taskId, 'Preview recipe acceptance');
-      const accept = async (): Promise<AcceptPreviewRecipeDraftResult> => {
-        const context = await this.requirePreviewContext(input.taskId);
-        if (context.task.kind === 'DESIGN') {
-          const detail = await this.store.getDesignDetail(input.taskId);
-          const setup = await this.inspectDesignWorkspace(detail);
-          if (setup.blocker) throw new Error(setup.blocker);
-          if (designRunActive(detail.currentRun)) throw new Error('Wait for the Design turn before changing Preview setup.');
-        }
-        await this.previewRecipeGenerator.writeAcceptedRecipe({
-          taskId: input.taskId,
-          draftId: input.draftId,
-          yaml: input.yaml,
-          worktreePath: context.worktree.worktreePath
-        });
-        this.emitPreviewRecipeGenerationUpdate(
-          context,
-          this.previewRecipeGenerator.completeAcceptance(input.taskId)
-        );
-        if (context.task.kind === 'DESIGN') {
-          const observed = await this.refreshDesignGitEvidence(input.taskId);
-          await this.store.acceptDesignWorkspaceSnapshot(input.taskId, observed.id);
-        }
-        return { recipePath: 'preview.yaml' };
-      };
-      const task = await this.requireTask(input.taskId);
-      return task.kind === 'DESIGN'
-        ? (await this.requireDesignUpdates()).withExclusiveAccess(input.taskId, accept)
-        : accept();
+      const detail = await this.store.getTaskDetail(input.taskId);
+      const previewRuns = detail.runs.filter((run) => run.mode === 'PREVIEW');
+      if (previewRuns.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
+        throw new Error('Wait for the Preview agent to finish before saving its proposal.');
+      }
+      const latest = previewRuns.sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+      if (latest) await this.agents.assertPreviewRepositoryUnchanged(latest.id);
+      const context = await this.requirePreviewContext(input.taskId);
+      const recipePath = await this.previewRecipeGenerator.writeAcceptedRecipe({
+        taskId: input.taskId,
+        draftId: input.draftId,
+        yaml: input.yaml,
+        worktreePath: context.worktree.worktreePath
+      });
+      this.previewRecipeGenerator.completeAcceptance(input.taskId);
+      this.previewAgent.publishProposals(context);
+      if (context.task.kind === 'DESIGN') {
+        const observed = await this.refreshDesignGitEvidence(input.taskId);
+        await this.store.acceptDesignWorkspaceSnapshot(input.taskId, observed.id);
+      }
+      return { recipePath };
     });
   }
 
@@ -4014,61 +3940,24 @@ export class TaskManagerService {
     this.assertPreviewEnabled();
     await this.requireRepositoryPreviewTask(input.taskId, 'Preview recipe discard');
     const context = await this.requirePreviewContext(input.taskId);
-    return this.withControlAction(() =>
-      this.previewRecipeGenerator.discard(input.taskId, (state) =>
-        this.emitPreviewRecipeGenerationUpdate(context, state)
-      )
-    );
+    const state = this.previewRecipeGenerator.discard(input.taskId);
+    this.previewAgent.publishProposals(context);
+    return state;
   }
 
-  private emitPreviewRecipeGenerationUpdate(
-    context: DesignPreviewContext,
-    state: PreviewRecipeGenerationSnapshot
-  ): void {
-    this.events.emit({
-      type: 'preview.recipe-generation.updated',
-      taskId: context.task.id,
-      iterationId: context.iteration.id,
-      worktreeId: context.worktree.id,
-      payload: state,
-      at: new Date().toISOString()
-    });
+  /** Runtime, model and provider defaults for the Preview agent, from Settings. */
+  private previewAgentDefaultSettings(): AgentExecutionSettings {
+    return {
+      runtimeId: this.appSettings.previewRecipeGenerationRuntimeId ?? this.appSettings.defaultRuntimeId,
+      model: this.appSettings.previewRecipeGenerationModel ?? undefined,
+      modelProvider: this.appSettings.previewRecipeGenerationModelProvider ?? undefined
+    };
   }
 
-  private async assertNoUnsettledPreviewRecipeGeneration(
-    taskId: string
-  ): Promise<void> {
-    const snapshot = await this.agentRuntimeStore.snapshot();
-    const matchingRuns = snapshot.runs.filter(
-      (run) =>
-        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
-        run.owner.taskId === taskId
-    );
-    for (const run of matchingRuns) {
-      if (['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(run.status)) {
-        await this.agents.finishRuntimeTurn(run.id);
-      }
-    }
-    const current = await this.agentRuntimeStore.snapshot();
-    const remaining = current.runs.some(
-      (run) =>
-        run.owner.kind === 'PREVIEW_RECIPE_GENERATION' &&
-        run.owner.taskId === taskId
-    );
-    if (remaining) {
-      throw new Error(
-        'Preview recipe generation is still recovering. Restart Task Monki before you try again or delete this task.'
-      );
-    }
-    await this.previewRecipeGenerator.recoverEvidence(
-      new Set(
-        current.runs.flatMap((run) =>
-          run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
-            ? [run.owner.generationId]
-            : []
-        )
-      )
-    );
+  /** The verified worktree of a task, or of a repository Design, that the Preview conversation reads. */
+  private async requireTaskPreviewContext(taskId: string) {
+    await this.requireRepositoryPreviewTask(taskId, 'Preview agent');
+    return this.requirePreviewContext(taskId);
   }
 
   openDesignPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
@@ -4564,8 +4453,7 @@ export class TaskManagerService {
         if (this.previewEnabled) {
           for (const worktree of snapshot.worktrees.filter(item => item.taskId === task.id)) await this.applications.retireWorktree(worktree);
         }
-        await this.previewRecipeGenerator.clearTask(task.id);
-        await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
+        this.previewRecipeGenerator.clearTask(task.id);
         await this.agents.releaseTask(task.id);
 
         let removedWorktree = false;
@@ -4641,8 +4529,7 @@ export class TaskManagerService {
 
     await this.designPreviews.stopTask(task.id);
     for (const worktree of snapshot.worktrees.filter(item => item.taskId === task.id)) await this.applications.retireWorktree(worktree);
-    await this.previewRecipeGenerator.clearTask(task.id);
-    await this.assertNoUnsettledPreviewRecipeGeneration(task.id);
+    this.previewRecipeGenerator.clearTask(task.id);
     await this.agents.deleteTaskProviderHistory(task);
 
     let removedWorktree = false;
@@ -5398,9 +5285,9 @@ export class TaskManagerService {
   ): Promise<T> {
     this.assertAcceptingWork();
     const observation = this.taskActionLocks.get(taskId);
-    if (observation?.label === 'Git observation' && label !== 'Git observation') {
-      // A task-open refresh must not reject the user's next action. That action
-      // revalidates its own inputs, including recovery after a failed observation.
+    if (observation && ['Git observation', 'Preview agent completion'].includes(observation.label) && label !== observation.label) {
+      // Background evidence checks must finish before the next user action,
+      // which revalidates its inputs against their result.
       await observation.work.catch(() => undefined);
       this.assertAcceptingWork();
     }
@@ -5537,50 +5424,6 @@ async function prepareTaskCreationSettings(
   const resolved = await adapter.resolveExecution({ settings, attachments });
   assertResolvedExecutionRuntime(adapter, resolved);
   return resolved.settings;
-}
-
-async function preparePreviewRecipeGenerationExecution(
-  adapter: AgentRuntimeAdapter,
-  requestedSettings: AgentExecutionSettings
-) {
-  const resolved = await adapter.resolveExecution({
-    settings: requestedSettings,
-    attachments: []
-  });
-  assertResolvedExecutionRuntime(adapter, resolved);
-  const capabilities = await adapter.capabilities();
-  const runtimeSupport = projectAgentExecutionSupport(
-    capabilities,
-    'PREVIEW_RECIPE_GENERATION'
-  );
-  if (!runtimeSupport.supported) throw new Error(runtimeSupport.reason);
-  const selectedModel = requestedSettings.model?.trim();
-  if (
-    selectedModel &&
-    (resolved.model.model !== selectedModel ||
-      resolved.settings.model !== selectedModel)
-  ) {
-    throw new Error(
-      `${adapter.descriptor.displayName} did not resolve the selected Preview model.`
-    );
-  }
-  const selectedModelProvider = requestedSettings.modelProvider?.trim();
-  if (
-    selectedModelProvider &&
-    (resolved.model.modelProvider !== selectedModelProvider ||
-      resolved.settings.modelProvider !== selectedModelProvider)
-  ) {
-    throw new Error(
-      `${adapter.descriptor.displayName} did not resolve the selected Preview model provider.`
-    );
-  }
-  const modelSupport = projectAgentExecutionSupport(
-    capabilities,
-    'PREVIEW_RECIPE_GENERATION',
-    { model: resolved.model }
-  );
-  if (!modelSupport.supported) throw new Error(modelSupport.reason);
-  return resolved;
 }
 
 async function prepareDesignCreationExecution(

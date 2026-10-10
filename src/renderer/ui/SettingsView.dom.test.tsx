@@ -133,7 +133,7 @@ describe('Tool settings', () => {
 });
 
 describe('Model settings', () => {
-  it('stores the Preview generation runtime and model together', () => {
+  it('stores the Preview agent runtime and model together', () => {
     const onSetAppSettings = vi.fn();
     renderSettings({
       onSetAppSettings,
@@ -144,7 +144,7 @@ describe('Model settings', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
     fireEvent.click(
       screen.getByRole('button', {
-        name: 'Preview generation: Codex · Preview model'
+        name: 'Preview agent: Codex · Preview model'
       })
     );
     fireEvent.click(
@@ -158,7 +158,7 @@ describe('Model settings', () => {
     });
   });
 
-  it('shows a missing saved Preview model instead of displaying a fallback', () => {
+  it.each(['AVAILABLE', 'UNKNOWN'] as const)('preserves the saved Preview model when its catalog is %s', (catalog) => {
     renderSettings({
       appSettings: {
         ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -167,20 +167,20 @@ describe('Model settings', () => {
         previewRecipeGenerationModelProvider: 'openai'
       },
       models: [previewModel],
-      runtimes: [readyCodexRuntime]
+      runtimes: [{ ...readyCodexRuntime, preflight: { ...readyCodexRuntime.preflight,
+        readiness: { ...readyCodexRuntime.preflight.readiness,
+          checks: { ...readyCodexRuntime.preflight.readiness.checks, modelCatalog: catalog } } } }]
     });
 
     fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
 
     const trigger = screen.getByRole('button', {
-      name: 'Preview generation: Codex · removed-model'
+      name: 'Preview agent: Codex · removed-model'
     });
-    expect(trigger.getAttribute('aria-invalid')).toBe('true');
-    expect(
-      screen.getByText(
-        'The selected Preview agent or model is no longer available. Choose another selection.'
-      )
-    ).not.toBeNull();
+    expect(trigger.getAttribute('aria-invalid')).toBe(catalog === 'AVAILABLE' ? 'true' : null);
+    expect(Boolean(screen.queryByText(
+      'The selected Preview agent or model is no longer available. Choose another selection.'
+    ))).toBe(catalog === 'AVAILABLE');
   });
 
   it('shows the configured Preview agent readiness error before a missing model error', () => {
@@ -211,7 +211,7 @@ describe('Model settings', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
 
     const previewSelector = screen.getByRole('button', {
-      name: 'Preview generation: Codex · saved-model'
+      name: 'Preview agent: Codex · saved-model'
     });
     const previewSetting = previewSelector.closest<HTMLElement>('.tm-model-default');
     expect(previewSetting).not.toBeNull();
@@ -238,7 +238,7 @@ describe('Model settings', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Models' }));
 
     const trigger = screen.getByRole('button', {
-      name: 'Preview generation: removed-agent · removed-model'
+      name: 'Preview agent: removed-agent · removed-model'
     });
     expect(trigger.getAttribute('aria-invalid')).toBe('true');
     expect(

@@ -26,6 +26,12 @@ Codex owns:
 - provider items, approvals, plans, settings, usage, and subagent events;
 - model catalog and supported reasoning efforts.
 
+Each session update has its own operation identity, retained across retries of
+that update. Re-entering a previous status is a new observation, not a replay of
+the earlier transition. If an inbound request cannot be materialized, Task Monki
+returns a protocol error so the provider does not wait indefinitely for a UI
+interaction that was never created.
+
 ## Process topology
 
 Task Monki uses one Codex App Server process per running app process.
@@ -206,7 +212,7 @@ Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
 discovery proves the custom-profile surface with a disposable ephemeral thread
 before selecting a Codex binary.
 
-Review, prompt refinement, Preview recipe generation, and Discourse use Task Monki's
+Review, prompt refinement, the Preview agent, and Discourse use Task Monki's
 read-only policy.
 A Full access implementation selection does not make a review unrestricted.
 The review uses the isolated read-only profile plus the validated Git common directory.
@@ -219,16 +225,16 @@ Attachment reads need no separate permission escalation or path expansion flow.
 Before each read-only thread starts or resumes, the adapter finds each enabled
 MCP server and disables it in that thread. If discovery fails, the turn does not start.
 
-Codex review, prompt refinement, Preview recipe generation, and Discourse use ordinary
+Codex review, prompt refinement, Preview agent turns, and Discourse use ordinary
 `turn/start` requests.
 The adapter does not expose separate review or refinement workflow methods.
 For review, prompt refinement, and Discourse, `AgentOrchestrator` records
 repository state before delivery. It compares that state after terminal output
 and fails a changed or unreadable turn. Task Monki leaves detected repository
-changes in place as evidence. Preview recipe generation receives only an
-app-owned disposable evidence directory. It does not receive a repository
-root. `PreviewRecipeGenerationService` hashes the exact evidence file before
-and after the turn and rejects changed evidence.
+changes in place as evidence. Preview agent turns run in the task worktree as
+a detached `PREVIEW` session with plan-mode developer instructions and the
+`inspect_preview` and `propose_preview_configuration` dynamic tools; proposals
+reach the project only through the reviewed draft.
 
 An empty local Codex session can bind its first exact attachment scope before
 the first provider prompt. The store permits this only before materialization
@@ -408,7 +414,7 @@ Settings are validated against the live model catalog before a turn starts. An
 explicit model must match that catalog exactly, including after one forced
 refresh; only an omitted or `default` selection may use the provider default.
 Renderer settings update the exact runtime and model for implementation, prompt
-refinement, Preview recipe generation, and review. They do not replace a missing
+refinement, the Preview agent, and review. They do not replace a missing
 explicit Preview model with another model.
 
 App-level user preferences are separate from `SqliteTaskStore`. The Electron
@@ -458,7 +464,8 @@ extension.
 
 Automatic discovery does not fail on the first stale binary. Each candidate is
 probed with `--version`, `codex app-server --help`, an isolated temporary
-`CODEX_HOME`, `initialize`, and the JSON-RPC methods Task Monki needs. The
+`CODEX_HOME` and working directory, `initialize`, and the JSON-RPC methods Task Monki needs.
+The probe does not load project instructions or grant access to a user repository. The
 newest compatible automatically discovered runtime is selected. An explicit
 configured runtime is treated as intentional and must itself be compatible.
 `CODEX_HOME` belongs to the versioned Codex child-environment contract; it is
@@ -516,10 +523,10 @@ Codex protocol detail:
   normal resume-and-attest path is required for every later turn.
 - Shared read-only sessions carry their selected reasoning effort in the same
   thread and turn settings as other ordinary Codex turns.
-- Prompt refinement and Preview recipe generation request `ephemeral: true`.
-  The adapter checks the returned flag before it sends a prompt.
-  These disposable threads do not retain Codex rollout history.
-  Tasks, Designs, reviews, and Discourse keep persistent threads for continuation.
+- Prompt refinement requests `ephemeral: true`. The adapter checks the returned
+  flag before it sends a prompt. These disposable threads do not retain Codex
+  rollout history. Tasks, Designs, Preview conversations, reviews, and Discourse
+  keep persistent threads for continuation.
   Ephemeral threads retain the same model, permissions, and cancellation rules.
 
 Disposable turns still use Task Monki's runtime records during execution.

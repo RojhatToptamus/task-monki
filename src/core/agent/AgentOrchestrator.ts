@@ -72,7 +72,7 @@ import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
 } from '../review/AgentReviewContract';
-import { INSPECT_DESIGN_TOOL_NAME } from '../design/DesignClientToolContract';
+import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -99,6 +99,7 @@ function isReadOnlyRuntimePurpose(
 ): boolean {
   return (
     purpose === 'TASK_REVIEW' ||
+    purpose === 'TASK_PREVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
     purpose === 'PREVIEW_RECIPE_GENERATION' ||
     purpose.startsWith('DISCOURSE_')
@@ -141,12 +142,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function clientToolGrantsForMode(mode: AgentRunMode): string[] | undefined {
+  const set = clientToolSetForMode(mode);
+  return set ? [...set.tools] : undefined;
+}
+
 function taskExecutionContext(input: {
   sessionId: string;
   operationId: string;
   worktree: WorktreeRecord;
   settings: AgentExecutionSettings;
   allowDynamicTools: boolean;
+  readOnly?: boolean;
 }): AgentExecutionContext {
   const managedAttachments: AgentExecutionContext['managedAttachments'] = [];
   const permissionProfileHash = createHash('sha256')
@@ -164,7 +171,7 @@ function taskExecutionContext(input: {
   return {
     attestation: { status: 'ATTESTED' },
     primaryCwd: input.worktree.worktreePath,
-    repositoryAccess: 'WRITE',
+    repositoryAccess: input.readOnly ? 'READ_ONLY' : 'WRITE',
     readRoots: [
       {
         canonicalPath: input.worktree.worktreePath,
@@ -194,9 +201,14 @@ export interface StartOrchestratedTurn {
   prompt: string;
   instructionProfile?: AgentInstructionProfile;
   settings: AgentExecutionSettings;
+  /** PRIMARY carries the task's work on the task runtime; PREVIEW is a detached conversation on the chosen runtime and model. */
+  role?: 'PRIMARY' | 'PREVIEW';
   generationKey?: string;
   beforeGitSnapshotId?: string;
+  /** An existing session to continue. A PREVIEW turn names its session: this one or `createSessionId`. */
   sessionId?: string;
+  /** The id of the session this turn creates, so the caller's receipts can name it before the provider confirms it. */
+  createSessionId?: string;
   retryOfRunId?: string;
   continuedFromRunId?: string;
 }
@@ -1705,36 +1717,33 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       runId: input.runId
     });
     const taskRuntimeSnapshot = await this.taskRuntime.snapshot();
+    const role = input.role ?? 'PRIMARY';
+    const byAge = (left: AgentSessionRecord, right: AgentSessionRecord) =>
+      left.createdAt.localeCompare(right.createdAt) || left.updatedAt.localeCompare(right.updatedAt);
+    const ownSessions = taskRuntimeSnapshot.agentSessions.filter(
+      (candidate) =>
+        candidate.taskId === input.task.id &&
+        candidate.iterationId === input.iteration.id &&
+        candidate.worktreeId === input.worktree.id &&
+        candidate.role === role
+    );
     let session: AgentSessionRecord | undefined;
     if (input.sessionId) {
       session = await this.requireSession(input.sessionId);
-    } else {
-      const primarySessions = taskRuntimeSnapshot.agentSessions.filter(
-        (candidate) =>
-          candidate.taskId === input.task.id &&
-          candidate.iterationId === input.iteration.id &&
-          candidate.worktreeId === input.worktree.id &&
-          candidate.role === 'PRIMARY'
-      );
-      if (input.task.currentAgentSessionId) {
-        session = primarySessions.find(
-          (candidate) => candidate.id === input.task.currentAgentSessionId
-        );
-        if (!session) {
-          throw new Error('Task current agent session ownership is inconsistent.');
-        }
-      } else {
-        session = primarySessions
-          .sort(
-            (left, right) =>
-              left.createdAt.localeCompare(right.createdAt) ||
-              left.updatedAt.localeCompare(right.updatedAt)
-          )
-          .at(-1);
+    } else if (role === 'PREVIEW') {
+      // The Preview coordinator keys conversations by runtime and model and names the session.
+      if (!input.createSessionId) throw new Error('A Preview turn must name its session.');
+    } else if (input.task.currentAgentSessionId) {
+      session = ownSessions.find((candidate) => candidate.id === input.task.currentAgentSessionId);
+      if (!session) {
+        throw new Error('Task current agent session ownership is inconsistent.');
       }
+    } else {
+      session = ownSessions.sort(byAge).at(-1);
     }
     if (session && (session.taskId !== input.task.id || session.iterationId !== input.iteration.id ||
-        session.worktreeId !== input.worktree.id || session.runtimeId !== input.task.runtimeId)) {
+        session.worktreeId !== input.worktree.id || session.role !== role ||
+        (role === 'PRIMARY' && session.runtimeId !== input.task.runtimeId))) {
       throw new Error('Selected agent session does not belong to this task iteration.');
     }
     if (session && session.worktreePath !== input.worktree.worktreePath) {
@@ -1744,13 +1753,15 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       // A reconnect changes future execution, never a historical session's cwd.
       session = undefined;
     }
-    const runtimeId = session?.runtimeId ?? input.task.runtimeId;
+    const runtimeId =
+      session?.runtimeId ??
+      (role === 'PREVIEW' ? (input.settings.runtimeId ?? input.task.runtimeId) : input.task.runtimeId);
     if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
       throw new Error(
         `Task runtime ${runtimeId} cannot start work through ${input.settings.runtimeId}.`
       );
     }
-    if (input.task.runtimeId !== runtimeId) {
+    if (role === 'PRIMARY' && input.task.runtimeId !== runtimeId) {
       throw new Error('Selected agent session runtime does not match its task.');
     }
     const adapter = this.runtimes.require(runtimeId);
@@ -1763,8 +1774,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     await this.assertCapacity();
 
     if (!session) {
-      const sessionId = randomUUID();
-      const operationId = `task-session:${input.task.id}:${input.iteration.id}:${runtimeId}${input.worktree.ownership === 'EXTERNAL' ? `:${sessionId}` : ''}`;
+      const sessionId = input.createSessionId ?? randomUUID();
+      const operationId = `task-session:${input.task.id}:${input.iteration.id}:${runtimeId}${input.worktree.ownership === 'EXTERNAL' || role === 'PREVIEW' ? `:${sessionId}` : ''}`;
       session = await this.taskRuntime.createTaskSession({
         id: sessionId,
         taskId: input.task.id,
@@ -1772,13 +1783,15 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         worktreeId: input.worktree.id,
         worktreePath: input.worktree.worktreePath,
         runtimeId,
+        role,
         requestedSettings: settings,
         executionContext: taskExecutionContext({
           sessionId,
           operationId,
           worktree: input.worktree,
           settings,
-          allowDynamicTools: input.mode === 'DESIGN'
+          allowDynamicTools: clientToolSetForMode(input.mode) !== undefined,
+          readOnly: input.mode === 'PREVIEW'
         }),
         operationId
       });
@@ -1830,8 +1843,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: input.retryOfRunId,
       continuedFromRunId: input.continuedFromRunId,
       instructionProfile: input.instructionProfile,
-      clientToolGrants:
-        input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
+      clientToolGrants: clientToolGrantsForMode(input.mode),
       attachmentSelection: toAgentAttachmentSelectionFromRecords(taskAttachments),
       operationId: `task-run:${runId}`
     });
@@ -2296,6 +2308,29 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     await this.runtimes.shutdownAll();
   }
 
+  /** Proposal acceptance uses the same observed repository boundary as other analysis turns. */
+  async assertPreviewRepositoryUnchanged(runId: string): Promise<void> {
+    const run = await this.runtimeStore.getRun(runId);
+    if (!run || run.purpose !== 'TASK_PREVIEW') throw new Error('The Preview analysis run is unavailable.');
+    const session = await this.runtimeStore.getSession(run.sessionId);
+    const before = run.repositoryIntegrity?.beforeFingerprint;
+    if (!session || !before) throw new Error('The Preview analysis has no verified repository baseline. Ask the agent again.');
+    if (await inspectReadOnlyRepositoryState(session.executionContext) !== before) {
+      throw new Error('Repository state changed during Preview analysis. Review the changes and ask the agent again.');
+    }
+  }
+
+  /** Ordinary task adapters publish terminal events; verify Preview before its queue advances. */
+  async verifyPreviewRepositoryBoundary(runId: string): Promise<void> {
+    const run = await this.runtimeStore.getRun(runId);
+    if (!run || run.purpose !== 'TASK_PREVIEW' || !isTerminalRuntimeRun(run.status)) return;
+    await this.verifyReadOnlyRuntimeBoundary({
+      type: 'TERMINAL', runId, providerTurnId: run.providerTurnId ?? run.id,
+      status: run.status === 'COMPLETED' ? 'completed' : run.status === 'INTERRUPTED' ? 'interrupted' : 'failed',
+      completedAt: run.endedAt ?? run.lastEventAt ?? run.createdAt
+    });
+  }
+
   private async startProviderTurn(
     adapter: AgentRuntimeAdapter,
     run: RunRecord,
@@ -2306,6 +2341,25 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   ): Promise<boolean> {
     assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
     if (!(await this.claimTaskTurnSubmission(run.id))) return false;
+    if (input.mode === 'PREVIEW') {
+      const runtimeSession = (await this.runtimeStore.getSession(session.id))!;
+      const beforeFingerprint = await inspectReadOnlyRepositoryState(runtimeSession.executionContext);
+      if (!beforeFingerprint) throw new Error('The Preview analysis has no verifiable repository.');
+      // A resumed provider session can record activity for this run while the repository is
+      // inspected; the baseline is independent of that, so it is written to the latest revision.
+      for (let attempt = 1; ; attempt++) {
+        const runtimeRun = (await this.runtimeStore.getRun(run.id))!;
+        try {
+          await this.runtimeStore.updateRun(run.id, runtimeRun.recordRevision, {
+            repositoryIntegrity: { status: 'PENDING', beforeFingerprint }
+          }, `preview-repository-before:${run.id}`);
+          break;
+        } catch (error) {
+          const latest = await this.runtimeStore.getRun(run.id);
+          if (attempt >= 3 || !latest || latest.recordRevision === runtimeRun.recordRevision) throw error;
+        }
+      }
+    }
     await adapter.startTurn({
       localRunId: run.id,
       session: {
@@ -2403,7 +2457,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         operationId: replacementSessionOperation,
         worktree: input.input.worktree,
         settings: input.settings,
-        allowDynamicTools: input.input.mode === 'DESIGN'
+        allowDynamicTools: clientToolSetForMode(input.input.mode) !== undefined,
+        readOnly: input.input.mode === 'PREVIEW'
       }),
       operationId: replacementSessionOperation
     });
@@ -2423,8 +2478,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       retryOfRunId: current.id,
       continuedFromRunId: input.input.continuedFromRunId,
       instructionProfile: input.input.instructionProfile,
-      clientToolGrants:
-        input.input.mode === 'DESIGN' ? [INSPECT_DESIGN_TOOL_NAME] : undefined,
+      clientToolGrants: clientToolGrantsForMode(input.input.mode),
       attachmentSelection: toAgentAttachmentSelectionFromRecords(
         input.attachmentRecords
       ),

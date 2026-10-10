@@ -193,7 +193,8 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     optionalStrings(instruction, 'taskInstructions', ['detail']);
     timestamp(instruction, 'createdAt', 'taskInstructions');
     timestamp(instruction, 'updatedAt', 'taskInstructions');
-    if (!state.tasks.some((task) => task.id === instruction.taskId && task.kind === 'NORMAL') ||
+    // A Design's messages belong only to its Preview conversation.
+    if (!state.tasks.some((task) => task.id === instruction.taskId && (task.kind === 'NORMAL' || instruction.role === 'PREVIEW')) ||
         !state.iterations.some((iteration) => iteration.id === instruction.iterationId && iteration.taskId === instruction.taskId) ||
         !state.worktrees.some((worktree) => worktree.id === instruction.worktreeId && worktree.taskId === instruction.taskId)) {
       throw new Error('Task instruction owner is missing.');

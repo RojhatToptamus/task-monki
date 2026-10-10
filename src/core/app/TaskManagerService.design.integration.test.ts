@@ -181,16 +181,14 @@ readyPath: /ready
     expect(copy.task.designPreviewTarget).toEqual(detail.revisions[0]!.target);
     expect(copy.currentWorktree!.branchName).not.toBe(detail.currentWorktree!.branchName);
     await expect(scenario.service.openApplicationPreview({ taskId: copy.task.id, attemptId: detail.currentPreview!.runtimeAttemptId! })).rejects.toThrow();
-    const savedAttempt = detail.currentPreview!.runtimeAttemptId!;
-    await expect(scenario.service.saveApplicationPreviewConfiguration({ taskId: detail.task.id, attemptId: savedAttempt, changes: [] })).rejects.toThrow('Stop the Design preview');
+    await expect(scenario.service.acceptPreviewRecipeDraft({ taskId: detail.task.id, draftId: 'proposal', yaml: 'name: application\ntype: static\ndirectory: .\n' })).rejects.toThrow('Stop the Design preview');
     const application = (await scenario.service.getApplicationPreview({ taskId: detail.task.id })).status!;
     const stopped = await scenario.service.stopApplicationPreview({ taskId: detail.task.id, expected: { active: application.active!.id, candidate: null, latest: application.latest!.id } });
     expect(stopped.status?.active).toBeUndefined();
     const retained = await scenario.service.getDesign(detail.task.id);
     expect(retained.revisions).toEqual(detail.revisions);
     expect(retained.canvas.state).toBe('RESTART_REQUIRED');
-    await expect(scenario.service.saveApplicationPreviewConfiguration({ taskId: detail.task.id, attemptId: savedAttempt, changes: [] })).rejects.toThrow('Saved Design sources are read only');
-    const restartedSetup = await scenario.service.startApplicationPreview({ taskId: detail.task.id, source: 'retained' });
+    const restartedSetup = await scenario.service.startApplicationPreview({ taskId: detail.task.id });
     const setupAttempt = restartedSetup.status!.candidate!;
     expect(await Promise.all(setupAttempt.sources.map(source => fs.realpath(source)))).toEqual([await fs.realpath(detail.currentWorktree!.worktreePath)]);
     expect(setupAttempt.sources).not.toContain(detail.currentPreview!.workspacePath);

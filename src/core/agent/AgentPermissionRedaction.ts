@@ -10,10 +10,11 @@ export function isRedactedExternalPathReference(value: string): boolean {
   return /^task-monki-external-path:[1-9][0-9]*$/u.test(value);
 }
 
-/** Keeps provider paths outside the worktree out of durable interaction data. */
+/** Conceals external paths except exact folders offered for explicit inspection consent. */
 export function redactExternalPermissionPaths(
   request: AgentPermissionApprovalRequest,
-  worktreePath: string
+  worktreePath: string,
+  inspectableReadPaths: readonly string[] = []
 ): AgentPermissionApprovalRequest {
   const worktree = path.resolve(worktreePath);
   const references = new Map<
@@ -24,7 +25,11 @@ export function redactExternalPermissionPaths(
     if (isRedactedExternalPathReference(candidate)) return candidate;
     if (!path.isAbsolute(candidate)) return candidate;
     const resolved = path.resolve(candidate);
-    if (isInsideOrEqual(resolved, worktree)) return resolved;
+    if (
+      isInsideOrEqual(resolved, worktree) ||
+      inspectableReadPaths.some((allowed) =>
+        pathComparisonKey(path.resolve(allowed)) === pathComparisonKey(resolved))
+    ) return resolved;
     const key = pathComparisonKey(resolved);
     let entry = references.get(key);
     if (!entry) {

@@ -139,8 +139,8 @@ async function packagedDesignResources() {
     path.join(resources, 'design-skills')
   );
   await fs.copyFile(
-    path.resolve('src/core/design/runtime/design-tool-mcp-server.mjs'),
-    path.join(resources, 'design-tool-mcp-server.mjs')
+    path.resolve('src/core/agent/clientTools/client-tool-mcp-server.mjs'),
+    path.join(resources, 'client-tool-mcp-server.mjs')
   );
   await fs.mkdir(path.join(resources, 'legal/third-party'), { recursive: true });
   await fs.copyFile(

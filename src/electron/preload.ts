@@ -19,7 +19,8 @@ import type {
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
   ImportDesignReferenceAssetRequest,
@@ -124,10 +125,12 @@ const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 const api: TaskManagerApi = {
   listApplicationPreviews: () => invokeIpc('application:listApplicationPreviews'),
   getApplicationPreview: input => invokeIpc('application:getApplicationPreview', input),
-  connectApplicationPreviewDependency: input => invokeIpc('application:connectApplicationPreviewDependency', input),
   connectApplicationPreviewSource: input => invokeIpc('application:connectApplicationPreviewSource', input),
   inspectApplicationPreviewSetup: input => invokeIpc('application:inspectApplicationPreviewSetup', input),
-  createApplicationPreviewConfiguration: input => invokeIpc('application:createApplicationPreviewConfiguration', input),
+  readApplicationPreviewFile: input => invokeIpc('application:readApplicationPreviewFile', input),
+  saveApplicationPreviewFile: input => invokeIpc('application:saveApplicationPreviewFile', input),
+  chooseApplicationPreviewFile: input => invokeIpc('application:chooseApplicationPreviewFile', input),
+  startRetainedApplicationPreview: input => invokeIpc('application:startRetainedApplicationPreview', input),
   startApplicationPreview: input => invokeIpc('application:startApplicationPreview', input),
   approveApplicationPreview: input => invokeIpc('application:approveApplicationPreview', input),
   stopApplicationPreview: input => invokeIpc('application:stopApplicationPreview', input),
@@ -135,8 +138,6 @@ const api: TaskManagerApi = {
   openApplicationPreview: input => invokeIpc('application:openApplicationPreview', input),
   readApplicationPreviewLogs: input => invokeIpc('application:readApplicationPreviewLogs', input),
   inspectApplicationPreviewConfiguration: input => invokeIpc('application:inspectApplicationPreviewConfiguration', input),
-  applyApplicationPreviewConfiguration: input => invokeIpc('application:applyApplicationPreviewConfiguration', input),
-  saveApplicationPreviewConfiguration: input => invokeIpc('application:saveApplicationPreviewConfiguration', input),
   rerunApplicationPreviewJob: input => invokeIpc('application:rerunApplicationPreviewJob', input),
   deleteApplicationPreviewData: input => invokeIpc('application:deleteApplicationPreviewData', input),
 
@@ -308,8 +309,9 @@ const api: TaskManagerApi = {
   refreshGitHub: (input: RefreshGitHubRequest) => invokeIpc('github:refresh', input),
   getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
     invokeIpc('preview:recipe-generation:get', input),
-  generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
-    invokeIpc('preview:recipe-generation:generate', input),
+  sendPreviewAgentMessage: (input: SendPreviewAgentMessageRequest) =>
+    invokeIpc('preview:agent:send', input),
+  stopPreviewAgent: (input: StopPreviewAgentRequest) => invokeIpc('preview:agent:stop', input),
   validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
     invokeIpc('preview:recipe-generation:validate', input),
   acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>

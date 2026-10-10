@@ -174,3 +174,17 @@
 .tm-queue__message { flex: 1; min-width: 0; display: grid; color: var(--text-soft); }
 .tm-queue__text { min-width: 0; overflow: hidden; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .tm-queue__item .tm-iconbtn { flex: 0 0 auto; width: var(--h-icon); height: var(--h-icon); color: var(--muted); }
+
+/* Side conversation — a conversation beside a working surface: 44px head, the log, the composer. */
+.tm-side-conversation { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); box-shadow: inset 1px 0 0 var(--edge); }
+.tm-side-conversation:focus { outline: 0; }
+.tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--hair); }
+.tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 600; white-space: nowrap; }
+.tm-side-conversation__head .tm-iconbtn { margin-left: auto; width: var(--h-icon); height: var(--h-icon); }
+.tm-side-conversation__log { flex: 1; min-height: 0; }
+.tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 14px 20px; }
+.tm-side-conversation__thread > .tm-message--user > .tm-message-content { max-width: 88%; }
+.tm-side-conversation__composer { flex: 0 0 auto; margin: 0 14px 14px; }
+.tm-side-conversation__composer .tm-composer__input { min-height: 64px; }
+.tm-side-conversation__composer .tm-composer__toolbar { min-height: var(--h-control); padding: 4px 6px 4px 12px; }
+.tm-side-conversation__working { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }

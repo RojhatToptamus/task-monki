@@ -1,3 +1,4 @@
+import { clientToolActivityLabel, clientToolNameFromIdentifier } from '../../shared/clientTools';
 import type {
   AgentItemRecord,
   InteractionRequestRecord,
@@ -194,29 +195,22 @@ function activityRowsFromItem(item: AgentItemRecord, cwd?: string): RunActivityL
     case 'FILE_CHANGE':
       return fileChangeActivityRows(item, payload, at, cwd);
     case 'MCP_TOOL_CALL':
+    case 'DYNAMIC_TOOL_CALL': {
+      // Task Monki's own tools read as what they did; provider tools keep their server and name.
+      const clientTool = clientToolActivityLabel(clientToolNameFromPayload(payload));
+      const kind = item.type === 'MCP_TOOL_CALL' ? 'mcp' : 'dynamic-tool';
       return [
         rowFromItem(item, {
           category: 'mcp',
-          label: 'MCP',
-          detail: compactToolName(payload) ?? 'tool call',
+          label: clientTool ? 'Task Monki' : item.type === 'MCP_TOOL_CALL' ? 'MCP' : 'Tool',
+          detail: clientTool ?? compactToolName(payload) ?? (item.type === 'MCP_TOOL_CALL' ? 'tool call' : 'dynamic tool'),
           tone: activityToneForStatus(activityStatusForItem(item.status), false),
           status: activityStatusForItem(item.status),
           at,
-          suffix: `mcp:${normalizeKey(compactToolName(payload) ?? '')}`
+          suffix: `${kind}:${normalizeKey(clientTool ?? compactToolName(payload) ?? '')}`
         })
       ];
-    case 'DYNAMIC_TOOL_CALL':
-      return [
-        rowFromItem(item, {
-          category: 'mcp',
-          label: 'Tool',
-          detail: compactToolName(payload) ?? 'dynamic tool',
-          tone: activityToneForStatus(activityStatusForItem(item.status), false),
-          status: activityStatusForItem(item.status),
-          at,
-          suffix: `dynamic-tool:${normalizeKey(compactToolName(payload) ?? '')}`
-        })
-      ];
+    }
     case 'WEB_SEARCH':
       {
         const detail = providerToolDetail(payload, 'request');
@@ -730,6 +724,15 @@ function providerToolDetail(
       fallback,
     72
   );
+}
+
+/** Providers name an MCP tool in different fields and spellings; any of them may point at a Task Monki tool. */
+function clientToolNameFromPayload(payload: Record<string, unknown>): string | undefined {
+  const rawInput = objectPayload(payload.rawInput);
+  const claudeCode = objectPayload(objectPayload(payload._meta).claudeCode);
+  return [payload.tool, payload.title, rawInput.toolName, rawInput.tool_name, claudeCode.toolName]
+    .map((value) => clientToolNameFromIdentifier(stringValue(value)))
+    .find((tool) => tool !== undefined);
 }
 
 function compactToolName(payload: Record<string, unknown>): string | undefined {

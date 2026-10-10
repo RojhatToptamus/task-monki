@@ -5013,6 +5013,7 @@ function taskPurposeFromMode(mode: AgentRunMode): AgentRuntimeRunRecord['purpose
     case 'RETRY': return 'TASK_RETRY';
     case 'REVIEW': return 'TASK_REVIEW';
     case 'DESIGN': return 'TASK_DESIGN';
+    case 'PREVIEW': return 'TASK_PREVIEW';
     case 'COMPACTION': return 'TASK_COMPACTION';
     case 'SUBAGENT': return 'PROVIDER_SUBAGENT';
   }
@@ -5028,6 +5029,7 @@ function taskModeFromPurpose(
     case 'TASK_RETRY': return 'RETRY';
     case 'TASK_REVIEW': return 'REVIEW';
     case 'TASK_DESIGN': return 'DESIGN';
+    case 'TASK_PREVIEW': return 'PREVIEW';
     case 'TASK_COMPACTION': return 'COMPACTION';
     case 'PROVIDER_SUBAGENT': return 'SUBAGENT';
     default: throw new Error(`Cannot project Discourse purpose ${purpose} as a Task run.`);

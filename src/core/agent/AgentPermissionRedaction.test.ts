@@ -6,6 +6,16 @@ import {
 } from './AgentPermissionRedaction';
 
 describe('permission path redaction', () => {
+  it('shows the exact inspectable folder while concealing unrelated external paths', () => {
+    const backend = nativeAbsolute('projects', 'backend');
+    const other = nativeAbsolute('private', 'unrelated');
+    const result = redactExternalPermissionPaths({
+      startedAtMs: 1, cwd: nativeAbsolute('frontend'),
+      permissions: { fileSystem: { read: [backend, other] } }
+    }, nativeAbsolute('frontend'), [backend]);
+    expect(result.permissions.fileSystem?.read).toEqual([backend, 'task-monki-external-path:1']);
+  });
+
   it('retains native worktree paths and removes external paths from nested durable fields', () => {
     const worktree = nativeAbsolute('worktree');
     const external = nativeAbsolute('cache', 'task-monki', 'run-1', 'file.txt');

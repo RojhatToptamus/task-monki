@@ -234,6 +234,8 @@ function itemForEvent(
   const payload = objectPayload(event.payload);
   const run = event.runId ? runById.get(event.runId) : undefined;
   const mode = (stringField(payload, 'mode') as AgentRunMode | undefined) ?? run?.mode;
+  // Preview has its own conversation; it is not implementation progress.
+  if (mode === 'PREVIEW') return undefined;
   const recoveryContinuation = isRecoveryContinuation(
     run,
     runById,

@@ -1,3 +1,4 @@
+import { PREVIEW_AGENT_EXTENSION } from '../../../shared/agentExecutionSupport';
 import type {
   AgentCapability,
   AgentDesignCapability,
@@ -81,10 +82,6 @@ export interface AcpRuntimeProfile {
         launchArgv: readonly string[];
         startupFailurePattern: RegExp;
       };
-  /** Preview YAML may run only from the app-owned disposable evidence copy. */
-  isolatedPreviewRecipeGeneration?: {
-    detail: string;
-  };
   /**
    * Exact provider text that represents a failed turn despite an ACP
    * `end_turn` response. This is profile-owned because ACP has no structured
@@ -346,10 +343,6 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
     detail:
       'Claude Agent ACP plan mode limits normal edits. Task Monki also tells the agent not to modify files, denies reported permission requests, and compares repository state after the turn.'
   },
-  isolatedPreviewRecipeGeneration: {
-    detail:
-      'Claude Agent ACP generates Preview YAML from an app-owned disposable evidence copy. It receives no source repository path.'
-  },
   attachmentTextTransport: 'embedded-resource',
   imageMediaTypes: ACP_IMAGE_MEDIA_TYPES,
   discoverModelsFromSession: true,
@@ -527,16 +520,15 @@ export function acpCapabilities(
         maturity: 'unsupported',
         detail: 'ACP cannot attest a restricted app-owned read root for Design skills.'
       },
-      'task-monki.preview-recipe-generation':
-        profile.isolatedPreviewRecipeGeneration
-          ? {
-              maturity: 'stable',
-              detail: profile.isolatedPreviewRecipeGeneration.detail
+      // Read-only work in a separate process cannot carry the task session's Task Monki tools.
+      ...(configuredReadOnlyPolicy?.kind === 'DEDICATED_PROCESS'
+        ? {
+            [PREVIEW_AGENT_EXTENSION]: {
+              maturity: 'unsupported' as const,
+              detail: `${profile.descriptor.displayName} runs read-only work in a separate process that denies Task Monki tools, so it cannot hold the Preview conversation.`
             }
-          : {
-              maturity: 'unsupported',
-              detail: `${profile.descriptor.displayName} uses its shared read-only turn path for Preview generation.`
-            }
+          }
+        : {})
     }
   };
 }

@@ -1,26 +1,27 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { DesignDetailSnapshot,PreviewRecipeGenerationSnapshot } from '../../shared/contracts';
+import { useRef, useState, type FormEvent } from 'react';
+import type { DesignDetailSnapshot } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
-import { ApplicationPreviewSetup } from './preview/ApplicationPreviewSetup';
+import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { DisclosureChevron } from './DisclosureChevron';
+import type { NotificationTone } from './AppOverlays';
 
-/** Repository selection belongs to creation; application setup belongs to Preview. */
-export function DesignRepositorySetup({ project, onUpdate, onOpenLocation, onModalOpenChange }: {
+/**
+ * Repository selection belongs to creation; application setup belongs to Preview. The Design's
+ * own Preview conversation drafts `preview.yaml` on its workspace, as on a task.
+ */
+export function DesignRepositorySetup({ project, agent, proposals, onUpdate, onOpenLocation, onModalOpenChange, onNotify }: {
   project: DesignDetailSnapshot;
+  agent?: PreviewAgentConversation;
+  proposals?: PreviewProposalActions;
   onUpdate(detail: DesignDetailSnapshot): void;
   onOpenLocation(): Promise<void>;
   onModalOpenChange(open: boolean): void;
+  onNotify?(message: string, tone?: NotificationTone): void;
 }) {
   const root = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const [recipe, setRecipe] = useState<PreviewRecipeGenerationSnapshot>();
-  useEffect(() => taskManagerApi.onUpdate(event => {
-    if (event.type === 'preview.recipe-generation.updated' && event.taskId === project.task.id) {
-      setRecipe(event.payload as PreviewRecipeGenerationSnapshot);
-    }
-  }), [project.task.id]);
   const setup = project.repositorySetup;
   const spec = setup?.description?.spec;
   const services = spec?.type === 'environment' ? Object.entries(spec.services).filter(([, value]) => ['static', 'command', 'attach', 'preview'].includes(value.type)).map(([id]) => id)
@@ -50,15 +51,13 @@ export function DesignRepositorySetup({ project, onUpdate, onOpenLocation, onMod
         {setup?.workspaceChanged ? <button className="outline-button" disabled={busy || active} onClick={() => void run(() => taskManagerApi.startDesign({ designId: project.task.id, acceptWorkspaceSnapshotId: setup.workspaceSnapshotId }))}>Continue with these changes</button> : null}
       </div>
     </div> : null}
-    {project.currentWorktree?.status === 'PRESENT' ? <ApplicationPreviewPanel taskId={project.task.id} projectName={project.repository.name} onModalOpenChange={onModalOpenChange}
-      setup={<ApplicationPreviewSetup taskId={project.task.id} worktreeId={project.currentWorktree.id} state={recipe}
-        disabledReason={active ? 'Wait for the Design turn to finish.' : undefined} fallbackReturnFocusRef={root} onModalOpenChange={onModalOpenChange}
-        get={async taskId => { const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId }); setRecipe(state); return state; }}
-        generate={async (taskId, clarification) => { const state = await taskManagerApi.generatePreviewRecipe({ taskId, clarification }); setRecipe(state); return state; }}
-        validate={(taskId, draftId, yaml) => taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml })}
-        accept={async (taskId, draftId, yaml) => { const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml }); await refresh(); return result; }}
-        discard={async taskId => { const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId }); setRecipe(state); return state; }}
-        writeManually={onOpenLocation} />} /> : null}
+    {project.currentWorktree?.status === 'PRESENT' ? <ApplicationPreviewPanel taskId={project.task.id} projectName={project.repository.name} worktree={project.currentWorktree} onModalOpenChange={onModalOpenChange} onNotify={onNotify}
+      agent={agent && { ...agent, disabledReason: agent.disabledReason ?? (active ? 'Wait for the Design turn to finish.' : undefined) }}
+      proposals={proposals && { ...proposals, accept: async (taskId, draftId, yaml) => {
+        const result = await proposals.accept(taskId, draftId, yaml);
+        await refresh();
+        return result;
+      } }} /> : null}
     {spec ? <section className="tm-design-repository-setup__application" aria-labelledby="design-application-title">
       <h3 id="design-application-title" className="tm-panel__title">Design target</h3>
       <form key={JSON.stringify(project.task.designPreviewTarget)} className="field-grid tm-design-repository-fields" onSubmit={event => void selectTarget(event)}>

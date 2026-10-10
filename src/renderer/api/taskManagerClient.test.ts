@@ -340,11 +340,11 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       })
     );
     const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
-    await api.startApplicationPreview({ taskId: 'task-1', source: 'file' });
+    await api.startApplicationPreview({ taskId: 'task-1' });
     await api.openApplicationPreview({ taskId: 'task-1', attemptId: 'attempt-1', service: 'web' });
     await api.readApplicationPreviewLogs({ taskId: 'task-1', attemptId: 'attempt-1', source: 'web', after: 3 });
     expect(calls).toEqual([
-      { url: 'http://127.0.0.1:3099/api/application/startApplicationPreview', body: { taskId: 'task-1', source: 'file' } },
+      { url: 'http://127.0.0.1:3099/api/application/startApplicationPreview', body: { taskId: 'task-1' } },
       { url: 'http://127.0.0.1:3099/api/application/openApplicationPreview', body: { taskId: 'task-1', attemptId: 'attempt-1', service: 'web' } },
       { url: 'http://127.0.0.1:3099/api/application/readApplicationPreviewLogs', body: { taskId: 'task-1', attemptId: 'attempt-1', source: 'web', after: 3 } }
     ]);

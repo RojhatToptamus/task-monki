@@ -3,10 +3,13 @@ import type {
   AgentRuntimeCapabilities
 } from './agent';
 
+/** A runtime reports that it cannot run the read-only Preview conversation with Task Monki tools. */
+export const PREVIEW_AGENT_EXTENSION = 'task-monki.preview-agent';
+
 export type AgentExecutionOperation =
   | 'ACTIVE_TURN_STEERING'
   | 'PROMPT_REFINEMENT'
-  | 'PREVIEW_RECIPE_GENERATION'
+  | 'PREVIEW_AGENT'
   | 'REVIEW'
   | 'DESIGN'
   | 'DISCOURSE';
@@ -58,8 +61,14 @@ export function projectAgentExecutionSupport(
     case 'PROMPT_REFINEMENT':
       return supported();
 
-    case 'PREVIEW_RECIPE_GENERATION':
-      return supported();
+    case 'PREVIEW_AGENT': {
+      // No runtime or model allowlist: a runtime is refused only when it reports it cannot run
+      // the conversation, such as one whose read-only work happens outside the task session.
+      const preview = capabilities.extensions[PREVIEW_AGENT_EXTENSION];
+      return preview?.maturity === 'unsupported'
+        ? unsupported(preview.detail ?? 'This agent cannot run the Preview conversation.')
+        : supported();
+    }
 
     case 'REVIEW':
       return supported();

@@ -58,8 +58,8 @@ behavior and architecture, not private roadmap sequencing.
    - Canonical Preview authority, lifecycle, native/Compose runtime, security,
      ownership, storage, shutdown, and recovery architecture.
 6. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
-   - Agent-assisted Preview recipe authoring, sanitized repository evidence,
-     structured drafts, review UX, validation, and exact acceptance boundary.
+   - The Preview agent conversation: detached PREVIEW sessions, message queue,
+     app-owned tools, proposal validation, and the exact acceptance boundary.
 7. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.

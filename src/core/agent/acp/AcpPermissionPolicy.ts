@@ -1,10 +1,14 @@
+import path from 'node:path';
 import type {
   AgentCommandApprovalRequest,
   AgentInteractionAction,
+  AgentPermissionApprovalDecision,
+  AgentPermissionApprovalRequest,
   AgentSessionRecord,
   RunRecord
 } from '../../../shared/contracts';
-import { buildInteractionPolicy } from '../AgentInteractionPolicy';
+import { buildInteractionPolicy, previewInspectionReadPaths } from '../AgentInteractionPolicy';
+import { redactExternalPermissionPaths } from '../AgentPermissionRedaction';
 import {
   agentActionForAcpPermissionKind,
   acpPermissionKindRemembersChoice,
@@ -16,6 +20,14 @@ export interface MaterializedAcpPermission {
   request: AgentCommandApprovalRequest;
   allowedActions: AgentInteractionAction[];
   warnings: string[];
+  /** Set when the request is the active run's own Task Monki tool. */
+  trustedAppTool?: string;
+}
+
+export interface MaterializedAcpReadPermission {
+  request: AgentPermissionApprovalRequest;
+  allowedActions: AgentInteractionAction[];
+  warnings: string[];
 }
 
 /** Intersects opaque provider choices with Task Monki's local safety policy. */
@@ -24,7 +36,11 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
-  trustedAppTool?: 'inspect_design';
+  /**
+   * A Task Monki tool the active run may call. It is accepted automatically through
+   * the provider's single one-time choice, like a Codex dynamic tool call.
+   */
+  trustedAppTool?: string;
   rememberedPermissionOwner?: string;
 }): MaterializedAcpPermission {
   const paths = pathsFromToolCall(input.toolCall);
@@ -42,8 +58,12 @@ export function materializeAcpPermission(input: {
   let localAllowed: AgentInteractionAction[];
   let hardBlocked = false;
 
-  if (input.trustedAppTool === 'inspect_design') {
+  if (input.trustedAppTool) {
     localAllowed = ['ACCEPT', 'DECLINE', 'CANCEL'];
+    if (!uniqueOption(input.options, 'allow_once')) {
+      warnings.push(`ACP did not offer one exact one-time choice for Task Monki tool ${input.trustedAppTool}.`);
+      hardBlocked = true;
+    }
   } else if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
     const policy = buildInteractionPolicy({
       type: 'FILE_CHANGE_APPROVAL',
@@ -139,6 +159,7 @@ export function materializeAcpPermission(input: {
   return {
     request,
     allowedActions,
+    ...(input.trustedAppTool ? { trustedAppTool: input.trustedAppTool } : {}),
     warnings: [
       ...new Set([
         ...warnings,
@@ -152,6 +173,81 @@ export function materializeAcpPermission(input: {
   };
 }
 
+/**
+ * In Preview, an ACP read is read-only access to the exact paths it names. It
+ * becomes the shared read-permission approval, so the person can grant it once
+ * only for paths inside the worktree or an explicitly shown project folder.
+ * Other runs and tool kinds keep the command-approval materialization.
+ */
+export function materializeAcpReadPermission(input: {
+  toolCall: AcpToolCallUpdate;
+  options: readonly AcpPermissionOption[];
+  session: AgentSessionRecord;
+  run: RunRecord;
+}): MaterializedAcpReadPermission | undefined {
+  if (input.run.mode !== 'PREVIEW' || input.toolCall.kind !== 'read') {
+    return undefined;
+  }
+  const base = cwdFromToolCall(input.toolCall) ?? input.session.worktreePath;
+  const paths = pathsFromToolCall(input.toolCall).map((candidate) => path.resolve(base, candidate));
+  const reason = reasonFromToolCall(input.toolCall);
+  const requested: AgentPermissionApprovalRequest = {
+    startedAtMs: Date.now(),
+    cwd: input.session.worktreePath,
+    ...(reason ? { reason } : {}),
+    permissions: {
+      fileSystem: {
+        entries: [...new Set(paths)].map((candidate) => ({
+          path: { type: 'path', path: candidate },
+          access: 'read'
+        }))
+      }
+    }
+  };
+  // Like Codex, conceal external paths other than folders eligible for explicit consent.
+  const request = redactExternalPermissionPaths(
+    requested,
+    input.session.worktreePath,
+    previewInspectionReadPaths(requested, input.run)
+  );
+  const policy = buildInteractionPolicy({
+    type: 'PERMISSION_APPROVAL',
+    request,
+    session: input.session,
+    run: input.run
+  });
+  const warnings = [...policy.warnings];
+  if (paths.length === 0) warnings.push('ACP did not provide verifiable file scope for this tool call.');
+  const grantable = uniqueOption(input.options, 'allow_once') !== undefined;
+  if (!grantable) warnings.push('ACP did not offer one exact one-time choice for this read.');
+  return {
+    request,
+    // ACP grants one tool call; a session-wide grant would be the provider's remembered choice.
+    allowedActions: policy.allowedActions.filter(
+      (action) => action === 'DECLINE' || (action === 'GRANT_TURN' && grantable)
+    ),
+    warnings: [...new Set(warnings)]
+  };
+}
+
+/** The exact provider choice for a read-permission decision; only the complete request can be granted. */
+export function acpReadPermissionOutcome(
+  options: readonly AcpPermissionOption[],
+  request: AgentPermissionApprovalRequest,
+  decision: AgentPermissionApprovalDecision
+): { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
+  if (decision.action === 'DECLINE') {
+    const reject = uniqueOption(options, 'reject_once');
+    return reject ? { outcome: 'selected', optionId: reject.optionId } : { outcome: 'cancelled' };
+  }
+  if (decision.action !== 'GRANT_TURN' || canonicalJson(decision.permissions) !== canonicalJson(request.permissions)) {
+    throw new Error('ACP can grant only the complete one-time read request.');
+  }
+  const allow = uniqueOption(options, 'allow_once');
+  if (!allow) throw new Error('The ACP agent did not offer one exact one-time choice for this read.');
+  return { outcome: 'selected', optionId: allow.optionId };
+}
+
 /** Selects an exact provider option only when the chosen access policy permits it. */
 export function selectAutomaticAcpPermissionOption(input: {
   approvalPolicy: string | undefined;
@@ -160,6 +256,7 @@ export function selectAutomaticAcpPermissionOption(input: {
   materialized: MaterializedAcpPermission;
 }): AcpPermissionOption | undefined {
   const autoAcceptsOneTime =
+    input.materialized.trustedAppTool !== undefined ||
     input.approvalPolicy === 'never' ||
     (input.approvalPolicy === 'auto-accept-edits' &&
       ['edit', 'delete', 'move'].includes(input.toolCall.kind ?? ''));
@@ -174,6 +271,23 @@ export function selectAutomaticAcpPermissionOption(input: {
     (option) => option.kind === 'allow_once' && permittedOptionIds.has(option.optionId)
   );
   return oneTime.length === 1 ? oneTime[0] : undefined;
+}
+
+/** Durable records omit undefined fields, so permission profiles compare as canonical JSON. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) =>
+    isRecord(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))
+      : entry
+  );
+}
+
+function uniqueOption(
+  options: readonly AcpPermissionOption[],
+  kind: AcpPermissionOption['kind']
+): AcpPermissionOption | undefined {
+  const matching = options.filter((option) => option.kind === kind);
+  return matching.length === 1 ? matching[0] : undefined;
 }
 
 function commandFromToolCall(toolCall: AcpToolCallUpdate): string | undefined {

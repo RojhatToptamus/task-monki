@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentProps,
   type RefObject
 } from 'react';
 import type { PreviewSecretsApi } from '../../../shared/applicationPreview';
@@ -17,12 +18,20 @@ export function PreviewSecretDialog({
   onSaved,
   onModalOpenChange,
   fallbackReturnFocusRef,
-  inPreview = true
+  inPreview = true,
+  inline = false,
+  sequence = false,
+  labels
 }: {
   /** Omit to create a reference; an empty list unlocks storage only. */
   references?: string[];
+  /** Enter a value for each reference in turn; finishing the last one saves the form. */
+  sequence?: boolean;
+  /** The value field's label per reference: the environment keys it feeds. */
+  labels?: Record<string, string>;
   fallbackReturnFocusRef?: RefObject<HTMLElement | null>;
   inPreview?: boolean;
+  inline?: boolean;
   recipients?: Record<string, string[]>;
   onClose(): void;
   onSaved(): void | Promise<void>;
@@ -32,6 +41,9 @@ export function PreviewSecretDialog({
   const creating = references === undefined;
   const unlockOnly = references?.length === 0;
   const [reference, setReference] = useState(references?.[0] ?? '');
+  const position = sequence ? references!.indexOf(reference) : -1;
+  // Inline under its own row, the reference is already named; a sequence names it on its progress line.
+  const referenceKnown = inline && !!references && (references.length === 1 || sequence);
   const [status, setStatus] = useState<VaultStatus>();
   const [exists, setExists] = useState<boolean>();
   const [error, setError] = useState<string>();
@@ -152,7 +164,8 @@ export function PreviewSecretDialog({
               'This reference was removed. Close this dialog and add it again.'
             );
         } else await api.create(input);
-        await onSaved();
+        if (sequence && position < references!.length - 1) setReference(references![position + 1]!);
+        else await onSaved();
       }
     } catch (cause) {
       setError(message(cause));
@@ -160,8 +173,9 @@ export function PreviewSecretDialog({
       setBusy(false);
     }
   }
+  const Container = inline ? InlineSecretForm : PreviewDialog;
   return (
-    <PreviewDialog
+    <Container
       title={title}
       fallbackReturnFocusRef={fallbackReturnFocusRef}
       busy={busy}
@@ -175,14 +189,14 @@ export function PreviewSecretDialog({
         <>
           <button
             type="button"
-            className="outline-button"
+            className={inline ? 'ghost-button' : 'outline-button'}
             disabled={busy}
             onClick={onClose}
           >
-            {inPreview ? 'Back to Preview' : 'Cancel'}
+            {inline ? 'Cancel' : inPreview ? 'Back to Preview' : 'Cancel'}
           </button>
           <button
-            className="primary-button"
+            className={inline ? 'outline-button' : 'primary-button'}
             disabled={
               busy ||
               !status ||
@@ -223,7 +237,12 @@ export function PreviewSecretDialog({
           />
         </label>
       ) : null}
-      {reference && !creating ? (
+      {sequence && reference ? (
+        <p className="tm-preview-secret-form__progress">
+          <code>{reference}</code> · {position + 1} of {references!.length}
+        </p>
+      ) : null}
+      {reference && !creating && !referenceKnown ? (
         <label className="field">
           <span>Secret reference</span>
           {references!.length > 1 ? (
@@ -244,15 +263,15 @@ export function PreviewSecretDialog({
           )}
         </label>
       ) : null}
-      {recipients?.[reference]?.length ? (
+      {recipients?.[reference]?.length && !inline ? (
         <p>Used by {recipients[reference].join(', ')}.</p>
       ) : null}
-      <p>
+      {!inline ? <p>
         Saving or unlocking does not approve or start a preview.
         {inPreview
           ? ' Return to review before starting.'
           : ' Changes apply on the next approved start.'}
-      </p>
+      </p> : null}
       {status?.warning ? <p role="status">{status.warning}</p> : null}
       {!status ? (
         <p role="status">Loading secret storage…</p>
@@ -311,7 +330,7 @@ export function PreviewSecretDialog({
             </p>
           ) : null}
           <label className="field">
-            <span>{exists ? 'New value' : 'Secret value'}</span>
+            <span>{labels?.[reference] || (exists ? 'New value' : 'Secret value')}</span>
             <input
               type="password"
               ref={attachValue}
@@ -330,14 +349,15 @@ export function PreviewSecretDialog({
               required
               autoComplete="off"
               spellCheck={false}
-              aria-label="Secret value"
             />
           </label>
-          <p>
-            {multiline
-              ? 'Multiline value pasted. Paste again to replace it, or clear it to type a new value.'
-              : 'The value stays concealed. Pasting multiple lines replaces the entire value and preserves every line.'}
-          </p>
+          {multiline || !inline ? (
+            <p>
+              {multiline
+                ? 'Multiline value pasted. Paste again to replace it, or clear it to type a new value.'
+                : 'Values stay concealed. You can paste a multiline value.'}
+            </p>
+          ) : null}
           {multiline ? (
             <button
               type="button"
@@ -371,6 +391,33 @@ export function PreviewSecretDialog({
           </button>
         </div>
       ) : null}
-    </PreviewDialog>
+    </Container>
+  );
+}
+
+function InlineSecretForm({
+  title,
+  children,
+  footer,
+  onSubmit,
+  onClose,
+  busy
+}: ComponentProps<typeof PreviewDialog>) {
+  return (
+    <form
+      className="tm-preview-secret-form"
+      aria-label={title}
+      onSubmit={onSubmit}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !busy) {
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+    >
+      <h4>{title}</h4>
+      {children}
+      <div className="tm-preview-secret-actions">{footer}</div>
+    </form>
   );
 }

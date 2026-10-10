@@ -151,24 +151,22 @@ A provider policy is not an operating-system sandbox.
 The repository comparison detects a change after it occurs; it does not confine the
 provider process. The UI must describe this boundary correctly.
 
-### Preview recipe generation
+### Prompt refinement and the Preview agent
 
-Prompt refinement and Preview recipe generation use fresh, transient sessions.
-Their runtime records remain until terminal settlement and confirmed release.
-The Codex adapter also requests native ephemeral threads for these two purposes.
-OpenCode and ACP keep their existing session behavior because their integrations have no verified equivalent flag.
+Prompt refinement uses fresh, transient sessions. Their runtime records remain
+until terminal settlement and confirmed release. The Codex adapter also requests
+native ephemeral threads for that purpose. OpenCode and ACP keep their existing
+session behavior because their integrations have no verified equivalent flag.
 Session close or unsubscribe does not promise provider history deletion.
 
-Preview recipe generation uses the runtime and model selected in Settings.
-It does not use an app-owned fallback model.
-
-The normal path uses the shared transient read-only turn.
-An adapter can use a disposable evidence copy when it cannot safely receive the
-source repository. That copy must not expose the source repository path.
-
-The Preview generation service owns the prompt, parsing, schema validation,
-cancellation, and user-visible error.
-The adapter owns protocol delivery.
+The Preview agent is a task-bound conversation, not a transient read-only turn.
+Its session has role `PREVIEW`, its runs have mode `PREVIEW` and purpose
+`TASK_PREVIEW`, and they stay detached from the task workflow. The conversation
+starts on the runtime and model selected in Settings and follows the person's
+selection in the panel; another selection starts another session.
+`PreviewAgentCoordinator` owns messages, the queue, stopping, and the
+`inspect_preview` and `propose_preview_configuration` tools served through the
+generic client-tool bridge. See `docs/architecture/PREVIEW_RECIPE_GENERATION.md`.
 
 ### Design
 

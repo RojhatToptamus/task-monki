@@ -677,6 +677,21 @@ details[open] > summary .tm-disclosure__chevron {
   background: var(--accent);
 }
 
+.tm-panel-resize--horizontal {
+  width: 100%;
+  min-width: 0;
+  height: 5px;
+  margin: -2px 0;
+  cursor: row-resize;
+}
+
+.tm-panel-resize--horizontal span {
+  top: 2px;
+  left: 0;
+  width: 100%;
+  height: 1px;
+}
+
 /* ----------------------------------------------------------------------- */
 /* Main detail                                                             */
 /* ----------------------------------------------------------------------- */
@@ -1572,11 +1587,21 @@ details[open] > summary .tm-disclosure__chevron {
 .tm-action-menu__copy small { color: var(--muted); font-size: var(--t-meta); line-height: 1.4; overflow-wrap: anywhere; }
 .tm-action-menu__check { display: grid; flex: 0 0 16px; place-items: center; }
 .tm-action-menu__danger { color: var(--blocked-ink); }
+.tm-action-menu__line { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.tm-action-menu__line > span:first-child { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+.tm-action-menu__meta { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
+.tm-action-menu__meta[data-tone='blocked'] { color: var(--blocked-ink); }
+.tm-action-menu__item[data-disabled] .tm-action-menu__meta { color: var(--text-disabled); }
+.tm-action-menu__separator { height: 1px; margin: 4px 2px; background: var(--hair); }
+.tm-action-menu__note { margin: 0; padding: 5px 8px 4px; color: var(--muted); font-size: var(--t-meta); line-height: 1.4; }
 /* One icon action language for Agent, Design and Discourse composers. */
 .tm-composer-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--h-toolbar); min-width: var(--h-toolbar); height: var(--h-toolbar); padding: 0; border-radius: var(--r-sm); }
 .tm-composer-action svg { width: 16px; height: 16px; }
 
 .interaction-permission { display: contents; }
+.interaction-details--permissions { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.interaction-details--permissions dd + dt { margin-top: 8px; }
+.interaction-permission + .interaction-permission dt { margin-top: 8px; }
 .interaction-card__reason { margin: 0 0 12px; color: var(--text-soft); font-size: var(--t-body); line-height: 1.5; }
 .interaction-card__error { margin-top: 12px; }
 .interaction-card__error .form-error { margin: 0 0 4px; }

@@ -13,6 +13,7 @@ import {
   defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
+import { projectAgentExecutionSupport } from '../../../shared/agentExecutionSupport';
 import { normalizeAcpReadOnlyExecutionSettings } from './AcpRuntimeAdapter';
 
 describe('ACP runtime profiles', () => {
@@ -222,6 +223,11 @@ describe('ACP runtime profiles', () => {
     expect(qualifiedGrok.executionPolicy.presets).not.toContainEqual(
       expect.objectContaining({ repositoryMutation: 'DENY' })
     );
+    // Its read-only process denies MCP tools, so the Preview conversation cannot run on Grok on any platform; the others keep it.
+    expect(projectAgentExecutionSupport(qualifiedGrok, 'PREVIEW_AGENT')).toMatchObject({ supported: false });
+    expect(projectAgentExecutionSupport(acpCapabilities(GROK_ACP_PROFILE), 'PREVIEW_AGENT')).toMatchObject({ supported: false });
+    expect(projectAgentExecutionSupport(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE), 'PREVIEW_AGENT')).toEqual({ supported: true });
+    expect(projectAgentExecutionSupport(acpCapabilities(CURSOR_ACP_PROFILE), 'PREVIEW_AGENT')).toEqual({ supported: true });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
       expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' }),
@@ -248,18 +254,12 @@ describe('ACP runtime profiles', () => {
       readOnlyTurns: {
         maturity: 'stable',
         detail: expect.stringContaining('compares repository state')
-      },
-      extensions: {
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
       }
     });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE, {
       runtimeVersion: 'a-newer-version'
     })).toMatchObject({
-      readOnlyTurns: { maturity: 'stable' },
-      extensions: {
-        'task-monki.preview-recipe-generation': { maturity: 'stable' }
-      }
+      readOnlyTurns: { maturity: 'stable' }
     });
     expect(GROK_ACP_PROFILE.readOnlyTurnPolicy).toMatchObject({
       kind: 'DEDICATED_PROCESS',

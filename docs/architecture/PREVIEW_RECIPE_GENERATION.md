@@ -1,78 +1,141 @@
-# Preview configuration generation
+# Preview agent
 
-Task Monki can prepare root `preview.yaml` when a task has no configuration.
-Generation is an authoring aid. Previewhost remains the parser and runtime owner;
-the agent cannot authorize execution.
+The Preview agent is a conversation in a task's Preview tab. It reads the task
+worktree, the configuration file, the runs and their logs, answers questions
+about the preview, explains failures, and proposes `preview.yaml` changes. Its app-owned tools
+only inspect and propose: the person reviews, saves, and separately approves
+execution. Provider restrictions and their limits are described below. Previewhost remains
+the parser and runtime owner.
 
-## User flow and write boundary
+## Conversation ownership
 
-**Generate with agent** opens the existing review modal with progress, YAML, and
-an evidence report. The user can edit, regenerate, discard, or close the draft.
-If evidence is insufficient, the agent asks up to three focused questions.
-The user can supply nonsecret clarification and regenerate. Clarification records
-user decisions, not repository evidence or permission to run commands.
-Task Monki rejects likely secret values before it sends clarification to the provider.
-Closing does not modify the repository. **Save configuration** validates the
-reviewed text and exclusively creates `preview.yaml`. It refuses an existing
-`preview.yaml` or `preview.yml`, including a file created during review.
-Acceptance does not approve or start the application.
+A Preview conversation is an agent session with role `PREVIEW` on the task's
+current worktree. Each turn is a run with mode `PREVIEW`, purpose
+`TASK_PREVIEW`, and instruction profile `PREVIEW`. The session, runs, items,
+questions and messages belong to the task, but they are detached from its
+workflow: a Preview run never becomes the task's current run, never moves the
+workflow phase, and never binds the task's current session. The renderer splits
+them out of the Agent tab (`partitionPreviewAgentRecords`) and renders them in
+the Preview panel with the same turn, step, question and queue components.
 
-Validation uses Previewhost's `parsePreviewSpec` after strict YAML parsing. Drafts
-are limited to 64 KiB. Unknown fields, aliases, duplicate keys, malformed reports,
-secret-like literal environment values, implicit package acquisition, and commands
-that conflict with trusted framework evidence are rejected. Validation errors use
-fixed messages instead of echoing unsafe source snippets.
+A repository-backed Design has the same conversation on its own workspace. It
+drafts the `preview.yaml` that the queued Design brief waits for. Its Preview runs
+are the only non-`DESIGN` runs a Design owns. They never become Design turns, bind
+the Design's current run or session, or appear in the Design conversation. The
+Design detail projects them separately as `previewAgent`. Messages are refused
+while a Design turn runs, and an active Preview turn blocks archiving. Saving a
+proposal also accepts the resulting workspace change, so the brief continues to
+the application-selection step.
 
-## Evidence and model output
+The conversation is keyed by runtime and model. The panel offers the full model
+catalog of the enabled runtimes; the Settings default (**Models → Preview
+agent**) is the starting selection. Choosing another runtime or model starts
+another session; earlier sessions stay in history. The selection is fixed while
+a turn runs. After relaunch, the last requested model remains selected even
+before the provider catalog loads; missing catalog entries never select a different model.
 
-`PreviewRecipeGenerationSupport.ts` owns the agent authoring instructions and
-parser-tested examples. `PreviewFrameworkCapabilities` derives narrow command and
-package preparation facts from sanitized manifests. Supported Next.js commands
-must consume the allocated port; fixed ports or HTTPS arguments are changed only
-when the derived capability supplies an exact compatible command and review
-comment. Unknown commands are reported as insufficient evidence.
+`PreviewAgentCoordinator` owns the conversation. Messages are durable
+`TaskInstruction` records with `role: 'PREVIEW'`. A message sent while the agent
+is idle starts a turn at once (`FOLLOW_UP`, `SENDING` → `SUBMITTED` with its run
+id). A message sent during a turn waits in the queue (`QUEUE`, `QUEUED`) behind
+the active run and is sent when that run completes in the same session. Stop
+interrupts the run and holds the queue; a held or failed message is sent again
+by its id. Task Monki restarts hold queued messages like the task queue does.
+Removing or editing a queued message uses the shared instruction editing.
 
-Native commands can consume the injected `PORT` and `HOST`, or use evidenced
-command-line flags with `{port}` or `{port:NAME}`. Generation must prove the
-listener behavior from source or derived framework facts. HTTP readiness accepts
-status 200–399 response headers without following redirects or checking bodies.
-Workers require an evidenced HTTP, TCP, or command probe.
+Each turn's prompt is the person's message followed by one line of preview
+state (`buildPreviewAgentTurnPrompt`); the agent's permanent instructions are
+`PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS`. Codex receives them as plan-mode
+developer instructions, ACP agents as a prompt prefix, OpenCode as the system
+prompt. Turns use each provider's read-only policy, with command and
+file-change approvals rejected. A read outside the worktree that the provider
+asks about becomes an explicit read-only permission request for the exact folder
+or file; a file qualifies only when its folder would. Home directories, their
+ancestors, writes and network access cannot be granted. Codex asks through its
+permission tool, OpenCode through its external-directory permission, and an ACP
+agent through a read permission request, which Task Monki answers with
+the agent's one-time choice. These inspection grants belong to the provider
+turn/session, not to Previewhost's separate permission to run a service.
 
-An evidenced npm installation is an explicit job with the required `dependsOn`
-edge. Its review comment identifies package lifecycle execution. Generation must
-not silently acquire packages through `npx`, `npm exec`, or package-manager `dlx`.
+Codex otherwise enforces a read-only, offline sandbox. OpenCode runs a `--pure`
+session whose native rules deny edits, commands, delegation and web tools; allow
+reads, questions and the Task Monki tools; and ask before external paths. Its
+process is not confined and keeps provider network access. Claude ACP uses plan
+mode and Cursor ACP uses Ask mode. In live qualification both read a file
+outside the worktree without a permission request, so only the instructions
+limit those reads. Neither mode provides an OS sandbox or offline guarantee. The
+exact model selected must resolve or the message is refused before a record
+is written.
 
-Public environment candidates come from bounded source inspection and explicitly
-tracked templates. Each candidate needs one report decision: attach a service,
-keep an evidenced source default, or omit it. Conflicting targets produce an
-unconfigured attachment, not a guessed endpoint. Secret values use named
-Previewhost references on their exact recipients.
-Generation does not use `fromEnv`: the embedded runtime supplies no owner inputs.
+Before proposing a backend connection, the agent asks whether to use an external URL or a local backend repository, unless the person has already chosen. Project examples, a running port and earlier runs do not decide that preference. External services do not provide process logs; Preview-managed services do. The agent reads project facts before asking and keeps questions and summaries short.
 
-The result is one bounded JSON object containing a draft or insufficient-evidence
-status, summary, evidence, assumptions, omissions, unresolved decisions, and public
-environment decisions. Evidence paths must name inspected files. Task Monki may
-accept bounded non-JSON progress before the final object, but rejects multiple
-objects or trailing commentary.
+Questions use each runtime's native structured question tool (Codex
+`request_user_input`, ACP form elicitation, OpenCode questions). They arrive as
+`USER_INPUT` interaction requests and are answered through the shared
+`InteractionPanel` inside the Preview panel; a pending question opens the panel.
 
-## Inspection and lifecycle
+## App-owned tools
 
-The provider receives an app-owned disposable evidence directory, not the live
-worktree. Inspection excludes symlinks, likely secret-bearing paths, actual `.env`
-files, binary files, dependencies, generated content, and oversized content.
-Lockfile and template parsers return restricted metadata rather than raw files.
-This reduces disclosure but does not make arbitrary committed source secret-free.
+The Preview agent calls two Task Monki tools through the generic client-tool
+bridge (`src/core/agent/clientTools`), the same bridge that serves
+`inspect_design` to the Design agent. Codex receives them as dynamic tools; ACP
+and OpenCode agents register a stdio MCP server (`task-monki-preview-tools`,
+`task_monki_preview`) whose grant is bound to the active run. They need no
+person's approval: an ACP permission request that correlates with the active
+run's own tool call is answered with its one-time choice, and OpenCode's
+Preview rules allow exactly these tool names.
 
-The selected provider must support the generation capability. Its turn uses the
-existing restricted permission mapping, sanitized environment, bounded output,
-and deadline. Instructions forbid application, test, Docker, network, and
-repository command execution. The provider's normal cancellation and process
-recovery mechanisms remain authoritative; this is not a new agent runtime.
+- `inspect_preview` with `what: "status"` returns the configuration file name,
+  each run with its services and outcome, the requirements that block a start,
+  the failure diagnosis and the proposal under review. It also lists registered
+  repository checkouts with observed branches so the agent can offer concrete
+  choices. This inventory grants no file access and never switches branches.
+  Secret requirements include their service bindings, never values. The agent
+  proposes references; the person supplies values through Preview's concealed
+  requirements dialog before execution approval. `what: "logs"` returns
+  the last lines of a run's output, optionally for one service. Logs are
+  Previewhost's redacted output; file contents are not repeated because the
+  agent reads the worktree directly.
+- `propose_preview_configuration` submits a complete `preview.yaml` with a
+  summary and notes. `PreviewRecipeGenerationService.propose` validates it and
+  returns the exact problems when it is rejected, so the agent repairs and
+  resubmits in the same turn. A valid proposal becomes the task's draft and the
+  renderer opens it in Configuration with a diff.
 
-Drafts live in main-process memory. One generation can run per task. Regeneration
-keeps the last valid draft until replacement succeeds. Deletion and shutdown cancel
-and join generation. Uncertain termination retains the existing provider recovery
-record and evidence directory until cleanup succeeds. Draft acceptance rechecks
-the current task and worktree identity, captured capability facts, and safe file
-creation boundaries. It does not inspect fresh repository contents. Regeneration
-captures new evidence after source changes.
+The agent reads the task worktree with its normal file tools, under the same
+read-only boundary as the task agent's analysis runs. The instructions forbid
+reading `.env` files and credential files; configuration values that are secret
+are always written as secret references. These file-reading instructions are
+not a filesystem access control: the provider can read files in its analysis
+scope. Task Monki does not supply stored secret values to its Preview tools.
+
+## Validation and acceptance
+
+Validation uses Previewhost's `parsePreviewSpec` after strict YAML 1.2 parsing.
+Drafts are limited to 64 KiB. Aliases, merge keys, tags, duplicate keys,
+`fromEnv` inputs, runtime identities as names, secret-like literal environment
+values, implicit package acquisition (`npx`, `npm exec`, `dlx`), and commands
+that conflict with trusted framework facts are rejected with the reason.
+`PreviewFrameworkCapabilities` derives the trusted Next.js command and lockfile
+installation job from the root manifest and lockfile; proposals that run Next.js
+must use that command, keep its review comment, and depend on exactly one
+installation job.
+
+A proposal lives in main-process memory until it is saved or discarded. The
+service keeps the original file bytes and the framework facts it validated
+against; the editor revalidates edits against the same facts, and **Save**
+compares the reviewed bytes before replacing the file atomically. A file that
+appeared or changed since the proposal refuses the save. Acceptance never
+approves or starts the application. Discarding, task deletion and shutdown drop
+the draft.
+
+Preview turns use the existing repository-integrity comparison before proposals are accepted and after the turn ends. A changed or unverifiable worktree fails the analysis, discards its proposal, and holds queued messages. Changes remain in place for inspection. This detects persistent repository changes; it does not provide filesystem confinement or undo external effects. Saving a proposal waits for the active turn to finish and rechecks the repository baseline.
+
+## Hosts
+
+The client-tool bridge is configured in every host
+(`clientToolMcpExecutablePath`, `clientToolMcpServerPath`,
+`clientToolCredentialRoot`); the packaged app ships
+`client-tool-mcp-server.mjs` beside its resources. Messages reach the main
+process through `preview:agent:send` and `preview:agent:stop`
+(`/api/preview/agent/send`, `/api/preview/agent/stop` in the development host).

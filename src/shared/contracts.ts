@@ -23,13 +23,14 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   DiscardPreviewRecipeDraftRequest,
-  GeneratePreviewRecipeRequest,
   GetPreviewRecipeGenerationRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewGenerationRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   ValidatePreviewRecipeDraftRequest
 } from './preview';
 import type {
@@ -462,6 +463,8 @@ export interface TaskInstruction extends InstructionAttachments {
   text: string;
   mode: 'QUEUE' | 'FOLLOW_UP' | 'RETRY' | 'STEER';
   status: 'QUEUED' | 'HELD' | 'SENDING' | 'SUBMITTED' | 'FAILED' | 'UNCERTAIN';
+  /** The conversation this message belongs to; absent for the task's primary agent session. */
+  role?: 'PREVIEW';
   /** Reserved before admission; may be absent from runtime storage after a crash. */
   runId?: string;
   detail?: string;
@@ -903,6 +906,16 @@ export interface TaskSnapshot {
   attachments: TaskAttachmentRecord[];
 }
 
+/** The records of one task's Preview conversation, apart from its own agent work. */
+export interface PreviewAgentConversationRecords {
+  runs: RunRecord[];
+  items: AgentItemRecord[];
+  instructions: TaskInstruction[];
+  interactions: InteractionRequestRecord[];
+  sessions: AgentSessionRecord[];
+  plans: AgentPlanRevisionRecord[];
+}
+
 export interface DesignDetailSnapshot {
   repositorySetup?: DesignRepositorySetup;
   schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
@@ -926,6 +939,11 @@ export interface DesignDetailSnapshot {
   currentRun?: RunRecord;
   currentSession?: AgentSessionRecord;
   currentPreview?: PreviewGenerationRecord;
+  /**
+   * The Design's detached Preview conversation on its workspace, which drafts `preview.yaml`.
+   * Its runs, questions and messages never appear in `turns`, `interactions` or `sessions`.
+   */
+  previewAgent?: PreviewAgentConversationRecords;
   origin?: import('./design').DesignOrigin;
   canvas: DesignCanvasProjection;
   actions: DesignActionAvailability;
@@ -1666,9 +1684,10 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   getPreviewRecipeGeneration(
     input: GetPreviewRecipeGenerationRequest
   ): Promise<PreviewRecipeGenerationSnapshot>;
-  generatePreviewRecipe(
-    input: GeneratePreviewRecipeRequest
-  ): Promise<PreviewRecipeGenerationSnapshot>;
+  sendPreviewAgentMessage(
+    input: SendPreviewAgentMessageRequest
+  ): Promise<TaskInstruction>;
+  stopPreviewAgent(input: StopPreviewAgentRequest): Promise<void>;
   validatePreviewRecipeDraft(
     input: ValidatePreviewRecipeDraftRequest
   ): Promise<PreviewRecipeValidation>;

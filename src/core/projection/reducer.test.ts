@@ -62,6 +62,20 @@ describe('projection reducer', () => {
     expect(next.events).toHaveLength(1);
   });
 
+  it('keeps a Preview conversation out of the task run projection and workflow phase', () => {
+    const task = createTask();
+    const preview = createRun({ id: 'preview-run', mode: 'PREVIEW', status: 'RUNNING' });
+    const state = { ...createEmptyState(), tasks: [task], runs: [preview] };
+    const started = applyEventToState(state, { ...createEvent('AGENT_RUN_STARTED', { mode: 'PREVIEW' }), runId: preview.id });
+    const running = applyEventToState(started, { ...createEvent('PROCESS_STARTED', { pid: 7 }), runId: preview.id });
+    const completed = applyEventToState(running, { ...createEvent('AGENT_RUN_COMPLETED', { terminalStatus: 'completed' }), runId: preview.id });
+    for (const next of [started, running, completed]) {
+      expect(next.tasks[0].workflowPhase).toBe(task.workflowPhase);
+      expect(next.tasks[0].projection).toEqual(task.projection);
+    }
+    expect(completed.runs[0].status).toBe('COMPLETED');
+  });
+
   it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();

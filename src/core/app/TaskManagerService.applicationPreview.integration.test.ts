@@ -11,6 +11,7 @@ import {
 import { AppEventBus } from '../runner/AppEventBus';
 import { TaskManagerService } from './TaskManagerService';
 import { createNodeOpenTargetHost } from '../open/OpenTargetService';
+import { validatePreviewRecipeDraft } from '../preview/generation/PreviewRecipeGenerationService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
 afterEach(() => scenarios.dispose());
@@ -33,7 +34,7 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       docs: { type: 'static', directory: './public' }
     }
   }));
-  await scenario.service.startApplicationPreview({ taskId: task.id, source: 'file' });
+  await scenario.service.startApplicationPreview({ taskId: task.id });
   await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).approval).toBeTruthy();
   const initial = await scenario.service.getApplicationPreview({ taskId: task.id });
   expect(await scenario.service.listApplicationPreviews()).toMatchObject([{
@@ -77,10 +78,16 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       taskId: task.id, attemptId: restored.status!.latest!.id, changes: []
     });
     expect(inspection.inspection?.error).toBeUndefined();
-    const pending = await reopened.connectApplicationPreviewSource({
+    const original = (await reopened.readApplicationPreviewFile({ taskId: task.id })).file!;
+    const config = JSON.parse(original.text);
+    config.services.docs.directory = extra;
+    await reopened.saveApplicationPreviewFile({ taskId: task.id, original, text: JSON.stringify(config) });
+    const connectedFolders = await reopened.connectApplicationPreviewSource({
       taskId: task.id, attemptId: restored.status!.latest!.id, service: 'docs', directory: extra,
       expected: { active: null, candidate: null, latest: restored.status!.latest!.id }
     });
+    expect(connectedFolders.status?.candidate).toBeUndefined();
+    const pending = await reopened.startApplicationPreview({ taskId: task.id });
     const candidateId = pending.status!.candidate!.id;
     await expect.poll(async () => {
       const current = await reopened.getApplicationPreview({ taskId: task.id });
@@ -113,7 +120,10 @@ it('retains source ownership across restart, replacement, and desktop opening', 
       .resolves.toEqual({ ok: true });
     expect(launchExecutable).toHaveBeenLastCalledWith(editor, [await fs.realpath(extra)], await fs.realpath(extra));
 
-    await reopened.startApplicationPreview({ taskId: task.id, source: 'file' });
+    const edited = (await reopened.readApplicationPreviewFile({ taskId: task.id })).file!;
+    config.services.docs.directory = './public';
+    await reopened.saveApplicationPreviewFile({ taskId: task.id, original: edited, text: JSON.stringify(config) });
+    await reopened.startApplicationPreview({ taskId: task.id });
     await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: task.id })).approval).toBeTruthy();
     const replacement = await reopened.getApplicationPreview({ taskId: task.id });
     await reopened.approveApplicationPreview({ taskId: task.id, attemptId: replacement.approval!.attemptId });
@@ -130,9 +140,9 @@ it('retains source ownership across restart, replacement, and desktop opening', 
 
     const otherWorktree = await prepareTestWorktree(reopened, unstartedTask.id);
     await fs.writeFile(path.join(otherWorktree.worktreePath, 'index.html'), 'other task');
-    await reopened.createApplicationPreviewConfiguration({ taskId: unstartedTask.id, type: 'static', directory: '.' });
+    await reopened.saveApplicationPreviewFile({ taskId: unstartedTask.id, text: 'name: application\ntype: static\ndirectory: .\n' });
     expect((await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeUndefined();
-    await reopened.startApplicationPreview({ taskId: unstartedTask.id, source: 'file' });
+    await reopened.startApplicationPreview({ taskId: unstartedTask.id });
     await expect.poll(async () => (await reopened.getApplicationPreview({ taskId: unstartedTask.id })).approval).toBeTruthy();
     const other = await reopened.getApplicationPreview({ taskId: unstartedTask.id });
     await reopened.approveApplicationPreview({ taskId: unstartedTask.id, attemptId: other.approval!.attemptId });
@@ -169,3 +179,35 @@ it('retains source ownership across restart, replacement, and desktop opening', 
     await persistence.close();
   }
 }, 20_000);
+
+it('rejects on manual Save exactly what it rejects in an agent proposal, without touching the file', async () => {
+  const scenario = await scenarios.create({ previewEnabled: true });
+  const task = await scenario.createTask({ title: 'Manual save parity' });
+  const worktree = await prepareTestWorktree(scenario.service, task.id);
+  const file = path.join(worktree.worktreePath, 'preview.yaml');
+  const base = 'name: application\ntype: command\ncwd: .\ncommand: [node, server.js]\n';
+  await fs.writeFile(file, base);
+  const original = (await scenario.service.readApplicationPreviewFile({ taskId: task.id })).file!;
+  const unsafe = {
+    // A synthetic value, never a real credential: the key alone marks it as one.
+    secretLiteral: `${base}env:\n  API_TOKEN: SYNTHETIC_REVIEW_VALUE\n`,
+    placeholder: `${base}env:\n  API_URL: "[concealed literal]"\n`,
+    fromEnv: `${base}env:\n  API_URL: {fromEnv: API_URL}\n`
+  };
+  for (const text of Object.values(unsafe)) {
+    const proposal = validatePreviewRecipeDraft(text);
+    expect(proposal.status).toBe('INVALID');
+    await expect(scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text }))
+      .rejects.toThrow(proposal.status === 'INVALID' ? proposal.issues[0]!.message : 'unreachable');
+    expect(await fs.readFile(file, 'utf8')).toBe(base);
+  }
+  // The message names the rule, never the value.
+  await expect(scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text: unsafe.secretLiteral }))
+    .rejects.not.toThrow('SYNTHETIC_REVIEW_VALUE');
+  const safe = `${base}env:\n  API_TOKEN: {secret: application/dev/api-token}\n`;
+  const saved = await scenario.service.saveApplicationPreviewFile({ taskId: task.id, original, text: safe });
+  expect(saved.hasConfigurationFile).toBe(true);
+  expect(saved.approval).toBeUndefined();
+  expect(saved.status?.candidate).toBeUndefined();
+  expect(await fs.readFile(file, 'utf8')).toBe(safe);
+});

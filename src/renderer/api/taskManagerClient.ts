@@ -29,7 +29,8 @@ import type {
   DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
-  GeneratePreviewRecipeRequest,
+  SendPreviewAgentMessageRequest,
+  StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
@@ -496,10 +497,12 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
     listApplicationPreviews: () => post(baseUrl, '/api/application/listApplicationPreviews', {}),
     getApplicationPreview: input => post(baseUrl, '/api/application/getApplicationPreview', input),
-    connectApplicationPreviewDependency: input => post(baseUrl, '/api/application/connectApplicationPreviewDependency', input),
     connectApplicationPreviewSource: input => post(baseUrl, '/api/application/connectApplicationPreviewSource', input),
     inspectApplicationPreviewSetup: input => post(baseUrl, '/api/application/inspectApplicationPreviewSetup', input),
-    createApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/createApplicationPreviewConfiguration', input),
+    readApplicationPreviewFile: input => post(baseUrl, '/api/application/readApplicationPreviewFile', input),
+    saveApplicationPreviewFile: input => post(baseUrl, '/api/application/saveApplicationPreviewFile', input),
+    chooseApplicationPreviewFile: input => post(baseUrl, '/api/application/chooseApplicationPreviewFile', input),
+    startRetainedApplicationPreview: input => post(baseUrl, '/api/application/startRetainedApplicationPreview', input),
     startApplicationPreview: input => post(baseUrl, '/api/application/startApplicationPreview', input),
     approveApplicationPreview: input => post(baseUrl, '/api/application/approveApplicationPreview', input),
     stopApplicationPreview: input => post(baseUrl, '/api/application/stopApplicationPreview', input),
@@ -507,14 +510,14 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     openApplicationPreview: input => post(baseUrl, '/api/application/openApplicationPreview', input),
     readApplicationPreviewLogs: input => post(baseUrl, '/api/application/readApplicationPreviewLogs', input),
     inspectApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/inspectApplicationPreviewConfiguration', input),
-    applyApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/applyApplicationPreviewConfiguration', input),
-    saveApplicationPreviewConfiguration: input => post(baseUrl, '/api/application/saveApplicationPreviewConfiguration', input),
     rerunApplicationPreviewJob: input => post(baseUrl, '/api/application/rerunApplicationPreviewJob', input),
     deleteApplicationPreviewData: input => post(baseUrl, '/api/application/deleteApplicationPreviewData', input),
     getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/get', input),
-    generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
-      post(baseUrl, '/api/preview/recipe-generation/generate', input),
+    sendPreviewAgentMessage: (input: SendPreviewAgentMessageRequest) =>
+      post<TaskInstruction>(baseUrl, '/api/preview/agent/send', input),
+    stopPreviewAgent: (input: StopPreviewAgentRequest) =>
+      post<void>(baseUrl, '/api/preview/agent/stop', input),
     validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
       post(baseUrl, '/api/preview/recipe-generation/validate', input),
     acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>

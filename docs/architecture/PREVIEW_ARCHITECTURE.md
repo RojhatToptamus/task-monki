@@ -35,22 +35,30 @@ explicit; failure logs never silently become the serving attempt's logs.
 
 ## Configuration and authorization
 
-Previewhost resolves root `preview.yaml` or `preview.yml`; ambiguous defaults
-fail. Task Monki does not parse or translate the former `.taskmonki` recipe.
-The Configuration tab edits bindings through Previewhost's inspection and apply
-APIs. Source connection selects a service, requests access, and changes that
-service's source through the same owner. Saving a portable configuration is an
-explicit action; it does not silently rewrite an existing file.
+The portable `preview.yaml` or `preview.yml` is the source for every ordinary start.
+Task Monki parses edits with Previewhost's schema and saves them atomically.
+The retained original filename and text must still match before replacement.
+A conflict between both default files requires an explicit choice. The other file becomes `.unused`.
+Runtime names remain internal; generated YAML uses a readable project name.
 
-The verified owning worktree is authorized again when configuration is inspected
-after restart. Additional folders require a new explicit source grant in that
-application session.
+Task Monki keeps bounded, in-memory records of submitted file text and execution specifications.
+These support changed-since-run notices and restoration during the session.
+After restart, runtime descriptions support only the fields they actually retain.
+Reconciliation produces a reviewable draft; it cannot reconstruct concealed environment literals.
+If the file is absent, starting retained runtime configuration is an explicit fallback action.
 
-Every application start or replacement has an exact attempt-scoped approval.
-The review shows services, commands, source folders, dependencies, and secret
-references. Task Monki resolves approval only for the displayed attempt. A
-canceled or superseded attempt cannot use that response. Previewhost checks the
-expected active/candidate/latest identities for conflicting mutations.
+External relative sources resolve against the registered repository checkout.
+Explicit grants and selected locations last for the runtime session. Grants are shared across tasks.
+A changed canonical source requires connection again. Choosing a folder never grants access.
+
+Every ordinary start or replacement requires approval for its exact candidate.
+Requirements and approval use the captured specification, even if the file changes during review.
+Approval warns when setup jobs overlap sources used by any serving preview.
+If this preview is already running, Task Monki reviews a restart before stopping it.
+Approval captures the complete specification and is consumed once.
+The runtime authorization must match that specification exactly; a mismatch requires ordinary approval.
+Cancel changes nothing. Folder overlap is a warning about writes, not a sandbox guarantee.
+No persistent approval or permission records are added.
 
 Settings → Secrets is trusted desktop input. It lists names and usage, accepts
 new values, and exposes no value-read operation. Values do not enter task events,
@@ -80,9 +88,8 @@ process group. Cleanup debt remains visible and prevents unsafe reuse. Task Monk
 retains worktrees and Design captures until the runtime releases them.
 
 Logs are bounded and are not durable across runtime restarts. Configuration and
-managed data remain available for an explicit restart. The latest accepted
-configuration is retained even when a replacement fails and the user stops the
-previously serving attempt.
+managed data remain available for an explicit restart. After a failed replacement and Stop, the next ordinary start reads the current file.
+The runtime retains historical execution configuration independently.
 
 ## Design
 

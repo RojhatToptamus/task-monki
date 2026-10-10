@@ -16,8 +16,8 @@ files:
 extraResources:
   - from: resources/design-skills
     to: design-skills
-  - from: src/core/design/runtime/design-tool-mcp-server.mjs
-    to: design-tool-mcp-server.mjs
+  - from: src/core/agent/clientTools/client-tool-mcp-server.mjs
+    to: client-tool-mcp-server.mjs
   - from: src/core/process/owned-process-launcher.mjs
     to: owned-process-launcher.mjs
   - from: LICENSE

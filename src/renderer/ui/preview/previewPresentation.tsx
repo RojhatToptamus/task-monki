@@ -1,26 +1,24 @@
 import {
+  createContext,
+  useContext,
   useLayoutEffect,
   useRef,
   type FormEventHandler,
   type ReactNode,
   type RefObject
 } from 'react';
-import { DisclosureChevron } from '../DisclosureChevron';
-import {
-  Box,
-  Database,
-  FileCode2,
-  Layers,
-  Link,
-  Terminal,
-  X
-} from 'lucide-react';
+import { X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type {
   ConfigurationBindingsInspection,
-  PreviewStatus
+  PreviewStatus,
+  ServiceStatus
 } from 'previewhost';
+import type { OpenTargetRef } from '../../../shared/contracts';
+import { serviceOutcome } from '../../model/applicationPreviewRuns';
+import { DisclosureChevron } from '../DisclosureChevron';
 import { useDialogFocusBoundary } from '../dialogFocus';
+import { SourceFolderActions } from './PreviewSourceFolder';
 
 export const message = (error: unknown) =>
   error instanceof Error
@@ -34,36 +32,145 @@ export const expected = (status?: PreviewStatus) => ({
   candidate: status?.candidate?.id ?? null,
   latest: status?.latest?.id ?? null
 });
+/** Run times use the system clock format without seconds. */
+export const clock = (iso: string) => {
+  const date = new Date(iso);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '';
+};
 export const label = (state: string) =>
   state.replaceAll('-', ' ').replace(/^./, (value) => value.toUpperCase());
 
-export function ServiceName({ name, type }: { name: string; type: string }) {
-  const Icon =
-    type === 'postgres' || type === 'external-postgres'
-      ? Database
-      : type === 'redis' || type === 'external-redis'
-        ? Layers
-        : type === 'static'
-          ? FileCode2
-          : type === 'compose'
-            ? Box
-            : ['attach', 'preview', 'external-tcp'].includes(type)
-              ? Link
-              : Terminal;
+export function serviceTypeLabel(type: string): string {
+  if (type === 'command') return 'Server';
+  if (type === 'job') return 'Step';
+  if (type === 'worker') return 'Worker';
+  if (type === 'attach') return 'External HTTP';
+  if (type === 'static') return 'Static files';
+  if (type === 'postgres' || type === 'external-postgres') return 'PostgreSQL';
+  if (type === 'redis' || type === 'external-redis') return 'Redis';
+  if (type === 'external-tcp') return 'External TCP';
+  if (type === 'compose') return 'Compose service';
+  return label(type);
+}
+
+/** The home folder reads as `~`. */
+export function homePath(path: string): string {
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
+}
+
+/** The first segment and as many trailing segments as fit; the end of a path is what identifies it. */
+export function middleTruncatePath(path: string, max = 48): string {
+  if (path.length <= max) return path;
+  const parts = path.split('/');
+  const head = parts[0] === '' ? `/${parts[1] ?? ''}` : parts[0]!;
+  const rest = parts.slice(parts[0] === '' ? 2 : 1);
+  let tail = rest.at(-1) ?? '';
+  for (let i = rest.length - 2; i >= 0; i -= 1) {
+    const next = `${rest[i]}/${tail}`;
+    if (head.length + 3 + next.length > max) break;
+    tail = next;
+  }
+  return `${head}/…/${tail}`;
+}
+
+/** A long machine path on one line: home abbreviated, middle truncated. The full path stays in `title`. */
+export function shortenPath(directory: string, max?: number): string {
+  return middleTruncatePath(homePath(directory), max);
+}
+
+export function basename(path: string): string {
+  return path.split('/').filter(Boolean).at(-1) ?? path;
+}
+
+export function parentPath(path: string): string {
+  const index = path.replace(/\/+$/, '').lastIndexOf('/');
+  return index > 0 ? path.slice(0, index) : '/';
+}
+
+/** Where a command runs, named for the person: the task's own worktree or an external folder. */
+export function folderName(directory: string, projectDirectory?: string): string {
+  if (projectDirectory) {
+    if (directory === projectDirectory) return 'worktree';
+    if (directory.startsWith(`${projectDirectory}/`))
+      return `worktree/${directory.slice(projectDirectory.length + 1)}`;
+  }
+  return directory.split('/').filter(Boolean).at(-1) ?? directory;
+}
+
+/** The app's toast, for completed actions nothing else on screen confirms. Silent when absent. */
+export type PreviewNotify = (message: string, tone?: 'info' | 'success' | 'error') => void;
+export const PreviewNotifyContext = createContext<PreviewNotify>(() => undefined);
+export const usePreviewNotify = () => useContext(PreviewNotifyContext);
+
+export function CopyPath({ path }: { path: string }) {
+  const notify = usePreviewNotify();
   return (
-    <span className="tm-application-preview__service-name">
-      <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
-      <span title={name}>{name}</span>
+    <button
+      type="button"
+      className="ghost-button"
+      onClick={() =>
+        void navigator.clipboard.writeText(path).then(
+          () => notify('Path copied', 'success'),
+          () => notify('The path could not be copied.', 'error')
+        )
+      }
+    >
+      Copy path
+    </button>
+  );
+}
+
+export function GroupLabel({ children }: { children: ReactNode }) {
+  return <p className="tm-preview-group">{children}</p>;
+}
+
+/** Disclosure summaries share one chevron and type treatment. */
+export function DisclosureSummary({ children }: { children: ReactNode }) {
+  return (
+    <summary>
+      <DisclosureChevron />
+      {children}
+    </summary>
+  );
+}
+
+/** One state word per service, in a table or at the end of a row; the deciding fact follows it. */
+export function StateWord({ service }: { service: Pick<ServiceStatus, 'type' | 'state' | 'waitingFor' | 'error'> }) {
+  const outcome = serviceOutcome(service);
+  return (
+    <span className="tm-application-preview__state" data-state={service.state}>
+      {outcome.word}
+      {outcome.detail ? <span className="tm-application-preview__state-detail"> · {outcome.detail}</span> : null}
     </span>
   );
 }
 
-export function serviceTypeLabel(type: string): string {
-  if (type === 'command') return 'HTTP';
-  if (type === 'postgres' || type === 'external-postgres') return 'PostgreSQL';
-  if (type === 'external-redis') return 'Redis';
-  if (type === 'attach') return 'Attached HTTP';
-  return label(type);
+/** Name, one line of detail, the value or action on the right. The one row shape in Preview. */
+export function Row({ name, detail, end, children, title, expansion, className }: {
+  name: ReactNode;
+  detail?: ReactNode;
+  /** A second, muted line under the detail. */
+  children?: ReactNode;
+  end?: ReactNode;
+  title?: string;
+  /** A full-width block under the row, such as the editor for its value. */
+  expansion?: ReactNode;
+  /** `tm-preview-row--line` sets name, detail and action on one 30px line. */
+  className?: string;
+}) {
+  return (
+    <div className={className ? `tm-preview-row ${className}` : 'tm-preview-row'}>
+      <span className="tm-preview-row__name" title={title}>{name}</span>
+      <div className="tm-preview-row__detail">
+        {detail}
+        {children ? <small>{children}</small> : null}
+      </div>
+      <span className="tm-preview-row__end">{end}</span>
+      {expansion ? <div className="tm-preview-row__expansion">{expansion}</div> : null}
+    </div>
+  );
 }
 
 export function PreviewDialog({
@@ -138,155 +245,131 @@ export function PreviewDialog({
   );
 }
 
-export function ConfigurationDefinitions({
-  description,
-  showSecrets = true
-}: {
-  description: ConfigurationBindingsInspection['description'];
-  showSecrets?: boolean;
+type Description = ConfigurationBindingsInspection['description'];
+type DescribedService = Description['spec'] extends infer Spec
+  ? Spec extends { type: 'environment'; services: infer Services }
+    ? Services[keyof Services]
+    : never
+  : never;
+
+/**
+ * What runs and what it can reach, without environment values: the approval surface and the
+ * read-only record of a past run. Folders are named for the person; exact paths sit under Access.
+ */
+export function PreviewRunReview({ description, projectDirectory, outcomes, sourceTargets, heading = 'What runs' }: {
+  description: Description;
+  projectDirectory?: string;
+  /** The observed state of each service, for a run that already happened. */
+  outcomes?: Record<string, ServiceStatus>;
+  /** Desktop open targets for the run's source folders, by exact path. */
+  sourceTargets?: Record<string, OpenTargetRef>;
+  heading?: string;
 }) {
   const spec = description.spec;
-  const services = description.compose
-    ? description.compose.services.map(
-        (value) =>
-          [
-            value.id,
-            {
-              ...value,
-              type: 'compose' as const,
-              cwd: spec.type === 'compose' ? spec.cwd : undefined
-            }
-          ] as const
-      )
+  const services: Array<[string, DescribedService | Description['spec']]> = description.compose
+    ? description.compose.services.map((service) => [service.id, { type: 'compose' as const, image: service.image } as never])
     : spec.type === 'environment'
       ? Object.entries(spec.services)
-      : [['Application', spec] as const];
+      : [['Application', spec]];
+  const probes = services.flatMap(([id, service]) =>
+    (
+      [
+        ['readiness', 'ready' in service ? service.ready : undefined],
+        ['health check', 'liveness' in service ? service.liveness?.probe : undefined]
+      ] as const
+    ).flatMap(([kind, probe]) => (probe?.type === 'command' ? [{ id, kind, probe }] : []))
+  );
   const sources = [
-    ...new Set(
-      services.flatMap(([, value]) =>
-        'cwd' in value && value.cwd
-          ? [value.cwd]
-          : 'directory' in value
-            ? [value.directory]
-            : []
+    ...new Set([
+      ...(spec.type === 'compose' ? [spec.cwd] : []),
+      ...probes.flatMap(({ probe }) => (probe.cwd ? [probe.cwd] : [])),
+      ...services.flatMap(([, service]) =>
+        'cwd' in service && service.cwd ? [service.cwd] : 'directory' in service && service.directory ? [service.directory] : []
       )
-    )
+    ])
   ];
+  const inWorktree = (directory: string) =>
+    !!projectDirectory && (directory === projectDirectory || directory.startsWith(`${projectDirectory}/`));
+  const folder = (service: { cwd?: string; directory?: string }) => {
+    const directory = service.cwd ?? service.directory;
+    return directory ? folderName(directory, projectDirectory) : undefined;
+  };
   return (
-    <div className="tm-application-preview__definitions">
-      <ul className="tm-application-preview__definition-list">
-        {services.map(([id, value]) => (
-          <li key={id}>
-            <div className="tm-application-preview__definition-heading">
-              <strong>
-                <ServiceName name={id} type={value.type} />
-              </strong>
-              <span>{serviceTypeLabel(value.type)}</span>
-            </div>
-            {'command' in value && value.command ? (
-              <code className="tm-application-preview__command">
-                {commandText(value.command)}
-              </code>
-            ) : null}
-            {value.type === 'attach' && value.url ? (
-              <code>
-                {typeof value.url === 'string'
-                  ? value.url
-                  : 'secret' in value.url
-                    ? `Secret: ${value.url.secret}`
-                    : `Environment: ${value.url.fromEnv}`}
-              </code>
-            ) : value.type === 'preview' ? (
-              <span>
-                Preview: {value.name}
-                {value.service ? ` · ${value.service}` : ''}
-              </span>
-            ) : value.type === 'external-tcp' ? (
-              <code>
-                {value.host}:{value.port}
-              </code>
-            ) : null}
-            {'image' in value && value.image ? (
-              <code>{value.image}</code>
-            ) : null}
-            {'files' in value ? <span>{value.files.join(', ')}</span> : null}
-            {'dependsOn' in value && value.dependsOn?.length ? (
-              <small>
-                After{' '}
-                {value.dependsOn
-                  .map((dependency) =>
-                    typeof dependency === 'string'
-                      ? dependency
-                      : dependency.service
-                  )
-                  .join(', ')}
-              </small>
-            ) : null}
-            {('cwd' in value && value.cwd) ||
-            'directory' in value ||
-            ('ready' in value && value.ready) ||
-            'readyPath' in value ? (
-              <details className="tm-application-preview__technical">
-                <summary>
-                  <DisclosureChevron />
-                  Details
-                </summary>
-                {'cwd' in value && value.cwd ? (
-                  <div>
-                    Working folder<code>{value.cwd}</code>
-                  </div>
-                ) : null}
-                {'directory' in value ? (
-                  <div>
-                    Served folder<code>{value.directory}</code>
-                  </div>
-                ) : null}
-                {'ready' in value && value.ready ? (
-                  <div>
-                    Readiness
-                    <code>
-                      {value.ready.type === 'command'
-                        ? commandText(value.ready.command)
-                        : `${value.ready.type.toUpperCase()} ${value.ready.port}${value.ready.type === 'http' ? ` ${value.ready.path}` : ''}`}
-                    </code>
-                  </div>
-                ) : 'readyPath' in value ? (
-                  <div>
-                    Readiness<code>{value.readyPath}</code>
-                  </div>
-                ) : null}
-              </details>
-            ) : null}
-          </li>
+    <div className="tm-preview-run-review">
+      <GroupLabel>{heading}</GroupLabel>
+      <div className="tm-preview-rows">
+        {services.map(([id, service]) => (
+          <Row
+            key={id}
+            name={id}
+            detail={'command' in service && service.command ? <code>{commandText(service.command)}</code> : <span>{serviceSummary(service)}</span>}
+            end={outcomes?.[id] ? <StateWord service={outcomes[id]!} /> : undefined}
+          >
+            {[
+              folder(service as { cwd?: string; directory?: string }),
+              'dependsOn' in service && service.dependsOn?.length ? `after ${service.dependsOn.join(', ')}` : undefined,
+              service.type === 'job' ? (service.run === 'once' ? 'once per retained environment' : 'every start') : undefined,
+              readiness(service)
+            ]
+              .filter(Boolean)
+              .join(' · ') || undefined}
+          </Row>
         ))}
-      </ul>
-      {sources.length ? (
-        <details open className="tm-application-preview__sources">
-          <summary>
-            <DisclosureChevron />
-            Source access · {sources.length}{' '}
-            {sources.length === 1 ? 'folder' : 'folders'}
-          </summary>
-          {sources.map((source) => (
-            <code key={source} title={source}>
-              {source}
-            </code>
-          ))}
-        </details>
-      ) : null}
-      {showSecrets && description.secrets?.length ? (
-        <div className="tm-application-preview__secret-references">
-          <h4>Secret references</h4>
-          {description.secrets.map((secret) => (
-            <code key={secret.id}>{secret.id}</code>
-          ))}
-        </div>
-      ) : null}
+        {probes.map(({ id, kind, probe }) => (
+          <Row key={`${id}:${kind}`} name={`${id} · ${kind}`} detail={<code>{commandText(probe.command)}</code>}>
+            {probe.cwd ? folderName(probe.cwd, projectDirectory) : undefined}
+          </Row>
+        ))}
+      </div>
+      <GroupLabel>Access</GroupLabel>
+      <div className="tm-preview-rows">
+        {sources.map((source) => (
+          <Row
+            key={source}
+            name={inWorktree(source) ? 'Task worktree' : 'External folder'}
+            detail={<code title={source}>{shortenPath(source)}</code>}
+            end={
+              <>
+                <CopyPath path={source} />
+                {sourceTargets?.[source] ? <SourceFolderActions source={source} target={sourceTargets[source]!} /> : null}
+              </>
+            }
+          />
+        ))}
+        {description.secrets?.map((secret) => (
+          <Row
+            key={secret.id}
+            name={<code title={secret.id}>{secret.id}</code>}
+            detail={secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ')}
+            end="Concealed value"
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-function commandText(command: string[]): string {
+function serviceSummary(service: DescribedService | Description['spec']): string {
+  if (service.type === 'postgres' || service.type === 'redis')
+    return `${serviceTypeLabel(service.type)} managed by Preview · data kept after Stop`;
+  if (service.type === 'attach' && 'url' in service && service.url)
+    return typeof service.url === 'string' ? service.url : 'secret' in service.url ? `Secret ${service.url.secret}` : `Environment ${service.url.fromEnv}`;
+  if (service.type === 'external-tcp' && 'host' in service) return `${service.host}:${service.port}`;
+  if (service.type === 'preview' && 'name' in service) return `Preview ${service.name}${service.service ? ` · ${service.service}` : ''}`;
+  if ('image' in service && service.image) return `${serviceTypeLabel(service.type)} · ${service.image}`;
+  if ('files' in service && Array.isArray(service.files)) return `Compose · ${service.files.join(', ')}`;
+  return serviceTypeLabel(service.type);
+}
+
+function readiness(service: DescribedService | Description['spec']): string | undefined {
+  if ('readyPath' in service && service.readyPath) return `ready at ${service.readyPath}`;
+  const probe = 'ready' in service ? service.ready : undefined;
+  if (!probe) return undefined;
+  if (probe.type === 'command') return undefined;
+  return probe.type === 'http' ? `ready at ${probe.path}` : `ready when port ${probe.port} accepts connections`;
+}
+
+export function commandText(command: string[]): string {
   return command
     .map((argument) =>
       /\s/.test(argument) ? JSON.stringify(argument) : argument

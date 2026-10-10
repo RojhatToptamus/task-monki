@@ -20,7 +20,7 @@ describe('TaskManagerService shutdown coordination', () => {
       store: { close(): Promise<void> };
       promptRefiner: { beginShutdown(): Promise<void> };
       agents: { shutdown(): Promise<void> };
-      designToolBridge: { shutdown(): Promise<void> };
+      clientToolBridge: { recover(): Promise<void>; shutdown(): Promise<void> };
       applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
@@ -39,7 +39,8 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push('agent-started');
       }
     };
-    internals.designToolBridge = {
+    internals.clientToolBridge = {
+      recover: () => Promise.resolve(),
       async shutdown() {
         events.push('design-tool-shutdown');
       }
@@ -91,6 +92,7 @@ describe('TaskManagerService shutdown coordination', () => {
       agents: { shutdown(): Promise<void> };
       applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
+      clientToolBridge: { recover(): Promise<void>; shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'NEW';
     internals.taskActionLocks = new Map();
@@ -121,6 +123,7 @@ describe('TaskManagerService shutdown coordination', () => {
       }
     };
     internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
+    internals.clientToolBridge = { recover: () => Promise.resolve(), shutdown: () => Promise.resolve() };
 
     const firstInit = service.init();
     const secondInit = service.init();
@@ -155,6 +158,7 @@ describe('TaskManagerService shutdown coordination', () => {
       agents: { shutdown(): Promise<void> };
       applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
+      clientToolBridge: { recover(): Promise<void>; shutdown(): Promise<void> };
       withTaskAction<T>(
         taskId: string,
         label: string,
@@ -169,6 +173,7 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.agents = { shutdown: () => Promise.resolve() };
     internals.applications = { close: () => Promise.resolve() };
     internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
+    internals.clientToolBridge = { recover: () => Promise.resolve(), shutdown: () => Promise.resolve() };
 
     const action = internals.withTaskAction('task-1', 'Preview startup', async () => {
       markActionStarted();
@@ -223,6 +228,7 @@ describe('TaskManagerService shutdown coordination', () => {
         update(input: unknown): Promise<typeof DEFAULT_TASK_MANAGER_APP_SETTINGS>;
       };
       hasActiveAgentRun(): Promise<boolean>;
+      clientToolBridge: { recover(): Promise<void>; shutdown(): Promise<void> };
       applyRuntimeSettings(input: unknown): Promise<unknown>;
       agents: {
         shutdown(): Promise<void>;
@@ -288,6 +294,7 @@ describe('TaskManagerService shutdown coordination', () => {
       }
     };
     internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
+    internals.clientToolBridge = { recover: () => Promise.resolve(), shutdown: () => Promise.resolve() };
     internals.events = { emit() {} };
 
     const update = service.updateAppSettings({
@@ -356,7 +363,7 @@ describe('TaskManagerService shutdown coordination', () => {
       store: { close(): Promise<void> };
       agentRuntimeStore: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
-      designToolBridge: { shutdown(): Promise<void> };
+      clientToolBridge: { recover(): Promise<void>; shutdown(): Promise<void> };
       applications: { close(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
     };
@@ -394,7 +401,8 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push('agent-shutdown');
       }
     };
-    internals.designToolBridge = {
+    internals.clientToolBridge = {
+      recover: () => Promise.resolve(),
       async shutdown() {
         events.push('design-tool-shutdown');
       }

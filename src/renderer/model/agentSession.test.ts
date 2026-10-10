@@ -17,6 +17,13 @@ describe('agent session history', () => {
       makeAgentItemRecord({ type: 'USER_MESSAGE', payload: { text: 'Generated execution wrapper' } }),
       makeAgentItemRecord({ id: 'answer', type: 'AGENT_MESSAGE', payload: { text: 'Work complete.' } })
     ], []))).toBe('Work complete.');
+    const aggregate = makeRunRecord({ status: 'COMPLETED', finalMessage: 'Found the cause.\nThe repair is ready.' });
+    const streamed = [
+      makeAgentItemRecord({ id: 'first', type: 'AGENT_MESSAGE', createdAt: '2026-07-19T12:01:00Z', payload: { text: 'Found the cause.' } }),
+      makeAgentItemRecord({ id: 'second', type: 'AGENT_MESSAGE', createdAt: '2026-07-19T12:02:00Z', payload: { text: 'The repair is ready.' } })
+    ];
+    expect(sessionEntries(aggregate, streamed, []).map((entry) => entry.kind === 'message' ? entry.text : entry.kind))
+      .toEqual(['Found the cause.', 'The repair is ready.']);
   });
 
   it('shows an answered interaction once, hides its linked provider echo, and keeps unrelated narrative', () => {

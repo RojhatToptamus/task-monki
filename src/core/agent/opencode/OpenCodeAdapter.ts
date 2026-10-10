@@ -83,6 +83,8 @@ import {
   mapOpenCodePermission,
   mapOpenCodeQuestion,
   openCodePermissionRules,
+  isOpenCodeInteractiveReadOnlySettings,
+  openCodeInteractiveReadOnlySettings,
   openCodeReadOnlyPermissionRules,
   openCodePermissionRulesEndWith,
   assertOpenCodeExecutionSettings,
@@ -103,7 +105,6 @@ import {
   mapOpenCodeTodoSteps,
   mapOpenCodeUsage,
   normalizeOpenCodeEvent,
-  OPENCODE_DESIGN_MCP_SERVER_NAME,
   openCodeErrorDiagnostic,
   parseOpenCodeMessages,
   parseOpenCodePermissions,
@@ -138,14 +139,17 @@ import {
   type ResolvedOpenCodeRuntime
 } from './OpenCodeRuntimeResolver';
 import { openCodeSensitiveEnvironmentValues } from './OpenCodeEnvironmentPolicy';
-import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
+import {
+  buildDesignAgentDeveloperInstructions,
+  PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS
+} from '../../../shared/promptTemplates';
 import {
   loadDesignSkillPack,
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
-import type {
-  DesignClientToolBridge
-} from '../../design/DesignClientToolBridge';
+import type { ClientToolBridge } from '../clientTools/ClientToolBridge';
+import type { ClientToolSet } from '../clientTools/ClientToolContract';
+import { clientToolSetForMode } from '../clientTools/ClientToolSets';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -177,7 +181,7 @@ const MAX_TRACKED_ASSISTANT_USAGE_EVICTIONS_PER_SESSION = 2_048;
 const MAX_TRACKED_ASSISTANT_USAGE_RUNS = 2_048;
 const MAX_INBOUND_RESYNC_MS = 15_000;
 const MAX_RUNTIME_DELTA_BYTES = 64 * 1024;
-const OPENCODE_DESIGN_MCP_TIMEOUT_MS = 120_000;
+const CLIENT_TOOL_MCP_TIMEOUT_MS = 120_000;
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -246,12 +250,14 @@ interface OpenCodeSessionRuntimeOwner {
   runtimeId: string;
   worktreePath: string;
   pure?: boolean;
-  design?: boolean;
+  /** The Task Monki tools this session registers as an MCP server. */
+  clientTools?: ClientToolSet;
 }
 
-interface OpenCodeDesignToolRegistration {
+interface OpenCodeClientToolRegistration {
   serverId: string;
   grantId: string;
+  toolSet: ClientToolSet;
 }
 
 interface PreparedOpenCodeAttachmentDelivery {
@@ -275,8 +281,8 @@ export interface OpenCodeAdapterOptions
   /** Total post-acknowledgement window for OpenCode to prove interruption. */
   interruptCompletionTimeoutMs?: number;
   designSkillRoot?: string;
-  designClientToolBridge?: Pick<
-    DesignClientToolBridge,
+  clientToolBridge?: Pick<
+    ClientToolBridge,
     'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
   >;
 }
@@ -339,7 +345,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private designSkillLoadAttempted = false;
   private readonly designToolRegistrations = new Map<
     string,
-    OpenCodeDesignToolRegistration
+    OpenCodeClientToolRegistration
   >();
 
   constructor(
@@ -453,7 +459,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               approvalsReviewer: 'user',
               networkAccess: true
             }
-          : input.settings
+          : isProviderNeutralInteractiveReadOnlySettings(input.settings)
+            ? openCodeInteractiveReadOnlySettings(input.settings)
+            : input.settings
       },
       models,
       'application OpenCode catalog',
@@ -887,8 +895,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     try {
       const { client, server } = await this.ensureSessionRuntime({
         ...session,
-        pure: input.mode === 'DESIGN',
-        design: input.mode === 'DESIGN'
+        pure: input.mode !== undefined && clientToolSetForMode(input.mode) !== undefined,
+        clientTools: input.mode ? clientToolSetForMode(input.mode) : undefined
       });
       const projectCatalog = parseOpenCodeProviderCatalog(
         (await client.get<unknown>('/provider')).data
@@ -1264,11 +1272,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const previousSupervisor = this.supervisors.get(session.id);
     let promptAcknowledged = false;
     try {
-      const designInstructions = this.designInstructions(input);
+      const profileInstructions = this.profileInstructions(input);
       const runtimeOwner = {
         ...session,
-        pure: input.mode === 'DESIGN',
-        design: input.mode === 'DESIGN'
+        pure: clientToolSetForMode(input.mode) !== undefined,
+        clientTools: clientToolSetForMode(input.mode)
       };
       let running = await this.ensureSessionRuntime(runtimeOwner);
       const projectCatalog = parseOpenCodeProviderCatalog(
@@ -1321,8 +1329,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
       running = await this.ensureSessionRuntime({
         ...session,
-        pure: input.mode === 'DESIGN',
-        design: input.mode === 'DESIGN'
+        pure: clientToolSetForMode(input.mode) !== undefined,
+        clientTools: clientToolSetForMode(input.mode)
       });
       const { client, server } = running;
       await this.bindEventStream(session, client, server.id);
@@ -1356,7 +1364,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         status: 'STARTING',
         lastEventAt: new Date().toISOString()
       }, runtimeOperationId('turn/send-intent', input.localRunId, providerMessageId, server.id));
-      if (input.mode === 'DESIGN') {
+      if (clientToolSetForMode(input.mode)) {
         await this.activateDesignToolGrant(session, input.localRunId, server.id);
       }
       if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
@@ -1375,7 +1383,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
             ...(selectedModel.settings.reasoningEffort
               ? { variant: selectedModel.settings.reasoningEffort }
               : {}),
-            ...(designInstructions ? { system: designInstructions } : {}),
+            ...(profileInstructions ? { system: profileInstructions } : {}),
             parts: attachmentDelivery.parts
           })
         ).raw;
@@ -1490,7 +1498,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (!run || run.sessionId !== session.id) {
         throw new Error('The OpenCode turn does not belong to the selected session.');
       }
-      if (run.mode === 'DESIGN') {
+      if (clientToolSetForMode(run.mode)) {
         await this.revokeDesignToolGrant(session.id).catch((cause) =>
           this.recordProtocolIncident(session.id, cause).catch(() => undefined)
         );
@@ -2527,9 +2535,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         );
       }
     }
-    if (session.design) {
-      await this.ensureDesignToolRegistration(
+    if (session.clientTools) {
+      await this.ensureClientToolRegistration(
         session,
+        session.clientTools,
         running.client,
         running.server.id
       );
@@ -2537,17 +2546,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     return { client: running.client, server: running.server };
   }
 
-  private async ensureDesignToolRegistration(
+  private async ensureClientToolRegistration(
     session: OpenCodeSessionRuntimeOwner,
+    toolSet: ClientToolSet,
     client: OpenCodeClientTransport,
     serverId: string
   ): Promise<void> {
-    const bridge = this.options.designClientToolBridge;
+    const bridge = this.options.clientToolBridge;
     if (!bridge) {
-      throw new Error('The packaged inspect_design MCP bridge is not configured.');
+      throw new Error(`The packaged ${toolSet.label} tool MCP bridge is not configured.`);
     }
     const existing = this.designToolRegistrations.get(session.id);
-    if (existing?.serverId === serverId) return;
+    if (existing?.serverId === serverId && existing.toolSet.id === toolSet.id) return;
     if (existing) {
       await bridge.releaseSessionGrant(existing.grantId);
       this.designToolRegistrations.delete(session.id);
@@ -2557,26 +2567,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runtimeId: this.descriptor.id,
       sessionId: session.id,
       worktreeId: await this.requireSessionWorktreeId(session.id),
-      providerGeneration: serverId
+      providerGeneration: serverId,
+      toolSet: toolSet.id
     });
     const environment = grant.launch.environment;
     const sensitiveValues = Object.entries(environment)
-      .filter(([name]) => name.startsWith('TASK_MONKI_DESIGN_TOOL_'))
+      .filter(([name]) => name.startsWith('TASK_MONKI_CLIENT_TOOL_'))
       .map(([, value]) => value);
     try {
       const registration = await client.post<unknown>('/mcp', {
-        name: OPENCODE_DESIGN_MCP_SERVER_NAME,
+        name: toolSet.openCodeServerName,
         config: {
           type: 'local',
           command: [grant.launch.executablePath, ...grant.launch.argv],
           environment,
-          timeout: OPENCODE_DESIGN_MCP_TIMEOUT_MS
+          timeout: CLIENT_TOOL_MCP_TIMEOUT_MS
         }
       }, { sensitiveValues });
-      assertOpenCodeMcpConnected(
-        registration.data,
-        OPENCODE_DESIGN_MCP_SERVER_NAME
-      );
+      assertOpenCodeMcpConnected(registration.data, toolSet.openCodeServerName, toolSet.label);
     } catch (cause) {
       await bridge.releaseSessionGrant(grant.id).catch(() => undefined);
       const error = mapOpenCodeMutationError('mcp/register', cause);
@@ -2584,20 +2592,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         await this.throwAmbiguousAfterQuarantine(
           session.id,
           'mcp/register',
-          'OpenCode may have registered the Design MCP server without an authoritative acknowledgement.',
+          `OpenCode may have registered the ${toolSet.label} MCP server without an authoritative acknowledgement.`,
           error
         );
       }
       throw error;
     }
-    const registration = { serverId, grantId: grant.id };
-    this.designToolRegistrations.set(session.id, registration);
+    this.designToolRegistrations.set(session.id, { serverId, grantId: grant.id, toolSet });
   }
 
   private async requireSessionWorktreeId(sessionId: string): Promise<string> {
     const session = await this.requireSession(sessionId);
     if (!session.worktreeId) {
-      throw new Error('The OpenCode Design session has no worktree identity.');
+      throw new Error('The OpenCode session has no worktree identity.');
     }
     return session.worktreeId;
   }
@@ -2608,9 +2615,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     serverId: string
   ): Promise<void> {
     const registration = this.designToolRegistrations.get(session.id);
-    const bridge = this.options.designClientToolBridge;
+    const bridge = this.options.clientToolBridge;
     if (!registration || registration.serverId !== serverId || !bridge) {
-      throw new Error('The OpenCode Design MCP server is not registered for this runtime.');
+      throw new Error('The OpenCode Task Monki MCP server is not registered for this runtime.');
     }
     await bridge.activateGrant({
       grantId: registration.grantId,
@@ -2626,16 +2633,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async revokeDesignToolGrant(sessionId: string): Promise<void> {
     const registration = this.designToolRegistrations.get(sessionId);
-    if (!registration || !this.options.designClientToolBridge) return;
-    await this.options.designClientToolBridge.revokeGrant(registration.grantId);
+    if (!registration || !this.options.clientToolBridge) return;
+    await this.options.clientToolBridge.revokeGrant(registration.grantId);
   }
 
   private async releaseDesignToolRegistration(sessionId: string): Promise<void> {
     const registration = this.designToolRegistrations.get(sessionId);
     if (!registration) return;
-    await this.options.designClientToolBridge?.releaseSessionGrant(
-      registration.grantId
-    );
+    await this.options.clientToolBridge?.releaseSessionGrant(registration.grantId);
     this.designToolRegistrations.delete(sessionId);
   }
 
@@ -2658,7 +2663,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let failure: unknown;
     try {
       await client.post(
-        `/mcp/${encodeURIComponent(OPENCODE_DESIGN_MCP_SERVER_NAME)}/disconnect`
+        `/mcp/${encodeURIComponent(registration.toolSet.openCodeServerName)}/disconnect`
       );
     } catch (cause) {
       failure = mapOpenCodeMutationError('mcp/disconnect', cause);
@@ -4274,7 +4279,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     await this.materializeInteraction(
       session,
       permission.id,
-      mapOpenCodePermission(permission, session.worktreePath),
+      mapOpenCodePermission(
+        permission,
+        session.worktreePath,
+        isOpenCodeInteractiveReadOnlySettings(session.requestedSettings)
+      ),
       raw,
       serverId,
       permission.source?.messageID ?? permission.tool?.messageID
@@ -4999,7 +5008,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         .filter((permission) => permission.sessionID === session.providerSessionId)
         .map((permission) => ({
           id: permission.id,
-          mapped: mapOpenCodePermission(permission, session.worktreePath),
+          mapped: mapOpenCodePermission(
+            permission,
+            session.worktreePath,
+            isOpenCodeInteractiveReadOnlySettings(session.requestedSettings)
+          ),
           raw: permissionsRaw,
           messageId: permission.source?.messageID ?? permission.tool?.messageID
         })),
@@ -5199,7 +5212,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runtimeOperationId('event/run-terminal', current.id, current.status, status, finalArtifact.id)
     );
     if (!published) return false;
-    if (current.mode === 'DESIGN') {
+    if (clientToolSetForMode(current.mode)) {
       await this.revokeDesignToolGrant(current.sessionId).catch((cause) =>
         this.recordProtocolIncident(current.sessionId, cause).catch(() => undefined)
       );
@@ -6258,19 +6271,24 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
               'The app-owned Design skill pack has not been validated yet.'
           },
       designBrowser: {
-        available: Boolean(this.options.designClientToolBridge),
-        detail: this.options.designClientToolBridge
+        available: Boolean(this.options.clientToolBridge),
+        detail: this.options.clientToolBridge
           ? undefined
           : 'The packaged inspect_design MCP bridge has not been configured yet.'
       }
     });
   }
 
-  private designInstructions(input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>): string | undefined {
-    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') return undefined;
-    if (input.mode !== 'DESIGN' || input.instructionProfile !== 'DESIGN') {
-      throw new Error('The DESIGN instruction profile is valid only for a Design turn.');
+  /** Permanent instructions for the mode's agent; Design and Preview turns always carry theirs. */
+  private profileInstructions(input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>): string | undefined {
+    const toolSet = clientToolSetForMode(input.mode);
+    if (!toolSet && !input.instructionProfile) return undefined;
+    if (!toolSet || input.instructionProfile !== toolSet.mode) {
+      throw new Error(
+        `The ${input.instructionProfile ?? input.mode} instruction profile is valid only for a ${toolSet?.label ?? clientToolSetForMode(input.instructionProfile!)?.label ?? input.instructionProfile} turn.`
+      );
     }
+    if (toolSet.id === 'preview') return PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS;
     if (!this.designSkillPack) {
       throw new Error(
         `Task Monki cannot start Design work because its skill pack is unavailable. ${
@@ -6312,13 +6330,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     session: AgentSessionRecord
   ): Promise<OpenCodeSessionRuntimeOwner> {
     const snapshot = await this.taskRuntime.snapshot();
-    const design = snapshot.runs.some(
-      (run) => run.sessionId === session.id && run.mode === 'DESIGN'
-    );
+    const clientTools = snapshot.runs
+      .filter((run) => run.sessionId === session.id)
+      .map((run) => clientToolSetForMode(run.mode))
+      .find((set) => set !== undefined);
     return {
       ...session,
-      pure: design,
-      design
+      pure: clientTools !== undefined,
+      clientTools
     };
   }
 
@@ -6424,12 +6443,20 @@ function isOpenCodeReadOnlyRuntimeSession(
   session: AgentRuntimeSessionRecord | undefined
 ): boolean {
   return session?.runtimeId === OPENCODE_RUNTIME_ID &&
+    session.role !== 'PREVIEW' &&
     session.executionContext.repositoryAccess === 'READ_ONLY';
 }
 
 function isProviderNeutralReadOnlySettings(settings: AgentExecutionSettings): boolean {
   return settings.sandbox === 'READ_ONLY' &&
     settings.approvalPolicy?.toLowerCase() === 'never' &&
+    settings.networkAccess === false;
+}
+
+/** Read-only work that keeps questions and consent requests, such as the Preview agent. */
+function isProviderNeutralInteractiveReadOnlySettings(settings: AgentExecutionSettings): boolean {
+  return settings.sandbox === 'READ_ONLY' &&
+    settings.approvalPolicy === 'on-request' &&
     settings.networkAccess === false;
 }
 
@@ -6596,12 +6623,12 @@ function deferredOpenCodeModel(
   };
 }
 
-function assertOpenCodeMcpConnected(value: unknown, serverName: string): void {
+function assertOpenCodeMcpConnected(value: unknown, serverName: string, label: string): void {
   const status = asRecord(value)?.[serverName];
   const state = asRecord(status)?.status;
   if (state === 'connected') return;
   throw new Error(
-    `OpenCode reported ${typeof state === 'string' ? state : 'an invalid status'} for the Design MCP server.`
+    `OpenCode reported ${typeof state === 'string' ? state : 'an invalid status'} for the ${label} MCP server.`
   );
 }
 

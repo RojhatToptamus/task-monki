@@ -652,7 +652,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     await expect(
       service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
     ).rejects.toThrow(
-      'cannot be disabled while it is the preview recipe generation runtime'
+      'cannot be disabled while it is the Preview agent runtime'
     );
     await service.updateAppSettings({ previewRecipeGenerationRuntimeId: null });
     await expect(

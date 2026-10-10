@@ -331,7 +331,7 @@ function ModelSettings({
   const previewUnavailableReason = selectedPreviewRuntime
       ? runtimeExecutionUnavailableReason(
           selectedPreviewRuntime,
-          'PREVIEW_RECIPE_GENERATION',
+          'PREVIEW_AGENT',
           { model: selected.selectedPreviewRecipeGenerationModel }
         )
       : undefined;
@@ -339,7 +339,7 @@ function ModelSettings({
     <SettingsPane
       id="models"
       title="Models"
-      detail="Defaults for implementation, prompt refinement, Preview generation, and review."
+      detail="Defaults for implementation, prompt refinement, the Preview agent, and review."
     >
       <div className="tm-model-defaults">
         <AgentModelSetting
@@ -389,7 +389,7 @@ function ModelSettings({
           }}
         />
         <AgentModelSetting
-          label="Preview generation"
+          label="Preview agent"
           runtimeId={selected.previewRecipeGenerationRuntimeId}
           modelId={selected.selectedPreviewRecipeGenerationModel?.id ?? ''}
           fallbackSummary={
@@ -411,7 +411,8 @@ function ModelSettings({
             ) ||
               ((appSettings.previewRecipeGenerationModel ||
                 appSettings.previewRecipeGenerationModelProvider) &&
-                !selected.selectedPreviewRecipeGenerationModel) ||
+                !selected.selectedPreviewRecipeGenerationModel &&
+                selectedPreviewRuntime?.preflight.readiness.checks.modelCatalog !== 'UNKNOWN') ||
               previewUnavailableReason
           )}
           selectionUnavailableMessage={
@@ -421,12 +422,12 @@ function ModelSettings({
           models={enabledModels}
           runtimes={enabledRuntimes}
           runtimeUnavailableReason={(runtime) =>
-            runtimeExecutionUnavailableReason(runtime, 'PREVIEW_RECIPE_GENERATION')
+            runtimeExecutionUnavailableReason(runtime, 'PREVIEW_AGENT')
           }
           modelUnavailableReason={(model, runtime) =>
             runtimeExecutionUnavailableReason(
               runtime,
-              'PREVIEW_RECIPE_GENERATION',
+              'PREVIEW_AGENT',
               { model }
             )
           }
@@ -1400,7 +1401,7 @@ function runtimeDisableReason(
     appSettings.defaultRuntimeId === runtimeId ? 'Implementation' : undefined,
     appSettings.promptRefinementRuntimeId === runtimeId ? 'Prompt refinement' : undefined,
     appSettings.previewRecipeGenerationRuntimeId === runtimeId
-      ? 'Preview generation'
+      ? 'Preview agent'
       : undefined,
     appSettings.reviewRuntimeId === runtimeId ? 'Review' : undefined
   ].filter((purpose): purpose is string => Boolean(purpose));

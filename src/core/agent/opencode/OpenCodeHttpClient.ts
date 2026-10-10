@@ -4,7 +4,7 @@ import {
   redactCredentialText
 } from '../AgentCredentialRedaction';
 import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
-import { OPENCODE_DESIGN_TOOL_NAME } from './OpenCodeProtocol';
+import { isOpenCodeClientToolName } from './OpenCodeProtocol';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const OPENCODE_MAX_WIRE_BYTES = 32 * 1024 * 1024;
@@ -579,7 +579,8 @@ export function sanitizeOpenCodeInlineAttachmentContent(
   const binaryContent = record.type === 'image' || record.type === 'audio';
   const designToolState =
     record.type === 'tool' &&
-    record.tool === OPENCODE_DESIGN_TOOL_NAME &&
+    typeof record.tool === 'string' &&
+    isOpenCodeClientToolName(record.tool) &&
     isRecord(record.state)
       ? record.state
       : undefined;

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
+import { PreviewError } from 'previewhost';
 import { ImportPreviewError } from '../core/git/ImportPreview';
 import type {
   AppUpdateEvent,
@@ -1114,10 +1115,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewDependency') {
-        sendJson(response, requestId, 200, await options.service.connectApplicationPreviewDependency((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewDependency']>[0]));
-        return;
-      }
       if (request.method === 'POST' && url.pathname === '/api/application/connectApplicationPreviewSource') {
         sendJson(response, requestId, 200, await options.service.connectApplicationPreviewSource((await readJson()) as Parameters<TaskManagerService['connectApplicationPreviewSource']>[0]));
         return;
@@ -1128,11 +1125,23 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/createApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.createApplicationPreviewConfiguration((await readJson()) as Parameters<TaskManagerService['createApplicationPreviewConfiguration']>[0]));
+
+      if (request.method === 'POST' && url.pathname === '/api/application/readApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.readApplicationPreviewFile((await readJson()) as never));
         return;
       }
-
+      if (request.method === 'POST' && url.pathname === '/api/application/saveApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.saveApplicationPreviewFile((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/application/chooseApplicationPreviewFile') {
+        sendJson(response, requestId, 200, await options.service.chooseApplicationPreviewFile((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/application/startRetainedApplicationPreview') {
+        sendJson(response, requestId, 200, await options.service.startRetainedApplicationPreview((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/application/startApplicationPreview') {
         sendJson(response, requestId, 200, await options.service.startApplicationPreview((await readJson()) as never));
         return;
@@ -1168,15 +1177,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/application/applyApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.applyApplicationPreviewConfiguration((await readJson()) as never));
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/application/saveApplicationPreviewConfiguration') {
-        sendJson(response, requestId, 200, await options.service.saveApplicationPreviewConfiguration((await readJson()) as never));
-        return;
-      }
 
       if (request.method === 'POST' && url.pathname === '/api/application/rerunApplicationPreviewJob') {
         sendJson(response, requestId, 200, await options.service.rerunApplicationPreviewJob((await readJson()) as never));
@@ -1198,12 +1198,22 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/generate') {
+      if (request.method === 'POST' && url.pathname === '/api/preview/agent/send') {
         sendJson(
           response,
           requestId,
           200,
-          await options.service.generatePreviewRecipe((await readJson()) as never)
+          await options.service.sendPreviewAgentMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/agent/stop') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.stopPreviewAgent((await readJson()) as never)
         );
         return;
       }
@@ -1467,6 +1477,10 @@ function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
   }
   if (error instanceof TaskCreationRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);
+  }
+  // Expired run logs are an ordinary state the Logs view names; the desktop host passes this message through too.
+  if (error instanceof PreviewError && error.code === 'ATTEMPT_EXPIRED') {
+    return new DevApiHttpError(410, error.code, error.message);
   }
   if (
     error instanceof Error &&

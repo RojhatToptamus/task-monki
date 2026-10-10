@@ -8,6 +8,8 @@ import type {
   AgentItemRecord,
   AgentJsonValue,
   AgentModel,
+  AgentPermissionApprovalDecision,
+  AgentPermissionApprovalRequest,
   AgentPreflight,
   AgentProtocolMessageReference,
   AgentRuntimeDiagnostic,
@@ -148,18 +150,25 @@ import {
   clientCapabilitiesForAcpProfile
 } from './AcpStdioSupervisor';
 import {
+  acpReadPermissionOutcome,
   materializeAcpPermission,
+  materializeAcpReadPermission,
   selectAutomaticAcpPermissionOption
 } from './AcpPermissionPolicy';
-import { buildDesignAgentDeveloperInstructions } from '../../../shared/promptTemplates';
+import {
+  buildDesignAgentDeveloperInstructions,
+  PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS
+} from '../../../shared/promptTemplates';
 import {
   loadDesignSkillPack,
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
 import type {
-  DesignClientToolBridge,
-  DesignClientToolMcpLaunch
-} from '../../design/DesignClientToolBridge';
+  ClientToolBridge,
+  ClientToolMcpLaunch
+} from '../clientTools/ClientToolBridge';
+import type { ClientToolSet } from '../clientTools/ClientToolContract';
+import { clientToolSetForMode, DESIGN_CLIENT_TOOLS } from '../clientTools/ClientToolSets';
 import { INSPECT_DESIGN_TOOL_NAME } from '../../design/DesignClientToolContract';
 import {
   acpInitializeNativeView,
@@ -204,11 +213,6 @@ const MAX_STREAM_OUTPUT_APPEND_ATTEMPTS = 3;
 const MAX_STREAM_CREDENTIAL_CARRY_BYTES = 64 * 1024;
 const MAX_STARTUP_EVENTS = 256;
 const MAX_STARTUP_EVENT_BYTES = 4 * 1024 * 1024;
-const ACP_DESIGN_MCP_SERVER_NAME = 'task-monki-design-tools';
-const CURSOR_DESIGN_TOOL_TITLE = `${ACP_DESIGN_MCP_SERVER_NAME}: ${INSPECT_DESIGN_TOOL_NAME}`;
-const GROK_DESIGN_TOOL_NAME = `${ACP_DESIGN_MCP_SERVER_NAME}__${INSPECT_DESIGN_TOOL_NAME}`;
-const CLAUDE_DESIGN_TOOL_TITLE =
-  `mcp__${ACP_DESIGN_MCP_SERVER_NAME}__${INSPECT_DESIGN_TOOL_NAME}`;
 
 interface BufferedAcpTextSegment {
   text: string;
@@ -311,24 +315,27 @@ export interface AcpRuntimeAdapterOptions
     options: ResolveAcpRuntimeOptions
   ) => Promise<ResolvedAcpRuntime>;
   designSkillRoot?: string;
-  designClientToolBridge?: Pick<
-    DesignClientToolBridge,
+  clientToolBridge?: Pick<
+    ClientToolBridge,
     'createSessionGrant' | 'activateGrant' | 'revokeGrant' | 'releaseSessionGrant'
   >;
   /** Internal lane used when a provider requires a process-scoped read-only policy. */
   runtimeLane?: 'DEFAULT' | 'READ_ONLY';
 }
 
-interface AcpDesignToolGrant {
+interface AcpClientToolGrant {
   grantId: string;
   providerGeneration: string;
   worktreeId: string;
-  launch: DesignClientToolMcpLaunch;
+  toolSet: ClientToolSet['id'];
+  launch: ClientToolMcpLaunch;
 }
 
-interface AcpDesignSessionContext {
+/** A session that registers Task Monki's MCP server for one tool set. */
+interface AcpClientToolContext {
   localSessionId: string;
   worktreeId: string;
+  toolSet: ClientToolSet;
 }
 
 /**
@@ -380,7 +387,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private designSkillPack?: DesignSkillPack;
   private designSkillFailure?: string;
   private designSkillLoadAttempted = false;
-  private readonly designToolGrants = new Map<string, AcpDesignToolGrant>();
+  private readonly designToolGrants = new Map<string, AcpClientToolGrant>();
   private readonly readOnlyLane?: AcpRuntimeAdapter;
 
   constructor(
@@ -421,7 +428,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           ...options,
           runtimeLane: 'READ_ONLY',
           designSkillRoot: undefined,
-          designClientToolBridge: undefined
+          clientToolBridge: undefined
         }
       );
       this.readOnlyLane.onRuntimeTurnEvent((event) => this.emitRuntimeTurnEvent(event));
@@ -1186,7 +1193,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private async createNativeSession(
     cwd: string,
-    design?: AcpDesignSessionContext
+    design?: AcpClientToolContext
   ): Promise<{
     client: AcpRpcClient;
     state: AcpNativeSessionState;
@@ -1409,7 +1416,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private async loadNativeSession(
     providerSessionId: string,
     cwd: string,
-    design?: AcpDesignSessionContext
+    design?: AcpClientToolContext
   ): Promise<{
     client: AcpRpcClient;
     state: AcpNativeSessionState;
@@ -1660,25 +1667,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<StartedAgentRuntimeTurn> {
     if (this.readOnlyLane) return this.readOnlyLane.startRuntimeTurn(input);
     await this.waitForRuntimeQuarantine();
-    const previewQualification =
-      this.profile.isolatedPreviewRecipeGeneration;
-    const isolatedPreviewQualification =
-      input.run.purpose === 'PREVIEW_RECIPE_GENERATION' &&
-      previewQualification !== undefined &&
-      input.executionContext.readRoots.length === 1 &&
-      input.executionContext.readRoots[0]?.kind === 'EMPTY_MANAGED' &&
-      input.executionContext.readRoots[0].entityId === undefined &&
-      input.executionContext.readRoots[0].canonicalPath ===
-        input.executionContext.primaryCwd;
-    if (
-      input.run.purpose === 'PREVIEW_RECIPE_GENERATION' &&
-      previewQualification &&
-      !isolatedPreviewQualification
-    ) {
-      throw new Error(
-        `${this.descriptor.displayName} Preview generation requires one app-owned isolated evidence directory.`
-      );
-    }
     const policy = requireAcpReadOnlyTurnPolicy(this.profile);
     if (
       input.run.sessionId !== input.session.id ||
@@ -1984,11 +1972,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     assertAgentTurnAttachmentSelection(run.attachmentSelection, attachments);
     const settings = input.settings ?? session.requestedSettings;
     assertAcpTaskExecutionPolicy(this.profile, settings);
-    const designInstructions = this.designInstructions(input);
+    const toolSet = clientToolSetForMode(input.mode);
+    const profileInstructions = this.profileInstructions(input);
     const attachmentDelivery = await this.prepareAttachmentDelivery({
       settings,
-      prompt: designInstructions
-        ? `${designInstructions}\n\nTask Monki Design request:\n${input.prompt}`
+      prompt: profileInstructions
+        ? `${profileInstructions}\n\nTask Monki ${toolSet?.label ?? 'Design'} request:\n${input.prompt}`
         : input.prompt,
       attachments
     });
@@ -2031,15 +2020,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     const providerSessionId = session.providerSessionId;
     if (!providerSessionId) throw new Error('ACP session setup did not return an ID.');
-    if (designInstructions) {
+    if (toolSet) {
       const server = this.supervisor?.currentServer;
       const grant = this.designToolGrants.get(session.id);
       if (!server) throw new Error('ACP runtime is not ready.');
-      if (!grant || grant.providerGeneration !== server.id) {
+      if (!grant || grant.providerGeneration !== server.id || grant.toolSet !== toolSet.id) {
         const loaded = await this.loadNativeSession(
           providerSessionId,
           session.worktreePath,
-          { localSessionId: session.id, worktreeId: session.worktreeId }
+          { localSessionId: session.id, worktreeId: session.worktreeId, toolSet }
         );
         client = loaded.client;
       }
@@ -2218,7 +2207,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (!client || !server || server.id !== interaction.serverInstanceId) {
       throw new Error('ACP interaction belongs to a prior runtime process.');
     }
-    const method = interaction.type === 'COMMAND_APPROVAL'
+    const method = isAcpPermissionInteraction(interaction)
       ? 'session/request_permission'
       : 'elicitation/create';
     const result = interaction.type === 'COMMAND_APPROVAL'
@@ -2228,11 +2217,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             input.decision as AgentCommandApprovalDecision
           )
         }
-      : mapAcpElicitationResponse(
-          interaction.type,
-          interaction.request,
-          input.decision
-        );
+      : interaction.type === 'PERMISSION_APPROVAL'
+        ? {
+            outcome: acpReadPermissionOutcome(
+              await this.journaledPermissionOptions(interaction),
+              interaction.request as AgentPermissionApprovalRequest,
+              input.decision as AgentPermissionApprovalDecision
+            )
+          }
+        : mapAcpElicitationResponse(
+            interaction.type,
+            interaction.request,
+            input.decision
+          );
     let responseEvidencePersisted = false;
     let responseRaw: AgentProtocolMessageReference;
     try {
@@ -3824,11 +3821,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         })
       : undefined;
     const toolCall = mergeAcpToolCallUpdate(providerItem?.payload, permission.toolCall);
-    const trustedAppTool =
-      correlatedToolCall &&
-      this.activeInspectDesignTool(run, correlatedToolCall, server.id)
-      ? 'inspect_design'
+    const trustedAppTool = correlatedToolCall
+      ? this.activeClientTool(run, correlatedToolCall, server.id)
       : undefined;
+    const readAccess = trustedAppTool
+      ? undefined
+      : materializeAcpReadPermission({ toolCall, options: permission.options, session, run });
     const materialized = materializeAcpPermission({
       toolCall,
       options: permission.options,
@@ -3841,12 +3839,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           : undefined
     });
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
-    const automaticOption = selectAutomaticAcpPermissionOption({
-      approvalPolicy: run.requestedSettings.approvalPolicy,
-      toolCall,
-      options: permission.options,
-      materialized
-    });
+    const automaticOption = readAccess
+      ? undefined
+      : selectAutomaticAcpPermissionOption({
+          approvalPolicy: run.requestedSettings.approvalPolicy,
+          toolCall,
+          options: permission.options,
+          materialized
+        });
     if (automaticOption) {
       await this.respondToAutomaticPermission({
         client,
@@ -3869,10 +3869,19 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         sessionId: session.id,
         providerTurnId: run.providerTurnId,
         providerItemId: toolCall.toolCallId,
-        type: 'COMMAND_APPROVAL',
-        request: this.redactProviderValue(materialized.request),
-        allowedActions: materialized.allowedActions,
-        policyWarnings: materialized.warnings,
+        ...(readAccess
+          ? {
+              type: 'PERMISSION_APPROVAL' as const,
+              request: this.redactProviderValue(readAccess.request),
+              allowedActions: readAccess.allowedActions,
+              policyWarnings: readAccess.warnings
+            }
+          : {
+              type: 'COMMAND_APPROVAL' as const,
+              request: this.redactProviderValue(materialized.request),
+              allowedActions: materialized.allowedActions,
+              policyWarnings: materialized.warnings
+            }),
         requestRawMessage: raw
       }, acpProtocolOperationId('interaction/create', raw, run.id, request.id));
     } catch (cause) {
@@ -5120,11 +5129,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runId: run.id,
       sessionId: run.sessionId,
       providerItemId: update.toolCallId,
-      type:
-        run.mode === 'DESIGN' &&
-        isTaskMonkiInspectDesignToolCall(this.descriptor.id, toolCall)
-          ? 'MCP_TOOL_CALL'
-          : mapAcpToolKind(toolCall.kind),
+      type: this.taskMonkiClientToolName(run, toolCall)
+        ? 'MCP_TOOL_CALL'
+        : mapAcpToolKind(toolCall.kind),
       status: mapAcpToolStatus(toolCall.status),
       payload: this.boundedItemPayload(
         this.redactProviderValue(sanitizeAcpAttachmentContent(toolCall))
@@ -6178,7 +6185,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       );
       const raw = await client.respond(
         responding.providerRequestId,
-        responding.type === 'COMMAND_APPROVAL'
+        isAcpPermissionInteraction(responding)
           ? { outcome: { outcome: 'cancelled' } }
           : { action: 'cancel' },
         async (reference) => {
@@ -6194,7 +6201,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         {
           status: 'CANCELED',
           responseRawMessage: raw,
-          resolution: responding.type === 'COMMAND_APPROVAL'
+          resolution: isAcpPermissionInteraction(responding)
             ? { outcome: 'cancelled' }
             : { action: 'cancel' },
           resolvedAt: new Date().toISOString()
@@ -6409,7 +6416,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
               maturity: 'unsupported' as const,
               detail: designSkillAccessFailure
             },
-        'task-monki.design-browser-verification': this.options.designClientToolBridge
+        'task-monki.design-browser-verification': this.options.clientToolBridge
           ? {
               maturity: 'stable' as const,
               detail: 'A generation-bound packaged inspect_design MCP bridge is configured.'
@@ -6443,9 +6450,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private designAdditionalDirectories(
-    design: AcpDesignSessionContext | undefined
+    design: AcpClientToolContext | undefined
   ): string[] | undefined {
-    if (!design) return undefined;
+    if (design?.toolSet.id !== 'design') return undefined;
     const advertised = Boolean(
       this.initializeResponse?.agentCapabilities.sessionCapabilities
         ?.additionalDirectories
@@ -6493,28 +6500,32 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private designSessionContextForCreate(
     input: Pick<CreateAgentSession, 'mode' | 'instructionProfile'>,
     session: AgentSessionRecord
-  ): AcpDesignSessionContext | undefined {
-    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') return undefined;
-    if (input.mode !== 'DESIGN' || input.instructionProfile !== 'DESIGN') {
-      throw new Error('The DESIGN instruction profile is valid only for a Design session.');
+  ): AcpClientToolContext | undefined {
+    const toolSet = input.mode ? clientToolSetForMode(input.mode) : undefined;
+    if (!toolSet && !input.instructionProfile) return undefined;
+    if (!toolSet || input.instructionProfile !== toolSet.mode) {
+      throw new Error(
+        `The ${input.instructionProfile ?? input.mode} instruction profile is valid only for a ${toolSet?.label ?? clientToolSetForMode(input.instructionProfile!)?.label ?? input.instructionProfile} session.`
+      );
     }
-    return { localSessionId: session.id, worktreeId: session.worktreeId };
+    return { localSessionId: session.id, worktreeId: session.worktreeId, toolSet };
   }
 
   private async designSessionContextForAttach(
     session: AgentSessionRecord
-  ): Promise<AcpDesignSessionContext | undefined> {
+  ): Promise<AcpClientToolContext | undefined> {
     const run = await this.taskRuntime.getActiveRunForSession(session.id);
-    if (!run || run.mode !== 'DESIGN') return undefined;
-    return { localSessionId: session.id, worktreeId: session.worktreeId };
+    const toolSet = run ? clientToolSetForMode(run.mode) : undefined;
+    if (!toolSet) return undefined;
+    return { localSessionId: session.id, worktreeId: session.worktreeId, toolSet };
   }
 
   private async prepareDesignMcpServer(
-    context: AcpDesignSessionContext
+    context: AcpClientToolContext
   ): Promise<AcpStdioMcpServer> {
-    const bridge = this.options.designClientToolBridge;
+    const bridge = this.options.clientToolBridge;
     if (!bridge) {
-      throw new Error('The packaged inspect_design MCP bridge is unavailable.');
+      throw new Error(`The packaged ${context.toolSet.label} tool MCP bridge is unavailable.`);
     }
     const providerGeneration = this.supervisor?.currentServer?.id;
     if (!providerGeneration) throw new Error('ACP runtime is not ready.');
@@ -6522,7 +6533,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (
       grant &&
       (grant.providerGeneration !== providerGeneration ||
-        grant.worktreeId !== context.worktreeId)
+        grant.worktreeId !== context.worktreeId ||
+        grant.toolSet !== context.toolSet.id)
     ) {
       await bridge.releaseSessionGrant(grant.grantId);
       this.designToolGrants.delete(context.localSessionId);
@@ -6533,18 +6545,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         runtimeId: this.descriptor.id,
         sessionId: context.localSessionId,
         worktreeId: context.worktreeId,
-        providerGeneration
+        providerGeneration,
+        toolSet: context.toolSet.id
       });
       grant = {
         grantId: created.id,
         providerGeneration,
         worktreeId: context.worktreeId,
+        toolSet: context.toolSet.id,
         launch: created.launch
       };
       this.designToolGrants.set(context.localSessionId, grant);
     }
     return {
-      name: ACP_DESIGN_MCP_SERVER_NAME,
+      name: context.toolSet.mcpServerName,
       command: grant.launch.executablePath,
       args: [...grant.launch.argv],
       env: Object.entries(grant.launch.environment)
@@ -6557,12 +6571,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     run: RunRecord,
     providerGeneration: string
   ): Promise<void> {
-    if (run.mode !== 'DESIGN') return;
-    const bridge = this.options.designClientToolBridge;
+    const toolSet = clientToolSetForMode(run.mode);
+    if (!toolSet) return;
+    const bridge = this.options.clientToolBridge;
     const grant = this.designToolGrants.get(run.sessionId);
-    if (!bridge || !grant || grant.providerGeneration !== providerGeneration) {
+    if (!bridge || !grant || grant.providerGeneration !== providerGeneration || grant.toolSet !== toolSet.id) {
       throw new Error(
-        'The inspect_design MCP grant does not belong to the active ACP generation.'
+        `The ${toolSet.label} tool MCP grant does not belong to the active ACP generation.`
       );
     }
     await bridge.activateGrant({
@@ -6577,22 +6592,44 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     });
   }
 
-  private activeInspectDesignTool(
+  /**
+   * A read approval keeps the shared permission shape, so its exact provider
+   * choices are read back from the journaled request it answers.
+   */
+  private async journaledPermissionOptions(
+    interaction: InteractionRequestRecord
+  ): Promise<AcpPermissionOption[]> {
+    const { raw } = await this.providerRuntime.readProtocolMessage(interaction.requestRawMessage);
+    const message: unknown = JSON.parse(raw);
+    if (
+      !isRecord(message) ||
+      message.method !== 'session/request_permission' ||
+      message.id !== interaction.providerRequestId
+    ) {
+      throw new Error('The journaled ACP permission request does not match this interaction.');
+    }
+    return parsePermissionRequest(message.params).options;
+  }
+
+  /** The app-owned tool this call names, when the run may call it in the current generation. */
+  private activeClientTool(
     run: RunRecord,
     toolCall: AcpToolCallUpdate,
     providerGeneration: string
-  ): boolean {
+  ): string | undefined {
     const grant = this.designToolGrants.get(run.sessionId);
-    return (
-      run.mode === 'DESIGN' &&
-      run.serverInstanceId === providerGeneration &&
-      grant?.providerGeneration === providerGeneration &&
-      isTaskMonkiInspectDesignToolCall(this.descriptor.id, toolCall)
-    );
+    return run.serverInstanceId === providerGeneration && grant?.providerGeneration === providerGeneration
+      ? this.taskMonkiClientToolName(run, toolCall)
+      : undefined;
+  }
+
+  private taskMonkiClientToolName(run: RunRecord, toolCall: Pick<AcpToolCallUpdate, 'title' | 'rawInput' | '_meta'>): string | undefined {
+    const toolSet = clientToolSetForMode(run.mode);
+    return toolSet ? taskMonkiClientToolName(this.descriptor.id, toolCall, toolSet) : undefined;
   }
 
   private async revokeDesignToolGrant(run: RunRecord): Promise<void> {
-    if (run.mode !== 'DESIGN') return;
+    if (!clientToolSetForMode(run.mode)) return;
     const grant = this.designToolGrants.get(run.sessionId);
     if (
       !grant ||
@@ -6601,7 +6638,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     ) {
       return;
     }
-    await this.options.designClientToolBridge?.revokeGrant(grant.grantId);
+    await this.options.clientToolBridge?.revokeGrant(grant.grantId);
   }
 
   private async revokeDesignToolGrantSafely(run: RunRecord): Promise<void> {
@@ -6618,7 +6655,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const grant = this.designToolGrants.get(localSessionId);
     if (!grant || (providerGeneration && grant.providerGeneration !== providerGeneration)) return;
-    await this.options.designClientToolBridge?.releaseSessionGrant(grant.grantId);
+    await this.options.clientToolBridge?.releaseSessionGrant(grant.grantId);
     this.designToolGrants.delete(localSessionId);
   }
 
@@ -6664,13 +6701,18 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
   }
 
-  private designInstructions(
+  /** Permanent instructions for the mode's agent; Design and Preview turns always carry theirs. */
+  private profileInstructions(
     input: Pick<StartAgentTurn, 'mode' | 'instructionProfile'>
   ): string | undefined {
-    if (input.mode !== 'DESIGN' && input.instructionProfile !== 'DESIGN') return undefined;
-    if (input.mode !== 'DESIGN' || input.instructionProfile !== 'DESIGN') {
-      throw new Error('The DESIGN instruction profile is valid only for a Design turn.');
+    const toolSet = clientToolSetForMode(input.mode);
+    if (!toolSet && !input.instructionProfile) return undefined;
+    if (!toolSet || input.instructionProfile !== toolSet.mode) {
+      throw new Error(
+        `The ${input.instructionProfile ?? input.mode} instruction profile is valid only for a ${toolSet?.label ?? clientToolSetForMode(input.instructionProfile!)?.label ?? input.instructionProfile} turn.`
+      );
     }
+    if (toolSet.id === 'preview') return PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS;
     if (!this.designSkillPack) {
       throw new Error(
         `Task Monki cannot start Design work because its skill pack is unavailable. ${
@@ -6957,32 +6999,46 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 }
 
+/**
+ * The Task Monki tool an ACP tool call names, if any. Each agent spells MCP tool titles its own
+ * way; only exact matches on the set's server name and a tool it defines count.
+ */
+export function taskMonkiClientToolName(
+  runtimeId: string,
+  toolCall: Pick<AcpToolCallUpdate, 'title' | 'rawInput' | '_meta'>,
+  toolSet: ClientToolSet
+): string | undefined {
+  const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : undefined;
+  if (!rawInput) return undefined;
+  const title = toolCall.title?.trim();
+  const claudeCode = isRecord(toolCall._meta?.claudeCode)
+    ? toolCall._meta.claudeCode
+    : undefined;
+  return toolSet.tools.find((tool) => {
+    const grokName = `${toolSet.mcpServerName}__${tool}`;
+    const claudeName = `mcp__${toolSet.mcpServerName}__${tool}`;
+    return (
+      (runtimeId === 'cursor-agent-acp' &&
+        title === `${toolSet.mcpServerName}: ${tool}` &&
+        rawInput.providerIdentifier === toolSet.mcpServerName &&
+        rawInput.toolName === tool &&
+        isRecord(rawInput.args)) ||
+      (runtimeId === 'grok-acp' &&
+        title === grokName &&
+        rawInput.tool_name === grokName &&
+        isRecord(rawInput.tool_input)) ||
+      (runtimeId === 'claude-agent-acp' &&
+        title === claudeName &&
+        claudeCode?.toolName === claudeName)
+    );
+  });
+}
+
 export function isTaskMonkiInspectDesignToolCall(
   runtimeId: string,
   toolCall: Pick<AcpToolCallUpdate, 'title' | 'rawInput' | '_meta'>
 ): boolean {
-  const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : undefined;
-  if (!rawInput) return false;
-  const title = toolCall.title?.trim();
-  const isCursorTool =
-    runtimeId === 'cursor-agent-acp' &&
-    rawInput.providerIdentifier === ACP_DESIGN_MCP_SERVER_NAME &&
-    rawInput.toolName === INSPECT_DESIGN_TOOL_NAME &&
-    isRecord(rawInput.args);
-  const claudeCode = isRecord(toolCall._meta?.claudeCode)
-    ? toolCall._meta.claudeCode
-    : undefined;
-  return (
-    (title === CURSOR_DESIGN_TOOL_TITLE && isCursorTool) ||
-    (runtimeId === 'grok-acp' &&
-      title === GROK_DESIGN_TOOL_NAME &&
-      rawInput.tool_name === GROK_DESIGN_TOOL_NAME &&
-      isRecord(rawInput.tool_input)) ||
-    (runtimeId === 'claude-agent-acp' &&
-      title === CLAUDE_DESIGN_TOOL_TITLE &&
-      claudeCode?.toolName === CLAUDE_DESIGN_TOOL_TITLE &&
-      typeof rawInput.operation === 'string')
-  );
+  return taskMonkiClientToolName(runtimeId, toolCall, DESIGN_CLIENT_TOOLS) === INSPECT_DESIGN_TOOL_NAME;
 }
 
 function acpRuntimeDiagnostics(authenticationAdvertised: boolean): AgentRuntimeDiagnostic[] {
@@ -7445,6 +7501,11 @@ function runtimeDeliveryErrorForAcp(
   );
 }
 
+/** Command approvals and Preview read approvals both answer `session/request_permission`. */
+function isAcpPermissionInteraction(interaction: Pick<InteractionRequestRecord, 'type'>): boolean {
+  return interaction.type === 'COMMAND_APPROVAL' || interaction.type === 'PERMISSION_APPROVAL';
+}
+
 function providerOptions(interaction: InteractionRequestRecord): AcpPermissionOption[] {
   if (!('providerOptions' in interaction.request) || !interaction.request.providerOptions) {
     throw new Error('ACP permission options are missing from the durable interaction.');
@@ -7872,7 +7933,8 @@ function isAcpReadOnlyRuntimeSession(
   profile: AcpRuntimeProfile
 ): boolean {
   const policy = profile.readOnlyTurnPolicy;
-  if (!policy || session.runtimeId !== profile.descriptor.id) return false;
+  // Preview uses ordinary task turns and their chat/tool transport, even in analysis mode.
+  if (!policy || session.runtimeId !== profile.descriptor.id || session.role === 'PREVIEW') return false;
   const native = session.executionContext.modelSettings.runtimeOptions?.[
     profile.descriptor.id
   ];

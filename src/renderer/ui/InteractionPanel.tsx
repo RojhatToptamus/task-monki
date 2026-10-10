@@ -510,11 +510,12 @@ function PermissionRequest({
         ? entry.path.path : JSON.stringify(entry.path),
       access: entry.access === 'read' ? 'Read files' : entry.access === 'write' ? 'Write files' : 'Deny access'
     }))
-  ];
+  ].filter((entry, index, entries) =>
+    entries.findIndex((candidate) => candidate.path === entry.path && candidate.access === entry.access) === index);
   return (
     <>
       {request.reason ? <p className="interaction-card__reason">{request.reason}</p> : null}
-      <dl className="interaction-details">
+      <dl className="interaction-details interaction-details--permissions">
         {paths.map((entry, index) => {
           const displayPath = entry.path === request.cwd
             ? 'Worktree'

@@ -1,31 +1,10 @@
-import type { DesignBrowserToolResult } from './AgentBrowserRuntime';
+import { safeClientToolFailure, type ClientToolDefinition } from '../agent/clientTools/ClientToolContract';
 
-export const INSPECT_DESIGN_TOOL_NAME = 'inspect_design';
-export const DESIGN_TOOL_MAX_TEXT_BYTES = 32 * 1024;
-export const DESIGN_TOOL_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+import { INSPECT_DESIGN_TOOL_NAME } from '../../shared/clientTools';
 
-export interface DesignClientToolDefinition {
-  name: typeof INSPECT_DESIGN_TOOL_NAME;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
+export { INSPECT_DESIGN_TOOL_NAME };
 
-export interface DesignClientToolTextContent {
-  type: 'text';
-  text: string;
-}
-
-export interface DesignClientToolImageContent {
-  type: 'image';
-  data: string;
-  mimeType: 'image/png';
-}
-
-export type DesignClientToolContent =
-  | DesignClientToolTextContent
-  | DesignClientToolImageContent;
-
-export const INSPECT_DESIGN_TOOL_DEFINITION: DesignClientToolDefinition = {
+export const INSPECT_DESIGN_TOOL_DEFINITION: ClientToolDefinition = {
   name: INSPECT_DESIGN_TOOL_NAME,
   description:
     'Open and inspect the exact current Design candidate. Use only the operations needed for this change.',
@@ -160,42 +139,10 @@ export const INSPECT_DESIGN_TOOL_DEFINITION: DesignClientToolDefinition = {
   }
 };
 
-export function designClientToolContent(
-  result: DesignBrowserToolResult
-): DesignClientToolContent[] {
-  if (Buffer.byteLength(result.text, 'utf8') > DESIGN_TOOL_MAX_TEXT_BYTES) {
-    throw new Error('The Design browser text result is too large.');
-  }
-  if (!result.image) return [{ type: 'text', text: result.text }];
-  if (
-    result.image.mimeType !== 'image/png' ||
-    result.image.bytes.byteLength > DESIGN_TOOL_MAX_IMAGE_BYTES ||
-    !Number.isSafeInteger(result.image.width) ||
-    result.image.width <= 0 ||
-    !Number.isSafeInteger(result.image.height) ||
-    result.image.height <= 0
-  ) {
-    throw new Error('The Design browser image result is invalid.');
-  }
-  return [
-    { type: 'text', text: result.text },
-    {
-      type: 'image',
-      data: result.image.bytes.toString('base64'),
-      mimeType: result.image.mimeType
-    }
-  ];
-}
-
+/** Design failures reach the provider as text; paths never do. */
 export function safeDesignClientToolFailure(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error)).trim();
-  if (
-    message.length > 0 &&
-    message.length <= 1_000 &&
-    !message.includes('/') &&
-    !message.includes('\\')
-  ) {
-    return message;
-  }
-  return 'The Design browser operation failed. Correct the source or open a fresh candidate.';
+  return safeClientToolFailure(
+    error,
+    'The Design browser operation failed. Correct the source or open a fresh candidate.'
+  );
 }

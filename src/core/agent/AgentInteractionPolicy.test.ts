@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentSessionRecord,
   AgentUserInputDecision,
@@ -14,6 +14,62 @@ import {
 } from './AgentInteractionPolicy';
 
 describe('Agent interaction policy', () => {
+  it('offers explicit Preview folder inspection without granting writes, network or shell escalation', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-inspection-'));
+    try {
+      const session = sessionFixture({ role: 'PREVIEW', worktreePath: path.join(directory, 'frontend') });
+      const run = { ...runFixture(), mode: 'PREVIEW' as const };
+      const request = { startedAtMs: 1, cwd: session.worktreePath, permissions: { fileSystem: { read: [directory] } } };
+      const policy = buildInteractionPolicy({ type: 'PERMISSION_APPROVAL', request, session, run });
+      expect(policy.allowedActions).toEqual(['GRANT_TURN', 'GRANT_SESSION', 'DECLINE']);
+      const interaction = interactionFixture({ type: 'PERMISSION_APPROVAL', request, allowedActions: policy.allowedActions });
+      expect(() => validateInteractionDecision(interaction, {
+        interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_TURN', permissions: request.permissions
+      }, session, run)).not.toThrow();
+      for (const permissions of [
+        { fileSystem: { read: [os.homedir()] } },
+        { fileSystem: { read: [path.parse(directory).root] } },
+        { fileSystem: { read: [directory], write: [directory] } },
+        { fileSystem: { entries: [{ path: { type: 'path' as const, path: directory }, access: 'write' as const }] } },
+        { fileSystem: { read: [directory] }, network: { enabled: true } }
+      ]) {
+        expect(buildInteractionPolicy({ type: 'PERMISSION_APPROVAL', request: { ...request, permissions }, session, run }).allowedActions).toEqual(['DECLINE']);
+        expect(() => validateInteractionDecision({ ...interaction, request: { ...request, permissions } }, {
+          interactionType: 'PERMISSION_APPROVAL', action: 'GRANT_SESSION', permissions
+        }, session, run)).toThrow();
+      }
+      expect(buildInteractionPolicy({ type: 'COMMAND_APPROVAL', request: { startedAtMs: 1, cwd: session.worktreePath, command: 'npm install' }, session, run }).allowedActions).toEqual(['DECLINE', 'CANCEL']);
+      expect(buildInteractionPolicy({ type: 'FILE_CHANGE_APPROVAL', request: { startedAtMs: 1 }, session, run }).allowedActions).toEqual(['DECLINE', 'CANCEL']);
+      expect(buildInteractionPolicy({ type: 'PERMISSION_APPROVAL', request, session, run: runFixture() }).allowedActions).toEqual(['DECLINE']);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('offers a Preview read of one external file only when its folder could be approved', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-file-inspection-'));
+    const home = vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    try {
+      await fs.mkdir(path.join(directory, 'backend'));
+      await fs.writeFile(path.join(directory, 'backend', 'package.json'), '{}');
+      await fs.writeFile(path.join(directory, '.npmrc'), 'token');
+      const session = sessionFixture({ role: 'PREVIEW', worktreePath: path.join(directory, 'frontend') });
+      const run = { ...runFixture(), mode: 'PREVIEW' as const };
+      const read = (file: string) => buildInteractionPolicy({
+        type: 'PERMISSION_APPROVAL',
+        request: { startedAtMs: 1, cwd: session.worktreePath, permissions: { fileSystem: { entries: [{ path: { type: 'path', path: file }, access: 'read' }] } } },
+        session,
+        run
+      }).allowedActions;
+      expect(read(path.join(directory, 'backend', 'package.json'))).toContain('GRANT_TURN');
+      // A file directly in the home directory is as broad as approving home itself.
+      expect(read(path.join(directory, '.npmrc'))).toEqual(['DECLINE']);
+    } finally {
+      home.mockRestore();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed for commands outside the task worktree or requiring blocked network', () => {
     const outside = buildInteractionPolicy({
       type: 'COMMAND_APPROVAL',

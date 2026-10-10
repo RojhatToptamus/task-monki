@@ -14,16 +14,30 @@ the task's current preview. Tasks without a runtime instance are not listed.
 
 ## Configure and start
 
-Open the task's **Preview** tab. If no configuration exists, choose **Set up
-Preview**. Review the suggested Vite, Next.js, or static-site configuration, or
-enter your command and working folder. Manual setup does not require an agent.
-**Save preview.yaml** creates the file without overwriting an existing file or
-starting commands. Then choose **Review and start**.
+Open the task's **Preview** tab. Without a configuration file it lists what the
+project files say (application, dependencies, environment keys, Compose services)
+and offers **Draft with Preview agent** or **Write it myself**. The agent works in
+a conversation opened any time from **Agent** in the status row: ask it to draft
+the configuration, check the setup, inspect logs, or explain a failure. On wide
+windows it docks beside the Preview, keeps its width and stays open across visits;
+on narrower windows it opens as a drawer. While it is closed, a dot on **Agent**
+shows that it is working or waiting for an answer. It reads the project and the runs, asks when the files do not
+decide something, and returns proposals that open in **Configuration** as a diff.
+Pick any enabled agent and model below the message field; a message sent while the
+agent works waits in the queue, and **Stop** interrupts the current response.
+**Save** writes the file without starting. **Save and review startup** also opens
+the execution review. Requirements, the execution review and failures appear at
+the top of **Activity**; when a start is blocked, **N to resolve** in the status
+row leads there. Resolve them, then choose **Approve and start**. When a retained run exists but the file is gone, **Start from last run**
+is the primary action.
 
-For a multi-service app, use **Generate with agent** or edit root `preview.yaml`.
-The agent proposes configuration for review; it cannot approve execution.
-If evidence is insufficient, answer the focused questions with nonsecret details
-and regenerate. Review the draft before saving it. Saving does not start the app.
+**Check for a plain static site** in the menu offers a draft only for HTML folders
+without a package manifest. Use the Preview agent for projects that need commands
+or dependency installation.
+
+After a failure, **Investigate with Preview agent** sends the diagnosis to the
+conversation. The agent cannot save, approve, or start execution. If the file
+changes during review, saving is refused and the existing file stays intact.
 
 A minimal file for a server that reads `PORT` and serves `/ready` is:
 
@@ -45,8 +59,7 @@ or declare an explicit setup job.
 
 Root `preview.yml` is also supported, but having both default files is an error.
 See Previewhost's configuration documentation for environment, database, worker,
-and Compose specs. The manual command form uses your shell; YAML command arrays
-do not use an implicit shell.
+and Compose specs. YAML command arrays do not use an implicit shell.
 
 Review the services, commands, source access, and secret references before
 **Approve and start**. Source changes remain live. Readiness must succeed before
@@ -60,43 +73,53 @@ dependencies when those dependencies determine readiness.
 **Activity** shows services, setup jobs, and their actual state. A row's **Logs**
 action selects that exact attempt and service. An update failure can coexist
 with a serving application; **Open app** continues to open that application.
+Setup jobs still modify live folders. When a job overlaps a serving source, Preview reviews the restart before stopping.
+Cancel keeps the serving preview. Approval stops it and starts the captured configuration once.
+Jobs can write outside their working folders; this warning does not guarantee isolation.
 Expand **Source folders** to see compact rows with folder names and shortened
 locations. Hover a name or location for the full path. **Open folder**
 opens it in the file manager. The folder menu offers installed editors, including
 VS Code, and **Copy path** for the full location.
 
-**Logs** has attempt and source filters, search, pause-follow, refresh, and
-clear-view controls. Pause-follow stops scrolling, not collection. Logs are
-bounded; older output and logs from a previous app session may be unavailable.
+**Logs** selects one run and one or more sources. Search highlights text; it does not infer severity.
+**Log sources** opens a checkbox menu with each source's state. With two to four sources chosen, **Side by side** shows them as separate panes in one log surface; four sources use a two-by-two layout. **Send last 40 lines to task agent** is in the toolbar's **⋯** menu when one failed source is shown.
+External HTTP and TCP connections check services started outside Preview; they cannot capture those processes’ output. **Ask agent to enable logs** drafts a request for managed services. Review the commands, folder access and secrets before saving or starting.
+Logs follow new output automatically. Each stream has a pause/play control. Scrolling up also pauses following without stopping collection; the **new lines** button returns to the latest output. Separate panes follow independently.
+The shared buffer retains at most 64 KiB. Logs expire when the runtime restarts.
 
-**Configuration** shows the selected attempt's services, sources, and environment
-bindings. Edit a binding as a literal value, secret reference, or service URL.
-Concealed values are not displayed. **Review and apply** starts a replacement
-with explicit authorization. Earlier attempts and saved Design captures are
-read-only.
+**Configuration** edits the portable file. It groups the file into services,
+databases, setup steps (in the order they run), folders and secrets. Open a row
+to change its command, folder, start order, repeat, readiness path or
+environment; values are written into the draft as you edit, preserving unrelated
+YAML and comments, and **Save** in the status row writes the file. A rejected
+file shows Previewhost's own reason. All starts read that file. Runtime
+descriptions are read-only records of earlier execution. **YAML** shows the
+source, and **Changes** (shown when the draft differs) compares it with the
+original file.
+If both default files exist, explicitly choose one; the other is retained with a `.unused` suffix.
 
-**Connect folder** shows the service, current folder, and selected replacement.
-Choosing or canceling the folder picker grants no access. The explicit connection
-permits Previewhost to use the folder until Task Monki closes. Commands run with
-your account permissions and can read or change files. Review and approve the
-resulting configuration before execution. External folders in an initial YAML
-file also require explicit connection. Shared folders remain protected while
-another preview uses them.
+Folder requirements show the folder name, a shortened location (hover for the exact path) and the services that use it. Choosing a folder grants no access.
+**Connect** grants access for the current app session. Other tasks can reuse that session grant.
+Commands run with your account permissions and can change files outside their working folder.
+External relative paths resolve from the registered repository, rather than the task's temporary worktree.
+The selected location stays local to this session; the portable declaration stays in YAML.
 
-**Connections** edits an existing attached URL, another preview, or a local
-database or TCP dependency. Database connection URLs use secret references.
-**Review connection** submits the change through the same execution approval.
-
-**Save as preview.yaml** creates a new file for future starts and does not
-overwrite an existing default file. External source paths remain machine-local.
-After editing an existing file, use **Update from preview.yaml** from the menu.
+Edit attached service addresses in **Configuration**, then save and review startup.
+For a browser client, the backend must allow the displayed Preview origin in its
+CORS configuration. A successful backend request does not prove the browser can
+read its response. Check the browser errors too. Update the allowed origin when
+the Preview address changes; Task Monki does not change an attached backend's permissions.
+Values needed by several services remain in one configuration file.
+Internal worktree identifiers are runtime names, never generated project names.
 
 ## Secrets
 
 Preview review identifies each required reference and its service or job. Choose
-**Add secret**, **Replace value**, or **Open secret storage** directly in Preview.
-The private dialog returns to the same review. Saving or unlocking never approves
+**Add value**, **Set up storage**, or **Unlock storage** directly in Preview.
+The concealed form stays in the requirements block. Saving or unlocking never approves
 or starts a preview. Missing or locked references block execution approval.
+To replace an existing value, choose **More → Manage required secrets**.
+The form lists only references required by this preview and keeps their values concealed.
 
 Values stay concealed, including through accessibility tools. Pasting multiple
 lines replaces the whole value and preserves every line. Clear it or paste again
@@ -130,17 +153,20 @@ Do not use production databases for local preview verification.
 
 ## Failure and recovery
 
-If the task folder is missing, Preview offers **Restore worktree**. Review the
-recorded Git state before restoration. Restoration keeps the task, retained
-preview configuration, and secrets. An external checkout uses **Reconnect
-checkout** instead. A locked registration or changed branch requires review.
+If the task folder is missing, the Preview tab shows a **Worktree missing** block
+with the recorded commit and branch, and **Restore worktree** is its only action.
+Restoration checks the branch out again at that commit; uncommitted files,
+including a preview configuration file in that folder, cannot be recovered. The
+task, retained run configuration, data, and secrets are kept. An external checkout
+uses **Reconnect checkout** instead. The runs list stays readable; **Run configuration** opens
+the configuration each run started with.
 
 Use a failed service or job's **Logs** action to inspect that exact attempt.
 Readiness errors include the probe path, deadline, and last observed response.
 Command failures direct you to project commands and dependencies. Supervisor
 failures identify Task Monki's runtime and retain bootstrap output in the attempt
 logs; reinstall or rebuild the app instead of installing runtime modules in the
-project. **Review and retry** requires a new execution approval.
+project. **Start preview** requires a new execution approval.
 
 A failed replacement usually keeps the previous application running. Its files
 are still live, and migrations may already have changed the database. This is
@@ -154,8 +180,8 @@ worktree. Task Monki does not kill unrelated processes to free a port.
 
 Closing a tab does not stop previews. Closing Task Monki joins runtime cleanup.
 After a crash or restart, inspect recovery state and start explicitly; application
-commands are not rerun automatically. Retained configuration survives a failed
-update followed by Stop.
+commands are not rerun automatically. The next start reads the current file, including after a failed update followed by Stop.
+If the file is missing, the menu offers an explicit start from the last runtime configuration.
 
 Design previews use inspected commit captures. Stop them before editing live
 workspace configuration. Use Design's revision controls to restart a saved
