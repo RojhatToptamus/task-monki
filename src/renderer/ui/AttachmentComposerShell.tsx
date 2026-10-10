@@ -90,7 +90,7 @@ export function AttachmentComposerShell({
             </button>
           </Tooltip>
           {toolbarStart}
-          <span className="task-attachment-hint">{hint}</span>
+          <span className="tm-composer__hint" title={typeof hint === 'string' ? hint : undefined}>{hint}</span>
         </> : null}
         {toolbarAction}
       </div>

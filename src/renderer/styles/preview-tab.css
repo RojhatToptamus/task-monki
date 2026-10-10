@@ -277,7 +277,6 @@ the row or the progress line names what the form is for; the heading only names 
 .tm-preview-agent__proposal .ghost-button { margin-left: auto; }
 /* The model chip keeps its width; the hint takes what is left. */
 .tm-side-conversation__tools { display: inline-flex; flex: 0 1 auto; min-width: 0; }
-.tm-side-conversation .tm-composer__hint { flex: 1 1 0; }
 .tm-side-conversation .tm-agent-session__editing { margin: 0; padding: 6px 12px; }
 
 /* Logs: one run,

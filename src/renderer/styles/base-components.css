@@ -908,7 +908,10 @@ secondary
 divided by a hair: configuration left,
 keyboard hint and the primary action right. */
 .tm-composer__toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 6px 8px; border-top: 1px solid var(--hair); }
-.tm-composer__hint { min-width: 0; margin-left: auto; overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+/* The hint takes only the room the chips and actions leave, so it is the first
+   thing to truncate; it sits against the actions it describes. */
+.tm-composer__hint { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.tm-composer__toolbar > button { flex-shrink: 0; }
 .tm-composer__input { display: block; width: 100%; min-height: 88px; max-height: min(200px, 24vh); padding: 12px 12px 4px; resize: none; field-sizing: content; color: var(--text); font: var(--t-body)/1.62 var(--font-ui); }
 .tm-composer__toolbar > .tm-composer__hint + * { margin-left: 4px; }
 /* A control inside a composer toolbar (the model, access, a mode) reads as part

@@ -472,16 +472,6 @@ and
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
-.task-attachment-hint {
-  min-width: 0;
-  margin-left: auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted);
-  font-size: var(--t-meta);
-  white-space: nowrap;
-}
-
 .task-attachments {
   display: flex;
   flex-wrap: wrap;

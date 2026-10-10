@@ -3,7 +3,7 @@
 .tm-agent-session { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
 .tm-agent-session__column { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 24px 32px; }
 /* Before the first run the tab is one composer, centred in the space it has. */
-.tm-prerun { display: grid; gap: 12px; min-width: 0; margin-block: auto; }
+.tm-prerun { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; margin-block: auto; }
 .tm-prerun__composer .tm-composer__input { min-height: 180px; max-height: min(420px, 50vh); }
 .tm-conversation__content:has(.tm-prerun) { display: flex; flex-direction: column; min-height: 100%; }
 .tm-agent-session__column:has(> .tm-prerun) { flex: 1; justify-content: center; padding-block: 32px 15vh; }
