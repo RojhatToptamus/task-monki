@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Check, CircleAlert, Copy, MoreHorizontal, Play, RotateCcw } from 'lucide-react';
+import { CircleAlert, MoreHorizontal, Play, RotateCcw } from 'lucide-react';
+import { CopyIconButton } from './CopyIconButton';
 import type {
   AgentItemRecord, AgentPlanRevisionRecord, InteractionRequestRecord, RunRecord, TaskAttachmentRecord, TaskInstruction
 } from '../../shared/contracts';
@@ -134,15 +135,9 @@ export function UserMessage({ text, time, status, attachments, onReadAttachment 
 function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
   turn: SessionTurn; onReadArtifact?: (id: string) => Promise<string>; onShowDebug?(): void;
 }) {
-  const [copied, setCopied] = useState(false);
   const [prompt, setPrompt] = useState<{ open: boolean; text?: string; error?: string }>({ open: false });
   const end = turn.run.endedAt ?? turn.run.lastEventAt;
   const promptArtifactId = turn.run.promptArtifactId;
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1600);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
   const showPrompt = () => {
     if (prompt.open) { setPrompt((current) => ({ ...current, open: false })); return; }
     setPrompt((current) => ({ ...current, open: true, error: undefined }));
@@ -159,10 +154,7 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
     <div className="tm-turn__footer">
       <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
       {end ? <><span aria-hidden="true">·</span><MessageTime value={end} /></> : null}
-      {turn.answer ? <button type="button" className="tm-iconbtn tm-turn__action" aria-label={copied ? 'Copied' : 'Copy response'} title={copied ? 'Copied' : 'Copy response'}
-        onClick={() => void navigator.clipboard?.writeText(turn.answer!).then(() => setCopied(true))}>
-        {copied ? <Check size={14} strokeWidth={1.5} aria-hidden="true" /> : <Copy size={14} strokeWidth={1.5} aria-hidden="true" />}
-      </button> : null}
+      {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
       {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />} items={details} /> : null}
     </div>
     {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">

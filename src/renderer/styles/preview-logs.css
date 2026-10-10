@@ -1,0 +1,79 @@
+/* Preview logs: one toolbar row and one log surface that holds the stream or
+   side-by-side panes. */
+
+.tm-preview-logs { position: relative; display: flex; flex-direction: column; gap: 10px; min-width: 0; container: preview-logs / inline-size; }
+
+/* Toolbar — one row at --h-toolbar; secondary controls overflow into the trailing menu. */
+.tm-preview-logs__toolbar { display: flex; align-items: center; gap: 4px; min-width: 0; height: var(--h-toolbar); }
+.tm-preview-logs__toolbar > .field { margin: 0; }
+.tm-preview-log-menu { display: inline-flex; flex: 0 1 auto; min-width: 0; }
+.tm-preview-log-menu__trigger { max-width: 200px; padding: 0 6px 0 8px; gap: 4px; color: var(--text-soft); font-weight: 500; }
+.tm-preview-log-menu__trigger > span { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-log-menu__trigger > svg { flex: 0 0 auto; color: var(--muted); }
+.tm-preview-log-search { flex: 1 1 240px; min-width: 140px; max-width: 360px; margin-left: 4px; }
+.tm-preview-log-search > svg { top: calc((var(--h-toolbar) - 16px) / 2); left: 9px; }
+.tm-preview-log-search > input { height: var(--h-toolbar); padding-left: 32px; font-size: var(--t-help); }
+.tm-preview-log-search > input::-webkit-search-cancel-button { display: none; -webkit-appearance: none; }
+.tm-preview-logs__tools { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; margin-left: auto; }
+.tm-preview-logs__matches { display: flex; align-items: center; gap: 2px; margin-right: 10px; }
+.tm-preview-log-count { padding: 0 6px; color: var(--muted); font-size: var(--t-meta); font-feature-settings: 'tnum'; white-space: nowrap; }
+.tm-preview-log-icon { width: var(--h-icon); min-width: var(--h-icon); height: var(--h-icon); padding: 0; }
+.tm-preview-log-icon--compact { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); }
+.tm-preview-logs .ghost-button[aria-pressed='true'] { background: var(--sel); color: var(--text); }
+.tm-preview-logs .ghost-button[aria-disabled='true'] { background: transparent; color: var(--text-disabled); }
+.tm-preview-log-more { display: inline-flex; flex: 0 0 auto; }
+.tm-preview-log-more__trigger { width: var(--h-icon); min-width: var(--h-icon); height: var(--h-icon); padding: 0; }
+.tm-preview-logs__error { display: flex; align-items: center; gap: 8px; margin: 0; }
+
+/* Surface — one well; side-by-side panes are columns inside it, split by --hair seams. */
+.tm-preview-log-surface { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(0, 1fr); min-width: 0; min-height: 280px; height: clamp(280px, calc(100vh - 320px), 1600px); overflow: hidden; border-radius: var(--r-md); background: var(--well); --lane: 9ch; }
+.tm-preview-log-surface--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tm-preview-log-surface--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tm-preview-log-surface--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.tm-preview-log-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tm-preview-log-surface:is(.tm-preview-log-surface--2, .tm-preview-log-surface--3) .tm-preview-log-pane + .tm-preview-log-pane,
+.tm-preview-log-surface--4 .tm-preview-log-pane:nth-child(2) { box-shadow: inset 1px 0 0 var(--hair); }
+.tm-preview-log-surface--4 .tm-preview-log-pane:nth-child(3) { box-shadow: inset 0 1px 0 var(--hair); }
+.tm-preview-log-surface--4 .tm-preview-log-pane:nth-child(4) { box-shadow: inset 1px 0 0 var(--hair), inset 0 1px 0 var(--hair); }
+.tm-preview-log-pane__head { display: flex; flex: 0 0 var(--h-toolbar); align-items: center; gap: 8px; min-width: 0; padding: 0 4px 0 12px; box-shadow: inset 0 -1px 0 var(--hair); font-size: var(--t-help); }
+.tm-preview-log-pane__name { overflow: hidden; min-width: 0; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-log-pane__state { flex: 0 0 auto; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
+.tm-preview-log-pane__state[data-state='failed'] { color: var(--blocked-ink); }
+.tm-preview-log-pane__head > button { margin-left: auto; }
+.tm-preview-log-surface__empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 24px; color: var(--muted); font-size: var(--t-body); text-align: center; pointer-events: none; }
+
+/* Stream */
+.tm-preview-stream-wrap { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.tm-preview-stream { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px 12px; color: var(--text-soft); font-family: var(--font-mono); font-size: var(--t-help); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-preview-stream:focus { outline: 0; }
+.app-shell[data-input-modality='keyboard'] .tm-preview-stream:focus { box-shadow: inset 0 0 0 3px var(--focus-ring); }
+.tm-preview-log-line { min-height: 1.55em; }
+.tm-preview-stream--lanes .tm-preview-log-line { display: grid; grid-template-columns: var(--lane) minmax(0, 1fr); gap: 0 12px; }
+.tm-preview-log-lane { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-log-message { min-width: 0; }
+.tm-preview-log-marker { display: flex; align-items: center; gap: 10px; margin: 6px 0; color: var(--muted); font-family: var(--font-ui); font-size: var(--t-meta); line-height: 1.4; white-space: normal; }
+.tm-preview-log-marker::before, .tm-preview-log-marker::after { content: ''; flex: 1; height: 1px; background: var(--hair); }
+.tm-preview-log-marker > span { overflow: hidden; max-width: 80%; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-log-marker b { color: var(--text-soft); font-weight: 600; }
+.tm-preview-log-marker b[data-state='failed'] { color: var(--blocked-ink); }
+.tm-preview-log-marker b:is([data-state='ready'], [data-state='succeeded']) { color: var(--verified-ink); font-weight: 500; }
+.tm-preview-log-marker i { color: var(--faint); font-style: normal; }
+.tm-preview-stream mark { border-radius: 2px; background: var(--sel); color: var(--text); }
+.tm-preview-stream mark[data-current-match='true'] { background: var(--accent-soft); color: var(--accent-ink); box-shadow: 0 0 0 1px var(--accent); }
+.tm-preview-follow { position: absolute; right: 12px; bottom: 12px; height: var(--h-compact); padding: 0 10px; border-radius: var(--r-pill); background: var(--overlay); color: var(--text-soft); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); }
+.tm-preview-follow:not(:disabled):hover { background: linear-gradient(var(--hover), var(--hover)), var(--overlay); }
+
+/* Seams between split panes are resize handles; the panes draw the hairline. */
+.tm-preview-log-surface > .tm-preview-log-resize { position: absolute; top: 0; bottom: 0; height: auto; margin: 0; transform: translateX(-50%); }
+.tm-preview-log-surface > .tm-preview-log-resize--rows { top: auto; right: 0; bottom: auto; left: 0; width: auto; height: 5px; transform: translateY(-50%); }
+.tm-preview-log-resize span { background: transparent; }
+
+/* Narrow: panes stack before a column gets too narrow to read (decided by the
+   component, which also owns the split sizes). Stacked panes do not resize. */
+.tm-preview-log-surface.tm-preview-log-surface--stacked { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; min-height: 360px; }
+.tm-preview-log-surface.tm-preview-log-surface--stacked .tm-preview-log-pane + .tm-preview-log-pane { box-shadow: inset 0 1px 0 var(--hair); }
+.tm-preview-log-surface--stacked.tm-preview-log-surface--3 { min-height: 480px; }
+.tm-preview-log-surface--stacked.tm-preview-log-surface--4 { min-height: 560px; }
+@container preview-logs (max-width: 560px) {
+  .tm-preview-stream--lanes .tm-preview-log-line { grid-template-columns: min(var(--lane), 10ch) minmax(0, 1fr); }
+}

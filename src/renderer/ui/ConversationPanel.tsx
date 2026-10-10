@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
@@ -25,16 +25,24 @@ export interface ConversationPanelComposer {
 
 /**
  * A conversation beside a working surface: a 44px head, the shared conversation log, and the
- * shared composer. Escape closes it and focus returns to whatever opened it. The caller owns
- * the thread and what sending means.
+ * shared composer. As an overlay it takes focus and Escape closes it from anywhere; docked
+ * beside the surface it is part of the page, so it takes focus only when asked and Escape
+ * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
+ * The caller owns the thread and what sending means.
  */
-export function ConversationPanel({ title, tools, label, onClose, composer, children }: {
+export function ConversationPanel({ title, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, children }: {
   title: string;
   /** Controls below the input, such as the model selector. */
   tools?: ReactNode;
   label: string;
   onClose(): void;
   composer: ConversationPanelComposer;
+  /** The control that toggles the panel; focus returns there when the opener cannot take it. */
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  /** Part of the page rather than an overlay, such as a panel restored open beside its surface. */
+  docked?: boolean;
+  /** Docked only: move focus to the composer when the panel mounts, because the person opened it. */
+  autoFocus?: boolean;
   children: ReactNode;
 }) {
   const fieldId = useId();
@@ -45,7 +53,18 @@ export function ConversationPanel({ title, tools, label, onClose, composer, chil
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const scroller = useConversationScroll();
-  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, trapFocus: false, busy: false, onClose });
+  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, fallbackReturnFocusRef: returnFocusRef, trapFocus: false, busy: false, onClose, active: !docked });
+  // Mount-only: a docked panel restored from the person's layout must not steal focus.
+  const focusOnMount = useRef(docked && autoFocus);
+  useEffect(() => {
+    if (focusOnMount.current) field.current?.focus({ preventScroll: true });
+  }, []);
+  const closeFromInside = (event: KeyboardEvent<HTMLElement>) => {
+    if (!docked || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    onClose();
+    returnFocusRef?.current?.focus({ preventScroll: true });
+  };
   const canSend = !composer.disabled && !sending && draft.trim().length > 0;
   async function submit() {
     if (!canSend) return;
@@ -69,7 +88,7 @@ export function ConversationPanel({ title, tools, label, onClose, composer, chil
   };
   const sendLabel = composer.sendLabel ?? 'Send';
   return (
-    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1}>
+    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={closeFromInside}>
       <header className="tm-side-conversation__head">
         <strong>{title}</strong>
         <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} title="Close · Esc" onClick={onClose}>

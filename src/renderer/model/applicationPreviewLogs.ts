@@ -37,6 +37,15 @@ export const markerWord = (state: string) =>
 /** Plain-text form of a marker for copying. */
 export const markerText = (line: ApplicationLogLine) =>
   `${line.text} ${markerWord(line.marker ?? '')}${line.detail ?? ''}`;
+/** The text a person sees on a row, marker or output. Search and copy both use it. */
+export const logLineText = (line: ApplicationLogLine) =>
+  line.marker ? markerText(line) : line.text;
+/**
+ * A row's identity in a stream. Markers keep the offset at which they were
+ * observed, so a marker can share its id with output and with other markers.
+ */
+export const logLineKey = (line: ApplicationLogLine) =>
+  `${line.marker ?? 'line'}:${line.id}:${line.source}`;
 
 /** The leading label is transport framing; labels printed inside a message stay text. */
 export function splitApplicationLogs(

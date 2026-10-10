@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type RefObject } from 'react';
 import { Pencil } from 'lucide-react';
 import type { PreviewRecipeGenerationDraft, TaskInstruction } from '../../../shared/contracts';
 import { isActiveRunStatus } from '../../model/agentSession';
@@ -19,7 +19,7 @@ import type { PreviewAgentConversation } from './PreviewAgentProps';
  * agent wants comes back as a proposal. Chat and Configuration use the same save and review
  * flow; approval stays in the Preview controls.
  */
-export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposal, worktreePath, draft, onDraftChange, onReviewProposal, onSaveAndReview, savingProposal, onClose }: {
+export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposal, worktreePath, draft, onDraftChange, onReviewProposal, onSaveAndReview, savingProposal, onClose, returnFocusRef, docked, autoFocus }: {
   agent: PreviewAgentConversation;
   selection: PreviewAgentSelection;
   onSelectionChange(selection: PreviewAgentSelection): void;
@@ -31,6 +31,11 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
   onSaveAndReview(): void;
   savingProposal: boolean;
   onClose(): void;
+  /** The control that toggles the panel. */
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  /** Beside the Preview rather than over it; see ConversationPanel. */
+  docked?: boolean;
+  autoFocus?: boolean;
 }) {
   const [editing, setEditing] = useState<{ id: string; text: string }>();
   const [busy, setBusy] = useState(false);
@@ -77,6 +82,9 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       title="Preview agent"
       label="Preview agent conversation"
       onClose={onClose}
+      returnFocusRef={returnFocusRef}
+      docked={docked}
+      autoFocus={autoFocus}
       tools={
         <AgentModelSelector
           label="Preview agent model"

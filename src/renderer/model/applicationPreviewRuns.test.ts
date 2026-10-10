@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { AttemptSummary, PreviewStatus } from 'previewhost';
-import { hostAndPort, previewRunRows, runTime, serviceOutcome } from './applicationPreviewRuns';
+import { previewAddresses, previewRunRows, primaryService, runTime, serviceOutcome } from './applicationPreviewRuns';
 
 const now = new Date('2026-10-09T14:40:00');
 const attempt = (overrides: Partial<AttemptSummary>): AttemptSummary => ({
@@ -45,7 +45,24 @@ it('words a service state with the fact that decided it', () => {
   expect(serviceOutcome({ type: 'command', state: 'waiting', waitingFor: ['install', 'api'] })).toEqual({ word: 'Waiting', detail: 'after install, api' });
   expect(serviceOutcome({ type: 'job', state: 'starting' })).toEqual({ word: 'Running' });
   expect(serviceOutcome({ type: 'job', state: 'skipped' })).toEqual({ word: 'Not started' });
-  expect(hostAndPort('http://tm-6ef76297-2457-4e2a-a3ad-a6d0cb1f2e3d--api.localhost:60300/health')).toBe('api.localhost:60300');
-  expect(hostAndPort('http://127.0.0.1:61280/')).toBe('127.0.0.1:61280');
-  expect(hostAndPort('not a url')).toBe('not a url');
+});
+
+it('gives each service its own routable address and opens the IP address only for the primary', () => {
+  const route = 'tm-6ef76297-2457-4e2a-a3ad-a6d0cbac62b0';
+  const host = (name: string) => `http://${route}--${name}.localhost:62492`;
+  const status: PreviewStatus = { name: 'fixture', busy: false, url: 'http://127.0.0.1:62492', active: {
+    id: 'run', type: 'environment', state: 'ready', startedAt: '2026-10-10T03:15:00Z', sources: [], services: {
+      api: { type: 'command', state: 'ready', browserUrl: host('api') },
+      web: { type: 'command', state: 'ready', url: 'http://127.0.0.1:62492', browserUrl: host('web') },
+      queue: { type: 'command', state: 'ready', browserUrl: host('queue') }
+    } } };
+  for (const name of ['api', 'web', 'queue']) {
+    const [named] = previewAddresses(status, name);
+    // The text is the real host, shortened: a stripped "api.localhost" does not route.
+    expect(named).toMatchObject({ kind: 'host', url: host(name), text: `tm-6ef7…--${name}.localhost:62492`, service: name, openable: true });
+  }
+  expect(previewAddresses(status, 'api')).toHaveLength(1);
+  expect(previewAddresses(status, 'web')[1]).toMatchObject({ kind: 'ip', url: 'http://127.0.0.1:62492', text: '127.0.0.1:62492', openable: true });
+  expect(primaryService(status)).toBe('web');
+  expect(previewAddresses({ ...status, active: undefined, latest: status.active })).toEqual([]);
 });

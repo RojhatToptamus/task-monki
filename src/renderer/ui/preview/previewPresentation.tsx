@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useLayoutEffect,
   useRef,
   type FormEventHandler,
@@ -53,10 +55,38 @@ export function serviceTypeLabel(type: string): string {
   return label(type);
 }
 
-/** The last two segments keep a long machine path recognisable; the full path stays in `title`. */
-export function shortenPath(directory: string): string {
-  const parts = directory.split('/').filter(Boolean);
-  return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : directory;
+/** The home folder reads as `~`. */
+export function homePath(path: string): string {
+  return path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
+}
+
+/** The first segment and as many trailing segments as fit; the end of a path is what identifies it. */
+export function middleTruncatePath(path: string, max = 48): string {
+  if (path.length <= max) return path;
+  const parts = path.split('/');
+  const head = parts[0] === '' ? `/${parts[1] ?? ''}` : parts[0]!;
+  const rest = parts.slice(parts[0] === '' ? 2 : 1);
+  let tail = rest.at(-1) ?? '';
+  for (let i = rest.length - 2; i >= 0; i -= 1) {
+    const next = `${rest[i]}/${tail}`;
+    if (head.length + 3 + next.length > max) break;
+    tail = next;
+  }
+  return `${head}/…/${tail}`;
+}
+
+/** A long machine path on one line: home abbreviated, middle truncated. The full path stays in `title`. */
+export function shortenPath(directory: string, max?: number): string {
+  return middleTruncatePath(homePath(directory), max);
+}
+
+export function basename(path: string): string {
+  return path.split('/').filter(Boolean).at(-1) ?? path;
+}
+
+export function parentPath(path: string): string {
+  const index = path.replace(/\/+$/, '').lastIndexOf('/');
+  return index > 0 ? path.slice(0, index) : '/';
 }
 
 /** Where a command runs, named for the person: the task's own worktree or an external folder. */
@@ -69,12 +99,23 @@ export function folderName(directory: string, projectDirectory?: string): string
   return directory.split('/').filter(Boolean).at(-1) ?? directory;
 }
 
+/** The app's toast, for completed actions nothing else on screen confirms. Silent when absent. */
+export type PreviewNotify = (message: string, tone?: 'info' | 'success' | 'error') => void;
+export const PreviewNotifyContext = createContext<PreviewNotify>(() => undefined);
+export const usePreviewNotify = () => useContext(PreviewNotifyContext);
+
 export function CopyPath({ path }: { path: string }) {
+  const notify = usePreviewNotify();
   return (
     <button
       type="button"
       className="ghost-button"
-      onClick={() => void navigator.clipboard.writeText(path)}
+      onClick={() =>
+        void navigator.clipboard.writeText(path).then(
+          () => notify('Path copied', 'success'),
+          () => notify('The path could not be copied.', 'error')
+        )
+      }
     >
       Copy path
     </button>
@@ -107,7 +148,7 @@ export function StateWord({ service }: { service: Pick<ServiceStatus, 'type' | '
 }
 
 /** Name, one line of detail, the value or action on the right. The one row shape in Preview. */
-export function Row({ name, detail, end, children, title, expansion }: {
+export function Row({ name, detail, end, children, title, expansion, className }: {
   name: ReactNode;
   detail?: ReactNode;
   /** A second, muted line under the detail. */
@@ -116,9 +157,11 @@ export function Row({ name, detail, end, children, title, expansion }: {
   title?: string;
   /** A full-width block under the row, such as the editor for its value. */
   expansion?: ReactNode;
+  /** `tm-preview-row--line` sets name, detail and action on one 30px line. */
+  className?: string;
 }) {
   return (
-    <div className="tm-preview-row">
+    <div className={className ? `tm-preview-row ${className}` : 'tm-preview-row'}>
       <span className="tm-preview-row__name" title={title}>{name}</span>
       <div className="tm-preview-row__detail">
         {detail}
@@ -284,7 +327,7 @@ export function PreviewRunReview({ description, projectDirectory, outcomes, sour
           <Row
             key={source}
             name={inWorktree(source) ? 'Task worktree' : 'External folder'}
-            detail={<code title={source}>{inWorktree(source) ? shortenPath(source) : source}</code>}
+            detail={<code title={source}>{shortenPath(source)}</code>}
             end={
               <>
                 <CopyPath path={source} />

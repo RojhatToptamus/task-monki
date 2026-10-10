@@ -17,15 +17,18 @@ the task's current preview. Tasks without a runtime instance are not listed.
 Open the task's **Preview** tab. Without a configuration file it lists what the
 project files say (application, dependencies, environment keys, Compose services)
 and offers **Draft with Preview agent** or **Write it myself**. The agent works in
-a conversation beside the tabs, opened any time from the chat button in the
-status row: ask it to draft the configuration, check the setup, inspect logs, or
-explain a failure. It reads the project and the runs, asks when the files do not
+a conversation opened any time from **Agent** in the status row: ask it to draft
+the configuration, check the setup, inspect logs, or explain a failure. On wide
+windows it docks beside the Preview, keeps its width and stays open across visits;
+on narrower windows it opens as a drawer. While it is closed, a dot on **Agent**
+shows that it is working or waiting for an answer. It reads the project and the runs, asks when the files do not
 decide something, and returns proposals that open in **Configuration** as a diff.
-Pick any enabled agent and model in the panel header; a message sent while the
+Pick any enabled agent and model below the message field; a message sent while the
 agent works waits in the queue, and **Stop** interrupts the current response.
 **Save** writes the file without starting. **Save and review startup** also opens
-the execution review. Resolve the listed requirements, then choose **Approve and
-start**. When a retained run exists but the file is gone, **Start from last run**
+the execution review. Requirements, the execution review and failures appear at
+the top of **Activity**; when a start is blocked, **N to resolve** in the status
+row leads there. Resolve them, then choose **Approve and start**. When a retained run exists but the file is gone, **Start from last run**
 is the primary action.
 
 **Check for a plain static site** in the menu offers a draft only for HTML folders
@@ -79,17 +82,23 @@ opens it in the file manager. The folder menu offers installed editors, includin
 VS Code, and **Copy path** for the full location.
 
 **Logs** selects one run and one or more sources. Search highlights text; it does not infer severity.
-**Log sources** opens a checkbox menu. **Side by side** opens the same menu so you can choose two to four sources for separate panes. Four sources use a two-by-two layout.
+**Log sources** opens a checkbox menu with each source's state. With two to four sources chosen, **Side by side** shows them as separate panes in one log surface; four sources use a two-by-two layout. **Send last 40 lines to task agent** is in the toolbar's **⋯** menu when one failed source is shown.
 External HTTP and TCP connections check services started outside Preview; they cannot capture those processes’ output. **Ask agent to enable logs** drafts a request for managed services. Review the commands, folder access and secrets before saving or starting.
 Logs follow new output automatically. Each stream has a pause/play control. Scrolling up also pauses following without stopping collection; the **new lines** button returns to the latest output. Separate panes follow independently.
 The shared buffer retains at most 64 KiB. Logs expire when the runtime restarts.
 
-**Configuration** edits the portable file. Field edits preserve unrelated YAML and comments.
-All starts read that file. Runtime descriptions are read-only records of earlier execution.
-The **Changes** view compares the draft with the original file.
+**Configuration** edits the portable file. It groups the file into services,
+databases, setup steps (in the order they run), folders and secrets. Open a row
+to change its command, folder, start order, repeat, readiness path or
+environment; values are written into the draft as you edit, preserving unrelated
+YAML and comments, and **Save** in the status row writes the file. A rejected
+file shows Previewhost's own reason. All starts read that file. Runtime
+descriptions are read-only records of earlier execution. **YAML** shows the
+source, and **Changes** (shown when the draft differs) compares it with the
+original file.
 If both default files exist, explicitly choose one; the other is retained with a `.unused` suffix.
 
-Folder requirements show the service and exact external path. Choosing a folder grants no access.
+Folder requirements show the folder name, a shortened location (hover for the exact path) and the services that use it. Choosing a folder grants no access.
 **Connect** grants access for the current app session. Other tasks can reuse that session grant.
 Commands run with your account permissions and can change files outside their working folder.
 External relative paths resolve from the registered repository, rather than the task's temporary worktree.

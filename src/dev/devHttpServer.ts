@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
+import { PreviewError } from 'previewhost';
 import { ImportPreviewError } from '../core/git/ImportPreview';
 import type {
   AppUpdateEvent,
@@ -1476,6 +1477,10 @@ function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
   }
   if (error instanceof TaskCreationRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);
+  }
+  // Expired run logs are an ordinary state the Logs view names; the desktop host passes this message through too.
+  if (error instanceof PreviewError && error.code === 'ATTEMPT_EXPIRED') {
+    return new DevApiHttpError(410, error.code, error.message);
   }
   if (
     error instanceof Error &&

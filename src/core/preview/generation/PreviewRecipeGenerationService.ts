@@ -14,12 +14,12 @@ import {
   inspectPreviewFrameworkRepositoryFacts,
   type PreviewFrameworkCapabilities
 } from './PreviewFrameworkCapabilities';
+import { configurationFormatReason } from '../ApplicationPreviewConfiguration';
 import { readPreviewRecipeFile, writeReviewedPreviewRecipe, type PreviewRecipeFile } from './PreviewRecipeFile';
 
 export const PREVIEW_RECIPE_PATH = 'preview.yaml';
 const MAX_PREVIEW_RECIPE_BYTES = 65_536;
 const MAX_PACKAGE_MANIFEST_BYTES = 256 * 1024;
-const MAX_REASON_LENGTH = 300;
 const SECRET_ENV_KEY = /(?:^|_)(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i;
 type Configuration = ReturnType<typeof parsePreviewSpec>;
 
@@ -171,7 +171,7 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
   try {
     plan = parseConfiguration(yaml);
   } catch (error) {
-    return invalid('INVALID_RECIPE', `The YAML does not match the Preview contract: ${reason(error)}`);
+    return invalid('INVALID_RECIPE', `The YAML does not match the Preview contract: ${configurationFormatReason(error)}`);
   }
   if (/^tm-[0-9a-f-]{36}$/i.test(plan.name)) {
     return invalid('INVALID_RECIPE', 'Use a readable project name. Task Monki assigns runtime identity separately.');
@@ -295,10 +295,6 @@ function parseConfiguration(yaml: string): Configuration {
   return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }) as PreviewSpec);
 }
 
-function reason(error: unknown): string {
-  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim();
-  return text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 1)}…` : text || 'invalid configuration.';
-}
 
 function commandNodes(spec: Configuration) {
   if (spec.type === 'command') return [{ id: 'app', ...spec }];

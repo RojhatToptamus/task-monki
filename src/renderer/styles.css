@@ -8,4 +8,7 @@
 @import './styles/new-task.css';
 @import './styles/app-shell.css';
 @import './styles/task-detail.css';
+@import './styles/preview-tab.css';
+@import './styles/preview-configuration.css';
+@import './styles/preview-logs.css';
 @import './styles/previews.css';

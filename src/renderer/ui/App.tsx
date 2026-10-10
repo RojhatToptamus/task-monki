@@ -3040,6 +3040,7 @@ export function App() {
               }
             }}
             onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
+            onNotify={notify}
             onPrepareTaskAgent={async (text) => {
               if (taskDetail.runs.length) {
                 const draft = agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? '';

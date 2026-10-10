@@ -3,7 +3,8 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor
+  waitFor,
+  within
 } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 
@@ -22,6 +23,7 @@ import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
+import { persistPreviewAgentOpen } from '../../model/workspaceLayout';
 import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
 import { createRuntimeReadiness } from '../../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../../core/agent/codex/codexCapabilities';
@@ -43,7 +45,8 @@ const api = vi.hoisted(() => ({
   saveApplicationPreviewFile: vi.fn(),
   connectApplicationPreviewSource: vi.fn(),
   chooseRepositoryFolder: vi.fn(),
-  readApplicationPreviewLogs: vi.fn()
+  readApplicationPreviewLogs: vi.fn(),
+  openApplicationPreview: vi.fn()
 }));
 vi.mock('../../api/taskManagerClient', () => ({ taskManagerApi: api }));
 const initial: PreviewStatus = {
@@ -80,6 +83,7 @@ const worktree = (status: WorktreeRecord['status']): WorktreeRecord => ({
 });
 beforeEach(() => {
   vi.resetAllMocks();
+  window.localStorage.clear();
   api.readApplicationPreviewFile.mockResolvedValue({});
   api.inspectApplicationPreviewSetup.mockResolvedValue({ projectDirectory: '/fixture', recommendations: [], facts: [] });
   api.inspectApplicationPreviewConfiguration.mockResolvedValue(inspected);
@@ -140,7 +144,7 @@ it('opens the conversation for a pending question, answers it in place, and neve
   const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
   expect(panel.textContent).toContain('Draft a preview configuration for this project.');
   expect(panel.textContent).toContain('Which application should run: Alpha or Beta?');
-  expect((screen.getByRole('button', { name: 'Preview agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
+  expect((screen.getByRole('button', { name: 'Agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
   expect((screen.getByRole('button', { name: 'Queue' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByRole('textbox', { name: 'Which application should run: Alpha or Beta?' }), { target: { value: 'Alpha' } });
   fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));
@@ -159,15 +163,15 @@ it.each(['header', 'chat'] as const)('preserves edits across a stale-save reject
   render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposals} />);
   expect(await screen.findByLabelText('Configuration changes')).toBeTruthy();
   expect(screen.getByText('Proposal ready')).toBeTruthy();
-  fireEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+  fireEvent.click(screen.getByRole('button', { name: 'YAML' }));
   const edited = proposal.draft!.yaml + '# Keep this edit\n';
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: edited } });
-  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
   fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   expect((await screen.findByRole('alert')).textContent).toContain('Configuration changed');
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect((screen.getByRole('textbox', { name: 'Preview YAML' }) as HTMLTextAreaElement).value).toBe(edited);
-  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
   fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   await waitFor(() => expect(proposals.accept).toHaveBeenCalledTimes(2));
   expect(proposals.accept).toHaveBeenLastCalledWith('task', 'draft', edited);
@@ -339,18 +343,27 @@ it('explains external service log ownership and offers a reviewed configuration 
   expect(onLogs).toHaveBeenCalledWith('serving', 'app', false);
 });
 
-it('edits the file draft while preserving comments and unrelated secret references', async () => {
+it('edits a command in place without touching comments or other references, refusing text that is not a command', async () => {
   const original = { name: 'preview.yaml' as const, text: '# Project note\nname: fixture\ntype: command\ncwd: .\ncommand: [node, server.js]\nenv:\n  TOKEN: {secret: fixture/dev/token}\n' };
   const onChange = vi.fn();
   const view = render(<ApplicationConfiguration draft={{ original, text: original.text }} view="Configuration" onView={() => {}}
     onChange={onChange} onSave={() => {}} busy={false} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Edit Application command' }));
-  fireEvent.change(screen.getByRole('textbox', { name: 'Application · command' }), { target: { value: '["node", "web.js"]' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply to draft' }));
-  expect(onChange.mock.lastCall?.[0]).toContain('# Project note');
-  expect(onChange.mock.lastCall?.[0]).toContain('fixture/dev/token');
-  expect(onChange.mock.lastCall?.[0]).toContain('web.js');
+  const row = screen.getByRole('button', { name: /^fixture/, expanded: false });
+  fireEvent.click(row);
+  const command = screen.getByRole('textbox', { name: 'Command' });
+  fireEvent.change(command, { target: { value: 'node "web.js' } });
+  fireEvent.blur(command);
+  expect(screen.getByRole('alert').textContent).toBe('Close the quoted argument.');
+  expect(onChange).not.toHaveBeenCalled();
+  fireEvent.change(command, { target: { value: 'node web.js "--title=Two words"' } });
+  fireEvent.keyDown(command, { key: 'Enter' });
+  expect(onChange.mock.lastCall?.[0]).toBe(original.text.replace('[node, server.js]', '[node, web.js, --title=Two words]'));
   expect(api.saveApplicationPreviewFile).not.toHaveBeenCalled();
+  view.rerender(<ApplicationConfiguration draft={{ original, text: onChange.mock.lastCall![0] }} view="Configuration" onView={() => {}}
+    onChange={onChange} onSave={() => {}} busy={false} />);
+  fireEvent.keyDown(command, { key: 'Escape' });
+  expect(row.getAttribute('aria-expanded')).toBe('false');
+  expect(document.activeElement).toBe(row);
   view.rerender(<ApplicationConfiguration draft={{ original, text: onChange.mock.lastCall![0] }}
     previous={{ ...original, text: original.text.replace('server.js', 'previous-run.js') }}
     view="Changes" onView={() => {}} onChange={onChange} onSave={() => {}} busy={false} />);
@@ -451,7 +464,7 @@ it('ignores late logs, preserves the cursor across hidden tabs, and releases its
   expect(api.readApplicationPreviewLogs).toHaveBeenCalledTimes(3);
 });
 
-it('lets a single-source log view choose separate panes through a persistent checkbox menu', async () => {
+it('splits chosen log sources into live panes and falls back to one stream when fewer than two remain', async () => {
   api.inspectApplicationPreviewConfiguration.mockRejectedValue(new Error('unavailable'));
   api.readApplicationPreviewLogs.mockResolvedValue({ text: '[backend] API ready\n[app] Frontend ready\n[install] Installed\n', cursor: 60, truncated: false });
   const services = { backend: { type: 'command' as const, state: 'ready' as const }, app: { type: 'command' as const, state: 'starting' as const }, install: { type: 'job' as const, state: 'succeeded' as const } };
@@ -459,24 +472,33 @@ it('lets a single-source log view choose separate panes through a persistent che
   const view = render(<ApplicationLogs taskId="task" status={{ ...initial, active: { ...initial.active!, type: 'environment', services } }}
     selection={selection} onSelect={() => undefined} />);
   await screen.findByText('Frontend ready');
-  fireEvent.click(screen.getByRole('button', { name: 'Side by side' }));
+  const sideBySide = screen.getByRole('button', { name: 'Side by side' });
+  expect(sideBySide.getAttribute('aria-disabled')).toBe('true');
+  fireEvent.click(sideBySide);
+  expect(screen.queryByRole('region', { name: 'app log pane' })).toBeNull();
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Log sources' }), { key: 'ArrowDown' });
   const backend = screen.getByRole('menuitemcheckbox', { name: 'backend' });
   fireEvent.click(backend);
+  // The menu stays open for multi-select.
   expect(screen.getByRole('menuitemcheckbox', { name: 'backend' }).getAttribute('aria-checked')).toBe('true');
-  expect(screen.getByRole('region', { name: 'backend log pane' }).textContent).toContain('API ready');
-  expect(screen.getByRole('region', { name: 'app log pane' }).textContent).not.toContain('API ready');
   fireEvent.keyDown(backend, { key: 'Escape' });
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Log sources' })));
+  fireEvent.click(screen.getByRole('button', { name: 'Side by side' }));
+  expect(screen.getByRole('region', { name: 'backend log pane' }).textContent).toContain('API ready');
+  expect(screen.getByRole('region', { name: 'app log pane' }).textContent).not.toContain('API ready');
   fireEvent.click(screen.getByRole('button', { name: 'Pause backend logs' }));
   expect(screen.getByRole('button', { name: 'Resume backend logs' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Pause app logs' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Resume backend logs' }));
   expect(screen.getByRole('button', { name: 'Pause backend logs' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Side by side' }));
-  expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).toContain('API ready');
+  // Choosing sources while split updates the panes in place.
   fireEvent.keyDown(screen.getByRole('button', { name: 'Log sources' }), { key: 'ArrowDown' });
+  fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'install' }));
+  expect(screen.getByRole('region', { name: 'install log pane' }).textContent).toContain('Installed');
+  fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'install' }));
   fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'backend' }));
   expect(screen.getByRole('region', { name: 'Combined log pane' }).textContent).not.toContain('API ready');
+  expect(screen.getByRole('button', { name: 'Side by side' }).getAttribute('aria-pressed')).toBe('false');
   expect(screen.getByRole('menuitemcheckbox', { name: 'app' }).getAttribute('aria-disabled')).toBe('true');
   view.rerender(<ApplicationLogs taskId="task" status={{ ...initial, active: { ...initial.active!, type: 'environment', services: {
     ...services, app: { ...services.app, state: 'ready' }, backend: { ...services.backend, state: 'starting' }
@@ -655,7 +677,8 @@ it('blocks startup until the backend connection is present in the file', async (
   render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
   expect((await screen.findByRole('button', { name: 'Start preview' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: 'Set address' }));
-  await screen.findByRole('button', { name: 'Connect address' });
+  // The service without an address opens straight to its Address field.
+  expect(await screen.findByRole('textbox', { name: 'Address' })).toBeTruthy();
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect(api.approveApplicationPreview).not.toHaveBeenCalled();
 });
@@ -667,8 +690,8 @@ it('shows a chosen missing folder before granting access and never starts on Con
   api.connectApplicationPreviewSource.mockResolvedValue(undefined);
   render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Choose folder' }));
-  expect(screen.getByText('api, migrate')).toBeTruthy();
-  expect(await screen.findByText('/chosen/backend')).toBeTruthy();
+  expect(screen.getByText('Used by api, migrate')).toBeTruthy();
+  expect((await screen.findAllByTitle('/chosen/backend'))[0]!.textContent).toBe('backend');
   expect(api.connectApplicationPreviewSource).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
   await waitFor(() => expect(api.connectApplicationPreviewSource).toHaveBeenCalledWith({ taskId: 'task', service: 'api', directory: '/chosen/backend', expected: { active: null, candidate: null, latest: null } }));
@@ -692,10 +715,10 @@ it('saves and replaces a concealed value under the required reference without st
   const addButtons = await screen.findAllByRole('button', { name: /Add value/ });
   fireEvent.click(addButtons[1]!);
   await screen.findByRole('form', { name: 'Add missing secret' });
-  fireEvent.change(screen.getByLabelText('Secret value'), { target: { value: 'discard-this-unsaved-value' } });
+  fireEvent.change(await screen.findByLabelText('TOKEN'), { target: { value: 'discard-this-unsaved-value' } });
   fireEvent.click(addButtons[0]!);
-  await waitFor(() => expect(screen.getByLabelText('Secret reference')).toHaveProperty('value', reference));
-  expect(screen.getByLabelText('Secret value')).toHaveProperty('value', '');
+  await waitFor(() => expect(addButtons[0]!.getAttribute('aria-expanded')).toBe('true'));
+  expect(await screen.findByLabelText('TOKEN')).toHaveProperty('value', '');
   const form = await screen.findByRole('form', { name: 'Add missing secret' });
   expect(screen.queryByRole('dialog')).toBeNull();
   const input = form.querySelector<HTMLInputElement>('input[type="password"]')!;
@@ -710,7 +733,7 @@ it('saves and replaces a concealed value under the required reference without st
   expect(screen.getByLabelText('Secret reference')).toHaveProperty('value', reference);
   const update = vi.fn(async () => true);
   window.previewSecrets!.update = update;
-  fireEvent.change(screen.getByLabelText('Secret value'), { target: { value: 'SYNTHETIC_replacement_with_at_least_32_characters' } });
+  fireEvent.change(screen.getByLabelText('TOKEN'), { target: { value: 'SYNTHETIC_replacement_with_at_least_32_characters' } });
   fireEvent.click(screen.getByRole('button', { name: 'Replace value' }));
   await waitFor(() => expect(update).toHaveBeenCalledWith({ id: reference, value: 'SYNTHETIC_replacement_with_at_least_32_characters' }));
   await waitFor(() => expect(screen.queryByRole('form', { name: 'Replace secret value' })).toBeNull());
@@ -747,7 +770,7 @@ it('opens a past run’s configuration read-only from the runs list and returns 
   fireEvent.click(await screen.findByRole('button', { name: /Run configuration at/ }));
   const view = await screen.findByLabelText('Configuration used for this run');
   expect(view.textContent).toContain('read-only');
-  expect(await screen.findByText('What ran')).toBeTruthy();
+  expect(await screen.findByRole('region', { name: 'Services' })).toBeTruthy();
   expect(view.querySelector('textarea')).toBeNull();
   expect(screen.getByRole('tab', { name: 'Configuration' }).getAttribute('aria-selected')).toBe('true');
   fireEvent.click(screen.getByRole('button', { name: 'Back to preview.yaml' }));
@@ -756,16 +779,28 @@ it('opens a past run’s configuration read-only from the runs list and returns 
   expect(screen.queryByLabelText('Configuration used for this run')).toBeNull();
 });
 
+it('restores a docked Preview agent the person left open without taking focus from the page', async () => {
+  persistPreviewAgentOpen(true);
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
+  await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+  expect(panel.contains(document.activeElement)).toBe(false);
+});
+
 it('opens the Preview agent from its own button, sends with the selected model, queues behind a turn, and stops it', async () => {
   const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
   const agent = agentConversation();
   const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
-  const toggle = await screen.findByRole('button', { name: 'Preview agent' });
+  const toggle = await screen.findByRole('button', { name: 'Agent' });
   expect(toggle.getAttribute('aria-pressed')).toBe('false');
   fireEvent.click(toggle);
   const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
   expect(panel.textContent).toContain('Scenario model');
+  // Opened by the person, the docked panel takes focus in its composer.
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration…' })));
   fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
   expect(screen.getByRole('complementary', { name: 'Preview agent conversation' })).toBeTruthy();
   fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration…' }), { target: { value: 'Add a Redis service' } });
@@ -787,9 +822,15 @@ it('opens the Preview agent from its own button, sends with the selected model, 
   fireEvent.click(screen.getByRole('button', { name: 'Remove instruction 1' }));
   await waitFor(() => expect(working.editQueued).toHaveBeenCalledWith('m2'));
 
+  // Docked beside the Preview it is part of the page: Escape elsewhere leaves it open, Escape inside closes it.
   fireEvent.keyDown(window, { key: 'Escape' });
+  expect(screen.getByRole('complementary', { name: 'Preview agent conversation' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Queue a message for after this response' }), { key: 'Escape' });
   await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
-  expect(screen.getByRole('button', { name: 'Preview agent' }).getAttribute('aria-pressed')).toBe('false');
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Agent' }));
+  expect(screen.getByRole('button', { name: 'Agent' }).getAttribute('aria-pressed')).toBe('false');
+  // Closed while the agent works, the entry still says so.
+  expect(screen.getByRole('button', { name: 'Agent' }).getAttribute('aria-describedby')).toBe(screen.getByText('Agent working').id);
   expect(api.cancelApplicationPreview).not.toHaveBeenCalled();
 });
 
@@ -813,7 +854,7 @@ it('continues the saved Preview model before its catalog loads and leaves provid
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
   const agent = agentConversation({ runs: [previewRun('COMPLETED')], models: [] });
   const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Preview agent' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Agent' }));
   expect(screen.getByRole('button', { name: /Preview agent model:.*scenario-model/ })).toBeTruthy();
   fireEvent.change(screen.getByRole('textbox', { name: 'Ask for a change or an explanation…' }), { target: { value: 'Continue our previous conversation.' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -832,4 +873,129 @@ it('selects the exact log run when two attempts have the same displayed time', a
   expect(runs.map((run) => run.getAttribute('aria-checked')).sort()).toEqual(['false', 'true']);
   fireEvent.click(runs.find((run) => run.getAttribute('aria-checked') === 'false')!);
   expect(onSelect).toHaveBeenCalledWith({ attemptId: 'failed' });
+});
+
+it('keeps start blockers in Activity only and leads there from the status row', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped,
+    requirements: { secrets: [], connections: [], sources: [{ service: 'api', declaration: '../backend', directory: '/projects/backend', connected: false }] } });
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
+  const block = await screen.findByRole('region', { name: 'Before this runs' });
+  expect(block.closest('[role="tabpanel"]')?.id).toBe('preview-panel-Activity');
+  fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
+  expect(block.closest('[hidden]')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '1 to resolve' }));
+  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+  await waitFor(() => expect(document.activeElement).toBe(block.closest('[data-preview-attention]')));
+  expect(api.startApplicationPreview).not.toHaveBeenCalled();
+});
+
+it('enters every missing value in one form, one reference after another', async () => {
+  const references = ['fixture/dev/client-id', 'fixture/dev/client-secret'];
+  const snapshot = (saved: number): ApplicationPreviewSnapshot => ({ name: 'fixture', hasConfigurationFile: true,
+    requirements: { sources: [], connections: [], secrets: references.map((id, i) => ({ id, selected: false, bindings: [{ service: 'backend', key: i ? 'CLIENT_SECRET' : 'CLIENT_ID' }], availability: i < saved ? 'available' as const : 'missing' as const })) } });
+  api.getApplicationPreview.mockResolvedValue(snapshot(0));
+  // A saved value is available on the next poll; the form must keep the list it opened with.
+  const create = vi.fn(async () => {
+    api.getApplicationPreview.mockResolvedValue(snapshot(create.mock.calls.length));
+  });
+  window.previewSecrets = { status: vi.fn(async () => ({ state: 'unlocked' })), has: vi.fn(async () => false), create } as unknown as PreviewSecretsApi;
+  try {
+    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add all values' }));
+    fireEvent.change(await screen.findByLabelText('CLIENT_ID'), { target: { value: 'synthetic-id' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save secret' }));
+    const polls = api.getApplicationPreview.mock.calls.length;
+    await waitFor(() => expect(api.getApplicationPreview.mock.calls.length).toBeGreaterThan(polls + 1), { timeout: 3000 });
+    expect(screen.getByText(/2 of 2/)).toBeTruthy();
+    expect(screen.queryByLabelText('Secret reference')).toBeNull();
+    fireEvent.change(await screen.findByLabelText('CLIENT_SECRET'), { target: { value: 'synthetic-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save secret' }));
+    await waitFor(() => expect(screen.queryByLabelText('CLIENT_SECRET')).toBeNull());
+    expect(create.mock.calls).toEqual([[{ id: references[0], value: 'synthetic-id' }], [{ id: references[1], value: 'synthetic-secret' }]]);
+    expect(api.startApplicationPreview).not.toHaveBeenCalled();
+  } finally {
+    delete window.previewSecrets;
+  }
+});
+
+it('opens the agent as a drawer when the Preview is narrow and returns focus to its entry on Escape', async () => {
+  const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  const width = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 700 } as DOMRect);
+  try {
+    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+    const toggle = await screen.findByRole('button', { name: 'Agent' });
+    toggle.focus();
+    fireEvent.click(toggle);
+    const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
+    expect(panel.closest('.tm-preview-agent-drawer')).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: 'Preview agent' })).toBeNull();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+  } finally {
+    width.mockRestore();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('opens and copies each service at its own routed address', async () => {
+  const route = 'tm-6ef76297-2457-4e2a-a3ad-a6d0cbac62b0';
+  const host = (name: string) => `http://${route}--${name}.localhost:62492`;
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: { name: 'fixture', busy: false, url: 'http://127.0.0.1:62492', active: {
+    ...initial.active!, type: 'environment', services: {
+      api: { type: 'command', state: 'ready', browserUrl: host('api') },
+      web: { type: 'command', state: 'ready', url: 'http://127.0.0.1:62492', browserUrl: host('web') },
+      queue: { type: 'command', state: 'ready', browserUrl: host('queue') }
+    } } } });
+  api.openApplicationPreview.mockImplementation(async ({ service }: { service?: string }) => ({ url: service ? host(service) : 'http://127.0.0.1:62492', opened: true }));
+  const onNotify = vi.fn();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  try {
+    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} onNotify={onNotify} />);
+    const table = await screen.findByRole('region', { name: 'Preview services' });
+    for (const name of ['api', 'web', 'queue']) {
+      const link = within(table).getByRole('link', { name: `tm-6ef7…--${name}.localhost:62492` });
+      expect(link.getAttribute('href')).toBe(host(name));
+      fireEvent.click(link);
+      await waitFor(() => expect(api.openApplicationPreview).toHaveBeenLastCalledWith({ taskId: 'task', attemptId: 'serving', service: name }));
+    }
+    // api has no IP address of its own: the router's port serves only the primary service, so it has no menu.
+    expect(within(table).queryByRole('button', { name: 'All addresses of api' })).toBeNull();
+    fireEvent.click(within(table).getByRole('button', { name: 'Copy address of api' }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(host('api')));
+    expect(await within(table).findByRole('button', { name: 'Copied' })).toBeTruthy();
+    // The primary service lists both addresses: each row opens its address, its copy item copies it and keeps the menu open.
+    fireEvent.keyDown(within(table).getByRole('button', { name: 'All addresses of web' }), { key: 'ArrowDown' });
+    const menu = await screen.findByRole('menu', { name: 'All addresses of web' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.getAttribute('aria-label'))).toEqual([
+      `Open host name ${host('web')}`, 'Copy host name', 'Open IP address http://127.0.0.1:62492', 'Copy IP address'
+    ]);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy IP address' }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith('http://127.0.0.1:62492'));
+    expect(screen.getByRole('menu', { name: 'All addresses of web' })).toBeTruthy();
+    expect(onNotify).not.toHaveBeenCalled();
+  } finally {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  }
+});
+
+it('reverts unsaved edits to the file without writing it', async () => {
+  const text = 'name: fixture\ntype: command\ncwd: .\ncommand: [node, server.js]\n';
+  api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: { name: 'fixture', busy: false, latest: { ...initial.active!, state: 'stopped' } } });
+  api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text } });
+  const onNotify = vi.fn();
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} onNotify={onNotify} />);
+  fireEvent.click(await screen.findByRole('tab', { name: 'Configuration' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'YAML' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: `${text}# not wanted\n` } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Revert changes' }));
+  await waitFor(() => expect((screen.getByRole('textbox', { name: 'Preview YAML' }) as HTMLTextAreaElement).value).toBe(text));
+  expect(screen.queryByRole('button', { name: 'Revert changes' })).toBeNull();
+  expect(onNotify).toHaveBeenCalledWith('Changes reverted');
+  expect(api.saveApplicationPreviewFile).not.toHaveBeenCalled();
 });

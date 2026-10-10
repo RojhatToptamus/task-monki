@@ -39,11 +39,11 @@ it('gives every state exactly one primary and names it from what exists', () => 
     chip: { label: 'Stopped' }, primary: { action: 'start-retained', label: 'Start from last run' }, secondary: [{ action: 'draft' }]
   });
   expect(row({ dirty: true })).toMatchObject({
-    chip: { label: 'Unsaved changes' }, primary: { action: 'save-and-review' }, secondary: [{ action: 'discard' }, { action: 'save' }]
+    chip: { label: 'Unsaved changes' }, primary: { action: 'save-and-review' }, secondary: [{ action: 'revert', label: 'Revert changes' }, { action: 'save' }]
   });
-  expect(row({ dirty: true, proposal: true }).chip.label).toBe('Proposal ready');
+  expect(row({ dirty: true, proposal: true })).toMatchObject({ chip: { label: 'Proposal ready' }, secondary: [{ action: 'discard' }, { action: 'save' }] });
   expect(row({ blockers: 2 })).toMatchObject({
-    chip: { label: 'Not running' }, reason: '2 to resolve first', primary: { action: 'start', disabled: true, disabledReason: 'Resolve 2 requirements before starting.' }
+    chip: { label: 'Not running' }, reason: '2 to resolve', primary: { action: 'start', disabled: true, disabledReason: 'Resolve 2 requirements before starting.' }
   });
   expect(row({}, { configurationError: 'Unknown service type' }).primary).toMatchObject({ disabled: true, disabledReason: 'Unknown service type' });
   const approval = { attemptId: 'pending', description: {} as never, secrets: [] };
@@ -55,6 +55,11 @@ it('gives every state exactly one primary and names it from what exists', () => 
   expect(row({}, { status: { name: 'app', busy: false, url: 'http://127.0.0.1:1', active: attempt('ready') } })).toMatchObject({
     chip: { label: 'Ready' }, url: 'http://127.0.0.1:1', primary: { action: 'open', label: 'Open app' }, secondary: [{ action: 'stop' }]
   });
+  // A saved file that is not serving yet stays visible from every tab, not only in Activity.
+  expect(row({}, { configurationChanged: true, status: { name: 'app', busy: false, url: 'http://127.0.0.1:1', active: attempt('ready') } })).toMatchObject({
+    chip: { label: 'Ready' }, reason: 'Changes not applied', primary: { action: 'open' }
+  });
+  expect(row({}, { status: { name: 'app', busy: false, url: 'http://127.0.0.1:1', active: attempt('ready') } }).reason).toBeUndefined();
   expect(row({}, { restartReview: { id: 'r', description: {} as never, affected: [] }, status: { name: 'app', busy: false, url: 'http://127.0.0.1:1', active: attempt('ready') } })).toMatchObject({
     chip: { label: 'Restart review' }, primary: { label: 'Approve restart' }
   });

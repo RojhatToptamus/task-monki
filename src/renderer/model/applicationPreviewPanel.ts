@@ -15,12 +15,12 @@ export type PreviewPrimaryAction =
   | 'open'
   | 'start';
 
-export type PreviewSecondaryAction = 'cancel' | 'stop' | 'discard' | 'save' | 'draft' | 'write';
+export type PreviewSecondaryAction = 'cancel' | 'stop' | 'discard' | 'revert' | 'save' | 'draft' | 'write';
 
 export interface PreviewStatusRowView {
   chip: { label: string; tone: Tone };
   url?: string;
-  /** Shown beside a primary that requirements disable. */
+  /** Shown beside a primary that requirements disable; it leads to the requirements in Activity. */
   reason?: string;
   primary?: {
     action: PreviewPrimaryAction;
@@ -76,7 +76,8 @@ export function previewStatusRow(input: PreviewStatusRowInput): PreviewStatusRow
       chip: { label: input.proposal ? 'Proposal ready' : 'Unsaved changes', tone: 'action' },
       url,
       primary: { action: 'save-and-review', label: 'Save and review startup', disabled: busy },
-      secondary: [{ action: 'discard', label: 'Discard' }, { action: 'save', label: 'Save' }]
+      // A proposal is the agent's and is discarded; your own edits are reverted to the file.
+      secondary: [input.proposal ? { action: 'discard', label: 'Discard' } : { action: 'revert', label: 'Revert changes' }, { action: 'save', label: 'Save' }]
     };
   if (review) {
     const restart = !!snapshot.restartReview;
@@ -96,7 +97,14 @@ export function previewStatusRow(input: PreviewStatusRowInput): PreviewStatusRow
   }
   if (status?.candidate) return { chip, url, secondary: [cancel] };
   if (serving)
-    return { chip, url, primary: { action: 'open', label: 'Open app', disabled: busy }, secondary: [{ action: 'stop', label: 'Stop' }] };
+    return {
+      chip,
+      url,
+      // A saved file is not what serves until a restart applies it; the reason leads to that decision in Activity.
+      reason: snapshot.configurationChanged ? 'Changes not applied' : undefined,
+      primary: { action: 'open', label: 'Open app', disabled: busy },
+      secondary: [{ action: 'stop', label: 'Stop' }]
+    };
   if (!snapshot.hasConfigurationFile) {
     // The runtime keeps the last run's configuration; it can run again without the file.
     const retained = !!latest;
@@ -145,7 +153,7 @@ function worktreeRow(worktree: Exclude<PreviewWorktreeAvailability, { state: 'av
   };
 }
 
-const resolveFirst = (count: number) => `${count} to resolve first`;
+const resolveFirst = (count: number) => `${count} to resolve`;
 const resolveTitle = (count: number) =>
   `Resolve ${count === 1 ? 'this requirement' : `${count} requirements`} before starting.`;
 
@@ -162,4 +170,17 @@ export function previewBlockerCount(requirements: ApplicationPreviewSnapshot['re
   const missingSecrets = unavailable.filter((secret) => secret.availability === 'missing').length;
   const prerequisites = requirements.description?.prerequisites?.filter((item) => item.status === 'missing').length ?? 0;
   return folders.size + (storageNeeded ? 1 : 0) + missingSecrets + requirements.connections.length + prerequisites;
+}
+
+/**
+ * Who uses a folder, in one line: runnable services by name, setup steps counted once there are
+ * more than two. The full list belongs in the row's title.
+ */
+export function previewFolderUsage(services: string[], typeOf: (service: string) => string | undefined): string {
+  const steps = services.filter((service) => typeOf(service) === 'job');
+  const runnable = services.filter((service) => typeOf(service) !== 'job');
+  const stepWords = steps.length === 1 ? steps[0]! : `${steps.length} steps`;
+  if (!steps.length) return `Used by ${runnable.join(', ')}`;
+  if (!runnable.length) return `Used by ${steps.length <= 2 ? steps.join(' and ') : stepWords}`;
+  return `Used by ${runnable.join(', ')} and ${stepWords}`;
 }

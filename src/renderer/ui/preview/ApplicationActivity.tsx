@@ -1,5 +1,6 @@
 import type { AttemptSummary, PreviewStatus, ServiceStatus } from 'previewhost';
-import { hostAndPort, previewRunRows } from '../../model/applicationPreviewRuns';
+import { previewAddresses, previewRunRows, type PreviewAddress } from '../../model/applicationPreviewRuns';
+import { PreviewAddressLink } from './PreviewAddress';
 import { clock, GroupLabel, Row, serviceTypeLabel, StateWord } from './previewPresentation';
 
 const hasLogs = (service: Pick<ServiceStatus, 'type'>) => ['command', 'worker', 'job', 'compose'].includes(service.type);
@@ -9,8 +10,10 @@ const hasLogs = (service: Pick<ServiceStatus, 'type'>) => ['command', 'worker', 
  * data kept across stops, and the runs themselves. The table keeps one shape in every state so
  * nothing jumps when a run becomes ready.
  */
-export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onConfigureLogs }: {
+export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onConfigureLogs, onOpenAddress }: {
   status?: PreviewStatus;
+  /** Opens a serving address; without it addresses are text with their copy menu. */
+  onOpenAddress?(address: PreviewAddress): void;
   restoredRun?: boolean;
   onLogs(attemptId: string, source?: string, failure?: boolean): void;
   onAsRun(attempt: AttemptSummary): void;
@@ -38,10 +41,10 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
     <>
       {showTable ? (
         <section aria-label="Preview services">
-          <h3 className="tm-panel__title">
+          <GroupLabel>
             Services
-            <span className="tm-application-preview__muted"> · {serving ? 'serving' : attempt === status?.candidate ? 'starting' : 'last run'} {clock(attempt.startedAt)}</span>
-          </h3>
+            <span className="tm-preview-group__meta"> · {serving ? 'serving' : attempt === status?.candidate ? 'starting' : 'last run'} <time dateTime={attempt.startedAt}>{clock(attempt.startedAt)}</time></span>
+          </GroupLabel>
           <div className="tm-application-preview__table-wrap">
             <table className="tm-application-preview__table tm-application-preview__services">
               <thead>
@@ -55,14 +58,16 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
               </thead>
               <tbody>
                 {(services.length || jobs.length ? services : [['Application', { type: attempt.type, state: attempt.state } as ServiceStatus] as const]).map(([id, service]) => {
-                  const address = serving ? service.browserUrl ?? service.url ?? (id === 'Application' ? status?.url : undefined) : undefined;
+                  const addresses = serving ? previewAddresses(status, id === 'Application' ? undefined : id) : [];
                   return (
                     <tr key={id}>
                       <th scope="row"><span className="tm-application-preview__service-name" title={id}>{id}</span></th>
                       <td>{serviceTypeLabel(service.type)}</td>
                       <td><StateWord service={service} /></td>
                       <td className="tm-application-preview__endpoint">
-                        {address ? <span title={address}>{hostAndPort(address)}</span> : retained(id) ? 'Data kept' : null}
+                        {addresses.length ? (
+                          <PreviewAddressLink name={id} addresses={onOpenAddress ? addresses : addresses.map((address) => ({ ...address, openable: false }))} onOpen={(address) => onOpenAddress?.(address)} />
+                        ) : retained(id) ? 'Data kept' : null}
                       </td>
                       <td>{logsFor(id === 'Application' ? undefined : id, service)}</td>
                     </tr>

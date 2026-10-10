@@ -127,6 +127,7 @@ import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationPreview, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
 import { ApplicationPreviewOverview, ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
+import type { NotificationTone } from './AppOverlays';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import {
   isReviewPhase,
@@ -149,6 +150,8 @@ interface TaskDetailProps {
   agentInstructions: AgentSessionProps['instructions'];
   agentDraft: string;
   onPrepareTaskAgent(text: string): Promise<void>;
+  /** The app's shared toast, for completed actions nothing else on screen confirms. */
+  onNotify?(message: string, tone?: NotificationTone): void;
   onSavePrompt: import('react').ComponentProps<typeof PreRunSetup>['onSavePrompt'];
   onReadAttachment: import('react').ComponentProps<typeof PreRunSetup>['onReadAttachment'];
   agentDraftError?: string;
@@ -1220,7 +1223,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 />
               ) : null}
 
-              <ApplicationPreviewOverview key={task.id} taskId={task.id} onOpen={() => setTab('preview')} />
+              <ApplicationPreviewOverview key={task.id} taskId={task.id} onOpen={() => setTab('preview')} onNotify={props.onNotify} />
 
               <TaskActivityPanel
                 view={overviewActivity}
@@ -1276,7 +1279,7 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('evidence'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onNotify={props.onNotify}
           worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
           onRestoreWorktree={() => props.onRestoreWorktree(task.id)}
           onPrepareWorktree={() => props.onPrepareWorktree(task.id)}

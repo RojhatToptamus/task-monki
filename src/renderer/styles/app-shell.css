@@ -2,7 +2,11 @@
 /* Task Monki Redesign — app shell (title bar + slim nav + main column)     */
 /* ======================================================================= */
 
+/* Positioned so absolutely positioned descendants without a closer containing block (visually
+   hidden labels deep in a scrolling pane) are clipped here instead of growing the document:
+   the window itself must never scroll. */
 .tm-app {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;

@@ -14,12 +14,9 @@ it('copies a native multi-source selection with its source labels', () => {
       lines={lines}
       lanes
       query=""
-      matchesOnly={false}
       follow={false}
       onFollow={() => {}}
       truncated={false}
-      expired={false}
-      empty=""
       active
     />
   );
@@ -46,12 +43,9 @@ it('pauses on upward scrolling, retains incoming lines, and resumes explicitly',
     lines,
     lanes: true,
     query: '',
-    matchesOnly: false,
     follow: true,
     onFollow,
     truncated: false,
-    expired: false,
-    empty: '',
     active: true
   };
   const view = render(<ApplicationLogStream {...props} />);
@@ -86,8 +80,8 @@ it('pauses on upward scrolling, retains incoming lines, and resumes explicitly',
 it('keeps follow paused when failure navigation itself scrolls to the end', () => {
   const onFollow = vi.fn();
   const withMarker = [...lines, { id: 3, source: 'web', text: 'web', marker: 'failed' }];
-  const props = { name: 'Application', lines: withMarker, lanes: false, query: '', matchesOnly: false,
-    follow: false, onFollow, truncated: false, expired: false, empty: '', active: true };
+  const props = { name: 'Application', lines: withMarker, lanes: false, query: '',
+    follow: false, onFollow, truncated: false, active: true };
   const view = render(<ApplicationLogStream {...props} />);
   const stream = screen.getByRole('region', { name: 'Application logs' });
   Object.defineProperties(stream, { scrollHeight: { value: 1000 }, clientHeight: { value: 200 } });
@@ -104,4 +98,19 @@ it('keeps follow paused when failure navigation itself scrolls to the end', () =
   stream.scrollTop = 800;
   fireEvent.scroll(stream);
   expect(onFollow).toHaveBeenLastCalledWith(true);
+});
+
+it('does not count output shown by a failure jump as new when the marker was observed first', () => {
+  // The status marker can be observed before the log read that contains its
+  // output, so it keeps a smaller offset while sitting after that output.
+  const output = [
+    { id: 10, source: 'migrate', text: 'applying 0003_add_tags.sql' },
+    { id: 40, source: 'migrate', text: 'Error: relation "notes" does not exist' },
+    { id: 0, source: 'migrate', text: 'migrate', marker: 'failed' }
+  ];
+  render(
+    <ApplicationLogStream name="Application" lines={output} lanes={false} query=""
+      follow={false} onFollow={() => {}} truncated={false} failureTarget="run:migrate" active />
+  );
+  expect(screen.queryByRole('button', { name: /new line/ })).toBeNull();
 });

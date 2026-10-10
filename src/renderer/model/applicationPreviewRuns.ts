@@ -96,10 +96,42 @@ export function serviceOutcome(service: Pick<ServiceStatus, 'type' | 'state' | '
   }
 }
 
-/** "api.localhost:60300" for a table cell: the service's own host and port without the runtime's route prefix; the full address stays in the title. */
-export function hostAndPort(url: string): string {
+/**
+ * One address a serving service answers on. The host name routes by service
+ * (`tm-<id>--api.localhost:port`); the IP address is the router's own port, which serves the
+ * primary service only. `service` is what the runtime needs to open it; the IP address opens
+ * without one and only when it is the preview's own address.
+ */
+export interface PreviewAddress {
+  kind: 'host' | 'ip';
+  url: string;
+  /** Short enough for a table cell, still the real host: `tm-6ef7…--api.localhost:62492`. */
+  text: string;
+  service?: string;
+  openable: boolean;
+}
+
+/** The addresses of one serving service, or of the application when `service` is omitted. */
+export function previewAddresses(status: PreviewStatus | undefined, service?: string): PreviewAddress[] {
+  const active = status?.active;
+  if (!active || !status?.url) return [];
+  const entry = service ? active.services?.[service] : undefined;
+  const addresses: PreviewAddress[] = [];
+  if (entry?.browserUrl) addresses.push({ kind: 'host', url: entry.browserUrl, text: shortAddress(entry.browserUrl), service, openable: true });
+  const ip = service ? entry?.url : status.url;
+  if (ip) addresses.push({ kind: 'ip', url: ip, text: shortAddress(ip), openable: ip === status.url });
+  return addresses;
+}
+
+/** The service that answers on the preview's own address, when the run is an environment. */
+export function primaryService(status: PreviewStatus | undefined): string | undefined {
+  return Object.entries(status?.active?.services ?? {}).find(([, service]) => !!status?.url && service.url === status.url)?.[0];
+}
+
+/** Host and port, with the runtime's route id shortened but kept: the text must still name the real host. */
+export function shortAddress(url: string): string {
   try {
-    return new URL(url).host.replace(/^tm-[0-9a-f-]+--/i, '');
+    return new URL(url).host.replace(/^(tm-[0-9a-f]{4})[0-9a-f-]*--/i, '$1…--');
   } catch {
     return url;
   }

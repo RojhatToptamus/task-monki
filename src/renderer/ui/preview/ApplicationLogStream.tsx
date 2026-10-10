@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useReducer, useRef } from 'react';
 import { ArrowDown } from 'lucide-react';
 import {
+  logLineKey,
   markerWord,
   type ApplicationLogLine
 } from '../../model/applicationPreviewLogs';
@@ -10,13 +11,10 @@ export function ApplicationLogStream({
   lines,
   lanes,
   query,
-  matchesOnly,
   currentMatch,
   follow,
   onFollow,
   truncated,
-  expired,
-  empty,
   failureTarget,
   active
 }: {
@@ -24,28 +22,29 @@ export function ApplicationLogStream({
   lines: ApplicationLogLine[];
   lanes: boolean;
   query: string;
-  matchesOnly: boolean;
-  currentMatch?: { line: number; occurrence: number };
+  /** The current search match: the row's `logLineKey` and its occurrence. */
+  currentMatch?: { key: string; occurrence: number };
   follow: boolean;
   onFollow(value: boolean): void;
   truncated: boolean;
-  expired: boolean;
-  empty: string;
   failureTarget?: string;
   active: boolean;
 }) {
   const stream = useRef<HTMLDivElement>(null);
-  const lastSeen = useRef(lines.at(-1)?.id ?? 0);
+  // Markers keep the offset at which they were observed, so the last row is not
+  // necessarily the newest output.
+  const latest = lines.reduce((max, line) => Math.max(max, line.id), 0);
+  const lastSeen = useRef(latest);
+  const [, seen] = useReducer((value: number) => value + 1, 0);
   const jump = useRef<string | undefined>(undefined);
   const navigationScroll = useRef<number | undefined>(undefined);
   const following = useRef(follow);
   following.current = follow;
-  const latest = lines.at(-1)?.id ?? 0;
   const newLines = follow
     ? 0
     : lines.filter((line) => line.id > lastSeen.current).length;
   const matchKey = currentMatch
-    ? `${currentMatch.line}:${currentMatch.occurrence}`
+    ? `${currentMatch.key}#${currentMatch.occurrence}`
     : undefined;
   useLayoutEffect(() => {
     if (!active || !stream.current) return;
@@ -84,37 +83,56 @@ export function ApplicationLogStream({
     );
     // A navigation scroll is not the user's request to resume at the end.
     if (node.scrollTop !== before) navigationScroll.current = node.scrollTop;
+    // Output already present when the view moved to it is not new.
+    if (lastSeen.current !== latest) {
+      lastSeen.current = latest;
+      seen();
+    }
   }
   function changeFollow(value: boolean) {
     if (!value && following.current) lastSeen.current = latest;
     onFollow(value);
   }
-  function highlight(line: ApplicationLogLine) {
+  /**
+   * Marks every occurrence of the query across a row's visible parts. A row is
+   * searched as one string, so a match may cross from a marker's name into its
+   * state word; occurrences are numbered the same way the parent counts them.
+   */
+  function highlight(line: ApplicationLogLine, parts: string[]): React.ReactNode[][] {
     const needle = query.toLowerCase();
-    const text = line.text.replaceAll('[REDACTED]', '[redacted]');
-    if (!needle) return text;
-    const parts: React.ReactNode[] = [];
-    let from = 0;
-    let occurrence = 0;
-    let index: number;
-    while ((index = text.toLowerCase().indexOf(needle, from)) !== -1) {
-      parts.push(text.slice(from, index));
-      const current =
-        currentMatch?.line === line.id &&
-        currentMatch.occurrence === occurrence;
-      parts.push(
-        <mark
-          key={`${line.id}:${occurrence}`}
-          data-current-match={current || undefined}
-        >
-          {text.slice(index, index + needle.length)}
-        </mark>
-      );
-      occurrence++;
-      from = index + needle.length;
+    const ranges: Array<[number, number]> = [];
+    if (needle) {
+      const lower = parts.join('').toLowerCase();
+      for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + needle.length))
+        ranges.push([at, at + needle.length]);
     }
-    parts.push(text.slice(from));
-    return parts;
+    const key = logLineKey(line);
+    let offset = 0;
+    return parts.map((part) => {
+      const start = offset;
+      offset += part.length;
+      const nodes: React.ReactNode[] = [];
+      let cursor = 0;
+      ranges.forEach(([from, to], occurrence) => {
+        const begin = Math.max(from, start) - start;
+        const end = Math.min(to, offset) - start;
+        if (begin >= end) return;
+        nodes.push(part.slice(cursor, begin));
+        nodes.push(
+          <mark
+            key={`${occurrence}:${begin}`}
+            data-current-match={
+              (currentMatch?.key === key && currentMatch.occurrence === occurrence) || undefined
+            }
+          >
+            {part.slice(begin, end)}
+          </mark>
+        );
+        cursor = end;
+      });
+      nodes.push(part.slice(cursor));
+      return nodes;
+    });
   }
   return (
     <div className="tm-preview-stream-wrap">
@@ -171,60 +189,58 @@ export function ApplicationLogStream({
       >
         {truncated ? (
           <p className="tm-preview-log-marker">
-            Earlier output evicted · 64 KB limit
+            <span>Earlier output evicted · 64 KB limit</span>
           </p>
         ) : null}
-        {expired ? (
-          <p className="tm-preview-log-marker">
-            Logs for this run expired when the runtime restarted.
-          </p>
-        ) : null}
-        {!expired && !lines.some((line) => !line.marker) ? <p>{empty}</p> : null}
-        {lines
-          .filter(
-            (line) =>
-              !matchesOnly ||
-              line.marker ||
-              line.text.toLowerCase().includes(query.toLowerCase())
-          )
-          .map((line) => (
-            <div
-              key={`${line.marker ?? 'line'}:${line.id}:${line.source}`}
-              className={
-                line.marker ? 'tm-preview-log-marker' : 'tm-preview-log-line'
-              }
-              data-failure={line.marker === 'failed' || undefined}
-              data-log-source={line.source}
-            >
-              {line.marker ? (
-                <span>
-                  {line.text} <b data-state={line.marker}>{markerWord(line.marker)}</b>
-                  {line.detail ? <i>{line.detail}</i> : null}
-                </span>
-              ) : (
-                <>
-                  {lanes ? (
-                    <span className="tm-preview-log-lane" title={line.source}>
-                      {line.source}
-                    </span>
-                  ) : null}
-                  <span className="tm-preview-log-message">
-                    {highlight(line)}
+        {lines.map((line) => (
+          <div
+            key={logLineKey(line)}
+            className={
+              line.marker ? 'tm-preview-log-marker' : 'tm-preview-log-line'
+            }
+            data-failure={line.marker === 'failed' || undefined}
+            data-log-source={line.source}
+          >
+            {line.marker ? (
+              <Marker line={line} parts={highlight(line, [line.text, ' ', markerWord(line.marker), line.detail ?? ''])} />
+            ) : (
+              <>
+                {lanes ? (
+                  <span className="tm-preview-log-lane" title={line.source}>
+                    {line.source}
                   </span>
-                </>
-              )}
-            </div>
-          ))}
+                ) : null}
+                <span className="tm-preview-log-message">
+                  {highlight(line, [line.text.replaceAll('[REDACTED]', '[redacted]')])[0]}
+                </span>
+              </>
+            )}
+          </div>
+        ))}
       </div>
       {!follow && newLines > 0 ? (
         <button
-          className="tm-preview-follow outline-button"
+          type="button"
+          className="tm-preview-follow ghost-button"
           onClick={() => onFollow(true)}
         >
-          <ArrowDown size={14} aria-hidden="true" />
+          <ArrowDown size={13} aria-hidden="true" />
           {newLines} new {newLines === 1 ? 'line' : 'lines'}
         </button>
       ) : null}
     </div>
+  );
+}
+
+/** A status marker: the source name, its state word and the observed detail. */
+function Marker({ line, parts }: { line: ApplicationLogLine; parts: React.ReactNode[][] }) {
+  const [name, space, word, detail] = parts;
+  return (
+    <span>
+      {name}
+      {space}
+      <b data-state={line.marker}>{word}</b>
+      {line.detail ? <i>{detail}</i> : null}
+    </span>
   );
 }

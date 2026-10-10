@@ -4,11 +4,11 @@ import type { PreviewStatus } from 'previewhost';
 import type { ApplicationPreviewSnapshot, PreviewDiagnosis, PreviewProjectFact } from '../../../shared/applicationPreview';
 import type { WorktreeRecord } from '../../../shared/contracts';
 import { taskManagerApi as api } from '../../api/taskManagerClient';
-import type { PreviewWorktreeAvailability } from '../../model/applicationPreviewPanel';
+import { previewFolderUsage, type PreviewWorktreeAvailability } from '../../model/applicationPreviewPanel';
 import type { PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
-import { CopyPath, DisclosureSummary, expected, GroupLabel, message, PreviewRunReview, Row, shortenPath } from './previewPresentation';
+import { basename, CopyPath, DisclosureSummary, expected, GroupLabel, message, parentPath, PreviewRunReview, Row, shortenPath, usePreviewNotify } from './previewPresentation';
 import { PreviewSecretDialog } from './PreviewSecretDialog';
 
 /** The worktree is gone, broken or not yet created: the block carries the consent the restore needs. The primary is in the status row. */
@@ -62,7 +62,12 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   onSecretReferences(references: string[] | undefined): void;
   refresh(): void;
 }) {
+  const notify = usePreviewNotify();
   const [chosenFolders, setChosenFolders] = useState<Record<string, string>>({});
+  const [allSecrets, setAllSecrets] = useState(false);
+  // "Add all values" decides the form once: saving one value makes it available on the next poll,
+  // and the form must keep stepping through the list it opened with.
+  const [sequenceFor, setSequenceFor] = useState<string>();
   const folders = new Map<string, { source: (typeof requirements.sources)[number]; services: string[] }>();
   for (const source of requirements.sources) {
     if (source.connected) continue;
@@ -71,6 +76,8 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
     if (group) group.services.push(source.service);
     else folders.set(key, { source, services: [source.service] });
   }
+  const spec = requirements.description?.spec;
+  const typeOf = (service: string) => (spec?.type === 'environment' ? spec.services[service]?.type : spec?.type);
   const unavailable = requirements.secrets.filter((secret) => secret.availability !== 'available');
   const storage = requirements.storage;
   const storageNeeded = (!!storage && storage.state !== 'unlocked') || unavailable.some((secret) => secret.availability !== 'missing');
@@ -78,26 +85,40 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
     ...(storage && storage.state !== 'unlocked' && storage.services.length ? ['database credentials'] : []),
     ...unavailable.filter((secret) => secret.availability !== 'missing').map((secret) => secret.id)
   ];
+  const storageSecrets = storageFor.filter((item) => item.includes('/')).length;
+  const storageNeeds = [
+    ...(storageFor.length > storageSecrets ? ['database credentials'] : []),
+    ...(storageSecrets ? [`${storageSecrets} ${storageSecrets === 1 ? 'secret' : 'secrets'}`] : [])
+  ].join(' and ');
   const missingSecrets = unavailable.filter((secret) => secret.availability === 'missing');
   const prerequisites = requirements.description?.prerequisites ?? [];
   const missingTools = prerequisites.filter((item) => item.status === 'missing');
   const unverified = prerequisites.filter((item) => item.status !== 'missing');
   const recipients = (secret: (typeof requirements.secrets)[number]) =>
-    secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`).join(', ');
+    secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`).join(', ');
+  const openSecret = secretReferences?.length === 1 ? secretReferences[0] : undefined;
   const inlineSecret = secretReferences && (secretReferences.length === 0
     ? storageNeeded
-    : secretReferences.length === 1 && missingSecrets.some(secret => secret.id === secretReferences[0]));
+    : !!openSecret && missingSecrets.some((secret) => secret.id === openSecret));
+  // Several missing values are entered one after another in one form.
+  const sequence = !!secretReferences && secretReferences.length > 1 && secretReferences.join('\0') === sequenceFor;
+  const shownSecrets = allSecrets || missingSecrets.findIndex((secret) => secret.id === openSecret) >= 4 ? missingSecrets : missingSecrets.slice(0, 4);
+  const offersConnect = [...folders.values()].some(({ source }) => !source.missing || chosenFolders[`${source.service}:${source.declaration}`]);
   const secretForm = secretReferences ? (
     <PreviewSecretDialog
       key={secretReferences.join('\0')}
       inline
+      sequence={sequence}
       references={secretReferences}
-      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} → ${binding.key}`)]))}
+      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`)]))}
+      labels={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, [...new Set(secret.bindings.map((binding) => binding.key))].join(', ')]))}
       onClose={() => {
         onSecretReferences(undefined);
         refresh();
       }}
       onSaved={() => {
+        // The row leaves the block; when it was the last one, the toast is the only confirmation.
+        notify(secretReferences.length === 0 ? 'Secret storage unlocked' : secretReferences.length === 1 ? 'Secret saved' : 'Secrets saved', 'success');
         onSecretReferences(undefined);
         refresh();
       }}
@@ -106,7 +127,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   return (
     <DecisionBlock kind="Before this runs" tone="action">
       {folders.size ? (
-        <>
+        <div className="tm-preview-requirement-group">
           <GroupLabel>Folders</GroupLabel>
           <div className="tm-preview-rows tm-preview-source-rows">
             {[...folders.values()].map(({ source, services }) => {
@@ -116,13 +137,13 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
               return (
                 <Row
                   key={key}
-                  name={services.join(', ')}
-                  title={services.join(', ')}
-                  detail={<span className="tm-preview-path">{missing ? 'Not found: ' : ''}{directory}</span>}
+                  name={<code>{basename(directory)}</code>}
+                  title={directory}
+                  detail={<span className="tm-preview-path" title={directory}>{missing ? 'Not found · ' : ''}{shortenPath(parentPath(directory))}</span>}
                   end={
                     missing ? (
                       <button
-                        className="outline-button"
+                        className="outline-button tm-preview-row-button"
                         disabled={busy}
                         onClick={() =>
                           void run(async () => {
@@ -135,7 +156,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                       </button>
                     ) : (
                       <button
-                        className="outline-button"
+                        className="outline-button tm-preview-row-button"
                         disabled={busy}
                         onClick={() =>
                           void run(() => api.connectApplicationPreviewSource({ taskId, service: source.service, directory, expected: expected(status) }))
@@ -145,64 +166,81 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                       </button>
                     )
                   }
-                />
+                >
+                  <span title={services.join(', ')}>{previewFolderUsage(services, typeOf)}</span>
+                </Row>
               );
             })}
           </div>
-          <p className="tm-preview-help">
-            Read/write access lasts until Task Monki quits, across tasks. Commands run as you, without a sandbox.
-          </p>
-        </>
+          {offersConnect ? <p className="tm-preview-help">Connected folders stay writable by preview commands until Task Monki quits.</p> : null}
+        </div>
       ) : null}
       {storageNeeded || missingSecrets.length ? (
-        <>
-          <GroupLabel>Secrets</GroupLabel>
+        <div className="tm-preview-requirement-group">
+          <div className="tm-preview-group-head">
+            <GroupLabel>Secrets</GroupLabel>
+            {missingSecrets.length >= 2 && !storageNeeded ? (
+              <button
+                className="ghost-button tm-preview-row-button"
+                aria-expanded={sequence}
+                onClick={() => {
+                  const references = missingSecrets.map((secret) => secret.id);
+                  setSequenceFor(references.join('\0'));
+                  onSecretReferences(references);
+                }}
+              >
+                Add all values
+              </button>
+            ) : null}
+          </div>
           <div className="tm-preview-rows tm-preview-secret-rows">
             {storageNeeded ? (
               <Row
+                className="tm-preview-row--line"
                 name="Secret storage"
                 expansion={secretReferences?.length === 0 ? secretForm : undefined}
-                detail={storage?.state === 'new' ? 'Not set up on this Mac yet' : 'Locked'}
+                detail={<span title={storageFor.length ? `Needed for ${storageFor.join(', ')}` : undefined}>{storage?.state === 'new' ? 'Not set up on this Mac' : 'Locked'}{storageNeeds ? ` · needed for ${storageNeeds}` : ''}</span>}
                 end={
-                  <button className="outline-button" onClick={() => onSecretReferences([])}>
+                  <button className="outline-button tm-preview-row-button" onClick={() => onSecretReferences([])}>
                     {storage?.state === 'new' ? 'Set up storage' : 'Unlock storage'}
                   </button>
                 }
-              >
-                {storageFor.length ? <>Needed for {storageFor.map((item, i) => <span key={item}>{i ? ', ' : ''}{item.includes('/') ? <code>{item}</code> : item}</span>)}</> : undefined}
-              </Row>
+              />
             ) : null}
-            {missingSecrets.map((secret) => (
+            {shownSecrets.map((secret) => (
               <Row
                 key={secret.id}
+                className="tm-preview-row--line"
                 name={<code title={secret.id}>{secret.id}</code>}
-                detail={`Used by ${recipients(secret)}`}
-                end={<button className="outline-button" aria-label={`Add value for ${secret.id}`} aria-expanded={secretReferences?.length === 1 && secretReferences[0] === secret.id} onClick={() => onSecretReferences([secret.id])}>Add value</button>}
-                expansion={secretReferences?.length === 1 && secretReferences[0] === secret.id ? secretForm : undefined}
+                detail={<span className="tm-preview-row__muted" title={recipients(secret)}>{recipients(secret)}</span>}
+                end={<button className="outline-button tm-preview-row-button" aria-label={`Add value for ${secret.id}`} aria-expanded={openSecret === secret.id} onClick={() => onSecretReferences([secret.id])}>Add</button>}
+                expansion={openSecret === secret.id && inlineSecret ? secretForm : undefined}
               />
             ))}
           </div>
-          <p className="tm-preview-help">Values stay in secret storage on this Mac and are never written to the file.</p>
-        </>
-      ) : null}
-      {secretReferences && !inlineSecret ? secretForm : null}
+          {shownSecrets.length < missingSecrets.length ? (
+            <button className="ghost-button tm-preview-more" onClick={() => setAllSecrets(true)}>Show {missingSecrets.length - shownSecrets.length} more</button>
+          ) : null}
+          {secretReferences && !inlineSecret ? secretForm : null}
+        </div>
+      ) : secretReferences && !inlineSecret ? secretForm : null}
       {requirements.connections.length ? (
-        <>
+        <div className="tm-preview-requirement-group">
           <GroupLabel>Connections</GroupLabel>
           <div className="tm-preview-rows">
             {requirements.connections.map((service) => (
-              <Row key={service} name={service} detail="Needs the address of the running service" end={<button className="outline-button" onClick={onEditFile}>Set address</button>} />
+              <Row key={service} name={service} detail="Needs the address of the running service" end={<button className="outline-button tm-preview-row-button" onClick={onEditFile}>Set address</button>} />
             ))}
           </div>
-        </>
+        </div>
       ) : null}
       {missingTools.length ? (
-        <>
+        <div className="tm-preview-requirement-group">
           <GroupLabel>Tools</GroupLabel>
           <div className="tm-preview-rows">
             {missingTools.map((item, i) => <Row key={i} name={item.service ?? item.requirement} detail={item.message} />)}
           </div>
-        </>
+        </div>
       ) : null}
       {unverified.length ? (
         <details className="tm-preview-disclosure">
@@ -232,7 +270,7 @@ export function PreviewRunApprovalBlock({ review, restart, projectDirectory, bus
     <DecisionBlock
       kind={restart ? 'Restart review' : 'Approve this run'}
       tone="action"
-      summary={restart ? 'Approving stops the serving app first; it is unavailable until the new version is ready. Cancel changes nothing.' : undefined}
+      summary={restart ? 'Approving stops the serving app until the new version is ready.' : undefined}
       actions={restart && !changes ? <button className="ghost-button" disabled={busy} onClick={onViewChanges}>View changes</button> : undefined}
     >
       {restart && changes ? (
@@ -254,8 +292,8 @@ export function PreviewRunApprovalBlock({ review, restart, projectDirectory, bus
           <GroupLabel>Rewrites live folders</GroupLabel>
           <div className="tm-preview-rows">
             {affected.map((row) => (
-              <Row key={row.job} name={row.job} detail={<code title={row.directory}>{shortenPath(row.directory)}</code>} end={<CopyPath path={row.directory} />}>
-                Shared with {row.previews.join(', ')}. The step can change files there or interrupt those previews.
+              <Row key={row.job} name={row.job} detail={<code className="tm-preview-path" title={row.directory}>{shortenPath(row.directory)}</code>} end={<CopyPath path={row.directory} />}>
+                Shared with {row.previews.join(', ')}; this step can change files they use.
               </Row>
             ))}
           </div>
@@ -269,7 +307,6 @@ export function PreviewRunApprovalBlock({ review, restart, projectDirectory, bus
       ) : (
         everything
       )}
-      <p className="tm-preview-help">Commands run with your account; folder access does not sandbox them. Saving or connecting never approves a run.</p>
     </DecisionBlock>
   );
 }

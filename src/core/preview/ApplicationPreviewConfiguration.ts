@@ -24,11 +24,17 @@ export function parseConfigurationFile(text: string): PreviewSpec {
   }
   try {
     return parsePreviewSpec(document.toJS({ maxAliasCount: 0 }));
-  } catch {
-    throw new Error(
-      'The YAML does not match the Preview configuration format. Review service types, commands, and references.'
-    );
+  } catch (error) {
+    throw new Error(`The YAML does not match the Preview configuration format: ${configurationFormatReason(error)}`);
   }
+}
+
+const MAX_FORMAT_REASON_LENGTH = 300;
+
+/** Previewhost's own reason, on one bounded line: the person and the agent correct the file from it. */
+export function configurationFormatReason(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim();
+  return text.length > MAX_FORMAT_REASON_LENGTH ? `${text.slice(0, MAX_FORMAT_REASON_LENGTH - 1)}…` : text || 'invalid configuration.';
 }
 
 export function within(root: string, directory: string): boolean {
