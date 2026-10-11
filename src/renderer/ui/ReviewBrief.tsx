@@ -1,21 +1,19 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { DisclosureChevron } from './DisclosureChevron';
+import { ChevronRight } from 'lucide-react';
 
 export interface ReviewBriefContent {
   /** The task as asked. */
   asked?: string;
   /** What the implementation agent reported: a claim, quoted. */
   report?: { author: string; text: string };
-  /** The reviewer's summary, quoted, and its findings counted in words. */
-  reviewer?: { author: string; summary?: string; counts?: string; status?: string };
-  /** The change's size. */
-  scope?: { files: number; additions: number; deletions: number };
+  /** The reviewer's summary, quoted; the author names the runtime and model. */
+  reviewer?: { author: string; summary?: string };
 }
 
 /**
- * The facts before the diff: what was asked, what the agent says it did, the
- * scope, and only then the reviewer's opinion, so the person forms a view
- * before reading the verdict. Folded, it is one line.
+ * The facts before the diff: what was asked, what the agent says it did, and
+ * only then the reviewer's opinion, so the person forms a view before reading the
+ * verdict. Folded, it is the request's first line.
  */
 export function ReviewBrief({ content, folded, onFoldedChange }: {
   content: ReviewBriefContent;
@@ -23,54 +21,36 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
   onFoldedChange(folded: boolean): void;
 }) {
   const bodyId = useId();
-  const { asked, report, reviewer, scope } = content;
-  const line = [
-    asked ? 'Asked' : '',
-    report ? `${report.author} reported` : '',
-    reviewer ? (reviewer.status ?? 'Reviewer') + (reviewer.counts ? `: ${reviewer.counts}` : '') : ''
-  ].filter(Boolean).join(' · ');
+  const { asked, report, reviewer } = content;
   return (
-    <section className="tm-review-brief" aria-label="Brief">
+    <section className="tm-review-brief" aria-label="Brief" data-folded={folded ? '' : undefined}>
       <button
         type="button"
-        className="tm-review-brief__head"
+        className="tm-review-brief__toggle"
         aria-expanded={!folded}
         aria-controls={bodyId}
+        aria-label={folded ? 'Show the brief' : 'Fold the brief'}
         onClick={() => onFoldedChange(!folded)}
       >
-        <DisclosureChevron />
-        <span className="tm-review-brief__label">Brief</span>
-        {folded ? <span className="tm-review-brief__line">{line}</span> : null}
+        <ChevronRight size={12} aria-hidden="true" />
+        {folded ? <span className="tm-review-brief__line">{asked ?? report?.text ?? reviewer?.summary}</span> : null}
       </button>
       {folded ? null : (
-        <div id={bodyId} className="tm-review-brief__body">
-          <div className="tm-review-brief__grid">
-            {asked ? (
-              <BriefBlock label="Asked">
-                <ClampedText lines={2} className="tm-review-brief__text">{asked}</ClampedText>
-              </BriefBlock>
-            ) : null}
-            {report ? (
-              <BriefBlock label={`${report.author} reported`}>
-                <ClampedText lines={3} className="tm-review-brief__quote">{report.text}</ClampedText>
-              </BriefBlock>
-            ) : null}
-            {reviewer ? (
-              <BriefBlock label="Reviewer" meta={reviewer.author}>
-                {reviewer.summary ? <ClampedText lines={2} className="tm-review-brief__quote">{reviewer.summary}</ClampedText> : null}
-                {reviewer.counts ? <p className="tm-review-brief__counts">{reviewer.counts}</p> : null}
-              </BriefBlock>
-            ) : null}
-          </div>
-          {scope ? (
-            <p className="tm-review-brief__scope">
-              <span className="tm-review-brief__scope-label">Scope</span>
-              <span>{scope.files} file{scope.files === 1 ? '' : 's'}</span>
-              <span className="tm-review-stat">
-                {scope.additions ? <span className="tm-review-stat__add">+{scope.additions}</span> : null}
-                {scope.deletions ? <span className="tm-review-stat__del">−{scope.deletions}</span> : null}
-              </span>
-            </p>
+        <div id={bodyId} className="tm-review-brief__grid">
+          {asked ? (
+            <BriefBlock label="Request">
+              <ClampedText lines={2} className="tm-review-brief__text">{asked}</ClampedText>
+            </BriefBlock>
+          ) : null}
+          {report ? (
+            <BriefBlock label={report.author}>
+              <ClampedText lines={3} className="tm-review-brief__quote">{report.text}</ClampedText>
+            </BriefBlock>
+          ) : null}
+          {reviewer?.summary ? (
+            <BriefBlock label="Review" meta={reviewer.author}>
+              <ClampedText lines={2} className="tm-review-brief__quote">{reviewer.summary}</ClampedText>
+            </BriefBlock>
           ) : null}
         </div>
       )}
@@ -81,17 +61,16 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
 function BriefBlock({ label, meta, children }: { label: string; meta?: string; children: ReactNode }) {
   return (
     <div className="tm-review-brief__block">
-      <h3 className="tm-review-brief__block-label">{label}{meta ? <span>{meta}</span> : null}</h3>
+      <h3 className="tm-review-brief__label">{label}{meta ? <span>{meta}</span> : null}</h3>
       {children}
     </div>
   );
 }
 
-/** Text clamped to a few lines, with More when the clamp hides anything. */
+/** Text clamped to a few lines; a click on it shows the rest when the clamp hides anything. */
 function ClampedText({ lines, className, children }: { lines: 2 | 3; className: string; children: string }) {
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
-  const textId = useId();
   const text = useRef<HTMLParagraphElement>(null);
   // Whether the clamp hides anything depends on the column's width, so it is measured again on resize.
   useLayoutEffect(() => {
@@ -104,14 +83,18 @@ function ClampedText({ lines, className, children }: { lines: 2 | 3; className: 
     observer.observe(element);
     return () => observer.disconnect();
   }, [children, expanded]);
+  const clampable = overflowing || expanded;
   return (
-    <div className="tm-review-brief__clamp">
-      <p ref={text} id={textId} className={`${className}${expanded ? '' : ` tm-review-brief__clamped--${lines}`}`}>{children}</p>
-      {overflowing || expanded ? (
-        <button type="button" className="tm-osection__link" aria-expanded={expanded} aria-controls={textId} onClick={() => setExpanded((value) => !value)}>
-          {expanded ? 'Less' : 'More'}
-        </button>
-      ) : null}
-    </div>
+    <p
+      ref={text}
+      className={`${className}${expanded ? '' : ` tm-review-brief__clamped--${lines}`}${clampable ? ' tm-review-brief__clampable' : ''}`}
+      role={clampable ? 'button' : undefined}
+      tabIndex={clampable ? 0 : undefined}
+      aria-expanded={clampable ? expanded : undefined}
+      onClick={clampable ? () => setExpanded((value) => !value) : undefined}
+      onKeyDown={clampable ? (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setExpanded((value) => !value); } } : undefined}
+    >
+      {children}
+    </p>
   );
 }

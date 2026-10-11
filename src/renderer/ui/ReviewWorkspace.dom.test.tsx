@@ -122,20 +122,32 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     window.localStorage.clear();
   });
 
-  it('shows a finding under its line and dismisses it with a reason and a note', async () => {
+  it('shows a finding under its line and dismisses it with a reason, or a reason and a note', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     const onDismiss = vi.fn(async () => undefined);
-    render(<Harness onDismissFinding={onDismiss} />);
+    render(<Harness findings={[finding, suggestion]} onDismissFinding={onDismiss} />);
 
     const thread = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
     expect(thread.closest('.tm-review-line-group')?.querySelector('code')?.textContent).toBe('Added: new');
-    expect(within(thread).getByText('In the request')).toBeDefined();
+    const openDismiss = async (article: HTMLElement) => {
+      const trigger = within(article).getByRole('button', { name: 'Dismiss this finding' });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+      return screen.findByRole('menu', { name: 'Dismiss this finding' });
+    };
 
-    fireEvent.click(within(thread).getByRole('button', { name: 'Dismiss this finding' }));
-    fireEvent.click(within(thread).getByRole('button', { name: 'Acceptable as is' }));
-    fireEvent.change(within(thread).getByLabelText('A note for the next review (optional)'), { target: { value: 'Single replica in production' } });
-    await act(async () => { fireEvent.click(within(thread).getByRole('button', { name: 'Dismiss' })); });
-    expect(onDismiss).toHaveBeenCalledWith('f1', 'ACCEPTED', 'Single replica in production');
+    const menu = await openDismiss(thread);
+    await act(async () => { fireEvent.click(within(menu).getByRole('menuitem', { name: 'Not a problem' })); });
+    expect(onDismiss).toHaveBeenLastCalledWith('f1', 'NOT_A_PROBLEM');
+
+    // D on the focused finding opens the reason and note.
+    const minor = screen.getByRole('article', { name: 'Minor finding: Name the limit' });
+    act(() => minor.focus());
+    fireEvent.keyDown(minor, { key: 'd' });
+    fireEvent.click(within(minor).getByRole('button', { name: 'Acceptable as is' }));
+    fireEvent.change(within(minor).getByLabelText('A note for the next review (optional)'), { target: { value: 'Matches the codebase' } });
+    await act(async () => { fireEvent.click(within(minor).getByRole('button', { name: 'Dismiss' })); });
+    expect(onDismiss).toHaveBeenLastCalledWith('f2', 'ACCEPTED', 'Matches the codebase');
   });
 
   it('sends Minor and Nit findings only once the person adds them', async () => {
@@ -158,7 +170,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on line 1' }));
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Return seconds here.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
     expect(screen.getByText('Return seconds here.')).toBeDefined();
     expect(screen.getByRole('button', { name: /^1 fix, 1 comment/ })).toBeDefined();
 
@@ -170,7 +182,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     }));
   });
 
-  it('comments on a removed line and on a range picked by shift-clicking line numbers', async () => {
+  it('comments on a removed line and on a range dragged across line numbers', async () => {
     api.readArtifact.mockResolvedValueOnce(`# Git diff evidence\n\n${section('Unstaged diff', fileDiff('src/a.ts', '@@ -1,2 +1,3 @@\n-gone\n+one\n+two\n+three'))}`);
     const onSubmit = vi.fn();
     render(<Harness findings={[]} onSubmit={onSubmit} />);
@@ -178,15 +190,19 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on removed line 1' }));
     expect(screen.getByText('Removed line 1')).toBeDefined();
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Why was this removed?' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
 
-    const numbers = [...document.querySelectorAll('.tm-diffline__num')];
-    fireEvent.click(numbers.find((element) => element.textContent === '1' && element.closest('.tm-diffline--addition'))!);
-    fireEvent.click(numbers.find((element) => element.textContent === '3')!, { shiftKey: true });
-    fireEvent.click(screen.getByRole('button', { name: 'Comment on line 3' }));
+    // Press the first added line's number and drag to the third: one comment covers the range.
+    const numbers = [...document.querySelectorAll<HTMLElement>('.tm-diffline__num')];
+    const first = numbers.find((element) => element.textContent === '1' && element.closest('.tm-diffline--addition'))!;
+    const third = numbers.find((element) => element.textContent === '3')!;
+    fireEvent.pointerDown(first, { button: 0 });
+    fireEvent.pointerOut(first, { relatedTarget: third });
+    fireEvent.pointerOver(third, { relatedTarget: first });
+    fireEvent.pointerUp(window);
     expect(screen.getByText('Lines 1–3')).toBeDefined();
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Collapse these.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ comments: [
@@ -210,10 +226,9 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Viewed' }));
     expect(screen.queryByText((_, element) => element?.tagName === 'CODE' && element.textContent === 'Added: new')).toBeNull();
     const file = screen.getByRole('region', { name: 'src/rateLimit.ts' });
-    expect(within(file).getByText('Limiter state is per process')).toBeDefined();
-    expect(screen.getByText('1 of 1 viewed')).toBeDefined();
+    expect(screen.getByLabelText('1 of 1 viewed')).toBeDefined();
 
-    fireEvent.click(within(file).getByRole('button', { name: 'Show' }));
+    fireEvent.click(within(file).getByRole('button', { name: /Limiter state is per process/ }));
     expect(await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
   });
 
@@ -240,12 +255,12 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     const thread = await screen.findByRole('article', { name: /Limiter state is per process/ });
     expect(within(thread).queryByRole('button', { name: 'Dismiss this finding' })).toBeNull();
     expect(within(thread).getByText('From the earlier review')).toBeDefined();
-    expect(screen.getByRole('button', { name: /^Nothing to send/ })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /^1 fix/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Comment on line 1' }));
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Still wrong.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
     expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(onSubmit).toHaveBeenCalledOnce();

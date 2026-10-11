@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
-import { Check, ChevronDown, ChevronRight, MoreHorizontal, Plus } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
+import { Check, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Pencil, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
 import type {
   AgentReviewGateStatus,
   ArtifactRecord,
@@ -74,8 +74,6 @@ export interface ReviewWorkspaceProps {
   onAskAboutFinding?(findingId: string): void;
   /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
   requestSheetToken?: number;
-  /** Whether the person is reading down the diff, so the page head can fold away. */
-  onReadingChange?(reading: boolean): void;
 }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
@@ -112,7 +110,8 @@ function findingWords(findings: readonly ReviewFindingView[]): string {
     .join(', ');
 }
 
-interface LineSelection { fileId: string; blockId: string; start: number; end: number }
+/** Rows of one block chosen in the gutter; the anchor is where the drag began. */
+interface LineSelection { fileId: string; blockId: string; start: number; end: number; anchor: number }
 interface CommentDraft {
   /** The row (or `file:<id>`) the composer opens under. */
   key: string;
@@ -192,15 +191,6 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const closePathMenu = useCallback(() => setPathMenu(undefined), []);
   const notify = useNotify();
   const diffRef = useRef<HTMLDivElement>(null);
-  const reading = useRef(false);
-  // Reading starts past the first lines and ends back at the top. Only a diff with
-  // room to spare counts, so the head folding away never leaves nothing to scroll.
-  const onDiffScroll = (pane: HTMLElement) => {
-    const next = reading.current ? pane.scrollTop > 8 : pane.scrollTop > 48 && pane.scrollHeight - pane.clientHeight > 240;
-    if (next === reading.current) return;
-    reading.current = next;
-    props.onReadingChange?.(next);
-  };
   const composerId = useId();
   // A jump into a collapsed file expands it first, then scrolls once it renders.
   const [pendingScroll, setPendingScroll] = useState<{ attribute: string; value: string; focus?: boolean }>();
@@ -275,32 +265,47 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     scrollToFinding(findingId);
   };
 
-  const openComposer = (file: DiffFile, block: DiffBlock, rowIndex: number) => {
-    const inSelection = selection && selection.fileId === file.id && selection.blockId === block.id &&
-      rowIndex >= selection.start && rowIndex <= selection.end;
-    const start = inSelection ? selection.start : rowIndex;
-    const end = inSelection ? selection.end : rowIndex;
-    const clicked = block.lines[rowIndex]!;
-    const side: ReviewComment['side'] = clicked.kind === 'deletion' ? 'OLD' : 'NEW';
-    const numbers = block.lines.slice(start, end + 1)
+  // The gutter is the comment control: press a line number, or drag across several,
+  // and the composer opens for that line or range. Shift extends the last choice.
+  const selectionRef = useRef<LineSelection | undefined>(undefined);
+  const dragging = useRef(false);
+  const applySelection = (next?: LineSelection) => { selectionRef.current = next; setSelection(next); };
+  const openComposer = (file: DiffFile, block: DiffBlock, range: Pick<LineSelection, 'start' | 'end' | 'anchor'>) => {
+    const anchorLine = block.lines[range.anchor]!;
+    const side: ReviewComment['side'] = anchorLine.kind === 'deletion' ? 'OLD' : 'NEW';
+    const numbers = block.lines.slice(range.start, range.end + 1)
       .map((line) => (side === 'OLD' ? (line.kind === 'deletion' ? line.oldLine : undefined) : line.newLine))
       .filter((value): value is number => value !== undefined);
+    if (!numbers.length) return;
     const line = Math.min(...numbers);
     const last = Math.max(...numbers);
-    setCommentDraft({ key: lineAnchorKey(file.id, block.id, end), path: file.path, side, line, endLine: last > line ? last : undefined, text: '' });
+    setCommentDraft({ key: lineAnchorKey(file.id, block.id, range.end), path: file.path, side, line, endLine: last > line ? last : undefined, text: '' });
   };
-  const selectRow = (file: DiffFile, block: DiffBlock, rowIndex: number, extend: boolean) => {
-    setSelection((currentSelection) => {
-      if (extend && currentSelection && currentSelection.fileId === file.id && currentSelection.blockId === block.id) {
-        const anchor = currentSelection.start;
-        return { fileId: file.id, blockId: block.id, start: Math.min(anchor, rowIndex), end: Math.max(anchor, rowIndex) };
-      }
-      if (currentSelection?.fileId === file.id && currentSelection.blockId === block.id && currentSelection.start === rowIndex && currentSelection.end === rowIndex) return undefined;
-      return { fileId: file.id, blockId: block.id, start: rowIndex, end: rowIndex };
-    });
+  const beginSelect = (file: DiffFile, block: DiffBlock, rowIndex: number, event: ReactPointerEvent) => {
+    if (!canComment || event.button > 0) return;
+    event.preventDefault();
+    const current = selectionRef.current;
+    const extend = event.shiftKey && current?.fileId === file.id && current.blockId === block.id;
+    applySelection(extend
+      ? { ...current, start: Math.min(current.start, rowIndex), end: Math.max(current.end, rowIndex) }
+      : { fileId: file.id, blockId: block.id, start: rowIndex, end: rowIndex, anchor: rowIndex });
+    dragging.current = true;
+    const finish = () => {
+      window.removeEventListener('pointerup', finish);
+      dragging.current = false;
+      const done = selectionRef.current;
+      if (done?.fileId === file.id && done.blockId === block.id) openComposer(file, block, done);
+    };
+    window.addEventListener('pointerup', finish);
   };
+  const extendSelect = (file: DiffFile, block: DiffBlock, rowIndex: number) => {
+    const current = selectionRef.current;
+    if (!dragging.current || current?.fileId !== file.id || current.blockId !== block.id) return;
+    applySelection({ ...current, start: Math.min(current.anchor, rowIndex), end: Math.max(current.anchor, rowIndex) });
+  };
+  const closeComposer = () => { setCommentDraft(undefined); applySelection(undefined); };
   const saveComment = () => {
-    if (!commentDraft?.text.trim()) { setCommentDraft(undefined); return; }
+    if (!commentDraft?.text.trim()) { closeComposer(); return; }
     const text = commentDraft.text.trim();
     updateDraft({
       comments: commentDraft.editingId
@@ -314,8 +319,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           text
         }]
     });
-    setCommentDraft(undefined);
-    setSelection(undefined);
+    closeComposer();
   };
   const deleteComment = (commentId: string) => updateDraft({ comments: draft.comments.filter((comment) => comment.id !== commentId) });
 
@@ -325,7 +329,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   ].filter((finding) => finding.state === 'OPEN');
   const focusedFinding = findings.find((finding) => finding.id === focusedFindingId);
   const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy &&
-    ((props.findingsSendable && plan.send.length) || draft.comments.length || props.requestChanges.reviewNotes));
+    ((props.findingsSendable && plan.send.length) || draft.comments.length || draft.note.trim() || props.requestChanges.reviewNotes));
 
   // J/K files, N/P open findings, V viewed and on, D/A/F the focused finding, C the selected lines.
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -371,9 +375,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     } else if (key === 'c' && selection && canComment) {
       const entry = ordered.find((candidate) => candidate.file.id === selection.fileId);
       const block = entry?.file.blocks.find((candidate) => candidate.id === selection.blockId);
-      if (entry && block) { event.preventDefault(); openComposer(entry.file, block, selection.end); }
-    } else if (key === 'escape' && selection) {
-      setSelection(undefined);
+      if (entry && block) { event.preventDefault(); openComposer(entry.file, block, selection); }
+    } else if (key === 'escape' && selection && !commentDraft) {
+      applySelection(undefined);
     }
   };
 
@@ -422,21 +426,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     : undefined;
 
   const headline = reviewHeadline(review?.status, openFindings.length);
-  const settledCount = findings.length - openFindings.length;
   const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer) && !props.historical
-    ? {
-      ...props.brief,
-      reviewer: props.brief.reviewer ? {
-        ...props.brief.reviewer,
-        status: headline.label,
-        counts: [findingWords(findings), settledCount ? `${settledCount} settled` : ''].filter(Boolean).join(' · ') || undefined
-      } : undefined,
-      scope: files.length && effectiveScope === 'all' ? {
-        files: files.length,
-        additions: files.reduce((sum, file) => sum + file.additions, 0),
-        deletions: files.reduce((sum, file) => sum + file.deletions, 0)
-      } : undefined
-    }
+    ? props.brief
     : undefined;
 
   const renderThreads = (items: ReviewFindingView[] | undefined) => items?.map((finding) => (
@@ -456,10 +447,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     />
   ));
 
-  // A comment is written in the app's composer: what it is about, the field, then the actions.
+  // A comment is written in the app's composer, under the line or range it is about.
   const composerForm = (draftComment: CommentDraft) => (
     <form key="composer" className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
-      <span className="tm-review-comment-composer__about">{commentAbout(draftComment)}</span>
+      {commentNeedsAbout(draftComment) ? <span className="tm-review-comment__about">{commentAbout(draftComment)}</span> : null}
       <label className="tm-visually-hidden" htmlFor={`${composerId}-comment`}>Comment</label>
       <textarea
         id={`${composerId}-comment`}
@@ -470,16 +461,16 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         placeholder="Add a comment"
         onChange={(event) => setCommentDraft({ ...draftComment, text: event.target.value })}
         onKeyDown={(event) => {
-          if (event.key === 'Escape') { event.preventDefault(); setCommentDraft(undefined); }
+          if (event.key === 'Escape') { event.preventDefault(); closeComposer(); }
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); saveComment(); }
         }}
       />
       <div className="tm-composer__toolbar">
-        <span className="tm-composer__hint">Saved to your review; sent with Request changes</span>
-        <button type="button" className="ghost-button" onClick={() => setCommentDraft(undefined)}>Cancel</button>
-        <Tooltip label={draftComment.editingId ? 'Save' : 'Add comment'} shortcut={SUBMIT_SHORTCUT}>
+        <span className="tm-review-comment-composer__spacer" />
+        <button type="button" className="ghost-button" onClick={closeComposer}>Cancel</button>
+        <Tooltip label={draftComment.editingId ? 'Save' : 'Comment'} shortcut={SUBMIT_SHORTCUT}>
           <button type="submit" className="primary-button button--sm" disabled={!draftComment.text.trim()}>
-            {draftComment.editingId ? 'Save' : 'Add comment'}
+            {draftComment.editingId ? 'Save' : 'Comment'}
           </button>
         </Tooltip>
       </div>
@@ -493,31 +484,43 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     commentDraft?.editingId === comment.id ? <Fragment key={comment.id}>{composerForm(commentDraft)}</Fragment> : (
       <div key={comment.id} className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
         <div className="tm-review-comment__body">
-          {comment.endLine || comment.side === 'OLD' || !comment.line ? (
-            <span className="tm-review-comment__about">{commentAbout(comment)}</span>
-          ) : null}
+          {commentNeedsAbout(comment) ? <span className="tm-review-comment__about">{commentAbout(comment)}</span> : null}
           <p>{comment.text}</p>
         </div>
         {canComment ? (
           <div className="tm-review-comment__actions">
-            <button type="button" className="ghost-button" onClick={() => setCommentDraft({
-              key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, text: comment.text, editingId: comment.id
-            })}>Edit</button>
-            <button type="button" className="ghost-button" onClick={() => deleteComment(comment.id)}>Delete</button>
+            <Tooltip label="Edit">
+              <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Edit comment" onClick={() => setCommentDraft({
+                key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, text: comment.text, editingId: comment.id
+              })}>
+                <Pencil size={13} aria-hidden="true" />
+              </button>
+            </Tooltip>
+            <Tooltip label="Delete">
+              <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Delete comment" onClick={() => deleteComment(comment.id)}>
+                <Trash2 size={13} aria-hidden="true" />
+              </button>
+            </Tooltip>
           </div>
         ) : null}
       </div>
     )
   ));
 
-  const compareMeta = effectiveScope === 'all' && props.worktree
-    ? `${props.worktree.baseRef ?? 'base'}@${props.worktree.baseSha.slice(0, 7)} → working tree`
-    : undefined;
+  const viewedLabel = viewedCount ? `${viewedCount}/${files.length}` : `${files.length}`;
   const feedbackCount = (props.findingsSendable ? plan.send.length + plan.suggestions.length : openFindings.length) + draft.comments.length;
 
   return (
     <section className="tm-review" aria-label="Review" onKeyDown={onKeyDown}>
       <div className="tm-review__bar">
+        <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
+          <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => setRail('files')}>
+            Files<span className="tm-review__rail-count" aria-label={viewedCount ? `${viewedCount} of ${files.length} viewed` : undefined}>{viewedLabel}</span>
+          </button>
+          <button type="button" className="segmented__btn" aria-pressed={rail === 'feedback'} onClick={() => setRail('feedback')}>
+            Feedback<span className="tm-review__rail-count">{feedbackCount}</span>
+          </button>
+        </div>
         {props.historical ? (
           <>
             <span className="tm-review__headline">{props.historical.capturedAt ? 'Earlier capture' : 'Earlier capture unavailable'}</span>
@@ -535,21 +538,22 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               {headline.label}
             </span>
             {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' ? (
-              <span className="tm-review__meta">Reviewed <MessageTime value={review.reviewedAt} /></span>
+              <span className="tm-review__meta"><MessageTime value={review.reviewedAt} /></span>
             ) : null}
             <ActionMenu
               className="tm-review__scope tm-review__bar-end"
               label="Changes to show"
               selection="single"
               side="bottom"
-              trigger={<>{SCOPE_LABELS[effectiveScope]}{compareMeta ? <span className="tm-review__compare">{compareMeta}</span> : null}<ChevronDown size={13} aria-hidden="true" /></>}
+              trigger={<>{SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} aria-hidden="true" /></>}
               items={scopeItems}
             />
             <ActionMenu
               className="tm-review__view"
               label="View options"
+              tooltip="View"
               side="bottom"
-              trigger={<>View<ChevronDown size={13} aria-hidden="true" /></>}
+              trigger={<SlidersHorizontal size={16} aria-hidden="true" />}
               items={viewItems}
             />
             {props.runReview ? (
@@ -573,55 +577,47 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       ) : null}
 
       <div className="tm-review__work">
-        <nav className="tm-review__index" aria-label="Files and feedback">
-          <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
-            <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => setRail('files')}>
-              Files<span className="tm-review__rail-count">{files.length}</span>
-            </button>
-            <button type="button" className="segmented__btn" aria-pressed={rail === 'feedback'} onClick={() => setRail('feedback')}>
-              Feedback<span className="tm-review__rail-count">{feedbackCount}</span>
-            </button>
-          </div>
-          <div className="tm-review__index-list">
-            {rail === 'files' ? ordered.map((entry) => {
-              const fileFindings = findingsByFile.get(entry.file.id) ?? [];
-              const words = findingWords(fileFindings);
-              const comments = draft.comments.filter((comment) => normalizeReviewPath(comment.path) === normalizeReviewPath(entry.file.path)).length;
-              const sub = [words, comments ? `${comments} comment${comments === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ')
-                || roleWord(entry);
-              return (
-                <button
-                  key={entry.file.id}
-                  type="button"
-                  className={`tm-review__index-file${activeFileId === entry.file.id ? ' tm-review__index-file--active' : ''}${isViewed(entry.file) ? ' tm-review__index-file--viewed' : ''}`}
-                  onClick={() => { if (isCollapsed(entry)) expand(entry.file.id); scrollToFile(entry.file.id); }}
-                >
-                  <span className="tm-review__index-path">{indexLabel(entry.file, files)}</span>
-                  {isViewed(entry.file) ? <Check size={13} aria-label="Viewed" /> : <DiffStat file={entry.file} />}
-                  {sub ? <span className="tm-review__index-sub" data-tone={fileFindings.some((finding) => finding.state === 'OPEN' && isBlockingFinding(finding)) ? 'blocked' : undefined}>{sub}</span> : null}
-                </button>
-              );
-            }) : (
-              <FeedbackList
-                plan={plan}
-                findingsSendable={props.findingsSendable}
-                findings={findings}
-                comments={draft.comments}
-                focusedFindingId={focusedFindingId}
-                onShowFinding={scrollToFinding}
-                onShowComment={scrollToComment}
-              />
-            )}
-          </div>
-          {files.length > 0 ? (
-            <div className="tm-review__progress">
-              <span>{viewedCount} of {files.length} viewed</span>
-              <span className="tm-review__meter" aria-hidden="true"><span style={{ width: `${(viewedCount / files.length) * 100}%` }} /></span>
-            </div>
-          ) : null}
+        <nav className="tm-review__index" aria-label={rail === 'files' ? 'Files' : 'Feedback'}>
+          {rail === 'files' ? ordered.map((entry) => {
+            const fileFindings = (findingsByFile.get(entry.file.id) ?? []).filter((finding) => finding.state === 'OPEN');
+            const comments = draft.comments.filter((comment) => normalizeReviewPath(comment.path) === normalizeReviewPath(entry.file.path)).length;
+            const feedback = fileFindings.length + comments;
+            const parts = entry.file.path.split('/');
+            const name = parts.pop() ?? entry.file.path;
+            return (
+              <button
+                key={entry.file.id}
+                type="button"
+                className={`tm-review__index-file${activeFileId === entry.file.id ? ' tm-review__index-file--active' : ''}${isViewed(entry.file) ? ' tm-review__index-file--viewed' : ''}`}
+                onClick={() => { if (isCollapsed(entry)) expand(entry.file.id); scrollToFile(entry.file.id); }}
+              >
+                <span className="tm-review__index-path">
+                  <span className="tm-review__index-name">{name}</span>
+                  {parts.length ? <span className="tm-review__index-dir">{parts.join('/')}</span> : null}
+                </span>
+                {feedback ? (
+                  <span className="tm-review__index-feedback" data-tone={fileFindings.some(isBlockingFinding) ? 'blocked' : undefined}>
+                    <MessageSquare size={12} aria-hidden="true" />{feedback}
+                    <span className="tm-visually-hidden"> {feedback === 1 ? 'note' : 'notes'}</span>
+                  </span>
+                ) : null}
+                {isViewed(entry.file) ? <Check size={13} className="tm-review__index-viewed" aria-label="Viewed" /> : <DiffStat file={entry.file} />}
+              </button>
+            );
+          }) : (
+            <FeedbackList
+              plan={plan}
+              findingsSendable={props.findingsSendable}
+              findings={findings}
+              comments={draft.comments}
+              focusedFindingId={focusedFindingId}
+              onShowFinding={scrollToFinding}
+              onShowComment={scrollToComment}
+            />
+          )}
         </nav>
 
-        <div ref={diffRef} className="tm-review__diff" tabIndex={-1} onScroll={(event) => onDiffScroll(event.currentTarget)}>
+        <div ref={diffRef} className="tm-review__diff" tabIndex={-1}>
           {briefContent ? (
             <ReviewBrief
               content={briefContent}
@@ -640,38 +636,44 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             const fileViewed = isViewed(file);
             const collapsed = isCollapsed(entry);
             const fileFindings = findingsByFile.get(file.id) ?? [];
-            const blocking = fileFindings.some((finding) => finding.state === 'OPEN' && isBlockingFinding(finding));
+            const openHere = fileFindings.filter((finding) => finding.state === 'OPEN');
             const parts = file.path.split('/');
             const name = parts.pop() ?? file.path;
             const fileKey = `file:${file.id}`;
             return (
-              <section key={file.id} className={`tm-review-file${collapsed ? ' tm-review-file--collapsed' : ''}`} data-file-id={file.id} aria-label={file.path}>
+              <section
+                key={file.id}
+                className={`tm-review-file${collapsed ? ' tm-review-file--collapsed' : ''}`}
+                data-file-id={file.id}
+                aria-label={file.path}
+                style={{ '--review-num': `${numberColumnWidth(file)}px` } as CSSProperties}
+              >
                 <header className="tm-review-file__head" onContextMenu={(event) => openPathMenu(file.path, event)}>
-                  <Tooltip label={collapsed ? 'Expand' : 'Collapse'} shortcut="⌥-click: all files">
+                  <Tooltip label={collapsed ? 'Expand' : 'Collapse'} shortcut="⌥ all files">
                     <button
                       type="button"
-                      className="tm-iconbtn tm-review-file__toggle"
+                      className="tm-review-file__toggle"
                       aria-expanded={!collapsed}
                       aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${file.path}`}
                       onClick={(event) => toggleCollapsed(entry, event.altKey)}
                     >
-                      <ChevronRight size={14} aria-hidden="true" />
+                      <ChevronRight size={12} aria-hidden="true" />
+                      <span className="tm-review-file__path">
+                        {parts.length ? <span className="tm-review-file__dir">{parts.join('/')}/</span> : null}
+                        <span className="tm-review-file__name">{name}</span>
+                      </span>
                     </button>
                   </Tooltip>
-                  <span className="tm-review-file__path">
-                    {parts.length ? <span className="tm-review-file__dir">{parts.join('/')}/</span> : null}
-                    <span className="tm-review-file__name">{name}</span>
-                  </span>
-                  {file.oldPath ? <span className="tm-review-file__word">Renamed from <code>{file.oldPath}</code></span>
-                    : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'Added' : 'Deleted'}</span> : null}
-                  {roleWord(entry) ? <span className="tm-review-file__word">{roleWord(entry)}</span> : null}
+                  {file.oldPath ? <span className="tm-review-file__word">from <code>{file.oldPath}</code></span>
+                    : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'New' : 'Deleted'}</span> : null}
                   <span className="tm-review-file__spacer" />
-                  {findingWords(fileFindings) ? <span className="tm-review-file__count" data-tone={blocking ? 'blocked' : undefined}>{findingWords(fileFindings)}</span> : null}
+                  {openHere.length ? (
+                    <span className="tm-review-file__count" data-tone={openHere.some(isBlockingFinding) ? 'blocked' : undefined}>{findingWords(openHere)}</span>
+                  ) : null}
                   <DiffStat file={file} />
-                  <label className="tm-review-file__viewed">
-                    <input type="checkbox" checked={fileViewed} onChange={() => setFileViewed(file, !fileViewed)} />
-                    Viewed
-                  </label>
+                  <Tooltip label="Viewed" shortcut="V">
+                    <input type="checkbox" className="tm-review-file__viewed" aria-label="Viewed" checked={fileViewed} onChange={() => setFileViewed(file, !fileViewed)} />
+                  </Tooltip>
                   <FileMenu
                     path={file.path}
                     target={props.worktree && !props.historical ? { type: 'worktreeFile', taskId: props.worktree.taskId, worktreeId: props.worktree.id, relativePath: file.path } : undefined}
@@ -683,14 +685,12 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                   />
                 </header>
                 {collapsed ? (
-                  // A collapsed file still states its open findings: Viewed never hides one.
-                  fileFindings.filter((finding) => finding.state === 'OPEN').map((finding) => (
-                    <div key={finding.id} className="tm-review-checkpoint">
+                  // A collapsed file still lists its open findings: Viewed never hides one.
+                  openHere.map((finding) => (
+                    <button key={finding.id} type="button" className="tm-review-checkpoint" onClick={() => scrollToFinding(finding.id)}>
                       <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
                       <span className="tm-review-checkpoint__title">{finding.title}</span>
-                      <span className="tm-review-checkpoint__state">{included.has(finding.id) ? 'In the request' : 'Suggestion'}</span>
-                      <button type="button" className="tm-osection__link" onClick={() => scrollToFinding(finding.id)}>Show</button>
-                    </div>
+                    </button>
                   ))
                 ) : (
                   <>
@@ -721,20 +721,24 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                 className={`tm-diffline tm-diffline--${line.kind} tm-diffline--annotated${selected ? ' tm-diffline--selected' : ''}`}
                                 onContextMenu={(event) => openPathMenu(file.path, event, line.newLine ?? line.oldLine)}
                               >
-                                {/* The number selects the line; shift-click extends the range a comment covers. */}
-                                <span className="tm-diffline__num" onClick={(event) => selectRow(file, block, row.index, event.shiftKey)}>{number ?? ''}</span>
-                                {/* The note column is reserved on every row, so the "+" never covers a number. */}
-                                <span className="tm-diffline__note">
+                                {/* The number is the comment control: press or drag across numbers to comment on a range. */}
+                                <span
+                                  className="tm-diffline__num"
+                                  onPointerDown={number !== undefined ? (event) => beginSelect(file, block, row.index, event) : undefined}
+                                  onPointerEnter={() => extendSelect(file, block, row.index)}
+                                >
                                   {canComment && number !== undefined ? (
                                     <button
                                       type="button"
                                       className="tm-review-line__comment"
                                       aria-label={`Comment on ${line.kind === 'deletion' ? 'removed ' : ''}line ${number}`}
-                                      onClick={() => openComposer(file, block, row.index)}
+                                      // A pointer comments through the gutter press; this handles the keyboard.
+                                      onClick={(event) => { if (event.detail === 0) openComposer(file, block, { start: row.index, end: row.index, anchor: row.index }); }}
                                     >
-                                      <Plus size={12} aria-hidden="true" />
+                                      <Plus size={11} aria-hidden="true" />
                                     </button>
                                   ) : null}
+                                  {number ?? ''}
                                 </span>
                                 <span className="tm-diffline__marker" aria-hidden="true">
                                   {line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ''}
@@ -787,6 +791,23 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   );
 }
 
+/**
+ * The gutter is wide enough for the file's largest line number and the comment
+ * "+" beside it, so the two never overlap and short files keep a narrow gutter.
+ */
+function numberColumnWidth(file: DiffFile): number {
+  let largest = 0;
+  for (const block of file.blocks) {
+    for (const line of block.lines) largest = Math.max(largest, line.newLine ?? 0, line.oldLine ?? 0);
+  }
+  return Math.max(44, 32 + String(largest).length * 7);
+}
+
+/** A range, a removed line or the whole file needs saying; a single line is the row above. */
+function commentNeedsAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>): boolean {
+  return !comment.line || Boolean(comment.endLine) || comment.side === 'OLD';
+}
+
 /** What a comment is about, when its row does not already say it. */
 function commentAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>): string {
   if (!comment.line) return 'Whole file';
@@ -794,12 +815,6 @@ function commentAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>)
   return comment.side === 'OLD' ? `Removed ${lines.toLowerCase()}` : lines;
 }
 
-/** A file's part in the change, when it is worth saying: the code a test covers, or generated output. */
-function roleWord(entry: OrderedReviewFile): string {
-  if (entry.subject) return `Test for ${entry.subject.path.split('/').at(-1)}`;
-  if (entry.role === 'generated') return 'Generated';
-  return '';
-}
 
 function lineCode(content: string, kind: string): string {
   if ((kind === 'addition' && content.startsWith('+')) || (kind === 'deletion' && content.startsWith('-')) || (kind === 'context' && content.startsWith(' '))) {

@@ -61,11 +61,12 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   const reasonId = useId();
   const summaryRef = useRef<HTMLButtonElement>(null);
   const findings = props.findingsSendable ? plan.send : [];
-  const queued = findings.length > 0 || comments.length > 0 || props.reviewNotes;
+  const noted = Boolean(props.note.trim());
+  const queued = findings.length > 0 || comments.length > 0 || noted || props.reviewNotes;
   const summary = findings.length || comments.length
     ? [findings.length ? count(findings.length, 'fix', 'fixes') : '', comments.length ? count(comments.length, 'comment', 'comments') : '']
       .filter(Boolean).join(', ')
-    : props.reviewNotes ? 'Review notes' : 'Nothing to send';
+    : props.reviewNotes ? 'Review notes' : 'Note';
   const primary = queued && request ? (
     <>
       {request.disabledReason ? <span id={reasonId} className="tm-review__request-reason">{request.disabledReason}</span> : null}
@@ -99,17 +100,6 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   return (
     <div className="tm-review__foot">
       <div className="tm-review__request">
-        <button
-          ref={summaryRef}
-          type="button"
-          className="tm-review__request-summary"
-          aria-expanded={props.sheetOpen}
-          aria-controls={props.sheetOpen ? sheetId : undefined}
-          onClick={() => props.onSheetOpenChange(!props.sheetOpen)}
-        >
-          {summary}
-          <ChevronUp size={13} aria-hidden="true" />
-        </button>
         <label className="tm-review__note">
           <span className="tm-visually-hidden">A note for the agent</span>
           <textarea
@@ -125,6 +115,20 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
             }}
           />
         </label>
+        {/* The summary sits by the decision, so the note's edge never moves. */}
+        {queued ? (
+          <button
+            ref={summaryRef}
+            type="button"
+            className="tm-review__request-summary"
+            aria-expanded={props.sheetOpen}
+            aria-controls={props.sheetOpen ? sheetId : undefined}
+            onClick={() => props.onSheetOpenChange(!props.sheetOpen)}
+          >
+            {summary}
+            <ChevronUp size={13} aria-hidden="true" />
+          </button>
+        ) : null}
         {primary}
       </div>
       {props.sheetOpen ? <ReviewRequestSheet {...props} id={sheetId} summaryRef={summaryRef} /> : null}
@@ -140,7 +144,6 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
 function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef: RefObject<HTMLButtonElement | null> }) {
   const { plan, comments, request, onSheetOpenChange, summaryRef } = props;
   const sheetRef = useRef<HTMLDivElement>(null);
-  const reasonId = useId();
   const findings = props.findingsSendable ? plan.send : [];
   const leftOut = [...plan.suggestions, ...plan.settled];
   const instruction = request?.instruction() ?? '';
@@ -167,7 +170,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
   return (
     <div ref={sheetRef} id={props.id} className="tm-review-sheet" role="dialog" aria-label="Request changes">
       <div className="tm-review-sheet__head">
-        <h2>{findings.length ? 'Request changes' : 'Send your comments'}</h2>
+        <h2>Request changes</h2>
         <button type="button" className="tm-iconbtn" aria-label="Close" onClick={() => onSheetOpenChange(false)}><X size={14} aria-hidden="true" /></button>
       </div>
       <div className="tm-review-sheet__body">
@@ -198,9 +201,8 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
           <section className="tm-review-sheet__group" aria-label="Your comments">
             <h3>Your comments</h3>
             {comments.map((comment) => (
-              <div key={comment.id} className="tm-review-sheet__item">
+              <div key={comment.id} className="tm-review-sheet__item tm-review-sheet__item--comment">
                 <span className="tm-review-sheet__n">{(position += 1)}</span>
-                <span className="tm-review__severity">You</span>
                 <button type="button" className="tm-review-sheet__title" onClick={() => props.onShowComment(comment.id)}>{comment.text}</button>
                 <code className="tm-review-sheet__loc">{formatCommentLocation(comment)}</code>
                 <Tooltip label="Delete comment">
@@ -211,9 +213,6 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
               </div>
             ))}
           </section>
-        ) : null}
-        {!props.findingsSendable && plan.send.length ? (
-          <p className="tm-review-sheet__fact">The review is out of date, so its findings are not sent. Run it again to send them.</p>
         ) : null}
         {leftOut.length ? (
           <section className="tm-review-sheet__group" aria-label="Left out">
@@ -228,29 +227,24 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
                 ) : <span />}
               </div>
             ))}
-            {plan.settled.some((finding) => finding.state === 'DISMISSED') ? (
-              <p className="tm-review-sheet__fact">The agent is told to leave dismissed findings alone.</p>
-            ) : null}
           </section>
         ) : null}
         {instruction ? (
           <details className="tm-review-sheet__instruction">
-            <summary><DisclosureChevron />Exact instruction<span>{count(instruction.split('\n').length, 'line', 'lines')}</span></summary>
+            <summary><DisclosureChevron />Instruction</summary>
             <pre>{instruction}</pre>
           </details>
         ) : null}
       </div>
+      {/* A disabled send states its reason once, in the foot below. */}
       <div className="tm-review-sheet__foot">
-        <span id={reasonId} className="tm-review-sheet__why">
-          {request?.disabledReason ?? 'Starts a follow-up in the same session.'}
-        </span>
+        <span className="tm-review-sheet__spacer" />
         <button type="button" className="ghost-button" onClick={() => onSheetOpenChange(false)}>Cancel</button>
         {request ? (
           <button
             type="button"
             className="primary-button button--sm"
-            disabled={Boolean(request.disabledReason) || request.busy || (!findings.length && !comments.length && !props.reviewNotes)}
-            aria-describedby={reasonId}
+            disabled={Boolean(request.disabledReason) || request.busy || (!findings.length && !comments.length && !props.note.trim() && !props.reviewNotes)}
             onClick={request.onSubmit}
           >
             Request changes

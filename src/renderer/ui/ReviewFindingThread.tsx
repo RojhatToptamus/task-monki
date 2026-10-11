@@ -4,6 +4,7 @@ import type { ReviewFindingDismissReason } from '../../shared/contracts';
 import { findingLevel, formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../model/reviewFollowUp';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
+import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
@@ -25,10 +26,11 @@ export function settledLabel(finding: ReviewFindingView): string {
 }
 
 /**
- * One finding under the line it is about. An open finding shows the reasoning,
- * whether it is in the request, and Ask and Dismiss, always visible. Dismissing
- * asks why: the reviewer was wrong, or it is acceptable as is. A dismissed or
- * withdrawn finding folds to a line that keeps the reason.
+ * One finding under the line it is about: the reasoning, and Ask and Dismiss on
+ * its title line, always visible. Blocker and Major go in the request; a Minor or
+ * Nit is added from its title line. Dismissing asks why (the reviewer was wrong,
+ * or it is acceptable as is), optionally with a note. A dismissed or withdrawn
+ * finding folds to a line that keeps the reason.
  */
 export function ReviewFindingThread({
   finding, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
@@ -79,6 +81,12 @@ export function ReviewFindingThread({
   }
 
   const blocking = isBlockingFinding(finding);
+  const dismissItems: ActionMenuItem[] = [
+    ...(Object.keys(DISMISS_REASON_LABELS) as ReviewFindingDismissReason[]).map((value) => ({
+      id: value, label: DISMISS_REASON_LABELS[value], onSelect: () => { if (onDismiss) void run(() => onDismiss(finding.id, value)); }
+    })),
+    { id: 'note', label: 'With a note…', separated: true, onSelect: () => onDismissingChange(true) }
+  ];
   return (
     <article
       className={`tm-review-thread${focused ? ' tm-review-thread--focused' : ''}${actionable ? '' : ' tm-review-thread--earlier'}`}
@@ -90,21 +98,32 @@ export function ReviewFindingThread({
       <header className="tm-review-thread__head">
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         <strong>{finding.title}</strong>
-        {actionable && (onAsk || onDismiss) ? (
+        {actionable ? (
           <span className="tm-review-thread__actions">
+            {/* Blocker and Major are in the request already; a suggestion is added here. */}
+            {!blocking && onToggleInclude ? (
+              <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
+                <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => onToggleInclude(finding.id)}>
+                  {inRequest ? <><Check size={12} aria-hidden="true" />In request</> : 'Add to request'}
+                </button>
+              </Tooltip>
+            ) : null}
             {onAsk ? (
               <Tooltip label="Ask the reviewer" shortcut="A">
-                <button type="button" className="tm-iconbtn tm-review-thread__ask" aria-label="Ask the reviewer about this finding" onClick={() => onAsk(finding.id)}>
+                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__ask" aria-label="Ask the reviewer about this finding" onClick={() => onAsk(finding.id)}>
                   <AgentMark />
                 </button>
               </Tooltip>
             ) : null}
             {onDismiss ? (
-              <Tooltip label="Dismiss" shortcut="D">
-                <button type="button" className="tm-iconbtn" aria-label="Dismiss this finding" aria-expanded={dismissing} onClick={() => onDismissingChange(!dismissing)}>
-                  <X size={13} aria-hidden="true" />
-                </button>
-              </Tooltip>
+              <ActionMenu
+                className="tm-review-thread__dismiss-menu"
+                label="Dismiss this finding"
+                tooltip="Dismiss"
+                side="bottom"
+                trigger={<X size={13} aria-hidden="true" />}
+                items={dismissItems}
+              />
             ) : null}
           </span>
         ) : null}
@@ -118,23 +137,6 @@ export function ReviewFindingThread({
         </p>
       ) : null}
       {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
-      {actionable && !dismissing ? (
-        <footer className="tm-review-thread__request">
-          {blocking ? (
-            <><span className="tm-review-thread__included"><Check size={12} aria-hidden="true" />In the request</span><span>Blocks finishing</span></>
-          ) : inRequest ? (
-            <>
-              <span className="tm-review-thread__included"><Check size={12} aria-hidden="true" />In the request</span>
-              {onToggleInclude ? <button type="button" className="ghost-button" onClick={() => onToggleInclude(finding.id)}>Take out</button> : null}
-            </>
-          ) : (
-            <>
-              {onToggleInclude ? <button type="button" className="outline-button button--sm" onClick={() => onToggleInclude(finding.id)}>Add to request</button> : null}
-              <span>A suggestion: not sent unless you add it.</span>
-            </>
-          )}
-        </footer>
-      ) : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>
           <div className="segmented" role="group" aria-label="Why dismiss it">

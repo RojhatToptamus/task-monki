@@ -307,8 +307,6 @@ export function TaskDetail(props: TaskDetailProps) {
   // while they move between tabs and cleared when the request is sent.
   // Bumped by the Overview's Request changes, which opens the Review tab's request sheet.
   const [requestSheetToken, setRequestSheetToken] = useState(0);
-  // Reading down the Review diff folds the page head away, as scrolling the conversation does.
-  const [reviewReading, setReviewReading] = useState(false);
   // The reviewer panel: open state, the finding the next question is about, and the unsent question.
   const [reviewerOpen, setReviewerOpen] = useState(false);
   const [reviewerFocusId, setReviewerFocusId] = useState<string>();
@@ -435,9 +433,6 @@ export function TaskDetail(props: TaskDetailProps) {
     setDraftPrModalOpen(false);
     setEvidenceGitSnapshotId(undefined);
   }, [task?.id]);
-
-  // The Review diff mounts at its top, so leaving the tab or the task ends reading.
-  useEffect(() => { setReviewReading(false); }, [tab, task?.id]);
 
   // A renamed task offers its new title for a draft pull request; nothing else resets.
   useEffect(() => {
@@ -675,8 +670,9 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const buildRequestInstruction = (reviewOutput?: string) => buildReviewRequestInstruction({
     taskTitle: task.title,
-    summary: reviewGate.result?.summary ?? reviewGate.summary,
-    // An out-of-date review's findings are context only; its comments still go.
+    // Only a current review's summary is the agent's context; a running one has none yet.
+    summary: reviewIsCurrent ? reviewGate.result?.summary ?? reviewGate.summary : undefined,
+    // An out-of-date review's findings are context only; the person's comments still go.
     findings: reviewIsCurrent ? reviewPlan.send : [],
     dismissed: reviewIsCurrent
       ? reviewPlan.settled
@@ -694,7 +690,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
     const findings = reviewIsCurrent ? reviewPlan.send : [];
     const comments = props.reviewDraft.comments;
-    if (findings.length === 0 && comments.length === 0 && !reviewSendsNotes) {
+    if (findings.length === 0 && comments.length === 0 && !props.reviewDraft.note.trim() && !reviewSendsNotes) {
       return;
     }
     let reviewOutput: string | undefined;
@@ -1485,9 +1481,9 @@ export function TaskDetail(props: TaskDetailProps) {
     : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
     : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
   // With a side panel docked, the page keeps only its tab bar, which then shares
-  // the panel head's 48px line; the title moves to the window's top bar. Reading
-  // down the Review diff folds the head the same way, to give the code the room.
-  const headCollapsed = (Boolean(sidePanel) && sidePanelLayout.docked) || (tab === 'review' && reviewReading);
+  // the panel head's 48px line; the title moves to the window's top bar. The
+  // Review tab always reads this way: the code gets the room.
+  const headCollapsed = (Boolean(sidePanel) && sidePanelLayout.docked) || tab === 'review';
   const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
   // The title moves between the page and the top bar only when a panel opens or
   // closes, or the conversation scrolls; a tab opening shows its head as it is.
@@ -1796,7 +1792,6 @@ export function TaskDetail(props: TaskDetailProps) {
               onRun: () => onNextAction(nextAction.primary!.id)
             } : undefined}
             requestSheetToken={requestSheetToken}
-            onReadingChange={setReviewReading}
             onDismissFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId, reason, note) => props.onDecideReviewFinding!({
               taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'DISMISS', dismissReason: reason, note
             }) : undefined}
