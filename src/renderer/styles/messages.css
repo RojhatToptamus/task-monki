@@ -243,3 +243,26 @@
 .tm-side-sheet__resize::before { left: 0; width: 2px; }
 .tm-side-sheet--floating { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: var(--layer-overlay); display: flex; width: min(380px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
 @keyframes tm-panel-in { from { opacity: 0; transform: translateX(8%); } }
+
+/* A review round: the request item by item in the person's message, and the
+   agent's answer to each under its reply (and on the Review tab). */
+.tm-round__lead { margin: 0 0 8px; color: var(--text); font-weight: var(--w-medium); }
+.tm-round__items { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.tm-round__items > li { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 8px; }
+.tm-round__num { color: var(--faint); font-size: var(--t-help); font-variant-numeric: tabular-nums; line-height: var(--lh-prose); text-align: right; }
+.tm-round__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tm-round__head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.tm-round__head > :first-child { flex: 0 0 auto; }
+.tm-round__kind,
+.tm-round__outcome { color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-round__text { min-width: 0; color: var(--text-soft); }
+.tm-round__where { align-self: flex-start; max-width: 100%; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; text-align: left; }
+.tm-round__where--link { padding: 0; border-radius: var(--r-xs); background: none; }
+.tm-round__where--link:hover { color: var(--text); text-decoration: underline; }
+.tm-round__answer { color: var(--text-soft); }
+.tm-round__note { margin: 8px 0 0; white-space: pre-wrap; }
+.tm-round__answers li[data-outcome='FIXED'] .tm-round__outcome { color: var(--verified-ink); }
+.tm-round__answers li[data-outcome='NEEDS_DECISION'] .tm-round__outcome { color: var(--waiting-ink); }
+.tm-round__answers li[data-outcome='NONE'] .tm-round__outcome { color: var(--faint); }
+/* Under the agent's reply the answers start after a hairline. */
+.tm-message-content > .tm-round__answers:not(:first-child) { margin-top: 12px; padding-top: 12px; box-shadow: inset 0 1px 0 var(--hair); }

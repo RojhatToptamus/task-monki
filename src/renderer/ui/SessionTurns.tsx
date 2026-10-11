@@ -13,6 +13,7 @@ import { StoredAttachmentChip } from './AttachmentChip';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
 import { PlanCard } from './Plan';
+import { ReviewAnswers, ReviewRequestCard } from './ReviewRound';
 import { UserInputSummary } from './UserInputSummary';
 
 /**
@@ -96,7 +97,9 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
   const live = turn.state === 'active';
   return <div className="tm-turn">
     {turn.opener && !clip ? turn.opener.kind === 'prompt'
-      ? <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
+      ? turn.opener.reviewRequest
+        ? <ReviewRequestCard request={turn.opener.reviewRequest} time={turn.opener.at} />
+        : <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
       : <Message from="user" className="tm-message--action">
         <span className="tm-message__action">{turn.opener.label === 'Retried'
           ? <RotateCcw size={13} aria-hidden="true" />
@@ -106,7 +109,11 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
     {entries.map((entry, index) => {
       if (entry.kind === 'message') return entry.author === 'You'
         ? <UserMessage key={entry.key} text={entry.text} time={entry.at} status={entry.status} />
-        : <Message key={entry.key} from="agent" label="Agent response"><MessageContent><MessageMarkdown text={entry.text} /></MessageContent></Message>;
+        : <Message key={entry.key} from="agent" label="Agent response"><MessageContent>
+          {entry.text ? <MessageMarkdown text={entry.text} /> : null}
+          {entry.answers && turn.opener?.kind === 'prompt' && turn.opener.reviewRequest
+            ? <ReviewAnswers request={turn.opener.reviewRequest} answers={entry.answers} /> : null}
+        </MessageContent></Message>;
       if (entry.kind === 'interaction') return <UserInputSummary key={entry.key} interaction={entry.interaction} />;
       if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;

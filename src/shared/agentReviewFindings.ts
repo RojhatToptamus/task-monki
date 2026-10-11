@@ -72,6 +72,12 @@ export interface AgentReviewGateProjection {
    * existed omit it, which means no decisions.
    */
   findingDecisions?: ReviewFindingDecision[];
+  /**
+   * The implementation agent finished its reply to the person's request after this
+   * review: how many items it answered, and how many wait on the person's decision.
+   * Cleared when the next turn starts.
+   */
+  requestAnswer?: { runId: string; answered: number; needsDecision: number };
   updatedAt?: string;
 }
 

@@ -49,12 +49,17 @@ The important product rule is:
   - `findingDecisions`: the append-only decisions on this review's findings
     (`src/shared/agentReviewFindings.ts`). Absent in stored projections from
     before decisions existed, which means none.
+  - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
+    the person's request after this review settles (`runId`, items answered,
+    items that need the person's decision); cleared when the next turn starts.
 - `RunRecord.mode`
   - `IMPLEMENTATION`, `FOLLOW_UP`, and `RETRY` modify the task worktree.
   - `REVIEW` inspects a diff and must use read-only settings.
-  - `REVIEW_QUESTION` answers one question about the current review, on the
-    same read-only lane. It never changes workflow, `currentRunId`,
-    `projection.agentRun` or the review gate, and never makes a review stale.
+  - `SIDE_QUESTION` answers a question in Ask, on the same read-only lane. It
+    never changes workflow, `currentRunId`, `projection.agentRun` or the review
+    gate, and never makes a review stale.
+  - `REVIEW_QUESTION` is the retired reviewer conversation. Stored runs keep
+    the mode and settle as they ran; nothing starts one any more.
 - `AgentSessionRecord`
   - Primary sessions back implementation/follow-up/retry runs.
   - Review sessions use `role: "REVIEW"` and one ordinary read-only turn.
@@ -180,6 +185,12 @@ When the review run emits a terminal event:
     - `PASSED` when verdict passes and no blocking findings override it.
     - `NEEDS_CHANGES` when findings require changes.
     - `INCONCLUSIVE` when there is output but no reliable pass/fail verdict.
+  - A re-review also records `resolvedFindings` (earlier open findings the code
+    now resolves, with a note) and gives each finding that is an earlier one
+    still open its `previousFindingId`; the Review tab marks findings Still open
+    or New and lists the resolved ones.
+- Every finished review raises a toast, and a review that waits on the person
+  enters the Inbox (see Review attention).
 - `AGENT_RUN_FAILED` or review policy/runtime failure
   - Status becomes `FAILED`.
 - `AGENT_RUN_INTERRUPTED`
@@ -201,9 +212,10 @@ Expected UI:
   - Primary path: Request changes, from the Review tab.
   - Secondary path: run review again or use the finish-panel Mark done anyway
     owner override.
-  - Once every finding is dismissed or withdrawn, the review no longer asks for
-    changes: finishing is clean without an override and the card stops saying
-    Needs changes.
+  - Once no open Blocker or Major finding remains (each is dismissed, withdrawn
+    or downgraded), the review no longer asks for changes: open Minor and Nit
+    findings are suggestions, finishing is clean without an override, and the
+    card stops saying Needs changes.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
   - Request changes only through open findings. Prose that explains why the
@@ -216,7 +228,8 @@ Expected UI:
 
 ### Finding decisions
 
-The person and the reviewer can change what a current review asks for. Every
+The person can change what a current review asks for. (Reviewer revisions
+recorded by the retired reviewer conversation still apply.) Every
 change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 `findingDecisions`; the review result itself is never rewritten, and
 `effectiveReviewFindings` derives each finding's state (`OPEN`, `DISMISSED`,
@@ -224,9 +237,9 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 
 - The person dismisses an open finding with a reason and an optional note of at
   most 500 characters, and can restore it (`decideReviewFinding`). The reason is
-  `NOT_A_PROBLEM` (the reviewer was wrong) or `ACCEPTED` (real, acceptable as
-  is); the next review is told which. Dismissals recorded before reasons existed
-  carry none.
+  `NOT_A_PROBLEM` (shown as Incorrect: the reviewer was wrong), `ACCEPTED`
+  (Intentional: real, and the code is so on purpose) or `DEFERRED` (Won't fix
+  now). Dismissals recorded before reasons existed carry none.
 - Blocker and Major findings are in Request changes by default; dismissing is
   the only way to leave one out. Minor and Nit findings are suggestions: they
   are sent only when the person adds them, and their inclusion is part of the
@@ -240,51 +253,59 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 - What the workflow acts on is `effectiveReviewGateStatus`: the gate rule
   (`reviewGateStatusFor`: a NEEDS_CHANGES verdict or any BLOCKER/MAJOR finding
   asks for changes) applied to the findings still open once every decision
-  applies. Decisions move it both ways: a BLOCKER or MAJOR finding the reviewer
-  adds or raises makes a passed or inconclusive review ask for changes, and
+  applies. A NEEDS_CHANGES verdict with findings asks for changes only while
+  an open BLOCKER or MAJOR finding remains, because that is what a request would
+  send by default; it keeps asking when the review recorded no findings
+  (raw-output reviews). Decisions move it both ways: a BLOCKER or MAJOR finding
+  added or raised makes a passed or inconclusive review ask for changes, and
   dismissing, withdrawing or downgrading those findings returns it to its
   verdict. An inconclusive verdict never reads as passed, because the reviewer
   never reached one. The finish policy, the next action, the board card and the
   board summary (`effectiveStatus`) all read this one rule.
 - A new review starts with no decisions. Its prompt lists the earlier review's
-  findings with their states, notes and reasons, and asks the reviewer not to
-  raise a dismissed or withdrawn finding again without saying why.
+  findings by id with their states, notes and reasons. It never raises a finding
+  the person marked incorrect, or one withdrawn, again; raises one marked
+  intentional again only if the code around it changed materially; leaves a
+  deferred one alone; and, as a re-review, reports new findings only at BLOCKER
+  or MAJOR.
 
-### Asking the reviewer
+### Ask
 
-1. From the Review tab the person asks a question about the review or about one
-   finding (`askReviewer`, idempotent by message id). Local Git state is observed
-   first, inside the task lock: if the code changed after the review, the review
-   turns stale and the question is refused. A canceled or archived task takes no
-   questions. The question is stored as a `TaskInstruction` with
-   `role: "REVIEW"`, `reviewRunId` and an optional `findingId`.
-2. A `REVIEW_QUESTION` run answers it in a fresh read-only session on the
-   review's runtime and settings, through the same read-only lane and Git
-   fingerprint check as the review. Every question rebuilds its context: the
-   findings with their decisions, the focused finding's reviewed diff, a diff
-   stat, and the last six exchanges.
-3. One question runs at a time. While it runs, follow-up, new runs, reviews,
-   commits, publishing, pull requests and phase transitions wait for it, or for
-   the person to stop it (`stopReviewerQuestion`, a control action that does not
-   wait for the task lock).
-4. The reviewer revises findings only through one fenced
-   `task-monki-revisions` block that ends its answer: withdraw a finding, change
-   its severity, or add one inside the reviewed diff, each with a reason, at
-   most eight. Task Monki validates the block strictly against the review as it
-   is when the answer completes and records one reviewer decision per entry.
-   An invalid block changes nothing; the reason is written to the run's
-   diagnostics and the prose still shows. Prose alone never changes a finding.
-5. A stale review keeps its conversation readable and takes no new questions.
+The agent is the only conversation; the reviewer is a fresh, read-only reporter.
+Questions about the task go to Ask, on Overview, Agent and Review.
+
+1. The person asks in the Ask panel (`askSideQuestion`, idempotent by message
+   id). A question can carry a subject: a finding of the current review
+   (`FINDING`, refused once that review is no longer current) or lines of the
+   diff (`LINES`). It is stored as a `TaskInstruction` with `role: "SIDE"`, its
+   thread and its subject.
+2. A `SIDE_QUESTION` run answers it in a fresh read-only session on the task's
+   runtime, reading the recent conversation, the current review with its
+   findings and decisions, the subject with its diff, and the thread's earlier
+   exchanges. While the implementation agent works, it reads a snapshot of the
+   worktree taken when the question was asked.
+3. One question runs at a time per thread. A question reading the live worktree
+   holds other work until it ends or is stopped.
+4. Nothing reaches the agent unless the person uses an answer: Use in follow-up
+   puts it in the agent's composer, and on Review, Add to request adds it to the
+   request's note.
 
 ### Requesting changes after review
 
-1. The Review tab's request bar says what will be sent: every open finding and
-   the person's own line comments, with an optional note. Comments can be sent
-   on their own, even without an actionable review.
-2. `buildReviewRequestInstruction` lists the open findings, the comments, and
-   the dismissed findings as context the agent must leave alone.
+1. The Review tab's request bar says what will be sent: every open Blocker and
+   Major finding, the suggestions the person added, and their own line
+   comments, with an optional note. Comments can be sent on their own, even
+   without an actionable review.
+2. `buildReviewRequestInstruction` numbers the findings, then the comments, in
+   one sequence, names the dismissed findings as context the agent must leave
+   alone, and asks the agent to end its reply with a
+   `task-monki-review-response` block answering every item: `FIXED`,
+   `NOT_CHANGED` (and why) or `NEEDS_DECISION` (and the question).
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
-   source implementation run.
+   source implementation run. The follow-up message carries the request item by
+   item (`TaskInstruction.reviewRequest`, validated by
+   `assertReviewRequestRecord`), so the Agent conversation shows it as a card of
+   those items rather than the instruction text.
 4. Reducer moves the task to `IN_PROGRESS`.
 5. The review stays as it was: a follow-up continues the reviewed work, and only
    a diff that differs from the reviewed one makes the review stale.
@@ -325,6 +346,12 @@ When the follow-up completes successfully:
 2. The post-run Git snapshot decides the review: a changed diff makes it
    `STALE` and the task needs a fresh review; a follow-up that changed nothing
    (it answered or asked a question, say) leaves the review current.
+3. When the follow-up answered a request, `REVIEW_REQUEST_ANSWERED` records how
+   many items the agent answered and how many need the person's decision
+   (`parseReviewResponse` over its reply). The answers show as a list under the
+   reply in the Agent conversation, and on the Review tab's brief until the next
+   review reads them; the next review's prompt carries the request and each
+   answer, as claims to check against the code.
 
 Expected UI when the diff changed:
 
@@ -332,9 +359,20 @@ Expected UI when the diff changed:
 - Card chip: Needs re-review.
 - Review tab: Review out of date, leading with the files that changed since the
   reviewed capture (All changes when nothing did; never an empty scope); the
-  earlier findings stay on the code as context without Ask or Dismiss, and the
-  reviewer panel keeps earlier answers but takes no new question.
+  earlier findings stay on the code as context without Ask or Dismiss.
 - Primary next action: Run review again.
+
+### Review attention
+
+Auto re-review stays off, so a finished review waits on the person. The Inbox
+and the board card name it in one of four words (`describeTaskAttention`):
+
+- Agent asked a question: the agent's answer to a request has an item that
+  needs the person's decision. Replying starts a turn, which clears it.
+- Review failed.
+- Fixes ready for review: the agent answered a request and the diff changed.
+- Needs changes: the review asks for changes and the person decides what to
+  send.
 
 If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
 in `IN_PROGRESS`. Retry the implementation after a definitive failure, or
@@ -502,11 +540,11 @@ When the UI shows the wrong state:
   with Request changes.
 - Comments can be written whenever the current diff is shown, including while
   a review runs; only sending waits for the review.
-- Keep `REVIEW_QUESTION` runs, their sessions and `REVIEW` messages out of the
-  Agent tab and the task's run selection (`partitionAgentRecords`); they belong
-  to the reviewer panel and to Debug.
-- Show a reviewer answer as prose only (`reviewerProse`); each recorded revision
-  is one line under the answer.
+- Keep `SIDE_QUESTION` runs and `SIDE` messages in Ask, and stored
+  `REVIEW_QUESTION` runs and `REVIEW` messages nowhere but Debug, out of the
+  Agent tab and the task's run selection (`partitionAgentRecords`).
+- Show a reply to a review request as its prose, with the
+  `task-monki-review-response` block taken out and shown as the answer list.
 - Derive every review entry action from the exact current completed
   implementation-side run. Never fall back to the source of a historical
   review or another completed run in the iteration.

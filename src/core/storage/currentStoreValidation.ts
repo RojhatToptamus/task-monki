@@ -1259,6 +1259,13 @@ function projection(value: unknown): void {
       'runId', 'sourceRunId', 'reviewedGitSnapshotId', 'finalArtifactId'
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
+    if (review.requestAnswer !== undefined) {
+      const answer = persistedRecord(review.requestAnswer, 'tasks.projection');
+      uuidField(answer, 'runId', 'tasks.projection');
+      optionalInteger(answer, 'answered', 'tasks.projection', 0);
+      optionalInteger(answer, 'needsDecision', 'tasks.projection', 0);
+      if (answer.answered === undefined || answer.needsDecision === undefined) invalid('tasks.projection');
+    }
     if (review.result !== undefined) reviewResult(review.result);
     if (review.findingDecisions !== undefined) {
       if (

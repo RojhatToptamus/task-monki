@@ -25,7 +25,7 @@ Every value here is a token; the cited section owns the details.
 | Colour | roles, never values (§7): planes `--ground`, `--panel`, `--surface`, `--well`, `--field`, `--sel`, `--card`, `--overlay`; ink `--text`, `--text-soft`, `--muted`, `--faint`; lines `--hair`, `--field-edge`, `--edge-raised`, `--edge`; `--accent` for action, focus and running work; `--waiting`, `--blocked`, `--verified`, `--idle`, each with `-ink` and `-bg` |
 | Buttons | primary (one per surface), secondary, ghost, danger; 32 tall, or 28 with `button--sm`; icon buttons 28, or 24 inside a row (§10) |
 | Icons | Lucide at 13, 16 or 18, 12 only inside a 16px mark; `AgentMark` for every agent (§8) |
-| Motion | 120ms feedback, 180ms menus, 220ms modals, 280ms drawers and folds, 200ms something moving; ease out; nothing animates when a tab opens; keyboard actions are instant (§12) |
+| Motion | 120ms feedback, 180ms menus, 220ms modals, 280ms drawers, 200ms something moving; ease out; nothing animates when a tab opens; keyboard actions are instant (§12) |
 | Cursor | the arrow, everywhere |
 
 ---
@@ -166,7 +166,7 @@ Where a thing goes follows from what it acts on and who owns the fact.
 
 | Thing | Goes | Never |
 |---|---|---|
-| The page's title | the page head; when the head folds, the window's top bar | a second bar inside the page that repeats it |
+| The page's title | the page head; on a task's working tabs (Agent, Review, Preview), and on a reading page scrolled past its head, the window's top bar | a second bar inside the page that repeats it |
 | The surface's one primary action | where the eye ends: the right end of the Now panel, a modal, the Review foot | among secondary actions in a toolbar |
 | An action on one item | on the item: its row's hover slot, its head, its ⋯ menu | in a page toolbar away from the item |
 | An action on a line of code | in the line-number gutter | in a new column that pushes the code right |
@@ -183,11 +183,13 @@ Where a thing goes follows from what it acts on and who owns the fact.
   last option. A bar that repeats the window's top bar is never an option.
 - **Near what it changes.** An action whose effect is out of view is in the
   wrong place.
-- **Folding moves information, it never drops it.** When a head folds (the
-  Agent tab on scroll, Review, a docked panel), the title moves to the top bar,
-  and anything the tab still needs moves with it: an agent's question or a
-  stopped run shows in the Review toolbar, because the head that carried it is
-  folded there.
+- **The title moves with its row, and nothing it carried is dropped.** Wherever
+  a page's title sits in the window's top bar, its row comes with it: the task
+  menu, the head's steps the tab does not offer itself (Run agent review on
+  imported work, Move to review), and Go to request where the tab does not show
+  the request. A fact the tab's own surface states stays there: the Review bar
+  carries the agent's request, a stopped run and Run review, so the title row
+  does not repeat them.
 - **The same thing sits in the same place on every surface.** Actions at the
   right, declining before accepting, the primary last, cancelling the whole
   request apart at the left.
@@ -801,7 +803,7 @@ These are settled. Use the value, don't re-derive it.
 | Popover / menu | 220–280 wide, 4 pad, rows at least 28 (4×8 padding around a 20 line; a two-line row grows) |
 | Pane status footer | 28 tall, 16 side pad |
 | Floating control (jump to latest, new responses) | 28 tall, `--r-sm`, `--card` with the `--edge` ring and `--shadow-pop` |
-| Modal | 440 confirm · 560 form · 640 creation · 720 payload |
+| Modal | 440 confirm · 560 form · 640 creation (880 and the modal's full height when New task is expanded; remembered) · 720 payload |
 | Side panel | 380 docked, resizable 320–560; floats over the content below a 560px content floor |
 | Settings section list | 212 |
 | Review index | 248 (208 below 1100) |
@@ -835,6 +837,11 @@ copy.
   Never a spinner.
 - Notices: `.tm-error` in its container, `.tm-error--page` on a page.
 - Agents: `AgentMark`, the only icon for any agent.
+- Expand: `ExpandToggle`, at the end of a surface's head and before Close
+  (Maximize2/Minimize2, named Expand and Collapse, or what it shows when the
+  head's disclosure already owns those words), ⌘⇧F. Escape collapses before it
+  closes; the surface keeps its expanded state only where it is an arrangement
+  (New task).
 
 **Which container.** Pick by what the content is, and use exactly one:
 
@@ -1053,6 +1060,14 @@ views with their marker and a control that adds one. No breadcrumbs (the
 rail is the location), no duplicate title inside the body, no tab bar that
 repeats what the rail already says. A task's context line is its lifecycle track,
 then its repository and branch, each marked by an icon instead of a separator.
+A task page has two kinds of tab. The reading tabs (Overview, Debug) keep the
+page head (title, lifecycle track, repository and branch, task menu), which
+scrolls with the page. The working tabs (Agent, Review, Preview) have no head:
+their title row stands in the window's top bar from the moment the tab opens,
+and the tab bar is the sheet's first line, so it sits in the same place on all
+three and shares a docked side panel's 48px head line. The lifecycle, repository
+and branch belong to the record, on the Overview; each working tab states its
+live state where it is acted on.
 Page tabs are 13/400 words on the bar's baseline, a 1px `--hair` inset line;
 the selected one changes only its ink to `--text` and takes that baseline in
 `--text`, 1px with square ends, so it covers the hairline rather than sitting on
@@ -1070,6 +1085,12 @@ it. A tab's weight never changes and a tab never carries a count.
   dot at the icon's corner, ringed in the ground; how many is in the tooltip
   ("Inbox, 20 waiting") and on the page itself, never a number over the icon. Repositories are managed in Settings; New task opens on the
   repository used last.
+- **The window's top bar carries a page title only when the page's own title is
+  not on screen**: a task's working tabs, or a reading page scrolled past its
+  head. The title row is the title at 13/500 `--text` (48vw at most, the full
+  title in its tooltip), then the task's ⋯, then Go to request and any step as
+  `button--sm` secondary buttons. A workspace whose 48px head never leaves the
+  view (Designs, New Design, Discourse) keeps its title there.
 - Every boundary between two panels is a resize handle: an 8px hit area on the
   boundary's `--hair` seam that draws a 2px `--edge` line on hover and focus, with a
   keyboard-reachable equivalent. A handle on the edge of a
@@ -1115,8 +1136,8 @@ it. A tab's weight never changes and a tab never carries a count.
 
 Small and fast. Motion shows continuity, cause or work in progress, never
 decoration. Animate `transform` and `opacity`; fills and ink may transition on
-hover. The one layout animation is a head folding its row (`grid-template-rows`),
-because the user watches that single surface move. Anything entering or
+hover. Layout never animates: heights and positions change at once, and only
+opacity and transform move. Anything entering or
 responding eases out. Something already on screen moving to a new place uses
 `--ease-in-out`. Never `ease-in`, `ease` or `linear` (the shimmer is the one
 linear loop). Leave faster than you arrive. Keyboard actions, tab switches and
@@ -1133,16 +1154,23 @@ actually running. Durations and curves are tokens.
 | Modal | scale 0.97; the scrim (every scrim) fades over `--motion-standard` | `--motion-modal` 220ms | `--ease-out` |
 | Floating side panel | 8% from its edge | `--motion-slow` 280ms | `--ease-drawer` |
 | Docked side panel | its content fades in; the page makes room at once | `--motion-standard` 180ms | `--ease-out` |
-| Task head, as a panel docks | its row folds closed while it fades and lifts 6px; the title rises 6px into the top bar 60ms later, and both reverse | `--motion-slow` 280ms | `--ease-drawer` |
+| Title row in the top bar, as a reading tab's head scrolls away | 6px up while it fades in; leaves at 120ms; still when a tab opens | `--motion-standard` 180ms | `--ease-out` |
 | Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
 | Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
+| Expanding or collapsing a surface (a side panel, New task) | its old box, its children held at their size | `--motion-slow` 280ms | `--ease-drawer` |
+| A Review file shown alone, and back | its place in the list | `--motion-move` 200ms | `--ease-in-out` |
 
 Nothing animates because a tab or page was opened: a surface that is already
 there when its tab mounts (a request bar, a disclosure mounted open, the task
-head folded or open, the title in the top bar beside a docked panel) appears still. A hand-built chevron does
+head, the title row in the top bar) appears still. A hand-built chevron does
 not flip when its menu opens; the open fill says so, as on every `ActionMenu`.
+
+A size change is a FLIP transform (`expandMotion.ts`): the surface takes its new
+layout at once, its box is drawn from the old box to the new one, and its
+children are counter-scaled and pinned to the corner holding the control. Never
+animate width or height.
 
 `--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
 `cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer` `cubic-bezier(0.32, 0.72, 0, 1)`.
@@ -1468,11 +1496,16 @@ carries the hover fill and there is no separate "Open" link.
 
 **Inbox rows.** The Inbox is one list in the table container. Each row leads
 with a 28px tile: the glyph for the kind of decision (approval, question, retry,
-failure, checkout, Git, delivery, finish) on a tint of its tone; then the title
+failure, checkout, Git, review, delivery, finish) on a tint of its tone; then the title
 with what it needs beneath it — the reason in its tone ink, then one recorded
 fact, the agent's question or the command; the repository when it
 distinguishes; the age; and, for a plain command approval only, its decisions
-in place. The whole row opens the task; there is no "Open task" button.
+in place. The whole row opens the task; there is no "Open task" button. A
+finished review waits on the person in one of four words, as the board card
+says it too: Agent asked a question (an answer to a request needs their
+decision), Review failed, Fixes ready for review (the agent answered a request
+and the code changed), Needs changes. A review that finishes also says so in a
+toast, wherever the person is.
 
 **The Now panel.** A single sheet that asks the user for a step has exactly one
 raised element: the Now panel, at the top of the work column. It holds the step
@@ -1523,8 +1556,8 @@ rendered: the Now panel offers what has not happened yet.
 
 **The Review tab.** The change is read in the order that matters, with the
 reviewer's findings and the person's own comments on the code they are about.
-The page head stays folded on this tab: the title sits in the window's top bar
-and the code gets the room. Nothing on the tab explains itself in words a
+Like every working tab, Review has no page head: the title row sits in the
+window's top bar and the code gets the room. Nothing on the tab explains itself in words a
 control's icon, state or tooltip already carries.
 
 - *Toolbar* (40px). The navigator's switch (Files, with viewed progress as
@@ -1536,23 +1569,31 @@ control's icon, state or tooltip already carries.
   Committed, Uncommitted, and Since the review once something changed since the
   review, which it then leads with; never an empty scope), a View icon (By
   importance, By path; expand or collapse every file), and the review action.
-  A stale review keeps Run review again as the primary there.
+  A stale review keeps Run review again as the primary there; a finished,
+  current one offers it as an icon beside its time.
 - *Navigator* (248px on `--panel`). Files by importance: files with an open
   Blocker or Major, then code with each test right after the code it covers,
   then styles and markup, configuration, documentation, and generated files,
   collapsed. One 28px row each: the name in mono, its folder muted, a comment
   count when it has feedback, then the counts or the viewed check. Feedback
   lists every finding and comment by what happens to it: To send, Suggestions,
-  Settled.
+  Settled, and after a re-review Resolved (a check and the reviewer's note; it
+  has no place in the code to go to).
 - *Brief.* Facts before opinions: the request, what the agent reported (quoted),
-  then the review's summary. Open on the first visit to a review run; folded, it
-  is the request's first line.
+  then the review's summary. After the agent answers a request, its answer to
+  each item spans the brief under them (Fixed, Not changed, Needs your decision,
+  or No answer, then its note; the location goes to the finding or file), with
+  Reply when an item waits on the person, until the next review reads them. Open
+  on the first visit to a review run and again when new answers arrive; folded,
+  it is the request's first line.
 - *Files.* Each file is a 1px `--edge-raised` border (`--r-sm`; it collapses to
   its 36px head) with a sticky head at table-row scale and no edge of its own,
   only a `--hair` seam under it while open: the chevron and path as one toggle (⌥: every file),
   the directory muted before the name, a word only for New, Deleted or a rename,
   the open findings in words, the counts, the shared checkbox for viewed (no
-  label), and ⋯ (Comment on file, then where it opens). A viewed or generated
+  label), ⋯ (Comment on file, Show whole file, then where it opens), then Show
+  only this file: the file alone at the top of the column, the navigator
+  beside it; J/K, N/P and the navigator move the focus. A viewed or generated
   file collapses, but its open findings stay as one-line rows: Viewed never
   hides a finding.
 - *Rows.* The gutter is the line number (the old side's on a removed line),
@@ -1562,19 +1603,42 @@ control's icon, state or tooltip already carries.
   number. Pressing a number, or dragging across several, opens one comment for
   that line or range. Then the marker and code that wraps; the gutter takes the
   row's tint. Threads and comments start at the code column.
+- *Gaps.* The unchanged lines between hunks are one 28px row on `--panel`: the
+  count in words at the code column ("19 unchanged lines") and the enclosing
+  symbol in mono `--faint`. When the checkout still holds the captured file
+  (its blob is the capture's new side and every hunk line reads the same), the
+  row is the control: its label opens every hidden line, and a gap longer than
+  20 lines also opens 20 at a time from two fixed 24px steps in its gutter, up
+  from the change below and down from the change above (the file's first gap
+  opens only up, its last only down). The lines after the last hunk have a gap
+  row too. Revealed lines are ordinary context rows; the gap shrinks or goes,
+  the height changes at once, and nothing above the gap moves. The file's ⋯
+  shows the whole file and goes back with "Show changes only". When the checkout
+  no longer matches, the gaps stay words and that item is disabled with
+  "Differs from the checkout". An earlier capture never opens its gaps. The
+  review holds only changed files; any other file opens in the editor from ⋯.
 - *Findings.* A thread under the last line of its range, on `--card` with the
   `--edge-raised` ring (`--r-sm`), its severity as a word (blocker and major in
-  `--blocked-ink`), and its actions on the title line: Add to request on a Minor
-  or Nit (Blocker and Major are in by default), Ask, and Dismiss, a menu of
-  reasons (Not a problem, Acceptable as is, With a note…). A dismissed finding
-  folds to one line with Restore.
+  `--blocked-ink`), in a re-review "Still open" or "New" beside it, and its
+  actions on the title line: Add to request on a Minor or Nit (Blocker and Major
+  are in by default), Ask (opens Ask about this finding), and Dismiss, a menu of
+  reasons (Incorrect, Intentional, Won't fix now, With a note…). The next review
+  never raises an Incorrect finding again, raises an Intentional one only when
+  the code around it changed, and leaves a deferred one alone. A dismissed
+  finding folds to one line with its reason and Restore.
 - *Comments* sit on `--field` (`--r-sm`, as does the composer in the diff) with icon-only Edit and Delete; they can be written
   any time the current diff is shown and are saved with the task as written.
+  The line composer's Ask, at its left, hands the lines and the text to Ask
+  instead of the request.
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   comments"), which opens the request sheet; a note that grows to four lines;
   and one primary: Request changes when something is queued, otherwise the step
   that finishes the task. The sheet lists what goes out in send order, what is
-  left out, and the instruction, one disclosure away.
+  left out, and the instruction, one disclosure away. A request goes out
+  numbered, findings then comments; in the Agent conversation it reads as a
+  card of those items, and the agent's reply ends with its answer to each,
+  shown as a list under the reply. A review asks for changes only while an open
+  Blocker or Major would be sent.
 - *Stale.* A review goes out of date only when the diff differs from the one it
   reviewed, which the next Git snapshot decides; a follow-up or retry that
   changes nothing leaves it current, and a diff back to exactly what was
@@ -1584,10 +1648,11 @@ control's icon, state or tooltip already carries.
   Dismiss; its findings are never sent, the person's comments still are.
 - *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
   file, D dismiss, A ask, F add or take out a suggestion, C comment on the
-  chosen lines, ⌘↵ the request sheet and then send.
+  chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being read
+  alone and every file again (Escape returns).
 
-**Side panels.** An assistant panel (Ask reviewer on Review, Side question on
-Agent, Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable
+**Side panels.** An assistant panel (Ask on Overview, Agent and Review, the
+Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable
 from 320 to 560, toggled from the right end of the tab bar with the agent mark.
 It stays a separate sheet in every window that can hold it: a narrow window
 lends it less width, down to 320, before the page would drop below 560px, and
@@ -1595,39 +1660,44 @@ only below that does it float over the page, sliding in 8% with the drawer
 curve. Its resize edge is the sheet's own left edge; hover and focus draw a 2px
 line there.
 
-With a panel docked, the two sheets read as one layout: the task page keeps only
-its 48px tab bar, which shares the panel head's line and hairline, and the
-task's title moves to the window's top bar beside the back and forward arrows
-(it does the same when the title scrolls away on the Agent tab). The head folds
-rather than disappearing, so the tab bar glides up into the shared line. The panel's
+With a panel docked, the two sheets read as one layout: the task page's tab bar,
+the first line of its sheet on every working tab, shares the panel head's line
+and hairline. The title is already in the window's top bar, so docking or
+closing a panel moves nothing above the tab bar. The panel's
 content keeps a 16px inset; its composer has the main composer's height and
 ends 16px above the sheet, as the main composer and the Review foot do,
 so every input box shares one bottom line. Its head is
-48px: mark, name, the runtime that answers, close. Escape closes it and focus
+48px: mark, name, the runtime that answers, Expand, Close. Expanded, the panel
+covers the task page and its tab bar as one sheet, its thread in the Agent
+tab's 760 column, while the page underneath keeps its layout; closing ends it. Escape closes it and focus
 returns to the toggle. An empty panel shows its composer, and the placeholder names what to ask; each
 answer it can act on carries that action under it ("Use in
 follow-up"). The Preview renders its agent into the sheet's slot; a Preview
 shown without a task page (a repository Design) keeps its own toggle and opens
 the same panel as a floating sheet over itself.
 
-A side question goes to the model chosen in the panel's composer (the task's
-own until another is picked; any enabled runtime) in a fresh read-only session,
-so the implementation keeps working; while it works, the question reads a
-snapshot taken when it was asked. In a narrow composer the model and effort chips
-show as their marks alone (a brain, a gauge), each named in a tooltip. Closing the panel ends the thread and
-removes the snapshot. Nothing reaches the main conversation unless the user
-uses an answer in a follow-up, which puts it in the composer under the question
-it answers.
+The agent is the only conversation; the reviewer is a read-only reporter, not a
+chat. Ask is the one read-only place for questions about the task. A question
+goes to the model chosen in the panel's composer (the task's own until another
+is picked) in a fresh read-only session that also reads the current review, so
+the implementation keeps working; while it works, the question reads a snapshot
+taken when it was asked. A question can be about a finding or lines of the diff:
+their title or location shows above the field with a control that clears it,
+and above the question once asked. In a narrow composer the model and effort
+chips show as their marks alone (a brain, a gauge), each named in a tooltip.
+Closing the panel ends the thread and removes the snapshot. Nothing reaches the
+agent unless the person uses an answer: "Use in follow-up" puts it in the
+composer under the question it answers; on Review, "Add to request" adds it to
+the request's note.
 
 **Before the first run, the Agent tab is one composer**, centred in the tab: the
 prompt, saved attachments, and the toolbar with model and access chips and the
 step (Prepare worktree or Start). Starting saves the prompt; there is no
 separate save. New task uses the same chips in its description's toolbar.
 
-On the Agent tab the page head rides above the conversation: its title and
-lifecycle slide away over `--motion-slow` with `--ease-drawer` once the first message has passed
-beneath and the reader keeps scrolling down, and return the same way on the way up;
-the tab bar stays pinned. Only keyboard focus inside the head holds it.
+On the Agent tab the conversation starts under the tab bar, which stays pinned
+while it scrolls; the title row is in the window's top bar, and nothing slides
+away.
 
 A list-detail workspace (Designs, New Design, Discourse) has a 48px head: the
 panel toggle, a 15/500 title with its state beside it on the same line, then the

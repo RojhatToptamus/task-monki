@@ -525,6 +525,12 @@ export function reduceProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'REVIEW_REQUEST_ANSWERED':
+      return {
+        ...base,
+        agentReview: reduceAgentReview(base.agentReview, event, run),
+        updatedAt: event.receivedAt
+      };
     case 'DELIVERY_COMMIT_CREATED':
       return {
         ...base,
@@ -1008,7 +1014,10 @@ function reduceAgentReview(
       // no implementation run to belong to, so it becomes earlier context.
       const startedMode = (run?.mode ?? eventMode) as RunRecord['mode'] | undefined;
       if (startedMode && isImplementationRunMode(startedMode)) {
-        return base;
+        // The person replied to the agent, so its answer no longer waits on them.
+        if (!base.requestAnswer) return base;
+        const { requestAnswer: _answered, ...rest } = base;
+        return rest;
       }
       if (base.status !== 'NOT_RUN' && base.status !== 'RUNNING') {
         return {
@@ -1122,6 +1131,16 @@ function reduceAgentReview(
         return base;
       }
       return { ...base, findingDecisions: [...decisions, decision] };
+    }
+    // The agent's reply to the request after this review settled.
+    case 'REVIEW_REQUEST_ANSWERED': {
+      const runId = event.runId;
+      const answered = getNumber(event.payload, 'answered');
+      const needsDecision = getNumber(event.payload, 'needsDecision');
+      if (!runId || base.runId !== getString(event.payload, 'reviewRunId') || answered === undefined || needsDecision === undefined) {
+        return base;
+      }
+      return { ...base, requestAnswer: { runId, answered, needsDecision }, updatedAt: event.receivedAt };
     }
     // Committing the reviewed changes moves the reviewed state to the new commit;
     // the clean tree's fingerprint keeps edits made after it counting.

@@ -224,3 +224,13 @@
 @media (max-width: 1100px) {
   .tm-review { --review-index-width: 208px; }
 }
+
+/* The agent's answers to the last request span the brief, under what was asked and reported. */
+.tm-review-brief__round { grid-column: 1 / -1; gap: 6px; }
+.tm-review-brief__round .tm-review-brief__label .ghost-button { margin-left: auto; }
+/* A re-review marks an earlier finding still open, or a new one, beside its severity. */
+.tm-review-thread__round { color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
+.tm-review__index-finding--resolved { cursor: default; }
+.tm-review__index-finding--resolved:hover { background-color: transparent; color: var(--text-soft); }
+.tm-review__index-finding--resolved > svg { justify-self: start; color: var(--verified-ink); }
+.tm-review__index-note { grid-column: 2; color: var(--faint); font-size: var(--t-meta); line-height: var(--lh-meta); }

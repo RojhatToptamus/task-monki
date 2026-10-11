@@ -7436,7 +7436,8 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         runId: review?.runId,
         hasResult: Boolean(review?.result),
         findingCounts,
-        effectiveStatus: effectiveReviewGateStatus(review)
+        effectiveStatus: effectiveReviewGateStatus(review),
+        ...(review?.requestAnswer ? { requestAnswered: { awaitingDecision: review.requestAnswer.needsDecision > 0 } } : {})
       }
     }
   };

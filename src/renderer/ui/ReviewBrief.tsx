@@ -1,5 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
+import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer } from '../../shared/contracts';
+import { ReviewAnswers } from './ReviewRound';
 
 export interface ReviewBriefContent {
   /** The task as asked. */
@@ -8,6 +10,14 @@ export interface ReviewBriefContent {
   report?: { author: string; text: string };
   /** The reviewer's summary, quoted; the author names the runtime and model, one fact each. */
   reviewer?: { author: string[]; summary?: string };
+  /** The agent's answers to the person's last request, until the next review reads them. */
+  round?: {
+    request: ReviewRequestRecord;
+    answers: readonly ReviewResponseAnswer[];
+    onShowItem?(item: ReviewRequestItem): void;
+    /** Present when an answer waits on the person's decision. */
+    onReply?(): void;
+  };
 }
 
 /**
@@ -21,7 +31,7 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
   onFoldedChange(folded: boolean): void;
 }) {
   const bodyId = useId();
-  const { asked, report, reviewer } = content;
+  const { asked, report, reviewer, round } = content;
   return (
     <section className="tm-review-brief" aria-label="Brief" data-folded={folded ? '' : undefined}>
       <button
@@ -51,6 +61,15 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
             <BriefBlock label="Review" meta={reviewer.author}>
               <ClampedText lines={2} className="tm-review-brief__quote">{reviewer.summary}</ClampedText>
             </BriefBlock>
+          ) : null}
+          {round ? (
+            <div className="tm-review-brief__block tm-review-brief__round">
+              <h3 className="tm-review-brief__label">
+                Answers to your request
+                {round.onReply ? <button type="button" className="ghost-button button--sm" onClick={round.onReply}>Reply</button> : null}
+              </h3>
+              <ReviewAnswers request={round.request} answers={round.answers} onShowItem={round.onShowItem} />
+            </div>
           ) : null}
         </div>
       )}

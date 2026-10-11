@@ -142,6 +142,27 @@ function turnWith(key: string, count: number): SessionTurn {
   })) };
 }
 
+describe('review rounds in the conversation', () => {
+  it('opens with the request and takes the answers out of the reply', () => {
+    const run = makeRunRecord({ id: 'fix', mode: 'FOLLOW_UP', status: 'COMPLETED' });
+    const reviewRequest = {
+      reviewRunId: 'review-1',
+      items: [{ number: 1, kind: 'FINDING' as const, findingId: 'leak', severity: 'MAJOR' as const, title: 'Listener leaks' }]
+    };
+    const sent = instruction({ id: 'request', runId: 'fix', mode: 'FOLLOW_UP', text: 'Address the review.', reviewRequest });
+    const reply = makeAgentItemRecord({ id: 'reply', runId: 'fix', payload: {
+      text: 'Removed the listener.\n```task-monki-review-response\n[{"item": 1, "outcome": "FIXED"}]\n```'
+    } });
+
+    const turn = sessionTurn(run, [reply], [sent]);
+    expect(turn.opener).toMatchObject({ kind: 'prompt', reviewRequest });
+    expect(turn.entries).toEqual([expect.objectContaining({ kind: 'message', text: 'Removed the listener.', answers: [{ item: 1, outcome: 'FIXED' }] })]);
+    expect(turn.answer).toBe('Removed the listener.');
+    // A reply that is not to a request keeps its text as written.
+    expect(sessionTurn(run, [reply], [{ ...sent, reviewRequest: undefined }]).entries[0]).toMatchObject({ text: expect.stringContaining('task-monki-review-response') });
+  });
+});
+
 function instruction(overrides: Partial<TaskInstruction>): TaskInstruction {
   return {
     id: 'instruction-1', taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sourceRunId: 'run-1',

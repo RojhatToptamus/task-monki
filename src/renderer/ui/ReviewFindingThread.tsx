@@ -40,9 +40,11 @@ export function settledLabel(finding: ReviewFindingView): string {
  * dismissed or withdrawn finding folds to a line that keeps the reason.
  */
 export function ReviewFindingThread({
-  finding, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
+  finding, round, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
 }: {
   finding: ReviewFindingView;
+  /** In a re-review: an earlier finding still open, or one the earlier review did not raise. */
+  round?: 'STILL_OPEN' | 'NEW';
   focused: boolean;
   actionable: boolean;
   inRequest: boolean;
@@ -104,6 +106,7 @@ export function ReviewFindingThread({
     >
       <header className="tm-review-thread__head">
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
+        {round ? <span className="tm-review-thread__round">{round === 'STILL_OPEN' ? 'Still open' : 'New'}</span> : null}
         <strong>{finding.title}</strong>
         {actionable ? (
           <span className="tm-review-thread__actions">

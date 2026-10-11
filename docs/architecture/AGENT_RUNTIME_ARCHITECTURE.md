@@ -177,9 +177,8 @@ attention, delivery, or in-flight state, and the renderer keeps them out of the
 main conversation.
 
 - `REVIEW_QUESTION` (purpose `TASK_REVIEW_QUESTION`, session role `REVIEW`)
-  answers a question about one review on the reviewing runtime. The answer may
-  end with a `task-monki-revisions` block; the reducer turns each valid entry
-  into an `AGENT_REVIEW_FINDING_DECIDED` event with actor `REVIEWER`.
+  is the retired reviewer conversation. Nothing starts one; a stored run settles
+  as it ran, and reviewer decisions it recorded still apply.
 - `SIDE_QUESTION` (purpose `TASK_SIDE_QUESTION`, session role `SIDE`) answers a
   question about the task on the runtime and model the request names (the task's
   own when it names none), always read-only, one at a time per task.

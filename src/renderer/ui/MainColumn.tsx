@@ -11,6 +11,7 @@ import {
   GitPullRequest,
   GitPullRequestClosed,
   GitPullRequestDraft,
+  ListChecks,
   RotateCcw,
   ShieldQuestionMark,
   type LucideIcon
@@ -724,6 +725,7 @@ const ATTENTION_ICONS: Record<TaskAttentionKind, LucideIcon> = {
   failure: CircleX,
   checkout: FolderX,
   git: GitBranch,
+  review: ListChecks,
   delivery: GitPullRequest,
   finish: CircleCheck
 };

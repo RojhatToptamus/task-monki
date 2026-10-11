@@ -4794,7 +4794,35 @@ export class TaskManagerService {
     );
     if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
       await this.reconcileImplementationOutcome(run, snapshot);
+      await this.recordReviewRequestAnswer(run);
     }
+  }
+
+  /** A finished reply to a review request: how many items the agent answered, and how many wait on the person. */
+  private async recordReviewRequestAnswer(run: RunRecord): Promise<void> {
+    const detail = await this.store.getTaskDetail(run.taskId);
+    const request = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest)?.reviewRequest;
+    if (!request?.reviewRunId) return;
+    const completed = detail.runs.find((candidate) => candidate.id === run.id) ?? run;
+    const reply = completed.finalMessage?.trim() ||
+      (completed.finalArtifactId ? await this.agentRuntimeStore.readArtifact(completed.finalArtifactId).catch(() => '') : '');
+    const { answers } = parseReviewResponse(reply, request);
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'REVIEW_REQUEST_ANSWERED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: {
+          reviewRunId: request.reviewRunId,
+          answered: answers.length,
+          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length
+        }
+      })
+    );
   }
 
   private async reconcileImplementationOutcome(

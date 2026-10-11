@@ -122,6 +122,40 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     window.localStorage.clear();
   });
 
+  it('shows the agent\'s answers to the last request and a re-review\'s resolved, still-open and new findings', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const onReply = vi.fn();
+    render(<Harness
+      findings={[{ ...finding, previousFindingId: 'old-leak' }, suggestion]}
+      resolvedFindings={[{ previousFindingId: 'naming', title: 'Unclear name', note: 'Renamed.' }]}
+      brief={{
+        asked: 'Rate-limit the API.',
+        round: {
+          key: 'request-1',
+          request: { reviewRunId: 'review-1', items: [
+            { number: 1, kind: 'FINDING', findingId: 'f1', severity: 'MAJOR', title: 'Limiter state is per process', path: 'src/rateLimit.ts', line: 1 },
+            { number: 2, kind: 'COMMENT', path: 'src/rateLimit.ts', side: 'NEW', line: 1, text: 'Which window?' }
+          ] },
+          answers: [{ item: 1, outcome: 'FIXED', note: 'Moved to Redis.' }, { item: 2, outcome: 'NEEDS_DECISION', note: 'One minute or five?' }],
+          onReply
+        }
+      }}
+    />);
+
+    const answers = await screen.findByRole('list', { name: 'Answers to the review request' });
+    expect(within(answers).getByText('Fixed')).toBeDefined();
+    expect(within(answers).getByText('Moved to Redis.')).toBeDefined();
+    expect(within(answers).getByText('Needs your decision')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    expect(onReply).toHaveBeenCalled();
+
+    const thread = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
+    expect(within(thread).getByText('Still open')).toBeDefined();
+    expect(within(screen.getByRole('article', { name: 'Minor finding: Name the limit' })).getByText('New')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
+    expect(within(screen.getByRole('navigation', { name: 'Feedback' })).getByText('Unclear name')).toBeDefined();
+  });
+
   it('shows a finding under its line and dismisses it with a reason, or a reason and a note', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     const onDismiss = vi.fn(async () => undefined);

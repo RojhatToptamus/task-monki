@@ -78,6 +78,7 @@ import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
+import { answeredReviewRound } from '../model/reviewRounds';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import {
   findCompletedCurrentImplementationRun,
@@ -610,6 +611,7 @@ export function TaskDetail(props: TaskDetailProps) {
   });
   const overviewPreview = progressTurn ? conversationPreview(progressTurn) : undefined;
   const resultReport = progressTurn ? conversationAnswer(progressTurn) : undefined;
+  const reviewRound = answeredReviewRound(progressTurn);
   const evidenceGitSnapshot = evidenceGitSnapshotId
     ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId)
     : gitSnapshot;
@@ -1830,6 +1832,16 @@ export function TaskDetail(props: TaskDetailProps) {
               reviewer: reviewGate.status !== 'NOT_RUN' ? {
                 author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter((part): part is string => Boolean(part)),
                 summary: reviewGate.result?.summary ?? reviewGate.summary
+              } : undefined,
+              // The answers to the last request stay until the next review reads them.
+              round: reviewRound && reviewRound.request.reviewRunId === reviewGate.runId ? {
+                key: reviewRound.key,
+                request: reviewRound.request,
+                answers: reviewRound.answers,
+                onReply: reviewRound.answers.some((answer) => answer.outcome === 'NEEDS_DECISION') ? () => {
+                  setTab('agent');
+                  requestAnimationFrame(() => document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true }));
+                } : undefined
               } : undefined
             }}
             draft={props.reviewDraft}
@@ -1868,6 +1880,7 @@ export function TaskDetail(props: TaskDetailProps) {
             }) : undefined}
             onAskAboutFinding={askAvailable && reviewGate.runId ? (findingId) => openAsk({ kind: 'FINDING', reviewRunId: reviewGate.runId!, findingId }) : undefined}
             onAskAboutLines={askAvailable ? (lines, text) => openAsk({ kind: 'LINES', ...lines }, text) : undefined}
+            resolvedFindings={reviewIsCurrent ? reviewGate.result?.resolvedFindings : undefined}
             runReview={hasActionableReviewSource && reviewGate.status !== 'RUNNING' ? {
               label: reviewGate.status === 'NOT_RUN' ? 'Run review' : 'Run review again',
               disabledReason: reviewActionsPaused ? reviewActionPauseTitle : undefined,

@@ -1,5 +1,8 @@
 import {
+  effectiveReviewGateStatus,
   getImplementationRetryReason,
+  type AgentReviewGateProjection,
+  type BoardAgentReviewSummary,
   type BoardTaskSummary,
   type Task
 } from '../../shared/contracts';
@@ -10,7 +13,7 @@ export type TaskAttentionSource = Task | BoardTaskSummary;
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
 /** What the user is asked for, so a surface can mark it with one glyph. */
-export type TaskAttentionKind = 'approval' | 'question' | 'retry' | 'failure' | 'checkout' | 'git' | 'delivery' | 'finish';
+export type TaskAttentionKind = 'approval' | 'question' | 'retry' | 'failure' | 'checkout' | 'git' | 'review' | 'delivery' | 'finish';
 
 export interface TaskAttentionDescriptor {
   label: string;
@@ -87,6 +90,11 @@ export function describeTaskAttention(
     return gitAttention;
   }
 
+  const reviewAttention = describeReviewAttention(task);
+  if (reviewAttention) {
+    return reviewAttention;
+  }
+
   const deliveryAttention = describeDeliveryAttention(task);
   if (deliveryAttention) {
     return deliveryAttention;
@@ -127,6 +135,40 @@ function describeGitAttention(
       return { label: 'Git conflicts', kind: 'git', tone: 'error' };
     case 'UNAVAILABLE':
       return { label: 'Git unavailable', kind: 'git', tone: 'error' };
+  }
+  return undefined;
+}
+
+/**
+ * A finished review the person acts on: the agent's question about a request, a
+ * failed review, fixes to review again, or findings to decide. Auto re-review is
+ * off, so each waits on the person; a review or run in flight waits on nobody.
+ */
+function describeReviewAttention(
+  task: TaskAttentionSource
+): TaskAttentionDescriptor | undefined {
+  if (!['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) || IN_FLIGHT_RUNS.has(task.projection.agentRun)) {
+    return undefined;
+  }
+  // A board summary carries the review's facts; a full task carries the gate they come from.
+  const review = task.projection.agentReview as Partial<AgentReviewGateProjection & BoardAgentReviewSummary> | undefined;
+  if (!review?.status || review.status === 'NOT_RUN' || review.status === 'RUNNING') {
+    return undefined;
+  }
+  const answered = review.requestAnswered ??
+    (review.requestAnswer ? { awaitingDecision: review.requestAnswer.needsDecision > 0 } : undefined);
+  if (answered?.awaitingDecision) {
+    return { label: 'Agent asked a question', kind: 'question', tone: 'warning' };
+  }
+  if (review.status === 'FAILED') {
+    return { label: 'Review failed', kind: 'failure', tone: 'error' };
+  }
+  if (answered && review.status === 'STALE') {
+    return { label: 'Fixes ready for review', kind: 'review', tone: 'info' };
+  }
+  const effective = review.effectiveStatus ?? effectiveReviewGateStatus(review as AgentReviewGateProjection);
+  if (effective === 'NEEDS_CHANGES') {
+    return { label: 'Needs changes', kind: 'review', tone: 'warning' };
   }
   return undefined;
 }

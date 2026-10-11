@@ -143,6 +143,32 @@ describe('describeTaskAttention', () => {
     });
   });
 
+  it('asks for the person on a finished review: a question, a failure, fixes to review again, or findings to decide', () => {
+    const reviewed = (agentReview: object, agentRun: 'COMPLETED' | 'RUNNING' = 'COMPLETED') => makeTaskRecord({
+      workflowPhase: 'REVIEW',
+      projection: { agentRun, agentReview: { runId: 'review-1', ...agentReview } as never }
+    });
+    const blocking = { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'One leak.',
+      findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'Never removed.' }] };
+
+    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { runId: 'run-2', answered: 2, needsDecision: 1 } })))
+      .toEqual({ label: 'Agent asked a question', kind: 'question', tone: 'warning' });
+    expect(describeTaskAttention(reviewed({ status: 'FAILED' }))).toEqual({ label: 'Review failed', kind: 'failure', tone: 'error' });
+    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { runId: 'run-2', answered: 2, needsDecision: 0 } })))
+      .toEqual({ label: 'Fixes ready for review', kind: 'review', tone: 'info' });
+    expect(describeTaskAttention(reviewed({ status: 'NEEDS_CHANGES', result: blocking })))
+      .toEqual({ label: 'Needs changes', kind: 'review', tone: 'warning' });
+    // A board summary carries the same facts without the review result.
+    expect(describeTaskAttention({ ...makeTaskRecord({ workflowPhase: 'REVIEW' }), projection: {
+      ...makeTaskRecord().projection, agentRun: 'COMPLETED',
+      agentReview: { status: 'STALE', hasResult: true, findingCounts: {}, requestAnswered: { awaitingDecision: true } }
+    } } as never)).toMatchObject({ label: 'Agent asked a question' });
+    // Work in flight, a passed review and a stale one nobody answered wait on nobody.
+    expect(describeTaskAttention(reviewed({ status: 'NEEDS_CHANGES', result: blocking }, 'RUNNING'))).toBeUndefined();
+    expect(describeTaskAttention(reviewed({ status: 'PASSED' }))).toBeUndefined();
+    expect(describeTaskAttention(reviewed({ status: 'STALE' }))).toBeUndefined();
+  });
+
   it('never asks for attention on finished tasks', () => {
     for (const workflowPhase of ['DONE', 'CANCELED', 'ARCHIVED'] as const) {
       expect(describeTaskAttention(makeTaskRecord({

@@ -305,6 +305,7 @@ export const DOMAIN_EVENT_TYPES = [
   'WORKTREE_FAILED',
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
+  'REVIEW_REQUEST_ANSWERED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
   'GITHUB_PREFLIGHT_COMPLETED',
@@ -955,6 +956,8 @@ export interface BoardAgentReviewSummary {
    * which can differ from `status` both ways. Task Monki always sets it.
    */
   effectiveStatus?: AgentReviewGateStatus;
+  /** The agent answered the request after this review; true when an item waits on the person's decision. */
+  requestAnswered?: { awaitingDecision: boolean };
 }
 
 export type BoardStatusProjection = Pick<

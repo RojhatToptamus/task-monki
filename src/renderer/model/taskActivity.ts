@@ -309,6 +309,17 @@ function itemForEvent(
         'action'
       );
     }
+    case 'REVIEW_REQUEST_ANSWERED': {
+      const waiting = typeof payload.needsDecision === 'number' ? payload.needsDecision : 0;
+      return item(
+        event,
+        'review',
+        'Agent',
+        waiting > 0 ? 'Agent asked for your decision' : 'Agent answered your request',
+        fact(waiting > 0 ? `${waiting} item${waiting === 1 ? '' : 's'} wait on you` : undefined),
+        waiting > 0 ? 'action' : 'info'
+      );
+    }
     case 'GIT_SNAPSHOT_CAPTURED':
       return gitSnapshotItem(event, payload, state);
     case 'DELIVERY_COMMIT_CREATED':

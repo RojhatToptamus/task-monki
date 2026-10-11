@@ -1,4 +1,4 @@
-import type { AgentItemRecord, AgentPlanRevisionRecord, AgentReviewGateProjection, RunRecord, TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
+import { parseReviewResponse, type AgentItemRecord, type AgentPlanRevisionRecord, type AgentReviewGateProjection, type ReviewRequestRecord, type ReviewResponseAnswer, type RunRecord, type TaskInstruction, type InteractionRequestRecord } from '../../shared/contracts';
 import { buildRunActivityProjection } from './runActivity';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
 
@@ -7,7 +7,8 @@ export type SessionStep =
   | { key: string; at: string; kind: 'reasoning'; text: string; seconds?: number; active: boolean };
 
 export type SessionEntry =
-  | { key: string; at: string; kind: 'message'; author: 'You' | 'Agent'; text: string; status?: string }
+  /** An agent message replying to a review request carries its answers, taken out of its text. */
+  | { key: string; at: string; kind: 'message'; author: 'You' | 'Agent'; text: string; status?: string; answers?: ReviewResponseAnswer[] }
   | { key: string; at: string; kind: 'steps'; steps: SessionStep[] }
   | { key: string; at: string; kind: 'interaction'; interaction: InteractionRequestRecord }
   | { key: string; at: string; kind: 'plan'; plan: AgentPlanRevisionRecord };
@@ -15,7 +16,8 @@ export type SessionEntry =
 export type SessionTurnState = 'active' | 'completed' | 'stopped' | 'failed' | 'interrupted';
 
 export type SessionTurnOpener =
-  | { kind: 'prompt'; key: string; text: string; at: string }
+  /** A follow-up sent from the Review tab carries its request item by item. */
+  | { kind: 'prompt'; key: string; text: string; at: string; reviewRequest?: ReviewRequestRecord }
   | { kind: 'marker'; key: string; label: string; at: string };
 
 export interface SessionTurn {
@@ -45,14 +47,15 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
   const runInstructions = instructions.filter((item) => item.runId === run.id);
   const authored = runInstructions.find((item) => item.mode !== 'STEER');
   const opener: SessionTurnOpener | undefined = authored
-    ? { kind: 'prompt', key: authored.id, text: authored.text, at: run.startedAt }
+    ? { kind: 'prompt', key: authored.id, text: authored.text, at: run.startedAt, ...(authored.reviewRequest ? { reviewRequest: authored.reviewRequest } : {}) }
     : options.prompt !== undefined ? { kind: 'prompt', key: `${run.id}:prompt`, text: options.prompt, at: run.startedAt }
     : run.mode === 'RETRY' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Retried', at: run.startedAt }
     : run.mode === 'FOLLOW_UP' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Continued', at: run.startedAt }
     : undefined;
   // A review is a detached gate; its findings belong to the review surface.
-  const entries = run.mode === 'REVIEW' ? []
+  const steps = run.mode === 'REVIEW' ? []
     : sessionEntries(run, items, runInstructions.filter((item) => item.mode === 'STEER'), options.cwd, options.plans, options.interactions);
+  const entries = authored?.reviewRequest ? withReviewAnswers(steps, authored.reviewRequest) : steps;
   const state = turnState(run);
   const end = run.endedAt ?? (state === 'active' ? undefined : run.lastEventAt);
   const durationMs = end ? Date.parse(end) - Date.parse(run.startedAt) : undefined;
@@ -62,6 +65,17 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
   return { key: run.id, run, opener, entries, state,
     durationMs: durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined,
     answer: answer?.kind === 'message' ? answer.text : undefined };
+}
+
+/** The agent's answers to a review request leave its prose and travel with the message as data. */
+function withReviewAnswers(entries: SessionEntry[], request: ReviewRequestRecord): SessionEntry[] {
+  return entries.flatMap((entry) => {
+    if (entry.kind !== 'message' || entry.author !== 'Agent') return [entry];
+    const { prose, answers } = parseReviewResponse(entry.text, request);
+    if (prose === entry.text) return [entry];
+    if (!prose && answers.length === 0) return [];
+    return [{ ...entry, text: prose, ...(answers.length > 0 ? { answers } : {}) }];
+  });
 }
 
 export function sessionEntries(run: RunRecord, items: AgentItemRecord[], steers: TaskInstruction[], cwd?: string, plans: AgentPlanRevisionRecord[] = [], interactions: InteractionRequestRecord[] = []): SessionEntry[] {

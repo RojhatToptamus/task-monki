@@ -200,9 +200,15 @@ SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding
 decisions (`AgentReviewGateProjection.findingDecisions`), the `REVIEW` message
 role with `reviewRunId` and `findingId`, and the `REVIEW_QUESTION` run mode.
-Schema 30 adds the `SIDE` message role with `threadId`, `snapshotTakenAt` and
-`snapshotOmittedFileCount`, the `SIDE_QUESTION` run mode, the `SIDE` session
-role, and the `WORKTREE_SNAPSHOT` read-root kind. Older stores load unchanged:
+Schema 30 adds the `SIDE` message role with `threadId`, `snapshotTakenAt`,
+`snapshotOmittedFileCount` and an optional Ask `subject` (a finding or lines),
+the `SIDE_QUESTION` run mode, the `SIDE` session role, and the
+`WORKTREE_SNAPSHOT` read-root kind. It also carries review rounds: a follow-up
+message's `reviewRequest`, the `REVIEW_REQUEST_ANSWERED` event and the review
+gate's `requestAnswer`, a review result's `resolvedFindings` and findings'
+`previousFindingId`, and the `DEFERRED` dismissal reason. The reviewer
+conversation is retired: nothing writes `REVIEW` messages or `REVIEW_QUESTION`
+runs any more, and stored ones still load. Older stores load unchanged:
 every new field is optional. A side question's snapshot is not durable state;
 it is owned by `ReadOnlySnapshotService` and swept at startup.
 

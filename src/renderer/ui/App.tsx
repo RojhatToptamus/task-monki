@@ -27,6 +27,7 @@ import {
   type DesignDetailSnapshot,
   type DesignDraftRecord,
   type DesignListItem,
+  type BoardTaskSummary,
   type ExternalToolStatusReport,
   type InteractionRequestRecord,
   type Repository,
@@ -189,6 +190,18 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
+
+/** What a finished review says in a notice; a stopped review was the person's own doing. */
+function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
+  const title = task.title.length > 60 ? `${task.title.slice(0, 59).trimEnd()}…` : task.title;
+  switch (task.projection.agentReview.effectiveStatus ?? task.projection.agentReview.status) {
+    case 'PASSED': return { message: `Review passed for ${title}`, tone: 'success' };
+    case 'NEEDS_CHANGES': return { message: `Review of ${title} needs changes`, tone: 'info' };
+    case 'INCONCLUSIVE': return { message: `Review of ${title} was inconclusive`, tone: 'info' };
+    case 'FAILED': return { message: `Review of ${title} failed`, tone: 'error' };
+    default: return undefined;
+  }
+}
 
 // Stable writers, so each draft store keeps one in-flight save per task.
 const saveAgentDraftText = (taskId: string, text: string) => taskManagerApi.saveTaskAgentDraft({ taskId, text });
@@ -1486,6 +1499,19 @@ export function App() {
       void updateAppSettings({ selectedRepositoryId: activeRepositoryId });
     }
   }, [activeRepositoryId, selectedRepositoryId, updateAppSettings]);
+
+  // A review that finishes says so wherever the person is; the Inbox keeps what it asks of them.
+  const reviewStatusesRef = useRef<Map<string, string> | undefined>(undefined);
+  useEffect(() => {
+    const previous = reviewStatusesRef.current;
+    reviewStatusesRef.current = new Map(snapshot.tasks.map((task) => [task.id, task.projection.agentReview.status]));
+    if (!previous) return;
+    for (const task of snapshot.tasks) {
+      if (previous.get(task.id) !== 'RUNNING') continue;
+      const notice = reviewFinishedNotice(task);
+      if (notice) notify(notice.message, notice.tone);
+    }
+  }, [snapshot.tasks, notify]);
 
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
   const selectedTask =

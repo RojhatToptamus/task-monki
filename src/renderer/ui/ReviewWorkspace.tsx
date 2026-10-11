@@ -5,7 +5,9 @@ import type {
   ArtifactRecord,
   OpenTargetRef,
   ReviewComment,
+  AgentReviewResolvedFinding,
   ReviewFindingDismissReason,
+  ReviewRequestItem,
   TaskReviewDraft,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -58,7 +60,8 @@ export interface ReviewWorkspaceProps {
   /** Imported work compares against a chosen base; the menu can change it. */
   comparison?: { label: string; onChange(): void; disabledReason?: string };
   /** What was asked, what the agent reported, and the reviewer's summary. */
-  brief?: Omit<ReviewBriefContent, 'scope'>;
+  /** The brief; its round, keyed by the request it answers, takes its links from the workspace. */
+  brief?: Omit<ReviewBriefContent, 'round'> & { round?: Omit<NonNullable<ReviewBriefContent['round']>, 'onShowItem'> & { key: string } };
   /** The person's unsent review, saved with the task as it changes. */
   draft: TaskReviewDraft;
   onDraftChange(draft: TaskReviewDraft): void;
@@ -75,6 +78,8 @@ export interface ReviewWorkspaceProps {
   onDismissFinding?(findingId: string, reason: ReviewFindingDismissReason, note?: string): Promise<void>;
   onRestoreFinding?(findingId: string): Promise<void>;
   onAskAboutFinding?(findingId: string): void;
+  /** A re-review's earlier findings that the code now resolves. */
+  resolvedFindings?: readonly AgentReviewResolvedFinding[];
   /** Hands the selected lines, and what was typed about them, to Ask instead of the request. */
   onAskAboutLines?(lines: { path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }, text: string): void;
   /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
@@ -197,7 +202,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [selection, setSelection] = useState<LineSelection>();
   const [commentDraft, setCommentDraft] = useState<CommentDraft>();
   const [sheetOpen, setSheetOpen] = useState(false);
-  const briefRound = review?.runId ?? 'none';
+  // The brief's fold is kept per review, and opens again when new answers arrive.
+  const briefRound = `${review?.runId ?? 'none'}${props.brief?.round ? `:${props.brief.round.key}` : ''}`;
   const [briefFolded, setBriefFolded] = useState(() => readBriefFolded(props.taskId, briefRound));
   const [pathMenu, setPathMenu] = useState<{ target: OpenTargetRef; position: { x: number; y: number } }>();
   const closePathMenu = useCallback(() => setPathMenu(undefined), []);
@@ -440,14 +446,25 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const headline = reviewHeadline(review?.status, openFindings.length, review?.working);
   // A review that finished and still matches the code needs no call to run again.
   const rerunSettled = Boolean(review && !review.working && (review.status === 'PASSED' || review.status === 'NEEDS_CHANGES' || review.status === 'INCONCLUSIVE'));
-  const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer) && !props.historical
-    ? props.brief
+  // An answered item shows where it is: its finding when the review still has it, else its file.
+  const showRequestItem = (item: ReviewRequestItem) => {
+    if (item.kind === 'FINDING' && findings.some((finding) => finding.id === item.findingId)) { scrollToFinding(item.findingId); return; }
+    const entry = item.path ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(item.path!)) : undefined;
+    if (!entry) return;
+    if (isCollapsed(entry)) expand(entry.file.id);
+    scrollToFile(entry.file.id);
+  };
+  const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical
+    ? { ...props.brief, ...(props.brief.round ? { round: { ...props.brief.round, onShowItem: showRequestItem } } : {}) }
     : undefined;
 
+  // A re-review says which findings are earlier ones still open and which are new.
+  const reReview = Boolean(props.resolvedFindings?.length || findings.some((finding) => finding.previousFindingId));
   const renderThreads = (items: ReviewFindingView[] | undefined) => items?.map((finding) => (
     <ReviewFindingThread
       key={finding.id}
       finding={finding}
+      round={finding.previousFindingId ? 'STILL_OPEN' : reReview ? 'NEW' : undefined}
       focused={focusedFindingId === finding.id}
       actionable={findingsActionable}
       inRequest={included.has(finding.id)}
@@ -656,6 +673,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               findingsSendable={props.findingsSendable}
               findings={findings}
               comments={draft.comments}
+              resolved={props.resolvedFindings ?? []}
               focusedFindingId={focusedFindingId}
               onShowFinding={scrollToFinding}
               onShowComment={scrollToComment}
@@ -924,11 +942,12 @@ function FileMenu({ path, target, onComment, onError }: {
  * request, offered as a suggestion, or settled. A finding of an out-of-date
  * review is only context, so those are listed apart.
  */
-function FeedbackList({ plan, findingsSendable, findings, comments, focusedFindingId, onShowFinding, onShowComment }: {
+function FeedbackList({ plan, findingsSendable, findings, comments, resolved, focusedFindingId, onShowFinding, onShowComment }: {
   plan: ReviewRequestPlan;
   findingsSendable: boolean;
   findings: readonly ReviewFindingView[];
   comments: readonly ReviewComment[];
+  resolved: readonly AgentReviewResolvedFinding[];
   focusedFindingId?: string;
   onShowFinding(findingId: string): void;
   onShowComment(commentId: string): void;
@@ -953,11 +972,20 @@ function FeedbackList({ plan, findingsSendable, findings, comments, focusedFindi
       <span className="tm-review__index-loc">{formatCommentLocation(comment)}</span>
     </button>
   );
+  // A resolved finding is no longer in the code, so it has nowhere to go to.
+  const resolvedRow = (finding: AgentReviewResolvedFinding) => (
+    <div key={finding.previousFindingId} className="tm-review__index-finding tm-review__index-finding--resolved">
+      <Check size={13} aria-hidden="true" />
+      <span className="tm-review__index-title">{finding.title}</span>
+      {finding.note ? <span className="tm-review__index-note">{finding.note}</span> : null}
+    </div>
+  );
   const groups: Array<{ label: string; rows: ReactElement[] }> = findingsSendable
     ? [
       { label: 'To send', rows: [...plan.send.map((finding) => findingRow(finding)), ...comments.map(commentRow)] },
       { label: 'Suggestions', rows: plan.suggestions.map((finding) => findingRow(finding)) },
-      { label: 'Settled', rows: plan.settled.map((finding) => findingRow(finding, settledLabel(finding))) }
+      { label: 'Settled', rows: plan.settled.map((finding) => findingRow(finding, settledLabel(finding))) },
+      { label: 'Resolved', rows: resolved.map(resolvedRow) }
     ]
     : [
       { label: 'Your comments', rows: comments.map(commentRow) },
