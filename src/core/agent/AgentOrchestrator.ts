@@ -11,6 +11,7 @@ import type {
   AgentReviewTarget,
   AgentRunMode,
   AgentSessionRecord,
+  DomainEvent,
   InteractionRequestRecord,
   RespondToInteractionRequest,
   RunRecord,
@@ -143,6 +144,30 @@ function isTaskReadOnlyTurnPurpose(
     purpose === 'TASK_REVIEW_QUESTION' ||
     purpose === 'TASK_SIDE_QUESTION'
   );
+}
+
+/**
+ * The latest outcome the Task store recorded for each run, from the events the
+ * shared read-only lane publishes: a terminal event, or AGENT_RUNTIME_LOST when the
+ * run requires recovery. A later loss reopens a terminal run for a new outcome.
+ */
+function recordedTaskRunOutcomes(
+  events: readonly DomainEvent[]
+): Map<string, 'TERMINAL' | 'RECOVERY_REQUIRED'> {
+  const outcomes = new Map<string, 'TERMINAL' | 'RECOVERY_REQUIRED'>();
+  for (const event of events) {
+    if (!event.runId) continue;
+    if (
+      event.type === 'AGENT_RUN_COMPLETED' ||
+      event.type === 'AGENT_RUN_FAILED' ||
+      event.type === 'AGENT_RUN_INTERRUPTED'
+    ) {
+      outcomes.set(event.runId, 'TERMINAL');
+    } else if (event.type === 'AGENT_RUNTIME_LOST') {
+      outcomes.set(event.runId, 'RECOVERY_REQUIRED');
+    }
+  }
+  return outcomes;
 }
 
 class ReviewerRevisionsRejected extends Error {}
@@ -1830,16 +1855,25 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         })
         .filter((operationId): operationId is string => operationId !== undefined)
     );
+    const recordedOutcomes = recordedTaskRunOutcomes(taskSnapshot.events);
     for (const run of snapshot.runs) {
       const terminal = isTerminalRuntimeRun(run.status);
       const observedAt = run.endedAt ?? run.lastEventAt ?? run.createdAt;
       const taskProjectionOperationId = terminal
         ? `shared-review-terminal:${run.id}:${observedAt}`
         : `shared-review-recovery:${run.id}:${observedAt}`;
+      // The outcome is identified by its run: another writer (a start failure, the
+      // browser-development boundary) or an earlier build may have recorded it under
+      // a different operation or completion time than this record now carries.
+      const taskOutcomeRecorded =
+        run.owner.kind === 'TASK' &&
+        isTaskReadOnlyTurnPurpose(run.purpose) &&
+        (recordedOutcomes.get(run.id) === (terminal ? 'TERMINAL' : 'RECOVERY_REQUIRED') ||
+          publishedTaskRuntimeOperations.has(taskProjectionOperationId));
       const taskProjectionNeedsReconciliation =
         run.owner.kind === 'TASK' &&
         isTaskReadOnlyTurnPurpose(run.purpose) &&
-        !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
+        !taskOutcomeRecorded;
       const transientTurnNeedsCleanup =
         terminal &&
         (run.owner.kind === 'PROMPT_REFINEMENT' ||
@@ -1893,7 +1927,11 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         run.repositoryIntegrity?.status === 'PENDING' ||
         taskProjectionNeedsReconciliation;
       if (needsEventProcessing) {
-        if (!run.providerTurnId && event.type === 'TERMINAL') {
+        if (taskOutcomeRecorded) {
+          // Only the runtime record is unsettled; projecting again would append a
+          // second outcome and capture post-run evidence for it again.
+          await this.verifyReadOnlyRuntimeBoundary(event);
+        } else if (!run.providerTurnId && event.type === 'TERMINAL') {
           const verified = await this.verifyReadOnlyRuntimeBoundary(event);
           await this.projectTaskReadOnlyRuntimeEvent(verified);
         } else {
@@ -1907,7 +1945,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         ) {
           await this.finishRuntimeTurn(run.id);
         } else if (run.owner.kind === 'TASK' && isTaskReadOnlyTurnPurpose(run.purpose)) {
-          if (!needsEventProcessing && terminalQueueNeedsSettlement) {
+          // The projection settles and releases the turn it projects; a turn whose
+          // outcome was already recorded is settled and released here instead.
+          if (
+            !taskProjectionNeedsReconciliation &&
+            (needsEventProcessing || terminalQueueNeedsSettlement)
+          ) {
             await this.finishRuntimeTurn(run.id);
           }
         } else {

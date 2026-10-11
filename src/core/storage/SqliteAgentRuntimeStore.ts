@@ -5023,7 +5023,9 @@ function runtimeRunUpdate(
       existing.delivery === 'ACKNOWLEDGED' || existing.delivery === 'TERMINAL'
       ? 'TERMINAL'
       : 'NOT_DELIVERED';
-    result.endedAt = update.endedAt ?? occurredAt;
+    // A later update to a settled run, such as its post-run Git snapshot, keeps
+    // the recorded completion time; only the transition into terminal sets it.
+    result.endedAt = update.endedAt ?? existing.endedAt ?? occurredAt;
     if (existing.interruptDelivery) result.interruptDelivery = 'TERMINAL';
   }
   return result;
