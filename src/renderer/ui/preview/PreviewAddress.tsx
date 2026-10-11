@@ -2,6 +2,7 @@ import { ExternalLink } from 'lucide-react';
 import { taskManagerApi as api } from '../../api/taskManagerClient';
 import type { PreviewAddress } from '../../model/applicationPreviewRuns';
 import { CopyIconButton } from '../CopyIconButton';
+import { Tooltip } from '../Tooltip';
 import { usePreviewNotify } from './previewPresentation';
 
 /**
@@ -32,15 +33,16 @@ export function PreviewAddressActions({ name, address, label, onOpen }: {
     <span className="tm-preview-address">
       <span className="tm-preview-address__label" title={address.url}>{label ?? address.text}</span>
       {onOpen ? (
-        <button
-          type="button"
-          className="tm-iconbtn tm-preview-address__action"
-          aria-label={`Open ${name}`}
-          title={`Open ${address.url}`}
-          onClick={() => onOpen(address)}
-        >
-          <ExternalLink size={13} aria-hidden="true" />
-        </button>
+        <Tooltip label={`Open ${address.url}`}>
+          <button
+            type="button"
+            className="tm-iconbtn tm-preview-address__action"
+            aria-label={`Open ${name}`}
+            onClick={() => onOpen(address)}
+          >
+            <ExternalLink size={13} aria-hidden="true" />
+          </button>
+        </Tooltip>
       ) : null}
       <CopyIconButton
         value={address.url}

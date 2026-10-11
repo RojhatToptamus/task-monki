@@ -5,7 +5,7 @@ import { isActiveRunStatus } from '../model/agentSession';
 import { sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } from '../model/sideQuestions';
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
-import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
+import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, WorkingLine } from './SessionTurns';
 
 export interface SideConversation {
   records: AgentConversationRecords;
@@ -53,9 +53,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
     interactions: conversation.records.interactions
   });
   const active = runs.find((run) => isActiveRunStatus(run.status));
-  const unattached = questions.filter((question) =>
-    !runs.some((run) => run.id === question.runId) && (question.status === 'SENDING' || question.status === 'UNCERTAIN' || (question.status === 'FAILED' && !question.runId))
-  );
+  const unattached = unattachedInstructions(questions, runs);
 
   return (
     <ConversationPanel
@@ -95,26 +93,16 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
             {snapshot ? <p className="tm-side-conversation__note">{snapshot}</p> : null}
             {followUp ? (
               <button type="button" className="ghost-button" onClick={() => onUseInFollowUp(followUp)}>
-                <CornerDownLeft size={14} aria-hidden="true" />
+                <CornerDownLeft size={13} aria-hidden="true" />
                 Use in follow-up
               </button>
             ) : null}
           </div>
         );
       })}
-      {unattached.map((question) => (
-        <UserMessage
-          key={question.id}
-          text={question.text}
-          time={question.createdAt}
-          status={question.status === 'FAILED' ? question.detail ?? 'Not sent' : question.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Sending…'}
-        />
-      ))}
+      <UnattachedMessages instructions={unattached} />
       {active && (active.status === 'QUEUED' || active.status === 'STARTING' || !turns.at(-1)?.entries.length) ? (
-        <div className="tm-side-conversation__working">
-          <span role="status" className="tm-shimmer">{active.status === 'INTERRUPTING' ? 'Stopping…' : implementationActive ? 'Reading a snapshot…' : 'Reading the task…'}</span>
-          <Elapsed since={active.startedAt} />
-        </div>
+        <WorkingLine label={active.status === 'INTERRUPTING' ? 'Stopping…' : implementationActive ? 'Reading a snapshot…' : 'Reading the task…'} since={active.startedAt} />
       ) : null}
     </ConversationPanel>
   );

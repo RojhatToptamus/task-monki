@@ -401,7 +401,7 @@ function MentionTokenGroup({
               }}
             >
               {token.labelSnapshot}
-              <X aria-hidden="true" size={12} />
+              <X aria-hidden="true" size={13} />
             </button>
           </li>
         ))}

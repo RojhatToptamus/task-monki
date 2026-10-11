@@ -101,8 +101,7 @@
 /* Conversation log — one scrolling body; the jump back sits centred above the composer. */
 .tm-conversation { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
 .tm-conversation__viewport { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable; }
-/* The history is a scroll region: it never shows the browser outline,
-and from
+/* The history is a scroll region: it never shows the browser outline, and from
    the keyboard it shows the token ring inside its own edge. */
 .tm-conversation__viewport:focus { outline: none; }
 .app-shell[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); }
@@ -121,8 +120,7 @@ and from
 }
 .tm-conversation__latest:hover { color: var(--text); }
 
-/* Message anatomy — the user's words in a right-aligned bubble,
-agent prose on the sheet. */
+/* Message anatomy — the user's words in a right-aligned bubble, agent prose on the sheet. */
 .tm-message { display: flex; flex-direction: column; min-width: 0; }
 .tm-message--user { align-items: flex-end; }
 .tm-message--user > .task-attachments { justify-content: flex-end; max-width: min(80%, 560px); margin-top: 8px; }
@@ -134,8 +132,7 @@ agent prose on the sheet. */
 .tm-message__meta time { font-variant-numeric: tabular-nums; }
 .tm-message__action { display: inline-flex; align-items: center; gap: 6px; min-height: var(--h-compact); color: var(--muted); font-size: var(--t-help); }
 
-/* Steps — tool calls and reasoning between messages,
-quieter than prose. */
+/* Steps — tool calls and reasoning between messages, quieter than prose. */
 .tm-steps { display: grid; min-width: 0; }
 .tm-step { min-width: 0; }
 .tm-step__row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: var(--h-compact); padding: 0; color: var(--muted); font-size: var(--t-help); text-align: left; }
@@ -149,7 +146,7 @@ quieter than prose. */
 .tm-step__label { flex: 0 0 auto; color: var(--text-soft); white-space: nowrap; }
 .tm-step__detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-step__detail--mono { font: var(--t-meta) var(--font-mono); }
-.tm-step__metric { flex: 0 0 auto; color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+.tm-step__metric { flex: 0 0 auto; color: var(--muted); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-step--failed .tm-step__label,
 .tm-step__failed { color: var(--blocked-ink); }
 .tm-step__failed { font-size: var(--t-meta); }
@@ -202,7 +199,7 @@ quieter than prose. */
 .tm-side-conversation__head { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; min-width: 0; height: 48px; padding: 0 10px 0 16px; box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: 500; white-space: nowrap; }
 .tm-side-conversation__mark { flex: 0 0 auto; color: var(--accent-ink); }
-.tm-side-conversation__meta { min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
+.tm-side-conversation__meta { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-side-conversation__head .tm-iconbtn { margin-left: auto; width: var(--h-icon); height: var(--h-icon); }
 .tm-side-conversation__log { flex: 1; min-height: 0; }
 .tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 16px 20px; }
@@ -219,7 +216,7 @@ quieter than prose. */
 
 /* An assistant's own sheet beside the page (DESIGN.md 5, side panels). Docked,
    it is a sibling of the page's sheet; floating, it slides over the page. */
-.tm-side-sheet > .tm-side-conversation { flex: 1; background: transparent; box-shadow: none; }
+:is(.tm-side-sheet, .tm-side-sheet__slot) > .tm-side-conversation { flex: 1; background: transparent; box-shadow: none; }
 /* The sheet clips its overflow, so the handle lies along its inside edge; the sheet's own seam is the line. */
 .tm-side-sheet__resize { position: absolute; top: 0; bottom: 0; left: 0; width: 8px; margin: 0; z-index: var(--layer-handle); }
 .tm-side-sheet__resize span { background: transparent; }

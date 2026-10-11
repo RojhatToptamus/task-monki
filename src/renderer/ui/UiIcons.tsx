@@ -1,5 +1,4 @@
 import {
-  ArrowRight,
   Check,
   ChevronDown,
   Columns2,
@@ -45,7 +44,7 @@ export function UiLucideIcon({
  * question, the reviewer, the Preview agent and prompt refinement. Agents
  * never get a chat or comment icon (DESIGN.md 3.3).
  */
-export function AgentMark({ size = 14, className }: { size?: number; className?: string } = {}) {
+export function AgentMark({ size = 13, className }: { size?: number; className?: string } = {}) {
   return <UiLucideIcon component={Sparkles} size={size} className={className} />;
 }
 
@@ -104,13 +103,9 @@ export function UiCheckIcon({ size = 11 }: { size?: number } = {}) {
   return <UiLucideIcon component={Check} size={size} />;
 }
 
-export function UiArrowRightIcon() {
-  return <UiLucideIcon component={ArrowRight} size={12} />;
-}
-
 export function UiChevronDownIcon({
   open = false,
-  size = 12,
+  size = 13,
   className = ''
 }: {
   open?: boolean;

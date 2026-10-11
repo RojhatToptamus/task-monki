@@ -43,7 +43,7 @@ export function RepositorySettings({
       title="Repositories"
       action={
         <button type="button" className="outline-button button--sm" disabled={addingRepository} onClick={() => void onAddRepository()}>
-          <Plus size={14} aria-hidden="true" />
+          <Plus size={13} aria-hidden="true" />
           Add repository
         </button>
       }

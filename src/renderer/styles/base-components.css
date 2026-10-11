@@ -12,7 +12,7 @@
 .tm-disclosure__chevron {
   display: block;
   flex: 0 0 auto;
-  transition: transform var(--motion-fast) ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 details > summary {
@@ -35,25 +35,8 @@ details[open] > summary .tm-disclosure__chevron {
   color: var(--text);
 }
 
-/* ----------------------------------------------------------------------- */
-/* Sidebar                                                                 */
-/* ----------------------------------------------------------------------- */
-
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 280px;
-  width: 280px;
-  padding: 16px 14px;
-  background: var(--ground);
-  border-right: 1px solid var(--edge);
-  overflow: hidden;
-}
-
 /* Badge: a short state word on a 12–14% tint of its tone (DESIGN.md A.6).
-   One size everywhere — 20 tall,
-6 radius,
-no border and no dot; the tint and
+   One size everywhere — 20 tall, 6 radius, no border and no dot; the tint and
    the ink are the whole signal. */
 .status-pill {
   display: inline-flex;
@@ -80,7 +63,7 @@ no border and no dot; the tint and
 }
 
 /* One line weight for every stroke icon at every size: the stroke is drawn in
-   screen pixels, so a 13px glyph and a 20px rail icon read as one family. */
+   screen pixels, so a 13px glyph and an 18px rail icon read as one family. */
 svg.lucide {
   stroke-width: var(--icon-stroke);
 }
@@ -127,43 +110,8 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   color: var(--verified);
 }
 
-/* A task's status as words: ink only when it needs the user or failed. */
-.tm-status-word {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  color: var(--text-soft);
-  white-space: nowrap;
-}
-
-.tm-status-word .tm-status-glyph {
-  width: 13px;
-  height: 13px;
-}
-
-.tm-status-word--action {
-  color: var(--waiting-ink);
-}
-
-.tm-status-word--error {
-  color: var(--blocked-ink);
-}
-
 .status-pill__label {
   color: inherit;
-}
-
-.status-pill--with-value .status-pill__label,
-.status-pill--muted .status-pill__label {
-  color: var(--muted);
-}
-
-.status-pill__value {
-  color: inherit;
-  font-family: var(--font-mono);
-  font-size: var(--t-meta);
-  font-weight: 500;
 }
 
 .status-pill--neutral {
@@ -190,7 +138,6 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   background: var(--accent-soft);
   color: var(--accent-ink);
 }
-
 
 .tm-panel__title.tm-panel__title--flush {
   margin: 0;
@@ -260,21 +207,6 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
 /* Main detail                                                             */
 /* ----------------------------------------------------------------------- */
 
-.detail {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.detail--empty {
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  text-align: center;
-}
-
 /* One segmented control for every switch (text or icons): a field track, items
    that change ink on hover, and the chosen item raised on the card plane. The
    weight never changes, so nothing shifts. */
@@ -337,8 +269,7 @@ select:not([multiple]):not([size]) {
   background-size: 5px 5px;
 }
 
-/* Buttons — four families on one geometry (DESIGN.md 5). Primary,
-secondary
+/* Buttons — four families on one geometry (DESIGN.md 5). Primary, secondary
    and destructive share the decision height; ghost is the compact toolbar
    family. `.button--sm` puts any filled family on the toolbar height. */
 .primary-button,
@@ -395,6 +326,13 @@ secondary
   background: var(--primary-hover);
 }
 
+/* Ink cannot take the shared ink overlay, so the primary family presses with its own fill. */
+.primary-button:not(:disabled):active,
+.tm-send-menu__trigger.tm-action-menu__trigger:not(:disabled):active {
+  background: var(--primary-press);
+  background-image: none;
+}
+
 .outline-button {
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
@@ -405,19 +343,12 @@ secondary
   background: var(--field-hover);
 }
 
-.outline-button--danger {
-  background: var(--blocked-bg);
-  box-shadow: none;
-  color: var(--blocked-ink);
-}
-
 .danger-button {
   background: var(--blocked-bg);
   color: var(--blocked-ink);
 }
 
-.danger-button:not(:disabled):hover,
-.outline-button--danger:not(:disabled):hover {
+.danger-button:not(:disabled):hover {
   background: var(--blocked-bg-hover);
 }
 
@@ -490,10 +421,6 @@ secondary
 }
 
 /* Prompt & config card */
-
-.card--prompt {
-  padding-top: 0;
-}
 
 /* Interactive approvals */
 
@@ -719,7 +646,7 @@ secondary
   flex: 0 0 auto;
   width: 12px;
   color: var(--muted);
-  transition: transform 120ms ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .interaction-technical[open] > summary > svg {
@@ -911,9 +838,7 @@ secondary
   outline: 0;
 }
 
-/* The toolbar sits inside the same fill,
-divided by a hair: configuration left,
-keyboard hint and the primary action right. */
+/* The toolbar sits inside the same fill, divided by a hair: configuration left, keyboard hint and the primary action right. */
 .tm-composer__toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 6px 8px; border-top: 1px solid var(--hair); }
 /* The hint takes only the room the chips and actions leave, so it is the first
    thing to truncate; it sits against the actions it describes. */
@@ -939,8 +864,10 @@ keyboard hint and the primary action right. */
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact { display: inline-flex; flex: 0 1 auto; gap: 2px; min-width: 0; container-type: normal; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: 400; }
-:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; }
-:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-select { height: var(--h-toolbar); background-color: transparent; color: var(--muted); font: var(--t-help)/1 var(--font-ui); }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; container-type: normal; }
+/* In a toolbar the effort is always the select, sized to its value: a size-contained box there would collapse to its chevron. */
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-options { display: none; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-select { display: block; width: auto; field-sizing: content; height: var(--h-toolbar); background-color: transparent; color: var(--muted); font: var(--t-help)/1 var(--font-ui); }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error,
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error:not(:disabled):hover { box-shadow: none; color: var(--blocked-ink); }
 .tm-composer__primary,
@@ -951,9 +878,7 @@ keyboard hint and the primary action right. */
 .tm-send-menu__trigger.tm-action-menu__trigger { min-width: 26px; width: 26px; height: var(--h-toolbar); padding: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; background: var(--primary); box-shadow: inset 1px 0 0 var(--primary-hover); color: var(--on-primary); }
 .tm-send-menu__trigger.tm-action-menu__trigger:not(:disabled):hover,
 .tm-send-menu__trigger.tm-action-menu__trigger[data-state='open'] { background: var(--primary-hover); color: var(--on-primary); }
-/* Disabled,
-the pair keeps one rim: the chevron draws the seam,
-so the button
+/* Disabled, the pair keeps one rim: the chevron draws the seam, so the button
    leaves its own right edge open. */
 .tm-composer__send--split > .tm-composer__primary:disabled { box-shadow: inset 1px 0 0 var(--field-edge), inset 0 1px 0 var(--field-edge), inset 0 -1px 0 var(--field-edge); }
 .tm-send-menu__trigger.tm-action-menu__trigger:disabled { background: var(--primary-disabled); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text-disabled); }
@@ -970,8 +895,7 @@ so the button
 .tm-action-menu__popover[data-state='closed'] { animation: tm-menu-out var(--motion-fast) var(--ease-out); }
 .tm-action-menu__item { display: flex; align-items: center; gap: 8px; min-height: var(--h-toolbar); height: auto; padding: 5px 8px; border-radius: var(--r-xs); color: var(--text); font-size: var(--t-body); line-height: 1.4; cursor: default; outline: none; user-select: none; }
 .tm-action-menu__item[data-highlighted] { background: var(--hover); color: var(--text); }
-/* Menus portal outside the shell,
-so keyboard focus is keyed on the document. */
+/* Menus portal outside the shell, so keyboard focus is keyed on the document. */
 :root[data-input-modality='keyboard'] .tm-action-menu__item[data-highlighted] { background: var(--sel); box-shadow: inset 0 0 0 2px var(--focus-ring); }
 .tm-action-menu__item[data-disabled] { color: var(--text-disabled); }
 .tm-action-menu__copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
@@ -989,8 +913,7 @@ so keyboard focus is keyed on the document. */
 .tm-action-menu__item[data-disabled] .tm-action-menu__meta { color: var(--text-disabled); }
 .tm-action-menu__separator { height: 1px; margin: 4px 2px; background: var(--hair); }
 .tm-action-menu__note { margin: 0; padding: 5px 8px 4px; color: var(--muted); font-size: var(--t-meta); line-height: 1.4; }
-/* One icon action language for Agent,
-Design and Discourse composers. */
+/* One icon action language for Agent, Design and Discourse composers. */
 .tm-composer-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--h-toolbar); min-width: var(--h-toolbar); height: var(--h-toolbar); padding: 0; border-radius: var(--r-sm); }
 .tm-composer-action svg { width: 16px; height: 16px; }
 
@@ -1013,16 +936,12 @@ Design and Discourse composers. */
    A.3). It scales in from the trigger after the delay and appears instantly
    while the pointer moves between neighbours. */
 .tm-tooltip { z-index: var(--layer-tooltip); display: inline-flex; align-items: center; gap: 8px; max-width: 280px; padding: 5px 8px; border-radius: var(--r-xs); background: var(--overlay); color: var(--text); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); font-size: var(--t-help); font-weight: 500; line-height: 1.35; transform-origin: var(--radix-tooltip-content-transform-origin); user-select: none; }
-.tm-tooltip[data-state='delayed-open'] { animation: tm-tooltip-in 125ms var(--ease-out); }
+.tm-tooltip[data-state='delayed-open'] { animation: tm-tooltip-in var(--motion-fast) var(--ease-out); }
 .tm-tooltip__shortcut { color: var(--muted); font: inherit; }
 @keyframes tm-tooltip-in { from { opacity: 0; transform: scale(0.97); } }
 
 /* Table: one container for every comparable list (DESIGN.md A.5) — the object
-   edge drawn over the rows,
-12px corners,
-no fill,
-hair dividers,
-a 36px
+   edge drawn over the rows, 12px corners, no fill, hair dividers, a 36px
    header in muted ink and 48px rows that fill on hover. */
 .tm-table { position: relative; border-radius: var(--r-md); }
 .tm-table::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--edge-raised); pointer-events: none; }
@@ -1051,6 +970,9 @@ a 36px
 /* List rail: the Designs and Discourse history. A heading with New, search, a
    status filter, then rows that overhang the fields by 4px on each side; the
    list's 9px scrollbar gutter makes up its right padding. */
+/* In a narrow window the list rail becomes a drawer over the content. */
+:is(.tm-designs--compact .tm-designs-rail, .tm-discourse--compact .tm-discourse-rail) { position: absolute; inset: 0 auto 0 0; z-index: var(--layer-overlay); width: min(300px, calc(100% - 42px)); box-shadow: inset -1px 0 0 var(--edge), var(--shadow-pop); transform: translateX(-104%); visibility: hidden; transition: transform var(--motion-slow) var(--ease-drawer), visibility 0s linear var(--motion-slow); }
+:is(.tm-designs--compact .tm-designs-rail--open, .tm-discourse--compact .tm-discourse-rail--open) { transform: translateX(0); visibility: visible; transition-delay: 0s; }
 /* The head shares the 48px line of the workspace head beside it. */
 .tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 6px 14px; margin-bottom: 4px; }
 .tm-listrail__head h2 { margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: 500; letter-spacing: -0.01em; }
@@ -1059,7 +981,7 @@ a 36px
 .tm-listrail__new:hover { background: var(--field-hover); }
 .tm-listrail__new svg { width: 13px; height: 13px; }
 .tm-listrail__search { display: flex; align-items: center; gap: 7px; height: var(--h-control); margin: 0 14px 8px; padding: 0 10px; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--muted); }
-.tm-listrail__search svg { flex: 0 0 auto; width: 14px; height: 14px; }
+.tm-listrail__search svg { flex: 0 0 auto; width: 13px; height: 13px; }
 .app-shell .tm-listrail__search input,
 .app-shell .tm-listrail__search input:focus { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font: var(--t-help) var(--font-ui); }
 .tm-listrail__filter { margin: 0 14px 10px; }

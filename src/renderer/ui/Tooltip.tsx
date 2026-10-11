@@ -2,6 +2,9 @@ import * as RadixTooltip from '@radix-ui/react-tooltip';
 import { createContext, useContext, type ReactElement, type ReactNode } from 'react';
 
 const TOOLTIP_DELAY_MS = 500;
+
+/** The submit shortcut as the platform writes it, for tooltips and composer hints. */
+export const SUBMIT_SHORTCUT = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/u.test(navigator.userAgent) ? '⌘↵' : 'Ctrl+Enter';
 const TOOLTIP_SKIP_DELAY_MS = 300;
 const SharedProvider = createContext(false);
 

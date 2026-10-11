@@ -143,7 +143,7 @@ export function DesignFilesDrawer({
           <p>Select references to include in your next message.</p>
         </div>
         <button type="button" aria-label="Close files and references" onClick={onClose}>
-          <UiCloseIcon size={12} />
+          <UiCloseIcon size={13} />
         </button>
       </header>
 

@@ -38,6 +38,9 @@ it('gives every state exactly one primary and names it from what exists', () => 
   expect(row({}, { hasConfigurationFile: false, status: { name: 'app', busy: false, latest: attempt('stopped') } })).toMatchObject({
     chip: { label: 'Stopped' }, primary: { action: 'start-retained', label: 'Start from last run' }, secondary: [{ action: 'draft' }]
   });
+  // A saved Design capture is read-only here: it is never offered as the run to start again.
+  expect(row({}, { hasConfigurationFile: false, designAttempts: ['run'], status: { name: 'app', busy: false, latest: attempt('stopped') } }).primary)
+    .toMatchObject({ action: 'draft' });
   expect(row({ dirty: true })).toMatchObject({
     chip: { label: 'Unsaved changes' }, primary: { action: 'save-and-review' }, secondary: [{ action: 'revert', label: 'Revert changes' }, { action: 'save' }]
   });

@@ -72,7 +72,7 @@ export function PlanList({
           >
             <Mark
               className="tm-plan__mark"
-              size={14}
+              size={13}
               aria-hidden="true"
             />
             <span className="tm-plan__label">{step.step}</span>

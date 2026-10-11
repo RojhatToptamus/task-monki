@@ -108,8 +108,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     ? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
     : diff.filesByScope[effectiveScope]), [changedSinceReview, diff.filesByScope, effectiveScope]);
 
+  // "Since the review" also needs the reviewed diff; until both are read, the scope is loading, not empty.
+  const loading = diff.loading || (effectiveScope === 'since-review' && reviewed.loading);
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
-  const visibleFindings = props.historical || diff.loading ? NO_FINDINGS : findings;
+  const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
   const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings), [files, visibleFindings]);
   const index = useMemo(() => buildReviewIndex(files, anchored), [files, anchored]);
   const openFindings = findings.filter((finding) => finding.state === 'OPEN');
@@ -220,7 +222,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     }] : [])
   ];
 
-  const unavailable = diff.loading ? 'Loading changes…'
+  const unavailable = loading ? 'Loading changes…'
     : diff.error ? 'The captured diff could not be read.'
       : diff.missing ? (props.historical ? 'This capture has no diff.' : 'No changes captured yet.')
         : diff.inspection.completeness === 'UNINTERPRETABLE' ? 'The captured paths could not be read.'
@@ -612,7 +614,7 @@ function ReviewFindingThread({ finding, focused, actionable, onFocus, onDismiss,
             {onDismiss ? (
               <Tooltip label="Dismiss">
                 <button type="button" className="tm-iconbtn" aria-label="Dismiss this finding" aria-expanded={dismissing} onClick={() => setDismissing((value) => !value)}>
-                  <X size={14} aria-hidden="true" />
+                  <X size={13} aria-hidden="true" />
                 </button>
               </Tooltip>
             ) : null}

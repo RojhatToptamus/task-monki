@@ -47,7 +47,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
           <span className="tm-action-menu__meta" id={`${id}-${index}-meta`} data-tone={item.metaTone}>{item.meta}</span></span> : <span>{item.label}</span>}
         {description ? <small id={`${id}-${index}`}>{description}</small> : null}
       </span>
-      {item.pressed !== undefined ? <span className="tm-action-menu__check" aria-hidden="true">{item.pressed ? <Check size={14} /> : null}</span> : null}
+      {item.pressed !== undefined ? <span className="tm-action-menu__check" aria-hidden="true">{item.pressed ? <Check size={13} /> : null}</span> : null}
     </>;
     const props = {
       className: `tm-action-menu__item${item.danger ? ' tm-action-menu__danger' : ''}`,

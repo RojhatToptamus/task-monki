@@ -460,7 +460,7 @@ export function DesignConversation({
                       .finally(() => setStopping(false));
                   }}
                 >
-                  <Square size={14} aria-hidden="true" />
+                  <Square size={13} aria-hidden="true" />
                 </button>
               ) : null}
               {!questionPending ? <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}

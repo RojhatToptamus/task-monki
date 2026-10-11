@@ -2165,7 +2165,7 @@ export function DiscourseWorkspace({
                   aria-describedby={!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
-                  {activeWave ? <Square size={14} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
+                  {activeWave ? <Square size={13} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
                 </button>
               </div>
             )}
@@ -2262,7 +2262,7 @@ export function DiscourseWorkspace({
                   <ContextReference key={reference.contextLinkId} kind={reference.entityKind} label={reference.labelSnapshot}
                     description={`${reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · ${availabilityLabel(reference.availability)}`}>
                     <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
-                      <X aria-hidden="true" size={14} />
+                      <X aria-hidden="true" size={13} />
                     </button>
                   </ContextReference>
                 ))}
@@ -2325,7 +2325,7 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
     <div className="tm-discourse-composer-target">
       <span><strong>{label}</strong><small>{compactText(message.body, 120)}</small></span>
       <button type="button" aria-label="Remove reply target" onClick={onRemove}>
-        <X aria-hidden="true" size={14} />
+        <X aria-hidden="true" size={13} />
       </button>
     </div>
   );

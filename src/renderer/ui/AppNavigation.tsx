@@ -72,7 +72,7 @@ export function ArrowRightIcon() {
 }
 
 export function PlusIcon() {
-  return <UiLucideIcon component={Plus} size={14} />;
+  return <UiLucideIcon component={Plus} size={13} />;
 }
 
 export function InboxIcon() {

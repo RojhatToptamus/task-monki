@@ -183,21 +183,17 @@
 }
 
 .tm-designs-header__files {
-  height: 29px;
-  padding: 0 8px;
-  border-radius: var(--r-xs);
-  color: var(--muted);
-  font-size: var(--t-meta);
-  font-weight: 500;
-}
-
-.tm-designs-header__files {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  height: var(--h-toolbar);
+  padding: 0 8px;
   border: 0;
+  border-radius: var(--r-xs);
   background: var(--field);
   color: var(--text-soft);
+  font-size: var(--t-meta);
+  font-weight: 500;
 }
 
 .tm-designs-header__files:hover,
@@ -264,14 +260,16 @@
 }
 
 .tm-design-canvas__toolbar {
-  min-height: 49px;
+  min-height: 43px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 9px 15px;
+  gap: 8px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--hair);
+  background: var(--surface);
+  overflow: hidden;
 }
 
 .tm-design-conversation__log { flex: 1; min-height: 0; }
@@ -475,7 +473,7 @@
   gap: 6px;
 }
 
-.tm-design-composer .primary-button svg { width: 14px; height: 14px; }
+.tm-design-composer .primary-button svg { width: 13px; height: 13px; }
 
 .tm-design-composer__error,
 .tm-design-create__error,
@@ -678,8 +676,7 @@
   gap: 8px;
 }
 
-/* Inactive but readable: expressed through ink,
-never opacity (DESIGN §2.4). */
+/* Inactive but readable: expressed through ink, never opacity (DESIGN §2.4). */
 .tm-design-reference-row--inactive {
   grid-template-columns: 26px minmax(0, 1fr);
   color: var(--muted);
@@ -888,14 +885,6 @@ never opacity (DESIGN §2.4). */
   display: flex;
   flex-direction: column;
   background: var(--surface);
-}
-
-.tm-design-canvas__toolbar {
-  min-height: 43px;
-  padding: 7px 10px;
-  gap: 8px;
-  background: var(--surface);
-  overflow: hidden;
 }
 
 .tm-design-canvas__revision-actions {
@@ -1268,10 +1257,7 @@ never opacity (DESIGN §2.4). */
   margin-top: 7px;
 }
 
-/* Loading,
-errors,
-deletion,
-and compact mode */
+/* Loading, errors, deletion, and compact mode */
 
 .tm-designs-state {
   display: grid;
@@ -1397,22 +1383,6 @@ and compact mode */
   grid-template-columns: minmax(0, 1fr);
 }
 
-.tm-designs--compact .tm-designs-rail {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: var(--layer-overlay);
-  width: min(300px, calc(100% - 42px));
-  box-shadow: var(--shadow-pop);
-  transform: translateX(-104%);
-  visibility: hidden;
-  transition: transform 180ms ease, visibility 0s linear 180ms;
-}
-
-.tm-designs--compact .tm-designs-rail--open {
-  transform: translateX(0);
-  visibility: visible;
-  transition-delay: 0s;
-}
 
 .tm-designs--compact .tm-designs-rail__scrim,
 .tm-designs--compact .tm-designs-rail__close {

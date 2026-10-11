@@ -3,6 +3,7 @@
 /* ======================================================================= */
 
 .tm-detail {
+  position: relative;
   background: var(--surface);
   flex: 1;
   min-width: 0;
@@ -37,8 +38,11 @@
 }
 
 /* The task's tab bar is the same 48px line as an open side panel's head, so the
-   two titles and the hairlines under them meet. */
+   two titles and the hairlines under them meet; the assistant toggle sits at its right end. */
 .tm-detail__nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   flex: 0 0 auto;
   padding: 0 var(--tm-gutter);
   background: var(--surface);
@@ -49,12 +53,10 @@
   height: 48px;
 }
 
-
 .tm-detail--agent,
 .tm-detail--review { overflow: hidden; }
 
-/* Title left,
-the task menu on the same line at the right edge. */
+/* Title left, the task menu on the same line at the right edge. */
 .tm-detail__row {
   display: flex;
   align-items: flex-start;
@@ -92,8 +94,7 @@ the task menu on the same line at the right edge. */
   flex: 0 0 auto;
 }
 
-/* The lifecycle track first,
-then where the work lives. */
+/* The lifecycle track first, then where the work lives. */
 .tm-detail__context {
   display: flex;
   align-items: center;
@@ -175,8 +176,7 @@ then where the work lives. */
   color: var(--waiting-ink);
 }
 
-/* A branch is copied character for character,
-so it keeps the mono face and
+/* A branch is copied character for character, so it keeps the mono face and
    truncates rather than wrapping mid-token. */
 .tm-detail__branch code {
   min-width: 0;
@@ -191,9 +191,7 @@ so it keeps the mono face and
   white-space: nowrap;
 }
 
-/* A pending agent request,
-reachable from every tab but the Overview,
-where
+/* A pending agent request, reachable from every tab but the Overview, where
    the Now panel holds the request itself. */
 .tm-detail__attention {
   padding: 0;
@@ -338,10 +336,8 @@ where
   color: var(--waiting-ink);
 }
 
-/* An agent's own words,
-under a headline or caption that names it. Every
-   quotation of provider text takes this one treatment,
-so it never reads as
+/* An agent's own words, under a headline or caption that names it. Every
+   quotation of provider text takes this one treatment, so it never reads as
    Task Monki's account. */
 .tm-slot__quote,
 .tm-oresult__report blockquote {
@@ -407,9 +403,7 @@ so it never reads as
   line-height: 1.45;
 }
 
-/* Space,
-not rules,
-separates the parts of the Now panel. */
+/* Space, not rules, separates the parts of the Now panel. */
 .tm-slot .tm-prchecks {
   border-top: 0;
 }
@@ -429,8 +423,7 @@ separates the parts of the Now panel. */
   padding-right: 0;
 }
 
-/* The facts that bear on finishing,
-as plain words. Only an unresolved one
+/* The facts that bear on finishing, as plain words. Only an unresolved one
    takes a tone. */
 .tm-facts {
   display: flex;
@@ -456,9 +449,7 @@ as plain words. Only an unresolved one
   color: var(--blocked-ink);
 }
 
-/* A flat section: a quiet label,
-then content. Space separates sections,
-so
+/* A flat section: a quiet label, then content. Space separates sections, so
    no rule runs under the label. */
 .tm-osection {
   display: grid;
@@ -537,8 +528,7 @@ so
   padding: 10px 0 0;
 }
 
-/* As a section,
-the review's state word carries its tone; a leading glyph
+/* As a section, the review's state word carries its tone; a leading glyph
    would push its label off the shared left edge. */
 .tm-workpanels > .tm-reviewcard .tm-reviewcard__glyph {
   display: none;
@@ -557,16 +547,12 @@ the review's state word carries its tone; a leading glyph
 }
 
 /* Flat sections carry no bands or rules: disclosures sit on the section's own edge. */
-.tm-overview .tm-reviewfindings {
-  border-top: 0;
-}
-
-.tm-overview :is(.tm-reviewfindings, .tm-reviewcard__raw) > summary,
+.tm-overview .tm-reviewcard__raw > summary,
 .tm-overview .tm-reviewfindings__list {
   margin: 0;
 }
 
-.tm-overview :is(.tm-reviewfindings, .tm-reviewcard__raw) > summary,
+.tm-overview .tm-reviewcard__raw > summary,
 .tm-overview .tm-finding[open] > summary {
   padding: 0;
   border-radius: 0;
@@ -584,9 +570,7 @@ the review's state word carries its tone; a leading glyph
   padding-right: 24px;
 }
 
-/* The task's single "what next" model: in the Now panel,
-beside PR Status,
-or
+/* The task's single "what next" model: in the Now panel, beside PR Status, or
    as a task-level transition above the tabs. */
 .tm-nextaction {
   display: grid;
@@ -611,8 +595,7 @@ or
   line-height: 1.5;
 }
 
-/* The request as written: prose,
-clamped until asked for in full. */
+/* The request as written: prose, clamped until asked for in full. */
 .tm-orequest__prompt {
   max-width: 72ch;
   margin: 0;
@@ -663,9 +646,7 @@ clamped until asked for in full. */
   white-space: nowrap;
 }
 
-/* What the agent reported,
-attributed to it,
-above what Task Monki captured. */
+/* What the agent reported, attributed to it, above what Task Monki captured. */
 .tm-oresult__report {
   display: grid;
   gap: 4px;
@@ -692,8 +673,7 @@ above what Task Monki captured. */
   margin-top: 6px;
 }
 
-/* How the task runs and where its work lives: a label and its value per row,
-the value in the interface face unless it is a string to copy. */
+/* How the task runs and where its work lives: a label and its value per row, the value in the interface face unless it is a string to copy. */
 .tm-props {
   display: grid;
   gap: 2px;
@@ -823,8 +803,7 @@ the value in the interface face unless it is a string to copy. */
   min-width: 0;
 }
 
-/* When the evidence was observed,
-beside the control that observes it again. */
+/* When the evidence was observed, beside the control that observes it again. */
 .tm-prstatus__refreshline {
   display: inline-flex;
   flex: 0 0 auto;
@@ -946,7 +925,7 @@ beside the control that observes it again. */
 .tm-prchecks__head svg {
   width: 12px;
   height: 12px;
-  transition: transform var(--motion-fast) ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-prchecks[open] > .tm-prchecks__head svg {
@@ -991,7 +970,7 @@ beside the control that observes it again. */
   width: 10px;
   flex: 0 0 auto;
   color: var(--muted);
-  transition: transform 120ms ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-prcheck[open] .tm-prcheck__chevron {
@@ -1062,10 +1041,8 @@ beside the control that observes it again. */
   gap: 14px;
 }
 
-/* One event per row: what happened,
-then who recorded it and when. Space
-   separates rows; no rules,
-no marks. */
+/* One event per row: what happened, then who recorded it and when. Space
+   separates rows; no rules, no marks. */
 .tm-taskactivity__item {
   display: grid;
   gap: 2px;
@@ -1225,8 +1202,7 @@ no marks. */
   border-bottom: 1px solid var(--hair);
 }
 
-/* When the running RunHeader fills the head,
-the head's own padding + divider
+/* When the running RunHeader fills the head, the head's own padding + divider
    handle spacing — drop the RunHeader's default bottom margin so it centers in
    the head row and aligns with the padded body below. */
 .tm-reviewcard__head--run .tm-runheader {
@@ -1318,15 +1294,10 @@ the head's own padding + divider
   margin-top: 0;
 }
 
-.tm-reviewfindings {
-  border-top: 1px solid var(--hair);
-}
-
 .tm-reviewcard__raw {
   border-top: 1px solid var(--hair);
 }
 
-.tm-reviewfindings > summary,
 .tm-reviewcard__raw > summary {
   display: flex;
   align-items: center;
@@ -1343,23 +1314,19 @@ the head's own padding + divider
   font-weight: 500;
 }
 
-.tm-reviewfindings > summary::-webkit-details-marker,
 .tm-reviewcard__raw > summary::-webkit-details-marker {
   display: none;
 }
 
-.tm-reviewfindings > summary:hover,
 .tm-reviewcard__raw > summary:hover {
   color: var(--text);
   background: var(--hover);
 }
 
-.tm-reviewfindings > summary,
 .tm-finding[open] > summary {
   background: var(--field);
 }
 
-.tm-reviewfindings[open] > summary .tm-disclosure__chevron,
 .tm-reviewcard__raw[open] > summary .tm-disclosure__chevron {
   transform: rotate(90deg);
 }
@@ -1368,10 +1335,6 @@ the head's own padding + divider
   margin: 0 -14px;
   border-top: 1px solid var(--hair);
   background: transparent;
-}
-
-.tm-reviewfindings > .tm-reviewcard__raw > summary {
-  margin: 0;
 }
 
 .tm-finding {
@@ -1459,7 +1422,7 @@ the head's own padding + divider
   align-items: center;
   justify-content: center;
   color: var(--muted);
-  transition: transform var(--motion-fast) ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-finding[open] .tm-finding__chevron {
@@ -1481,30 +1444,6 @@ the head's own padding + divider
   margin-top: 7px;
 }
 
-/* Selectable FindingRow: same grammar as the read-only card row,
-with a leading
-   checkbox column so the drawer mirrors the review card exactly (audit §06). */
-.tm-finding--select .tm-finding__summary {
-  display: grid;
-  grid-template-columns: 15px 92px minmax(0, 1fr);
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px 14px;
-  cursor: pointer;
-  color: var(--text);
-}
-
-.tm-finding--select .tm-finding__summary:hover {
-  background: var(--hover);
-}
-
-.tm-finding__check {
-  margin-top: 3px;
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
-}
-
 .tm-modal {
   position: fixed;
   inset: 0;
@@ -1516,14 +1455,13 @@ with a leading
 }
 
 /* A modal is a sheet lifted over a dimmed app (DESIGN.md A.3): the surface
-   plane with the floating edge and the modal shadow,
-never a brighter fill.
+   plane with the floating edge and the modal shadow, never a brighter fill.
    It scales in from 0.97 while the scrim fades. */
 .tm-modal__scrim {
   position: absolute;
   inset: 0;
   background: var(--scrim);
-  animation: tm-scrim-in 200ms var(--ease-out);
+  animation: tm-scrim-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-modal__panel {
@@ -1793,7 +1731,7 @@ never a brighter fill.
 
 @media (max-width: 620px) {
   .tm-board-editor__options,
-.tm-board-editor__options--phases {
+  .tm-board-editor__options--phases {
     grid-template-columns: 1fr;
   }
 }
@@ -1845,7 +1783,6 @@ never a brighter fill.
 .tm-delete-modal {
   width: min(660px, 100%);
 }
-
 
 .tm-delete-modal__worktree {
   display: flex;
@@ -1977,8 +1914,7 @@ never a brighter fill.
   font-size: var(--t-meta);
 }
 
-/* A plan is a checklist: shaped marks,
-a word only where a run stopped. */
+/* A plan is a checklist: shaped marks, a word only where a run stopped. */
 .tm-plan__steps {
   display: flex;
   flex-direction: column;
@@ -2181,40 +2117,12 @@ a word only where a run stopped. */
 .tm-change-summary__chevron {
   margin-left: 8px;
   color: var(--muted);
-  transition: transform 140ms ease, color 140ms ease;
+  transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
 .tm-change-summary__more[open] .tm-change-summary__chevron {
   color: var(--muted);
   transform: rotate(90deg);
-}
-
-/* diff card */
-.tm-diff {
-  border: 0;
-  border-radius: var(--r-md);
-  overflow: hidden;
-  background: var(--well);
-}
-
-.tm-diff pre {
-  margin: 0;
-  padding: 14px 16px;
-  color: var(--text-soft);
-  font: var(--t-meta)/1.55 var(--font-mono);
-  overflow: auto;
-  max-height: 280px;
-  white-space: pre;
-}
-
-.tm-filefilter {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
-  gap: 8px;
-  padding: 0 16px 12px;
-  border-bottom: 1px solid var(--hair);
-  background: var(--surface);
 }
 
 .tm-filefilter__search {
@@ -2327,8 +2235,7 @@ a word only where a run stopped. */
   min-width: 100%;
 }
 
-/* Every row keeps both number gutters and a change marker,
-so code stays in one
+/* Every row keeps both number gutters and a change marker, so code stays in one
    column and a change never depends on its tint alone. */
 .tm-diffline {
   display: grid;
@@ -2446,8 +2353,7 @@ so code stays in one
   font-size: var(--t-body);
 }
 
-/* Permanent fact → a plain muted caption,
-not a tinted full-width box
+/* Permanent fact → a plain muted caption, not a tinted full-width box
    (DESIGN.md §4 ban on tinted boxes / audit §03 Debug). */
 .tm-debug__notice {
   padding: 0 2px;
@@ -2559,7 +2465,7 @@ not a tinted full-width box
   }
 
   .tm-runheader__scope,
-.tm-runheader__trailing {
+  .tm-runheader__trailing {
     grid-column: 2 / -1;
     overflow: visible;
     white-space: normal;
@@ -2592,7 +2498,6 @@ not a tinted full-width box
     backdrop-filter: none;
   }
 }
-
 
 /* The Overview names what the review found; the findings themselves live in the Review tab. */
 .tm-reviewcard__findings { display: flex; align-items: baseline; gap: 12px; margin: 4px 0 0; font-size: var(--t-help); }

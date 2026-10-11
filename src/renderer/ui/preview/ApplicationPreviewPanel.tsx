@@ -27,6 +27,7 @@ import { ApplicationConfiguration, type ConfigurationView, type PreviewEditorDra
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewAgentPanel } from './PreviewAgentPanel';
 import { FloatingSidePanel } from '../TaskSidePanel';
+import { OverviewSection } from '../TaskOverview';
 import { AgentMark } from '../UiIcons';
 import type { PreviewAgentConversation, PreviewAgentHost, PreviewProposalActions } from './PreviewAgentProps';
 import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
@@ -94,9 +95,8 @@ export function worktreeAvailability(worktree: WorktreeRecord | undefined, pendi
 }
 
 /**
- * The Preview card on the task Overview, in the Agent card's anatomy: the head opens the Preview
- * tab and carries the state; serving services list their addresses, otherwise one line says how
- * the last run ended.
+ * The Overview's Preview section: the state and since when, then the serving addresses. Without a
+ * serving run, the line says how the last run ended. The section link opens the Preview tab.
  */
 export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskId: string; onOpen(): void; onNotify?: PreviewNotify }) {
   const { snapshot, error } = useApplicationPreview(taskId, true);
@@ -110,46 +110,45 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
         return address ? [{ id, address }] : [];
       })
     : [];
+  // A single application needs no name beside its address; named services are rows.
   const application = serving && !Object.keys(serving.services ?? {}).length ? previewAddress(status) : undefined;
-  const rows = application ? [{ id: 'Application', address: application }] : services;
   const last = previewRunRows(status, !!snapshot?.restoredRun)[0];
+  const servingSince = serving ? previewRunRows(status, false).find((run) => run.attempt.id === serving.id)?.time : undefined;
   const line = error
     ? error
     : serving
-      ? `Since ${previewRunRows(status, false).find((run) => run.attempt.id === serving.id)?.time ?? ''}`
+      ? servingSince ? `Since ${servingSince}` : undefined
       : last
-        ? [`Last run ${last.time}`, last.cause].filter(Boolean).join(' · ')
+        ? last.cause ? `Last run ${last.time}, ${last.cause}` : `Last run ${last.time}`
         : 'No runs yet';
   const open = (address: PreviewAddress) => {
     if (serving) void openPreviewAddress(taskId, serving.id, address).catch((cause) => notify(message(cause), 'error'));
   };
   return (
     <PreviewNotifyContext.Provider value={notify}>
-      <section className="tm-panel tm-agent-overview tm-preview-overview" aria-label="Preview summary">
-        <button type="button" className="tm-agent-overview__link" onClick={onOpen}>
-          <span>
-            <strong>Preview</strong>
-            <span title={line}>{line}</span>
-          </span>
-          <span className="tm-agent-overview__state">
-            {error ? 'Unavailable' : applicationPreviewStatus(status, !!snapshot?.approval).label}
-            <span aria-hidden="true">→</span>
-          </span>
-        </button>
-        {rows.length ? (
-          <div className="tm-preview-overview__services">
-            {rows.slice(0, 3).map((row) => (
-              <div className="tm-config__row" key={row.id}>
-                <span className="tm-config__k">{row.id}</span>
-                <span className="tm-config__v">
-                  <PreviewAddressActions name={row.id} address={row.address} onOpen={open} />
-                </span>
+      <OverviewSection
+        title="Preview"
+        className="tm-preview-overview"
+        aside={<button type="button" className="tm-osection__link" onClick={onOpen}>Open preview</button>}
+      >
+        <p className="tm-preview-overview__state">
+          <span>{error ? 'Unavailable' : applicationPreviewStatus(status, !!snapshot?.approval).label}</span>
+          {line ? <span className="tm-preview-overview__line" title={line}>{line}</span> : null}
+        </p>
+        {application ? (
+          <PreviewAddressActions name="Application" address={application} onOpen={open} />
+        ) : services.length ? (
+          <dl className="tm-props">
+            {services.slice(0, 3).map((row) => (
+              <div className="tm-props__row" key={row.id}>
+                <dt>{row.id}</dt>
+                <dd><PreviewAddressActions name={row.id} address={row.address} onOpen={open} /></dd>
               </div>
             ))}
-            {rows.length > 3 ? <p className="tm-preview-overview__more">{rows.length - 3} more in Preview</p> : null}
-          </div>
+          </dl>
         ) : null}
-      </section>
+        {services.length > 3 ? <p className="tm-preview-overview__more">{services.length - 3} more in Preview</p> : null}
+      </OverviewSection>
     </PreviewNotifyContext.Provider>
   );
 }
@@ -586,7 +585,7 @@ export function ApplicationPreviewPanel({
   ) : null;
   const agentPanel = !agentConversation ? null
     : agentHost ? (agentHost.slot ? createPortal(agentConversation, agentHost.slot) : null)
-    : <FloatingSidePanel label="Preview agent">{agentConversation}</FloatingSidePanel>;
+    : <FloatingSidePanel>{agentConversation}</FloatingSidePanel>;
   const latestMeta = `${serving && latest?.id !== serving.id ? 'update' : 'this run'}${latest?.startedAt ? ` · ${previewRunRows(status, false).find((run) => run.attempt.id === latest.id)?.time ?? ''}` : ''}`;
   // What holds the preview, decided in Activity only: Configuration and Logs are never pushed down.
   const attentionBlock = availability.state !== 'available' ? (

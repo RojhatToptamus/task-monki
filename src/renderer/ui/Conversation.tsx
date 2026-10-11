@@ -46,15 +46,18 @@ export function Conversation({ instance, label, className = '', header, children
   // The part of the header marked data-conversation-collapse slides away; the
   // rest (the tabs) stays. The header never hides before the first message has
   // passed beneath it, so hiding never opens an empty band at the top.
+  // A collapsible part appearing or leaving changes the header's height, so
+  // the observer re-reads it without measuring on every render.
   const headerHeight = useRef(0);
   const canCollapse = useRef(false);
+  const hasHeader = Boolean(header);
   useLayoutEffect(() => {
     const element = headerRef.current;
     if (!element) return;
-    const collapsible = element.querySelector<HTMLElement>('[data-conversation-collapse]');
-    canCollapse.current = Boolean(collapsible);
-    if (!collapsible) setHeaderVisible(true);
     const measure = () => {
+      const collapsible = element.querySelector<HTMLElement>('[data-conversation-collapse]');
+      canCollapse.current = Boolean(collapsible);
+      if (!collapsible) setHeaderVisible(true);
       headerHeight.current = element.offsetHeight;
       element.style.setProperty('--conversation-header-hide', `${collapsible?.offsetHeight ?? 0}px`);
     };
@@ -62,7 +65,7 @@ export function Conversation({ instance, label, className = '', header, children
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [header]);
+  }, [hasHeader]);
   const reportHeader = useRef(onHeaderVisibleChange);
   reportHeader.current = onHeaderVisibleChange;
   useLayoutEffect(() => { reportHeader.current?.(headerVisible); }, [headerVisible]);
@@ -71,6 +74,17 @@ export function Conversation({ instance, label, className = '', header, children
   // restoring a reading position and Jump to latest are programmatic.
   const readerIntent = useRef({ until: 0, dragging: false });
   const noteReaderScroll = () => { readerIntent.current.until = performance.now() + READER_INTENT_MS; };
+  // A scrollbar drag can end outside the viewport, so the release is heard on the window.
+  const noteScrollbarDrag = () => {
+    readerIntent.current.dragging = true;
+    const release = () => {
+      readerIntent.current.dragging = false;
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+  };
   const trackScroll = (viewport: HTMLElement) => {
     if (header) {
       const top = Math.max(0, viewport.scrollTop);
@@ -93,9 +107,7 @@ export function Conversation({ instance, label, className = '', header, children
       onWheel={noteReaderScroll}
       onTouchMove={noteReaderScroll}
       onKeyDown={(event) => { if (READER_SCROLL_KEYS.has(event.key)) noteReaderScroll(); }}
-      onPointerDown={(event) => { if (event.target === event.currentTarget) readerIntent.current.dragging = true; }}
-      onPointerUp={() => { readerIntent.current.dragging = false; }}
-      onPointerCancel={() => { readerIntent.current.dragging = false; }}
+      onPointerDown={(event) => { if (event.target === event.currentTarget) noteScrollbarDrag(); }}
       onClickCapture={(event) => {
         if ((event.target as HTMLElement).closest('[data-disclosure]')) instance.stopScroll();
       }}>

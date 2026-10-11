@@ -1008,7 +1008,7 @@ function ThemePresetPicker({
                     style={{ '--theme-option-accent': themeTokens(preset.id, mode)['--accent'] } as CSSProperties}
                   />
                   <span>{preset.label}</span>
-                  {preset.id === value ? <UiCheckIcon size={12} /> : null}
+                  {preset.id === value ? <UiCheckIcon size={13} /> : null}
                 </button>
               ))}
             </div>

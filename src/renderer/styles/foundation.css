@@ -232,9 +232,8 @@ button {
 }
 
 /* The token overlay preserves each control family's rest fill and geometry.
-   Ink-filled controls (the primary family) cannot take an ink overlay,
-so they
-   press with their own derived fill. */
+   Ink-filled controls (the primary family) cannot take an ink overlay, so they
+   press with their own derived fill (base-components.css). */
 :where(button, [role='button']):not(:disabled):active {
   background-image: linear-gradient(var(--press), var(--press));
 }
@@ -338,8 +337,8 @@ so they
 
 @media (prefers-reduced-motion: reduce) {
   *,
-*::before,
-*::after {
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;

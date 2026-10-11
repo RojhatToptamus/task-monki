@@ -165,13 +165,47 @@ function TurnFooter({ turn, noticeShown, onReadArtifact, onShowDebug }: {
     <div className="tm-turn__footer">
       {outcome ? <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{outcome}</span> : null}
       {end ? <MessageTime value={end} /> : null}
-      {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
+      {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={13} className="tm-iconbtn tm-turn__action" /> : null}
       {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={details} /> : null}
     </div>
     {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">
       {prompt.error ? <p role="alert">{prompt.error}</p> : prompt.text === undefined ? <p>Loading prompt…</p> : <pre>{prompt.text}</pre>}
     </section> : null}
   </>;
+}
+
+/**
+ * Messages no run carries yet: still sending, delivery uncertain, or refused
+ * before a run was admitted. A panel shows them after its turns.
+ */
+export function unattachedInstructions(instructions: readonly TaskInstruction[], runs: readonly { id: string }[]): TaskInstruction[] {
+  return instructions.filter((item) =>
+    !runs.some((run) => run.id === item.runId) && (item.status === 'SENDING' || item.status === 'UNCERTAIN' || (item.status === 'FAILED' && !item.runId))
+  );
+}
+
+/** Those messages, each with its delivery state. */
+export function UnattachedMessages({ instructions }: { instructions: readonly TaskInstruction[] }) {
+  return <>
+    {instructions.map((item) => (
+      <UserMessage
+        key={item.id}
+        text={item.text}
+        time={item.createdAt}
+        status={item.status === 'FAILED' ? item.detail ?? 'Not sent' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Sending…'}
+      />
+    ))}
+  </>;
+}
+
+/** The one live line while an agent works: what it is doing, and for how long. */
+export function WorkingLine({ label, since }: { label: string; since: string }) {
+  return (
+    <div className="tm-side-conversation__working">
+      <span role="status" className="tm-shimmer">{label}</span>
+      <Elapsed since={since} />
+    </div>
+  );
 }
 
 export function Elapsed({ since }: { since: string }) {

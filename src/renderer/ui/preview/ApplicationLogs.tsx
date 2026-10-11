@@ -345,7 +345,7 @@ function RunLogs({
           source,
           marker: state,
           text: displayName(source),
-          detail: `${exit ? ` · ${failureWord(exit)}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`}`
+          detail: `${exit ? ` · ${failureWord(exit)}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`}`
         });
       }
       previous[source] = state;
@@ -536,7 +536,7 @@ function RunLogs({
             selection="single"
             align="start"
             side="bottom"
-            trigger={<><span>{attempt.id === status?.active?.id ? 'Current run' : runTime(attempt.startedAt)}</span><ChevronDown size={14} aria-hidden="true" /></>}
+            trigger={<><span>{attempt.id === status?.active?.id ? 'Current run' : runTime(attempt.startedAt)}</span><ChevronDown size={13} aria-hidden="true" /></>}
             items={attempts.map((item) => ({
               id: item.id,
               label: runTime(item.startedAt),
@@ -555,7 +555,7 @@ function RunLogs({
             side="bottom"
             closeOnSelect={false}
             note={atPaneLimit ? 'Side by side shows up to four sources.' : undefined}
-            trigger={<><span>{chosen.length === sources.length ? 'All sources' : chosen.length === 1 ? displayName(chosen[0]!) : `${chosen.length} sources`}</span><ChevronDown size={14} aria-hidden="true" /></>}
+            trigger={<><span>{chosen.length === sources.length ? 'All sources' : chosen.length === 1 ? displayName(chosen[0]!) : `${chosen.length} sources`}</span><ChevronDown size={13} aria-hidden="true" /></>}
             items={[
               {
                 label: 'All sources',

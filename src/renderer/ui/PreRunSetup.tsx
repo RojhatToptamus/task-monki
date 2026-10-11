@@ -67,7 +67,7 @@ export function PreRunSetup({
       await onSavePrompt(draft, true);
       setSaveError(undefined);
     });
-    void writes.current.catch(() => setSaveError('Draft could not be saved. Keep this page open and try Save again.'));
+    void writes.current.catch(() => setSaveError('The draft could not be saved. Keep this page open and try again.'));
   };
   const savePrompt = async (): Promise<boolean> => {
     if (saving || files.busy || files.hasErrors || files.modelError || !text.trim()) return false;
@@ -106,7 +106,8 @@ export function PreRunSetup({
         className="tm-prerun__composer"
         attachments={files}
         attachmentLabel="Prompt attachments"
-        hint={saveError ?? fileError ?? runtimeReason}
+        // A disabled action says why where everyone can read it, not only in a hover title.
+        hint={saveError ?? fileError ?? runtimeReason ?? (action?.disabled ? action.title : undefined)}
         toolbarStart={<>
           <AgentModelSelector
             label="Model"

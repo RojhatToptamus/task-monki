@@ -165,7 +165,7 @@ function AttachmentPreviewDialog({ name, onClose, onOpenChange, children }: {
 }
 
 function CloseIcon() {
-  return <X aria-hidden="true" size={15} />;
+  return <X aria-hidden="true" size={16} />;
 }
 
 function ImageFileIcon() {

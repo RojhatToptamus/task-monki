@@ -19,6 +19,7 @@ import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
 import { StatusGlyph } from './StatusBadge';
 import { ArrowUp, ChevronDown, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
 import { AgentMark } from './UiIcons';
+import { SUBMIT_SHORTCUT } from './Tooltip';
 
 export interface AgentSessionProps {
   task: Task;
@@ -67,7 +68,6 @@ type SendMode = 'QUEUE' | 'STEER' | 'CONTINUE' | 'RETRY';
 interface ReadingPosition { taskId: string; top: number; firstTurnKey?: string; clip: number; following: boolean }
 
 const READING_KEY = 'task-monki:agent-reading';
-const SHORTCUT = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/u.test(navigator.userAgent) ? '⌘↵' : 'Ctrl+Enter';
 
 export function AgentSession(props: AgentSessionProps) {
   const { task, run, draft } = props;
@@ -258,7 +258,7 @@ export function AgentSession(props: AgentSessionProps) {
     : displayedRun?.status === 'STARTING' || displayedRun?.status === 'QUEUED' ? 'Starting…'
     : activeReview ? 'Reviewing…' : 'Working…';
   const canSend = !busy && !blocked && !files.busy && !files.hasErrors && !files.modelError && !(needsText && !draft.trim());
-  const hint = editing ? `${SHORTCUT} to save` : blocked;
+  const hint = editing ? `${SUBMIT_SHORTCUT} to save` : blocked;
   const model = displayedRun?.observedSettings?.model ?? displayedRun?.requestedSettings.model;
 
   return <section className="tm-agent-session" aria-label="Agent session">
@@ -311,11 +311,11 @@ export function AgentSession(props: AgentSessionProps) {
               {mode && !questionPending ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
                 <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
                   aria-label={delivery[mode].label}
-                  title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SHORTCUT}`)}>
+                  title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SUBMIT_SHORTCUT}`)}>
                   {sendControl(mode, followUp)}
                 </button>
                 {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
-                  trigger={<ChevronDown size={14} aria-hidden="true" />}
+                  trigger={<ChevronDown size={13} aria-hidden="true" />}
                   items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,
                     onSelect: () => setChoice({ runId: run.id, mode: item }) }))} /> : null}
               </div> : null}
@@ -341,7 +341,7 @@ export function AgentSession(props: AgentSessionProps) {
         <label className="tm-visually-hidden" htmlFor={`agent-draft-${task.id}`}>{editing ? 'Edit queued instruction' : 'Instruction'}</label>
         <textarea className="tm-composer__input" ref={composer} id={`agent-draft-${task.id}`} rows={3} value={editing?.text ?? draft} readOnly={busy || questionPending} aria-disabled={questionPending || undefined}
           aria-describedby={hint ? `agent-composer-note-${task.id}` : undefined} maxLength={TASK_INSTRUCTION_MAX_LENGTH}
-          placeholder={questionPending ? questionPrompt : mode ? delivery[mode].placeholder : 'Continue the work…'}
+          placeholder={questionPending ? questionPrompt : mode ? delivery[mode].placeholder : 'Continue the work'}
           onPaste={composerFiles.paste}
           onChange={(event) => { if (editing) setEditing({ ...editing, text: event.target.value }); else props.onDraftChange(event.target.value); }}
           onKeyDown={(event) => {

@@ -173,17 +173,19 @@ shared primitives instead of building a local variant:
   take the shared chevron, so colour them with `background-color`.
 - Settings: `SettingsPane` and `SettingsRow` inside `tm-settings__list`.
 - Side conversations: `ConversationPanel` in `DockedSidePanel` or
-  `FloatingSidePanel` from `useTaskSidePanelLayout`.
+  `FloatingSidePanel` (`TaskSidePanel.tsx`, placed by `useTaskSidePanelLayout`);
+  `SessionTurns` holds their turns, unsent messages and working line.
 - Composers: `AttachmentComposerShell` or `ConversationPanel`, with chips
   (`AgentModelSelector` compact, `AccessMenu`, `AgentProfileSelect`) in the toolbar.
 - Activity: `StatusGlyph` "working" is still; live text takes `.tm-shimmer`. Never
   add a spinner.
-- Icons: Lucide with a `size` only; the line weight is `--icon-stroke` in CSS, so
-  never pass `strokeWidth` or `absoluteStrokeWidth`.
+- Icons: Lucide with a `size` of 13, 16 or 18 only; the line weight is
+  `--icon-stroke` in CSS, so never pass `strokeWidth` or `absoluteStrokeWidth`.
+  An icon-only control is named by `Tooltip`, never a native `title`.
 - Agents: `AgentMark` is the only icon for any agent.
 - Values: colours, radii, font sizes, control heights, durations and easing are
   tokens (`themes.css`, `src/renderer/styles/foundation.css`); a literal is a
-  defect, and `npm run check:themes` rejects literal sizes and radii. Theme
+  defect, and `npm run check:themes` rejects literal font sizes and radii. Theme
   tokens change only through `tools/build-themes.mjs`.
 
 Before a material UI change,

@@ -1,7 +1,6 @@
 import type {
   DomainEvent,
   GitSnapshotRecord,
-  GitHubRepositoryRecord,
   BranchPublicationRecord,
   PullRequestSnapshotRecord,
   CiRollupRecord,
@@ -44,15 +43,6 @@ export function selectLatestGitSnapshot(
   return snapshot.gitSnapshots
     .filter((gitSnapshot) => gitSnapshot.taskId === task.id && gitSnapshot.iterationId === task.currentIterationId)
     .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
-}
-
-export function selectLatestGitHubRepository(
-  snapshot: Pick<TaskSnapshot, 'githubRepositories'>,
-  task: Task
-): GitHubRepositoryRecord | undefined {
-  return snapshot.githubRepositories
-    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
-    .sort((a, b) => b.checkedAt.localeCompare(a.checkedAt))[0];
 }
 
 export function selectLatestBranchPublication(

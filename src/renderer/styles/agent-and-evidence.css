@@ -13,9 +13,7 @@
 .tm-agent-session__elapsed { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-agent-session__requests:empty { display: none; }
 
-/* A turn — what was asked,
-what the agent did,
-and how it ended. No turn chrome. */
+/* A turn — what was asked, what the agent did, and how it ended. No turn chrome. */
 .tm-turn { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .tm-turn + .tm-turn { margin-top: 12px; }
 .tm-turn__footer { display: flex; align-items: center; gap: 10px; min-height: var(--h-compact); margin-top: -4px; color: var(--muted); font-size: var(--t-meta); }
@@ -34,8 +32,7 @@ and how it ended. No turn chrome. */
 .tm-turn__notice[data-status='RECOVERY_REQUIRED'] > svg { color: var(--waiting-ink); }
 .tm-turn__notice strong { color: var(--text); font-weight: 500; }
 .tm-turn__notice p { margin: 2px 0 0; }
-/* The run's own reason,
-quoted under the runtime's name like every provider text. */
+/* The run's own reason, quoted under the runtime's name like every provider text. */
 .tm-turn__notice .tm-turn__reported { display: grid; gap: 2px; margin: 6px 0 0; }
 .tm-turn__reported figcaption { color: var(--muted); font-weight: 500; }
 .tm-turn__reported blockquote { margin: 0; padding-left: 10px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); overflow-wrap: anywhere; }
@@ -46,8 +43,7 @@ quoted under the runtime's name like every provider text. */
 .tm-turn--review > span:first-of-type { color: var(--text-soft); }
 .tm-turn--review > .ghost-button { margin-left: auto; }
 
-/* Changed files — the run's captured diff,
-shared by the conversation and Overview. */
+/* Changed files — the run's captured diff, shared by the conversation and Overview. */
 .tm-changes { min-width: 0; }
 .tm-changes__none { margin: 0; color: var(--muted); font-size: var(--t-body); }
 .tm-changes__head { display: flex; align-items: center; gap: 8px; min-height: var(--h-toolbar); color: var(--muted); font-size: var(--t-help); }
@@ -58,8 +54,7 @@ shared by the conversation and Overview. */
 .tm-changes__more > summary { display: flex; align-items: center; gap: 6px; min-height: var(--h-compact); padding-left: 22px; color: var(--muted); font-size: var(--t-help); cursor: pointer; }
 .tm-changes__more > summary:hover { color: var(--text); }
 
-/* Composer — the queue,
-the draft and the delivery controls are one field. */
+/* Composer — the queue, the draft and the delivery controls are one field. */
 /* A grid track of minmax(0, 1fr): a long hint in the composer never widens it past the conversation. */
 /* The footer reserves the same right-hand gutter as the log above it, so the composer centres on the conversation's axis. */
 .tm-agent-session__dock { flex: 0 0 auto; overflow: hidden; scrollbar-gutter: stable; }
@@ -67,8 +62,7 @@ the draft and the delivery controls are one field. */
 .tm-agent-session__editing { display: flex; align-items: center; gap: 8px; padding: 6px 8px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-agent-session__editing > button { margin-left: auto; }
 
-/* Overview — the agent's state and latest answer,
-one click from the conversation. */
+/* Overview — the agent's state and latest answer, one click from the conversation. */
 @media (max-width: 1100px) {
   .tm-agent-session__column { padding: 20px 16px 24px; }
   .tm-agent-session__footer { padding: 0 16px 12px; }
@@ -936,19 +930,6 @@ one click from the conversation. */
     flex-direction: column;
   }
 
-  .sidebar {
-    flex: 0 0 auto;
-    width: 100%;
-    max-height: 230px;
-    padding: 10px 12px;
-    border-right: 0;
-    border-bottom: 1px solid var(--hair);
-  }
-
-  .detail {
-    min-height: 0;
-  }
-
   .card {
     padding: 14px;
   }
@@ -962,7 +943,7 @@ one click from the conversation. */
   }
 
   .provider-run-node__children,
-.subagent-node__children {
+  .subagent-node__children {
     margin-left: 8px;
     padding-left: 8px;
   }
@@ -1048,20 +1029,7 @@ one click from the conversation. */
 
 /* Codex final artifact */
 
-.card--artifact {
-  background: var(--well);
-  border-color: var(--hair);
-  padding: 16px 18px;
-}
-
 /* Findings */
-
-.card--findings {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow: hidden;
-}
 
 .findings {
   overflow: hidden;

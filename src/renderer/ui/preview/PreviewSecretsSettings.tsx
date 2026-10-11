@@ -128,7 +128,7 @@ export function PreviewSecretsSettings() {
       ) : status.state !== 'unlocked' ? (
         <div className="tm-settings__list">
           <div className="tm-application-secrets__empty">
-            <LockKeyhole size={20} aria-hidden="true" />
+            <LockKeyhole size={18} aria-hidden="true" />
             <p role="status">
               {status.warning ?? (status.state === 'new'
                 ? 'Store secrets once and use their references in your previews.'
@@ -163,7 +163,7 @@ export function PreviewSecretsSettings() {
               <input
                 aria-label="Search secret references"
                 type="search"
-                placeholder="Search references…"
+                placeholder="Search references"
                 value={query}
                 maxLength={128}
                 onChange={(event) => {

@@ -41,14 +41,10 @@ code.tm-preview-entry__name { flex: 0 1 auto; font-size: var(--t-help); }
 .tm-preview-entry__end { display: flex; grid-column: 3; grid-row: 1 / 3; align-items: center; justify-content: flex-end; gap: 6px; color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
 .tm-preview-entry__chevron { grid-column: 4; grid-row: 1 / 3; color: var(--muted); }
 .tm-preview-entry[aria-expanded='true'] .tm-preview-entry__chevron { transform: rotate(90deg); }
-/* Open,
-the editor's fields state the command,
-folder and order; the row would say them twice. */
+/* Open, the editor's fields state the command, folder and order; the row would say them twice. */
 .tm-preview-entry[aria-expanded='true'] :is(.tm-preview-entry__summary, .tm-preview-entry__meta) { display: none; }
 
-/* The inline editor: label column,
-controls at decision height,
-one reading width. */
+/* The inline editor: label column, controls at decision height, one reading width. */
 .tm-preview-entry-editor { display: grid; gap: 10px; max-width: calc(140px + 16px + 720px); padding: 6px 0 16px; }
 .tm-preview-entry-editor__field { display: grid; grid-template-columns: 140px minmax(0, 1fr); column-gap: 16px; align-items: start; }
 .tm-preview-entry-editor__field > label,
@@ -87,14 +83,10 @@ one reading width. */
 .tm-preview-entry-editor__menu .tm-action-menu__trigger:disabled { background: var(--field-disabled); color: var(--text-disabled); }
 .tm-preview-entry-editor__none { color: var(--placeholder); font-family: var(--font-ui); }
 
-/* An external database address: kind,
-then the value. */
+/* An external database address: kind, then the value. */
 .tm-preview-entry-editor__address { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 4px; }
 
-/* Environment: key,
-kind,
-value,
-remove. */
+/* Environment: key, kind, value, remove. */
 .tm-preview-env { display: grid; gap: 4px; min-width: 0; }
 .tm-preview-env__row { display: grid; grid-template-columns: minmax(0, 1fr) 128px minmax(0, 1fr) var(--h-icon); gap: 4px; align-items: start; }
 .tm-preview-env .field > input,
@@ -127,9 +119,9 @@ remove. */
 @container application-preview (max-width: 760px) {
   .tm-preview-entry-editor__field { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
   .tm-preview-entry-editor__field > label,
-.tm-preview-entry-editor__field > span { padding-top: 0; }
+  .tm-preview-entry-editor__field > span { padding-top: 0; }
   .tm-preview-entry-editor__actions,
-.tm-preview-entry-editor > .form-error { padding-left: 0; }
+  .tm-preview-entry-editor > .form-error { padding-left: 0; }
   .tm-preview-env__row { grid-template-columns: minmax(0, 1fr) 120px var(--h-icon); }
   .tm-preview-env__row > [role='cell']:nth-child(3) { grid-column: 1 / 3; grid-row: 2; }
   .tm-preview-entry__meta { max-width: 24ch; }

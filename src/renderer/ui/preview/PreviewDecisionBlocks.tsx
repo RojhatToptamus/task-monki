@@ -331,7 +331,7 @@ export function PreviewDiagnosisBlock({ diagnosis, meta, primary, secondary, mor
         <>
           <button className="outline-button" disabled={primary.disabled} title={primary.disabledReason} onClick={primary.onSelect}>{primary.label}</button>
           {secondary ? <button className="ghost-button" disabled={secondary.disabled} title={secondary.disabledReason} onClick={secondary.onSelect}>{secondary.label}</button> : null}
-          <ActionMenu label="More recovery actions" trigger={<>More<ChevronDown size={14} aria-hidden="true" /></>} items={more} />
+          <ActionMenu label="More recovery actions" trigger={<>More<ChevronDown size={13} aria-hidden="true" /></>} items={more} />
         </>
       }
       details={

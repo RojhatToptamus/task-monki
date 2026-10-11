@@ -1,18 +1,16 @@
 /* Task Preview tab: status row, decision blocks, configuration, logs and the agent panel. */
 
-/* Overview card: the Agent card's anatomy,
-with serving addresses as config rows. */
-.tm-preview-overview__services { display: grid; margin-top: 12px; }
-.tm-preview-overview__services .tm-config__row { align-items: center; min-width: 0; }
-.tm-preview-overview__services .tm-config__k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-preview-overview__more { margin: 6px 0 0; color: var(--muted); font-size: var(--t-help); }
+/* The Overview's Preview section: the state and since when, then the serving addresses as property rows. */
+.tm-preview-overview__state { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0; color: var(--text); font-size: var(--t-body); }
+.tm-preview-overview__line { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-overview .tm-props__row { align-items: center; }
+.tm-preview-overview .tm-props__row > dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-overview__more { margin: 0; color: var(--muted); font-size: var(--t-help); }
 
-/* A serving address: the service name or its shortened host,
-then Open and Copy. */
+/* A serving address: the service name or its shortened host, then Open and Copy. */
 .tm-preview-address { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; font: var(--t-meta)/1.4 var(--font-mono); }
 .tm-preview-address__label { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
-/* Open and Copy beside an address,
-in the compact icon-button style of the rows they sit in. */
+/* Open and Copy beside an address, in the compact icon-button style of the rows they sit in. */
 .tm-preview-address__action { flex: 0 0 auto; width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 
 /*
@@ -24,8 +22,7 @@ in the compact icon-button style of the rows they sit in. */
 .tm-detail__body.tm-detail__body--preview { padding: 0; overflow: hidden; scrollbar-gutter: auto; display: flex; flex-direction: column; }
 .tm-application-preview { --preview-head-top: 8px; --preview-statusrow: 44px; --preview-sections: 32px; position: relative; display: grid; flex: 1; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
 .tm-application-preview__main { position: relative; container: application-preview / inline-size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
-/* The top padding gives the status row's controls the same space above as below,
-before the sections. */
+/* The top padding gives the status row's controls the same space above as below, before the sections. */
 .tm-preview-head { position: sticky; top: 0; z-index: var(--layer-sticky); padding: var(--preview-head-top) var(--tm-gutter) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-preview-statusrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: var(--preview-statusrow); min-width: 0; }
 .tm-preview-statusrow__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
@@ -118,15 +115,6 @@ before the sections. */
   color: var(--text-soft);
   font-size: var(--t-meta);
   font-weight: 500;
-  list-style: none;
-}
-
-.tm-preview-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-
-.tm-preview-disclosure[open] > summary .tm-disclosure__chevron {
-  transform: rotate(90deg);
 }
 
 .tm-preview-disclosure[open] > summary {
@@ -181,30 +169,28 @@ before the sections. */
   overflow-wrap: anywhere;
 }
 
-/* Preview: one decision block,
-file-backed editing,
-and a bounded log workspace. */
+/* Secret actions sit at the right of their row. */
 .tm-preview-secret-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 
-/* Expanded decision block: the shared Inbox card with a body,
-group labels and hairline rows. */
-.tm-decision--expanded { display: block; }
-.tm-decision--expanded .tm-decision__body { display: grid; gap: 10px; }
-.tm-decision--expanded .tm-decision__head { margin: 0; flex-wrap: wrap; align-items: baseline; }
-.tm-decision__meta { color: var(--muted); font: var(--t-meta)/1.3 var(--font-mono); }
-.tm-decision__meta::before { content: '·'; margin-right: 7px; }
-.tm-decision--expanded .tm-decision__title,
-.tm-decision--expanded .tm-decision__summary { white-space: normal; overflow: visible; margin: 0; }
-.tm-decision--expanded .tm-decision__summary { max-width: 78ch; font-size: var(--t-help); line-height: 1.5; }
-.tm-decision--expanded .tm-decision__actions { justify-content: flex-start; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
-.tm-decision--expanded .tm-decision__actions .tm-preview-disclosure { margin: 0; }
-.tm-decision--expanded .tm-decision__actions .tm-preview-disclosure[open] { flex-basis: 100%; }
-.tm-decision--expanded .tm-decision__actions .tm-action-menu__trigger { color: var(--text-soft); font-weight: 500; padding: 0 8px; }
-.tm-decision--expanded .tm-decision__actions .tm-action-menu__trigger svg { color: var(--muted); }
+/* A decision block: one reason for attention, its context and the next action, as an object on
+   the tab's plane (DESIGN §2.6). Only a kind that needs attention takes a tone. */
+.tm-decision { display: grid; gap: 10px; min-width: 0; padding: 16px; border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); }
+.tm-decision__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
+.tm-decision__kind { color: var(--text-soft); font-size: var(--t-help); font-weight: 500; }
+.tm-decision__kind--error { color: var(--blocked-ink); }
+.tm-decision__kind--action { color: var(--waiting-ink); }
+.tm-decision__meta { min-width: 0; overflow: hidden; color: var(--muted); font: var(--t-meta)/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.tm-decision__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 500; line-height: 1.35; }
+.tm-decision__summary { max-width: 78ch; margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: 1.5; }
+.tm-decision__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 2px; }
+.tm-decision__actions .tm-preview-disclosure { margin: 0; }
+.tm-decision__actions .tm-preview-disclosure[open] { flex-basis: 100%; }
+.tm-decision__actions .tm-action-menu__trigger { padding: 0 8px; color: var(--text-soft); font-weight: 500; }
+.tm-decision__actions .tm-action-menu__trigger svg { color: var(--muted); }
 
 /* Group labels and rows (DESIGN §3 group label, §5 settings row): no cards inside the block. */
-.tm-preview-group { margin: 4px 0 0; color: var(--faint); font-size: var(--t-group); font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; }
-.tm-preview-group__meta { color: var(--muted); font-size: var(--t-meta); font-weight: 400; letter-spacing: normal; text-transform: none; }
+.tm-preview-group { margin: 4px 0 0; color: var(--muted); font-size: var(--t-group); font-weight: 500; }
+.tm-preview-group__meta { font-size: var(--t-meta); font-weight: 400; }
 .tm-preview-group__meta time { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-preview-rows { display: grid; min-width: 0; }
 .tm-preview-row { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto; gap: 2px 14px; align-items: baseline; min-height: 34px; padding: 6px 0; border-top: 1px solid var(--hair); min-width: 0; font-size: var(--t-help); }
@@ -227,10 +213,7 @@ group labels and hairline rows. */
 .tm-preview-excerpt__bar > .ghost-button { margin-left: auto; }
 .tm-preview-excerpt pre { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--well); color: var(--text-soft); font: var(--t-help)/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* Activity: runs as rows,
-one per attempt: time,
-outcome and cause,
-Logs and As run. */
+/* Activity: runs as rows, one per attempt: time, outcome and cause, Logs and As run. */
 .tm-preview-runs { display: grid; }
 .tm-preview-run { display: grid; grid-template-columns: minmax(84px, auto) minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; min-height: 34px; padding: 4px 0; border-top: 1px solid var(--hair); font-size: var(--t-help); }
 .tm-preview-run:first-child { border-top: 0; }
@@ -265,12 +248,10 @@ Logs and As run. */
 .tm-preview-secret-form h4 { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 500; }
 .tm-preview-secret-form p { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-preview-secret-form__progress code { color: var(--text); font-size: var(--t-help); }
-/* Inline,
-the row or the progress line names what the form is for; the heading only names the form. */
+/* Inline, the row or the progress line names what the form is for; the heading only names the form. */
 .tm-preview-secret-form > h4 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .tm-preview-secret-form :is(.outline-button, .ghost-button) { height: var(--h-toolbar); }
 
-.tm-preview-agent__intro { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-preview-agent__proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--well); }
 .tm-preview-agent__proposal strong { color: var(--text); font-size: var(--t-label); font-weight: 500; }
 .tm-preview-agent__proposal span { color: var(--muted); font: var(--t-meta) var(--font-mono); }
@@ -279,10 +260,7 @@ the row or the progress line names what the form is for; the heading only names 
 .tm-side-conversation__tools { display: inline-flex; flex: 0 1 auto; min-width: 0; }
 .tm-side-conversation .tm-agent-session__editing { margin: 0; padding: 6px 12px; }
 
-/* Logs: one run,
-a shared source menu,
-interleaved lanes or side-by-side panes. */
-
+/* Narrow Preview tabs drop the least needed service column and stack rows. */
 @container application-preview (max-width: 760px) {
   .tm-application-preview__services tr > :nth-child(4) { display: none; }
   .tm-preview-file-conflict { grid-template-columns: 1fr; }

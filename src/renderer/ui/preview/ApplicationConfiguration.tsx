@@ -346,7 +346,7 @@ function EntryEditor({ entry, entries, text, busy, onChange, onYaml, onDone }: {
             trigger={
               <>
                 <span className={entry.dependsOn.length ? undefined : 'tm-preview-entry-editor__none'}>{entry.dependsOn.join(', ') || 'Nothing'}</span>
-                <ChevronDown size={14} aria-hidden="true" />
+                <ChevronDown size={13} aria-hidden="true" />
               </>
             }
             items={others.map((other) => ({

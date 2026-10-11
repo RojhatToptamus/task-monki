@@ -25,9 +25,9 @@ export function AccessMenu({ presets, selected, networkOn, disabled = false, onP
       align="start"
       disabled={disabled || presets.length === 0}
       trigger={<>
-        <ShieldCheck size={14} aria-hidden="true" />
+        <ShieldCheck size={13} aria-hidden="true" />
         <span>{summary}</span>
-        <ChevronDown size={12} aria-hidden="true" />
+        <ChevronDown size={13} aria-hidden="true" />
       </>}
       items={[
         ...presets.map((preset) => ({

@@ -29,9 +29,9 @@ export function AgentProfileSelect({
       align="end"
       disabled={disabled}
       trigger={<>
-        <UserRound size={14} aria-hidden="true" />
+        <UserRound size={13} aria-hidden="true" />
         <span>{summary}</span>
-        <ChevronDown size={12} aria-hidden="true" />
+        <ChevronDown size={13} aria-hidden="true" />
       </>}
       items={[
         { id: '', label: 'No profile', pressed: !value, onSelect: () => onChange(undefined) },

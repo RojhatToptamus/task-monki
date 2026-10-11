@@ -53,7 +53,6 @@ import {
   selectActiveRun,
   selectCurrentWorktree,
   selectLatestGitSnapshot,
-  selectLatestGitHubRepository,
   selectLatestBranchPublication,
   selectLatestPullRequest,
   selectLatestCiRollup,
@@ -1575,9 +1574,6 @@ export function App() {
   const selectedGitSnapshot = selectedTask && taskDetail
     ? selectLatestGitSnapshot(taskDetail, selectedTask)
     : undefined;
-  const selectedGitHubRepository = selectedTask && taskDetail
-    ? selectLatestGitHubRepository(taskDetail, selectedTask)
-    : undefined;
   const selectedBranchPublication = selectedTask && taskDetail
     ? selectLatestBranchPublication(taskDetail, selectedTask)
     : undefined;
@@ -2798,7 +2794,6 @@ export function App() {
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
             gitSnapshots={selectedGitSnapshots}
-            githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
             ciRollup={selectedCiRollup}

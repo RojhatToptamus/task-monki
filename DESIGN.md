@@ -207,7 +207,7 @@ planes.
 
 ### 2.6 Lines, shadows and focus
 
-- **Four line weights, one job each.** Every line in the app is one of these,
+- **Five line weights, one job each.** Every line in the app is one of these,
   and which one you need follows from what the thing *is*:
 
   | Weight | Belongs to | Examples |
@@ -218,7 +218,7 @@ planes.
   | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
   | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
 
-  `--control-edge` is the fifth and separate: an opaque 3:1 line for a control
+  `--control-edge` is separate from these five: an opaque 3:1 line for a control
   with no fill at all to be identified by (an unchecked checkbox, a radio, a
   toggle track in the off position).
 
@@ -237,7 +237,7 @@ planes.
   An object — something with a boundary that sits above its plane and could
   conceptually be picked up — gets `--edge-raised` instead.
 - **Polarity is automatic, and it is the whole reason this works in both modes.**
-  All three tokens are alpha over `ink`, so the same token is a dark hairline in
+  Every one of them is alpha over `ink`, so the same token is a dark hairline in
   light mode and a light rim in dark mode. That is not a trick, it is the right
   physics: in light mode an object's edge is where it *casts* shade, in dark mode
   it is where it *catches* light. Light mode pairs the hairline with a soft
@@ -424,13 +424,10 @@ the platform's own faces (SF Pro and SF Mono on macOS), which need no download
 and render best on the platform. A component references those tokens and never
 a family name; a webfont is adopted only by bundling it with the app. Weights: **400 and
 500** only (`--w-medium`; the page title takes `--w-title`, also 500). Semibold
-reads heavy in the system face the app falls back to, so the hierarchy comes
-from size and ink, not weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
+reads heavy in the system face, so the hierarchy comes from size and ink, not
+weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
 "tnum"` on every number that sits in a column or updates in place, so digits
-don't jitter. System fallbacks in the token, `font-display: swap`, and nothing
-that depends on a webfont having loaded to be legible.
-
-Inter and Inter Tight are out.
+don't jitter. Nothing depends on a webfont having loaded to be legible.
 
 ### 3.2 Scale
 
@@ -545,15 +542,15 @@ These are settled. Use the value, don't re-derive it.
 | Titlebar | 44 tall (`TITLEBAR_HEIGHT`), shares the ground with the rail |
 | Rail | 56 wide, icon-only, permanent; 36px items |
 | Content sheet | inset 8px from the window's right and bottom edges, `--r-md` |
-| Secondary list column | 280 min · 360 default |
-| Toolbar / panel header | 44 tall |
+| Secondary list column | 268 default, resizable 220–360 |
+| Toolbar / panel header | 48 tall |
 | Page gutter | 24 at minimum width · 32 wide |
 | Reading column (settings, prose) | 880 max; tables and lists go full width |
 | List row | 26 compact · 30 default · 36 two-line |
 | Button | 32 tall (28 with `button--sm`), 12 horizontal pad, 64 min width |
-| Icon button | 28 square (26 compact), 16 glyph |
+| Icon button | 28 square (24 compact, `--h-compact`), 16 glyph (13 compact) |
 | Single-line field | 32 tall, 12 horizontal pad |
-| Textarea / composer | 88 min body, 96 min total, 10–12 pad |
+| Textarea / composer | 88 min body plus the 42 toolbar, 10–12 pad |
 | Popover / menu | 220–280 wide, 4 pad, 28 rows |
 | Modal | 440 confirm · 560 form · 640 creation · 720 payload |
 | Side panel | 380 docked, resizable 320–560; floats over the content below a 560px content floor |
@@ -650,8 +647,8 @@ step (Prepare worktree or Start). Starting saves the prompt; there is no
 separate save. New task uses the same chips in its description's toolbar.
 
 **Badges.** A state word on a 12–14% tint of its tone (`status-pill`, the
-`Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, no border, no dot. A
-spinner leads it only while work is in flight. One size everywhere.
+`Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, no border, no dot, and
+nothing in it moves. One size everywhere.
 
 **Tables and comparable lists.** One container (`tm-table`, and the Inbox list):
 the `--edge-raised` ring drawn over the rows, `--r-md`, no fill of its own,
@@ -831,8 +828,8 @@ single action that resolves it. No illustration, no second button.
 "Full history") are `tm-osection__link`: accent ink, no fill, at the right of
 the header of the section they belong to.
 
-**List rails** (the Designs and Discourse history) share `.tm-listrail`: the
-heading centred on a 30px New, a 30px search field, the status filter, then
+**List rails** (the Designs and Discourse history) share the `.tm-listrail__*`
+elements: the heading centred on a 28px New, a 32px search field, the status filter, then
 50px rows that overhang the fields by 4px on each side. A row is the title and
 one meta line — a status word in its tone, a neutral unread count, the time at
 the right. An empty rail is one line.
@@ -858,7 +855,7 @@ the right. An empty rail is one line.
   toast for a failure with no surface of its own.
 - **Selection survives** a refresh, a filter change, and a drawer opening; it is
   cleared only by the user. Scroll position is restored when returning to a list.
-- **Tooltips are for names and shortcuts**, delayed ~400ms, never for information
+- **Tooltips are for names and shortcuts**, delayed 500ms, never for information
   needed to make the decision in front of you.
 - **One primary action per surface.** Use the established keyboard behavior for
   each control. Multiline editing and input composition must not trigger
@@ -979,8 +976,8 @@ brief, the model and profile chips, the reason a run cannot start, and Create.
   clipping containers and remain within the window.
 - Related tabs share the same shell geometry. Switching tabs must not introduce
   unexplained gutters, background seams, or header movement.
-- Every boundary between two panels is a resize handle: a 5px hit area on the
-  boundary's hairline, which brightens to `--edge` on hover and focus, with a
+- Every boundary between two panels is a resize handle: an 8px hit area on the
+  boundary's hairline that draws a 2px `--edge` line on hover and focus, with a
   keyboard-reachable equivalent. A handle on the edge of a
   sheet that clips its overflow lies inside that edge, or nothing can grab it.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
@@ -1077,7 +1074,7 @@ an hour are instant. Nothing loops unless work is actually running.
 
 `--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
 `cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer` `cubic-bezier(0.32, 0.72, 0, 1)`.
-Under `prefers-reduced-motion` movement collapses to nothing and fades remain.
+Under `prefers-reduced-motion` every transition and animation collapses to an instant change.
 
 ---
 
@@ -1104,9 +1101,8 @@ correct answer far more often than a border is).
 | Rail | `--ground` | — | — | — |
 | Rail item, rest | — | `--muted` | — | — |
 | Rail item, hover | `--hover` | `--text-soft` | — | — |
-| Rail item, selected | `--sel` | `--text` | — | — |
-| Rail count, waiting on you | `--waiting-bg` | `--waiting-ink` | 2px `--ground` ring | — |
-| Rail update dot | `--accent` | — | 2px `--ground` ring | — |
+| Rail item, selected | `--card` (raised, clearly apart from hover) | `--text` | — | — |
+| Rail dot, waiting on you or an update | `--accent` | — | 2px ring in the item's fill | — |
 | Content sheet | `--surface` | `--text` | `--hair` seam (outset) | — |
 | Rail inside a sheet (Review index, Settings sections) | `--panel` or none | `--text-soft` | `--hair` on the attached edge | — |
 | Panel header / toolbar | inherits parent | `--text` | `--hair` below | — |
@@ -1121,7 +1117,8 @@ correct answer far more often than a border is).
 | Page title, section heading, card title | `--text` |
 | Body prose, secondary sentence | `--text-soft` |
 | Helper text, metadata, timestamps, counts, group labels | `--muted` |
-| Placeholders, inactive counts, disabled meta | `--faint` |
+| Placeholders | `--placeholder` (the `--muted` floor) |
+| Inactive counts, disabled meta | `--faint` |
 | Link, rest | `--accent-ink` |
 | Link, hover | `--accent` |
 | Machine values (paths, hashes, branches) | `--muted`, or `--faint` when secondary |
@@ -1150,7 +1147,7 @@ correct answer far more often than a border is).
 | Side panel, floating | `--surface` | `--edge` | `--shadow-pop` |
 | Tooltip, toast | `--overlay` | `--edge` | `--shadow-pop` |
 | Table / comparable list | — | `--edge-raised` ring over the rows; `--hair` between rows | — |
-| Review finding thread | `--card` | `--edge-raised`; focused: `--focus-ring` | `--shadow-card` |
+| Review finding thread | `--card` | `--edge-raised`; the finding jumped to, or keyboard focus: a 1px `--focus-ring` rim | `--shadow-card` |
 | Review finding, earlier review | `--panel` | `--hair` | — |
 | User's line comment | `--field` | `--field-edge` | — |
 | Code / payload block | `--well` | — | — |

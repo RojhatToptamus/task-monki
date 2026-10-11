@@ -25,7 +25,6 @@ import type {
   ExistingWorktree,
   Finding,
   GitSnapshotRecord,
-  GitHubRepositoryRecord,
   AgentInteractionDecision,
   AgentGoalSnapshotRecord,
   AgentItemRecord,
@@ -184,7 +183,6 @@ interface TaskDetailProps {
   gitSnapshot?: GitSnapshotRecord;
   gitSnapshots: GitSnapshotRecord[];
   postRunEvidencePendingRunIds?: string[];
-  githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
   ciRollup?: CiRollupRecord;
@@ -334,7 +332,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setPreviewAgentFocus(open && focus);
     try { persistPreviewAgentOpen(open); } catch { /* the preference is lost; the panel still works */ }
   }, []);
-  // The Review tab keeps its 248px index and a 560px diff before the panel floats.
+  // The page keeps at least 560px beside a docked panel; below that the panel floats over it.
   const sidePanelLayout = useTaskSidePanelLayout(560);
   const [agentHeaderVisible, setAgentHeaderVisible] = useState(true);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
@@ -426,8 +424,12 @@ export function TaskDetail(props: TaskDetailProps) {
     endSideThread();
     setSideDraft('');
     setDraftPrModalOpen(false);
-    setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
     setEvidenceGitSnapshotId(undefined);
+  }, [task?.id]);
+
+  // A renamed task offers its new title for a draft pull request; nothing else resets.
+  useEffect(() => {
+    setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
   }, [task?.id, task?.title]);
 
   useEffect(() => {
@@ -471,7 +473,32 @@ export function TaskDetail(props: TaskDetailProps) {
     return () => window.clearTimeout(timeout);
   }, [reviewStartPending, task?.id]);
 
-  if (!task || !reviewGate || !headerState || !prStatus) {
+  // Every hook runs before the empty state below returns, so a task that
+  // disappears while open never changes the hook order.
+  const taskActivityLedger = useMemo(
+    () => task
+      ? buildTaskActivityLedger({
+        task,
+        events: props.events,
+        runs: [...props.runs, ...(props.previewAgent?.runs ?? []), ...(props.reviewer?.records.runs ?? [])]
+      })
+      : undefined,
+    [task, props.events, props.runs, props.previewAgent?.runs, props.reviewer?.records.runs]
+  );
+  const overviewActivity = useMemo(
+    () => taskActivityLedger && projectOverviewTaskActivity(taskActivityLedger),
+    [taskActivityLedger]
+  );
+  const debugActivity = useMemo(
+    () => taskActivityLedger && projectDebugTaskActivity(taskActivityLedger),
+    [taskActivityLedger]
+  );
+  const progressRun = selectProgressRun(run, props.runs);
+  const progressTurn = useMemo(() => progressRun
+    ? sessionTurn(progressRun, props.items, props.agentInstructions, { plans: planRevisions })
+    : undefined, [progressRun, props.items, props.agentInstructions, planRevisions]);
+
+  if (!task || !reviewGate || !headerState || !prStatus || !overviewActivity || !debugActivity) {
     return (
       <main className="tm-detail">
         <div className="tm-detail__body">
@@ -551,27 +578,6 @@ export function TaskDetail(props: TaskDetailProps) {
     implementationRetryReason: getImplementationRetryReason(task),
     hasInvestigationSource: Boolean(deliverySourceRun) || importedBeforeFirstRun
   });
-  const taskActivityLedger = useMemo(
-    () =>
-      buildTaskActivityLedger({
-        task,
-        events: props.events,
-        runs: [...props.runs, ...(props.previewAgent?.runs ?? []), ...(props.reviewer?.records.runs ?? [])]
-      }),
-    [task, props.events, props.runs, props.previewAgent?.runs, props.reviewer?.records.runs]
-  );
-  const overviewActivity = useMemo(
-    () => projectOverviewTaskActivity(taskActivityLedger),
-    [taskActivityLedger]
-  );
-  const debugActivity = useMemo(
-    () => projectDebugTaskActivity(taskActivityLedger),
-    [taskActivityLedger]
-  );
-  const progressRun = selectProgressRun(run, props.runs);
-  const progressTurn = useMemo(() => progressRun
-    ? sessionTurn(progressRun, props.items, props.agentInstructions, { plans: planRevisions })
-    : undefined, [progressRun, props.items, props.agentInstructions, planRevisions]);
   const overviewPreview = progressTurn ? conversationPreview(progressTurn) : undefined;
   const resultReport = progressTurn ? conversationAnswer(progressTurn) : undefined;
   const evidenceGitSnapshot = evidenceGitSnapshotId
@@ -1459,11 +1465,6 @@ export function TaskDetail(props: TaskDetailProps) {
   // the panel head's 48px line; the title moves to the window's top bar.
   const headCollapsed = Boolean(sidePanel) && sidePanelLayout.docked;
   const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
-  const onCompactTitleChange = props.onCompactTitleChange;
-  useEffect(() => {
-    onCompactTitleChange?.(titleOutOfView ? task.title : undefined);
-  }, [onCompactTitleChange, task.title, titleOutOfView]);
-  useEffect(() => () => onCompactTitleChange?.(undefined), [onCompactTitleChange]);
 
   const taskNav = (
         <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
@@ -1551,6 +1552,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
   return (
     <>
+    <CompactTitle title={titleOutOfView ? task.title : undefined} onChange={props.onCompactTitleChange} />
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
       {tab !== 'agent' ? <div className="tm-detail__chrome">{headCollapsed ? null : taskMasthead}{taskNav}</div> : null}
 
@@ -1846,13 +1848,22 @@ export function TaskDetail(props: TaskDetailProps) {
         />
       ) : null}
 
-      {sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel label={sidePanel.label}>{sidePanel.element}</FloatingSidePanel> : null}
+      {sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}
     </main>
     {sidePanel && sidePanelLayout.docked ? (
-      <DockedSidePanel width={sidePanelLayout.width} onWidthChange={sidePanelLayout.setWidth} label={sidePanel.label}>{sidePanel.element}</DockedSidePanel>
+      <DockedSidePanel width={sidePanelLayout.width} maxWidth={sidePanelLayout.maxWidth} onWidthChange={sidePanelLayout.setWidth} label={sidePanel.label}>{sidePanel.element}</DockedSidePanel>
     ) : null}
     </>
   );
+}
+
+/** Gives the window's top bar the task title while the page's own title is out of view. */
+function CompactTitle({ title, onChange }: { title?: string; onChange?(title: string | undefined): void }) {
+  useEffect(() => {
+    onChange?.(title);
+  }, [onChange, title]);
+  useEffect(() => () => onChange?.(undefined), [onChange]);
+  return null;
 }
 
 export function TaskWorkPanels({ children }: { children: ReactNode }) {

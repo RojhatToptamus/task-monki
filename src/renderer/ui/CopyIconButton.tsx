@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { Tooltip } from './Tooltip';
 
 /** Copies text and reports success for a moment, so the control that copied can say so itself. */
 export function useCopied(onError?: () => void): [boolean, (text: string) => void] {
@@ -35,8 +36,10 @@ export function CopyIconButton({ value, label, size = 16, className = 'tm-iconbt
   const [copied, copy] = useCopied(onError);
   const name = copied ? 'Copied' : label;
   return (
-    <button type="button" className={className} aria-label={name} title={name} onClick={() => copy(typeof value === 'function' ? value() : value)}>
-      <CopyGlyph copied={copied} size={size} />
-    </button>
+    <Tooltip label={name}>
+      <button type="button" className={className} aria-label={name} onClick={() => copy(typeof value === 'function' ? value() : value)}>
+        <CopyGlyph copied={copied} size={size} />
+      </button>
+    </Tooltip>
   );
 }

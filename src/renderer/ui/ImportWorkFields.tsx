@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, GitCompareArrows, Search, X } from 'lucide-react';
 import type { ExistingWorktree, ImportPreview } from '../../shared/contracts';
 import { abbreviateHomePath } from '../model/repositories';
+import { Tooltip } from './Tooltip';
 import { formatStatusValue } from './display';
 
 export function branchTaskTitle(branch?: string): string {
@@ -68,7 +69,7 @@ export function ImportWorkFields({
 
   if (selected?.existingTaskId) {
     return <div className="import-work__existing">
-      <span className="import-work__existing-label"><Check size={15} />This checkout already has a task</span>
+      <span className="import-work__existing-label"><Check size={16} />This checkout already has a task</span>
       <strong>{selected.existingTask?.title ?? 'Existing task'}</strong>
       <span className="import-work__meta">
         {selected.existingTask ? <span>{formatStatusValue(selected.existingTask.workflowPhase)}</span> : null}
@@ -96,7 +97,7 @@ export function ImportWorkFields({
       <span className="field__header"><span>Checkout</span><small>{checkouts ? `${filtered.length} of ${checkouts.items.length}` : ''}</small></span>
       <div className="import-work__picker">
         <div className="import-work__search">
-          <Search size={15} aria-hidden="true" />
+          <Search size={16} aria-hidden="true" />
           <input ref={searchRef} value={query} aria-label="Filter checkouts" placeholder="Filter by branch or folder"
             disabled={locked} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
               if (event.key === 'ArrowDown') {
@@ -109,8 +110,10 @@ export function ImportWorkFields({
                 if (available.length === 1) onSelect(available[0]!.worktreePath);
               }
             }} />
-          {query ? <button type="button" className="newtask-modal__close" aria-label="Clear filter" disabled={locked}
-            onClick={() => { onQuery(''); searchRef.current?.focus(); }}><X size={14} /></button> : null}
+          {query ? <Tooltip label="Clear filter">
+            <button type="button" className="tm-iconbtn" aria-label="Clear filter" disabled={locked}
+              onClick={() => { onQuery(''); searchRef.current?.focus(); }}><X size={13} aria-hidden="true" /></button>
+          </Tooltip> : null}
         </div>
         {/* A listbox, not a radio group: selecting a checkout loads its
             comparison and can open an existing task, so arrows only move focus
@@ -163,7 +166,7 @@ export function ImportWorkFields({
         aria-invalid={Boolean(previewError)} onChange={(event) => onCommitRef(event.target.value)} /> : null}
       <div className="import-work__preview" aria-busy={Boolean(selected && !preview && !previewError && (comparison !== 'commit' || commitRef.trim()))}>
         <div className="import-work__preview-summary">
-          <GitCompareArrows size={15} aria-hidden="true" />
+          <GitCompareArrows size={16} aria-hidden="true" />
           <div><p role={previewError || preview?.unavailableReason ? 'alert' : 'status'}>{previewMessage}</p>
             {preview ? <code title={preview.baseSha}>{preview.baseRef.replace(/^refs\/heads\//, '')} {preview.baseSha.slice(0, 8)} → {preview.headSha.slice(0, 8)}</code> : null}</div>
           {preview?.unavailableReason ? <button className="ghost-button" type="button" disabled={locked} onClick={onRetry}>Refresh</button> :

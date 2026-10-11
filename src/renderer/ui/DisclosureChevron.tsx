@@ -6,7 +6,7 @@ export function DisclosureChevron({ className }: { className?: string }) {
       aria-hidden="true"
       className={['tm-disclosure__chevron', className].filter(Boolean).join(' ')}
       focusable="false"
-      size={12}
+      size={13}
     />
   );
 }

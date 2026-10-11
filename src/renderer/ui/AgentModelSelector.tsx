@@ -459,7 +459,7 @@ export function AgentModelSelector({
           }
         >
           <div className="tm-agent-console__search">
-            <Search aria-hidden="true" size={14} />
+            <Search aria-hidden="true" size={13} />
             <input
               ref={searchRef}
               type="text"
@@ -486,7 +486,7 @@ export function AgentModelSelector({
                   searchRef.current?.focus();
                 }}
               >
-                <X aria-hidden="true" size={12} />
+                <X aria-hidden="true" size={13} />
               </button>
             ) : null}
           </div>
@@ -957,7 +957,7 @@ function ChevronIcon({ open }: { open: boolean }) {
     <ChevronDown
       className={`tm-agent-console__chevron ${open ? 'is-open' : ''}`}
       aria-hidden="true"
-      size={12}
+      size={13}
     />
   );
 }

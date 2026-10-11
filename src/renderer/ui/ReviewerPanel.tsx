@@ -7,7 +7,8 @@ import { reviewerProse, reviewerRevisionLines, reviewQuestions } from '../model/
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
-import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
+import { Tooltip } from './Tooltip';
+import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, WorkingLine } from './SessionTurns';
 
 export interface ReviewerConversation {
   records: AgentConversationRecords;
@@ -60,9 +61,7 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
   const findingTitle = new Map(findings.map((finding) => [finding.id, finding.title]));
   const aboutByInstruction = new Map(questions.map((question) => [question.id, question.findingId ? findingTitle.get(question.findingId) : undefined]));
   const active = runs.find((run) => isActiveRunStatus(run.status));
-  const unattached = questions.filter((question) =>
-    !runs.some((run) => run.id === question.runId) && (question.status === 'SENDING' || question.status === 'UNCERTAIN' || (question.status === 'FAILED' && !question.runId))
-  );
+  const unattached = unattachedInstructions(questions, runs);
 
   // The working line says when the reviewer is answering; the hint only says why a question cannot be asked.
   const disabledReason = stale ? 'Review out of date' : undefined;
@@ -99,9 +98,11 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
           <div className="tm-reviewer__about">
             <CornerUpLeft size={13} aria-hidden="true" />
             <span>{focusFinding.title}</span>
-            <button type="button" className="tm-iconbtn" aria-label="Ask about the whole review instead" onClick={onClearFocus}>
-              <X size={13} aria-hidden="true" />
-            </button>
+            <Tooltip label="Ask about the whole review instead">
+              <button type="button" className="tm-iconbtn" aria-label="Ask about the whole review instead" onClick={onClearFocus}>
+                <X size={13} aria-hidden="true" />
+              </button>
+            </Tooltip>
           </div>
         ) : undefined
       }}
@@ -128,19 +129,9 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
           </div>
         );
       })}
-      {unattached.map((question) => (
-        <UserMessage
-          key={question.id}
-          text={question.text}
-          time={question.createdAt}
-          status={question.status === 'FAILED' ? question.detail ?? 'Not sent' : question.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Sending…'}
-        />
-      ))}
+      <UnattachedMessages instructions={unattached} />
       {active && (active.status === 'QUEUED' || active.status === 'STARTING' || !turns.at(-1)?.entries.length) && questionIds.size > 0 ? (
-        <div className="tm-side-conversation__working">
-          <span role="status" className="tm-shimmer">{active.status === 'INTERRUPTING' ? 'Stopping…' : 'Reading the review…'}</span>
-          <Elapsed since={active.startedAt} />
-        </div>
+        <WorkingLine label={active.status === 'INTERRUPTING' ? 'Stopping…' : 'Reading the review…'} since={active.startedAt} />
       ) : null}
     </ConversationPanel>
   );

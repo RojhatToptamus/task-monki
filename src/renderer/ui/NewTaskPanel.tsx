@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { X } from 'lucide-react';
 import { AgentMark } from './UiIcons';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import type {
   AgentExecutionSettings,
   AgentModel,
@@ -101,7 +102,6 @@ interface NewTaskPanelProps {
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onClose(): void;
 }
-
 
 export function NewTaskPanel({
   agentProfiles = [],
@@ -736,15 +736,11 @@ export function NewTaskPanel({
           ) : <div className="newtask-modal__heading">
             <strong>New task</strong>
           </div>}
-          <button
-            type="button"
-            className="newtask-modal__close"
-            aria-label="Close"
-            disabled={isSubmitting}
-            onClick={closePanel}
-          >
-            <CloseIcon />
-          </button>
+          <Tooltip label="Close" shortcut="Esc">
+            <button type="button" className="tm-iconbtn" aria-label="Close" disabled={isSubmitting} onClick={closePanel}>
+              <X aria-hidden="true" size={16} />
+            </button>
+          </Tooltip>
         </header>
 
         <div className="newtask-modal__body">
@@ -940,7 +936,7 @@ export function NewTaskPanel({
           {importing ? <p className="import-work__footer-note" role="status">
             {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'Imports as In progress. No files move and no agent starts.')}
           </p> : (
-            <span className="newtask-modal__hint" aria-hidden="true"><kbd>{CREATE_SHORTCUT}</kbd> to create</span>
+            <span className="newtask-modal__hint" aria-hidden="true"><kbd>{SUBMIT_SHORTCUT}</kbd> to create</span>
           )}
           <div className="newtask-modal__footer-actions">
             <button
@@ -976,9 +972,6 @@ export function NewTaskPanel({
   );
 }
 
-const CREATE_SHORTCUT =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/u.test(navigator.userAgent) ? '⌘↵' : 'Ctrl+Enter';
-
 export function refinementInputFingerprint(input: {
   repositoryId: string;
   title: string;
@@ -995,10 +988,6 @@ function createPromptRefinementRequestId(): string {
     return globalThis.crypto.randomUUID();
   }
   return `prompt-refine-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function CloseIcon() {
-  return <X aria-hidden="true" size={15} />;
 }
 
 function RefinementProposal({

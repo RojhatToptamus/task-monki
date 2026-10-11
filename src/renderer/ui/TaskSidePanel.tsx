@@ -18,6 +18,8 @@ const SHELL_CHROME_WIDTH = 56 + 8 + 8;
 export function useTaskSidePanelLayout(minContentWidth: number): {
   docked: boolean;
   width: number;
+  /** The widest the panel can be in this window, never beyond its own maximum. */
+  maxWidth: number;
   setWidth(width: number): void;
 } {
   const [width, setWidthState] = useState(() => focusedPanelWidth('task-side-panel', PANEL_DEFAULT_WIDTH, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH));
@@ -28,9 +30,11 @@ export function useTaskSidePanelLayout(minContentWidth: number): {
     return () => window.removeEventListener('resize', onResize);
   }, []);
   const room = viewport - SHELL_CHROME_WIDTH - minContentWidth;
+  const maxWidth = Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, room));
   return {
     docked: room >= PANEL_MIN_WIDTH,
-    width: Math.max(PANEL_MIN_WIDTH, Math.min(width, room)),
+    width: Math.min(Math.max(PANEL_MIN_WIDTH, width), maxWidth),
+    maxWidth,
     setWidth: (next) => {
       setWidthState(next);
       persistFocusedPanelWidth('task-side-panel', next);
@@ -38,31 +42,35 @@ export function useTaskSidePanelLayout(minContentWidth: number): {
   };
 }
 
-/** The docked sheet beside the page, with its resize handle on the shared edge. */
-export function DockedSidePanel({ width, onWidthChange, label, children }: {
+/**
+ * The docked sheet beside the page, with its resize handle on the shared edge.
+ * The panel inside is the landmark, so the sheet itself is a plain box.
+ */
+export function DockedSidePanel({ width, maxWidth, onWidthChange, label, children }: {
   width: number;
+  maxWidth: number;
   onWidthChange(width: number): void;
   label: string;
   children: ReactNode;
 }) {
   return (
-    <aside className="tm-side-sheet" style={{ flexBasis: width }} aria-label={label}>
+    <div className="tm-side-sheet" style={{ flexBasis: width }}>
       <PanelResizeHandle
         className="tm-side-sheet__resize"
         label={`Resize ${label}`}
         value={width}
         min={PANEL_MIN_WIDTH}
-        max={PANEL_MAX_WIDTH}
+        max={maxWidth}
         defaultValue={PANEL_DEFAULT_WIDTH}
         direction={-1}
         onChange={onWidthChange}
       />
       {children}
-    </aside>
+    </div>
   );
 }
 
 /** The same panel over the page when the window is too narrow to dock it. */
-export function FloatingSidePanel({ label, children }: { label: string; children: ReactNode }) {
-  return <aside className="tm-side-sheet tm-side-sheet--floating" aria-label={label}>{children}</aside>;
+export function FloatingSidePanel({ children }: { children: ReactNode }) {
+  return <div className="tm-side-sheet tm-side-sheet--floating">{children}</div>;
 }

@@ -315,7 +315,7 @@
   gap: 12px;
   padding: 0;
   border: 0;
-  transition: background-color 180ms ease;
+  transition: background-color var(--motion-standard) var(--ease-out);
   scroll-margin: 68px;
 }
 
@@ -425,8 +425,7 @@
 }
 
 /* Message actions keep their space but appear only while the message is
-   hovered or holds focus (DESIGN.md 5.1),
-so a long transcript reads as text. */
+   hovered or holds focus (DESIGN.md 5.1), so a long transcript reads as text. */
 .tm-discourse-message footer {
   display: flex;
   align-items: center;
@@ -482,13 +481,13 @@ so a long transcript reads as text. */
   bottom: 8px;
   z-index: var(--layer-sticky);
   transform: translateX(-50%);
-  height: 29px;
-  padding: 0 11px;
-  border: 1px solid var(--edge);
+  height: var(--h-toolbar);
+  padding: 0 12px;
+  border: 0;
   border-radius: var(--r-pill);
   background: var(--overlay);
   color: var(--accent-ink);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   font-size: var(--t-meta);
   font-weight: 500;
 }
@@ -523,7 +522,7 @@ so a long transcript reads as text. */
 
 .tm-discourse-response__chevron {
   color: var(--muted);
-  transition: transform var(--motion-fast) ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-discourse-response__concerns details[open] .tm-discourse-response__chevron {
@@ -552,8 +551,7 @@ so a long transcript reads as text. */
   font-weight: 500;
 }
 
-/* Comparison explanations are prose,
-not the legacy review label/value grid. */
+/* Comparison explanations are prose, not the legacy review label/value grid. */
 .tm-discourse-team__details > summary {
   width: fit-content;
   margin-top: 8px;
@@ -960,7 +958,7 @@ not the legacy review label/value grid. */
 }
 
 .tm-discourse-mode-menu__trigger { display: inline-flex; align-items: center; gap: 6px; width: auto; min-height: var(--h-toolbar); padding: 0 8px; color: var(--text-soft); font-size: var(--t-help); }
-.tm-discourse-mode-menu__trigger > svg:last-child { width: 12px; transition: transform var(--motion-fast) ease; }
+.tm-discourse-mode-menu__trigger > svg:last-child { width: 13px; transition: transform var(--motion-fast) var(--ease-out); }
 .tm-discourse-mode-menu__trigger[aria-expanded='true'] > svg:last-child { transform: rotate(180deg); }
 
 .tm-discourse-composer__requirement {
@@ -1009,12 +1007,13 @@ not the legacy review label/value grid. */
 }
 
 .tm-discourse-preview-button svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
 }
 
 .tm-discourse-pin-menu .tm-discourse-message-menu__trigger { display: inline-flex; width: auto; align-items: center; gap: 8px; font-size: var(--t-help); min-height: var(--h-toolbar); }
 
+/* No reserved gutter: the head's hairline runs to the panel's edge. */
 .tm-discourse-inspector {
   position: relative;
   width: 100%;
@@ -1022,7 +1021,6 @@ not the legacy review label/value grid. */
   overflow-y: auto;
   background: var(--panel);
   box-shadow: none;
-  scrollbar-gutter: stable;
 }
 
 .tm-discourse-drawer-scrim {
@@ -1031,26 +1029,32 @@ not the legacy review label/value grid. */
   width: 100%;
   height: 100%;
   background: var(--scrim);
-  animation: tm-discourse-scrim-in 140ms ease-out both;
+  animation: tm-scrim-in var(--motion-fast) var(--ease-out) both;
 }
 
 .tm-discourse-drawer-scrim--rail {
   display: none;
 }
 
+/* The same 48px head as a side conversation's: label, then the hairline below it. */
 .tm-discourse-inspector__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-height: 48px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--hair);
+  padding: 6px 10px 6px 16px;
   background: var(--panel);
+  box-shadow: inset 0 -1px 0 var(--hair);
 }
 
 .tm-discourse-inspector__head h2 {
   margin: 0;
-  font-size: var(--t-body);
+  color: var(--text);
+  font-size: var(--t-label);
+  font-weight: 500;
 }
 
 .tm-discourse-inspector__section {
@@ -1185,21 +1189,9 @@ not the legacy review label/value grid. */
 .tm-discourse-confirm h2 { margin: 0; font-size: var(--t-heading); }
 .tm-discourse-confirm > p { margin: 4px 0 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
 
-@keyframes tm-discourse-drawer-in {
-  from { transform: translateX(16px); opacity: 0; }
-}
-
-@keyframes tm-discourse-sheet-in {
-  from { transform: translateY(14px); opacity: 0; }
-}
-
-@keyframes tm-discourse-scrim-in {
-  from { opacity: 0; }
-}
-
 .tm-discourse-confirm {
   width: min(440px, calc(100vw - 32px));
-  padding: 20px;
+  padding: 24px;
 }
 
 .tm-discourse-confirm .tm-modal__actions {
@@ -1212,23 +1204,6 @@ not the legacy review label/value grid. */
 
 .tm-discourse.tm-discourse--compact.tm-discourse--inspector-open {
   grid-template-columns: minmax(0, 1fr) 1px min(var(--discourse-inspector-width, 320px), 42cqw);
-}
-
-.tm-discourse--compact .tm-discourse-rail {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: var(--layer-overlay);
-  width: min(300px, calc(100% - 42px));
-  box-shadow: var(--shadow-pop);
-  transform: translateX(-104%);
-  visibility: hidden;
-  transition: transform 180ms ease, visibility 0s linear 180ms;
-}
-
-.tm-discourse--compact .tm-discourse-rail--open {
-  transform: translateX(0);
-  visibility: visible;
-  transition-delay: 0s;
 }
 
 .tm-discourse--compact .tm-discourse-drawer-scrim--rail {
@@ -1268,10 +1243,6 @@ not the legacy review label/value grid. */
 
   .tm-discourse-message--agent {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .tm-discourse-response {
-    margin-left: 31px;
   }
 
   .tm-discourse-status-banner {
@@ -1321,10 +1292,10 @@ not the legacy review label/value grid. */
   }
 
   .tm-discourse-message,
-.tm-discourse-message footer,
-.tm-discourse-rail,
-.tm-discourse-inspector,
-.tm-discourse-drawer-scrim {
+  .tm-discourse-message footer,
+  .tm-discourse-rail,
+  .tm-discourse-inspector,
+  .tm-discourse-drawer-scrim {
     transition: none;
     animation: none;
   }
@@ -1342,7 +1313,7 @@ not the legacy review label/value grid. */
   }
 
   .interaction-actions--command .primary-button,
-.interaction-actions--command .outline-button {
+  .interaction-actions--command .outline-button {
     width: 100%;
     padding-inline: 8px;
   }

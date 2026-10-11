@@ -19,7 +19,7 @@ import type { DiscourseDefaultPolicy } from '../../shared/discourse';
 import { UiLucideIcon } from './UiIcons';
 
 export function DiscoursePinIcon() {
-  return <UiLucideIcon component={Pin} size={12} />;
+  return <UiLucideIcon component={Pin} size={13} />;
 }
 
 export function DiscourseTaskIcon() {
@@ -39,7 +39,7 @@ export function DiscourseContextPreviewIcon() {
 }
 
 export function DiscourseSlidersIcon() {
-  return <UiLucideIcon component={Settings2} size={15} />;
+  return <UiLucideIcon component={Settings2} size={16} />;
 }
 
 export function DiscourseReplyIcon() {
@@ -51,7 +51,7 @@ export function DiscourseCopyIcon() {
 }
 
 export function DiscourseCheckIcon() {
-  return <UiLucideIcon component={Check} size={14} />;
+  return <UiLucideIcon component={Check} size={13} />;
 }
 
 export function DiscourseMoreIcon() {
@@ -59,11 +59,11 @@ export function DiscourseMoreIcon() {
 }
 
 export function DiscourseChevronDownIcon() {
-  return <UiLucideIcon component={ChevronDown} size={14} />;
+  return <UiLucideIcon component={ChevronDown} size={13} />;
 }
 
 export function DiscourseCloseIcon() {
-  return <UiLucideIcon component={X} size={15} />;
+  return <UiLucideIcon component={X} size={16} />;
 }
 
 export function DiscourseRoundtableIcon() {

@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode,
 import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
-import { Tooltip } from './Tooltip';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
 export interface ConversationPanelComposer {
@@ -25,7 +25,7 @@ export interface ConversationPanelComposer {
 }
 
 /**
- * A conversation beside a working surface: a 44px head, the shared conversation log, and the
+ * A conversation beside a working surface: a 48px head, the shared conversation log, and the
  * shared composer. As an overlay it takes focus and Escape closes it from anywhere; docked
  * beside the surface it is part of the page, so it takes focus only when asked and Escape
  * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
@@ -138,9 +138,11 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
               {composer.secondary.label}
             </button>
           ) : null}
-          <button type="submit" className="primary-button tm-composer-action" disabled={!canSend} aria-label={sendLabel} title={`${sendLabel} · ⌘/Ctrl Enter`}>
-            <ArrowUp size={16} aria-hidden="true" />
-          </button>
+          <Tooltip label={sendLabel} shortcut={SUBMIT_SHORTCUT} side="top">
+            <button type="submit" className="primary-button tm-composer-action" disabled={!canSend} aria-label={sendLabel}>
+              <ArrowUp size={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
         </div>
         {error ? <p className="tm-visually-hidden" role="alert">{error}</p> : null}
       </form>

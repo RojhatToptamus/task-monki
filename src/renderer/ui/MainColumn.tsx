@@ -693,7 +693,7 @@ function Inbox({
         {decisions.length === 0 ? (
           <div className="tm-inbox__empty">
             <span className="tm-inbox__empty-mark">
-              <CircleCheck aria-hidden="true" size={20} />
+              <CircleCheck aria-hidden="true" size={18} />
             </span>
             <span>Approvals, questions and failed runs appear here.</span>
           </div>
@@ -733,7 +733,7 @@ function AttentionTile({ kind, tone }: { kind: TaskAttentionKind; tone: TaskAtte
   const Icon = ATTENTION_ICONS[kind];
   return (
     <span className="tm-attention-tile" data-tone={tone} aria-hidden="true">
-      <Icon size={15} />
+      <Icon size={16} />
     </span>
   );
 }

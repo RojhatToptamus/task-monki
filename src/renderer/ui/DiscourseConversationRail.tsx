@@ -1,7 +1,7 @@
 import type { Ref } from 'react';
-import { Plus, Search } from 'lucide-react';
 import type { DiscourseConversationSummary } from '../../shared/discourse';
 import { PanelIcon } from './AppNavigation';
+import { UiPlusIcon, UiSearchIcon } from './UiIcons';
 
 interface DiscourseConversationRailProps {
   archived: boolean;
@@ -67,7 +67,7 @@ export function DiscourseConversationRail({
               disabled={sending}
               onClick={onNewConversation}
             >
-              <PlusIcon />
+              <UiPlusIcon />
               <span>New</span>
             </button>
             {modalOpen ? (
@@ -84,7 +84,7 @@ export function DiscourseConversationRail({
           </div>
         </div>
         <label className="tm-listrail__search">
-          <SearchIcon />
+          <UiSearchIcon />
           <span className="tm-visually-hidden">Search conversation titles</span>
           <input
             ref={searchRef}
@@ -168,12 +168,4 @@ function formatCompactDate(value: string): string {
     return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
   }
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
-}
-
-function PlusIcon() {
-  return <Plus aria-hidden="true" size={16} />;
-}
-
-function SearchIcon() {
-  return <Search aria-hidden="true" size={16} />;
 }

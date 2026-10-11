@@ -846,7 +846,7 @@ function UserInputQuestion({
             {choice.customSelected ? <textarea
               className="interaction-question__input"
               rows={1}
-              placeholder="Your answer…"
+              placeholder="Your answer"
               aria-label={`${question.header} other answer`}
               disabled={disabled}
               value={choice.custom}
@@ -1061,7 +1061,7 @@ function RejectButtons({
       {showCancel && hasAction(interaction, 'CANCEL') ? (
         <button
           type="button"
-          className="outline-button outline-button--danger interaction-actions__stop"
+          className="danger-button interaction-actions__stop"
           disabled={disabled}
           onClick={() =>
             void onRespond({
@@ -1162,7 +1162,7 @@ function InteractionTechnicalDetails({
 function ChoiceMark({ kind }: { kind: 'radio' | 'checkbox' }) {
   return (
     <span className="interaction-choice__mark" data-kind={kind} aria-hidden="true">
-      {kind === 'checkbox' ? <Check size={12} /> : null}
+      {kind === 'checkbox' ? <Check size={13} /> : null}
     </span>
   );
 }

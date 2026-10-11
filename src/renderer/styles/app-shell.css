@@ -19,8 +19,7 @@
 /* ---- Title bar ---- */
 
 /* The titlebar and the rail share the ground and read as one L-shaped frame
-   around the content sheet,
-so nothing separates them. */
+   around the content sheet, so nothing separates them. */
 .tm-titlebar {
   display: flex;
   align-items: center;
@@ -162,9 +161,7 @@ so nothing separates them. */
 }
 
 /* Every page is one sheet inset from the window edge (DESIGN.md 7.2): the
-   surface plane,
-12px corners,
-and a hair seam that keeps the corner legible
+   surface plane, 12px corners, and a hair seam that keeps the corner legible
    where the fill step is small. */
 .tm-canvas__content > :not(.tm-rail) {
   flex: 1;
@@ -186,7 +183,7 @@ and a hair seam that keeps the corner legible
 /* ---- Rail ---- */
 
 /* The rail is permanent and icon-only (DESIGN.md 7.2). Names are tooltips; a
-   count appears only when it waits on the user. */
+   dot appears only when something waits on the user. */
 .tm-rail {
   flex: 0 0 56px;
   display: flex;
@@ -294,8 +291,7 @@ and a hair seam that keeps the corner legible
   margin-left: auto;
 }
 
-/* The Tasks page's views: words on the bar's baseline,
-then one control that
+/* The Tasks page's views: words on the bar's baseline, then one control that
    adds a saved view. */
 .tm-main__tabbar {
   display: flex;
@@ -400,8 +396,7 @@ then one control that
 
 /* All four lanes stay side by side down to the app's 1100px minimum window;
    a wider rail scrolls them horizontally. Only a window narrower than the app
-   minimum (the browser development host) stacks the lanes,
-at full width. */
+   minimum (the browser development host) stacks the lanes, at full width. */
 @media (max-width: 1099px) {
   .tm-board {
     display: flex;
@@ -440,8 +435,7 @@ at full width. */
   scrollbar-gutter: stable;
 }
 
-/* Cards in a row share its height,
-so their footers line up. */
+/* Cards in a row share its height, so their footers line up. */
 .tm-grid__inner {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(296px, 1fr));
@@ -459,9 +453,7 @@ so their footers line up. */
 
 /* ---- Task card ---- */
 
-/* A task card: the repository and the state badge on top,
-the title,
-then
+/* A task card: the repository and the state badge on top, the title, then
    one quiet fact and the pull request when they exist (DESIGN.md 5). */
 .tm-card {
   position: relative;
@@ -658,7 +650,7 @@ then
   color: var(--muted);
   line-height: 0;
   cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out);
 }
 
 .tm-taskmenu__trigger:hover,
@@ -828,14 +820,8 @@ then
 }
 
 /* One list in the table container (DESIGN.md A.5): a tile for the kind of
-   decision,
-the task and what it needs,
-the repository,
-the age,
-and,
-for an
-   approval,
-its answer in place. */
+   decision, the task and what it needs, the repository, the age, and, for an
+   approval, its answer in place. */
 .tm-inbox__list {
   position: relative;
   margin: 0;
@@ -1001,11 +987,11 @@ its answer in place. */
 
 /* Fixed columns, so an approval's buttons never push the age out of line. */
 .tm-inbox-row__repo { grid-column: 4; }
-.tm-inbox-row__age { grid-column: 5; }
 
 .tm-inbox-row__age {
+  grid-column: 5;
   min-width: 28px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--t-help);
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1272,8 +1258,7 @@ its answer in place. */
 
 /* ---- Settings ---- */
 
-/* One sheet with its own section list (DESIGN.md 7.1): the list on the left,
-the section in an 880px reading column on the right. */
+/* One sheet with its own section list (DESIGN.md 7.1): the list on the left, the section in an 880px reading column on the right. */
 .tm-settings {
   display: flex;
   flex: 1;
@@ -1321,7 +1306,6 @@ the section in an 880px reading column on the right. */
 .tm-settings__nav-item--active:hover {
   background: var(--sel);
   color: var(--text);
-  font-weight: 500;
 }
 
 .tm-settings__inner {
@@ -1362,8 +1346,7 @@ the section in an 880px reading column on the right. */
 }
 
 /* Rows of settings share the list container every table uses: the object
-   edge,
-12px corners and no fill of its own. */
+   edge, 12px corners and no fill of its own. */
 .tm-settings__list {
   overflow: visible;
   padding: 0 16px;
@@ -1538,8 +1521,7 @@ the section in an 880px reading column on the right. */
   color: var(--text);
 }
 
-/* A miniature of the shell in the chosen theme. It uses the live tokens,
-so it
+/* A miniature of the shell in the chosen theme. It uses the live tokens, so it
    can never disagree with the app around it. */
 .tm-theme-preview {
   padding: 4px 0 16px;
@@ -1925,7 +1907,7 @@ so it
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .tm-agent-console__trigger:not(:disabled):hover,
@@ -1967,7 +1949,7 @@ so it
 
 .tm-agent-console__chevron {
   color: var(--muted);
-  transition: transform 120ms ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-agent-console__chevron.is-open {
@@ -1987,7 +1969,7 @@ so it
   border: 0;
   border-radius: var(--r);
   background: var(--card);
-  box-shadow: var(--shadow-pop);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   overflow: hidden;
 }
 
@@ -2292,7 +2274,7 @@ so it
   }
 
   .tm-agent-console__label,
-.tm-agent-console__row--agent .tm-agent-console__label {
+  .tm-agent-console__row--agent .tm-agent-console__label {
     padding-top: 0;
   }
 
@@ -2456,8 +2438,8 @@ so it
 
 @media (max-width: 520px) {
   .tm-settings__row,
-.tm-agent-setting__summary,
-.tm-executable-setting__head {
+  .tm-agent-setting__summary,
+  .tm-executable-setting__head {
     align-items: flex-start;
   }
 
@@ -2477,7 +2459,7 @@ so it
   }
 
   .tm-theme-picker__trigger,
-.tm-theme-picker {
+  .tm-theme-picker {
     width: 100%;
   }
 

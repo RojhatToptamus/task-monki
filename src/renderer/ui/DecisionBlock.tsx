@@ -23,32 +23,30 @@ export function DecisionBlock({
   details?: ReactNode;
 }) {
   return (
-    <section className="tm-decision tm-decision--expanded" aria-label={kind}>
-      <div className="tm-decision__body">
-        <div className="tm-decision__head">
-          <span className={`tm-decision__kind tm-decision__kind--${tone}`}>
-            {kind}
-          </span>
-          {meta ? <span className="tm-decision__meta">{meta}</span> : null}
-        </div>
-        {title ? <h3 className="tm-decision__title">{title}</h3> : null}
-        {summary ? <p className="tm-decision__summary">{summary}</p> : null}
-        {children}
-        {actions || details ? (
-          <div className="tm-decision__actions">
-            {actions}
-            {details ? (
-              <details className="tm-preview-disclosure">
-                <summary>
-                  <DisclosureChevron />
-                  Details
-                </summary>
-                {details}
-              </details>
-            ) : null}
-          </div>
-        ) : null}
+    <section className="tm-decision" aria-label={kind}>
+      <div className="tm-decision__head">
+        <span className={`tm-decision__kind tm-decision__kind--${tone}`}>
+          {kind}
+        </span>
+        {meta ? <span className="tm-decision__meta">{meta}</span> : null}
       </div>
+      {title ? <h3 className="tm-decision__title">{title}</h3> : null}
+      {summary ? <p className="tm-decision__summary">{summary}</p> : null}
+      {children}
+      {actions || details ? (
+        <div className="tm-decision__actions">
+          {actions}
+          {details ? (
+            <details className="tm-preview-disclosure">
+              <summary>
+                <DisclosureChevron />
+                Details
+              </summary>
+              {details}
+            </details>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -47,7 +47,7 @@ export function RunHeader({
         <ActionButtonTitle disabled={stopDisabled} title={stopTitle}>
           <button
             type="button"
-            className="outline-button outline-button--danger tm-runheader__stop"
+            className="danger-button tm-runheader__stop"
             disabled={stopDisabled}
             onClick={onStop}
           >
