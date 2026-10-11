@@ -6,6 +6,7 @@ import { applicationPreviewStatus } from '../model/applicationPreviewStatus';
 import { visiblePreviewInstances, type PreviewInstanceFilter } from '../model/previewInstances';
 import { AccessibleTab } from './AccessibleTabs';
 import { Chip } from './StatusBadge';
+import { Tooltip } from './Tooltip';
 import { message } from './preview/previewPresentation';
 
 const filters = [
@@ -107,10 +108,12 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
         <div className="tm-main__head-copy">
           <h1 className="tm-main__title">Previews</h1>
         </div>
-        <button type="button" className="tm-preview-icon-button" aria-label="Refresh previews" title="Refresh previews"
-          disabled={reading} onClick={() => refresh.current()}>
-          <RefreshCw size={16} aria-hidden="true" />
-        </button>
+        <Tooltip label="Refresh">
+          <button type="button" className="tm-iconbtn" aria-label="Refresh previews"
+            disabled={reading} onClick={() => refresh.current()}>
+            <RefreshCw size={16} aria-hidden="true" />
+          </button>
+        </Tooltip>
       </header>
       <div className="tm-previews__toolbar">
         <div className="tm-tabs" role="tablist" aria-label="Filter previews">
@@ -138,8 +141,8 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
           </div> : !visible.length && loaded ? <div className="tm-previews__empty">
             <p>No previews match these filters.</p>
             <button type="button" className="outline-button" onClick={() => { onStateChange({ ...state, query: '', filter: 'all' }); search.current?.focus(); }}>Clear filters</button>
-          </div> : visible.length ? <table className="tm-previews__table">
-            <thead><tr><th scope="col">Project / worktree</th><th scope="col">Status</th><th scope="col"><span className="tm-visually-hidden">Actions</span></th></tr></thead>
+          </div> : visible.length ? <div className="tm-table tm-previews__table"><table>
+            <thead><tr><th scope="col">Project</th><th scope="col" className="tm-previews__status-col">Status</th><th scope="col" className="tm-table__actions"><span className="tm-visually-hidden">Actions</span></th></tr></thead>
             <tbody>{visible.map((instance) => {
               const status = applicationPreviewStatus(instance.status, instance.approvalPending);
               const owner = instance.kind === 'design' ? 'Design' : instance.isCurrentWorktree ? 'preview' : 'task';
@@ -147,21 +150,23 @@ export function PreviewsPage({ state, onStateChange, scrollPosition, onOpen, onB
               return <tr key={instance.worktreeId}>
                 <td><button type="button" className="tm-previews__identity" data-task-id={instance.taskId} data-worktree-id={instance.worktreeId}
                   aria-label={`Open ${owner}: ${context}`}
-                  title={instance.projectDirectory} onClick={(event) => openOwner(instance, event.currentTarget)}>
+                  onClick={(event) => openOwner(instance, event.currentTarget)}>
                   <span className="tm-previews__project"><span title={instance.repositoryName}>{instance.repositoryName}</span><span className="tm-previews__kind">{!instance.isCurrentWorktree ? 'Earlier worktree' : instance.kind === 'design' ? 'Design' : null}</span></span>
                   <span className="tm-previews__context"><code title={instance.branch}>{instance.branch}</code><span title={instance.title}>{instance.title}</span></span>
                 </button></td>
                 <td><div className="tm-previews__status"><Chip label={status.label} tone={status.tone} />
                   {status.note ? <span>{status.note}</span> : null}</div></td>
-                <td><div className="tm-previews__actions">
-                  {instance.status.active && instance.status.url ? <button type="button" className="outline-button"
+                <td className="tm-table__actions"><div className="tm-previews__actions">
+                  {instance.status.active && instance.status.url ? <button type="button" className="outline-button button--sm"
                     disabled={Boolean(openingId)} onClick={() => void openApp(instance)}>Open app</button> : null}
-                  <button type="button" className="tm-preview-icon-button" aria-label={`View ${owner}: ${context}`} title={`View ${owner}`}
-                    onClick={(event) => openOwner(instance, event.currentTarget)}><ChevronRight size={16} aria-hidden="true" /></button>
+                  <Tooltip label={`View ${owner}`}>
+                    <button type="button" className="tm-iconbtn" aria-label={`View ${owner}: ${context}`}
+                      onClick={(event) => openOwner(instance, event.currentTarget)}><ChevronRight size={16} aria-hidden="true" /></button>
+                  </Tooltip>
                 </div>{actionError?.worktreeId === instance.worktreeId ? <p className="form-error" role="alert">{actionError.message}</p> : null}</td>
               </tr>;
             })}</tbody>
-          </table> : null}
+          </table></div> : null}
       </div>
     </main>
   );

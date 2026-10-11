@@ -155,7 +155,7 @@ resting separation of the thing it is applied to.
 | hover | One small fill step in the direction the element already sits — `--hover` on a transparent row, `--field-hover` on a control, `--card-hover` on a card. Never on a text surface; never a shadow change; never another role's token. |
 | focus | Text surfaces: `--field-focus` fill plus the resting rim strengthened to `--field-edge-focus` — **neutral, never the accent hue**. Quiet, and it fires however focus arrived — including a plain pointer click. |
 | focus-visible | Keyboard traversal only: adds the 3px `--focus-ring` halo. This is the one loud state in the system, and a mouse click must never produce it. |
-| active | `--press` over the rest fill. The primary family, whose fill is already ink, uses `--primary-press` — an ink overlay on an ink fill is invisible. |
+| active | `--press` over the rest fill. The primary family, whose fill is already ink, uses `--primary-press` — an ink overlay on an ink fill is invisible. Only a control that owns a fill takes it, which is why hover rules set `background-color` and never the shorthand (it would erase the overlay). A tab, a segment, a text link, a disclosure row, a switch and a scrim have no fill to darken and press by ink alone — never a grey box; a menu trigger opens on press, so its open state is its press. |
 | selected | `--sel`, one fixed rung: above the hover step, below `--card`. Identical weight in every theme. |
 | disabled | `--field-disabled` fill and `--text-disabled` ink. **Never an opacity, and never a weaker boundary** — a disabled control reads *inert*, not *absent*, so its `--control-edge` or `--field-edge` stays at full strength. |
 
@@ -579,8 +579,9 @@ secondary and destructive share the decision geometry so a pair aligns;
 `button--sm` puts any of them on the toolbar height. Choose button emphasis by
 action priority, not by whether the button contains an icon or a label.
 Icon-only buttons (`tm-iconbtn`, 28 square) use a 16px glyph and always carry an
-`aria-label` and a `Tooltip`. Every button settles to `scale(0.97)` while
-pressed (§9).
+`aria-label` and a `Tooltip`, never a native `title`. Every button settles to
+`scale(0.97)` while pressed (§9); a menu trigger does not, because its menu is
+already open beside it.
 
 Primary and secondary are **one geometry with different fills** — same height,
 same padding, same radius, same minimum width — so a pair aligns to the pixel. A
@@ -791,9 +792,11 @@ follow-up"). The Preview renders its agent into the sheet's slot; a Preview
 shown without a task page (a repository Design) keeps its own toggle and opens
 the same panel as a floating sheet over itself.
 
-A side question goes to the task's own runtime and model in a fresh read-only
-session, so the implementation keeps working; while it works, the question
-reads a snapshot taken when it was asked. Closing the panel ends the thread and
+A side question goes to the model chosen in the panel's composer (the task's
+own until another is picked; any enabled runtime) in a fresh read-only session,
+so the implementation keeps working; while it works, the question reads a
+snapshot taken when it was asked. In a narrow composer the model and effort chips
+show as their marks alone (a brain, a gauge), each named in a tooltip. Closing the panel ends the thread and
 removes the snapshot. Nothing reaches the main conversation unless the user
 uses an answer in a follow-up, which puts it in the composer under the question
 it answers.
@@ -857,6 +860,13 @@ the right. An empty rail is one line.
   cleared only by the user. Scroll position is restored when returning to a list.
 - **Tooltips are for names and shortcuts**, delayed 500ms, never for information
   needed to make the decision in front of you.
+- **The arrow cursor everywhere.** A desktop app does not turn controls into
+  links: no pointer hand on buttons, rows, tabs or cards. Text fields keep the
+  text cursor and resize handles their resize cursor. `check:themes` refuses
+  `cursor: pointer`.
+- **Menus are one component.** Every menu, including a right-click menu, is
+  `ActionMenu` (or `ActionContextMenu` at the pointer), with submenus for a
+  choice inside a choice ("Open with"). Menu rows are words; no app icons.
 - **One primary action per surface.** Use the established keyboard behavior for
   each control. Multiline editing and input composition must not trigger
   accidental submission.
@@ -874,8 +884,11 @@ the right. An empty rail is one line.
   the lifecycle track, a status word, a run header. Motion is kept for the one
   line of live text on a surface — a conversation's working line, the running
   step when it is the latest thing said, "Reviewing" — which takes a slow text
-  shimmer (`.tm-shimmer`, 2.4s) beside a ticking elapsed time. Reduced motion
-  leaves the words still. A pending button keeps its own icon and is disabled;
+  shimmer (`.tm-shimmer`, 2.4s) beside a ticking elapsed time. The shimmer
+  clears the glyphs with the text fill colour, so a label's own ink or a hover
+  never paints over it; reduced motion leaves the words still in that ink.
+  Loading copy ("Loading conversation…") is a still, muted line: loading is not
+  live work. A pending button keeps its own icon and is disabled;
   its label changes only when it has one ("Checking…").
 - **A checklist is read by its marks.** An agent's plan is the one collection
   whose state is a mark, because every checklist reads that way: shapes, not
@@ -1063,14 +1076,23 @@ an hour are instant. Nothing loops unless work is actually running.
 
 | Element | From | Duration | Easing token |
 |---|---|---|---|
-| Hover and state feedback | — | `--motion-fast` 120ms | `--ease-out` |
+| Hover and state feedback, a field's focus rim | — | `--motion-fast` 120ms | `--ease-out` |
 | Button press | scale 0.97 | 120ms | `--ease-out` |
 | Tooltip | scale 0.97, after 500ms; instant between neighbours | 125ms | `--ease-out` |
-| Menu | scale 0.96 from its trigger; leaves at 120ms | `--motion-standard` 180ms | `--ease-out` |
-| Modal | scale 0.97; the scrim fades over 200ms | `--motion-modal` 220ms | `--ease-out` |
+| Menu, popover, picker | scale 0.96 from its trigger; leaves at 120ms | `--motion-standard` 180ms | `--ease-out` |
+| Submenu | opacity only; leaves at once | `--motion-fast` 120ms | `--ease-out` |
+| Modal | scale 0.97; the scrim (every scrim) fades over `--motion-standard` | `--motion-modal` 220ms | `--ease-out` |
 | Floating side panel | 8% from its edge | `--motion-slow` 280ms | `--ease-drawer` |
-| Toast | 8px up | 240ms | `--ease-out` |
+| Docked side panel | its content fades in; the page makes room at once | `--motion-standard` 180ms | `--ease-out` |
+| Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
+| Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
+| Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | 200ms | `--ease-in-out` |
+
+Nothing animates because a tab or page was opened: a surface that is already
+there when its tab mounts (a request bar, a disclosure mounted open, the title
+in the top bar beside a docked panel) appears still. A hand-built chevron does
+not flip when its menu opens; the open fill says so, as on every `ActionMenu`.
 
 `--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
 `cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer` `cubic-bezier(0.32, 0.72, 0, 1)`.

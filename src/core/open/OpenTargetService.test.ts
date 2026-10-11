@@ -10,10 +10,6 @@ import {
 } from './OpenTargetService';
 
 describe('OpenTargetService', () => {
-  it('provides an icon reader in the shared Node host', () => {
-    expect(createNodeOpenTargetHost().getFileIconDataUrl).toEqual(expect.any(Function));
-  });
-
   it.runIf(process.platform !== 'win32')(
     'refuses descriptor copy when the selected file is replaced by a symlink',
     async () => {
@@ -85,39 +81,23 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('uses a native app icon when PATH detection can be matched to an app bundle', async () => {
-    const host = new FakeOpenTargetHost(
-      {
-        '/bin/code': executable(),
-        '/Applications/Visual Studio Code.app': directory(),
-        '/repo': directory(),
-        '/worktree': directory()
-      },
-      {
-        iconDataUrls: {
-          '/Applications/Visual Studio Code.app': 'data:image/png;base64,vscode'
-        }
-      }
-    );
-    const service = new OpenTargetService(host);
-
-    const inspection = await service.inspect(
-      {
-        target: {
-          type: 'worktree',
-          worktreeId: 'worktree-1'
-        }
-      },
-      testContext()
-    );
-
-    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({
-      icon: {
-        kind: 'image',
-        dataUrl: 'data:image/png;base64,vscode'
-      }
+  it('reuses the detected editors while the menu opens again within a minute', async () => {
+    const host = new FakeOpenTargetHost({
+      '/bin/code': executable(),
+      '/repo': directory(),
+      '/worktree': directory()
     });
-    expect(inspection.apps.find((app) => app.id === 'default')).not.toHaveProperty('icon');
+    const service = new OpenTargetService(host);
+    const target = { target: { type: 'worktree' as const, worktreeId: 'worktree-1' } };
+
+    const first = await service.inspect(target, testContext());
+    const probes = host.accessCalls;
+    const second = await service.inspect(target, testContext());
+
+    expect(first.apps.map((app) => app.id)).toEqual(['vscode', 'default']);
+    expect(second.apps).toEqual(first.apps);
+    // Only the target is checked again, never each editor's install locations.
+    expect(host.accessCalls - probes).toBeLessThan(probes);
   });
 
   it('rejects worktree file targets that escape the recorded root', async () => {
@@ -334,11 +314,10 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('detects and opens Windows editors from PATH with PATHEXT and native icon paths', async () => {
+  it('detects and opens Windows editors from PATH with PATHEXT', async () => {
     const host = new FakeOpenTargetHost(
       {
         'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.CMD': executable(),
-        'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe': executable(),
         'C:\\repo': directory(),
         'C:\\worktree': directory(),
         'C:\\worktree\\src': directory(),
@@ -349,10 +328,6 @@ describe('OpenTargetService', () => {
           PATH: 'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\bin',
           PATHEXT: '.EXE;.CMD',
           LOCALAPPDATA: 'C:\\Users\\person\\AppData\\Local'
-        },
-        iconDataUrls: {
-          'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe':
-            'data:image/png;base64,windows-vscode'
         },
         platform: 'win32'
       }
@@ -378,12 +353,7 @@ describe('OpenTargetService', () => {
 
     expect(inspection.preferredAppId).toBe('vscode');
     expect(inspection.revealLabel).toBe('Reveal in File Explorer');
-    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({
-      icon: {
-        kind: 'image',
-        dataUrl: 'data:image/png;base64,windows-vscode'
-      }
-    });
+    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({ label: 'VS Code' });
 
     await expect(
       service.execute(
@@ -572,14 +542,12 @@ class FakeOpenTargetHost implements OpenTargetHost {
   readonly defaults: string[] = [];
   readonly reveals: string[] = [];
   private readonly entries: Record<string, FakeEntry>;
-  private readonly iconDataUrls: Record<string, string>;
   private readonly realpaths: Record<string, string>;
 
   constructor(
     entries: Record<string, FakeEntry>,
     private readonly options: {
       env?: NodeJS.ProcessEnv;
-      iconDataUrls?: Record<string, string>;
       platform?: NodeJS.Platform;
       realpaths?: Record<string, string>;
     } = {}
@@ -587,7 +555,6 @@ class FakeOpenTargetHost implements OpenTargetHost {
     this.platform = options.platform ?? 'darwin';
     this.env = options.env ?? { PATH: '/bin' };
     this.entries = normalizeRecord(entries, this.platform);
-    this.iconDataUrls = normalizeRecord(options.iconDataUrls ?? {}, this.platform);
     this.realpaths = normalizeRecord(options.realpaths ?? {}, this.platform);
   }
 
@@ -607,7 +574,10 @@ class FakeOpenTargetHost implements OpenTargetHost {
     return this.realpaths[normalize(filePath, this.platform)] ?? normalize(filePath, this.platform);
   }
 
+  accessCalls = 0;
+
   async access(filePath: string) {
+    this.accessCalls += 1;
     return Boolean(this.entries[normalize(filePath, this.platform)]);
   }
 
@@ -631,9 +601,6 @@ class FakeOpenTargetHost implements OpenTargetHost {
     this.reveals.push(filePath);
   }
 
-  async getFileIconDataUrl(filePath: string) {
-    return this.iconDataUrls[normalize(filePath, this.platform)];
-  }
 }
 
 function testContext(input: { repositoryPath?: string; worktreePath?: string } = {}) {

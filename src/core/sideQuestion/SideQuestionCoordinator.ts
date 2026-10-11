@@ -6,6 +6,7 @@ import {
   type AskSideQuestionRequest,
   type EndSideThreadRequest,
   type RunRecord,
+  type SideQuestionModelChoice,
   type StopSideQuestionRequest,
   type TaskDetailSnapshot,
   type TaskInstruction
@@ -38,8 +39,11 @@ export interface SideQuestionCoordinatorOptions {
   /** Reads a runtime-owned or Task-owned artifact, such as a run's final answer. */
   readArtifact(artifactId: string): Promise<string>;
   events: Pick<AppEventBus, 'emit'>;
-  /** The task's implementation runtime, model and settings, made read-only. */
-  questionSettings(detail: TaskDetailSnapshot): AgentExecutionSettings;
+  /**
+   * The settings a question runs with, always read-only: the chosen runtime and model, or
+   * the task's implementation runtime and model when none was chosen.
+   */
+  questionSettings(detail: TaskDetailSnapshot, choice?: SideQuestionModelChoice): AgentExecutionSettings;
   assertRuntimeEnabled(runtimeId: string): void;
   /**
    * Runs `action` under the task's action lock, once the task's current action settles,
@@ -84,6 +88,7 @@ export class SideQuestionCoordinator {
     const messageId = requireUuid(input.messageId, 'message');
     const threadId = requireUuid(input.threadId, 'thread');
     const text = questionText(input.text);
+    const choice = modelChoice(input.model);
     return this.serialize(input.taskId, async () => {
       const detail = await this.options.store.getTaskDetail(input.taskId);
       const task = detail.task;
@@ -101,7 +106,7 @@ export class SideQuestionCoordinator {
       if (detail.runs.some((run) => run.mode === 'SIDE_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
         throw new Error('Wait for the current side question to finish, or stop it.');
       }
-      const settings = this.options.questionSettings(detail);
+      const settings = this.options.questionSettings(detail, choice);
       this.options.assertRuntimeEnabled(settings.runtimeId ?? task.runtimeId);
 
       const runId = existing?.runId ?? randomUUID();
@@ -418,6 +423,29 @@ function threadKey(taskId: string, threadId: string): string {
 function requireUuid(value: unknown, label: string): string {
   if (typeof value !== 'string' || !UUID.test(value)) throw new Error(`A valid ${label} ID is required.`);
   return value;
+}
+
+const MODEL_CHOICE_FIELD_MAX_LENGTH = 200;
+
+/** A chosen runtime and model, checked for shape; whether they can run is the runtime's to say. */
+function modelChoice(value: unknown): SideQuestionModelChoice | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Choose a valid model for the side question.');
+  const record = value as Record<string, unknown>;
+  const field = (key: string, required: boolean): string | undefined => {
+    const item = record[key];
+    if (item === undefined && !required) return undefined;
+    if (typeof item !== 'string' || !item.trim() || item.length > MODEL_CHOICE_FIELD_MAX_LENGTH) {
+      throw new Error('Choose a valid model for the side question.');
+    }
+    return item.trim();
+  };
+  return {
+    runtimeId: field('runtimeId', true)!,
+    model: field('model', false),
+    modelProvider: field('modelProvider', false),
+    reasoningEffort: field('reasoningEffort', false)
+  };
 }
 
 function questionText(text: unknown): string {

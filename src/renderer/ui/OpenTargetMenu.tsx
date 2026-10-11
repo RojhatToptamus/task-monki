@@ -1,274 +1,85 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react';
-import { createPortal } from 'react-dom';
-import type {
-  OpenTargetAction,
-  OpenTargetAppIcon,
-  OpenTargetInspection,
-  OpenTargetRef
-} from '../../shared/contracts';
+import { useEffect, useState } from 'react';
+import type { OpenTargetInspection, OpenTargetRef } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
-import {
-  buildOpenTargetMenuModel,
-  type OpenTargetMenuItem
-} from '../model/openTargetMenu';
-import {
-  focusMenuItem,
-  focusOwningMenu,
-  focusVisibleMenuItem,
-  handleMenuBlur,
-  handleMenuKeyDown
-} from './menuKeyboard';
+import { buildOpenTargetMenuModel, type OpenTargetMenuItem } from '../model/openTargetMenu';
+import { ActionContextMenu, type ActionMenuItem } from './ActionMenu';
 
-interface OpenTargetContextMenuProps {
+/**
+ * The open-target actions as menu items: Open, an Open with submenu, then Copy path and
+ * Reveal. The target is inspected each time the menu opens; until that answer arrives the
+ * same rows show, disabled, so the menu never changes shape. A failed action is reported
+ * through `onError`.
+ */
+export function useOpenTargetMenuItems(
+  target: OpenTargetRef | undefined,
+  active: boolean,
+  onError?: (message: string) => void
+): ActionMenuItem[] {
+  const targetKey = target ? JSON.stringify(target) : '';
+  const [state, setState] = useState<{ key: string; inspection?: OpenTargetInspection; error?: string }>({ key: '' });
+  useEffect(() => {
+    if (!active || !target) return;
+    let canceled = false;
+    void taskManagerApi.inspectOpenTarget({ target }).then(
+      (inspection) => { if (!canceled) setState({ key: targetKey, inspection }); },
+      (cause: unknown) => { if (!canceled) setState({ key: targetKey, error: openTargetErrorMessage(cause, 'The path could not be inspected.') }); }
+    );
+    return () => { canceled = true; };
+    // The key stands for the target object, which callers may recreate on every render.
+  }, [active, targetKey]);
+  if (!target) return [];
+
+  const run = (item: OpenTargetMenuItem) => () => {
+    void executeOpenTargetAction(target, item).catch((cause: unknown) =>
+      onError?.(openTargetErrorMessage(cause, 'The action failed.')));
+  };
+  const inspection = state.key === targetKey ? state.inspection : undefined;
+  if (!inspection) {
+    const reason = state.key === targetKey ? state.error : undefined;
+    return [
+      { id: 'open', label: 'Open', disabled: true, disabledReason: reason },
+      { id: 'open-with', label: 'Open with', disabled: true, items: [] },
+      { id: 'copyPath', label: 'Copy path', separated: true, onSelect: run({ id: 'copyPath', label: 'Copy path', action: 'copyPath' }) },
+      { id: 'reveal', label: revealLabel(), disabled: true }
+    ];
+  }
+  const model = buildOpenTargetMenuModel(inspection);
+  const toItem = (item: OpenTargetMenuItem): ActionMenuItem => ({
+    id: item.id,
+    label: item.label,
+    meta: item.meta,
+    disabled: item.disabled,
+    disabledReason: item.disabled ? item.disabledReason : undefined,
+    onSelect: run(item)
+  });
+  return [
+    toItem(model.primary),
+    { id: 'open-with', label: 'Open with', disabled: model.openWith.length === 0, items: model.openWith.map(toItem) },
+    ...model.utilities.map((item, index) => ({ ...toItem(item), separated: index === 0 }))
+  ];
+}
+
+/** The open-target menu at the pointer, for a right-click on a path. */
+export function OpenTargetContextMenu({ target, position, onClose, onError }: {
   target: OpenTargetRef;
   position: { x: number; y: number };
   onClose(): void;
+  onError?(message: string): void;
+}) {
+  const items = useOpenTargetMenuItems(target, true, onError);
+  return <ActionContextMenu label="Open target" position={position} items={items} onClose={onClose} />;
 }
 
-interface OpenTargetMenuItemsProps {
-  target: OpenTargetRef;
-  onActionComplete?(): void;
-  autoFocusFirst?: boolean;
+async function executeOpenTargetAction(target: OpenTargetRef, item: OpenTargetMenuItem): Promise<void> {
+  const result = await taskManagerApi.executeOpenTargetAction({ target, action: item.action, appId: item.appId });
+  if (!result.ok) throw new Error(result.message ?? 'The action failed.');
+  if (result.clipboardText !== undefined) await writeClipboard(result.clipboardText);
 }
 
-export function OpenTargetContextMenu({
-  target,
-  position,
-  onClose
-}: OpenTargetContextMenuProps) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(
-    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
-  );
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => focusMenuItem(rootRef.current));
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        onClose();
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose();
-        returnFocusRef.current?.focus();
-      }
-    };
-    const onScroll = (event: Event) => {
-      if (!rootRef.current?.contains(event.target as Node)) onClose();
-    };
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onClose);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onClose);
-    };
-  }, [onClose]);
-
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    if (!root) return;
-    root.style.left = `${position.x}px`;
-    root.style.top = `${position.y}px`;
-  }, [position.x, position.y]);
-
-  return (
-    <div
-      className="tm-pathmenu tm-pathmenu--floating"
-      role="menu"
-      tabIndex={-1}
-      aria-label="Open target"
-      ref={rootRef}
-      onKeyDown={(event) =>
-        handleMenuKeyDown(event, {
-          onClose,
-          returnFocus: returnFocusRef.current
-        })
-      }
-      onBlur={(event) => handleMenuBlur(event, onClose)}
-    >
-      <OpenTargetMenuItems target={target} onActionComplete={() => {
-        onClose();
-        returnFocusRef.current?.focus({ preventScroll: true });
-      }} autoFocusFirst />
-    </div>
-  );
-}
-
-export function OpenTargetMenuItems({
-  target,
-  onActionComplete,
-  autoFocusFirst = false
-}: OpenTargetMenuItemsProps) {
-  const targetKey = useMemo(() => JSON.stringify(target), [target]);
-  const [inspection, setInspection] = useState<OpenTargetInspection>();
-  const [error, setError] = useState<string>();
-  const [busyAction, setBusyAction] = useState<string>();
-  const [inspectionAttempt, setInspectionAttempt] = useState(0);
-  const firstItemRef = useRef<HTMLButtonElement>(null);
-  const loadingItemRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let canceled = false;
-    setInspection(undefined);
-    setError(undefined);
-    setBusyAction(undefined);
-    void taskManagerApi
-      .inspectOpenTarget({ target })
-      .then((next) => {
-        if (!canceled) {
-          if (document.activeElement === loadingItemRef.current) {
-            focusOwningMenu(loadingItemRef.current);
-          }
-          setInspection(next);
-        }
-      })
-      .catch((caught: unknown) => {
-        if (!canceled) {
-          setError(openTargetErrorMessage(caught, 'Could not inspect path.'));
-        }
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [targetKey, inspectionAttempt]);
-
-  useLayoutEffect(() => {
-    if (!autoFocusFirst || !inspection) {
-      return;
-    }
-    const firstItem = firstItemRef.current;
-    const menu = firstItem?.closest<HTMLElement>('[role="menu"]');
-    if (!firstItem || !menu) return;
-    const focused = document.activeElement;
-    if (focused === menu) {
-      focusVisibleMenuItem(menu, firstItem);
-    } else if (focused instanceof HTMLElement && menu.contains(focused)) {
-      focusVisibleMenuItem(menu, focused);
-    }
-  }, [autoFocusFirst, inspection]);
-
-  const runAction = async (item: OpenTargetMenuItem) => {
-    if (item.disabled || busyAction) {
-      return;
-    }
-    const activeItem =
-      document.activeElement instanceof Element ? document.activeElement : firstItemRef.current;
-    focusOwningMenu(activeItem);
-    setBusyAction(item.id);
-    setError(undefined);
-    try {
-      const result = await taskManagerApi.executeOpenTargetAction({
-        target,
-        action: item.action,
-        appId: item.appId
-      });
-      if (!result.ok) {
-        throw new Error(result.message ?? 'Action failed.');
-      }
-      if (result.clipboardText !== undefined) {
-        await writeClipboard(result.clipboardText);
-      }
-      onActionComplete?.();
-    } catch (caught) {
-      setError(openTargetErrorMessage(caught, 'Action failed.'));
-    } finally {
-      setBusyAction(undefined);
-    }
-  };
-
-  if (error && !inspection) {
-    return (
-      <>
-        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true" tabIndex={-1}>
-          {error}
-        </div>
-        <button
-          type="button"
-          role="menuitem"
-          tabIndex={-1}
-          className="tm-taskmenu__item tm-pathmenu__item"
-          onClick={(event) => {
-            focusOwningMenu(event.currentTarget);
-            setInspectionAttempt((attempt) => attempt + 1);
-          }}
-        >
-          Retry
-        </button>
-        <OpenTargetLiveAnnouncement tone="error">{error}</OpenTargetLiveAnnouncement>
-      </>
-    );
-  }
-  if (!inspection) {
-    return (
-      <>
-        <div ref={loadingItemRef} className="tm-pathmenu__message" role="menuitem" aria-disabled="true" tabIndex={-1}>
-          Loading…
-        </div>
-        <OpenTargetLiveAnnouncement>Loading open target.</OpenTargetLiveAnnouncement>
-      </>
-    );
-  }
-
-  const model = buildOpenTargetMenuModel(inspection);
-  const menuBusy = Boolean(busyAction);
-
-  return (
-    <>
-      <MenuButton
-        buttonRef={firstItemRef}
-        item={model.primary}
-        busy={busyAction === model.primary.id}
-        disabled={menuBusy}
-        onRun={runAction}
-      />
-      {model.openWith.length > 0 ? (
-        <div className="tm-pathmenu__submenu" role="group" aria-label="Open with">
-          <span className="tm-pathmenu__submenu-label" aria-hidden="true">Open with</span>
-          <div className="tm-pathmenu__submenu-body">
-            {model.openWith.map((item) => (
-              <MenuButton
-                key={item.id}
-                item={item}
-                iconColumn
-                busy={busyAction === item.id}
-                disabled={menuBusy}
-                onRun={runAction}
-              />
-            ))}
-          </div>
-        </div>
-      ) : null}
-      <div className="tm-pathmenu__separator" role="separator" />
-      {model.utilities.map((item) => (
-        <MenuButton
-          key={item.id}
-          item={item}
-          busy={busyAction === item.id}
-          disabled={menuBusy}
-          onRun={runAction}
-        />
-      ))}
-      {error ? (
-        <>
-          <div
-            className="tm-pathmenu__message tm-pathmenu__message--error"
-            role="menuitem"
-            aria-disabled="true"
-            tabIndex={-1}
-          >
-            {error}
-          </div>
-          <OpenTargetLiveAnnouncement tone="error">{error}</OpenTargetLiveAnnouncement>
-        </>
-      ) : null}
-    </>
-  );
+/** The platform's word for showing a file in its folder, until the inspection says it. */
+function revealLabel(): string {
+  if (typeof navigator === 'undefined') return 'Reveal in folder';
+  return /Mac/u.test(navigator.userAgent) ? 'Reveal in Finder' : /Windows/u.test(navigator.userAgent) ? 'Show in Explorer' : 'Reveal in folder';
 }
 
 function openTargetErrorMessage(error: unknown, fallback: string): string {
@@ -276,68 +87,11 @@ function openTargetErrorMessage(error: unknown, fallback: string): string {
   return error.message.replace(/^Error invoking remote method 'openTarget:(?:inspect|execute)': (?:Error: )?/, '');
 }
 
-function OpenTargetLiveAnnouncement({
-  tone = 'status',
-  children
-}: {
-  tone?: 'status' | 'error';
-  children: string;
-}) {
-  if (typeof document === 'undefined') {
-    return null;
-  }
-  return createPortal(
-    <span className="tm-visually-hidden" role={tone === 'error' ? 'alert' : 'status'}>
-      {children}
-    </span>,
-    document.body
-  );
-}
-
-function MenuButton({
-  buttonRef,
-  item,
-  iconColumn = false,
-  busy,
-  disabled,
-  onRun
-}: {
-  buttonRef?: Ref<HTMLButtonElement>;
-  item: OpenTargetMenuItem;
-  /** In a group of app items: an item without an icon keeps the column, so labels align. */
-  iconColumn?: boolean;
-  busy: boolean;
-  disabled: boolean;
-  onRun(item: OpenTargetMenuItem): void;
-}) {
-  const title = item.disabled ? item.disabledReason : item.label;
-  return (
-    <button
-      ref={buttonRef}
-      type="button"
-      role="menuitem"
-      tabIndex={-1}
-      className="tm-taskmenu__item tm-pathmenu__item"
-      disabled={item.disabled || disabled}
-      title={title}
-      onClick={() => void onRun(item)}
-    >
-      {item.app?.icon ? <AppIcon icon={item.app.icon} /> : iconColumn ? <span className="tm-pathmenu__appicon" aria-hidden="true" /> : null}
-      <span>{busy ? busyLabel(item.action) : item.label}</span>
-    </button>
-  );
-}
-
-function AppIcon({ icon }: { icon: OpenTargetAppIcon }) {
-  return <img className="tm-pathmenu__appicon" src={icon.dataUrl} alt="" />;
-}
-
 async function writeClipboard(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return;
   }
-
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.setAttribute('readonly', '');
@@ -348,19 +102,6 @@ async function writeClipboard(text: string): Promise<void> {
   const copied = document.execCommand('copy');
   document.body.removeChild(textarea);
   if (!copied) {
-    throw new Error('Clipboard is unavailable.');
-  }
-}
-
-function busyLabel(action: OpenTargetAction): string {
-  switch (action) {
-    case 'copyPath':
-    case 'copyFileContents':
-      return 'Copying…';
-    case 'reveal':
-      return 'Revealing…';
-    case 'open':
-    case 'openTerminal':
-      return 'Opening…';
+    throw new Error('The clipboard is unavailable.');
   }
 }

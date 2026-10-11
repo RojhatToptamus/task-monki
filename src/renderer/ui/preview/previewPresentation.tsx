@@ -17,6 +17,7 @@ import type {
 import type { OpenTargetRef } from '../../../shared/contracts';
 import { serviceOutcome } from '../../model/applicationPreviewRuns';
 import { DisclosureChevron } from '../DisclosureChevron';
+import { Tooltip } from '../Tooltip';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { SourceFolderActions } from './PreviewSourceFolder';
 
@@ -227,16 +228,15 @@ export function PreviewDialog({
       >
         <header className="tm-application-preview__dialog-head">
           <h3>{title}</h3>
-          <button
+          <Tooltip label="Close"><button
             type="button"
             className="tm-preview-icon-button"
             disabled={busy}
             onClick={onClose}
             aria-label="Close"
-            title="Close"
           >
             <X size={16} aria-hidden="true" />
-          </button>
+          </button></Tooltip>
         </header>
         {onSubmit ? <form onSubmit={onSubmit}>{contents}</form> : contents}
       </div>

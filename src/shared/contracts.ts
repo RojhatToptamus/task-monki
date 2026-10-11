@@ -1146,7 +1146,16 @@ export interface AskSideQuestionRequest {
   /** Lowercase UUID; repeating it returns the recorded question. */
   messageId: string;
   text: string;
+  /**
+   * The runtime, model and reasoning effort that answer this question, independent of the
+   * main conversation; the task's own when absent. The answer is read-only whatever it is.
+   */
+  model?: SideQuestionModelChoice;
 }
+
+export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
+  runtimeId: AgentRuntimeId;
+};
 
 export interface StopSideQuestionRequest {
   taskId: string;
@@ -1375,12 +1384,9 @@ export type OpenTargetAppId =
   | 'xcode'
   | 'default';
 
-export type OpenTargetAppIcon = { kind: 'image'; dataUrl: string };
-
 export interface OpenTargetDetectedApp {
   id: OpenTargetAppId;
   label: string;
-  icon?: OpenTargetAppIcon;
 }
 
 export type OpenTargetRef =

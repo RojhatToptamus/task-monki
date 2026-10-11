@@ -13,6 +13,7 @@ import {
 } from '../model/designs';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { StatusGlyph } from './StatusBadge';
+import { Tooltip } from './Tooltip';
 import {
   UiDesktopIcon,
   UiExternalLinkIcon,
@@ -353,21 +354,19 @@ export function DesignCanvas({
             ))}
           </div>
           <span className="tm-design-canvas__device-size">{selectedDevice.size}</span>
-          <button
+          <Tooltip label="Reload preview"><button
             type="button"
             className="tm-design-canvas__tool"
             aria-label="Reload preview"
-            title="Reload preview"
             disabled={!generationId || operation !== undefined}
             onClick={() => void refreshPreview()}
           >
             <UiRefreshIcon />
-          </button>
-          <button
+          </button></Tooltip>
+          <Tooltip label="Open preview in browser"><button
             type="button"
             className="tm-design-canvas__tool"
             aria-label="Open preview in browser"
-            title="Open preview in browser"
             disabled={
               !generationId ||
               !routeId ||
@@ -382,7 +381,7 @@ export function DesignCanvas({
             )}
           >
             <UiExternalLinkIcon />
-          </button>
+          </button></Tooltip>
           </> : null}
         </div>
       </header>

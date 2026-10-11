@@ -284,6 +284,11 @@
   letter-spacing: -0.018em;
 }
 
+/* Loading is a still, muted line: the shimmer is kept for live work. */
+.tm-discourse-empty--loading h2 {
+  color: var(--muted);
+}
+
 .tm-discourse-empty p {
   max-width: 420px;
   margin: 0;
@@ -457,7 +462,7 @@
 .tm-discourse-message footer > button:hover,
 .tm-discourse-message-menu__trigger:hover,
 .tm-discourse-message-menu__trigger[aria-expanded='true'] {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -480,7 +485,8 @@
   left: 50%;
   bottom: 8px;
   z-index: var(--layer-sticky);
-  transform: translateX(-50%);
+  /* Centred with translate, so the press scale composes with it. */
+  translate: -50% 0;
   height: var(--h-toolbar);
   padding: 0 12px;
   border: 0;
@@ -513,7 +519,6 @@
   list-style: none;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  cursor: pointer;
 }
 
 .tm-discourse-response__concerns summary::-webkit-details-marker {
@@ -892,7 +897,6 @@
   background: transparent;
   color: var(--text-soft);
   text-align: left;
-  cursor: pointer;
 }
 
 .discourse-mention-input__option:hover,
@@ -958,8 +962,8 @@
 }
 
 .tm-discourse-mode-menu__trigger { display: inline-flex; align-items: center; gap: 6px; width: auto; min-height: var(--h-toolbar); padding: 0 8px; color: var(--text-soft); font-size: var(--t-help); }
-.tm-discourse-mode-menu__trigger > svg:last-child { width: 13px; transition: transform var(--motion-fast) var(--ease-out); }
-.tm-discourse-mode-menu__trigger[aria-expanded='true'] > svg:last-child { transform: rotate(180deg); }
+/* The chevron stays still while open, like the ActionMenu chips beside it. */
+.tm-discourse-mode-menu__trigger > svg:last-child { width: 13px; }
 
 .tm-discourse-composer__requirement {
   display: flex;
@@ -1029,7 +1033,7 @@
   width: 100%;
   height: 100%;
   background: var(--scrim);
-  animation: tm-scrim-in var(--motion-fast) var(--ease-out) both;
+  animation: tm-scrim-in var(--motion-standard) var(--ease-out) both;
 }
 
 .tm-discourse-drawer-scrim--rail {
@@ -1172,6 +1176,9 @@
   border-radius: var(--r);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
+  /* It grows from its trigger at the composer's right, as a menu does. */
+  transform-origin: bottom right;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-discourse-preview__head {
@@ -1342,10 +1349,9 @@
 .tm-discourse-message-details,
 .tm-discourse-inspector__section > details { margin-top: 8px; color: var(--muted); font-size: var(--t-help); }
 .tm-discourse-message-details summary,
-.tm-discourse-inspector__section > details > summary { cursor: pointer; }
 .tm-discourse-message-details p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .tm-discourse-peer-request { color: var(--muted); font-size: var(--t-help); }
-.tm-discourse-peer-request summary { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tm-discourse-peer-request summary { display: flex; align-items: center; gap: 8px; }
 .tm-discourse-peer-request summary > span { flex: 1; }
 .tm-discourse-peer-request time { font: var(--t-meta) var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-discourse-peer-request p { white-space: pre-wrap; }

@@ -157,7 +157,7 @@ describe('ReviewWorkspace findings and requests', () => {
     render(<Harness onSubmit={onSubmit} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on line 1' }));
-    fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Return seconds here.' } });
+    fireEvent.change(screen.getByLabelText(/^Comment for/), { target: { value: 'Return seconds here.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
     expect(screen.getByText('Return seconds here.')).toBeDefined();
     expect(screen.getByText('1 finding and 1 comment')).toBeDefined();

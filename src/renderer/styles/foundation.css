@@ -31,6 +31,7 @@
   --motion-standard: 180ms;
   --motion-modal: 220ms;
   --motion-slow: 280ms;
+  --motion-toast: 240ms;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
@@ -124,7 +125,17 @@ body {
   font-weight: var(--w-medium);
   line-height: 1.35;
   pointer-events: auto;
-  animation: tm-toast-in 240ms var(--ease-out);
+  animation: tm-toast-in var(--motion-toast) var(--ease-out);
+}
+
+/* A toast leaves faster than it arrived, before it is removed. */
+.tm-notifier__item[data-leaving] {
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-notifier__item strong {
@@ -206,10 +217,46 @@ textarea {
 }
 
 button {
-  cursor: pointer;
   border: 0;
   background: none;
   color: inherit;
+}
+
+/* A desktop app keeps the arrow on everything it can click: a disclosure's
+   words would otherwise take the text caret, a link the pointing hand. */
+summary,
+:any-link {
+  cursor: default;
+}
+
+/* State feedback eases (DESIGN.md 9): fills and ink settle over --motion-fast,
+   and a press scale returns the same way. A component that names its own
+   transition replaces this one. Menu items and listbox options stay instant,
+   because their highlight follows the pointer and the arrow keys. */
+.app-shell :where(button:not([role='option']), [role='button'], [role='tab'], summary, a) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+
+/* Text surfaces change fill and rim on hover and focus, including a pointer
+   click into a composer, so both ease rather than snap. */
+.app-shell :where(
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select,
+  .tm-composer,
+  .tm-listrail__search,
+  .tm-filefilter__search,
+  .tm-agent-console__search,
+  .import-work__search,
+  .tm-theme-picker__trigger
+) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .app-shell :where(button, [role='button'], input, textarea, select):disabled,
@@ -231,10 +278,39 @@ button {
   color: var(--text-disabled);
 }
 
-/* The token overlay preserves each control family's rest fill and geometry.
-   Ink-filled controls (the primary family) cannot take an ink overlay, so they
-   press with their own derived fill (base-components.css). */
-:where(button, [role='button']):not(:disabled):active {
+/* Press darkens a fill that is already there (DESIGN.md A.4, A.5): --press over
+   the control's rest or hover fill, which is why those hover rules set
+   background-color and never the shorthand. Only controls that own a fill take
+   it. Ink-filled controls (the primary family) press with their own derived
+   fill (base-components.css). A tab, a segment, a text link, a disclosure row,
+   a switch and a scrim have no fill to darken, and a menu trigger answers with
+   its open state, so none of them ever shows a grey box. */
+:where(
+  .outline-button,
+  .danger-button,
+  .ghost-button,
+  .tm-iconbtn,
+  .tm-detail__assistant,
+  .tm-listrail__new,
+  .tm-prstatus__refresh,
+  .tm-preview-icon-button,
+  .tm-design-canvas__tool,
+  .task-attachment__remove,
+  .tm-filefilter__clear,
+  .tm-discourse-message-action,
+  .tm-conversation__latest,
+  .tm-preview-follow,
+  .tm-discourse-new-responses,
+  .tm-rail__item,
+  .tm-settings__nav-item,
+  .tm-listrail__item,
+  .tm-review__index-file,
+  .tm-review__index-finding,
+  .tm-card__hit,
+  .tm-inbox-row__hit,
+  .tm-previews__identity,
+  .tm-preview-entry--toggle
+):not(:disabled):active {
   background-image: linear-gradient(var(--press), var(--press));
 }
 
@@ -341,14 +417,14 @@ button {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
     animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
   }
 
-  .tm-shimmer {
-    background: none;
-    color: var(--text-soft);
-  }
+  /* The shimmer's still fallback lives beside .tm-shimmer in
+     base-components.css, which loads after this file. */
 }
 
 @media (prefers-contrast: more) {

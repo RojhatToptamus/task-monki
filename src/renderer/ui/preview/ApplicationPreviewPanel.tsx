@@ -1,7 +1,7 @@
 import { isActiveRunStatus } from '../../model/agentSession';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Ellipsis } from 'lucide-react';
+import { MoreHorizontal } from 'lucide-react';
 import type { AttemptSummary } from 'previewhost';
 import type { ApplicationPreviewSnapshot, PreviewConfigurationFile } from '../../../shared/applicationPreview';
 import type { WorktreeRecord } from '../../../shared/contracts';
@@ -730,7 +730,7 @@ export function ApplicationPreviewPanel({
                   Preview agent
                 </button>
               ) : null}
-              {menu.length ? <ActionMenu label="More preview actions" trigger={<Ellipsis size={16} aria-hidden="true" />} items={menu} /> : null}
+              {menu.length ? <ActionMenu label="More preview actions" tooltip="More actions" trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={menu} /> : null}
             </div>
           </div>
           {tabs.length ? (

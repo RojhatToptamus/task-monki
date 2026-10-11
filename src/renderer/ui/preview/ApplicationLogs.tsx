@@ -15,7 +15,7 @@ import {
   ChevronDown,
   ChevronUp,
   Columns2,
-  Ellipsis,
+  MoreHorizontal,
   Pause,
   Play,
   Search
@@ -37,6 +37,7 @@ import { applicationAttempts, previewRunRows, runTime } from '../../model/applic
 import { CopyGlyph, useCopied } from '../CopyIconButton';
 import { ApplicationLogStream } from './ApplicationLogStream';
 import { PanelResizeHandle } from '../PanelResizeHandle';
+import { Tooltip } from '../Tooltip';
 import { message } from './previewPresentation';
 
 const TERMINAL_MARKERS = new Set([
@@ -614,26 +615,24 @@ function RunLogs({
                   ? `${matchIndex < 0 ? 0 : (matchIndex % matches.length) + 1} of ${matches.length}`
                   : 'No matches'}
               </span>
-              <button
+              <Tooltip label="Previous match" shortcut="Shift+Enter"><button
                 type="button"
                 className="ghost-button tm-preview-log-icon"
                 aria-label="Previous log match"
-                title="Previous match (Shift+Enter)"
                 onClick={() => navigateMatch(-1)}
                 disabled={!matches.length}
               >
                 <ChevronUp size={16} aria-hidden="true" />
-              </button>
-              <button
+              </button></Tooltip>
+              <Tooltip label="Next match" shortcut="Enter"><button
                 type="button"
                 className="ghost-button tm-preview-log-icon"
                 aria-label="Next log match"
-                title="Next match (Enter)"
                 onClick={() => navigateMatch(1)}
                 disabled={!matches.length}
               >
                 <ChevronDown size={16} aria-hidden="true" />
-              </button>
+              </button></Tooltip>
               {full ? (
                 <button
                   type="button"
@@ -647,44 +646,42 @@ function RunLogs({
             </span>
           ) : null}
           {full && sources.length > 1 ? (
-            <button
+            <Tooltip label={sideBySideAvailable ? 'Side by side' : SIDE_BY_SIDE_REASON}><button
               type="button"
               className="ghost-button tm-preview-log-icon"
               aria-pressed={side}
               aria-disabled={!sideBySideAvailable || undefined}
               aria-label="Side by side"
-              title={sideBySideAvailable ? 'Side by side' : SIDE_BY_SIDE_REASON}
               onClick={toggleSideBySide}
             >
               <Columns2 size={16} aria-hidden="true" />
-            </button>
+            </button></Tooltip>
           ) : null}
-          <button
+          <Tooltip label={followLabel}><button
             type="button"
             className="ghost-button tm-preview-log-icon"
             aria-label={followLabel}
-            title={followLabel}
             onClick={() => followAll(followKeys, allPaused)}
           >
             {allPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-          </button>
+          </button></Tooltip>
           {full ? (
-            <button
+            <Tooltip label={copied ? 'Copied' : 'Copy visible logs'}><button
               type="button"
               className="ghost-button tm-preview-log-icon"
               aria-label="Copy visible logs"
-              title={copied ? 'Copied' : 'Copy visible logs'}
               onClick={copyVisible}
             >
               <CopyGlyph copied={copied} />
-            </button>
+            </button></Tooltip>
           ) : null}
           {more.length ? (
             <ActionMenu
               className="tm-preview-log-more"
               label="More log actions"
+              tooltip="More actions"
               side="bottom"
-              trigger={<Ellipsis size={16} aria-hidden="true" />}
+              trigger={<MoreHorizontal size={16} aria-hidden="true" />}
               items={more}
             />
           ) : null}
@@ -734,15 +731,14 @@ function RunLogs({
                     <span className="tm-preview-log-pane__state" data-state={sourceState(source)}>
                       {stateWord(source)}
                     </span>
-                    <button
+                    <Tooltip label={paused.includes(source) ? 'Resume logs' : 'Pause logs'}><button
                       type="button"
                       className="ghost-button tm-preview-log-icon tm-preview-log-icon--compact"
                       aria-label={`${paused.includes(source) ? 'Resume' : 'Pause'} ${displayName(source)} logs`}
-                      title={paused.includes(source) ? 'Resume logs' : 'Pause logs'}
                       onClick={() => follow(source, paused.includes(source))}
                     >
                       {paused.includes(source) ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
-                    </button>
+                    </button></Tooltip>
                   </header>
                 ) : null}
                 <ApplicationLogStream

@@ -65,7 +65,7 @@
 }
 
 .tm-iconbtn:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -94,6 +94,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   animation: tm-scrim-in var(--motion-standard) var(--ease-out);
+}
+
+/* With a side panel docked the title lives here as part of the layout, not
+   because the head scrolled away, so it arrives with the layout, unanimated. */
+.tm-app:has(.tm-side-sheet:not(.tm-side-sheet--floating)) .tm-titlebar__title {
+  animation: none;
 }
 
 .tm-newtask {
@@ -214,7 +220,7 @@
 }
 
 .tm-rail__item:hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text-soft);
 }
 
@@ -491,8 +497,7 @@
 }
 
 .app-shell[data-input-modality='keyboard'] .tm-card__hit:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__item:focus {
+.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
   outline: 0;
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
@@ -610,7 +615,6 @@
   border: 0;
   border-radius: var(--r-md);
   background: transparent;
-  cursor: pointer;
 }
 
 .tm-card__body .tm-taskmenu {
@@ -627,7 +631,7 @@
 
 .tm-card:hover .tm-card__actions,
 .tm-card:focus-within .tm-card__actions,
-.tm-card__actions:has([aria-expanded='true']) {
+.tm-card__actions:has([data-state='open']) {
   opacity: 1;
   visibility: visible;
 }
@@ -637,154 +641,11 @@
   display: inline-flex;
 }
 
-.tm-taskmenu__trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: var(--h-icon);
+.tm-taskmenu__trigger.tm-action-menu__trigger {
+  width: var(--h-icon);
+  min-width: var(--h-icon);
   padding: 0;
-  border: 0;
   border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--muted);
-  line-height: 0;
-  cursor: pointer;
-  transition: color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out);
-}
-
-.tm-taskmenu__trigger:hover,
-.tm-taskmenu__trigger[aria-expanded='true'] {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-taskmenu__menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: var(--layer-menu);
-  display: flex;
-  min-width: 152px;
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  border: 0;
-  border-radius: var(--r);
-  background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
-
-.tm-taskmenu__menu--floating {
-  position: fixed;
-  top: auto;
-  right: auto;
-  min-width: 0;
-}
-
-.tm-taskmenu__menu:not(.tm-taskmenu__menu--floating):has(.tm-pathmenu__item) {
-  min-width: 214px;
-}
-
-.tm-taskmenu__item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--h-toolbar);
-  padding: 5px 8px;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--text);
-  font-size: var(--t-body);
-  line-height: 1.4;
-  text-align: left;
-  cursor: default;
-}
-
-.tm-taskmenu__item:not(:disabled):hover {
-  background: var(--hover);
-}
-
-.tm-taskmenu__item:disabled {
-  color: var(--muted);
-}
-
-.tm-taskmenu__item--danger {
-  color: var(--blocked-ink);
-}
-
-.tm-pathmenu--floating {
-  position: fixed;
-  z-index: var(--layer-menu);
-  display: flex;
-  min-width: 214px;
-  max-width: min(280px, calc(100vw - 18px));
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  border: 0;
-  border-radius: var(--r);
-  background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
-}
-
-.tm-pathmenu__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tm-pathmenu__item span:last-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-pathmenu__appicon {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-}
-
-.tm-pathmenu__separator {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--hair);
-}
-
-.tm-pathmenu__submenu {
-  display: grid;
-  gap: 1px;
-}
-
-.tm-pathmenu__submenu-label {
-  padding: 5px 10px 3px;
-  color: var(--muted);
-  font-size: var(--t-group);
-  font-weight: var(--w-medium);
-}
-
-.tm-pathmenu__submenu-body {
-  display: grid;
-  gap: 1px;
-  padding-left: 10px;
-}
-
-.tm-pathmenu__message {
-  padding: 8px 10px;
-  color: var(--muted);
-  font-size: var(--t-help);
-  line-height: 1.35;
-}
-
-.tm-pathmenu__message--error {
-  color: var(--blocked-ink);
 }
 
 /* ---- Inbox ---- */
@@ -878,7 +739,6 @@
   border: 0;
   border-radius: inherit;
   background: transparent;
-  cursor: pointer;
 }
 
 .app-shell[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
@@ -1298,7 +1158,7 @@
 }
 
 .tm-settings__nav-item:hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -1472,6 +1332,9 @@
   border: 0;
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   scrollbar-gutter: stable;
+  /* It grows from its trigger, as a menu does (DESIGN.md 9). */
+  transform-origin: top right;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-theme-picker__group + .tm-theme-picker__group {
@@ -1704,7 +1567,6 @@
   min-width: 0;
   max-width: 100%;
   padding: 0 28px 0 10px;
-  cursor: pointer;
 }
 
 .tm-settings__select--compact {
@@ -1792,7 +1654,6 @@
   gap: 8px;
   padding: 4px 0;
   color: var(--muted);
-  cursor: pointer;
   font-size: var(--t-meta);
   list-style: none;
 }
@@ -1907,7 +1768,7 @@
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
-  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
 .tm-agent-console__trigger:not(:disabled):hover,
@@ -1947,13 +1808,10 @@
   white-space: nowrap;
 }
 
+/* The chevron stays still while the menu is open, like every ActionMenu chip
+   beside it; the open fill already says the menu is showing. */
 .tm-agent-console__chevron {
   color: var(--muted);
-  transition: transform var(--motion-fast) var(--ease-out);
-}
-
-.tm-agent-console__chevron.is-open {
-  transform: rotate(180deg);
 }
 
 .tm-agent-console__menu {
@@ -1971,16 +1829,26 @@
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   overflow: hidden;
+  /* It grows from its trigger, as an ActionMenu does (DESIGN.md 9); showing
+     it again replays the entrance because [hidden] removes its box. */
+  transform-origin: top left;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-agent-console__menu--top {
   top: auto;
   bottom: 40px;
+  transform-origin: bottom left;
 }
 
 .tm-agent-console__menu--right {
   right: 0;
   left: auto;
+  transform-origin: top right;
+}
+
+.tm-agent-console__menu--top.tm-agent-console__menu--right {
+  transform-origin: bottom right;
 }
 
 .tm-agent-console__row--agent-unlabelled .tm-agent-console__menu {
@@ -2233,18 +2101,14 @@
   display: inline;
 }
 
-.tm-agent-console__reasoning-select {
+/* The effort as a menu, where its choices do not fit as a row. */
+.tm-agent-console__reasoning-menu {
   display: none;
-  width: 100%;
-  min-width: 0;
-  height: 30px;
-  padding: 0 26px 0 8px;
-  border: 0;
-  outline: 0;
-  border-radius: var(--r-xs);
-  background-color: var(--card);
-  color: var(--text);
-  font: var(--w-medium) var(--t-meta)/1 var(--font-ui);
+}
+
+.tm-agent-console__chip-icon {
+  display: none;
+  flex: 0 0 auto;
 }
 
 @container tm-agent-reasoning (max-width: 280px) {
@@ -2262,8 +2126,8 @@
   }
 
   .tm-agent-console__reasoning[data-many-options='true']
-    .tm-agent-console__reasoning-select {
-    display: block;
+    .tm-agent-console__reasoning-menu {
+    display: inline-flex;
   }
 }
 

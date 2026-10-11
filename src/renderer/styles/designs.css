@@ -43,6 +43,7 @@
   border: 0;
   border-radius: 0;
   background: var(--scrim);
+  animation: tm-scrim-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-design-layout {
@@ -64,6 +65,16 @@
   padding: 0;
   border-radius: var(--r-xs);
   color: var(--muted);
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+/* Segments press by ink; they have no fill to darken. */
+.tm-design-layout button:not([aria-pressed='true']):active,
+.tm-design-canvas__devices button:not([aria-pressed='true']):active {
+  color: var(--text);
 }
 
 .tm-design-layout button svg {
@@ -396,7 +407,6 @@
   align-items: center;
   gap: 8px;
   padding: 10px 0 2px;
-  cursor: pointer;
   list-style: none;
   font-size: var(--t-meta);
   font-weight: var(--w-medium);
@@ -748,6 +758,7 @@
   gap: 4px;
   margin: 0;
   opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
 }
 
 .tm-design-reference-row:hover .tm-design-reference-row__actions,
@@ -756,9 +767,9 @@
   opacity: 1;
 }
 
-.tm-design-reference-row:hover > label > span:last-child,
-.tm-design-reference-row:focus-within > label > span:last-child,
-.tm-design-reference-row--selected > label > span:last-child {
+/* The actions' room is reserved at rest, so revealing them never re-truncates
+   the name (DESIGN.md 5.1: hover reveals, it does not relocate). */
+.tm-design-reference-row > label > span:last-child {
   padding-right: 86px;
 }
 
@@ -790,7 +801,6 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  cursor: pointer;
   list-style: none;
   color: var(--muted);
   font-size: var(--t-meta);
@@ -823,7 +833,6 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-meta);
   list-style: none;
@@ -990,6 +999,10 @@
   place-items: center;
   border-radius: var(--r-xs);
   color: var(--muted);
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 
 .tm-design-canvas__devices button:hover {
@@ -1029,7 +1042,7 @@
 }
 
 .tm-design-canvas__tool:hover:not(:disabled) {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 

@@ -123,8 +123,8 @@ describe('agent session history', () => {
     expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('PASSED'))).toBe('Passed');
     // A verdict stays the verdict after follow-up work makes the review stale.
     expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('NEEDS_CHANGES'))).toBe('Needs changes');
-    // An earlier review's verdict is no longer recorded, so only how it ended is said.
-    expect(reviewTurnOutcome(turn('review-1', 'completed'), verdict('PASSED'))).toBeUndefined();
+    // An earlier review's verdict is no longer recorded: it is named as earlier, or by how it ended.
+    expect(reviewTurnOutcome(turn('review-1', 'completed'), verdict('PASSED'))).toBe('Earlier review');
     expect(reviewTurnOutcome(turn('review-1', 'failed'), verdict('PASSED'))).toBe('Failed');
     // A live review is announced by the working line, not twice.
     expect(reviewTurnOutcome(turn('review-2', 'active'), verdict('PASSED'))).toBeUndefined();

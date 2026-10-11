@@ -91,6 +91,7 @@ function DesignMenu({ label, items, compact = false, onOpenChange }: {
   onOpenChange?(open: boolean): void;
 }) {
   return <ActionMenu className={compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'} label={label}
+    tooltip={compact ? 'Version options' : 'Design options'}
     onOpenChange={onOpenChange}
     trigger={<MoreHorizontal aria-hidden="true" size={16} />}
     items={items.map(({ action, ...item }) => ({ ...item, onSelect: action }))} />;

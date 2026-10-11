@@ -1,4 +1,5 @@
 import { Pencil, Play, X } from 'lucide-react';
+import { Tooltip } from './Tooltip';
 
 interface QueuedMessage {
   id: string;
@@ -37,12 +38,12 @@ export function MessageQueue({ items, editingId, disabled = false, continueDisab
         disabled={disabled || Boolean(continueDisabledReason)} title={continueDisabledReason ?? 'Continue with this instruction'} onClick={() => onContinue(item.id)}>
         <Play size={16} aria-hidden="true" />
       </button> : null}
-      {onEdit ? <button type="button" className="tm-iconbtn" aria-label={`Edit instruction ${index + 1}`} title="Edit instruction" disabled={disabled} onClick={() => onEdit(item.id)}>
+      {onEdit ? <Tooltip label="Edit instruction"><button type="button" className="tm-iconbtn" aria-label={`Edit instruction ${index + 1}`} disabled={disabled} onClick={() => onEdit(item.id)}>
         <Pencil size={16} aria-hidden="true" />
-      </button> : null}
-      <button type="button" className="tm-iconbtn" aria-label={`Remove instruction ${index + 1}`} title="Remove instruction" disabled={disabled} onClick={() => onRemove(item.id)}>
+      </button></Tooltip> : null}
+      <Tooltip label="Remove instruction"><button type="button" className="tm-iconbtn" aria-label={`Remove instruction ${index + 1}`} disabled={disabled} onClick={() => onRemove(item.id)}>
         <X size={16} aria-hidden="true" />
-      </button>
+      </button></Tooltip>
     </li>)}</ol>
   </div>;
 }

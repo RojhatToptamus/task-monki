@@ -51,7 +51,7 @@
 .tm-changes__note { overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
 .tm-changes__action { margin-left: auto; }
 .tm-changes__files .tm-change-summary__file { min-height: var(--h-compact); padding: 2px 0 2px 22px; border-top: 0; }
-.tm-changes__more > summary { display: flex; align-items: center; gap: 6px; min-height: var(--h-compact); padding-left: 22px; color: var(--muted); font-size: var(--t-help); cursor: pointer; }
+.tm-changes__more > summary { display: flex; align-items: center; gap: 6px; min-height: var(--h-compact); padding-left: 22px; color: var(--muted); font-size: var(--t-help); }
 .tm-changes__more > summary:hover { color: var(--text); }
 
 /* Composer — the queue, the draft and the delivery controls are one field. */
@@ -247,7 +247,6 @@
   min-height: 28px;
   padding: 0 4px;
   border-radius: var(--r-xs);
-  cursor: pointer;
   color: var(--muted);
   font-family: var(--font-ui);
   font-size: var(--t-meta);
@@ -333,7 +332,6 @@
 }
 
 .structured-data__raw summary {
-  cursor: pointer;
   color: var(--accent-ink);
   font-family: var(--font-mono);
   font-size: var(--t-meta);
@@ -367,7 +365,6 @@
   justify-content: space-between;
   gap: 12px;
   padding: 15px 18px;
-  cursor: pointer;
   list-style: none;
 }
 
@@ -442,7 +439,6 @@
   justify-content: space-between;
   gap: 12px;
   padding: 11px 12px;
-  cursor: pointer;
   background: var(--field);
   list-style: none;
 }
@@ -584,7 +580,6 @@
 }
 
 .provider-activity-row__children summary {
-  cursor: pointer;
   font: var(--t-meta)/1.4 var(--font-mono);
 }
 
@@ -620,7 +615,6 @@
   justify-content: space-between;
   gap: 10px;
   padding: 9px 10px;
-  cursor: pointer;
   background: var(--field);
   list-style: none;
 }
@@ -742,7 +736,6 @@
 
 .provider-files summary,
 .provider-revisions summary {
-  cursor: pointer;
   font-family: var(--font-mono);
   font-size: var(--t-meta);
 }
@@ -821,7 +814,6 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 11px;
-  cursor: pointer;
   background: var(--field);
   list-style: none;
 }
@@ -891,7 +883,6 @@
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  cursor: pointer;
   font-family: var(--font-mono);
 }
 
@@ -966,7 +957,6 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-help);
   font-weight: var(--w-medium);

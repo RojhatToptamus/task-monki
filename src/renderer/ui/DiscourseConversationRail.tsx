@@ -2,6 +2,7 @@ import type { Ref } from 'react';
 import type { DiscourseConversationSummary } from '../../shared/discourse';
 import { PanelIcon } from './AppNavigation';
 import { UiPlusIcon, UiSearchIcon } from './UiIcons';
+import { Tooltip } from './Tooltip';
 
 interface DiscourseConversationRailProps {
   archived: boolean;
@@ -71,15 +72,14 @@ export function DiscourseConversationRail({
               <span>New</span>
             </button>
             {modalOpen ? (
-              <button
+              <Tooltip label="Close conversation list"><button
                 type="button"
                 className="tm-iconbtn tm-discourse-rail__close"
                 aria-label="Close conversation list"
-                title="Close conversation list"
                 onClick={onClose}
               >
                 <PanelIcon />
-              </button>
+              </button></Tooltip>
             ) : null}
           </div>
         </div>

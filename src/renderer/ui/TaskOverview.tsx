@@ -125,6 +125,7 @@ export function SlotActions({
           <ActionMenu
             className="tm-slot-more"
             label="More actions"
+            tooltip="More actions"
             side="bottom"
             align="start"
             trigger={<MoreHorizontal size={16} aria-hidden="true" />}

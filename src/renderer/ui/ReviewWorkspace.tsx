@@ -1,9 +1,8 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
-import { Check, ChevronDown, MessageSquarePlus, Undo2, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { Check, ChevronDown, Plus, Undo2, X } from 'lucide-react';
 import type { AgentReviewGateStatus, ArtifactRecord, OpenTargetRef, WorktreeRecord } from '../../shared/contracts';
 import type { DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import { findingLevel, formatFindingLocation } from '../model/findings';
-import { openTargetMenuPosition } from '../model/openTargetMenu';
 import { readViewedFiles, writeViewedFiles } from '../model/reviewViewed';
 import {
   anchorReviewFindings,
@@ -18,8 +17,9 @@ import {
 } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { MessageTime } from './Message';
+import { useNotify } from './NotifyContext';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
-import { Tooltip } from './Tooltip';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
 
@@ -134,6 +134,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [activeFileId, setActiveFileId] = useState<string>();
   const [commentDraft, setCommentDraft] = useState<{ anchor: string; path: string; line?: number; text: string; editingId?: string }>();
   const [pathMenu, setPathMenu] = useState<{ target: OpenTargetRef; position: { x: number; y: number } }>();
+  const closePathMenu = useCallback(() => setPathMenu(undefined), []);
+  const notify = useNotify();
   const diffRef = useRef<HTMLDivElement>(null);
   const noteId = useId();
   const requestReasonId = useId();
@@ -198,7 +200,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     event.preventDefault();
     setPathMenu({
       target: { type: 'worktreeFile', taskId: props.worktree.taskId, worktreeId: props.worktree.id, relativePath: path, line },
-      position: openTargetMenuPosition(event.clientX, event.clientY)
+      position: { x: event.clientX, y: event.clientY }
     });
   };
 
@@ -238,6 +240,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     commentCount ? `${commentCount} comment${commentCount === 1 ? '' : 's'}` : ''
   ].filter(Boolean).join(' and ') || 'Review notes';
   const showRequestBar = Boolean(props.requestChanges) && (openFindings.length > 0 || commentCount > 0 || Boolean(props.requestChanges?.reviewNotes));
+  // The bar animates in only when it appears while the tab is open.
+  const requestBarAtMount = useRef(showRequestBar);
 
   const renderThreads = (items: ReviewFindingView[] | undefined) => items?.map((finding) => (
     <ReviewFindingThread
@@ -264,11 +268,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       </div>
     ));
 
+  // A line comment is written in the app's composer: the field, then a toolbar with the shortcut and the actions.
   const renderComposer = (anchor: string) => commentDraft?.anchor === anchor ? (
-    <div className="tm-review-comment tm-review-comment--draft">
-      <label className="tm-visually-hidden" htmlFor={`${noteId}-comment`}>Comment</label>
+    <form className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
+      <label className="tm-visually-hidden" htmlFor={`${noteId}-comment`}>Comment for {props.agentName}</label>
       <textarea
         id={`${noteId}-comment`}
+        className="tm-composer__input"
         autoFocus
         rows={2}
         value={commentDraft.text}
@@ -279,13 +285,14 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); saveComment(); }
         }}
       />
-      <div className="tm-review-comment__actions">
+      <div className="tm-composer__toolbar">
+        <span className="tm-composer__hint">{SUBMIT_SHORTCUT} to {commentDraft.editingId ? 'save' : 'comment'}</span>
         <button type="button" className="ghost-button" onClick={() => setCommentDraft(undefined)}>Cancel</button>
-        <button type="button" className="primary-button button--sm" disabled={!commentDraft.text.trim()} onClick={saveComment}>
+        <button type="submit" className="primary-button button--sm" disabled={!commentDraft.text.trim()}>
           {commentDraft.editingId ? 'Save' : 'Comment'}
         </button>
       </div>
-    </div>
+    </form>
   ) : null;
 
   return (
@@ -436,7 +443,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                     aria-label={`Comment on line ${line.newLine}`}
                                     onClick={() => setCommentDraft({ anchor: commentKey, path: file.path, line: line.newLine, text: '' })}
                                   >
-                                    <MessageSquarePlus size={13} aria-hidden="true" />
+                                    <Plus size={13} aria-hidden="true" />
                                   </button>
                                 ) : null}
                               </div>
@@ -457,7 +464,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       </div>
 
       {showRequestBar && props.requestChanges ? (
-        <div className="tm-review__request">
+        <div className={`tm-review__request${requestBarAtMount.current ? '' : ' tm-review__request--enter'}`}>
           <span className="tm-review__request-summary">{requestSummary}</span>
           <label className="tm-review__note">
             <span className="tm-visually-hidden">Note for {props.agentName}</span>
@@ -490,7 +497,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         </div>
       ) : null}
 
-      {pathMenu ? <OpenTargetContextMenu target={pathMenu.target} position={pathMenu.position} onClose={() => setPathMenu(undefined)} /> : null}
+      {pathMenu ? <OpenTargetContextMenu target={pathMenu.target} position={pathMenu.position} onClose={closePathMenu} onError={(message) => notify(message, 'error')} /> : null}
     </section>
   );
 }

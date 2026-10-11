@@ -89,13 +89,23 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
 }
 
 /* Live text, such as a conversation's working line: at most one per surface.
-   Reduced motion leaves the words still (foundation.css). */
+   The fill colour, not `color`, clears the glyphs, so a label's own ink or a
+   hover ink never paints over the highlight. Reduced motion leaves the words
+   still, in the label's own ink. */
 .tm-shimmer {
   background: linear-gradient(90deg, var(--muted) 35%, var(--text) 50%, var(--muted) 65%) 0 0 / 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
-  color: transparent;
+  -webkit-text-fill-color: transparent;
   animation: tm-shimmer 2.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-shimmer {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentcolor;
+  }
 }
 
 .tm-status-glyph--waiting {
@@ -165,7 +175,7 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   left: 2px;
   width: 1px;
   background: transparent;
-  transition: background var(--motion-fast) var(--ease-out);
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 
 .tm-panel-resize span {
@@ -230,11 +240,20 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   font-size: var(--t-body);
   font-weight: 400;
   white-space: nowrap;
-  transition: color var(--motion-fast) var(--ease-out);
+  /* The chosen item's fill and rim arrive together. */
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 
 .segmented__btn:not(:disabled):not([aria-pressed='true']):hover {
   color: var(--text-soft);
+}
+
+/* A segment has no fill to darken: it presses by ink (foundation.css). */
+.segmented__btn:not(:disabled):not([aria-pressed='true']):active {
+  color: var(--text);
 }
 
 .segmented__btn[aria-pressed='true']:where(:not(:disabled)) {
@@ -267,6 +286,55 @@ select:not([multiple]):not([size]) {
   background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
   background-repeat: no-repeat;
   background-size: 5px 5px;
+}
+
+/* Every checkbox is the shared mark, the one the agent's question choices use: a
+   16px field square on the control edge, accent with a check when on. The native
+   input stays, so labels, keyboard and forms work unchanged; an input hidden
+   behind a row's own mark is left alone. */
+input[type='checkbox']:not(.tm-visually-hidden) {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-radius: var(--r-xs);
+  background-color: var(--field);
+  box-shadow: inset 0 0 0 1px var(--control-edge);
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+}
+
+input[type='checkbox']:not(.tm-visually-hidden):checked {
+  background-color: var(--accent);
+  box-shadow: none;
+}
+
+input[type='checkbox']:not(.tm-visually-hidden):checked::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--on-primary);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+
+input[type='checkbox']:not(.tm-visually-hidden):disabled {
+  background-color: var(--field-disabled);
+}
+
+input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
+  background-color: var(--text-disabled);
+}
+
+.app-shell[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--control-edge), 0 0 0 3px var(--focus-ring);
+}
+
+.app-shell[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):checked:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 /* Buttons — four families on one geometry (DESIGN.md 5). Primary, secondary
@@ -313,7 +381,7 @@ select:not([multiple]):not([size]) {
 }
 
 .ghost-button:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -340,7 +408,7 @@ select:not([multiple]):not([size]) {
 }
 
 .outline-button:not(:disabled):hover {
-  background: var(--field-hover);
+  background-color: var(--field-hover);
 }
 
 .danger-button {
@@ -349,7 +417,7 @@ select:not([multiple]):not([size]) {
 }
 
 .danger-button:not(:disabled):hover {
-  background: var(--blocked-bg-hover);
+  background-color: var(--blocked-bg-hover);
 }
 
 /* Press: every button settles by a fraction on press and returns on release
@@ -361,7 +429,20 @@ select:not([multiple]):not([size]) {
     transform var(--motion-fast) var(--ease-out);
 }
 
-:where(.primary-button, .outline-button, .danger-button, .ghost-button, .tm-iconbtn):not(:disabled):active {
+:where(
+  .primary-button,
+  .outline-button,
+  .danger-button,
+  .ghost-button,
+  .tm-iconbtn,
+  .tm-detail__assistant,
+  .tm-listrail__new,
+  .tm-prstatus__refresh,
+  .tm-preview-icon-button,
+  .tm-design-canvas__tool,
+  .tm-preview-follow,
+  .tm-discourse-new-responses
+):not(:disabled):active {
   transform: scale(0.97);
 }
 
@@ -531,14 +612,6 @@ select:not([multiple]):not([size]) {
   gap: 7px;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  cursor: pointer;
-}
-
-.interaction-remember input {
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  accent-color: var(--accent);
 }
 
 .interaction-remember:has(input:disabled) {
@@ -590,7 +663,6 @@ select:not([multiple]):not([size]) {
 }
 
 .interaction-change-list summary {
-  cursor: pointer;
   font-family: var(--font-mono);
   font-size: var(--t-meta);
 }
@@ -631,7 +703,6 @@ select:not([multiple]):not([size]) {
   align-items: center;
   gap: 3px;
   width: max-content;
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-meta);
   font-weight: var(--w-medium);
@@ -724,7 +795,6 @@ select:not([multiple]):not([size]) {
   color: var(--text);
   font-size: var(--t-body);
   line-height: 1.5;
-  cursor: pointer;
 }
 .interaction-choice__text { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
 .interaction-choice strong { font-weight: 400; }
@@ -865,9 +935,18 @@ select:not([multiple]):not([size]) {
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: 400; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; container-type: normal; }
-/* In a toolbar the effort is always the select, sized to its value: a size-contained box there would collapse to its chevron. */
+/* In a toolbar the effort is always a chip menu, like the model beside it. */
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-options { display: none; }
-:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-select { display: block; width: auto; field-sizing: content; height: var(--h-toolbar); background-color: transparent; color: var(--muted); font: var(--t-help)/1 var(--font-ui); }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-menu { display: inline-flex; }
+.tm-agent-console__reasoning-menu__trigger.tm-action-menu__trigger { gap: 6px; padding: 0 8px; font-size: var(--t-help); }
+.tm-agent-console__reasoning-menu__trigger .tm-agent-console__chip-chevron { color: var(--muted); }
+/* A narrow composer (a side panel) shows the model and the effort as their marks alone, as Codex does; each names itself in a tooltip. */
+.tm-composer__toolbar { container: tm-composer-toolbar / inline-size; }
+@container tm-composer-toolbar (max-width: 440px) {
+  .tm-agent-console--compact :is(.tm-agent-console__summary, .tm-agent-console__chevron, .tm-agent-console__chip-label, .tm-agent-console__chip-chevron) { display: none; }
+  .tm-agent-console--compact .tm-agent-console__chip-icon { display: inline-block; }
+  .tm-agent-console--compact :is(.tm-agent-console__trigger, .tm-agent-console__reasoning-menu__trigger.tm-action-menu__trigger) { width: var(--h-toolbar); min-width: var(--h-toolbar); padding: 0; justify-content: center; }
+}
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error,
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error:not(:disabled):hover { box-shadow: none; color: var(--blocked-ink); }
 .tm-composer__primary,
@@ -893,6 +972,10 @@ select:not([multiple]):not([size]) {
 .tm-action-menu__popover { z-index: var(--layer-menu); width: 240px; max-width: calc(100vw - 16px); max-height: var(--radix-dropdown-menu-content-available-height); overflow-y: auto; padding: 4px; border: 0; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: var(--radix-dropdown-menu-content-transform-origin); }
 .tm-action-menu__popover[data-state='open'] { animation: tm-menu-in var(--motion-standard) var(--ease-out); }
 .tm-action-menu__popover[data-state='closed'] { animation: tm-menu-out var(--motion-fast) var(--ease-out); }
+/* A submenu follows the pointer between rows, many times a minute: it fades in
+   quickly without growing, and leaves at once so two never overlap. */
+.tm-action-menu__popover--sub[data-state='open'] { animation: tm-scrim-in var(--motion-fast) var(--ease-out); }
+.tm-action-menu__popover--sub[data-state='closed'] { animation: none; }
 .tm-action-menu__item { display: flex; align-items: center; gap: 8px; min-height: var(--h-toolbar); height: auto; padding: 5px 8px; border-radius: var(--r-xs); color: var(--text); font-size: var(--t-body); line-height: 1.4; cursor: default; outline: none; user-select: none; }
 .tm-action-menu__item[data-highlighted] { background: var(--hover); color: var(--text); }
 /* Menus portal outside the shell, so keyboard focus is keyed on the document. */
@@ -913,6 +996,12 @@ select:not([multiple]):not([size]) {
 .tm-action-menu__item[data-disabled] .tm-action-menu__meta { color: var(--text-disabled); }
 .tm-action-menu__separator { height: 1px; margin: 4px 2px; background: var(--hair); }
 .tm-action-menu__note { margin: 0; padding: 5px 8px 4px; color: var(--muted); font-size: var(--t-meta); line-height: 1.4; }
+.tm-action-menu__note[data-tone='blocked'] { color: var(--blocked-ink); }
+/* A submenu row: its chevron sits where a check would, and the row stays lit while its submenu is open. */
+.tm-action-menu__subchevron { flex: 0 0 auto; color: var(--muted); }
+.tm-action-menu__subtrigger[data-state='open'] { background: var(--hover); }
+/* A right-click menu's stand-in trigger: a point at the pointer. */
+.tm-action-menu__anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
 /* One icon action language for Agent, Design and Discourse composers. */
 .tm-composer-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--h-toolbar); min-width: var(--h-toolbar); height: var(--h-toolbar); padding: 0; border-radius: var(--r-sm); }
 .tm-composer-action svg { width: 16px; height: 16px; }
@@ -978,7 +1067,7 @@ select:not([multiple]):not([size]) {
 .tm-listrail__head h2 { margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: var(--w-medium); letter-spacing: -0.01em; }
 .tm-listrail__head-actions { display: flex; align-items: center; gap: 4px; }
 .tm-listrail__new { display: inline-flex; align-items: center; gap: 4px; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); color: var(--text); font-size: var(--t-help); font-weight: var(--w-medium); }
-.tm-listrail__new:hover { background: var(--field-hover); }
+.tm-listrail__new:hover { background-color: var(--field-hover); }
 .tm-listrail__new svg { width: 13px; height: 13px; }
 .tm-listrail__search { display: flex; align-items: center; gap: 7px; height: var(--h-control); margin: 0 14px 8px; padding: 0 10px; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--muted); }
 .tm-listrail__search svg { flex: 0 0 auto; width: 13px; height: 13px; }
@@ -987,7 +1076,7 @@ select:not([multiple]):not([size]) {
 .tm-listrail__filter { margin: 0 14px 10px; }
 .tm-listrail__list { min-height: 0; flex: 1; overflow-y: auto; padding: 0 1px 12px 10px; scrollbar-gutter: stable; }
 .tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: 50px; margin: 1px 0; padding: 8px 10px; border: 0; border-radius: var(--r-sm); color: var(--text-soft); text-align: left; }
-.tm-listrail__item:hover { background: var(--hover); }
+.tm-listrail__item:hover { background-color: var(--hover); }
 .tm-listrail__item--active,
 .tm-listrail__item--active:hover { background: var(--sel); color: var(--text); }
 .tm-listrail__item-title { min-width: 0; overflow: hidden; font-size: var(--t-help); font-weight: var(--w-medium); line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import type { TaskInstruction } from '../../shared/contracts';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
+import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
+import type { AgentModel, AgentRuntimeState, TaskInstruction } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
 import type { AgentConversationRecords } from '../model/agentRecords';
 import { SideQuestionPanel, type SideConversation } from './SideQuestionPanel';
@@ -26,15 +28,32 @@ function conversation(records: AgentConversationRecords = EMPTY): SideConversati
   };
 }
 
-function Harness(props: { conversation: SideConversation; implementationActive?: boolean; runtimeUnavailable?: string; onUse?(text: string): void }) {
+const models: AgentModel[] = [
+  { id: 'codex:openai/gpt-6.1-sol', runtimeId: 'codex', modelProvider: 'openai', model: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', hidden: false, isDefault: true, supportedReasoningEfforts: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium', serviceTiers: [], inputModalities: ['text'] }
+];
+
+function runtime(readiness = createRuntimeReadiness('READY', 'Codex is ready.', { checks: { modelCatalog: 'AVAILABLE' } })): AgentRuntimeState {
+  return {
+    preflight: {
+      runtime: { id: 'codex', displayName: 'Codex', kind: 'APP_SERVER', transport: 'STDIO', lifecycleScope: 'APPLICATION' },
+      readiness,
+      capabilities: codexCapabilities()
+    },
+    models,
+    refreshedAt: '2026-10-10T09:00:00.000Z'
+  } as AgentRuntimeState;
+}
+
+function Harness(props: { conversation: SideConversation; implementationActive?: boolean; runtimes?: AgentRuntimeState[]; onUse?(text: string): void }) {
   const [draft, setDraft] = useState('');
   return (
     <SideQuestionPanel
       conversation={props.conversation}
-      agentName="Codex"
+      defaultModel={{ runtimeId: 'codex', model: 'gpt-6.1-sol', modelProvider: 'openai', reasoningEffort: 'low' }}
+      models={models}
+      runtimes={props.runtimes ?? [runtime()]}
       threadId="thread-1"
       implementationActive={props.implementationActive ?? false}
-      runtimeUnavailable={props.runtimeUnavailable}
       draft={draft}
       onDraftChange={setDraft}
       onUseInFollowUp={props.onUse ?? (() => undefined)}
@@ -45,14 +64,19 @@ function Harness(props: { conversation: SideConversation; implementationActive?:
 }
 
 describe('SideQuestionPanel', () => {
-  it('asks in the open thread', async () => {
+  it('asks in the open thread, on the model chosen for side questions', async () => {
     const side = conversation();
     render(<Harness conversation={side} implementationActive />);
 
-    fireEvent.change(screen.getByRole('textbox', { name: 'Ask Codex without interrupting it' }), { target: { value: 'Why a Map?' } });
+    expect(screen.getByRole('button', { name: /Side question model reasoning effort: Low/ })).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the work' }), { target: { value: 'Why a Map?' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
 
-    expect(side.ask).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1', text: 'Why a Map?' }));
+    expect(side.ask).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: 'thread-1',
+      text: 'Why a Map?',
+      model: { runtimeId: 'codex', model: 'gpt-6.1-sol', modelProvider: 'openai', reasoningEffort: 'low' }
+    }));
   });
 
   it('offers a finished answer for the follow-up, introduced by its question', () => {
@@ -77,15 +101,15 @@ describe('SideQuestionPanel', () => {
     });
     render(<Harness conversation={side} />);
 
-    expect(screen.getByRole('textbox', { name: 'Ask Codex without interrupting it' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('textbox', { name: 'Ask about the work' })).toHaveProperty('disabled', true);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })); });
     expect(side.stop).toHaveBeenCalledWith('side-1');
   });
 
-  it('says why the runtime cannot answer before anything is written', () => {
-    render(<Harness conversation={conversation()} runtimeUnavailable="Codex is not signed in." />);
+  it('says why the chosen runtime cannot answer before anything is written', () => {
+    render(<Harness conversation={conversation()} runtimes={[runtime(createRuntimeReadiness('AUTHENTICATION_REQUIRED', 'Codex is not signed in.'))]} />);
 
-    expect(screen.getByRole('textbox', { name: 'Ask Codex without interrupting it' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('textbox', { name: 'Ask about the work' })).toHaveProperty('disabled', true);
     expect(screen.getByText('Codex is not signed in.')).toBeDefined();
   });
 });

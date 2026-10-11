@@ -48,6 +48,7 @@ import {
 } from './DesignCanvas';
 import type { NotificationTone } from './AppOverlays';
 import { DesignRepositorySetup } from './DesignRepositorySetup';
+import { Tooltip } from './Tooltip';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { DesignConversation } from './DesignConversation';
 import { DesignFilesDrawer } from './DesignFilesDrawer';
@@ -410,15 +411,14 @@ export function DesignsWorkspace({
               <span>New</span>
             </button>
             {historyModalOpen ? (
-              <button
+              <Tooltip label="Close Design history"><button
                 type="button"
                 className="tm-iconbtn tm-designs-rail__close"
                 aria-label="Close Design history"
-                title="Close Design history"
                 onClick={() => onHistoryCollapsedChange?.(true)}
               >
                 <PanelIcon />
-              </button>
+              </button></Tooltip>
             ) : null}
           </div>
         </header>
@@ -536,7 +536,7 @@ export function DesignsWorkspace({
             </header>
             <div className="tm-designs-loading__body">
               <div className="tm-workspace-loading">
-                <span className="tm-shimmer">Loading Design</span>
+                <span>Loading Design</span>
               </div>
             </div>
           </div>
@@ -1058,16 +1058,15 @@ function NewDesignForm({
             <h1>New Design</h1>
           </div>
           {canCancel ? (
-            <button
+            <Tooltip label="Close new Design"><button
               type="button"
               className="tm-iconbtn"
               aria-label="Close new Design"
-              title="Close new Design"
               disabled={submitting}
               onClick={onCancel}
             >
               <UiCloseIcon />
-            </button>
+            </button></Tooltip>
           ) : null}
         </header>
 
@@ -1428,17 +1427,18 @@ function DesignHistoryToggle({
 }) {
   const label = collapsed ? 'Show Design history' : 'Hide Design history';
   return (
-    <button
-      type="button"
-      className="tm-iconbtn tm-mode-history-toggle"
-      aria-label={label}
-      aria-expanded={!collapsed}
-      aria-controls="design-history-panel"
-      title={label}
-      onClick={() => onChange?.(!collapsed)}
-    >
-      <PanelIcon />
-    </button>
+    <Tooltip label={label}>
+      <button
+        type="button"
+        className="tm-iconbtn tm-mode-history-toggle"
+        aria-label={label}
+        aria-expanded={!collapsed}
+        aria-controls="design-history-panel"
+        onClick={() => onChange?.(!collapsed)}
+      >
+        <PanelIcon />
+      </button>
+    </Tooltip>
   );
 }
 

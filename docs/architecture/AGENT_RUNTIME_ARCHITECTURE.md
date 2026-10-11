@@ -181,7 +181,8 @@ main conversation.
   end with a `task-monki-revisions` block; the reducer turns each valid entry
   into an `AGENT_REVIEW_FINDING_DECIDED` event with actor `REVIEWER`.
 - `SIDE_QUESTION` (purpose `TASK_SIDE_QUESTION`, session role `SIDE`) answers a
-  question about the task on its own runtime and model, one at a time per task.
+  question about the task on the runtime and model the request names (the task's
+  own when it names none), always read-only, one at a time per task.
   `SideQuestionCoordinator` owns it. While a run that may write the worktree is
   active, the question reads a read-only snapshot from
   `ReadOnlySnapshotService` (read-root kind `WORKTREE_SNAPSHOT`) and blocks

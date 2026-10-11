@@ -133,6 +133,7 @@ import {
   SettingsIcon
 } from './AppNavigation';
 import { Tooltip, TooltipProvider } from './Tooltip';
+import { NotifyProvider } from './NotifyContext';
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
@@ -387,9 +388,18 @@ export function App() {
   }, []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setNotifications((current) => appendUniqueNotification(current, { id, tone, message }));
+    // A copy already fading out does not swallow the same notice raised again.
+    setNotifications((current) => appendUniqueNotification(
+      current.filter((notification) => !notification.leaving || notification.tone !== tone || notification.message !== message),
+      { id, tone, message }
+    ));
     window.setTimeout(() => {
-      setNotifications((current) => current.filter((notification) => notification.id !== id));
+      // The toast fades out over --motion-fast before it leaves the stack.
+      setNotifications((current) => current.map((notification) =>
+        notification.id === id ? { ...notification, leaving: true } : notification));
+      window.setTimeout(() => {
+        setNotifications((current) => current.filter((notification) => notification.id !== id));
+      }, 120);
     }, 4200);
   }, []);
 
@@ -2626,6 +2636,7 @@ export function App() {
 
   return (
     <TooltipProvider>
+    <NotifyProvider value={notify}>
     <div
       ref={appRootRef}
       className="tm-app app-shell"
@@ -3181,6 +3192,7 @@ export function App() {
 
       <GlobalNotifier notifications={notifications} />
     </div>
+    </NotifyProvider>
     </TooltipProvider>
   );
 }

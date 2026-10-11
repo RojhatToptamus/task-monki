@@ -15,6 +15,7 @@ import {
 import { abbreviateHomePath, type RepositorySetupState } from '../model/repositories';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { AgentModelSetting } from './AgentModelSelector';
+import { Tooltip } from './Tooltip';
 import {
   describeExternalToolAvailability,
   selectSettingsModels
@@ -176,17 +177,16 @@ export function FirstLaunchSetup({
                     ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}`
                     : 'Not checked'}
                 </span>
-                <button
+                <Tooltip label="Re-check tools"><button
                   type="button"
                   className="tm-iconbtn"
                   disabled={isRefreshingTools}
                   aria-busy={isRefreshingTools}
                   aria-label="Re-check tools"
-                  title="Re-check tools"
                   onClick={() => void refreshTools()}
                 >
                   <RefreshIcon />
-                </button>
+                </button></Tooltip>
               </div>
               <SetupToolList
                 externalToolStatus={externalToolStatus}

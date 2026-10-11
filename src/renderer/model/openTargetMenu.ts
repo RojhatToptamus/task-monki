@@ -10,62 +10,48 @@ export interface OpenTargetMenuItem {
   label: string;
   action: OpenTargetAction;
   appId?: OpenTargetAppId;
+  /** A short muted value on the item's line: the app Open uses, or Default in Open with. */
+  meta?: string;
   disabled?: boolean;
   disabledReason?: string;
-  app?: OpenTargetDetectedApp;
 }
 
 export interface OpenTargetMenuModel {
+  /** Open, in the preferred app (named beside it) or the system's default app. */
   primary: OpenTargetMenuItem;
+  /** Every app that can open the target, the preferred one first, then the terminal. */
   openWith: OpenTargetMenuItem[];
   utilities: OpenTargetMenuItem[];
 }
 
-export interface ViewportSize {
-  width: number;
-  height: number;
-}
-
-const MENU_MARGIN = 8;
-const ESTIMATED_MENU_WIDTH = 292;
-const ESTIMATED_MENU_HEIGHT = 340;
-
+/** Finder's grammar: Open uses the preferred app; Open with lists the alternatives. */
 export function buildOpenTargetMenuModel(
   inspection: OpenTargetInspection
 ): OpenTargetMenuModel {
   const preferredApp = appById(inspection.apps, inspection.preferredAppId);
-  const hasPreferredIde = preferredApp && preferredApp.id !== 'default';
-  const primary: OpenTargetMenuItem = hasPreferredIde
-    ? {
-        id: `open:${preferredApp.id}`,
-        label: `Open in ${preferredApp.label}`,
-        action: 'open',
-        appId: preferredApp.id,
-        disabled: !inspection.canOpen,
-        disabledReason: inspection.disabledReason,
-        app: preferredApp
-      }
-    : {
-        id: 'open:default',
-        label: 'Open in default app',
-        action: 'open',
-        appId: 'default',
-        disabled: !inspection.canOpen,
-        disabledReason: inspection.disabledReason,
-        app: preferredApp
-      };
+  const preferredIde = preferredApp && preferredApp.id !== 'default' ? preferredApp : undefined;
+  const openState = { disabled: !inspection.canOpen, disabledReason: inspection.disabledReason };
+  const primary: OpenTargetMenuItem = {
+    id: 'open',
+    label: 'Open',
+    meta: preferredIde?.label,
+    action: 'open',
+    appId: preferredIde?.id ?? 'default',
+    ...openState
+  };
 
-  const openWith: OpenTargetMenuItem[] = inspection.apps
-    .filter((app) => app.id !== 'default' && app.id !== preferredApp?.id)
-    .map((app) => ({
-      id: `openWith:${app.id}`,
-      label: app.label,
-      action: 'open' as const,
-      appId: app.id,
-      disabled: !inspection.canOpen,
-      disabledReason: inspection.disabledReason,
-      app
-    }));
+  const apps = inspection.apps.filter((app) => app.id !== 'default');
+  const openWith: OpenTargetMenuItem[] = [
+    ...(preferredIde ? [preferredIde] : []),
+    ...apps.filter((app) => app.id !== preferredIde?.id)
+  ].map((app) => ({
+    id: `openWith:${app.id}`,
+    label: app.label,
+    meta: app.id === preferredIde?.id ? 'Default' : undefined,
+    action: 'open' as const,
+    appId: app.id,
+    ...openState
+  }));
 
   if (inspection.target.type === 'repository' || inspection.target.type === 'worktree') {
     openWith.push({
@@ -110,36 +96,9 @@ export function buildOpenTargetMenuModel(
   return { primary, openWith, utilities };
 }
 
-export function openTargetMenuPosition(
-  x: number,
-  y: number,
-  viewport: ViewportSize | undefined = browserViewport()
-): { x: number; y: number } {
-  if (!viewport) {
-    return { x, y };
-  }
-  return {
-    x: Math.max(
-      MENU_MARGIN,
-      Math.min(x, Math.max(MENU_MARGIN, viewport.width - ESTIMATED_MENU_WIDTH))
-    ),
-    y: Math.max(
-      MENU_MARGIN,
-      Math.min(y, Math.max(MENU_MARGIN, viewport.height - ESTIMATED_MENU_HEIGHT))
-    )
-  };
-}
-
 function appById(
   apps: OpenTargetDetectedApp[],
   appId: OpenTargetAppId
 ): OpenTargetDetectedApp | undefined {
   return apps.find((app) => app.id === appId);
-}
-
-function browserViewport(): ViewportSize | undefined {
-  if (typeof window === 'undefined') {
-    return undefined;
-  }
-  return { width: window.innerWidth, height: window.innerHeight };
 }

@@ -1,6 +1,9 @@
 import { useMemo, useState, type RefObject } from 'react';
 import { CornerDownLeft } from 'lucide-react';
+import type { AgentModel, AgentRuntimeState, SideQuestionModelChoice } from '../../shared/contracts';
 import type { AgentConversationRecords } from '../model/agentRecords';
+import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
+import { AgentModelSelector } from './AgentModelSelector';
 import { isActiveRunStatus } from '../model/agentSession';
 import { sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } from '../model/sideQuestions';
 import { canStopTaskRun } from '../model/runProgress';
@@ -9,7 +12,7 @@ import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, Work
 
 export interface SideConversation {
   records: AgentConversationRecords;
-  ask(input: { threadId: string; text: string; messageId: string }): Promise<void>;
+  ask(input: { threadId: string; text: string; messageId: string; model?: SideQuestionModelChoice }): Promise<void>;
   stop(runId: string): Promise<void>;
   /** Ends the thread: its read-only snapshot is removed; its runs stay in Debug. */
   end(threadId: string): Promise<void>;
@@ -17,20 +20,21 @@ export interface SideConversation {
 }
 
 /**
- * A side question to the task's agent: asked of a fresh read-only session on
- * the same runtime and model, so the implementation keeps working. Nothing here
- * reaches the main conversation unless the person uses an answer in a
+ * A side question about the task: asked of a fresh read-only session on the model
+ * chosen here, the task's own by default, so the implementation keeps working.
+ * Nothing here reaches the main conversation unless the person uses an answer in a
  * follow-up. While the agent works, questions read a snapshot of the worktree.
  */
-export function SideQuestionPanel({ conversation, agentName, threadId, implementationActive, runtimeUnavailable, draft, onDraftChange, onUseInFollowUp, onClose, returnFocusRef, docked, autoFocus }: {
+export function SideQuestionPanel({ conversation, defaultModel, models, runtimes, onDiscoverModels, threadId, implementationActive, draft, onDraftChange, onUseInFollowUp, onClose, returnFocusRef, docked, autoFocus }: {
   conversation: SideConversation;
-  /** The runtime that answers, the task's own agent. */
-  agentName: string;
+  /** The task's runtime and model, which answer until another is chosen. */
+  defaultModel: SideQuestionModelChoice;
+  models: AgentModel[];
+  runtimes: AgentRuntimeState[];
+  onDiscoverModels?(runtimeId: string): Promise<void>;
   threadId: string;
   /** The implementation agent is working, so answers read a snapshot taken when asked. */
   implementationActive: boolean;
-  /** Why the task's runtime cannot answer now, stated where the question is written. */
-  runtimeUnavailable?: string;
   draft: string;
   onDraftChange(text: string): void;
   onUseInFollowUp(text: string): void;
@@ -40,6 +44,11 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
   autoFocus?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const [choice, setChoice] = useState(defaultModel);
+  const chosenModel = models.find((model) => model.runtimeId === choice.runtimeId && model.model === choice.model);
+  const unavailable = runtimeExecutionUnavailableReason(
+    runtimes.find((runtime) => runtime.preflight.runtime.id === choice.runtimeId), 'SIDE_QUESTION'
+  );
   const questions = useMemo(() => sideThreadQuestions(conversation.records.instructions, threadId), [conversation.records.instructions, threadId]);
   const runs = useMemo(
     () => conversation.records.runs.filter((run) => questions.some((question) => question.runId === run.id)),
@@ -58,19 +67,39 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
   return (
     <ConversationPanel
       title="Side question"
-      meta={agentName}
       label="Side question"
       onClose={onClose}
       returnFocusRef={returnFocusRef}
       docked={docked}
       autoFocus={autoFocus}
+      tools={
+        <AgentModelSelector
+          label="Side question model"
+          presentation="compact"
+          runtimeId={choice.runtimeId}
+          modelId={chosenModel?.id ?? ''}
+          fallbackSummary={choice.model}
+          reasoningEffort={choice.reasoningEffort ?? ''}
+          models={models}
+          runtimes={runtimes}
+          disabled={Boolean(active)}
+          showSelectionError={false}
+          showRuntimeLabel={false}
+          onDiscoverModels={onDiscoverModels}
+          onSelectionChange={(runtimeId, modelId) => {
+            const next = models.find((candidate) => candidate.id === modelId && candidate.runtimeId === runtimeId);
+            setChoice({ runtimeId, model: next?.model, modelProvider: next?.modelProvider, reasoningEffort: next?.defaultReasoningEffort });
+          }}
+          onReasoningEffortChange={(reasoningEffort) => setChoice({ ...choice, reasoningEffort: reasoningEffort || undefined })}
+        />
+      }
       composer={{
-        placeholder: `Ask ${agentName} without interrupting it`,
-        hint: runtimeUnavailable ?? '',
-        disabled: Boolean(active || runtimeUnavailable),
+        placeholder: 'Ask about the work',
+        hint: unavailable ?? '',
+        disabled: Boolean(active || unavailable),
         draft,
         onDraftChange,
-        onSubmit: (text) => conversation.ask({ threadId, text, messageId: crypto.randomUUID() }),
+        onSubmit: (text) => conversation.ask({ threadId, text, messageId: crypto.randomUUID(), model: choice }),
         secondary: active && canStopTaskRun(active)
           ? { label: 'Stop', disabled: busy || active.status === 'INTERRUPTING', onClick: async () => {
               setBusy(true);
@@ -81,7 +110,7 @@ export function SideQuestionPanel({ conversation, agentName, threadId, implement
     >
       {turns.length === 0 && unattached.length === 0 ? (
         <p className="tm-side-conversation__empty">
-          Ask about the work while {agentName} keeps going.
+          Answers read the task without interrupting it.
         </p>
       ) : null}
       {turns.map((turn) => {

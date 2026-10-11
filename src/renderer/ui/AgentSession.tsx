@@ -302,7 +302,7 @@ export function AgentSession(props: AgentSessionProps) {
           hint={<span id={`agent-composer-note-${task.id}`}>{hint ?? model}</span>}
           toolbarAction={<>
             {editing ? <button className="primary-button tm-composer__primary" type="submit" disabled={busy || editFiles.busy || !editing.text.trim() || editFiles.hasErrors || Boolean(editFiles.modelError)}>{busy ? 'Saving…' : 'Save'}</button> : <>
-              {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" disabled={busy || hasFiles}
+              {!active && actions?.canForkAlternative ? <ActionMenu label="More session actions" tooltip="More actions" disabled={busy || hasFiles}
                 trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                 items={[{ label: 'Fork alternative', description: 'Start from the recorded base. Local changes are not included.', disabled: Boolean(blocked), disabledReason: blocked,
                   onSelect: () => void act(() => props.onRetry(run.id, 'FORK', draft || undefined)) }]} /> : null}

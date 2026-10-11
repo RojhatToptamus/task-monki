@@ -59,8 +59,11 @@ describe('DiscourseMessage actions', () => {
       />
     );
 
-    expect(html).toContain('aria-label="Reply" title="Reply"');
-    expect(html).toContain('aria-label="Copy" title="Copy"');
+    // Named by an accessible label and a Tooltip, never a native title.
+    expect(html).toContain('aria-label="Reply"');
+    expect(html).toContain('aria-label="Copy"');
+    expect(html).not.toContain('title="Reply"');
+    expect(html).not.toContain('title="Copy"');
     expect(html).toContain('aria-label="More actions for You"');
     expect(html).not.toContain('>Reply</button>');
     expect(html).not.toContain('>Copy</button>');

@@ -7,6 +7,7 @@ import {
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { DisclosureChevron } from './DisclosureChevron';
+import { Tooltip } from './Tooltip';
 
 export function InspectorSidebar({ children, returnFocus, onClose }: {
   children: ReactNode;
@@ -22,10 +23,11 @@ export function InspectorSidebar({ children, returnFocus, onClose }: {
       aria-labelledby="discourse-inspector-title">
       <div className="tm-discourse-inspector__head">
         <h2 id="discourse-inspector-title">Conversation settings</h2>
-        <button type="button" className="tm-iconbtn" aria-label="Close conversation settings"
-          title="Close conversation settings" onClick={closeAndReturnFocus}>
-          <DiscourseCloseIcon />
-        </button>
+        <Tooltip label="Close conversation settings">
+          <button type="button" className="tm-iconbtn" aria-label="Close conversation settings" onClick={closeAndReturnFocus}>
+            <DiscourseCloseIcon />
+          </button>
+        </Tooltip>
       </div>
       {children}
     </aside>
@@ -72,10 +74,12 @@ export function ContextPreview({
     >
       <header className="tm-discourse-preview__head">
         <h2 id="discourse-preview-title">Message context</h2>
-        <button type="button" className="tm-iconbtn" aria-label="Close context preview" title="Close context preview"
-          onClick={() => { returnFocusOnCloseRef.current = true; onClose(); }}>
-          <DiscourseCloseIcon />
-        </button>
+        <Tooltip label="Close context preview">
+          <button type="button" className="tm-iconbtn" aria-label="Close context preview"
+            onClick={() => { returnFocusOnCloseRef.current = true; onClose(); }}>
+            <DiscourseCloseIcon />
+          </button>
+        </Tooltip>
       </header>
       <p className="tm-discourse-preview__summary">{preview.references.length
         ? 'Your message, recent conversation, and these sources:'

@@ -233,6 +233,10 @@
   color: var(--text-soft);
 }
 
+.tm-tab:active {
+  color: var(--text);
+}
+
 .app-shell[data-input-modality='keyboard'] .tm-tab:focus {
   outline: 0;
   border-radius: var(--r-xs);
@@ -835,7 +839,7 @@
 }
 
 .tm-prstatus__refresh:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -907,7 +911,6 @@
   min-height: 26px;
   padding: 0 4px;
   list-style: none;
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
@@ -954,7 +957,6 @@
   gap: 12px;
   min-width: 0;
   padding: 8px 0;
-  cursor: pointer;
   list-style: none;
   color: inherit;
 }
@@ -1093,7 +1095,6 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
   list-style: none;
   color: var(--muted);
   font-size: var(--t-meta);
@@ -1308,7 +1309,6 @@
   padding: 0 14px;
   border-radius: var(--r-xs);
   list-style: none;
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
@@ -1354,7 +1354,6 @@
   gap: 10px;
   min-height: 48px;
   padding: 9px 14px;
-  cursor: pointer;
   color: var(--text);
 }
 
@@ -1596,7 +1595,6 @@
   flex: 0 0 auto;
   border: 1px solid transparent;
   border-radius: var(--r-pill);
-  cursor: pointer;
 }
 
 .tm-board-editor__swatch:has(input:checked) {
@@ -1683,13 +1681,6 @@
 .tm-board-editor__option:has(input:checked) {
   border-color: var(--edge);
   color: var(--text);
-}
-
-.tm-board-editor__option input {
-  width: 15px;
-  height: 15px;
-  flex: 0 0 auto;
-  accent-color: var(--accent);
 }
 
 .tm-board-editor__option > span {
@@ -1793,7 +1784,6 @@
   border-radius: var(--r);
   background: var(--field);
   color: var(--text-soft);
-  cursor: pointer;
 }
 
 .tm-delete-modal__worktree:has(input:not(:disabled)):hover {
@@ -1814,11 +1804,6 @@
 
 .tm-delete-modal__worktree input {
   margin-top: 2px;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  accent-color: var(--blocked);
-  cursor: inherit;
 }
 
 .tm-delete-modal__worktree span {
@@ -1846,7 +1831,6 @@
 }
 
 .tm-raw summary {
-  cursor: pointer;
   color: var(--muted);
   font-size: var(--t-help);
   font-family: var(--font-ui);
@@ -2104,7 +2088,6 @@
   align-items: center;
   padding: 7px 10px;
   color: var(--text-soft);
-  cursor: pointer;
   font-size: var(--t-help);
   font-weight: var(--w-medium);
   list-style: none;
@@ -2194,7 +2177,7 @@
 }
 
 .tm-filefilter__clear:hover {
-  background: var(--hair);
+  background-color: var(--hair);
   color: var(--text);
 }
 
@@ -2509,8 +2492,8 @@
 
 /* The tab's assistant panel toggle, at the right end of the tab bar: Ask
    reviewer, Side question, Preview agent. */
-.tm-detail__assistant { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: var(--h-toolbar); margin-left: auto; padding: 0 10px; border-radius: var(--r-sm); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-detail__assistant { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: var(--h-toolbar); margin-left: auto; padding: 0 10px; border-radius: var(--r-sm); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
 .tm-detail__assistant svg { color: var(--accent-ink); }
-.tm-detail__assistant:hover { background: var(--hover); color: var(--text); }
-.tm-detail__assistant[aria-pressed='true'] { background: var(--sel); color: var(--text); }
+.tm-detail__assistant:hover { background-color: var(--hover); color: var(--text); }
+.tm-detail__assistant[aria-pressed='true'] { background-color: var(--sel); color: var(--text); }
 .tm-detail__assistant-dot { position: absolute; top: 5px; left: 21px; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }

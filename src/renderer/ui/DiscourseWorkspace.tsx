@@ -61,6 +61,7 @@ import {
   discoursePendingConversationFingerprint
 } from '../model/discourseSend';
 import { ActionMenu } from './ActionMenu';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
@@ -1767,7 +1768,7 @@ export function DiscourseWorkspace({
         aria-label="Loading Discourse"
       >
         <div className="tm-workspace-loading">
-          <span className="tm-shimmer">Loading Discourse</span>
+          <span>Loading Discourse</span>
         </div>
       </div>
     );
@@ -1828,17 +1829,16 @@ export function DiscourseWorkspace({
 
       <section className="tm-discourse-conversation">
         <header className="tm-discourse-header">
-          <button
+          <Tooltip label={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}><button
             ref={railReturnFocusRef}
             type="button"
             className="tm-iconbtn tm-mode-history-toggle tm-discourse-rail-toggle"
             aria-label={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
             aria-expanded={!effectiveHistoryCollapsed}
-            title={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
             onClick={() => setHistoryVisible(effectiveHistoryCollapsed)}
           >
             <PanelIcon />
-          </button>
+          </button></Tooltip>
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
               <form
@@ -1883,17 +1883,16 @@ export function DiscourseWorkspace({
             {aggregate?.conversation.status === 'ARCHIVED' ? <div className="tm-discourse-header__meta">Archived</div> : null}
           </div>
           <div className="tm-discourse-header__actions">
-            <button
+            <Tooltip label={inspectorOpen ? 'Close conversation settings' : 'Open conversation settings'}><button
               ref={inspectorReturnFocusRef}
               type="button"
               className="tm-iconbtn"
               aria-label={inspectorOpen ? 'Close conversation settings' : 'Open conversation settings'}
               aria-expanded={inspectorOpen}
-              title={inspectorOpen ? 'Close conversation details' : 'Open conversation details'}
               onClick={() => setInspectorOpen((value) => !value)}
             >
               <DiscoursePanelRightIcon expanded={inspectorOpen} />
-            </button>
+            </button></Tooltip>
             {aggregate ? (
               <ActionMenu
                 className="tm-action-menu"
@@ -2017,7 +2016,7 @@ export function DiscourseWorkspace({
             </div>
           ) : conversationPending ? (
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
-              <h2 className="tm-shimmer">Loading conversation…</h2>
+              <h2>Loading conversation…</h2>
             </div>
           ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
@@ -2156,17 +2155,17 @@ export function DiscourseWorkspace({
                     onClose={() => setPreview(undefined)}
                   />
                 ) : null}
-                <button
+                <Tooltip label={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note' : 'Send'}
+                  shortcut={activeWave ? undefined : SUBMIT_SHORTCUT} side="top"><button
                   type="button"
                   className={`${activeWave ? 'outline-button' : 'primary-button'} tm-composer-action`}
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : files.busy || files.hasErrors || Boolean(files.modelError) || files.interactionBlocked || !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                   aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Post note' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
-                  title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
                   aria-describedby={!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
                   {activeWave ? <Square size={13} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
-                </button>
+                </button></Tooltip>
               </div>
             )}
           >

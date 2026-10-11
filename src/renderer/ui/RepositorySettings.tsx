@@ -93,6 +93,7 @@ export function RepositorySettings({
                         <ActionMenu
                           className="tm-table__menu"
                           label={`Actions for ${repository.name}`}
+                          tooltip="More actions"
                           side="bottom"
                           trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                           items={items}

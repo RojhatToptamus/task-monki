@@ -1,19 +1,18 @@
-import { useCallback, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Ellipsis } from 'lucide-react';
+import { useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import type { OpenTargetRef } from '../../../shared/contracts';
 import { taskManagerApi } from '../../api/taskManagerClient';
-import { openTargetMenuPosition } from '../../model/openTargetMenu';
 import { repositoryName } from '../../model/repositories';
-import { OpenTargetContextMenu } from '../OpenTargetMenu';
+import { ActionMenu } from '../ActionMenu';
+import { useOpenTargetMenuItems } from '../OpenTargetMenu';
 
 /** Open a run's source folder on the desktop, or pick the app from the shared open-target menu. */
 export function SourceFolderActions({ source, target }: { source: string; target: OpenTargetRef }) {
   const name = repositoryName(source);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string>();
-  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number }>();
-  const closeMenu = useCallback(() => setMenuPosition(undefined), []);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const items = useOpenTargetMenuItems(target, menuOpen, setError);
 
   async function openFolder() {
     if (opening) return;
@@ -36,18 +35,15 @@ export function SourceFolderActions({ source, target }: { source: string; target
         aria-label={`Open folder ${name}`} aria-busy={opening} onClick={() => void openFolder()}>
         Open folder
       </button>
-      <button type="button" className="tm-preview-icon-button"
-        aria-label={`Folder actions for ${name}`} title="Folder actions"
-        aria-haspopup="menu" aria-expanded={!!menuPosition}
-        onClick={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          setMenuPosition(openTargetMenuPosition(rect.right, rect.bottom));
-        }}>
-        <Ellipsis size={16} aria-hidden="true" />
-      </button>
-      {menuPosition ? createPortal(
-        <OpenTargetContextMenu target={target} position={menuPosition} onClose={closeMenu} />, document.body
-      ) : null}
+      <ActionMenu
+        label={`Folder actions for ${name}`}
+        tooltip="Folder actions"
+        side="bottom"
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        trigger={<MoreHorizontal size={16} aria-hidden="true" />}
+        items={items}
+      />
     </>
   );
 }

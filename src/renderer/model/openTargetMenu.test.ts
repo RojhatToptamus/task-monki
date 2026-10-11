@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { OpenTargetInspection } from '../../shared/contracts';
-import { buildOpenTargetMenuModel, openTargetMenuPosition } from './openTargetMenu';
+import { buildOpenTargetMenuModel } from './openTargetMenu';
 
 describe('buildOpenTargetMenuModel', () => {
-  it('uses the preferred detected IDE as the primary action', () => {
+  it('opens in the preferred IDE and lists it first, as the default, in Open with', () => {
     const model = buildOpenTargetMenuModel(
       inspection({
         preferredAppId: 'cursor',
@@ -13,11 +13,13 @@ describe('buildOpenTargetMenuModel', () => {
     );
 
     expect(model.primary).toMatchObject({
-      label: 'Open in Cursor',
+      label: 'Open',
+      meta: 'Cursor',
       action: 'open',
       appId: 'cursor'
     });
-    expect(model.openWith.map((item) => item.label)).toEqual(['VS Code', 'Terminal']);
+    expect(model.openWith.map((item) => item.label)).toEqual(['Cursor', 'VS Code', 'Terminal']);
+    expect(model.openWith[0]).toMatchObject({ meta: 'Default', appId: 'cursor' });
     expect(model.openWith.find((item) => item.id === 'openWith:terminal')).toMatchObject({
       action: 'openTerminal'
     });
@@ -35,10 +37,11 @@ describe('buildOpenTargetMenuModel', () => {
     );
 
     expect(model.primary).toMatchObject({
-      label: 'Open in default app',
+      label: 'Open',
       action: 'open',
       appId: 'default'
     });
+    expect(model.primary.meta).toBeUndefined();
     expect(model.openWith.map((item) => item.label)).toEqual(['Terminal']);
   });
 
@@ -53,21 +56,6 @@ describe('buildOpenTargetMenuModel', () => {
     expect(model.utilities.find((item) => item.id === 'copyFileContents')).toMatchObject({
       disabled: true,
       disabledReason: 'Target is not a file.'
-    });
-  });
-
-  it('clamps floating menu coordinates inside the viewport', () => {
-    expect(openTargetMenuPosition(900, 700, { width: 960, height: 720 })).toEqual({
-      x: 668,
-      y: 380
-    });
-    expect(openTargetMenuPosition(20, 30, { width: 960, height: 720 })).toEqual({
-      x: 20,
-      y: 30
-    });
-    expect(openTargetMenuPosition(0, 0, { width: 240, height: 260 })).toEqual({
-      x: 8,
-      y: 8
     });
   });
 });
@@ -87,8 +75,7 @@ function inspection(input: {
     preferredAppId: input.preferredAppId ?? 'cursor',
     apps: (input.apps ?? ['cursor', 'default']).map((id) => ({
       id,
-      label: id === 'cursor' ? 'Cursor' : id === 'vscode' ? 'VS Code' : 'Default app',
-      icon: id === 'default' ? undefined : { kind: 'image', dataUrl: `data:image/png;base64,${id}` }
+      label: id === 'cursor' ? 'Cursor' : id === 'vscode' ? 'VS Code' : 'Default app'
     })),
     revealLabel: 'Reveal in Finder',
     canOpen: true,

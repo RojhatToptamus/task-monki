@@ -1,5 +1,5 @@
 import {
-  Ellipsis,
+  MoreHorizontal,
   KeyRound,
   LockKeyhole,
   Search
@@ -94,7 +94,8 @@ export function PreviewSecretsSettings() {
             </button>
             <ActionMenu
               label="Secret storage actions"
-              trigger={<Ellipsis size={16} aria-hidden="true" />}
+              tooltip="More actions"
+              trigger={<MoreHorizontal size={16} aria-hidden="true" />}
               items={[
                 {
                   label: 'Lock storage',
@@ -219,7 +220,8 @@ export function PreviewSecretsSettings() {
                   </button>
                   <ActionMenu
                     label={`Actions for ${id}`}
-                    trigger={<Ellipsis size={16} aria-hidden="true" />}
+                    tooltip="More actions"
+                    trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                     items={[
                       {
                         label: 'Delete secret…',

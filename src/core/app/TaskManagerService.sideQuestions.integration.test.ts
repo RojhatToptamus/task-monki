@@ -218,6 +218,33 @@ describe('TaskManagerService side questions', () => {
     await reopened.close();
   }, 30_000);
 
+  it('answers with the model chosen for the question, read-only whatever the task uses', async () => {
+    const s = await scenarios.create({ name: 'task-monki-side-question-model' });
+    const task = await s.createTask({
+      title: 'Chosen model', prompt: 'Add the feature module.', agentSettings: { model: 'scenario-model', reasoningEffort: 'high' }
+    });
+    await prepareTestWorktree(s.service, task.id);
+    const implementation = await s.service.startRun({ taskId: task.id });
+    await s.completeRun(implementation.id, 'Implemented the feature module.');
+
+    s.agent.nextRuntimeTurnResult = { output: 'The question ran on the chosen model.' };
+    await s.service.askSideQuestion({
+      taskId: task.id, threadId: randomUUID(), messageId: randomUUID(), text: 'Which model answers?',
+      model: { runtimeId: task.runtimeId, model: 'scenario-model', reasoningEffort: 'medium' }
+    });
+    // The question's effort, not the task's, and read-only access whatever the task allows.
+    expect(s.agent.startedRuntimeTurns.at(-1)!.executionContext.modelSettings).toMatchObject({
+      runtimeId: task.runtimeId,
+      model: 'scenario-model',
+      reasoningEffort: 'medium',
+      sandbox: 'READ_ONLY',
+      networkAccess: false
+    });
+    await expect(s.service.askSideQuestion({
+      taskId: task.id, threadId: randomUUID(), messageId: randomUUID(), text: 'And now?', model: { runtimeId: '' }
+    })).rejects.toThrow('Choose a valid model for the side question.');
+  });
+
   it('admits a side question only on one of the profile\'s own read-only snapshots', async () => {
     const s = await scenarios.create({ name: 'task-monki-side-question-foreign-snapshot' });
     const task = await s.createTask({ title: 'Foreign snapshot', prompt: 'Work.' });

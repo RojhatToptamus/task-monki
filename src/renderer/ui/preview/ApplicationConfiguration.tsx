@@ -24,6 +24,7 @@ import {
 import { ActionMenu } from '../ActionMenu';
 import { DiffLines } from '../DiffLines';
 import { DisclosureChevron } from '../DisclosureChevron';
+import { Tooltip } from '../Tooltip';
 import { commandText, GroupLabel, serviceTypeLabel, shortenPath } from './previewPresentation';
 
 export interface PreviewEditorDraft {
@@ -648,16 +649,15 @@ function EnvironmentTable({ labelId, entry, entries, text, busy, write }: {
               />
             </span>
             <span role="cell">
-              <button
+              <Tooltip label="Remove"><button
                 type="button"
                 className="tm-preview-icon-button"
                 aria-label={`Remove ${name}`}
-                title="Remove"
                 disabled={busy}
                 onClick={() => (added ? setPending(undefined) : write(() => removeEnvironmentBinding(text, entry.path, binding.key)))}
               >
                 <X size={16} aria-hidden="true" />
-              </button>
+              </button></Tooltip>
             </span>
           </div>
         );

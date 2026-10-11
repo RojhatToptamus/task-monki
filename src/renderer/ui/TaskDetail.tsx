@@ -1436,10 +1436,17 @@ export function TaskDetail(props: TaskDetailProps) {
   const sideQuestionPanel = tab === 'agent' && sideThread && sideQuestionAvailable && props.sideQuestion ? (
     <SideQuestionPanel
       conversation={props.sideQuestion}
-      agentName={runtimeName}
+      defaultModel={{
+        runtimeId: task.runtimeId,
+        model: task.agentSettings?.model,
+        modelProvider: task.agentSettings?.modelProvider,
+        reasoningEffort: task.agentSettings?.reasoningEffort
+      }}
+      models={props.models ?? props.runtimeState?.models ?? []}
+      runtimes={props.runtimes ?? (props.runtimeState ? [props.runtimeState] : [])}
+      onDiscoverModels={props.onDiscoverAgentRuntimeModels}
       threadId={sideThread.id}
       implementationActive={Boolean(activeImplementationRun)}
-      runtimeUnavailable={runtimeUnavailable}
       draft={sideDraft}
       onDraftChange={setSideDraft}
       onUseInFollowUp={(text) => {

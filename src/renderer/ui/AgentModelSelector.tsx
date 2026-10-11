@@ -7,10 +7,12 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode
 } from 'react';
-import { Check, ChevronDown, RefreshCw, Search, X } from 'lucide-react';
+import { Brain, Check, ChevronDown, Gauge, RefreshCw, Search, X } from 'lucide-react';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import { formatReasoningEffort } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
+import { ActionMenu } from './ActionMenu';
+import { Tooltip } from './Tooltip';
 
 export type ModelDiscoveryStatus = 'idle' | 'loading' | 'failed';
 
@@ -411,37 +413,40 @@ export function AgentModelSelector({
         {showRuntimeLabel ? (
           <span className="tm-agent-console__label">Model</span>
         ) : null}
-        <button
-          ref={triggerRef}
-          type="button"
-          className={`tm-agent-console__trigger ${
-            (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
-            selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
-            selectedRuntimeUnavailableReason ||
-            selectionUnavailable
-              ? 'tm-agent-console__trigger--error'
-              : ''
-          }`}
-          aria-label={`${label}: ${triggerDetails}`}
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          aria-controls={listboxId}
-          aria-busy={
-            discovery?.runtimeId === runtimeId && discovery.status === 'loading'
-          }
-          aria-invalid={selectionUnavailable || undefined}
-          aria-describedby={
-            selectionUnavailable && showSelectionError
-              ? selectionErrorId
-              : undefined
-          }
-          title={selectedRuntimeUnavailableReason ?? triggerDetails}
-          disabled={disabled || runtimes.length === 0}
-          onClick={() => (open ? closeMenu(false) : openMenu())}
-        >
-          <span className={`tm-agent-console__summary${discovery?.runtimeId === runtimeId && discovery.status === 'loading' ? ' tm-shimmer' : ''}`}>{triggerSummary}</span>
-          <ChevronIcon open={open} />
-        </button>
+        <Tooltip label={selectedRuntimeUnavailableReason ?? triggerDetails}>
+          <button
+            ref={triggerRef}
+            type="button"
+            className={`tm-agent-console__trigger ${
+              (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
+              selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
+              selectedRuntimeUnavailableReason ||
+              selectionUnavailable
+                ? 'tm-agent-console__trigger--error'
+                : ''
+            }`}
+            aria-label={`${label}: ${triggerDetails}`}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            aria-busy={
+              discovery?.runtimeId === runtimeId && discovery.status === 'loading'
+            }
+            aria-invalid={selectionUnavailable || undefined}
+            aria-describedby={
+              selectionUnavailable && showSelectionError
+                ? selectionErrorId
+                : undefined
+            }
+            disabled={disabled || runtimes.length === 0}
+            onClick={() => (open ? closeMenu(false) : openMenu())}
+          >
+            {/* A narrow composer shows the model as this mark alone; its name is the title. */}
+            <Brain className="tm-agent-console__chip-icon" size={16} aria-hidden="true" />
+            <span className="tm-agent-console__summary">{triggerSummary}</span>
+            <ChevronDown className="tm-agent-console__chevron" aria-hidden="true" size={13} />
+          </button>
+        </Tooltip>
 
         <div
           id={popupId}
@@ -570,7 +575,7 @@ export function AgentModelSelector({
                             size={13}
                           />
                         ) : null}
-                        <span className={discoveryLoading ? 'tm-shimmer' : undefined}>{optionLabel}</span>
+                        <span>{optionLabel}</span>
                       </span>
                       <span className="tm-agent-console__option-meta">
                         {option.meta}
@@ -654,22 +659,32 @@ export function AgentModelSelector({
                 </button>
               ))}
             </div>
-            <select
-              className="tm-agent-console__reasoning-select"
-              aria-label={`${label} reasoning effort`}
-              value={reasoningEffort}
+            {/* Where the choices do not fit as a row, they are a menu. */}
+            <ActionMenu
+              className="tm-agent-console__reasoning-menu"
+              label={`${label} reasoning effort: ${reasoningEffort ? formatReasoningEffort(reasoningEffort) : 'Default'}`}
+              tooltip="Reasoning effort"
+              selection="single"
+              side="top"
+              align="start"
               disabled={disabled}
-              onChange={(event) => onReasoningEffortChange(event.target.value)}
-            >
-              {includesProviderDefaultReasoning ? (
-                <option value="">Default</option>
-              ) : null}
-              {efforts.map((effort) => (
-                <option value={effort} key={effort}>
-                  {formatReasoningEffort(effort)}
-                </option>
-              ))}
-            </select>
+              trigger={<>
+                <Gauge className="tm-agent-console__chip-icon" size={16} aria-hidden="true" />
+                <span className="tm-agent-console__chip-label">{reasoningEffort ? formatReasoningEffort(reasoningEffort) : 'Default'}</span>
+                <ChevronDown className="tm-agent-console__chip-chevron" size={13} aria-hidden="true" />
+              </>}
+              items={[
+                ...(includesProviderDefaultReasoning
+                  ? [{ id: 'provider-default', label: 'Default', pressed: reasoningEffort === '', onSelect: () => onReasoningEffortChange('') }]
+                  : []),
+                ...efforts.map((effort) => ({
+                  id: effort,
+                  label: formatReasoningEffort(effort),
+                  pressed: effort === reasoningEffort,
+                  onSelect: () => onReasoningEffortChange(effort)
+                }))
+              ]}
+            />
           </div>
         </div>
       ) : null}
@@ -952,15 +967,6 @@ function modelCatalogNeedsActivation(runtime: AgentRuntimeState): boolean {
   );
 }
 
-function ChevronIcon({ open }: { open: boolean }) {
-  return (
-    <ChevronDown
-      className={`tm-agent-console__chevron ${open ? 'is-open' : ''}`}
-      aria-hidden="true"
-      size={13}
-    />
-  );
-}
 
 function CheckIcon() {
   return <Check aria-hidden="true" size={13} />;

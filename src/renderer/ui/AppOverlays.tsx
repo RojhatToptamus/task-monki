@@ -28,6 +28,8 @@ export interface AppNotification {
   id: string;
   tone: NotificationTone;
   message: string;
+  /** Fading out ahead of removal. */
+  leaving?: boolean;
 }
 
 const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }> = [
@@ -250,6 +252,7 @@ export function GlobalNotifier({ notifications }: { notifications: AppNotificati
         <div
           className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
           key={notification.id}
+          data-leaving={notification.leaving ? '' : undefined}
         >
           <StatusGlyph
             kind={

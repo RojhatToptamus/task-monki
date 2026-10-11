@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowDown } from 'lucide-react';
 import { useStickToBottom, type StickToBottomInstance } from 'use-stick-to-bottom';
+import { Tooltip } from './Tooltip';
 
 /**
  * Scroll state for a conversation log. It follows new output only while the
@@ -116,18 +117,25 @@ export function Conversation({ instance, label, className = '', header, children
         {children}
       </div>
     </div>
-    {instance.isAtBottom ? null : <button type="button" className="tm-conversation__latest" aria-label="Jump to latest" title="Jump to latest"
-      onClick={(event) => {
-        // The button hides itself once the view reaches the end. When it was
-        // pressed from the keyboard (a click with no pointer detail), keep focus
-        // in the conversation instead of letting it fall to the page.
-        if (event.detail === 0 && event.currentTarget === document.activeElement) {
-          instance.scrollRef.current?.focus({ preventScroll: true });
-        }
-        void instance.scrollToBottom();
-      }}>
-      <ArrowDown size={16} aria-hidden="true" />
-    </button>}
+    {/* Always mounted so it can fade in and out; hidden, it is inert and out
+        of the accessibility tree. */}
+    <Tooltip label="Jump to latest" side="top">
+      <button type="button" className="tm-conversation__latest" aria-label="Jump to latest"
+        data-visible={!instance.isAtBottom}
+        aria-hidden={instance.isAtBottom ? true : undefined}
+        inert={instance.isAtBottom ? true : undefined}
+        onClick={(event) => {
+          // The button hides itself once the view reaches the end. When it was
+          // pressed from the keyboard (a click with no pointer detail), keep focus
+          // in the conversation instead of letting it fall to the page.
+          if (event.detail === 0 && event.currentTarget === document.activeElement) {
+            instance.scrollRef.current?.focus({ preventScroll: true });
+          }
+          void instance.scrollToBottom();
+        }}>
+        <ArrowDown size={16} aria-hidden="true" />
+      </button>
+    </Tooltip>
   </div>;
 }
 

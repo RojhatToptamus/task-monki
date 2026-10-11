@@ -59,6 +59,7 @@ import type {
   ReviewFindingDecision,
   StopReviewerQuestionRequest,
   AskSideQuestionRequest,
+  SideQuestionModelChoice,
   EndSideThreadRequest,
   StopSideQuestionRequest,
   PrepareWorktreeRequest,
@@ -578,7 +579,7 @@ export class TaskManagerService {
       snapshots: this.snapshots,
       readArtifact: (artifactId) => this.readArtifact({ artifactId }),
       events,
-      questionSettings: (detail) => this.sideQuestionSettings(detail),
+      questionSettings: (detail, choice) => this.sideQuestionSettings(detail, choice),
       assertRuntimeEnabled: (runtimeId) => this.assertRuntimeEnabled(runtimeId),
       withTaskLock: (taskId, action) =>
         this.withQueuedTaskAction(taskId, 'Side question', () =>
@@ -3725,7 +3726,9 @@ export class TaskManagerService {
    * A side question goes to the task's own runtime and model: the task settings with
    * the latest implementation run's selection, made read-only with approval policy never.
    */
-  private sideQuestionSettings(detail: TaskDetailSnapshot): AgentExecutionSettings {
+  private sideQuestionSettings(detail: TaskDetailSnapshot, choice?: SideQuestionModelChoice): AgentExecutionSettings {
+    // A chosen model answers on its own terms: nothing of the task's model carries over.
+    if (choice) return mergeRunSettings({ readOnly: true, settings: [choice] });
     const latestImplementation = detail.runs
       .filter((run) => isImplementationRunMode(run.mode) && run.runtimeId === detail.task.runtimeId)
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt))

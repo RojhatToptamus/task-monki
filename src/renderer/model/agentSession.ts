@@ -268,6 +268,8 @@ export function reviewTurnOutcome(
     case 'stopped': return 'Stopped';
     case 'failed': return 'Failed';
     case 'interrupted': return 'Interrupted';
+    // A later review replaced this one; its verdict is no longer recorded, so it says that much.
+    case 'completed': return review?.runId ? 'Earlier review' : undefined;
     default: return undefined;
   }
 }

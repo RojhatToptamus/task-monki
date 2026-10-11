@@ -73,7 +73,6 @@
 .tm-application-preview__dialog .tm-modal__actions { flex: 0 0 auto; margin: 0; padding: 16px 24px 24px; border-top: 1px solid var(--hair); }
 .tm-application-preview__dialog .tm-modal__actions button { flex: 0 0 auto; }
 .tm-application-preview__checkbox { display: inline-flex; gap: 8px; align-items: center; font-size: var(--t-help); }
-.tm-application-preview__checkbox input { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); }
 .tm-application-secrets__search { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .tm-application-secrets__search .field { width: min(100%, 320px); }
 .tm-application-secrets__row { gap: 12px; }
@@ -82,7 +81,7 @@
 .tm-application-secrets__identity code { font-family: var(--font-mono); }
 .tm-application-secrets__identity > code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-application-secrets__identity details { color: var(--muted); margin-top: 4px; font-size: var(--t-meta); }
-.tm-application-secrets__identity details summary { display: flex; align-items: center; gap: 6px; cursor: pointer; width: fit-content; }
+.tm-application-secrets__identity details summary { display: flex; align-items: center; gap: 6px; width: fit-content; }
 .tm-application-secrets__identity details code { display: block; margin-top: 6px; }
 .tm-application-secrets__empty { display: grid; justify-items: start; gap: 12px; padding: 24px 0; }
 .tm-application-secrets__empty p { margin: 0; color: var(--muted); font-size: var(--t-body); }
@@ -111,7 +110,6 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
   color: var(--text-soft);
   font-size: var(--t-meta);
   font-weight: var(--w-medium);
@@ -135,7 +133,7 @@
 }
 
 .tm-preview-icon-button:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 

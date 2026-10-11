@@ -651,8 +651,13 @@ it('opens the selected source through desktop actions and keeps a failed open re
   expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'default' });
   fireEvent.click(screen.getByRole('button', { name: 'Open folder backend' }));
   await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-  fireEvent.click(screen.getByRole('button', { name: 'Folder actions for backend' }));
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Open in VS Code' }));
+  const folderActions = screen.getByRole('button', { name: 'Folder actions for backend' });
+  folderActions.focus();
+  fireEvent.keyDown(folderActions, { key: 'ArrowDown' });
+  const open = await screen.findByRole('menuitem', { name: 'Open' });
+  await waitFor(() => expect(open.getAttribute('data-disabled')).toBeNull());
+  expect(open.textContent).toContain('VS Code');
+  fireEvent.click(open);
   await waitFor(() => expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'vscode' }));
   expect(api.inspectOpenTarget).toHaveBeenCalledWith({ target });
   await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
@@ -662,7 +667,7 @@ it('opens the selected source through desktop actions and keeps a failed open re
     api.executeOpenTargetAction.mockResolvedValue({ ok: true, clipboardText: '/other/repository/backend' });
     const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
     trigger.focus();
-    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Copy path' }));
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     expect(writeText).toHaveBeenCalledWith('/other/repository/backend');
@@ -670,17 +675,6 @@ it('opens the selected source through desktop actions and keeps a failed open re
   } finally {
     Reflect.deleteProperty(navigator, 'clipboard');
   }
-  const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
-  fireEvent.click(trigger);
-  await screen.findByRole('menuitem', { name: 'Copy path' });
-  fireEvent.scroll(screen.getByRole('menu'));
-  expect(screen.getByRole('menu')).toBeTruthy();
-  fireEvent.scroll(screen.getByLabelText('Configuration used for this run'));
-  expect(screen.queryByRole('menu')).toBeNull();
-  fireEvent.click(trigger);
-  await screen.findByRole('menuitem', { name: 'Copy path' });
-  fireEvent.resize(window);
-  expect(screen.queryByRole('menu')).toBeNull();
 });
 
 
