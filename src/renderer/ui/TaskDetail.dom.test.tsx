@@ -1,5 +1,5 @@
 import { useState, type ComponentProps } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
@@ -422,7 +422,9 @@ describe('Agent pre-run setup', () => {
       projection: { worktree: 'NOT_CREATED' }
     });
     Object.assign(props, readyRuntime());
-    render(<TaskDetail {...props} />);
+    // The window's top bar, where the Agent tab's title row sits.
+    const titlebar = document.body.appendChild(document.createElement('div'));
+    render(<TaskDetail {...props} titlebarSlot={titlebar} />);
     // The Overview's decision slot holds the one setup step, above the request.
     expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Request' })).toBeTruthy();
@@ -431,11 +433,12 @@ describe('Agent pre-run setup', () => {
     // The Agent tab's pre-run setup offers the same single step with its settings.
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
-    expect(screen.getByRole('heading', { name: 'Test task' })).toBeTruthy();
+    expect(within(titlebar).getByRole('heading', { name: 'Test task' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Start this task' })).toBeTruthy();
     expect(screen.getByText('Add a multiply helper and cover it with tests.')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Request' })).toBeNull();
     expect(screen.getByRole('button', { name: /^Access: / })).toBeTruthy();
+    titlebar.remove();
   });
 
   it('does not present a different permission preset as the saved execution settings', async () => {
@@ -469,6 +472,119 @@ describe('Agent pre-run setup', () => {
       networkAccess: true
     }));
     expect(screen.queryByRole('button', { name: 'Prepare worktree' })).toBeNull();
+  });
+});
+
+describe('Task title placement', () => {
+  function titlebar(): HTMLElement {
+    const slot = document.createElement('div');
+    document.body.prepend(slot);
+    return slot;
+  }
+  function selectTab(name: string) {
+    fireEvent.click(screen.getByRole('tab', { name }));
+  }
+  function pageHeading(): HTMLElement {
+    return screen.getByRole('heading', { level: 1, name: 'Test task' });
+  }
+
+  it('keeps the head on the Overview and gives the working tabs the title row in the top bar', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    render(<TaskDetail {...detailProps()} titlebarSlot={slot} />);
+
+    // The Overview's head states the title and the lifecycle; the top bar stays empty.
+    expect(slot.contains(pageHeading())).toBe(false);
+    expect(screen.getByRole('list', { name: 'Lifecycle' })).toBeDefined();
+    expect(within(slot).queryByRole('button', { name: /Task options/ })).toBeNull();
+
+    for (const name of ['Agent', 'Review', 'Preview']) {
+      selectTab(name);
+      // One heading, in the top bar with the task's menu; no head above the tabs.
+      expect(slot.contains(pageHeading())).toBe(true);
+      expect(within(slot).getByRole('button', { name: 'Task options for Test task' })).toBeDefined();
+      expect(screen.queryByRole('list', { name: 'Lifecycle' })).toBeNull();
+      // Opening a tab never animates the title.
+      expect(slot.firstElementChild!.hasAttribute('data-instant')).toBe(true);
+    }
+
+    selectTab('Overview');
+    expect(slot.contains(pageHeading())).toBe(false);
+    slot.remove();
+  });
+
+  it('moves the steps the head offered with the title row, except where the tab offers them itself', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    const props = detailProps();
+    props.initialTab = 'agent';
+    render(<TaskDetail {...props} titlebarSlot={slot} />);
+
+    // Imported work before any run: reviewing it is reachable from the Agent tab's title row.
+    fireEvent.click(within(slot).getByRole('button', { name: 'Run agent review' }));
+    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
+
+    // The Review bar offers its own review step, so the title row does not repeat it.
+    selectTab('Review');
+    expect(within(slot).queryByRole('button', { name: 'Run agent review' })).toBeNull();
+    slot.remove();
+  });
+
+  it('leaves the title in the top bar when a side panel docks beside a working tab', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    const props = detailProps();
+    props.initialTab = 'agent';
+    props.run = makeRunRecord({ status: 'COMPLETED', endedAt: TEST_NOW });
+    props.runs = [props.run];
+    props.ask = {
+      records: { runs: [], items: [], instructions: [], interactions: [], sessions: [], plans: [] },
+      ask: vi.fn(async () => undefined), stop: vi.fn(async () => undefined), end: vi.fn(async () => undefined)
+    };
+    render(<TaskDetail {...props} titlebarSlot={slot} />);
+
+    const tabBar = screen.getByRole('tablist', { name: 'Task sections' }).parentElement!;
+    const toggle = within(tabBar).getByRole('button', { name: 'Ask', pressed: false });
+    fireEvent.click(toggle);
+
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(slot.contains(pageHeading())).toBe(true);
+    expect(screen.getByRole('tab', { name: 'Agent', selected: true })).toBeDefined();
+    expect(screen.queryByRole('list', { name: 'Lifecycle' })).toBeNull();
+    slot.remove();
+  });
+
+  it('raises the title row into the top bar once the Overview head scrolls away, and only then animates it', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    let report: ((entries: Array<{ isIntersecting: boolean }>) => void) | undefined;
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) { report = callback; }
+      observe() {} disconnect() {}
+    });
+    const slot = titlebar();
+    render(<TaskDetail {...detailProps()} titlebarSlot={slot} />);
+    const row = () => slot.firstElementChild as HTMLElement;
+
+    // Where the page already is on opening: shown as it is, never animated.
+    act(() => report!([{ isIntersecting: true }]));
+    expect(row().hasAttribute('data-visible')).toBe(false);
+    expect(row().getAttribute('aria-hidden')).toBe('true');
+
+    act(() => report!([{ isIntersecting: false }]));
+    expect(row().hasAttribute('data-visible')).toBe(true);
+    expect(row().hasAttribute('data-instant')).toBe(false);
+    // The head keeps the page's heading; the top bar's copy is not a second one.
+    expect(slot.contains(pageHeading())).toBe(false);
+    expect(within(slot).getByRole('button', { name: 'Task options for Test task' })).toBeDefined();
+
+    act(() => report!([{ isIntersecting: true }]));
+    expect(row().hasAttribute('data-visible')).toBe(false);
+    slot.remove();
+    vi.unstubAllGlobals();
   });
 });
 

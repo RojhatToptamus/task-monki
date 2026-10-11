@@ -83,32 +83,59 @@
   flex: 1;
 }
 
-/* The task's title stands in for the page's own while that is out of view. */
+/* A task page's title row: on the working tabs (Agent, Review, Preview) it is
+   the page's title, and on a reading tab it stands in for the head once that
+   has scrolled away. The title gives way before its menu and steps do. */
+.tm-titlebar__slot {
+  display: flex;
+  min-width: 0;
+}
+
+.tm-titlebar__task {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: 6px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.tm-titlebar__task > :not(.tm-titlebar__title) {
+  flex: 0 0 auto;
+}
+
+/* It rises in as a reading tab's head scrolls away and leaves faster than it
+   came. A tab opening shows it as it is. */
+.tm-titlebar__task[data-visible] {
+  opacity: 1;
+  transform: none;
+  transition-duration: var(--motion-standard);
+}
+.tm-titlebar__task[data-instant] { transition: none; }
+
 .tm-titlebar__title {
   min-width: 0;
   max-width: 48vw;
-  margin-left: 6px;
+  margin: 0;
   overflow: hidden;
-  color: var(--text-soft);
-  font-size: var(--t-body);
+  color: var(--text);
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0;
-  transform: translateY(6px);
-  pointer-events: none;
-  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-slow) var(--ease-drawer);
 }
 
-/* It rises in as the page's head collapses or scrolls away, a beat after the head
-   starts to leave, so the title reads as moving up rather than appearing twice. */
-.tm-titlebar__title[data-visible] {
-  opacity: 1;
-  transform: none;
-  pointer-events: auto;
-  transition: opacity var(--motion-standard) var(--ease-out) var(--motion-beat), transform var(--motion-slow) var(--ease-drawer);
+.tm-titlebar__title:focus {
+  outline: none;
 }
-/* Opening a tab that already has its title up top shows it still. */
-.tm-titlebar__title[data-instant] { transition: none; }
+
+/* The request link and a step sit a little apart from the title and its menu. */
+.tm-titlebar__taskmenu + * {
+  margin-left: 4px;
+}
 
 /* New task is the primary family at the toolbar height (`primary-button
    button--sm`); the titlebar rule above keeps it out of the drag region. */

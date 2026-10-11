@@ -296,7 +296,7 @@ Expected UI while follow-up is active:
 - Card chip: Fixing review feedback.
 - Review tab: the diff and findings stay; the headline says Fixing review
   feedback, or the agent's pending request ("Codex asked a question") with Go to
-  request, since the page head that otherwise carries it is folded there.
+  request, since the Review tab has no page head to carry it.
 - Review actions hidden or disabled:
   - no Request changes
   - no Run review again

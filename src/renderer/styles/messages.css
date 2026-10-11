@@ -109,13 +109,8 @@
 .tm-conversation__viewport:focus { outline: none; }
 .app-shell[data-input-modality='keyboard'] .tm-conversation__viewport:focus-visible { box-shadow: var(--focus-halo-inset); }
 .tm-conversation__content { min-width: 0; }
-/* The page head rides above a long conversation: its title area slides away
-   while the reader scrolls down and returns on the way up, leaving a little
-   faster than it arrives, and the tabs stay pinned. Only keyboard focus inside
-   it holds it in place; a clicked tab keeps focus and must not pin it. */
-.tm-conversation__header { position: sticky; top: 0; z-index: var(--layer-sticky); background: var(--surface); transition: transform var(--motion-modal) var(--ease-drawer); }
-.tm-conversation__header[data-visible='false'] { transform: translateY(calc(-1 * var(--conversation-header-hide, 100%))); transition-duration: var(--motion-standard); }
-.app-shell[data-input-modality='keyboard'] .tm-conversation__header:focus-within { transform: translateY(0); }
+/* The task's tabs stay pinned above the conversation while it scrolls. */
+.tm-conversation__header { position: sticky; top: 0; z-index: var(--layer-sticky); background: var(--surface); }
 /* Jump to latest stays mounted and fades: it rises in when the reader leaves
    the end and leaves faster once the view is back there. A floating control,
    not a toast: the card plane lifted by the floating edge and shadow. */

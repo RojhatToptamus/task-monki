@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useState, type ReactNode } from 'react';
 import { ArrowDown } from 'lucide-react';
 import { useStickToBottom, type StickToBottomInstance } from 'use-stick-to-bottom';
 import { Tooltip } from './Tooltip';
@@ -24,96 +24,28 @@ export function useConversationScroll({ startAtBottom = true }: { startAtBottom?
   return { ...instance, scrollToBottom: (options) => instance.scrollToBottom(options ?? motion) };
 }
 
-const READER_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
-const READER_INTENT_MS = 600;
-
 /**
  * A conversation log with an unobtrusive jump back to the latest output (AI
  * Elements Conversation). Opening a disclosure is reading, so it releases the
  * lock instead of pulling the view back to the end.
  */
-export function Conversation({ instance, label, className = '', header, children, onScroll, onHeaderVisibleChange }: {
+export function Conversation({ instance, label, className = '', header, children, onScroll }: {
   instance: StickToBottomInstance;
   label: string;
   className?: string;
+  /** Stays at the top of the view while the history scrolls beneath it (the task's tabs). */
   header?: ReactNode;
   children: ReactNode;
   onScroll?(scroller: HTMLElement): void;
-  /** Whether the collapsible part of the header is in view. */
-  onHeaderVisibleChange?(visible: boolean): void;
 }) {
-  const [headerVisible, setHeaderVisible] = useState(true);
-  const headerRef = useRef<HTMLDivElement>(null);
-  // The part of the header marked data-conversation-collapse slides away; the
-  // rest (the tabs) stays. The header never hides before the first message has
-  // passed beneath it, so hiding never opens an empty band at the top.
-  // A collapsible part appearing or leaving changes the header's height, so
-  // the observer re-reads it without measuring on every render.
-  const headerHeight = useRef(0);
-  const canCollapse = useRef(false);
-  const hasHeader = Boolean(header);
-  useLayoutEffect(() => {
-    const element = headerRef.current;
-    if (!element) return;
-    const measure = () => {
-      const collapsible = element.querySelector<HTMLElement>('[data-conversation-collapse]');
-      canCollapse.current = Boolean(collapsible);
-      if (!collapsible) setHeaderVisible(true);
-      headerHeight.current = element.offsetHeight;
-      element.style.setProperty('--conversation-header-hide', `${collapsible?.offsetHeight ?? 0}px`);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [hasHeader]);
-  const reportHeader = useRef(onHeaderVisibleChange);
-  reportHeader.current = onHeaderVisibleChange;
-  useLayoutEffect(() => { reportHeader.current?.(headerVisible); }, [headerVisible]);
-  const scrollDirection = useRef({ top: 0, direction: 0, distance: 0 });
-  // Only the reader's own scrolling moves the header. Following new output,
-  // restoring a reading position and Jump to latest are programmatic.
-  const readerIntent = useRef({ until: 0, dragging: false });
-  const noteReaderScroll = () => { readerIntent.current.until = performance.now() + READER_INTENT_MS; };
-  // A scrollbar drag can end outside the viewport, so the release is heard on the window.
-  const noteScrollbarDrag = () => {
-    readerIntent.current.dragging = true;
-    const release = () => {
-      readerIntent.current.dragging = false;
-      window.removeEventListener('pointerup', release);
-      window.removeEventListener('pointercancel', release);
-    };
-    window.addEventListener('pointerup', release);
-    window.addEventListener('pointercancel', release);
-  };
-  const trackScroll = (viewport: HTMLElement) => {
-    if (header) {
-      const top = Math.max(0, viewport.scrollTop);
-      const previous = scrollDirection.current;
-      const delta = top - previous.top;
-      if (delta) {
-        const direction = Math.sign(delta);
-        const distance = direction === previous.direction ? previous.distance + Math.abs(delta) : Math.abs(delta);
-        scrollDirection.current = { top, direction, distance };
-        const byReader = readerIntent.current.dragging || performance.now() < readerIntent.current.until;
-        if (top < headerHeight.current || !canCollapse.current) setHeaderVisible(true);
-        else if (byReader && distance >= 12) setHeaderVisible(direction < 0);
-      }
-    }
-    onScroll?.(viewport);
-  };
   return <div className={`tm-conversation ${className}`.trim()}>
     <div ref={instance.scrollRef} className="tm-conversation__viewport" tabIndex={0} aria-label={label}
-      onScroll={(event) => trackScroll(event.currentTarget)}
-      onWheel={noteReaderScroll}
-      onTouchMove={noteReaderScroll}
-      onKeyDown={(event) => { if (READER_SCROLL_KEYS.has(event.key)) noteReaderScroll(); }}
-      onPointerDown={(event) => { if (event.target === event.currentTarget) noteScrollbarDrag(); }}
+      onScroll={onScroll ? (event) => onScroll(event.currentTarget) : undefined}
       onClickCapture={(event) => {
         if ((event.target as HTMLElement).closest('[data-disclosure]')) instance.stopScroll();
       }}>
       <div ref={instance.contentRef} className="tm-conversation__content">
-        {header ? <div ref={headerRef} className="tm-conversation__header" data-visible={headerVisible}>{header}</div> : null}
+        {header ? <div className="tm-conversation__header">{header}</div> : null}
         {children}
       </div>
     </div>
