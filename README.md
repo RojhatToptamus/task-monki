@@ -1,10 +1,13 @@
 <p align="center">
-  <img src="./public/assets/brand/monkey_icon_charcoal.svg" width="96" alt="Task Monki logo" />
+  <img src="./build/icons/256x256.png" width="96" alt="Task Monki logo" />
 </p>
 
 <h1 align="center">Task Monki</h1>
 
-![Task Monki dashboard](./.github/assets/task-monki-dashboard-dark.jpg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/task-monki-dashboard-dark.jpg" />
+  <img src="./.github/assets/task-monki-dashboard-light.jpg" alt="The Task Monki board with tasks in Backlog, In progress, Review and Done" />
+</picture>
 
 <p align="center">
   <a href="https://youtu.be/ItbCXShonFo">
