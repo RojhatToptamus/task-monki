@@ -27,8 +27,6 @@ export type ReviewScope = DiffEvidenceScope | 'since-review';
 
 export interface ReviewWorkspaceProps {
   taskId: string;
-  /** The implementation agent's name, for "Add a note for Codex". */
-  agentName: string;
   review?: {
     status: AgentReviewGateStatus;
     reviewedAt?: string;
@@ -271,14 +269,14 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   // A line comment is written in the app's composer: the field, then a toolbar with the shortcut and the actions.
   const renderComposer = (anchor: string) => commentDraft?.anchor === anchor ? (
     <form className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
-      <label className="tm-visually-hidden" htmlFor={`${noteId}-comment`}>Comment for {props.agentName}</label>
+      <label className="tm-visually-hidden" htmlFor={`${noteId}-comment`}>Comment</label>
       <textarea
         id={`${noteId}-comment`}
         className="tm-composer__input"
         autoFocus
         rows={2}
         value={commentDraft.text}
-        placeholder={`Comment for ${props.agentName}`}
+        placeholder="Add a comment"
         onChange={(event) => setCommentDraft({ ...commentDraft, text: event.target.value })}
         onKeyDown={(event) => {
           if (event.key === 'Escape') { event.preventDefault(); setCommentDraft(undefined); }
@@ -422,11 +420,24 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           return (
                             <div key={anchor} className="tm-review-line-group">
                               <div
-                                className={`tm-diffline tm-diffline--${line.kind}`}
+                                className={`tm-diffline tm-diffline--${line.kind} tm-diffline--annotated`}
                                 onContextMenu={(event) => openPathMenu(file.path, event, targetLine)}
                               >
                                 <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
                                 <span className="tm-diffline__num">{line.newLine ?? ''}</span>
+                                {/* The note column is reserved on every row, so the "+" never covers a number. */}
+                                <span className="tm-diffline__note">
+                                  {line.newLine !== undefined && !props.historical && props.requestChanges ? (
+                                    <button
+                                      type="button"
+                                      className="tm-review-line__comment"
+                                      aria-label={`Comment on line ${line.newLine}`}
+                                      onClick={() => setCommentDraft({ anchor: commentKey, path: file.path, line: line.newLine, text: '' })}
+                                    >
+                                      <Plus size={12} aria-hidden="true" />
+                                    </button>
+                                  ) : null}
+                                </span>
                                 <span className="tm-diffline__marker" aria-hidden="true">
                                   {line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ''}
                                 </span>
@@ -436,16 +447,6 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                   ) : null}
                                   {lineCode(line.content, line.kind) || ' '}
                                 </code>
-                                {line.newLine !== undefined && !props.historical && props.requestChanges ? (
-                                  <button
-                                    type="button"
-                                    className="tm-review-line__comment"
-                                    aria-label={`Comment on line ${line.newLine}`}
-                                    onClick={() => setCommentDraft({ anchor: commentKey, path: file.path, line: line.newLine, text: '' })}
-                                  >
-                                    <Plus size={13} aria-hidden="true" />
-                                  </button>
-                                ) : null}
                               </div>
                               {renderThreads(anchored.byLine.get(anchor))}
                               {line.newLine !== undefined ? renderComments(file.path, line.newLine) : null}
@@ -467,12 +468,12 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         <div className={`tm-review__request${requestBarAtMount.current ? '' : ' tm-review__request--enter'}`}>
           <span className="tm-review__request-summary">{requestSummary}</span>
           <label className="tm-review__note">
-            <span className="tm-visually-hidden">Note for {props.agentName}</span>
+            <span className="tm-visually-hidden">Review note</span>
             <input
               id={noteId}
               type="text"
               value={props.note}
-              placeholder={`Add a note for ${props.agentName}`}
+              placeholder="Add a note"
               onChange={(event) => props.onNoteChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !props.requestChanges?.disabledReason) {

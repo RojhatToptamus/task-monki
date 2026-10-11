@@ -121,7 +121,7 @@ import {
 import { selectProgressRun } from '../model/runProgress';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
-  formatAgentNetworkAccess,
+  isAgentNetworkAccessEnabled,
   formatAgentPermissionMode
 } from '../model/agentPermissions';
 import { ActionButtonTitle } from './ActionButtonTitle';
@@ -173,8 +173,11 @@ interface TaskDetailProps {
   onEditInstruction: AgentSessionProps['onEditQueue'];
   onSendInstruction: AgentSessionProps['onSendQueue'];
   headingRef?: RefObject<HTMLHeadingElement | null>;
-  /** The task's title while the page's own title area is out of view, for the window's top bar. */
-  onCompactTitleChange?(title: string | undefined): void;
+  /**
+   * The task's title while the page's own title area is out of view, for the window's top bar.
+   * `animate` is false when the change came with a tab or page opening, which shows it still.
+   */
+  onCompactTitleChange?(title: string | undefined, animate: boolean): void;
   error?: string;
   task?: Task;
   repository?: Repository;
@@ -446,6 +449,8 @@ export function TaskDetail(props: TaskDetailProps) {
   // to or from it remounts the tablist. If the control that had focus went away
   // with it, keep the user oriented on the tab they just selected.
   const previousTabRef = useRef(tab);
+  const renderedTabRef = useRef(tab);
+  useEffect(() => { renderedTabRef.current = tab; }, [tab]);
   useLayoutEffect(() => {
     if (previousTabRef.current === tab) return;
     previousTabRef.current = tab;
@@ -1305,10 +1310,11 @@ export function TaskDetail(props: TaskDetailProps) {
   const detailsRows = (
     <dl className="tm-props">
       <PropRow label="Agent" value={runtimeName} />
-      <PropRow label="Model" value={model === 'unknown' ? 'Default' : model} />
-      <PropRow label="Effort" value={humanizeEnum(effort)} />
-      <PropRow label="Permissions" value={formatAgentPermissionMode(displayedAgentSettings)} />
-      <PropRow label="Network" value={formatAgentNetworkAccess(displayedAgentSettings)} />
+      {/* A setting's companion (effort, network) follows it in muted ink. */}
+      <PropRow label="Model" value={<>{model === 'unknown' ? 'Default' : model}
+        <span className="tm-props__sub">{humanizeEnum(effort)} effort</span></>} />
+      <PropRow label="Access" value={<>{formatAgentPermissionMode(displayedAgentSettings)}
+        <span className="tm-props__sub">Network {isAgentNetworkAccessEnabled(displayedAgentSettings) ? 'on' : 'off'}</span></>} />
       {worktree ? (
         <PropRow
           label={externalWork ? 'Compared to' : 'Base'}
@@ -1325,7 +1331,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const taskMasthead = (
       <div
         className={detailHeadClassName}
-        data-conversation-collapse=""
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
@@ -1436,7 +1441,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const sideQuestionPanel = tab === 'agent' && sideThread && sideQuestionAvailable && props.sideQuestion ? (
     <SideQuestionPanel
       conversation={props.sideQuestion}
-      defaultModel={{
+      defaultModel={props.sideQuestion.defaultModel ?? {
         runtimeId: task.runtimeId,
         model: task.agentSettings?.model,
         modelProvider: task.agentSettings?.modelProvider,
@@ -1472,6 +1477,9 @@ export function TaskDetail(props: TaskDetailProps) {
   // the panel head's 48px line; the title moves to the window's top bar.
   const headCollapsed = Boolean(sidePanel) && sidePanelLayout.docked;
   const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
+  // The title moves between the page and the top bar only when a panel opens or
+  // closes, or the conversation scrolls; a tab opening shows its head as it is.
+  const tabJustOpened = renderedTabRef.current !== tab;
 
   const taskNav = (
         <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
@@ -1557,11 +1565,21 @@ export function TaskDetail(props: TaskDetailProps) {
       </div>
   );
 
+  // With a side panel docked the masthead folds away rather than vanishing, while
+  // the title rises into the window's top bar; closing the panel reverses both.
+  const collapsibleMasthead = (
+    <div className="tm-detail__fold" data-collapsed={headCollapsed ? '' : undefined}
+      data-instant={tabJustOpened ? '' : undefined} inert={headCollapsed ? true : undefined}
+      data-conversation-collapse={headCollapsed ? undefined : ''}>
+      <div className="tm-detail__fold-inner">{taskMasthead}</div>
+    </div>
+  );
+
   return (
     <>
-    <CompactTitle title={titleOutOfView ? task.title : undefined} onChange={props.onCompactTitleChange} />
+    <CompactTitle title={titleOutOfView ? task.title : undefined} animate={!tabJustOpened} onChange={props.onCompactTitleChange} />
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
-      {tab !== 'agent' ? <div className="tm-detail__chrome">{headCollapsed ? null : taskMasthead}{taskNav}</div> : null}
+      {tab !== 'agent' ? <div className="tm-detail__chrome">{collapsibleMasthead}{taskNav}</div> : null}
 
       <div
         id="task-detail-panel"
@@ -1627,6 +1645,7 @@ export function TaskDetail(props: TaskDetailProps) {
               <h2 className="tm-visually-hidden">Details and history</h2>
               <OverviewSection
                 title="Details"
+                inset
                 aside={externalWork && worktree?.status === 'PRESENT' ? (
                   <button type="button" className="tm-osection__link"
                     disabled={reviewActionsPaused || reviewActionBusy}
@@ -1666,7 +1685,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('review')}
-          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{headCollapsed ? null : taskMasthead}{taskNav}</div>}
+          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{collapsibleMasthead}{taskNav}</div>}
           onHeaderVisibleChange={setAgentHeaderVisible}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
@@ -1720,7 +1739,6 @@ export function TaskDetail(props: TaskDetailProps) {
           <ReviewWorkspace
             key={task.id}
             taskId={task.id}
-            agentName={runtimeName}
             review={reviewGate.status === 'NOT_RUN' ? undefined : { status: reviewGate.status, reviewedAt: reviewGate.updatedAt }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
@@ -1865,11 +1883,12 @@ export function TaskDetail(props: TaskDetailProps) {
 }
 
 /** Gives the window's top bar the task title while the page's own title is out of view. */
-function CompactTitle({ title, onChange }: { title?: string; onChange?(title: string | undefined): void }) {
+/** Reports the top bar's title, and whether its change should be animated. */
+function CompactTitle({ title, animate, onChange }: { title?: string; animate: boolean; onChange?(title: string | undefined, animate: boolean): void }) {
   useEffect(() => {
-    onChange?.(title);
-  }, [onChange, title]);
-  useEffect(() => () => onChange?.(undefined), [onChange]);
+    onChange?.(title, animate);
+  }, [onChange, title, animate]);
+  useEffect(() => () => onChange?.(undefined, false), [onChange]);
   return null;
 }
 

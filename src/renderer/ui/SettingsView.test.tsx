@@ -345,6 +345,27 @@ describe('SettingsView', () => {
     );
   });
 
+  it('starts side questions on the implementation default until a model is chosen for them', () => {
+    const following = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      defaultRuntimeId: 'codex',
+      defaultModel: codexModel.model,
+      defaultReasoningEffort: 'low'
+    });
+    expect(following.sideQuestionRuntimeId).toBe('codex');
+    expect(following.selectedSideQuestionModel?.id).toBe(codexModel.id);
+
+    const chosen = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      defaultRuntimeId: 'codex',
+      defaultReasoningEffort: 'low',
+      sideQuestionRuntimeId: 'codex',
+      sideQuestionModel: codexModel.model,
+      sideQuestionReasoningEffort: codexModel.supportedReasoningEfforts.at(-1)
+    });
+    expect(chosen.selectedSideQuestionEffort).toBe(codexModel.supportedReasoningEfforts.at(-1));
+  });
+
   it('does not replace a missing provider-only Preview selection', () => {
     const selected = selectSettingsModels([codexModel], runtimes, {
       ...DEFAULT_TASK_MANAGER_APP_SETTINGS,

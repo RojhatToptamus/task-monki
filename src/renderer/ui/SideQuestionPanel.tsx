@@ -12,6 +12,8 @@ import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, Work
 
 export interface SideConversation {
   records: AgentConversationRecords;
+  /** Where a new thread's model starts: the Settings default for side questions. */
+  defaultModel?: SideQuestionModelChoice;
   ask(input: { threadId: string; text: string; messageId: string; model?: SideQuestionModelChoice }): Promise<void>;
   stop(runId: string): Promise<void>;
   /** Ends the thread: its read-only snapshot is removed; its runs stay in Debug. */

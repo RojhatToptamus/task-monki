@@ -935,7 +935,8 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: 400; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; container-type: normal; }
-/* In a toolbar the effort is always a chip menu, like the model beside it. */
+/* In a toolbar the effort is always a chip menu, like the model beside it; both lead with their mark. */
+.tm-agent-console--compact .tm-agent-console__chip-icon { display: inline-block; color: var(--muted); }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-options { display: none; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning-menu { display: inline-flex; }
 .tm-agent-console__reasoning-menu__trigger.tm-action-menu__trigger { gap: 6px; padding: 0 8px; font-size: var(--t-help); }
@@ -944,7 +945,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-composer__toolbar { container: tm-composer-toolbar / inline-size; }
 @container tm-composer-toolbar (max-width: 440px) {
   .tm-agent-console--compact :is(.tm-agent-console__summary, .tm-agent-console__chevron, .tm-agent-console__chip-label, .tm-agent-console__chip-chevron) { display: none; }
-  .tm-agent-console--compact .tm-agent-console__chip-icon { display: inline-block; }
+  .tm-agent-console--compact .tm-agent-console__chip-icon { width: 16px; height: 16px; }
   .tm-agent-console--compact :is(.tm-agent-console__trigger, .tm-agent-console__reasoning-menu__trigger.tm-action-menu__trigger) { width: var(--h-toolbar); min-width: var(--h-toolbar); padding: 0; justify-content: center; }
 }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger--error,

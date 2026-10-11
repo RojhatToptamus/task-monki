@@ -22,6 +22,36 @@
   background: var(--surface);
 }
 
+/* The masthead folds to nothing when a side panel docks: its row closes on the
+   drawer curve while the content fades and lifts, so the tab bar glides up
+   instead of jumping. The title meanwhile rises into the window's top bar. */
+.tm-detail__fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--motion-slow) var(--ease-drawer);
+}
+
+.tm-detail__fold-inner {
+  min-height: 0;
+  overflow: hidden;
+  transition: opacity var(--motion-standard) var(--ease-out), transform var(--motion-slow) var(--ease-drawer);
+}
+
+.tm-detail__fold[data-collapsed] {
+  grid-template-rows: 0fr;
+}
+
+.tm-detail__fold[data-collapsed] .tm-detail__fold-inner {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* Opening a tab shows its head as it is. */
+.tm-detail__fold[data-instant],
+.tm-detail__fold[data-instant] .tm-detail__fold-inner {
+  transition: none;
+}
+
 /* The Overview scrolls as a whole and reserves a scrollbar gutter; the header
    of a tab whose panes scroll on their own reserves the same, so the title row
    and task menu never shift between tabs. */
@@ -291,6 +321,11 @@
   min-width: 0;
 }
 
+/* The record's groups are their own boxes, so they sit closer together. */
+.tm-overview__side {
+  gap: 12px;
+}
+
 .tm-workpanels {
   display: grid;
   min-width: 0;
@@ -298,7 +333,7 @@
 }
 
 /* The Now panel: the Overview's one raised element. Every other block on the
-   page is a flat section. */
+   page is a flat section or a recessed record group. */
 .tm-slot {
   display: grid;
   gap: 12px;
@@ -461,6 +496,16 @@
   min-width: 0;
 }
 
+/* Record content — Details, the preview, History, and the review and pull
+   request in the story — is recessed onto the panel ground: grouped, with no
+   ring or shadow, so the Now panel stays the page's one raised element. */
+.tm-osection--inset,
+.tm-workpanels > :is(.tm-prstatus, .tm-reviewcard) {
+  padding: 16px 18px;
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
 .tm-osection__head {
   display: flex;
   align-items: baseline;
@@ -508,10 +553,7 @@
 /* Review and PR Status keep their own heads; on the Overview those heads take
    the section label's place and style. */
 .tm-workpanels > :is(.tm-prstatus, .tm-reviewcard) {
-  padding: 0;
   border: 0;
-  border-radius: 0;
-  background: transparent;
   box-shadow: none;
   overflow: visible;
 }
@@ -550,7 +592,7 @@
   color: var(--blocked-ink);
 }
 
-/* Flat sections carry no bands or rules: disclosures sit on the section's own edge. */
+/* Overview sections carry no bands or rules: disclosures sit on the section's own edge. */
 .tm-overview .tm-reviewcard__raw > summary,
 .tm-overview .tm-reviewfindings__list {
   margin: 0;
@@ -678,17 +720,20 @@
 }
 
 /* How the task runs and where its work lives: a label and its value per row, the value in the interface face unless it is a string to copy. */
+/* The label column is as wide as the longest label, up to 92px, and every row
+   shares it, so values keep the most room the record column can give. */
 .tm-props {
   display: grid;
-  gap: 2px;
+  grid-template-columns: fit-content(92px) minmax(0, 1fr);
+  gap: 2px 12px;
   margin: 0;
 }
 
 .tm-props__row {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: baseline;
-  gap: 12px;
   min-height: 26px;
   padding: 3px 0;
 }
@@ -706,6 +751,18 @@
   font-size: var(--t-body);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A setting's companion value (effort beside the model, network beside access)
+   wraps beneath it whole rather than being cut off. */
+.tm-props__row > dd:has(.tm-props__sub) {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 8px;
+}
+
+.tm-props__sub {
+  color: var(--muted);
 }
 
 .tm-props__row code {
@@ -1029,6 +1086,66 @@
   color: var(--text-soft);
   font: var(--w-medium) var(--t-meta)/1.55 var(--font-mono);
   white-space: pre-wrap;
+}
+
+/* The Overview's History: the date once per day, then each entry with its
+   time on the right and who recorded it beneath. */
+.tm-ohistory,
+.tm-ohistory__day {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tm-ohistory {
+  gap: 14px;
+}
+
+.tm-ohistory__date {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--t-meta);
+  font-weight: 400;
+}
+
+.tm-ohistory__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tm-ohistory__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 1px 12px;
+  min-width: 0;
+}
+
+.tm-ohistory__title {
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--t-body);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.tm-ohistory__time,
+.tm-ohistory__actor {
+  color: var(--muted);
+  font-size: var(--t-meta);
+  line-height: 1.4;
+}
+
+.tm-ohistory__time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tm-ohistory__actor {
+  grid-column: 1;
 }
 
 /* Activity timeline */

@@ -34,9 +34,9 @@ export function TaskActivityPanel({
 
 /**
  * The Overview's History: the latest consequential entries, in order, each as
- * what happened, who recorded it and when. The evidence behind each entry, and
- * the raw audit, stay in the full ledger in Debug, so the Overview never repeats
- * what its Now panel already says.
+ * what happened, when, and who recorded it, with the date stated once per day.
+ * The evidence behind each entry, and the raw audit, stay in the full ledger in
+ * Debug, so the Overview never repeats what its Now panel already says.
  */
 function OverviewTaskActivity({
   view,
@@ -51,6 +51,7 @@ function OverviewTaskActivity({
   return (
     <OverviewSection
       title="History"
+      inset
       className="tm-taskactivity-panel tm-taskactivity-panel--overview"
       aside={
         onViewAll ? (
@@ -60,8 +61,37 @@ function OverviewTaskActivity({
         ) : undefined
       }
     >
-      <TaskActivityList items={view.items} evidence={false} />
+      <OverviewHistoryDays items={view.items} />
     </OverviewSection>
+  );
+}
+
+/** Entries grouped by local day; each states its time, then who recorded it. */
+function OverviewHistoryDays({ items }: { items: TaskActivityItem[] }) {
+  const days: { key: string; label: string; items: { item: TaskActivityItem; timestamp: TaskActivityTimestamp }[] }[] = [];
+  for (const item of items) {
+    const timestamp = formatTaskActivityTimestamp(item.at);
+    const day = days.at(-1);
+    if (day?.key === timestamp.date) day.items.push({ item, timestamp });
+    else days.push({ key: timestamp.date, label: timestamp.day, items: [{ item, timestamp }] });
+  }
+  return (
+    <div className="tm-ohistory">
+      {days.map((day) => (
+        <section key={day.key} className="tm-ohistory__day" aria-label={day.label}>
+          <h4 className="tm-ohistory__date">{day.label}</h4>
+          <ol className="tm-ohistory__list">
+            {day.items.map(({ item, timestamp }) => (
+              <li key={item.id} className="tm-ohistory__item">
+                <span className="tm-ohistory__title">{item.title}</span>
+                <time className="tm-ohistory__time" dateTime={item.at} title={timestamp.full}>{timestamp.time}</time>
+                <span className="tm-ohistory__actor">{item.actor}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -97,18 +127,18 @@ function DebugTaskActivity({
   );
 }
 
-function TaskActivityList({ items, evidence = true }: { items: TaskActivityItem[]; evidence?: boolean }) {
+function TaskActivityList({ items }: { items: TaskActivityItem[] }) {
   return (
     <div className="tm-taskactivity__list">
       {items.map((item) => (
-        <TaskActivityRow key={item.id} item={item} evidence={evidence} />
+        <TaskActivityRow key={item.id} item={item} />
       ))}
     </div>
   );
 }
 
 /** What happened first; who recorded it and when, beneath. */
-function TaskActivityRow({ item, evidence }: { item: TaskActivityItem; evidence: boolean }) {
+function TaskActivityRow({ item }: { item: TaskActivityItem }) {
   const timestamp = formatTaskActivityTimestamp(item.at);
   return (
     <article className="tm-taskactivity__item">
@@ -119,7 +149,7 @@ function TaskActivityRow({ item, evidence }: { item: TaskActivityItem; evidence:
           {timestamp.label}
         </time>
       </div>
-      {evidence && item.evidence ? <TimelineEvidence evidence={item.evidence} /> : null}
+      {item.evidence ? <TimelineEvidence evidence={item.evidence} /> : null}
     </article>
   );
 }
@@ -190,6 +220,8 @@ function RawEventAudit({ events }: { events: DomainEvent[] }) {
 
 export interface TaskActivityTimestamp {
   date: string;
+  /** The day alone, e.g. "Jul 2", with the year when it is not this year. */
+  day: string;
   time: string;
   full: string;
   /** Compact but absolute, e.g. "Jul 2, 10:05 AM" in the system clock format; never relative to now. */
@@ -198,6 +230,10 @@ export interface TaskActivityTimestamp {
 
 // Every time in the app follows the system clock format, as conversation times do.
 const ACTIVITY_TIME_FORMAT = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+
+const ACTIVITY_DAY_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+
+const ACTIVITY_DAY_FORMAT_WITH_YEAR = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 
 const ACTIVITY_LABEL_FORMAT = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -219,6 +255,7 @@ export function formatTaskActivityTimestamp(value: string): TaskActivityTimestam
   if (Number.isNaN(date.getTime())) {
     return {
       date: 'Unknown',
+      day: 'Unknown date',
       time: '',
       full: 'Unknown time',
       label: 'Unknown time'
@@ -229,12 +266,11 @@ export function formatTaskActivityTimestamp(value: string): TaskActivityTimestam
   const day = pad2(date.getDate());
   const dateLabel = `${year}-${month}-${day}`;
   const timeLabel = ACTIVITY_TIME_FORMAT.format(date);
-  const label = (year === new Date().getFullYear()
-    ? ACTIVITY_LABEL_FORMAT
-    : ACTIVITY_LABEL_FORMAT_WITH_YEAR
-  ).format(date);
+  const thisYear = year === new Date().getFullYear();
+  const label = (thisYear ? ACTIVITY_LABEL_FORMAT : ACTIVITY_LABEL_FORMAT_WITH_YEAR).format(date);
   return {
     date: dateLabel,
+    day: (thisYear ? ACTIVITY_DAY_FORMAT : ACTIVITY_DAY_FORMAT_WITH_YEAR).format(date),
     time: timeLabel,
     full: `${dateLabel} ${timeLabel}`,
     label

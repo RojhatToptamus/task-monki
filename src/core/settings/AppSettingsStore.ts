@@ -248,6 +248,10 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     reviewRuntimeId: record.reviewRuntimeId,
     reviewModelProvider: record.reviewModelProvider,
     reviewReasoningEffort: record.reviewReasoningEffort,
+    sideQuestionModel: record.sideQuestionModel,
+    sideQuestionRuntimeId: record.sideQuestionRuntimeId,
+    sideQuestionModelProvider: record.sideQuestionModelProvider,
+    sideQuestionReasoningEffort: record.sideQuestionReasoningEffort,
     codexExternalTools: { ...record.codexExternalTools },
     externalExecutables: { ...record.externalExecutables },
     runtimeExecutablePaths: { ...record.runtimeExecutablePaths },
@@ -340,6 +344,9 @@ export function mergeAppSettings(
   }
   if ('reviewReasoningEffort' in input) {
     patch.reviewReasoningEffort = normalizeOptionalString(input.reviewReasoningEffort);
+  }
+  for (const key of ['sideQuestionModel', 'sideQuestionRuntimeId', 'sideQuestionModelProvider', 'sideQuestionReasoningEffort'] as const) {
+    if (key in input) patch[key] = normalizeOptionalString(input[key]);
   }
   if (input.codexExternalTools !== undefined) {
     if (!isRecord(input.codexExternalTools)) {
@@ -512,6 +519,10 @@ function isCurrentAppSettingsRecord(
     'reviewRuntimeId',
     'reviewModelProvider',
     'reviewReasoningEffort',
+    'sideQuestionModel',
+    'sideQuestionRuntimeId',
+    'sideQuestionModelProvider',
+    'sideQuestionReasoningEffort',
     'codexExternalTools',
     'externalExecutables',
     'runtimeExecutablePaths',
@@ -530,7 +541,11 @@ function isCurrentAppSettingsRecord(
     record.reviewModel,
     record.reviewRuntimeId,
     record.reviewModelProvider,
-    record.reviewReasoningEffort
+    record.reviewReasoningEffort,
+    record.sideQuestionModel,
+    record.sideQuestionRuntimeId,
+    record.sideQuestionModelProvider,
+    record.sideQuestionReasoningEffort
   ];
   const tools = record.codexExternalTools;
   const executables = record.externalExecutables;

@@ -35,6 +35,7 @@ import {
   type RefinePromptRequest,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
+  type SideQuestionModelChoice,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorktreePreparationInspection,
@@ -259,7 +260,9 @@ export function App() {
   const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
   const [designsLoading, setDesignsLoading] = useState(false);
   // The open task's title while its page shows only the tab bar.
-  const [compactTaskTitle, setCompactTaskTitle] = useState<string>();
+  const [compactTitle, setCompactTitle] = useState<{ title?: string; animate: boolean }>({ animate: false });
+  const compactTaskTitle = compactTitle.title;
+  const onCompactTitleChange = useCallback((title: string | undefined, animate: boolean) => setCompactTitle({ title, animate }), []);
   const [designsError, setDesignsError] = useState<string | undefined>();
   const [designExternalLinkRequest, setDesignExternalLinkRequest] =
     useState<DesignCanvasExternalLinkRequest>();
@@ -1625,6 +1628,23 @@ export function App() {
     () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
     [enabledRuntimeIds, runtimeModels]
   );
+  // Side questions start on their own default from Settings, else the implementation default.
+  const sideQuestionDefault = useMemo((): SideQuestionModelChoice => appSettings.sideQuestionRuntimeId
+    ? {
+        runtimeId: appSettings.sideQuestionRuntimeId,
+        model: appSettings.sideQuestionModel,
+        modelProvider: appSettings.sideQuestionModelProvider,
+        reasoningEffort: appSettings.sideQuestionReasoningEffort
+      }
+    : {
+        runtimeId: appSettings.defaultRuntimeId,
+        model: appSettings.defaultModel,
+        modelProvider: appSettings.defaultModelProvider,
+        reasoningEffort: appSettings.defaultReasoningEffort
+      }, [
+    appSettings.sideQuestionRuntimeId, appSettings.sideQuestionModel, appSettings.sideQuestionModelProvider, appSettings.sideQuestionReasoningEffort,
+    appSettings.defaultRuntimeId, appSettings.defaultModel, appSettings.defaultModelProvider, appSettings.defaultReasoningEffort
+  ]);
   const designRuntimeCatalog = useMemo(
     () =>
       runtimeCatalog
@@ -2672,7 +2692,13 @@ export function App() {
                   </button>
                 </Tooltip>
               </div>
-              {compactTaskTitle && showDetail ? <span className="tm-titlebar__title" title={compactTaskTitle}>{compactTaskTitle}</span> : null}
+              {/* Always mounted on a task page, so the title can rise in and settle out with the page's head. */}
+              {showDetail && selectedTask ? (
+                <span className="tm-titlebar__title" data-visible={compactTaskTitle ? '' : undefined}
+                  data-instant={compactTitle.animate ? undefined : ''} aria-hidden={compactTaskTitle ? undefined : true} title={compactTaskTitle}>
+                  {compactTaskTitle ?? selectedTask.title}
+                </span>
+              ) : null}
               <div className="tm-titlebar__spacer" />
               <button
                 ref={newTaskButtonRef}
@@ -2797,7 +2823,7 @@ export function App() {
             }}
             initialTab={view === 'previews' ? previewDetailTab : undefined}
             headingRef={taskDetailHeadingRef}
-            onCompactTitleChange={setCompactTaskTitle}
+            onCompactTitleChange={onCompactTitleChange}
             error={error}
             task={selectedTask}
             repository={taskDetail.repository}
@@ -2848,6 +2874,7 @@ export function App() {
             } : undefined}
             sideQuestion={selectedTask && selectedRecords ? {
               records: selectedRecords.side,
+              defaultModel: sideQuestionDefault,
               ask: async (input) => {
                 await withAppAction(() => taskManagerApi.askSideQuestion({ taskId: selectedTask.id, ...input }));
               },

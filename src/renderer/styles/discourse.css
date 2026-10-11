@@ -750,7 +750,7 @@
   display: none;
 }
 
-.tm-discourse-agent-config .tm-agent-console__reasoning button {
+.tm-discourse-agent-config .tm-agent-console__reasoning-options button {
   display: grid;
   min-height: var(--h-toolbar);
   place-items: center;
@@ -758,11 +758,11 @@
   border-radius: var(--r-xs);
 }
 
-.tm-discourse-agent-config .tm-agent-console__reasoning button > span {
+.tm-discourse-agent-config .tm-agent-console__reasoning-options button > span {
   display: none;
 }
 
-.tm-discourse-agent-config .tm-agent-console__reasoning button.is-selected {
+.tm-discourse-agent-config .tm-agent-console__reasoning-options button.is-selected {
   background: var(--card);
 }
 

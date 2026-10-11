@@ -441,8 +441,8 @@ export function AgentModelSelector({
             disabled={disabled || runtimes.length === 0}
             onClick={() => (open ? closeMenu(false) : openMenu())}
           >
-            {/* A narrow composer shows the model as this mark alone; its name is the title. */}
-            <Brain className="tm-agent-console__chip-icon" size={16} aria-hidden="true" />
+            {/* A composer chip leads with its mark, like Access and Profile; a narrow composer shows the mark alone. */}
+            <Brain className="tm-agent-console__chip-icon" size={13} aria-hidden="true" />
             <span className="tm-agent-console__summary">{triggerSummary}</span>
             <ChevronDown className="tm-agent-console__chevron" aria-hidden="true" size={13} />
           </button>
@@ -669,7 +669,7 @@ export function AgentModelSelector({
               align="start"
               disabled={disabled}
               trigger={<>
-                <Gauge className="tm-agent-console__chip-icon" size={16} aria-hidden="true" />
+                <Gauge className="tm-agent-console__chip-icon" size={13} aria-hidden="true" />
                 <span className="tm-agent-console__chip-label">{reasoningEffort ? formatReasoningEffort(reasoningEffort) : 'Default'}</span>
                 <ChevronDown className="tm-agent-console__chip-chevron" size={13} aria-hidden="true" />
               </>}

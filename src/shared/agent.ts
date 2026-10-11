@@ -276,6 +276,11 @@ export interface TaskManagerAppSettings {
   reviewRuntimeId?: AgentRuntimeId;
   reviewModelProvider?: AgentModelProviderId;
   reviewReasoningEffort?: string;
+  /** The side questions' default model and effort; unset follows the implementation default. */
+  sideQuestionModel?: string;
+  sideQuestionRuntimeId?: AgentRuntimeId;
+  sideQuestionModelProvider?: AgentModelProviderId;
+  sideQuestionReasoningEffort?: string;
   codexExternalTools: CodexExternalToolSettings;
   externalExecutables: ExternalExecutablePathSettings;
   runtimeExecutablePaths: Record<AgentRuntimeId, string | null>;

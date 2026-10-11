@@ -1,8 +1,8 @@
 /* Task Preview tab: status row, decision blocks, configuration, logs and the agent panel. */
 
-/* The Overview's Preview section: the state and since when, then the serving addresses as property rows. */
-.tm-preview-overview__state { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0; color: var(--text); font-size: var(--t-body); }
-.tm-preview-overview__line { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
+/* The Overview's Preview section: the state and since when (wrapping beneath it in the narrow record column, never cut off), then the serving addresses as property rows. */
+.tm-preview-overview__state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; margin: 0; color: var(--text); font-size: var(--t-body); }
+.tm-preview-overview__line { min-width: 0; color: var(--muted); font-size: var(--t-help); overflow-wrap: anywhere; }
 .tm-preview-overview .tm-props__row { align-items: center; }
 .tm-preview-overview .tm-props__row > dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-overview__more { margin: 0; color: var(--muted); font-size: var(--t-help); }

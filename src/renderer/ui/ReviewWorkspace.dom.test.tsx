@@ -45,7 +45,6 @@ function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(note: st
   return (
     <ReviewWorkspace
       taskId={`task-${Math.random()}`}
-      agentName="Codex"
       review={{ status: 'NEEDS_CHANGES', reviewedAt: '2026-07-07T10:12:00.000Z' }}
       findings={[finding]}
       currentDiffArtifactId="diff-1"
@@ -157,12 +156,12 @@ describe('ReviewWorkspace findings and requests', () => {
     render(<Harness onSubmit={onSubmit} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on line 1' }));
-    fireEvent.change(screen.getByLabelText(/^Comment for/), { target: { value: 'Return seconds here.' } });
+    fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Return seconds here.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
     expect(screen.getByText('Return seconds here.')).toBeDefined();
     expect(screen.getByText('1 finding and 1 comment')).toBeDefined();
 
-    fireEvent.change(screen.getByLabelText('Note for Codex'), { target: { value: 'Keep the signature.' } });
+    fireEvent.change(screen.getByLabelText('Review note'), { target: { value: 'Keep the signature.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(onSubmit).toHaveBeenCalledWith('Keep the signature.', [expect.objectContaining({ path: 'src/rateLimit.ts', line: 1, text: 'Return seconds here.' })]);
   });

@@ -1341,6 +1341,10 @@ export interface UpdateAppSettingsRequest {
   reviewRuntimeId?: import('./agent').AgentRuntimeId | null;
   reviewModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewReasoningEffort?: string | null;
+  sideQuestionModel?: string | null;
+  sideQuestionRuntimeId?: import('./agent').AgentRuntimeId | null;
+  sideQuestionModelProvider?: import('./agent').AgentModelProviderId | null;
+  sideQuestionReasoningEffort?: string | null;
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;

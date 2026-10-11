@@ -5,7 +5,7 @@
 /* These bodies never scroll; their own panes do, so they reserve no gutter. */
 .tm-detail__body.tm-detail__body--review { display: flex; flex-direction: column; padding: 0; overflow: hidden; scrollbar-gutter: auto; }
 
-.tm-review { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.tm-review { --review-code-inset: 124px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
 
 /* One line of state, the scope menu, and the review action. */
 /* The bar spans the page gutter on both sides and reserves the header's scrollbar gutter, so its ends line up with the tab bar's. */
@@ -59,16 +59,20 @@
 .tm-review-gap { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 var(--tm-gutter) 0 24px; background: var(--panel); color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
 .tm-review-gap code { overflow: hidden; color: var(--muted); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 
+/* Review rows add a note column between the numbers and the marker: the "+"
+   lives there, so it never covers a line number, and threads, comments and
+   the composer start at the code column that follows it (--review-code-inset). */
+.tm-diffline.tm-diffline--annotated { grid-template-columns: 42px 42px 22px 18px max-content; }
+.tm-diffline__note { position: relative; user-select: none; }
 .tm-review-line-group { position: relative; }
-.tm-review-line-group > .tm-diffline { position: relative; }
-.tm-review-line__comment { position: absolute; top: 0; left: 2px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--r-xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
+.tm-review-line__comment { position: absolute; top: 1px; left: 2px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
 .tm-review-line__comment:hover { background-color: var(--field-hover); }
 .tm-review-line-group > .tm-diffline:hover .tm-review-line__comment,
 .tm-review-line__comment:focus-visible { opacity: 1; }
 
 /* A finding opens under the line it is about: a card on the diff, the
    reasoning, and Ask and Dismiss on its title line. */
-.tm-review-thread { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px var(--tm-gutter) 12px 108px; padding: 12px 14px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
+.tm-review-thread { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); padding: 12px 14px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
 .tm-review-general .tm-review-thread { margin-left: var(--tm-gutter); }
 .tm-review-thread--focused,
 .tm-review-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring), var(--shadow-card); }
@@ -92,13 +96,13 @@
 
 /* The user's own comments read as theirs: the field plane, not a card. Edit and
    Delete wait at the end of the text and show on hover or focus, as a thread's actions do. */
-.tm-review-comment { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; margin: 8px var(--tm-gutter) 12px 108px; padding: 10px 8px 10px 12px; border-radius: var(--r); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); }
+.tm-review-comment { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); padding: 10px 8px 10px 12px; border-radius: var(--r); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); }
 .tm-review-comment p { flex: 1; min-width: 0; margin: 0; padding-top: 3px; color: var(--text); line-height: 1.55; white-space: pre-wrap; }
 .tm-review-comment__actions { display: flex; flex: 0 0 auto; gap: 2px; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
 /* Writing one is the app's composer, at the comment's place in the diff. */
-.tm-review-comment-composer { max-width: 760px; margin: 8px var(--tm-gutter) 12px 108px; }
+.tm-review-comment-composer { max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); }
 .tm-review-comment-composer .tm-composer__input { min-height: 64px; }
 
 /* The request bar: what will be sent, a note, and the action. */

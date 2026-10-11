@@ -352,7 +352,7 @@ function ModelSettings({
     <SettingsPane
       id="models"
       title="Models"
-      detail="Defaults for implementation, prompt refinement, the Preview agent, and review."
+      detail="Defaults for implementation, prompt refinement, the Preview agent, review, and side questions."
     >
       <div className="tm-settings__list tm-model-defaults">
         <AgentModelSetting
@@ -484,6 +484,40 @@ function ModelSettings({
             onSetAppSettings({ reviewReasoningEffort: reasoningEffort || null })
           }
         />
+        {/* Side questions start here; each question can still pick another model in its panel. */}
+        <AgentModelSetting
+          label="Side questions"
+          runtimeId={selected.sideQuestionRuntimeId}
+          modelId={selected.selectedSideQuestionModel?.id ?? ''}
+          reasoningEffort={selected.selectedSideQuestionEffort}
+          models={enabledModels}
+          runtimes={enabledRuntimes}
+          runtimeUnavailableReason={(runtime) =>
+            runtimeExecutionUnavailableReason(runtime, 'SIDE_QUESTION')
+          }
+          onDiscoverModels={onDiscoverAgentRuntimeModels}
+          onSelectionChange={(runtimeId, modelId) => {
+            const nextModel =
+              enabledModels.find(
+                (candidate) => candidate.runtimeId === runtimeId && candidate.id === modelId
+              ) ?? selectModel(enabledModels, undefined, runtimeId);
+            onSetAppSettings({
+              sideQuestionRuntimeId: runtimeId,
+              sideQuestionModel: nextModel?.model ?? null,
+              sideQuestionModelProvider: nextModel?.modelProvider ?? null,
+              sideQuestionReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
+            });
+          }}
+          onReasoningEffortChange={(reasoningEffort) =>
+            // Choosing an effort makes the whole selection explicit, so it stops following the implementation default.
+            onSetAppSettings({
+              sideQuestionRuntimeId: selected.sideQuestionRuntimeId,
+              sideQuestionModel: selected.selectedSideQuestionModel?.model ?? null,
+              sideQuestionModelProvider: selected.selectedSideQuestionModel?.modelProvider ?? null,
+              sideQuestionReasoningEffort: reasoningEffort || null
+            })
+          }
+        />
       </div>
     </SettingsPane>
   );
@@ -494,12 +528,15 @@ interface SelectedSettingsModels {
   promptRefinementRuntimeId: string;
   previewRecipeGenerationRuntimeId: string;
   reviewRuntimeId: string;
+  sideQuestionRuntimeId: string;
   selectedDefaultModel?: AgentModel;
   selectedPromptRefinementModel?: AgentModel;
   selectedPreviewRecipeGenerationModel?: AgentModel;
   selectedReviewModel?: AgentModel;
+  selectedSideQuestionModel?: AgentModel;
   selectedDefaultEffort: string;
   selectedReviewEffort: string;
+  selectedSideQuestionEffort: string;
 }
 
 export function selectSettingsModels(
@@ -534,6 +571,7 @@ export function selectSettingsModels(
     );
   const promptRefinementRuntimeIds = supportedRuntimeIds('PROMPT_REFINEMENT');
   const reviewRuntimeIds = supportedRuntimeIds('REVIEW');
+  const sideQuestionRuntimeIds = supportedRuntimeIds('SIDE_QUESTION');
   const promptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId &&
     availableRuntimeIds.has(appSettings.promptRefinementRuntimeId)
@@ -549,11 +587,24 @@ export function selectSettingsModels(
       : reviewRuntimeIds.has(defaultRuntimeId)
         ? defaultRuntimeId
         : ([...reviewRuntimeIds][0] ?? defaultRuntimeId);
+  // Side questions follow the implementation default until a model is chosen for them.
+  const sideQuestionChosen = Boolean(appSettings.sideQuestionRuntimeId && availableRuntimeIds.has(appSettings.sideQuestionRuntimeId));
+  const sideQuestionRuntimeId = sideQuestionChosen
+    ? appSettings.sideQuestionRuntimeId!
+    : sideQuestionRuntimeIds.has(defaultRuntimeId)
+      ? defaultRuntimeId
+      : ([...sideQuestionRuntimeIds][0] ?? defaultRuntimeId);
   const selectedDefaultModel = selectModel(
     models,
     appSettings.defaultModel,
     defaultRuntimeId,
     appSettings.defaultModelProvider
+  );
+  const selectedSideQuestionModel = selectModel(
+    models,
+    sideQuestionChosen ? appSettings.sideQuestionModel : appSettings.defaultModel,
+    sideQuestionRuntimeId,
+    sideQuestionChosen ? appSettings.sideQuestionModelProvider : appSettings.defaultModelProvider
   );
   const selectedPromptRefinementModel = selectModel(
     models,
@@ -588,14 +639,21 @@ export function selectSettingsModels(
     promptRefinementRuntimeId,
     previewRecipeGenerationRuntimeId,
     reviewRuntimeId,
+    sideQuestionRuntimeId,
     selectedDefaultModel,
     selectedPromptRefinementModel,
     selectedPreviewRecipeGenerationModel,
     selectedReviewModel,
+    selectedSideQuestionModel,
     selectedDefaultEffort:
       resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '',
     selectedReviewEffort:
-      resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? ''
+      resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '',
+    selectedSideQuestionEffort:
+      resolveReasoningEffort(
+        selectedSideQuestionModel,
+        sideQuestionChosen ? appSettings.sideQuestionReasoningEffort : appSettings.defaultReasoningEffort
+      ) ?? ''
   };
 }
 

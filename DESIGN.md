@@ -735,9 +735,13 @@ a More menu, each keeping its disabled reason inline.
 Provider text is quoted, never set as Task Monki's own: under a title or caption
 that names the agent, with a 2px `--edge-raised` rule along its left edge.
 
-Everything else on the page is a flat section: a quiet label (`--t-help`/500,
-`--muted`), then content. Space separates sections; no rule runs under a label,
-no card, no fill. The panel's primary is the page's primary; actions in a
+Everything else on the page is a section: a quiet label (`--t-help`/500,
+`--muted`), then content. Space separates sections; no rule runs under a label.
+The story's sections (request, result) are flat: no card, no fill. Record
+content — Details, the preview, History, and the agent review and pull request
+in the story — is an inset group: `--panel` fill, `--r-md` corners, a 16px 18px
+inset, no ring or shadow. Recessed reads as reference and raised as "act", so
+the groups never compete with the Now panel. Record groups sit 12px apart. The panel's primary is the page's primary; actions in a
 section stay secondary. A disabled action keeps its place, and its reason is
 stated once beside the actions and tied with `aria-describedby` (a disabled
 button cannot take focus, so a tooltip alone never reaches the keyboard).
@@ -746,9 +750,11 @@ button cannot take focus, so a tooltip alone never reaches the keyboard).
 panel, the request (omitted when it only repeats the title), the result (what
 the agent reported, attributed, above the files Task Monki captured, or "No file
 changes"), the agent review once one exists, and the pull request. A fixed
-300px record column beside it holds Details (one label and value per row), the
-preview, and History: what happened, who recorded it and when, with each
-entry's evidence left to the full ledger in Debug. An empty section is never
+300px record column beside it holds Details (one label and value per row; a
+setting's companion, such as the effort beside the model, follows in muted ink
+and wraps beneath rather than being cut off), the preview, and History: the date
+once per day, then what happened with its time on the right and who recorded it
+beneath, with each entry's evidence left to the full ledger in Debug. An empty section is never
 rendered: the Now panel offers what has not happened yet.
 
 **The Review tab.** Findings are read on the code. A 248px index on `--panel`
@@ -781,7 +787,8 @@ line there.
 With a panel docked, the two sheets read as one layout: the task page keeps only
 its 48px tab bar, which shares the panel head's line and hairline, and the
 task's title moves to the window's top bar beside the back and forward arrows
-(it does the same when the title scrolls away on the Agent tab). The panel's
+(it does the same when the title scrolls away on the Agent tab). The head folds
+rather than disappearing, so the tab bar glides up into the shared line. The panel's
 content keeps a 16px inset; its composer has the main composer's height and
 ends 16px above the sheet, as the main composer and the Review request bar do,
 so every input box shares one bottom line. Its head is
@@ -1084,14 +1091,15 @@ an hour are instant. Nothing loops unless work is actually running.
 | Modal | scale 0.97; the scrim (every scrim) fades over `--motion-standard` | `--motion-modal` 220ms | `--ease-out` |
 | Floating side panel | 8% from its edge | `--motion-slow` 280ms | `--ease-drawer` |
 | Docked side panel | its content fades in; the page makes room at once | `--motion-standard` 180ms | `--ease-out` |
+| Task head, as a panel docks | its row folds closed while it fades and lifts 6px; the title rises 6px into the top bar 60ms later, and both reverse | `--motion-slow` 280ms | `--ease-drawer` |
 | Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
 | Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | 200ms | `--ease-in-out` |
 
 Nothing animates because a tab or page was opened: a surface that is already
-there when its tab mounts (a request bar, a disclosure mounted open, the title
-in the top bar beside a docked panel) appears still. A hand-built chevron does
+there when its tab mounts (a request bar, a disclosure mounted open, the task
+head folded or open, the title in the top bar beside a docked panel) appears still. A hand-built chevron does
 not flip when its menu opens; the open fill says so, as on every `ActionMenu`.
 
 `--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
@@ -1164,7 +1172,8 @@ correct answer far more often than a border is).
 | Modal | `--surface` | `--edge` | `--shadow-modal` |
 | Modal scrim | `--scrim` | — | — |
 | Now panel | `--card` | `--edge-raised` | `--shadow-card` |
-| Flat section label | — | — | — (text `--muted`, `--t-help`/500) |
+| Overview record group (Details, preview, History, agent review, PR) | `--panel` | — | — |
+| Section label | — | — | — (text `--muted`, `--t-help`/500) |
 | Side panel, docked | `--surface` (its own sheet) | `--hair` seam | — |
 | Side panel, floating | `--surface` | `--edge` | `--shadow-pop` |
 | Tooltip, toast | `--overlay` | `--edge` | `--shadow-pop` |

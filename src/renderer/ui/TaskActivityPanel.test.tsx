@@ -21,6 +21,7 @@ describe('Activity Timeline timestamp formatting', () => {
   it('does not describe invalid timestamps as recent activity', () => {
     expect(formatTaskActivityTimestamp('not-a-date')).toEqual({
       date: 'Unknown',
+      day: 'Unknown date',
       time: '',
       full: 'Unknown time',
       label: 'Unknown time'
@@ -98,6 +99,9 @@ describe('Activity Timeline timestamp formatting', () => {
     expect(html).toContain('>History</h3>');
     // Every bounded entry is visible, oldest first; nothing hides behind a disclosure.
     expect(html.indexOf('Worktree ready')).toBeLessThan(html.indexOf('Review completed'));
+    // Entries on the same day share one date line.
+    const day = formatTaskActivityTimestamp('2026-07-02T10:05:00.000Z').day;
+    expect(html.split(`>${day}</h4>`)).toHaveLength(2);
     expect(html).not.toContain('<details');
     expect(html).toContain('Full history');
   });

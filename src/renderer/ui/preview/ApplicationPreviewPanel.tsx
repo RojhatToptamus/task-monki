@@ -128,12 +128,13 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
     <PreviewNotifyContext.Provider value={notify}>
       <OverviewSection
         title="Preview"
+        inset
         className="tm-preview-overview"
         aside={<button type="button" className="tm-osection__link" onClick={onOpen}>Open preview</button>}
       >
         <p className="tm-preview-overview__state">
           <span>{error ? 'Unavailable' : applicationPreviewStatus(status, !!snapshot?.approval).label}</span>
-          {line ? <span className="tm-preview-overview__line" title={line}>{line}</span> : null}
+          {line ? <span className="tm-preview-overview__line">{line}</span> : null}
         </p>
         {application ? (
           <PreviewAddressActions name="Application" address={application} onOpen={open} />

@@ -276,20 +276,26 @@ function interactionHeadline(interaction: InteractionRequestRecord, agent: strin
   }
 }
 
-/** A flat Overview section: one header style, no card. */
+/**
+ * An Overview section: one header style. The story's sections are flat; the
+ * record's are `inset`, recessed onto the panel ground so each reads as a group
+ * without competing with the Now panel.
+ */
 export function OverviewSection({
   title,
   aside,
+  inset = false,
   className = '',
   children
 }: {
   title: string;
   aside?: ReactNode;
+  inset?: boolean;
   className?: string;
   children: ReactNode;
 }) {
   return (
-    <section className={`tm-osection ${className}`.trim()}>
+    <section className={`tm-osection${inset ? ' tm-osection--inset' : ''} ${className}`.trim()}>
       <div className="tm-osection__head">
         <h3 className="tm-osection__title">
           {title}

@@ -158,7 +158,3 @@ export function isAgentNetworkAccessEnabled(
 ): boolean {
   return settings.sandbox === 'DANGER_FULL_ACCESS' || settings.networkAccess === true;
 }
-
-export function formatAgentNetworkAccess(settings: AgentExecutionSettings): string {
-  return isAgentNetworkAccessEnabled(settings) ? 'Enabled' : 'Disabled';
-}
