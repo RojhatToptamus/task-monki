@@ -110,11 +110,6 @@ export function SideQuestionPanel({ conversation, defaultModel, models, runtimes
           : undefined
       }}
     >
-      {turns.length === 0 && unattached.length === 0 ? (
-        <p className="tm-side-conversation__empty">
-          Answers read the task without interrupting it.
-        </p>
-      ) : null}
       {turns.map((turn) => {
         const followUp = turn.state === 'completed' ? sideQuestionFollowUp(turn) : undefined;
         const snapshot = sideQuestionSnapshotNote(questions.find((question) => question.id === turn.opener?.key));

@@ -1783,7 +1783,7 @@ export function TaskDetail(props: TaskDetailProps) {
               asked: requestRepeatsTitle(task) ? undefined : task.prompt,
               report: resultReport ? { author: runtimeName, text: resultReport } : undefined,
               reviewer: reviewGate.status !== 'NOT_RUN' ? {
-                author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter(Boolean).join(' · '),
+                author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter((part): part is string => Boolean(part)),
                 summary: reviewGate.result?.summary ?? reviewGate.summary
               } : undefined
             }}

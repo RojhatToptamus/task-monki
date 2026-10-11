@@ -66,10 +66,6 @@ export function DiscourseCloseIcon() {
   return <UiLucideIcon component={X} size={16} />;
 }
 
-export function DiscourseRoundtableIcon() {
-  return <UiLucideIcon component={MessagesSquare} size={28} />;
-}
-
 export function DiscourseNavIcon() {
   return <UiLucideIcon component={MessageSquare} />;
 }

@@ -1,30 +1,113 @@
 #!/usr/bin/env node
-// Renderer styles take type sizes and corner radii from the token scales in
-// DESIGN.md §3.2 and §4. A literal is a value the system already answers. A
-// desktop app keeps the arrow cursor on controls, so the pointer hand is refused.
+// Renderer styles take type sizes, weights, corner radii and layers from the
+// token scales in DESIGN.md §8.2 and §9. A literal is a value the system already
+// answers. A desktop app keeps the arrow cursor on controls, enabled or not; code
+// is set in the app's mono, never the browser's generic one; facts are never
+// strung together with separator glyphs; and motion uses the motion tokens.
+//
+// Rules with known debt are ratchets: their count is recorded in
+// tools/design-baseline.json and may only go down. Lower the number there when a
+// change removes violations; never raise it.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const stylesDirectory = resolve(here, '../src/renderer/styles');
+const baseline = JSON.parse(readFileSync(resolve(here, 'design-baseline.json'), 'utf8'));
+
+// Each pattern is matched against a declaration source with comments blanked.
 const rules = [
   // Relative em sizes (inline code set against its prose) are deliberate.
   { pattern: /font-size:\s*[\d.]+(?:px|rem)\b/g, message: 'literal font-size; use a --t-* token' },
   { pattern: /font:\s*(?:\d{3}\s+)?[\d.]+(?:px|rem)\b/g, message: 'literal size in font shorthand; use a --t-* token' },
   { pattern: /border-radius:[^;}]*(?<![\w-])[1-9][\d.]*px/g, message: 'literal border-radius; use a --r-* token' },
+  { pattern: /border-radius:\s*50%/g, message: 'percentage radius; a circle or pill is --r-pill' },
   { pattern: /var\(--(?:working|working-ink|working-bg|ctx-bg|amber-bg|error-bg)\)/g, message: 'removed alias; use the canonical token' },
-  { pattern: /cursor:\s*pointer/g, message: 'pointer cursor; desktop controls keep the arrow' }
+  { pattern: /cursor:\s*(?:pointer|not-allowed)/g, message: 'pointer or not-allowed cursor; controls keep the arrow, enabled or not' },
+  { pattern: /font-weight:\s*\d{3}\b/g, message: 'literal font-weight; use --w-regular, --w-medium or --w-title' },
+  { pattern: /font:\s*\d{3}\s/g, message: 'literal weight in font shorthand; use a --w-* token' },
+  { pattern: /font-family:\s*(?!\s)(?!var\(--font-(?:ui|mono)\)|inherit)[^;}]+/g, message: 'font-family that is not --font-ui, --font-mono or inherit' },
+  { pattern: /z-index:\s*-?\d+/g, message: 'literal z-index; use a --layer-* token' },
+  { pattern: /#[0-9a-f]{3,8}\b|\b(?:rgb|hsl|oklch|lab|lch)a?\(/gi, message: 'colour literal; every colour is a token (DESIGN.md §7.1)' },
+  { pattern: /text-transform:\s*uppercase|letter-spacing:\s*(?:0?\.\d+|[1-9][\d.]*)(?:em|px)/g, message: 'capitals or added tracking; labels are sentence case (DESIGN.md §8.2)' },
+  { pattern: /content:\s*["'][^"']*(?:·|\s[•—–]\s)[^"']*["']/g, message: 'separator glyph in generated content; separate facts with space or layout (DESIGN.md §5)' },
+  { pattern: /transition:\s*all\b/g, message: 'transition: all; name the properties that move' },
+  // Durations and curves are motion tokens; 0s, the shimmer's loop and the
+  // reduced-motion collapse (0.01ms) are the exceptions.
+  { pattern: /(?:transition|animation)(?:-duration|-delay)?:[^;{}]*?(?<![\w-])(?!0s\b)\d+(?:\.\d+)?m?s\b/g, message: 'literal duration; use a --motion-* token (DESIGN.md §12)', allow: /tm-shimmer|0\.01ms/ },
+  { pattern: /(?:transition|animation)(?:-timing-function)?:[^;{}]*?(?<![\w-])(?:ease-in(?!-out)|ease(?![-\w])|cubic-bezier\()/g, message: 'literal easing; use --ease-out, --ease-in-out or --ease-drawer (DESIGN.md §12)' }
 ];
+
+// Rules read per rule block: the selector and its declarations.
+const blockRules = [
+  { test: (selector, body) => /:disabled|\[aria-disabled|--disabled\b/.test(selector) && /opacity:\s*0?\.\d/.test(body), message: 'disabled as opacity; a disabled control is a fill and an ink (DESIGN.md §7.3)' },
+  { test: (selector) => /(?:textarea|\.tm-composer|\[contenteditable[^\]]*\]):hover/.test(selector), message: 'hover on a multi-line text surface (DESIGN.md §7.3)' },
+  { test: (selector, body) => /:hover/.test(selector) && /--shadow-(?:pop|modal)/.test(body), message: 'hover crossing shadow tiers (DESIGN.md §7.5)' }
+];
+
+// Ratchets: counted, compared with the baseline, never allowed to grow.
+const ratchets = {
+  'line-height-literal': { pattern: /line-height:\s*(?!\s)(?!var\(--lh-|1\s*[;}]|normal|inherit)[^;}]+|font:[^;{}]*var\(--t-[\w-]+\)\s*\/\s*(?!var\()[^;\s]+/g, message: 'literal line-height; use --lh-meta, --lh-ui, --lh-body, --lh-title or --lh-prose' },
+  'height-literal': { pattern: /(?:^|[;{\s])(?:min-|max-)?height:\s*(?:20|24|28|32|36|40|44|48)px/gm, message: 'literal height on the control or row scale; use an --h-* token (DESIGN.md §3)' },
+  'hover-background-shorthand': { block: (selector, body) => /:hover|:active|\[data-state=['"]open['"]\]|\[aria-expanded=['"]true['"]\]/.test(selector) && /(?:^|;)\s*background\s*:/.test(body), message: 'hover or press sets the background shorthand; set background-color so the press overlay survives' }
+};
+
 const failures = [];
+const ratchetHits = Object.fromEntries(Object.keys(ratchets).map((name) => [name, []]));
 
 for (const filename of readdirSync(stylesDirectory).filter((name) => name.endsWith('.css'))) {
   const source = readFileSync(resolve(stylesDirectory, filename), 'utf8').replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '));
-  for (const { pattern, message } of rules) {
+  const lineOf = (index) => source.slice(0, index).split('\n').length;
+  for (const { pattern, message, allow } of rules) {
+    for (const match of source.matchAll(pattern)) {
+      if (allow && allow.test(match[0])) continue;
+      failures.push(`${filename}:${lineOf(match.index)} ${message}: ${match[0].trim()}`);
+    }
+  }
+  for (const block of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const [selector, body] = [block[1], block[2]];
+    for (const { test, message } of blockRules) {
+      if (test(selector, body)) failures.push(`${filename}:${lineOf(block.index + selector.length)} ${message}: ${selector.trim().split('\n').pop()}`);
+    }
+    for (const [name, rule] of Object.entries(ratchets)) {
+      if (rule.block && rule.block(selector, body)) ratchetHits[name].push(`${filename}:${lineOf(block.index + selector.length)}`);
+    }
+  }
+  for (const [name, rule] of Object.entries(ratchets)) {
+    if (!rule.pattern) continue;
+    for (const match of source.matchAll(rule.pattern)) ratchetHits[name].push(`${filename}:${lineOf(match.index)}`);
+  }
+}
+
+// Icons come in the sizes DESIGN.md §8.3 names (12 only for a glyph inside a
+// 16px mark) and draw the shared --icon-stroke, so no component sets its own.
+const uiDirectory = resolve(here, '../src/renderer/ui');
+const iconRules = [
+  { pattern: /\bsize=\{(?!(?:12|13|16|18)\})\d+\}/g, message: 'icon size outside 13, 16, 18 (12 inside a 16px mark)' },
+  { pattern: /\b(?:strokeWidth|absoluteStrokeWidth)=/g, message: 'icon stroke set on the component; the stroke is --icon-stroke' }
+];
+const tsxFiles = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+  entry.isDirectory() ? tsxFiles(resolve(directory, entry.name))
+    : entry.name.endsWith('.tsx') && !entry.name.includes('.test.') ? [resolve(directory, entry.name)] : []);
+for (const file of tsxFiles(uiDirectory)) {
+  const source = readFileSync(file, 'utf8');
+  for (const { pattern, message } of iconRules) {
     for (const match of source.matchAll(pattern)) {
       const line = source.slice(0, match.index).split('\n').length;
-      failures.push(`${filename}:${line} ${message}: ${match[0].trim()}`);
+      failures.push(`${file.slice(uiDirectory.length + 1)}:${line} ${message}: ${match[0]}`);
     }
+  }
+}
+
+const ratchetReport = [];
+for (const [name, hits] of Object.entries(ratchetHits)) {
+  const allowed = baseline.styles?.[name];
+  if (allowed === undefined) throw new Error(`tools/design-baseline.json has no styles.${name}`);
+  if (hits.length > allowed) {
+    failures.push(`${ratchets[name].message}: ${hits.length} now, ${allowed} allowed. Latest: ${hits.slice(-Math.min(5, hits.length - allowed)).join(', ')}`);
+  } else if (hits.length < allowed) {
+    ratchetReport.push(`${name}: ${hits.length} (baseline ${allowed}; lower styles.${name} in tools/design-baseline.json)`);
   }
 }
 
@@ -32,4 +115,5 @@ if (failures.length > 0) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-console.log('Renderer styles use type and radius tokens, and no pointer cursor.');
+if (ratchetReport.length > 0) console.log(ratchetReport.join('\n'));
+console.log('Renderer styles use the type, weight, radius, layer, colour and motion tokens, the arrow cursor, the app mono and no separator glyphs; icons use the shared sizes and stroke.');

@@ -168,7 +168,7 @@
 /* Under the label: the 13px icon and its 8px gap. */
 .tm-step__body { display: grid; gap: 6px; min-width: 0; padding: 2px 0 8px 21px; }
 /* Opening a disclosure fades its content in; the height changes at once
-   (DESIGN.md 9 animates opacity, never layout). Radix skips this when a
+   (DESIGN.md 12 animates opacity, never layout). Radix skips this when a
    disclosure mounts already open, so a tab switch shows it still. */
 :is(.tm-step__body, .tm-steps__list, .tm-plan-card__body)[data-state='open'] { animation: tm-scrim-in var(--motion-fast) var(--ease-out); }
 .tm-step__reasoning .tm-message-markdown { color: var(--muted); font-size: var(--t-help); line-height: var(--lh-prose); }
@@ -230,7 +230,7 @@
 .tm-side-sheet__slot { display: contents; }
 .tm-side-conversation__exchange > .ghost-button { align-self: flex-start; }
 
-/* An assistant's own sheet beside the page (DESIGN.md 5, side panels). Docked,
+/* An assistant's own sheet beside the page (DESIGN.md Appendix B, side panels). Docked,
    it is a sibling of the page's sheet; floating, it slides over the page. */
 :is(.tm-side-sheet, .tm-side-sheet__slot) > .tm-side-conversation { flex: 1; background: transparent; box-shadow: none; }
 /* Docked, the page makes room at once; the panel's content fades in so it

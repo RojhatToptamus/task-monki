@@ -176,7 +176,7 @@
   font-weight: var(--w-medium);
 }
 
-/* The inline notice (DESIGN.md 5): --r-sm, 8 by 12, help text in its tone.
+/* The inline notice (DESIGN.md 10): --r-sm, 8 by 12, help text in its tone.
    Its actions are ghost buttons in the notice's ink. */
 .tm-discourse-status-banner {
   position: sticky;
@@ -403,7 +403,7 @@
 }
 
 /* Message actions keep their space but appear only while the message is
-   hovered or holds focus (DESIGN.md 5.1), so a long transcript reads as text. */
+   hovered or holds focus (DESIGN.md 6.5), so a long transcript reads as text. */
 .tm-discourse-message footer {
   display: flex;
   align-items: center;
@@ -728,7 +728,7 @@
   font-size: var(--t-help);
 }
 
-/* The reasoning switch here is the one segmented control (DESIGN.md 5): a
+/* The reasoning switch here is the one segmented control (DESIGN.md 10): a
    field track with its rim and --r-sm, 28px items at --r-xs, the chosen item
    on the card plane with the --edge-raised rim. Keyboard focus adds the halo
    to that rim and never changes the corner. */

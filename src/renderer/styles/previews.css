@@ -29,7 +29,7 @@
   scrollbar-gutter: stable;
 }
 
-/* The shared table (DESIGN.md 5): the ring over the rows, a whole row lit on hover. */
+/* The shared table (DESIGN.md 10): the ring over the rows, a whole row lit on hover. */
 .tm-previews__table table {
   table-layout: fixed;
 }

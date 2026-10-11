@@ -105,7 +105,7 @@
   opacity: 1;
   transform: none;
   pointer-events: auto;
-  transition: opacity var(--motion-standard) var(--ease-out) 60ms, transform var(--motion-slow) var(--ease-drawer);
+  transition: opacity var(--motion-standard) var(--ease-out) var(--motion-beat), transform var(--motion-slow) var(--ease-drawer);
 }
 /* Opening a tab that already has its title up top shows it still. */
 .tm-titlebar__title[data-instant] { transition: none; }
@@ -146,7 +146,7 @@
   overflow: hidden;
 }
 
-/* Every page is one sheet inset from the window edge (DESIGN.md 7.2): the
+/* Every page is one sheet inset from the window edge (DESIGN.md 11.2): the
    surface plane, 12px corners, and a hair seam that keeps the corner legible
    where the fill step is small. */
 .tm-canvas__content > :not(.tm-rail) {
@@ -168,7 +168,7 @@
 
 /* ---- Rail ---- */
 
-/* The rail is permanent and icon-only (DESIGN.md 7.2). Names are tooltips; a
+/* The rail is permanent and icon-only (DESIGN.md 11.2). Names are tooltips; a
    dot appears only when something waits on the user. */
 .tm-rail {
   flex: 0 0 56px;
@@ -321,7 +321,7 @@
   padding-top: 16px;
 }
 
-/* The inline notice (DESIGN.md 5), in the blocked tone. Inside a composer, card
+/* The inline notice (DESIGN.md 10), in the blocked tone. Inside a composer, card
    or dialog it sits in its container's flow; on a page it takes the gutter. */
 .tm-error {
   margin: 0;
@@ -449,7 +449,7 @@
 /* ---- Task card ---- */
 
 /* A task card: the repository and the state badge on top, the title, then
-   one quiet fact and the pull request when they exist (DESIGN.md 5). */
+   one quiet fact and the pull request when they exist (DESIGN.md Appendix B). */
 .tm-card {
   position: relative;
   display: flex;
@@ -1107,7 +1107,7 @@
 
 /* ---- Settings ---- */
 
-/* One sheet with its own section list (DESIGN.md 7.1): the list on the left, the section in an 880px reading column on the right. */
+/* One sheet with its own section list (DESIGN.md 11.1): the list on the left, the section in an 880px reading column on the right. */
 .tm-settings {
   display: flex;
   flex: 1;
@@ -1229,7 +1229,7 @@
   font-weight: var(--w-medium);
 }
 
-/* A table row (DESIGN.md 4.1): 48 tall, so a 32px control has 8px above and below. */
+/* A table row (DESIGN.md 9.1): 48 tall, so a 32px control has 8px above and below. */
 .tm-settings__row {
   display: flex;
   min-height: 48px;
@@ -1268,7 +1268,7 @@
   z-index: var(--layer-menu);
 }
 
-/* A single-line field (DESIGN.md 5): 32 tall, 8px corners, 12px inset, the
+/* A single-line field (DESIGN.md 10): 32 tall, 8px corners, 12px inset, the
    value at the body size. Focus is the shared text-entry rule in foundation.css. */
 .tm-theme-picker__trigger {
   display: grid;
@@ -1304,7 +1304,7 @@
   color: var(--muted);
 }
 
-/* The ActionMenu geometry (DESIGN.md 5): 4px pad, 28px rows, 6px row corners. */
+/* The ActionMenu geometry (DESIGN.md 10): 4px pad, 28px rows, 6px row corners. */
 .tm-theme-picker__menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -1319,7 +1319,7 @@
   border: 0;
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   scrollbar-gutter: stable;
-  /* It grows from its trigger, as a menu does (DESIGN.md 9). */
+  /* It grows from its trigger, as a menu does (DESIGN.md 12). */
   transform-origin: top right;
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
@@ -1539,7 +1539,7 @@
   line-height: var(--lh-ui);
 }
 
-/* Single-line fields (DESIGN.md 5): 32 tall, 12px inset, the value in body
+/* Single-line fields (DESIGN.md 10): 32 tall, 12px inset, the value in body
    type like every other field and field-style trigger. */
 .tm-settings__select,
 .tm-settings__input {
@@ -1597,7 +1597,7 @@
   border-top: 0;
 }
 
-/* A two-line row (DESIGN.md 4.1): the agent's name and its status over a switch. */
+/* A two-line row (DESIGN.md 9.1): the agent's name and its status over a switch. */
 .tm-agent-setting__summary {
   display: flex;
   min-height: 48px;
@@ -1635,7 +1635,7 @@
 }
 
 /* The runtime's facts (state, version, next step) stand apart by space, never
-   a separator glyph (DESIGN.md 1.9). */
+   a separator glyph (DESIGN.md 5). */
 .tm-agent-setting__facts {
   display: flex;
   flex-wrap: wrap;
@@ -1647,7 +1647,7 @@
 }
 
 /* The disclosure's name, then its current value in the quieter ink: no
-   separator between them (DESIGN.md 1.9). 16 + 4 + 4 keeps a 24px target. */
+   separator between them (DESIGN.md 5). 16 + 4 + 4 keeps a 24px target. */
 .tm-agent-setting__details > summary {
   display: inline-flex;
   align-items: center;
@@ -1819,7 +1819,7 @@
   color: var(--muted);
 }
 
-/* The menu takes the ActionMenu geometry (DESIGN.md 5): 6px below its
+/* The menu takes the ActionMenu geometry (DESIGN.md 10): 6px below its
    trigger, 4px pad, 28px rows with 6px corners. */
 .tm-agent-console__menu {
   position: absolute;
@@ -1836,7 +1836,7 @@
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   overflow: hidden;
-  /* It grows from its trigger, as an ActionMenu does (DESIGN.md 9); showing
+  /* It grows from its trigger, as an ActionMenu does (DESIGN.md 12); showing
      it again replays the entrance because [hidden] removes its box. */
   transform-origin: top left;
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
@@ -2035,7 +2035,7 @@
 }
 
 /* The effort is the one segmented control (`segmented segmented--fill` in the
-   markup, DESIGN.md 5): a 32px track of 28px segments, the chosen one raised
+   markup, DESIGN.md 10): a 32px track of 28px segments, the chosen one raised
    on the card plane with its ring. This rule only adds the container that
    decides when the choices fold into a menu. */
 .tm-agent-console__reasoning {

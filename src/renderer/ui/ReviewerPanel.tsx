@@ -107,13 +107,6 @@ export function ReviewerPanel({ conversation, reviewerName, reviewRunId, stale, 
         ) : undefined
       }}
     >
-      {turns.length === 0 && unattached.length === 0 ? (
-        <p className="tm-side-conversation__empty">
-          {stale
-            ? 'A run changed the task after this review. Run the review again to ask about the current code.'
-            : 'Ask why a finding matters, whether it still applies, or how to fix it.'}
-        </p>
-      ) : null}
       {turns.map((turn) => {
         const about = turn.opener ? aboutByInstruction.get(turn.opener.key) : undefined;
         const revisions = reviewerRevisionLines(decisions, findings, turn.run.id);

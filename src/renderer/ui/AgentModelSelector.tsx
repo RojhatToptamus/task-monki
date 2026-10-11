@@ -621,7 +621,7 @@ export function AgentModelSelector({
       {onReasoningEffortChange && efforts.length > 0 ? (
         <div className="tm-agent-console__row">
           <span className="tm-agent-console__label">Reasoning</span>
-          {/* The one segmented control (DESIGN.md 5), filling the row. */}
+          {/* The one segmented control (DESIGN.md 10), filling the row. */}
           <div
             className="segmented segmented--fill tm-agent-console__reasoning"
             role="group"

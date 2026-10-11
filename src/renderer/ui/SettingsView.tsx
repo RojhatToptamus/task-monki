@@ -88,7 +88,7 @@ export interface SettingsViewProps extends AgentProfilesSettingsActions, Reposit
   runtimes: AgentRuntimeState[];
 }
 
-/** Settings is one sheet with its own section list (DESIGN.md 7.1, settings archetype). */
+/** Settings is one sheet with its own section list (DESIGN.md 11.1, settings archetype). */
 export function SettingsView(props: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>(props.initialSection ?? 'repositories');
 

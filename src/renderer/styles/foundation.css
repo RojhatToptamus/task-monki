@@ -1,5 +1,5 @@
 :root {
-  /* Type — the seven roles in DESIGN.md 3.2. A component never sets a size
+  /* Type — the seven roles in DESIGN.md 8.2. A component never sets a size
      that is not one of these. */
   --t-title: 22px;
   --t-heading: 15px;
@@ -25,7 +25,7 @@
   /* The page gutter: every page's title, tabs and content start here. */
   --tm-gutter: 32px;
 
-  /* Icons draw one line weight at every size (DESIGN.md 3.3). */
+  /* Icons draw one line weight at every size (DESIGN.md 8.3). */
   --icon-stroke: 1.25px;
 
   /* Control heights — decision surface, toolbar, compact, icon button. */
@@ -34,12 +34,21 @@
   --h-compact: 24px;
   --h-icon: 28px;
 
+  /* Rows, bars and heads (DESIGN.md §3): a dense row (rail, index, menu), a
+     content row or file head, a two-line or table row, a toolbar under a head,
+     and a head. */
+  --h-row-dense: 28px;
+  --h-row: 36px;
+  --h-row-tall: 48px;
+  --h-bar: 40px;
+  --h-head: 48px;
+
   /* Keyboard focus adds a halo to whatever rim a control has; it never replaces
      it. Inside a scrolling or clipped list the halo is drawn inward. */
   --focus-halo: 0 0 0 3px var(--focus-ring);
   --focus-halo-inset: inset 0 0 0 2px var(--focus-ring);
 
-  /* Motion (DESIGN.md 9). Durations by job; easing curves are the only three
+  /* Motion (DESIGN.md 12). Durations by job; easing curves are the only three
      the app uses. Entering surfaces ease out; nothing eases in. */
   --motion-fast: 120ms;
   --motion-standard: 180ms;
@@ -47,6 +56,8 @@
   --motion-slow: 280ms;
   /* Something moving on screen (a toggle's knob) eases both ways over this. */
   --motion-move: 200ms;
+  /* The beat one motion waits after another it follows (the title after the fold). */
+  --motion-beat: 60ms;
   --motion-toast: 240ms;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
@@ -255,7 +266,7 @@ summary,
   cursor: default;
 }
 
-/* State feedback eases (DESIGN.md 9): fills and ink settle over --motion-fast,
+/* State feedback eases (DESIGN.md 12): fills and ink settle over --motion-fast,
    and a press scale returns the same way. A component that names its own
    transition replaces this one. Menu items and listbox options stay instant,
    because their highlight follows the pointer and the arrow keys. */

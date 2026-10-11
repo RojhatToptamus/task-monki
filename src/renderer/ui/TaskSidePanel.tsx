@@ -9,7 +9,7 @@ const PANEL_MAX_WIDTH = 560;
 const SHELL_CHROME_WIDTH = 56 + 8 + 8;
 
 /**
- * Where a task's assistant panel sits (DESIGN.md 5, side panels): its own sheet
+ * Where a task's assistant panel sits (DESIGN.md Appendix B, side panels): its own sheet
  * beside the page, narrowing toward its minimum before the page drops below
  * `minContentWidth`, and floating over the page only when even that does not
  * fit. The chosen width is the person's and persists; a narrow window lends

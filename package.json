@@ -57,7 +57,7 @@
     "check:architecture": "node scripts/check-architecture.mjs",
     "verify": "npm run check:themes && npm run typecheck && npm run check:architecture && npm test && npm run test:renderer:dom && npm run check:codex-protocol && npm run build",
     "generate:themes": "node tools/build-themes.mjs",
-    "check:themes": "node tools/build-themes.mjs --check && node tools/check-theme-control-rims.mjs && node tools/check-style-tokens.mjs",
+    "check:themes": "node tools/build-themes.mjs --check && node tools/check-theme-control-rims.mjs && node tools/check-style-tokens.mjs && node tools/check-renderer-ui.mjs",
     "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",

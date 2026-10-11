@@ -42,7 +42,7 @@ export function UiLucideIcon({
 /**
  * The one mark for every agent in the app: the implementation agent's side
  * question, the reviewer, the Preview agent and prompt refinement. Agents
- * never get a chat or comment icon (DESIGN.md 3.3).
+ * never get a chat or comment icon (DESIGN.md 8.3).
  */
 export function AgentMark({ size = 13, className }: { size?: number; className?: string } = {}) {
   return <UiLucideIcon component={Sparkles} size={size} className={className} />;

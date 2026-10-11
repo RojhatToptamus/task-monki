@@ -38,7 +38,7 @@ export function RailItem({
   const descriptionId = useId();
   const waiting = count > 0 ? `${count} ${countNoun}${count === 1 ? '' : 's'} waiting` : undefined;
   return (
-    <Tooltip label={waiting ? `${label} · ${count > 99 ? '99+' : count} waiting` : label} side="right">
+    <Tooltip label={waiting ? `${label}, ${count > 99 ? '99+' : count} waiting` : label} side="right">
       <button
         type="button"
         className={`tm-rail__item${active ? ' tm-rail__item--active' : ''}`}

@@ -254,7 +254,7 @@
   background: none;
   color: var(--muted);
   font-size: var(--t-body);
-  font-weight: 400;
+  font-weight: var(--w-regular);
   white-space: nowrap;
   transition: color var(--motion-fast) var(--ease-out);
 }
@@ -501,7 +501,7 @@
    ring or shadow, so the Now panel stays the page's one raised element. */
 .tm-osection--inset,
 .tm-workpanels > :is(.tm-prstatus, .tm-reviewcard) {
-  padding: 16px 18px;
+  padding: 16px;
   border-radius: var(--r-md);
   background: var(--panel);
 }
@@ -926,7 +926,7 @@
 
 .tm-prstatus__state {
   color: var(--muted);
-  font-weight: 400;
+  font-weight: var(--w-regular);
 }
 
 .tm-prstatus__freshness {
@@ -1111,7 +1111,7 @@
   margin: 0;
   color: var(--faint);
   font-size: var(--t-meta);
-  font-weight: 400;
+  font-weight: var(--w-regular);
 }
 
 .tm-ohistory__list {
@@ -1902,7 +1902,6 @@
 }
 
 .tm-delete-modal__worktree--disabled {
-  cursor: not-allowed;
 }
 
 .tm-delete-modal__worktree--disabled strong {
@@ -2442,7 +2441,7 @@
 }
 
 /* Permanent fact → a plain muted caption, not a tinted full-width box
-   (DESIGN.md §4 ban on tinted boxes / audit §03 Debug). */
+   (DESIGN.md §9 ban on tinted boxes / audit §03 Debug). */
 .tm-debug__notice {
   padding: 0 2px;
   font-size: var(--t-meta);

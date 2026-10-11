@@ -9,7 +9,7 @@ const TOOLTIP_SKIP_DELAY_MS = 300;
 const SharedProvider = createContext(false);
 
 /**
- * Tooltips name icon-only controls and show shortcuts (DESIGN.md 5.1). The
+ * Tooltips name icon-only controls and show shortcuts (DESIGN.md 6.5). The
  * first one waits half a second; moving to a neighbour shows the next at once.
  */
 export function TooltipProvider({ children }: { children: ReactNode }) {

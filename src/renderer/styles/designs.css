@@ -221,7 +221,7 @@
   background: var(--surface);
 }
 
-/* The toolbar under a head is 40px (DESIGN.md 4.1): 28px controls, words from
+/* The toolbar under a head is 40px (DESIGN.md 9.1): 28px controls, words from
    the 16px edge of the stage below. */
 .tm-design-canvas__toolbar {
   min-height: 40px;
@@ -668,7 +668,7 @@
 }
 
 /* The actions' room is reserved at rest, so revealing them never re-truncates
-   the name (DESIGN.md 5.1: hover reveals, it does not relocate). It holds the
+   the name (DESIGN.md 6.5: hover reveals, it does not relocate). It holds the
    two widest actions, Import and Remove. */
 .tm-design-reference-row > label > span:last-child {
   padding-right: 112px;
@@ -1177,7 +1177,7 @@
   width: min(440px, 100%);
 }
 
-/* The inline notice (DESIGN.md 5): --r-sm, 8 by 12, help text in its tone. */
+/* The inline notice (DESIGN.md 10): --r-sm, 8 by 12, help text in its tone. */
 .tm-design-delete__error,
 .tm-modal__panel .tm-design-external__error {
   margin: 8px 0 0;

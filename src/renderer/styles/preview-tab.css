@@ -47,7 +47,7 @@
 .tm-application-preview__endpoint { min-width: 0; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); }
 .tm-application-preview__endpoint > .tm-preview-address { max-width: 320px; }
 .tm-application-preview__muted,
-.tm-application-preview__notice { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: 400; line-height: 1.5; }
+.tm-application-preview__notice { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-regular); line-height: 1.5; }
 .tm-application-preview__error { margin: 0; color: var(--blocked-ink); font-size: var(--t-help); line-height: 1.5; white-space: normal; }
 .tm-application-preview__state { font-size: var(--t-help); color: var(--muted); white-space: nowrap; }
 .tm-application-preview__state-detail { color: var(--muted); }
@@ -188,13 +188,13 @@
 
 /* Group labels and rows (DESIGN §3 group label, §5 settings row): no cards inside the block. */
 .tm-preview-group { margin: 4px 0 0; color: var(--muted); font-size: var(--t-group); font-weight: var(--w-medium); }
-.tm-preview-group__meta { font-size: var(--t-meta); font-weight: 400; }
+.tm-preview-group__meta { font-size: var(--t-meta); font-weight: var(--w-regular); }
 .tm-preview-group__meta time { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-preview-rows { display: grid; min-width: 0; }
 .tm-preview-row { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto; gap: 2px 14px; align-items: baseline; min-height: 34px; padding: 6px 0; border-top: 1px solid var(--hair); min-width: 0; font-size: var(--t-help); }
 .tm-preview-rows > .tm-preview-row:first-child { border-top: 0; }
 .tm-preview-row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }
-.tm-preview-row__name code { font-size: var(--t-help); font-weight: 400; }
+.tm-preview-row__name code { font-size: var(--t-help); font-weight: var(--w-regular); }
 .tm-preview-row__detail { min-width: 0; color: var(--text-soft); overflow-wrap: anywhere; line-height: 1.5; }
 .tm-preview-row__detail code { color: var(--text); font-size: var(--t-help); white-space: pre-wrap; }
 .tm-preview-row__detail small { display: block; margin-top: 2px; color: var(--muted); font-size: var(--t-meta); }

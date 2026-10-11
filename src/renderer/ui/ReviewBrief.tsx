@@ -6,8 +6,8 @@ export interface ReviewBriefContent {
   asked?: string;
   /** What the implementation agent reported: a claim, quoted. */
   report?: { author: string; text: string };
-  /** The reviewer's summary, quoted; the author names the runtime and model. */
-  reviewer?: { author: string; summary?: string };
+  /** The reviewer's summary, quoted; the author names the runtime and model, one fact each. */
+  reviewer?: { author: string[]; summary?: string };
 }
 
 /**
@@ -58,10 +58,10 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
   );
 }
 
-function BriefBlock({ label, meta, children }: { label: string; meta?: string; children: ReactNode }) {
+function BriefBlock({ label, meta = [], children }: { label: string; meta?: string[]; children: ReactNode }) {
   return (
     <div className="tm-review-brief__block">
-      <h3 className="tm-review-brief__label">{label}{meta ? <span>{meta}</span> : null}</h3>
+      <h3 className="tm-review-brief__label">{label}{meta.map((fact) => <span key={fact}>{fact}</span>)}</h3>
       {children}
     </div>
   );

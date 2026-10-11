@@ -5,7 +5,7 @@
  * file that touches the filesystem, so this module can also be loaded by tests
  * and by the audit tooling.
  *
- * Design contract (DESIGN.md §2):
+ * Design contract (docs/design/THEMES.md):
  *   1. Surfaces are a strictly monotonic ladder in perceived lightness.
  *   2. An interaction step is always SMALLER than the structural step it sits
  *      inside, so state never reads as elevation.

@@ -242,7 +242,7 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   background: transparent;
   color: var(--muted);
   font-size: var(--t-body);
-  font-weight: 400;
+  font-weight: var(--w-regular);
   white-space: nowrap;
   /* The chosen item's fill and rim arrive together. */
   transition:
@@ -341,7 +341,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
-/* Buttons — four families on one geometry (DESIGN.md 5). Primary, secondary
+/* Buttons — four families on one geometry (DESIGN.md 10). Primary, secondary
    and destructive share the decision height; ghost is the compact toolbar
    family. `.button--sm` puts any filled family on the toolbar height. */
 .primary-button,
@@ -425,7 +425,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 }
 
 /* Press: every button settles by a fraction on press and returns on release
-   (DESIGN.md 9). Fill and ink transition with it; geometry never does. */
+   (DESIGN.md 12). Fill and ink transition with it; geometry never does. */
 :where(.primary-button, .outline-button, .danger-button, .ghost-button, .tm-iconbtn, .segmented__btn) {
   transition:
     background-color var(--motion-fast) var(--ease-out),
@@ -801,7 +801,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   line-height: 1.5;
 }
 .interaction-choice__text { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
-.interaction-choice strong { font-weight: 400; }
+.interaction-choice strong { font-weight: var(--w-regular); }
 .interaction-choice small { color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .interaction-choice__mark { display: grid; place-items: center; flex: 0 0 16px; width: 16px; height: 16px; margin-top: 2px; border-radius: var(--r-2xs); background: var(--field); box-shadow: inset 0 0 0 1px var(--control-edge); color: var(--on-primary); }
 .interaction-choice__mark[data-kind='radio'] { border-radius: var(--r-pill); }
@@ -937,7 +937,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .app-shell[data-input-modality='keyboard'] :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__trigger:focus { box-shadow: 0 0 0 2px var(--focus-ring); }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact { display: inline-flex; flex: 0 1 auto; gap: 2px; min-width: 0; container-type: normal; }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__row { display: flex; min-width: 0; }
-:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: 400; }
+:is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__summary { font-size: var(--t-help); font-weight: var(--w-regular); }
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__reasoning { min-height: var(--h-toolbar); padding: 0; background: transparent; box-shadow: none; container-type: normal; }
 /* In a toolbar the effort is always a chip menu, like the model beside it; both lead with their mark. */
 :is(.tm-composer__toolbar, .tm-chip-row) .tm-agent-console--compact .tm-agent-console__chip-icon { display: inline-block; color: var(--muted); }
