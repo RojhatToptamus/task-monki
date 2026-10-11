@@ -22,39 +22,9 @@
   background: var(--surface);
 }
 
-/* The masthead folds to nothing when a side panel docks: its row closes on the
-   drawer curve while the content fades and lifts, so the tab bar glides up
-   instead of jumping. The title meanwhile rises into the window's top bar. */
-.tm-detail__fold {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows var(--motion-slow) var(--ease-drawer);
-}
-
-.tm-detail__fold-inner {
-  min-height: 0;
-  overflow: hidden;
-  transition: opacity var(--motion-standard) var(--ease-out), transform var(--motion-slow) var(--ease-drawer);
-}
-
-.tm-detail__fold[data-collapsed] {
-  grid-template-rows: 0fr;
-}
-
-.tm-detail__fold[data-collapsed] .tm-detail__fold-inner {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-
-/* Opening a tab shows its head as it is. */
-.tm-detail__fold[data-instant],
-.tm-detail__fold[data-instant] .tm-detail__fold-inner {
-  transition: none;
-}
-
-/* The Overview scrolls as a whole and reserves a scrollbar gutter; the header
-   of a tab whose panes scroll on their own reserves the same, so the title row
-   and task menu never shift between tabs. */
+/* The Overview scrolls as a whole and reserves a scrollbar gutter; the tab bar
+   of a tab whose panes scroll on their own reserves the same, so the assistant
+   toggle at its right end never shifts between tabs. */
 .tm-detail:not(.tm-detail--overview, .tm-detail--debug) > .tm-detail__chrome {
   overflow: hidden;
   scrollbar-gutter: stable;

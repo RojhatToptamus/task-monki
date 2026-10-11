@@ -9,6 +9,7 @@ import {
   type ReactNode,
   type RefObject
 } from 'react';
+import { createPortal } from 'react-dom';
 import { FolderGit2, GitBranch, RefreshCw } from 'lucide-react';
 import {
   EMPTY_REVIEW_DRAFT,
@@ -181,10 +182,11 @@ interface TaskDetailProps {
   onSendInstruction: AgentSessionProps['onSendQueue'];
   headingRef?: RefObject<HTMLHeadingElement | null>;
   /**
-   * The task's title while the page's own title area is out of view, for the window's top bar.
-   * `animate` is false when the change came with a tab or page opening, which shows it still.
+   * The window's top bar, where the task's title row sits whenever the page
+   * head is not on screen: always on the working tabs, and on a reading tab
+   * once its head has scrolled away.
    */
-  onCompactTitleChange?(title: string | undefined, animate: boolean): void;
+  titlebarSlot?: HTMLElement | null;
   error?: string;
   task?: Task;
   repository?: Repository;
@@ -344,7 +346,9 @@ export function TaskDetail(props: TaskDetailProps) {
   }, []);
   // The page keeps at least 560px beside a docked panel; below that the panel floats over it.
   const sidePanelLayout = useTaskSidePanelLayout(560);
-  const [agentHeaderVisible, setAgentHeaderVisible] = useState(true);
+  // Whether a reading tab's head has scrolled out of view, and whether that
+  // change came from the reader scrolling (the only change that animates).
+  const [headScrolledAway, setHeadScrolledAway] = useState({ away: false, animate: false });
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<{ taskId: string; settings: AgentExecutionSettings }>();
@@ -454,8 +458,6 @@ export function TaskDetail(props: TaskDetailProps) {
   // to or from it remounts the tablist. If the control that had focus went away
   // with it, keep the user oriented on the tab they just selected.
   const previousTabRef = useRef(tab);
-  const renderedTabRef = useRef(tab);
-  useEffect(() => { renderedTabRef.current = tab; }, [tab]);
   useLayoutEffect(() => {
     if (previousTabRef.current === tab) return;
     previousTabRef.current = tab;
@@ -464,6 +466,28 @@ export function TaskDetail(props: TaskDetailProps) {
       document.getElementById(`task-detail-tab-${tab}`)?.focus({ preventScroll: true });
     }
   }, [tab]);
+
+  // A reading tab's head scrolls with the page; once its title has left the
+  // view, the title row stands in the window's top bar. The first report after
+  // a tab or task opens states where the page already is, so it never animates.
+  const headTitleRef = useRef<HTMLHeadingElement | null>(null);
+  const setHeadTitle = useCallback((element: HTMLHeadingElement | null) => {
+    headTitleRef.current = element;
+    if (props.headingRef) props.headingRef.current = element;
+  }, [props.headingRef]);
+  useEffect(() => {
+    setHeadScrolledAway({ away: false, animate: false });
+    const title = headTitleRef.current;
+    const root = detailRootRef.current;
+    if ((tab !== 'overview' && tab !== 'debug') || !title || !root || typeof IntersectionObserver === 'undefined') return;
+    let settled = false;
+    const observer = new IntersectionObserver(([entry]) => {
+      setHeadScrolledAway({ away: !entry.isIntersecting, animate: settled });
+      settled = true;
+    }, { root });
+    observer.observe(title);
+    return () => observer.disconnect();
+  }, [tab, task?.id]);
 
   useEffect(() => {
     if (reviewIsRunning) {
@@ -953,7 +977,7 @@ export function TaskDetail(props: TaskDetailProps) {
   });
 
   // A turn after the review that stopped (failed, interrupted, lost) waits on the person
-  // before the review can move; the Review tab says so, since its page head is folded.
+  // before the review can move; the Review tab says so, since it has no page head.
   const implementationNeedsYou = Boolean(run && run.mode !== 'REVIEW' && (
     implementationRetryRequired || ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(run.status)
   ));
@@ -1351,6 +1375,39 @@ export function TaskDetail(props: TaskDetailProps) {
     </dl>
   );
   const repositoryUnavailable = props.repository && props.repository.status !== 'AVAILABLE';
+  // The title row's steps and menu, in the page head at the decision height or
+  // in the window's top bar at the toolbar height. Only the head states the
+  // repository's state, so only there does a step point to it.
+  const stepButton = (action: HeadAction, place: 'head' | 'titlebar') => (
+    <button
+      key={action.label}
+      type="button"
+      className={place === 'head' ? 'outline-button' : 'outline-button button--sm'}
+      disabled={action.disabled}
+      title={action.title}
+      aria-describedby={place === 'head' && repositoryUnavailable ? repositoryContextId : undefined}
+      onClick={action.onClick}
+    >
+      {action.label}
+    </button>
+  );
+  const taskMenu = (place: 'head' | 'titlebar') => (
+    <TaskActionsMenu
+      taskId={task.id}
+      title={task.title}
+      archived={task.workflowPhase === 'ARCHIVED'}
+      openTarget={
+        worktree
+          ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
+          : { type: 'repository', repositoryId: task.repositoryId }
+      }
+      onArchive={props.onArchive}
+      onRequestDelete={props.onRequestDelete}
+      onOpenDebug={() => setTab('debug')}
+      className={place === 'head' ? 'tm-detail__taskmenu' : 'tm-titlebar__taskmenu'}
+      align={place === 'head' ? 'end' : 'start'}
+    />
+  );
   const taskMasthead = (
       <div
         className={detailHeadClassName}
@@ -1358,41 +1415,13 @@ export function TaskDetail(props: TaskDetailProps) {
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
         <div className="tm-detail__row">
-          <h1 ref={props.headingRef} className="tm-detail__title" tabIndex={-1}>
+          <h1 ref={setHeadTitle} className="tm-detail__title" tabIndex={-1}>
             {task.title}
           </h1>
           <div className="tm-detail__titleactions">
             {/* Header actions reach the same steps from every other tab. */}
-            {tab !== 'overview'
-              ? headActions.map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    className="outline-button"
-                    disabled={action.disabled}
-                    title={action.title}
-                    aria-describedby={repositoryUnavailable ? repositoryContextId : undefined}
-                    onClick={action.onClick}
-                  >
-                    {action.label}
-                  </button>
-                ))
-              : null}
-            <TaskActionsMenu
-              taskId={task.id}
-              title={task.title}
-              archived={task.workflowPhase === 'ARCHIVED'}
-              openTarget={
-                worktree
-                  ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
-                  : { type: 'repository', repositoryId: task.repositoryId }
-              }
-              onArchive={props.onArchive}
-              onRequestDelete={props.onRequestDelete}
-              onOpenDebug={() => setTab('debug')}
-              className="tm-detail__taskmenu"
-              align="end"
-            />
+            {tab !== 'overview' ? headActions.map((action) => stepButton(action, 'head')) : null}
+            {taskMenu('head')}
           </div>
         </div>
         <div className="tm-detail__context">
@@ -1494,14 +1523,24 @@ export function TaskDetail(props: TaskDetailProps) {
     ? { label: 'Reviewer', element: reviewerPanel }
     : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
     : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
-  // With a side panel docked, the page keeps only its tab bar, which then shares
-  // the panel head's 48px line; the title moves to the window's top bar. The
-  // Review tab always reads this way: the code gets the room.
-  const headCollapsed = (Boolean(sidePanel) && sidePanelLayout.docked) || tab === 'review';
-  const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
-  // The title moves between the page and the top bar only when a panel opens or
-  // closes, or the conversation scrolls; a tab opening shows its head as it is.
-  const tabJustOpened = renderedTabRef.current !== tab;
+  // The title has one place at a time: the page head while it is on screen,
+  // otherwise the window's top bar. Only the reading tabs (Overview, Debug)
+  // have a head, and it scrolls with the page. The working tabs give the
+  // conversation, the diff and the preview the height: their title row stands
+  // in the top bar from the moment they open, so the tab bar never moves
+  // between them and nothing folds when a side panel docks.
+  const readingTab = tab === 'overview' || tab === 'debug';
+  const titleInTopBar = !readingTab || headScrolledAway.away;
+  // The title row carries what the head offers from every tab but the
+  // Overview, whose Now panel holds it: a step, and the agent's request where
+  // the tab does not show it. The Review bar has its own review step and
+  // request, and the Agent tab shows the request itself.
+  const moveToReview = awaitingMoveToReview ? nextAction.primary : undefined;
+  const titleRowSteps: HeadAction[] = tab === 'overview' ? [] : [
+    ...(tab === 'review' ? [] : headActions),
+    ...(moveToReview ? [{ label: moveToReview.label, ...nextActionState(moveToReview.id), onClick: () => onNextAction(moveToReview.id) }] : [])
+  ];
+  const titleRowRequest = Boolean(pendingInteraction) && !['overview', 'agent', 'review'].includes(tab);
 
   const taskNav = (
         <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
@@ -1587,21 +1626,35 @@ export function TaskDetail(props: TaskDetailProps) {
       </div>
   );
 
-  // With a side panel docked the masthead folds away rather than vanishing, while
-  // the title rises into the window's top bar; closing the panel reverses both.
-  const collapsibleMasthead = (
-    <div className="tm-detail__fold" data-collapsed={headCollapsed ? '' : undefined}
-      data-instant={tabJustOpened ? '' : undefined} inert={headCollapsed ? true : undefined}
-      data-conversation-collapse={headCollapsed ? undefined : ''}>
-      <div className="tm-detail__fold-inner">{taskMasthead}</div>
-    </div>
-  );
+  // The title row in the window's top bar. On a working tab its title is the
+  // page's heading; on a reading tab it echoes the head that scrolled away, and
+  // is the one thing that moves: it rises in as the reader scrolls. A tab
+  // opening shows it as it is.
+  const titlebarRow = props.titlebarSlot ? createPortal(
+    <div className="tm-titlebar__task" data-visible={titleInTopBar ? '' : undefined}
+      data-instant={readingTab && headScrolledAway.animate ? undefined : ''}
+      inert={titleInTopBar ? undefined : true} aria-hidden={titleInTopBar ? undefined : true}>
+      {readingTab ? (
+        <span className="tm-titlebar__title" aria-hidden="true" title={task.title}>{task.title}</span>
+      ) : (
+        <h1 ref={props.headingRef} className="tm-titlebar__title" tabIndex={-1} title={task.title}>{task.title}</h1>
+      )}
+      {taskMenu('titlebar')}
+      {titleRowRequest ? (
+        <button type="button" className="tm-detail__attention" onClick={() => {
+          setTab('agent'); setAgentAttentionRequest((value) => value + 1);
+        }}>Go to request</button>
+      ) : null}
+      {titleRowSteps.map((action) => stepButton(action, 'titlebar'))}
+    </div>,
+    props.titlebarSlot
+  ) : null;
 
   return (
     <>
-    <CompactTitle title={titleOutOfView ? task.title : undefined} animate={!tabJustOpened} onChange={props.onCompactTitleChange} />
+    {titlebarRow}
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
-      {tab !== 'agent' ? <div className="tm-detail__chrome">{collapsibleMasthead}{taskNav}</div> : null}
+      {tab !== 'agent' ? <div className="tm-detail__chrome">{readingTab ? taskMasthead : null}{taskNav}</div> : null}
 
       <div
         id="task-detail-panel"
@@ -1707,8 +1760,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('review')}
-          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{collapsibleMasthead}{taskNav}</div>}
-          onHeaderVisibleChange={setAgentHeaderVisible}
+          attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskNav}</div>}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
             promptDraft={task.promptDraft}
@@ -1928,16 +1980,6 @@ export function TaskDetail(props: TaskDetailProps) {
     ) : null}
     </>
   );
-}
-
-/** Gives the window's top bar the task title while the page's own title is out of view. */
-/** Reports the top bar's title, and whether its change should be animated. */
-function CompactTitle({ title, animate, onChange }: { title?: string; animate: boolean; onChange?(title: string | undefined, animate: boolean): void }) {
-  useEffect(() => {
-    onChange?.(title, animate);
-  }, [onChange, title, animate]);
-  useEffect(() => () => onChange?.(undefined, false), [onChange]);
-  return null;
 }
 
 export function TaskWorkPanels({ children }: { children: ReactNode }) {

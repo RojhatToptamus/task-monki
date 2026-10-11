@@ -266,10 +266,8 @@ export function App() {
   const [designDetail, setDesignDetail] = useState<DesignDetailSnapshot>();
   const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
   const [designsLoading, setDesignsLoading] = useState(false);
-  // The open task's title while its page shows only the tab bar.
-  const [compactTitle, setCompactTitle] = useState<{ title?: string; animate: boolean }>({ animate: false });
-  const compactTaskTitle = compactTitle.title;
-  const onCompactTitleChange = useCallback((title: string | undefined, animate: boolean) => setCompactTitle({ title, animate }), []);
+  // Where the open task's page puts its title row while its head is not on screen.
+  const [taskTitlebarSlot, setTaskTitlebarSlot] = useState<HTMLDivElement | null>(null);
   const [designsError, setDesignsError] = useState<string | undefined>();
   const [designExternalLinkRequest, setDesignExternalLinkRequest] =
     useState<DesignCanvasExternalLinkRequest>();
@@ -2667,13 +2665,8 @@ export function App() {
                   </button>
                 </Tooltip>
               </div>
-              {/* Always mounted on a task page, so the title can rise in and settle out with the page's head. */}
-              {showDetail && selectedTask ? (
-                <span className="tm-titlebar__title" data-visible={compactTaskTitle ? '' : undefined}
-                  data-instant={compactTitle.animate ? undefined : ''} aria-hidden={compactTaskTitle ? undefined : true} title={compactTaskTitle}>
-                  {compactTaskTitle ?? selectedTask.title}
-                </span>
-              ) : null}
+              {/* The task page renders its title row here (TaskDetail). */}
+              {showDetail ? <div ref={setTaskTitlebarSlot} className="tm-titlebar__slot" /> : null}
               <div className="tm-titlebar__spacer" />
               <button
                 ref={newTaskButtonRef}
@@ -2797,7 +2790,7 @@ export function App() {
             }}
             initialTab={view === 'previews' ? previewDetailTab : undefined}
             headingRef={taskDetailHeadingRef}
-            onCompactTitleChange={onCompactTitleChange}
+            titlebarSlot={taskTitlebarSlot}
             error={error}
             task={selectedTask}
             repository={taskDetail.repository}
