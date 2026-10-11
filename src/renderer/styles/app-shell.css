@@ -106,7 +106,7 @@
   background: var(--primary);
   color: var(--on-primary);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   -webkit-app-region: no-drag;
   transition: background-color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
 }
@@ -373,7 +373,7 @@
 .tm-col__label {
   margin: 0;
   font-size: var(--t-label);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   color: var(--text);
 }
 
@@ -538,7 +538,7 @@
   margin: 0;
   padding: 1px 0;
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   line-height: 1.38;
   color: var(--text);
   text-align: left;
@@ -642,7 +642,7 @@
   align-items: center;
   justify-content: center;
   width: 28px;
-  height: 28px;
+  height: var(--h-icon);
   padding: 0;
   border: 0;
   border-radius: var(--r-xs);
@@ -767,7 +767,7 @@
   padding: 5px 10px 3px;
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-pathmenu__submenu-body {
@@ -924,7 +924,7 @@
   overflow: hidden;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -945,7 +945,7 @@
 
 .tm-inbox-row__status {
   flex: 0 0 auto;
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-inbox-row__status[data-tone='warning'] {
@@ -1047,7 +1047,7 @@
   margin: 0 0 0 2px;
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 /* The settings container: the object edge, no fill of its own. */
@@ -1072,7 +1072,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   line-height: 1.35;
 }
 
@@ -1104,7 +1104,7 @@
   border-top: 1px solid var(--hair);
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__checked {
@@ -1145,7 +1145,7 @@
 .tm-setup-tools__copy strong {
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__copy span {
@@ -1165,7 +1165,7 @@
 .tm-setup-tools__meta strong {
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__meta span {
@@ -1210,7 +1210,7 @@
 .tm-setup-finish__status strong {
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-finish__actions {
@@ -1334,7 +1334,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   letter-spacing: -0.01em;
 }
 
@@ -1375,7 +1375,7 @@
   margin: 0 0 0 2px;
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-settings__row {
@@ -1424,7 +1424,7 @@
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-align: left;
 }
 
@@ -1484,7 +1484,7 @@
   padding: 5px 8px 3px;
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   line-height: 16px;
 }
 
@@ -1548,7 +1548,7 @@
   background: var(--primary);
   color: var(--on-primary);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-theme-preview__body {
@@ -1606,7 +1606,7 @@
 .tm-theme-preview__title {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-theme-preview__tabs {
@@ -1652,7 +1652,7 @@
   overflow: hidden;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1679,7 +1679,7 @@
 .tm-settings__k {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-settings__description {
@@ -1691,13 +1691,13 @@
 
 .tm-settings__select,
 .tm-settings__input {
-  height: 32px;
+  height: var(--h-control);
   border: 0;
   border-radius: var(--r-sm);
   background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
-  font: 500 var(--t-help)/1 var(--font-ui);
+  font: var(--w-medium) var(--t-help)/1 var(--font-ui);
 }
 
 .tm-settings__select {
@@ -1735,7 +1735,7 @@
   gap: 7px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-setting {
@@ -1769,7 +1769,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-setting__identity p,
@@ -1840,7 +1840,7 @@
 .tm-model-default__title strong {
   color: var(--text);
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-model-default__title span {
@@ -1885,7 +1885,7 @@
   padding-top: 7px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-console__row--agent .tm-agent-console__label {
@@ -1942,7 +1942,7 @@
 .tm-agent-console__summary {
   overflow: hidden;
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2061,7 +2061,7 @@
   padding: 9px 7px 5px;
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-console__group-title span:last-child:not(:first-child) {
@@ -2113,7 +2113,7 @@
   gap: 7px;
   overflow: hidden;
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2216,7 +2216,7 @@
   overflow: hidden;
   max-width: 100%;
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2244,7 +2244,7 @@
   border-radius: var(--r-xs);
   background-color: var(--card);
   color: var(--text);
-  font: 500 var(--t-meta)/1 var(--font-ui);
+  font: var(--w-medium) var(--t-meta)/1 var(--font-ui);
 }
 
 @container tm-agent-reasoning (max-width: 280px) {
@@ -2314,7 +2314,7 @@
 }
 
 .tm-agent-console--compact .tm-agent-console__trigger {
-  height: 28px;
+  height: var(--h-toolbar);
   padding-inline: 8px;
   background: var(--field);
 }

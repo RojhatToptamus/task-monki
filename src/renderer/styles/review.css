@@ -10,7 +10,7 @@
 /* One line of state, the scope menu, and the review action. */
 /* The bar spans the page gutter on both sides and reserves the header's scrollbar gutter, so its ends line up with the tab bar's. */
 .tm-review__bar { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; min-height: 44px; padding: 0 var(--tm-gutter); overflow: hidden; scrollbar-gutter: stable; border-bottom: 1px solid var(--hair); }
-.tm-review__headline { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--t-body); font-weight: 500; }
+.tm-review__headline { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); }
 .tm-review__meta { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); }
 .tm-review__meta code { font-family: var(--font-mono); }
 .tm-review__bar-end { margin-left: auto; }
@@ -40,7 +40,7 @@
 .tm-review__index-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Severity is a word in ink, never a badge: blockers and majors must be fixed. */
-.tm-review__severity { color: var(--muted); font-size: var(--t-help); font-weight: 500; white-space: nowrap; }
+.tm-review__severity { color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-review__severity[data-severity='BLOCKER'],
 .tm-review__severity[data-severity='MAJOR'] { color: var(--blocked-ink); }
 
@@ -73,7 +73,7 @@
 .tm-review-thread--focused,
 .tm-review-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring), var(--shadow-card); }
 .tm-review-thread__head { display: flex; align-items: center; gap: 8px; min-height: 24px; }
-.tm-review-thread__head strong { flex: 1; min-width: 0; color: var(--text); font-weight: 500; }
+.tm-review-thread__head strong { flex: 1; min-width: 0; color: var(--text); font-weight: var(--w-medium); }
 .tm-review-thread__actions { display: inline-flex; gap: 2px; margin: -4px -6px -4px 0; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-thread:hover .tm-review-thread__actions,
 .tm-review-thread:focus-within .tm-review-thread__actions,

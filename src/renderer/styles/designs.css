@@ -162,7 +162,7 @@
   gap: 6px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   white-space: nowrap;
 }
 
@@ -193,7 +193,7 @@
   background: var(--field);
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-designs-header__files:hover,
@@ -289,7 +289,7 @@
   margin: 0 auto 18px;
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-conversation__earlier:hover:not(:disabled) {
@@ -399,7 +399,7 @@
   cursor: pointer;
   list-style: none;
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-technical-details > summary::-webkit-details-marker,
@@ -514,7 +514,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-files__head p {
@@ -526,7 +526,7 @@
 
 .tm-design-files__head > button {
   width: 28px;
-  height: 28px;
+  height: var(--h-toolbar);
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -577,7 +577,7 @@
 .tm-design-files__section-title h3 {
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-files__section-title > button {
@@ -624,7 +624,7 @@
 .tm-design-reference-add > button strong {
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-reference-add > button span {
@@ -725,7 +725,7 @@
 .tm-design-reference-row strong {
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-reference-row--inactive strong {
@@ -768,7 +768,7 @@
   border-radius: var(--r-2xs);
   color: var(--muted);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-reference-row__actions button:hover:not(:disabled) {
@@ -904,7 +904,7 @@
   overflow: hidden;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -918,8 +918,8 @@
 
 .tm-design-canvas__revision-actions .outline-button,
 .tm-design-canvas__revision-actions .primary-button {
-  min-height: 28px;
-  height: 28px;
+  min-height: var(--h-toolbar);
+  height: var(--h-toolbar);
   padding: 0 10px;
   border-radius: var(--r-xs);
   font-size: var(--t-meta);
@@ -942,7 +942,7 @@
 .tm-design-canvas__versions > span {
   flex: 0 0 auto;
   min-width: 31px;
-  height: 28px;
+  height: var(--h-toolbar);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1198,7 +1198,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-heading);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-create__intro .tm-iconbtn {
@@ -1315,7 +1315,7 @@
   gap: 7px;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-modal__field input {
@@ -1327,7 +1327,7 @@
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
-  font: 500 var(--t-help)/1 var(--font-ui);
+  font: var(--w-medium) var(--t-help)/1 var(--font-ui);
 }
 
 .tm-modal__field input:focus {
@@ -1361,13 +1361,13 @@
 .tm-design-external__destination span {
   color: var(--muted);
   font-size: var(--t-group);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-external__destination strong {
   overflow-wrap: anywhere;
   color: var(--text);
-  font: 500 var(--t-help)/1.4 var(--font-mono);
+  font: var(--w-medium) var(--t-help)/1.4 var(--font-mono);
 }
 
 .tm-modal__panel .tm-design-external__error {
@@ -1419,7 +1419,7 @@
 
 .tm-design-canvas__setup-title {
   font-size: var(--t-body);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-design-canvas__setup {

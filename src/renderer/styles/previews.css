@@ -87,7 +87,7 @@
 }
 
 .tm-previews__project {
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-previews__project > span:first-child,

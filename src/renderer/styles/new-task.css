@@ -42,7 +42,7 @@
 
 .newtask-modal__heading strong {
   font-size: var(--t-heading);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .newtask-modal__body {
@@ -74,7 +74,7 @@
   padding: 0;
   color: var(--text);
   font-size: var(--t-label);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-repository-select {
@@ -166,7 +166,7 @@
 }
 
 .tm-repository-select__popover .tm-repository-picker__search {
-  height: 32px;
+  height: var(--h-control);
   border-color: transparent;
   border-radius: var(--r-xs);
 }
@@ -289,7 +289,7 @@
   overflow: hidden;
   color: var(--text);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -335,7 +335,7 @@
 .field__header > label,
 .field__label {
   font-size: var(--t-label);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .field__label {
@@ -367,7 +367,7 @@
   color: var(--accent-ink);
   padding: 0;
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .field__refine:not(:disabled):hover {
@@ -391,7 +391,7 @@
   padding: 0;
   color: var(--muted);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .field__restore:not(:disabled):hover {
@@ -523,7 +523,7 @@
   user-select: text;
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -547,7 +547,7 @@
   justify-content: center;
   flex: 0 0 auto;
   width: 28px;
-  height: 28px;
+  height: var(--h-icon);
   padding: 0;
   border: 0;
   border-radius: var(--r-xs);
@@ -578,7 +578,7 @@
   background: var(--surface);
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   pointer-events: none;
 }
 
@@ -615,7 +615,7 @@
 
 .field__proposal-title {
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   color: var(--text);
 }
 
@@ -1006,4 +1006,4 @@
 
 /* Imported work has no description, so its model and access chips get a row. */
 .newtask-run { gap: 8px; }
-.newtask-run__label { margin-right: 4px; color: var(--text); font-size: var(--t-label); font-weight: 500; }
+.newtask-run__label { margin-right: 4px; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }

@@ -40,8 +40,8 @@
 .tm-application-preview__table { width: 100%; border-collapse: collapse; font-size: var(--t-help); text-align: left; }
 .tm-application-preview__table th,
 .tm-application-preview__table td { padding: 8px 12px; border-bottom: 1px solid var(--hair); vertical-align: middle; }
-.tm-application-preview__table thead th { color: var(--muted); font-weight: 500; white-space: nowrap; }
-.tm-application-preview__table tbody th { font-weight: 500; }
+.tm-application-preview__table thead th { color: var(--muted); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-application-preview__table tbody th { font-weight: var(--w-medium); }
 .tm-application-preview__table tbody tr:last-child > * { border-bottom: 0; }
 .tm-application-preview__table :is(th, td):last-child { text-align: right; width: 1%; white-space: nowrap; }
 .tm-application-preview__endpoint { min-width: 0; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); }
@@ -94,7 +94,7 @@
 
 .tm-preview-statusline { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; }
 .tm-preview-statusline > * { flex: 0 0 auto; }
-.tm-preview-statusline strong { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.tm-preview-statusline strong { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-statusline .tm-application-preview__url { display: flex; flex: 0 1 auto; min-width: 0; }
 
 .tm-preview-setup {
@@ -114,7 +114,7 @@
   cursor: pointer;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .tm-preview-disclosure[open] > summary {
@@ -176,26 +176,26 @@
    the tab's plane (DESIGN §2.6). Only a kind that needs attention takes a tone. */
 .tm-decision { display: grid; gap: 10px; min-width: 0; padding: 16px; border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); }
 .tm-decision__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
-.tm-decision__kind { color: var(--text-soft); font-size: var(--t-help); font-weight: 500; }
+.tm-decision__kind { color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-decision__kind--error { color: var(--blocked-ink); }
 .tm-decision__kind--action { color: var(--waiting-ink); }
 .tm-decision__meta { min-width: 0; overflow: hidden; color: var(--muted); font: var(--t-meta)/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.tm-decision__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 500; line-height: 1.35; }
+.tm-decision__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); line-height: 1.35; }
 .tm-decision__summary { max-width: 78ch; margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: 1.5; }
 .tm-decision__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 2px; }
 .tm-decision__actions .tm-preview-disclosure { margin: 0; }
 .tm-decision__actions .tm-preview-disclosure[open] { flex-basis: 100%; }
-.tm-decision__actions .tm-action-menu__trigger { padding: 0 8px; color: var(--text-soft); font-weight: 500; }
+.tm-decision__actions .tm-action-menu__trigger { padding: 0 8px; color: var(--text-soft); font-weight: var(--w-medium); }
 .tm-decision__actions .tm-action-menu__trigger svg { color: var(--muted); }
 
 /* Group labels and rows (DESIGN §3 group label, §5 settings row): no cards inside the block. */
-.tm-preview-group { margin: 4px 0 0; color: var(--muted); font-size: var(--t-group); font-weight: 500; }
+.tm-preview-group { margin: 4px 0 0; color: var(--muted); font-size: var(--t-group); font-weight: var(--w-medium); }
 .tm-preview-group__meta { font-size: var(--t-meta); font-weight: 400; }
 .tm-preview-group__meta time { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-preview-rows { display: grid; min-width: 0; }
 .tm-preview-row { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto; gap: 2px 14px; align-items: baseline; min-height: 34px; padding: 6px 0; border-top: 1px solid var(--hair); min-width: 0; font-size: var(--t-help); }
 .tm-preview-rows > .tm-preview-row:first-child { border-top: 0; }
-.tm-preview-row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--t-label); font-weight: 500; }
+.tm-preview-row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }
 .tm-preview-row__name code { font-size: var(--t-help); font-weight: 400; }
 .tm-preview-row__detail { min-width: 0; color: var(--text-soft); overflow-wrap: anywhere; line-height: 1.5; }
 .tm-preview-row__detail code { color: var(--text); font-size: var(--t-help); white-space: pre-wrap; }
@@ -245,7 +245,7 @@
 .tm-preview-more { justify-self: start; margin-left: -8px; }
 .tm-preview-agent__proposal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .tm-preview-secret-form { display: grid; gap: 10px; max-width: 480px; padding: 8px 0 6px; }
-.tm-preview-secret-form h4 { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: 500; }
+.tm-preview-secret-form h4 { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }
 .tm-preview-secret-form p { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
 .tm-preview-secret-form__progress code { color: var(--text); font-size: var(--t-help); }
 /* Inline, the row or the progress line names what the form is for; the heading only names the form. */
@@ -253,7 +253,7 @@
 .tm-preview-secret-form :is(.outline-button, .ghost-button) { height: var(--h-toolbar); }
 
 .tm-preview-agent__proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--well); }
-.tm-preview-agent__proposal strong { color: var(--text); font-size: var(--t-label); font-weight: 500; }
+.tm-preview-agent__proposal strong { color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }
 .tm-preview-agent__proposal span { color: var(--muted); font: var(--t-meta) var(--font-mono); }
 .tm-preview-agent__proposal .ghost-button { margin-left: auto; }
 /* The model chip keeps its width; the hint takes what is left. */
