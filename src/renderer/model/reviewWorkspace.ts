@@ -80,13 +80,14 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
   return { byLine, byFile };
 }
 
-/** The last displayed row of a line range on one side, preferring the latest block. */
+/** The last displayed row of a line range on one side, preferring the latest block. Hidden unchanged lines are not displayed. */
 function findRowAnchor(file: DiffFile, side: ReviewComment['side'], line: number, endLine?: number): string | undefined {
   const last = endLine && endLine >= line ? endLine : line;
   for (let blockIndex = file.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
     const block = file.blocks[blockIndex]!;
     let anchor: number | undefined;
     block.lines.forEach((candidate, index) => {
+      if (candidate.expansion === 'hidden') return;
       const number = side === 'OLD' ? (candidate.kind === 'deletion' ? candidate.oldLine : undefined) : candidate.newLine;
       if (number !== undefined && number >= line && number <= last) anchor = index;
     });
@@ -113,11 +114,12 @@ export function buildReviewIndex(files: readonly DiffFile[], anchored: AnchoredF
   });
 }
 
-/** A stable signature of a file's displayed change, so "viewed" resets when the file changes. */
+/** A stable signature of a file's captured change, so "viewed" resets when the file changes and never when context is revealed. */
 export function diffFileSignature(file: DiffFile): string {
   let hash = 2166136261;
   for (const block of file.blocks) {
     for (const line of block.lines) {
+      if (line.expansion) continue;
       const text = `${line.kind}:${line.content}\n`;
       for (let index = 0; index < text.length; index += 1) {
         hash ^= text.charCodeAt(index);
@@ -149,27 +151,61 @@ export function filesChangedSinceReview(reviewed: readonly DiffFile[], current: 
  * becomes a quiet gap row that says how many unchanged lines it skips and keeps
  * the enclosing symbol Git reports; changed and context lines keep their index
  * so findings and comments can anchor to them.
+ *
+ * In a block filled from the checkout (`reviewContext.ts`), each run of hidden
+ * unchanged lines is the gap row instead, carrying which lines it holds so it
+ * can reveal them; revealed lines are context rows, and a gap revealed in full
+ * leaves no row.
  */
 export type ReviewDiffRow =
-  | { kind: 'gap'; hidden: number; heading?: string; raw: string }
+  | { kind: 'gap'; hidden: number; heading?: string; raw: string; reveal?: GapReveal }
   | { kind: 'line'; line: DiffLine; index: number };
+
+/**
+ * The hidden lines a gap row holds, by new-side number. A gap at the start of the
+ * file opens only up from the change below it, one at the end only down from the
+ * change above it.
+ */
+export interface GapReveal { from: number; to: number; edge: 'start' | 'middle' | 'end' }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 
 export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
   const rows: ReviewDiffRow[] = [];
+  const filled = lines.some((line) => line.expansion);
   let lastNewLine = 0;
-  lines.forEach((line, index) => {
-    if (line.kind === 'meta') return;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line.kind === 'meta') continue;
+    if (line.expansion === 'hidden') {
+      let end = index;
+      while (lines[end + 1]?.expansion === 'hidden') end += 1;
+      // The hunk the run leads into, past lines already revealed above it.
+      let next = end + 1;
+      while (lines[next]?.expansion === 'shown') next += 1;
+      const header = lines[next]?.kind === 'hunk' ? lines[next]! : undefined;
+      const match = header ? HUNK_HEADER.exec(header.content) : null;
+      const from = line.newLine ?? 0;
+      rows.push({
+        kind: 'gap',
+        hidden: end - index + 1,
+        heading: match?.[5]?.trim() || undefined,
+        raw: header?.content ?? '',
+        reveal: { from, to: lines[end]!.newLine ?? from, edge: from === 1 ? 'start' : header ? 'middle' : 'end' }
+      });
+      index = end;
+      continue;
+    }
     if (line.kind === 'hunk') {
+      if (filled) continue;
       const match = HUNK_HEADER.exec(line.content);
       const start = match ? Number(match[3]) : undefined;
       const hidden = start !== undefined ? Math.max(0, start - lastNewLine - 1) : 0;
       rows.push({ kind: 'gap', hidden, heading: match?.[5]?.trim() || undefined, raw: line.content });
-      return;
+      continue;
     }
     if (line.newLine !== undefined) lastNewLine = line.newLine;
     rows.push({ kind: 'line', line, index });
-  });
+  }
   return rows;
 }

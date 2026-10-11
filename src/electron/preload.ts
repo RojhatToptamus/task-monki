@@ -27,6 +27,7 @@ import type {
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
   ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
@@ -169,6 +170,8 @@ const api: TaskManagerApi = {
     invokeIpc('openTarget:inspect', input),
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     invokeIpc('openTarget:execute', input),
+  readWorktreeFile: (input: ReadWorktreeFileRequest) =>
+    invokeIpc('worktree:readFile', input),
   getAgentRuntimeCatalog: () => invokeIpc('agent:runtimeCatalog'),
   discoverAgentRuntimeModels: (runtimeId) =>
     invokeIpc('agent:discoverRuntimeModels', runtimeId),

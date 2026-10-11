@@ -155,6 +155,7 @@ export const IPC_INVOKE_CHANNELS = [
   'worktree:inspectPreparation',
   'worktree:list',
   'worktree:prepare',
+  'worktree:readFile',
   'worktree:reconnect'
 ] as const;
 

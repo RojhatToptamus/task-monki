@@ -45,6 +45,7 @@ import type {
   GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
   ImportDesignReferenceAssetRequest,
   OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
@@ -476,6 +477,9 @@ function installIpcHandlers(): void {
   });
   handleTrustedIpc('openTarget:execute', async (_, input: ExecuteOpenTargetActionRequest) => {
     return service.executeOpenTargetAction(input);
+  });
+  handleTrustedIpc('worktree:readFile', async (_, input: ReadWorktreeFileRequest) => {
+    return service.readWorktreeFile(input);
   });
 
   handleTrustedIpc('repository:add', async (_, repositoryPath: string) => {

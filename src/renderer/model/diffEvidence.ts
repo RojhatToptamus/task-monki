@@ -5,6 +5,12 @@ export interface DiffLine {
   oldLine?: number;
   newLine?: number;
   content: string;
+  /**
+   * Set on an unchanged line read from the checkout to fill a gap between hunks
+   * (`reviewContext.ts`): hidden until the person reveals it. Never part of the
+   * captured change, so it never counts toward what the change is.
+   */
+  expansion?: 'hidden' | 'shown';
 }
 
 export interface DiffBlock {

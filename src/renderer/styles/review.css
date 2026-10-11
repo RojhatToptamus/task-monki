@@ -115,8 +115,21 @@
 .tm-review-checkpoint__title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-soft); font-size: var(--t-body); text-overflow: ellipsis; white-space: nowrap; line-height: var(--h-row-dense); }
 
 .tm-review-block__label { padding: 6px 12px; color: var(--muted); font-size: var(--t-meta); }
-.tm-review-gap { display: flex; align-items: center; gap: 12px; height: 24px; padding: 0 12px 0 var(--review-code-inset); background: var(--panel); color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
+/* A gap is a dense row for the unchanged lines between hunks, its words at the code column. When the
+   checkout still holds the captured file, the row is the control: the label opens every hidden line, and a
+   long gap's gutter holds two fixed 24px steps, up and down. Opening changes the height at once. */
+.tm-review-gap { display: flex; align-items: center; gap: 12px; height: var(--h-row-dense); padding: 0 12px 0 var(--review-code-inset); background: var(--panel); color: var(--muted); font-size: var(--t-help); line-height: var(--lh-meta); white-space: nowrap; }
 .tm-review-gap code { min-width: 0; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-gap--open { gap: 0; padding: 0; }
+/* The label takes 8px of the marker column, so its hover and focus clear the words while the words stay on
+   the code column; the two steps (4 + 24 + 2 + 24) still fit beside it at the narrowest gutter (44 + 18 - 8). */
+.tm-review-gap__steps { display: grid; flex: 0 0 auto; grid-template-columns: repeat(2, var(--h-compact)); gap: 2px; box-sizing: border-box; width: calc(var(--review-code-inset) - 8px); padding-left: 4px; }
+.tm-review-gap__step--down { grid-column: 2; }
+.tm-review-gap__all { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; height: 100%; padding: 0 12px 0 8px; border: 0; background: transparent; color: var(--muted); font: inherit; text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review-gap__all:hover { background-color: var(--hover); color: var(--text-soft); }
+.tm-review-gap__all:active { background-color: var(--press); }
+/* Inside the file's clip, the keyboard halo is drawn inward so it is never cut. */
+.app-shell[data-input-modality='keyboard'] :is(.tm-review-gap__all, .tm-review-gap__step):focus { box-shadow: var(--focus-halo-inset); }
 
 /* Review rows: the line number (the old side's on a removed line) is the comment
    control, with the "+" inside it on hover; then the marker and code that wraps.
