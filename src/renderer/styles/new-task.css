@@ -41,6 +41,36 @@
   border-bottom: 1px solid var(--hair);
 }
 
+/* Expand and Close sit together at the head's end, 2px apart like every pair of icon buttons. */
+.newtask-modal__head-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Expanded, a writing size for a long description: the reading column's width
+   and the height the modal may take, so its head stays where it was and it ends
+   48px above the window's edge. The description takes every line the form leaves. */
+.newtask-modal__panel--expanded {
+  width: min(880px, 100%);
+  height: calc(100vh - max(48px, 10vh) - 48px);
+}
+
+.newtask-modal__panel--expanded :is(.newtask-section, .field--prompt, .field--prompt > .tm-composer) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.newtask-modal__panel--expanded .field--prompt > .tm-composer {
+  display: flex;
+  flex-direction: column;
+}
+
+.newtask-modal__panel--expanded .field.field--prompt textarea {
+  flex: 1 1 auto;
+}
+
 .newtask-modal__heading strong {
   font-size: var(--t-heading);
   font-weight: var(--w-medium);

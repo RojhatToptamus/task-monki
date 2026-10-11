@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { focusedPanelWidth, persistFocusedPanelWidth } from '../model/workspaceLayout';
+import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { PanelResizeHandle } from './PanelResizeHandle';
 
 const PANEL_DEFAULT_WIDTH = 380;
@@ -42,9 +43,69 @@ export function useTaskSidePanelLayout(minContentWidth: number): {
   };
 }
 
+/** The sheet grows over the page like a drawer pulled further out, and folds back the same way. */
+const SHEET_MOTION: ExpandMotion = { duration: '--motion-slow', easing: '--ease-drawer', scale: true };
+
+/**
+ * Whether the side sheet is expanded over the page. There is one side sheet on
+ * screen at a time, and the conversation inside it can be portalled from
+ * elsewhere in the tree (the Preview agent), so the state lives beside the
+ * sheet rather than in a context. Closing the panel ends the expansion.
+ */
+let sheetElement: HTMLElement | null = null;
+let sheetState: { expanded: boolean; available: boolean } = { expanded: false, available: false };
+const sheetListeners = new Set<() => void>();
+
+function setSheetState(next: typeof sheetState): void {
+  if (next.expanded === sheetState.expanded && next.available === sheetState.available) return;
+  sheetState = next;
+  sheetListeners.forEach((listener) => listener());
+}
+
+function subscribeSheet(listener: () => void): () => void {
+  sheetListeners.add(listener);
+  return () => sheetListeners.delete(listener);
+}
+
+const readSheet = () => sheetState;
+
+function attachSheet(element: HTMLElement | null): void {
+  if (element) {
+    sheetElement = element;
+    setSheetState({ ...sheetState, available: true });
+  } else {
+    sheetElement = null;
+    setSheetState({ expanded: false, available: false });
+  }
+}
+
+function useSideSheetState() {
+  return useSyncExternalStore(subscribeSheet, readSheet, readSheet);
+}
+
+/** For the panel's own head: whether it can expand, whether it is, and the change. */
+export function useSideSheetExpansion(): {
+  available: boolean;
+  expanded: boolean;
+  /** `animate` is false for a keyboard action, which is instant. */
+  setExpanded(expanded: boolean, animate: boolean): void;
+} {
+  const { available, expanded } = useSideSheetState();
+  return {
+    available,
+    expanded,
+    setExpanded: (next, animate) => {
+      if (next === sheetState.expanded || !sheetElement) return;
+      changeWithMotion(animate ? sheetElement : undefined, () => setSheetState({ ...sheetState, expanded: next }), SHEET_MOTION);
+    }
+  };
+}
+
 /**
  * The docked sheet beside the page, with its resize handle on the shared edge.
  * The panel inside is the landmark, so the sheet itself is a plain box.
+ * Expanded, it covers the page as well as its own place; a stand-in keeps the
+ * page's width, so nothing under it reflows and collapsing finds it as it was.
  */
 export function DockedSidePanel({ width, maxWidth, onWidthChange, label, children }: {
   width: number;
@@ -53,24 +114,35 @@ export function DockedSidePanel({ width, maxWidth, onWidthChange, label, childre
   label: string;
   children: ReactNode;
 }) {
+  const { expanded } = useSideSheetState();
   return (
-    <div className="tm-side-sheet" style={{ flexBasis: width }}>
-      <PanelResizeHandle
-        className="tm-side-sheet__resize"
-        label={`Resize ${label}`}
-        value={width}
-        min={PANEL_MIN_WIDTH}
-        max={maxWidth}
-        defaultValue={PANEL_DEFAULT_WIDTH}
-        direction={-1}
-        onChange={onWidthChange}
-      />
-      {children}
-    </div>
+    <>
+      {expanded ? <div className="tm-side-sheet__room" style={{ flexBasis: width }} aria-hidden="true" /> : null}
+      <div ref={attachSheet} className="tm-side-sheet" data-expanded={expanded ? '' : undefined} style={{ flexBasis: width }}>
+        {expanded ? null : (
+          <PanelResizeHandle
+            className="tm-side-sheet__resize"
+            label={`Resize ${label}`}
+            value={width}
+            min={PANEL_MIN_WIDTH}
+            max={maxWidth}
+            defaultValue={PANEL_DEFAULT_WIDTH}
+            direction={-1}
+            onChange={onWidthChange}
+          />
+        )}
+        {children}
+      </div>
+    </>
   );
 }
 
-/** The same panel over the page when the window is too narrow to dock it. */
+/** The same panel over the page when the window is too narrow to dock it; expanded, it covers the page. */
 export function FloatingSidePanel({ children }: { children: ReactNode }) {
-  return <div className="tm-side-sheet tm-side-sheet--floating">{children}</div>;
+  const { expanded } = useSideSheetState();
+  return (
+    <div ref={attachSheet} className="tm-side-sheet tm-side-sheet--floating" data-expanded={expanded ? '' : undefined}>
+      {children}
+    </div>
+  );
 }
