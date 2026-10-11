@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  REVIEW_FINDING_DISMISS_REASONS,
   REVIEW_FINDING_TEXT_MAX_LENGTH,
   TASK_INSTRUCTION_MAX_LENGTH,
   effectiveReviewFindings,
@@ -68,6 +69,11 @@ export class AgentReviewCoordinator {
     if (input.note !== undefined && typeof input.note !== 'string') throw new Error('A note must be text.');
     const note = input.note?.trim();
     if (input.kind === 'RESTORE' && note) throw new Error('Only a dismissal takes a note.');
+    if (input.dismissReason !== undefined && (
+      input.kind !== 'DISMISS' || !(REVIEW_FINDING_DISMISS_REASONS as readonly unknown[]).includes(input.dismissReason)
+    )) {
+      throw new Error('A dismissal reason is either Not a problem or Acceptable as is.');
+    }
     if (note && note.length > REVIEW_FINDING_TEXT_MAX_LENGTH) {
       throw new Error(`Keep the note to at most ${REVIEW_FINDING_TEXT_MAX_LENGTH} characters.`);
     }
@@ -92,6 +98,7 @@ export class AgentReviewCoordinator {
         findingId: finding.id,
         kind: input.kind,
         actor: 'USER',
+        ...(input.kind === 'DISMISS' && input.dismissReason ? { dismissReason: input.dismissReason } : {}),
         ...(input.kind === 'DISMISS' && note ? { note } : {}),
         createdAt: new Date().toISOString()
       };

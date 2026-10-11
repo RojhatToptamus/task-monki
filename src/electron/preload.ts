@@ -48,6 +48,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -294,6 +295,7 @@ const api: TaskManagerApi = {
   sendTaskInstruction: (input: SendTaskInstructionRequest) => invokeIpc('agent:sendTaskInstruction', input),
   saveTaskPrompt: (input: SaveTaskPromptRequest) => invokeIpc('task:savePrompt', input),
   saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => invokeIpc('agent:saveTaskAgentDraft', input),
+  saveTaskReviewDraft: (input: SaveTaskReviewDraftRequest) => invokeIpc('agent:saveTaskReviewDraft', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
     invokeIpc('agent:continueRun', input),

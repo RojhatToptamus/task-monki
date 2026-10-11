@@ -79,10 +79,13 @@ import {
   isDetachedSessionRole,
   isImplementationRunMode,
   effectiveReviewGateStatus,
+  isEmptyReviewDraft,
   isTaskCreationToken,
   openReviewFindings,
+  reviewDraftProblem,
   verifiedChecksMatchMergeHead,
-  type ReviewFindingDecision
+  type ReviewFindingDecision,
+  type TaskReviewDraft
 } from '../../shared/contracts';
 import {
   enforcePosixMode,
@@ -2483,6 +2486,24 @@ export class SqliteTaskStore {
       if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
       this.state = { ...this.state, tasks: this.state.tasks.map((record) =>
         record.id === taskId ? { ...record, ...(text !== undefined ? { agentDraft: text } : {}), ...(attachmentDraftId !== undefined ? { agentAttachmentDraftId: attachmentDraftId ?? undefined } : {}) } : record) };
+      await this.persistSnapshot();
+    });
+  }
+
+  /** Saves the person's unsent review with the task; an empty draft clears it. */
+  async saveTaskReviewDraft(taskId: string, draft: TaskReviewDraft): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const problem = reviewDraftProblem(draft);
+      if (problem) throw new Error(problem);
+      const task = this.state.tasks.find((record) => record.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      const saved = isEmptyReviewDraft(draft) ? undefined : clone(draft);
+      this.state = { ...this.state, tasks: this.state.tasks.map((record) => {
+        if (record.id !== taskId) return record;
+        const { reviewDraft: _previous, ...rest } = record;
+        return saved ? { ...rest, reviewDraft: saved } : rest;
+      }) };
       await this.persistSnapshot();
     });
   }

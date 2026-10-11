@@ -11,11 +11,13 @@ import {
 } from 'react';
 import { FolderGit2, GitBranch, RefreshCw } from 'lucide-react';
 import {
+  EMPTY_REVIEW_DRAFT,
   getImplementationRetryReason,
   normalizePullRequestTitle,
-  type DecideReviewFindingRequest
+  type DecideReviewFindingRequest,
+  type TaskReviewDraft
 } from '../../shared/contracts';
-import { effectiveReviewFindings } from '../../shared/agentReviewFindings';
+import { effectiveReviewFindings, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -73,8 +75,8 @@ import { TaskActionsMenu } from './TaskActionsMenu';
 import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
-import { buildReviewRequestInstruction } from '../model/reviewFollowUp';
-import type { ReviewFindingView, ReviewLineComment } from '../model/reviewWorkspace';
+import { buildReviewRequestInstruction, planReviewRequest } from '../model/reviewFollowUp';
+import type { ReviewFindingView } from '../model/reviewWorkspace';
 import {
   findCompletedCurrentImplementationRun,
   isActiveNonReviewRun,
@@ -169,6 +171,10 @@ interface TaskDetailProps {
   agentDraftError?: string;
   onAgentDraftChange: AgentSessionProps['onDraftChange'];
   onFlushAgentDraft: AgentSessionProps['onFlushDraft'];
+  /** The person's unsent review, saved with the task as it changes. */
+  reviewDraft: TaskReviewDraft;
+  reviewDraftError?: string;
+  onReviewDraftChange(draft: TaskReviewDraft): void;
   onQueueInstruction: AgentSessionProps['onQueue'];
   onEditInstruction: AgentSessionProps['onEditQueue'];
   onSendInstruction: AgentSessionProps['onSendQueue'];
@@ -299,8 +305,10 @@ export function TaskDetail(props: TaskDetailProps) {
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   // The review request in progress: the user's note and line comments, kept
   // while they move between tabs and cleared when the request is sent.
-  const [reviewNote, setReviewNote] = useState('');
-  const [reviewComments, setReviewComments] = useState<ReviewLineComment[]>([]);
+  // Bumped by the Overview's Request changes, which opens the Review tab's request sheet.
+  const [requestSheetToken, setRequestSheetToken] = useState(0);
+  // Reading down the Review diff folds the page head away, as scrolling the conversation does.
+  const [reviewReading, setReviewReading] = useState(false);
   // The reviewer panel: open state, the finding the next question is about, and the unsent question.
   const [reviewerOpen, setReviewerOpen] = useState(false);
   const [reviewerFocusId, setReviewerFocusId] = useState<string>();
@@ -419,8 +427,6 @@ export function TaskDetail(props: TaskDetailProps) {
   useEffect(() => {
     setExistingWorkModal(undefined);
     setReviewStartPending(false);
-    setReviewNote('');
-    setReviewComments([]);
     setReviewerOpen(false);
     setReviewerFocusId(undefined);
     setReviewerDraft('');
@@ -429,6 +435,9 @@ export function TaskDetail(props: TaskDetailProps) {
     setDraftPrModalOpen(false);
     setEvidenceGitSnapshotId(undefined);
   }, [task?.id]);
+
+  // The Review diff mounts at its top, so leaving the tab or the task ends reading.
+  useEffect(() => { setReviewReading(false); }, [tab, task?.id]);
 
   // A renamed task offers its new title for a draft pull request; nothing else resets.
   useEffect(() => {
@@ -555,15 +564,9 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
     deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
-  const reviewHasOutput =
-    Boolean(reviewGate.result) ||
-    Boolean(
-      reviewTextExcerpt?.availableContent.kind === 'BOUNDED_ARTIFACT' ||
-      (!reviewTextExcerpt && reviewRun?.finalMessage?.trim())
-    );
   const reviewHasActionableFindings =
     hasActionableReviewSource &&
-    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+    canRequestReviewChanges(reviewGate, effectiveReviewStatus(reviewGate));
   const deliverySourceRun =
     (task.currentRunId
       ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
@@ -658,42 +661,51 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
-  // Request changes lives in the Review tab, beside the findings it sends.
+  // Request changes lives in the Review tab: it opens there with the request sheet, so the
+  // person sees exactly what will be sent before sending it.
   const openRequestChanges = () => {
     setTab('review');
-    window.requestAnimationFrame(() => {
-      bodyRef.current?.querySelector<HTMLInputElement>('.tm-review__note input')?.focus();
-    });
+    setRequestSheetToken((token) => token + 1);
   };
 
+  const reviewIsCurrent = reviewAcceptsDecisions(reviewGate);
+  const reviewPlan = planReviewRequest(reviewFindingViews, props.reviewDraft, reviewGate.runId);
+  // A review whose notes are only prose (no structured findings) sends those notes.
+  const reviewSendsNotes = reviewIsCurrent && reviewHasActionableFindings && reviewFindingViews.length === 0;
+
+  const buildRequestInstruction = (reviewOutput?: string) => buildReviewRequestInstruction({
+    taskTitle: task.title,
+    summary: reviewGate.result?.summary ?? reviewGate.summary,
+    // An out-of-date review's findings are context only; its comments still go.
+    findings: reviewIsCurrent ? reviewPlan.send : [],
+    dismissed: reviewIsCurrent
+      ? reviewPlan.settled
+        .filter((finding) => finding.state === 'DISMISSED')
+        .map((finding) => ({ finding, reason: finding.dismissal?.reason, note: finding.dismissal?.note }))
+      : [],
+    comments: props.reviewDraft.comments,
+    note: props.reviewDraft.note,
+    reviewOutput
+  });
+
   const submitRequestChanges = async () => {
-    if (reviewActionsPaused || !hasActionableReviewSource) {
+    if (reviewActionsPaused || reviewIsRunning || reviewPending || !hasActionableReviewSource) {
       return;
     }
-    const open = reviewFindingViews.filter((finding) => finding.state === 'OPEN');
-    if (open.length === 0 && reviewComments.length === 0 && !reviewHasActionableFindings) {
+    const findings = reviewIsCurrent ? reviewPlan.send : [];
+    const comments = props.reviewDraft.comments;
+    if (findings.length === 0 && comments.length === 0 && !reviewSendsNotes) {
       return;
     }
-    const dismissed = reviewFindingViews
-      .filter((finding) => finding.state === 'DISMISSED')
-      .map((finding) => ({ finding, note: finding.dismissal?.note }));
     let reviewOutput: string | undefined;
-    if (open.length === 0 && reviewComments.length === 0) {
+    if (findings.length === 0 && comments.length === 0) {
       try {
         reviewOutput = await loadAvailableReviewOutput();
       } catch {
         return;
       }
     }
-    const instruction = buildReviewRequestInstruction({
-      taskTitle: task.title,
-      summary: reviewGate.result?.summary ?? reviewGate.summary,
-      findings: open,
-      dismissed,
-      comments: reviewComments,
-      note: reviewNote,
-      reviewOutput
-    });
+    const instruction = buildRequestInstruction(reviewOutput);
     await runReviewAction(async () => {
       try {
         if (actionableReviewSourceRun) {
@@ -701,10 +713,9 @@ export function TaskDetail(props: TaskDetailProps) {
         } else {
           await startWithSettings(task.id, instruction);
         }
-        setReviewNote('');
-        setReviewComments([]);
+        props.onReviewDraftChange(EMPTY_REVIEW_DRAFT);
       } catch {
-        // The app shell reports the error; the note and comments stay for a retry.
+        // The app shell reports the error; the draft stays for a retry.
       }
     });
   };
@@ -1474,8 +1485,9 @@ export function TaskDetail(props: TaskDetailProps) {
     : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
     : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
   // With a side panel docked, the page keeps only its tab bar, which then shares
-  // the panel head's 48px line; the title moves to the window's top bar.
-  const headCollapsed = Boolean(sidePanel) && sidePanelLayout.docked;
+  // the panel head's 48px line; the title moves to the window's top bar. Reading
+  // down the Review diff folds the head the same way, to give the code the room.
+  const headCollapsed = (Boolean(sidePanel) && sidePanelLayout.docked) || (tab === 'review' && reviewReading);
   const titleOutOfView = headCollapsed || (tab === 'agent' && !agentHeaderVisible);
   // The title moves between the page and the top bar only when a panel opens or
   // closes, or the conversation scrolls; a tab opening shows its head as it is.
@@ -1739,7 +1751,7 @@ export function TaskDetail(props: TaskDetailProps) {
           <ReviewWorkspace
             key={task.id}
             taskId={task.id}
-            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: reviewGate.status, reviewedAt: reviewGate.updatedAt }}
+            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: reviewGate.status, reviewedAt: reviewGate.updatedAt, runId: reviewGate.runId }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
             reviewedDiffArtifactId={reviewGate.status === 'STALE'
@@ -1757,18 +1769,36 @@ export function TaskDetail(props: TaskDetailProps) {
               onChange: () => setExistingWorkModal('comparison'),
               disabledReason: reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)
             } : undefined}
-            comments={reviewComments}
-            onCommentsChange={setReviewComments}
-            note={reviewNote}
-            onNoteChange={setReviewNote}
-            requestChanges={hasActionableReviewSource && reviewGate.status !== 'STALE' && !reviewIsRunning && !reviewPending ? {
-              disabledReason: reviewActionsPaused ? reviewActionPauseTitle : undefined,
+            brief={{
+              asked: requestRepeatsTitle(task) ? undefined : task.prompt,
+              report: resultReport ? { author: runtimeName, text: resultReport } : undefined,
+              reviewer: reviewGate.status !== 'NOT_RUN' ? {
+                author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter(Boolean).join(' · '),
+                summary: reviewGate.result?.summary ?? reviewGate.summary
+              } : undefined
+            }}
+            draft={props.reviewDraft}
+            onDraftChange={props.onReviewDraftChange}
+            plan={reviewPlan}
+            findingsSendable={reviewIsCurrent}
+            requestChanges={hasActionableReviewSource ? {
+              disabledReason: reviewIsRunning || reviewPending ? 'Sending waits for the review'
+                : reviewActionsPaused ? reviewActionPauseTitle : props.reviewDraftError,
               busy: reviewActionBusy,
-              reviewNotes: reviewHasActionableFindings && reviewFindingViews.length === 0,
+              reviewNotes: reviewSendsNotes,
+              instruction: () => buildRequestInstruction(loadedReviewOutput),
               onSubmit: () => void submitRequestChanges()
             } : undefined}
-            onDismissFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId, note) => props.onDecideReviewFinding!({
-              taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'DISMISS', note
+            finish={nextAction.primary && (nextAction.primary.id === 'commit' || nextAction.primary.id === 'mark-done') ? {
+              label: nextAction.primary.label,
+              disabledReason: nextActionState(nextAction.primary.id).disabled ? nextActionState(nextAction.primary.id).title : undefined,
+              busy: false,
+              onRun: () => onNextAction(nextAction.primary!.id)
+            } : undefined}
+            requestSheetToken={requestSheetToken}
+            onReadingChange={setReviewReading}
+            onDismissFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId, reason, note) => props.onDecideReviewFinding!({
+              taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'DISMISS', dismissReason: reason, note
             }) : undefined}
             onRestoreFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId) => props.onDecideReviewFinding!({
               taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'RESTORE'

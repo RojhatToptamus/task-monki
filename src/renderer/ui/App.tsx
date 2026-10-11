@@ -8,6 +8,7 @@ import {
 } from 'react';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  EMPTY_REVIEW_DRAFT,
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
   type CreateTaskRequest,
@@ -36,6 +37,7 @@ import {
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
   type SideQuestionModelChoice,
+  type TaskReviewDraft,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorktreePreparationInspection,
@@ -104,6 +106,7 @@ import { computeNavCounts, isTasksView, type NavView, type TasksView } from '../
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
 import { useExternalCheckoutObservation } from './useExternalCheckoutObservation';
 import { TaskDetail } from './TaskDetail';
+import { useTaskDraftStore } from './useTaskDraftStore';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
@@ -185,6 +188,10 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
+
+// Stable writers, so each draft store keeps one in-flight save per task.
+const saveAgentDraftText = (taskId: string, text: string) => taskManagerApi.saveTaskAgentDraft({ taskId, text });
+const saveReviewDraft = (taskId: string, draft: TaskReviewDraft) => taskManagerApi.saveTaskReviewDraft({ taskId, draft });
 
 type AppView = NavView | 'discourse' | 'designs' | 'previews';
 
@@ -271,40 +278,8 @@ export function App() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const pendingAppActions = useRef(0);
-  const [agentDrafts, setAgentDrafts] = useState<Record<string, string>>({});
-  const [agentDraftErrors, setAgentDraftErrors] = useState<Record<string, string | undefined>>({});
-  const agentDraftWrites = useRef(new Map<string, { text: string; work?: Promise<void>; error?: string }>());
-  const saveAgentDraft = (taskId: string, text: string) => {
-    setAgentDrafts((current) => {
-      const entries = Object.entries(current).filter(([id]) => id !== taskId).slice(-39);
-      return { ...Object.fromEntries(entries), [taskId]: text };
-    });
-    const entry = agentDraftWrites.current.get(taskId) ?? { text };
-    entry.text = text;
-    entry.error = undefined;
-    agentDraftWrites.current.set(taskId, entry);
-    if (!entry.work) {
-      entry.work = (async () => {
-        let saved: string;
-        do {
-          saved = entry.text;
-          await taskManagerApi.saveTaskAgentDraft({ taskId, text: saved });
-        } while (saved !== entry.text);
-        setAgentDraftErrors((current) => ({ ...current, [taskId]: undefined }));
-      })().catch((caught: unknown) => {
-        entry.error = `Draft could not be saved: ${String(caught)}`;
-        setAgentDraftErrors((current) => ({ ...current, [taskId]: entry.error }));
-        throw caught;
-      }).finally(() => {
-        entry.work = undefined;
-        for (const [id, previous] of agentDraftWrites.current) {
-          if (agentDraftWrites.current.size <= 40) break;
-          if (id !== taskId && !previous.work && !previous.error) agentDraftWrites.current.delete(id);
-        }
-      });
-      void entry.work.catch(() => undefined);
-    }
-  };
+  const agentDrafts = useTaskDraftStore(saveAgentDraftText);
+  const reviewDrafts = useTaskDraftStore(saveReviewDraft);
 
   const withAppAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     pendingAppActions.current += 1;
@@ -2787,9 +2762,9 @@ export function App() {
             onNotify={notify}
             onPrepareTaskAgent={async (text) => {
               if (taskDetail.runs.length) {
-                const draft = agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? '';
-                saveAgentDraft(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
-                await agentDraftWrites.current.get(selectedTask.id)?.work;
+                const draft = agentDrafts.values[selectedTask.id] ?? selectedTask.agentDraft ?? '';
+                agentDrafts.save(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
+                await agentDrafts.flush(selectedTask.id);
               } else {
                 const prompt = selectedTask.promptDraft ?? selectedTask.prompt;
                 await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: `${prompt}\n\n${text}`, draftOnly: true });
@@ -2801,14 +2776,13 @@ export function App() {
               if (!draftOnly) await refresh();
             }}
             agentInstructions={selectedRecords?.task.instructions ?? []}
-            agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
-            agentDraftError={agentDraftErrors[selectedTask.id]}
-            onAgentDraftChange={(text) => saveAgentDraft(selectedTask.id, text)}
-            onFlushAgentDraft={async () => {
-              const pending = agentDraftWrites.current.get(selectedTask.id);
-              await pending?.work;
-              if (pending?.error) throw new Error(pending.error);
-            }}
+            agentDraft={agentDrafts.values[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
+            agentDraftError={agentDrafts.errors[selectedTask.id]}
+            onAgentDraftChange={(text) => agentDrafts.save(selectedTask.id, text)}
+            onFlushAgentDraft={() => agentDrafts.flush(selectedTask.id)}
+            reviewDraft={reviewDrafts.values[selectedTask.id] ?? selectedTask.reviewDraft ?? EMPTY_REVIEW_DRAFT}
+            reviewDraftError={reviewDrafts.errors[selectedTask.id]}
+            onReviewDraftChange={(draft) => reviewDrafts.save(selectedTask.id, draft)}
             onQueueInstruction={async (runId, instruction, id, files) => {
               await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id, ...files }));
               await refresh();

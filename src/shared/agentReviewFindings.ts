@@ -74,6 +74,13 @@ export const REVIEW_REVISIONS_FENCE_TAG = 'task-monki-revisions';
 export const REVIEW_REVISIONS_MAX_ENTRIES = 8;
 
 export type ReviewFindingDecisionKind = 'DISMISS' | 'RESTORE' | 'WITHDRAW' | 'CHANGE_SEVERITY' | 'ADD';
+/**
+ * Why the person left a finding out: the reviewer was wrong (NOT_A_PROBLEM), or
+ * the finding is real but acceptable as it is (ACCEPTED). The next review is told
+ * which, so only a false positive asks it not to raise the finding again.
+ */
+export const REVIEW_FINDING_DISMISS_REASONS = ['NOT_A_PROBLEM', 'ACCEPTED'] as const;
+export type ReviewFindingDismissReason = (typeof REVIEW_FINDING_DISMISS_REASONS)[number];
 export type ReviewFindingDecisionActor = 'USER' | 'REVIEWER';
 
 export interface ReviewFindingDecision {
@@ -84,6 +91,8 @@ export interface ReviewFindingDecision {
   actor: ReviewFindingDecisionActor;
   /** USER DISMISS only; trimmed, at most 500 characters. */
   note?: string;
+  /** USER DISMISS only. Dismissals recorded before reasons existed omit it. */
+  dismissReason?: ReviewFindingDismissReason;
   /** Required for every REVIEWER decision; trimmed, at most 500 characters. */
   reason?: string;
   /** CHANGE_SEVERITY target. */
@@ -113,7 +122,7 @@ export interface EffectiveReviewFinding extends AgentReviewFinding {
   addedByReviewer: boolean;
   /** Set when the reviewer changed the severity. */
   originalSeverity?: AgentReviewFindingSeverity;
-  dismissal?: { note?: string; decidedAt: string };
+  dismissal?: { reason?: ReviewFindingDismissReason; note?: string; decidedAt: string };
   revision?: { kind: 'WITHDRAW' | 'CHANGE_SEVERITY' | 'ADD'; reason: string; decidedAt: string };
 }
 
@@ -245,6 +254,8 @@ export interface DecideReviewFindingRequest {
   kind: 'DISMISS' | 'RESTORE';
   /** DISMISS only; trimmed, at most 500 characters. */
   note?: string;
+  /** DISMISS only. */
+  dismissReason?: ReviewFindingDismissReason;
 }
 
 export interface AskReviewerRequest {
@@ -274,7 +285,11 @@ function applyDecision(
       return {
         ...finding,
         state: 'DISMISSED',
-        dismissal: { ...(decision.note ? { note: decision.note } : {}), decidedAt: revisedAt }
+        dismissal: {
+          ...(decision.dismissReason ? { reason: decision.dismissReason } : {}),
+          ...(decision.note ? { note: decision.note } : {}),
+          decidedAt: revisedAt
+        }
       };
     case 'RESTORE': {
       if (finding.state !== 'DISMISSED') return undefined;

@@ -983,6 +983,12 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/task-review/draft') {
+        await options.service.saveTaskReviewDraft((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/runs/steer') {
         await options.service.steerRun((await readJson()) as never);
         sendJson(response, requestId, 200, {});

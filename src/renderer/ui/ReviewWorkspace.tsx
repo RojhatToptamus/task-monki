@@ -1,10 +1,22 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
-import { Check, ChevronDown, Plus, Undo2, X } from 'lucide-react';
-import type { AgentReviewGateStatus, ArtifactRecord, OpenTargetRef, WorktreeRecord } from '../../shared/contracts';
-import type { DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
-import { findingLevel, formatFindingLocation } from '../model/findings';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
+import { Check, ChevronDown, ChevronRight, MoreHorizontal, Plus } from 'lucide-react';
+import type {
+  AgentReviewGateStatus,
+  ArtifactRecord,
+  OpenTargetRef,
+  ReviewComment,
+  ReviewFindingDismissReason,
+  TaskReviewDraft,
+  WorktreeRecord
+} from '../../shared/contracts';
+import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
+import { formatFindingLocation } from '../model/findings';
+import { formatCommentLocation, isBlockingFinding, type ReviewRequestPlan } from '../model/reviewFollowUp';
+import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
+import { readBriefFolded, readReviewFileOrder, writeBriefFolded, writeReviewFileOrder } from '../model/reviewPreferences';
 import { readViewedFiles, writeViewedFiles } from '../model/reviewViewed';
 import {
+  anchorReviewComments,
   anchorReviewFindings,
   buildReviewDiffRows,
   buildReviewIndex,
@@ -12,15 +24,16 @@ import {
   filesChangedSinceReview,
   lineAnchorKey,
   normalizeReviewPath,
-  type ReviewFindingView,
-  type ReviewLineComment
+  type ReviewFindingView
 } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { MessageTime } from './Message';
 import { useNotify } from './NotifyContext';
-import { OpenTargetContextMenu } from './OpenTargetMenu';
+import { OpenTargetContextMenu, useOpenTargetMenuItems } from './OpenTargetMenu';
+import { ReviewBrief, type ReviewBriefContent } from './ReviewBrief';
+import { ReviewFindingThread, settledLabel, severityLabel } from './ReviewFindingThread';
+import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from './ReviewRequest';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
-import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
 
 export type ReviewScope = DiffEvidenceScope | 'since-review';
@@ -30,6 +43,7 @@ export interface ReviewWorkspaceProps {
   review?: {
     status: AgentReviewGateStatus;
     reviewedAt?: string;
+    runId?: string;
   };
   findings: ReviewFindingView[];
   currentDiffArtifactId?: string;
@@ -40,23 +54,28 @@ export interface ReviewWorkspaceProps {
   worktree?: WorktreeRecord;
   /** Imported work compares against a chosen base; the menu can change it. */
   comparison?: { label: string; onChange(): void; disabledReason?: string };
-  comments: ReviewLineComment[];
-  onCommentsChange(comments: ReviewLineComment[]): void;
-  note: string;
-  onNoteChange(note: string): void;
-  /** Present while the review is current: sends open findings and comments to the agent. */
-  requestChanges?: {
-    disabledReason?: string;
-    busy: boolean;
-    /** The review left notes but no structured findings; those notes are what gets sent. */
-    reviewNotes?: boolean;
-    onSubmit(): void;
-  };
+  /** What was asked, what the agent reported, and the reviewer's summary. */
+  brief?: Omit<ReviewBriefContent, 'scope'>;
+  /** The person's unsent review, saved with the task as it changes. */
+  draft: TaskReviewDraft;
+  onDraftChange(draft: TaskReviewDraft): void;
+  /** What happens to each finding when the person requests changes. */
+  plan: ReviewRequestPlan;
+  /** False for an out-of-date review: its findings stay context and only comments are sent. */
+  findingsSendable: boolean;
+  /** Present while a request can be made: sends the findings to fix and the person's comments. */
+  requestChanges?: ReviewRequestAction & { reviewNotes: boolean };
+  /** With nothing to send, the step that finishes the task. */
+  finish?: ReviewFinishAction;
   /** Present when a review can run: none yet, or the code changed since it. */
   runReview?: { label: string; disabledReason?: string; busy: boolean; onRun(): void };
-  onDismissFinding?(findingId: string, note?: string): Promise<void>;
+  onDismissFinding?(findingId: string, reason: ReviewFindingDismissReason, note?: string): Promise<void>;
   onRestoreFinding?(findingId: string): Promise<void>;
   onAskAboutFinding?(findingId: string): void;
+  /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
+  requestSheetToken?: number;
+  /** Whether the person is reading down the diff, so the page head can fold away. */
+  onReadingChange?(reading: boolean): void;
 }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
@@ -68,28 +87,51 @@ const SCOPE_LABELS: Record<ReviewScope, string> = {
   'since-review': 'Since the review'
 };
 
-function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number): string {
+function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number): { label: string; tone?: 'blocked' | 'waiting' | 'verified' } {
   switch (status) {
-    case 'RUNNING': return 'Reviewing';
+    case 'RUNNING': return { label: 'Reviewing' };
     // A run after the review makes it out of date, whether or not files changed.
-    case 'STALE': return 'Review out of date';
-    case 'PASSED': return 'Review passed';
-    case 'NEEDS_CHANGES': return openCount > 0 ? 'Needs changes' : 'No open findings';
-    case 'INCONCLUSIVE': return 'Review inconclusive';
-    case 'FAILED': return 'Review failed';
-    case 'CANCELED': return 'Review stopped';
-    default: return 'Not reviewed';
+    case 'STALE': return { label: 'Review out of date', tone: 'waiting' };
+    case 'PASSED': return { label: 'Review passed', tone: 'verified' };
+    case 'NEEDS_CHANGES': return openCount > 0 ? { label: 'Needs changes', tone: 'blocked' } : { label: 'No open findings', tone: 'verified' };
+    case 'INCONCLUSIVE': return { label: 'Review inconclusive', tone: 'waiting' };
+    case 'FAILED': return { label: 'Review failed', tone: 'waiting' };
+    case 'CANCELED': return { label: 'Review stopped', tone: 'waiting' };
+    default: return { label: 'Not reviewed' };
   }
 }
 
+/** Open findings in words, most severe first: "1 major, 2 minor". */
+function findingWords(findings: readonly ReviewFindingView[]): string {
+  const open = findings.filter((finding) => finding.state === 'OPEN');
+  const counts = new Map<string, number>();
+  for (const finding of open) counts.set(finding.severity, (counts.get(finding.severity) ?? 0) + 1);
+  return (['BLOCKER', 'MAJOR', 'MINOR', 'NIT'] as const)
+    .filter((severity) => counts.has(severity))
+    .map((severity) => `${counts.get(severity)} ${severityLabel({ severity }).toLowerCase()}`)
+    .join(', ');
+}
+
+interface LineSelection { fileId: string; blockId: string; start: number; end: number }
+interface CommentDraft {
+  /** The row (or `file:<id>`) the composer opens under. */
+  key: string;
+  path: string;
+  side: ReviewComment['side'];
+  line?: number;
+  endLine?: number;
+  text: string;
+  editingId?: string;
+}
+
 /**
- * The Review tab: what changed, with the reviewer's findings on the code they
- * are about. One index lists files with their findings; the diff shows each
- * finding under its line; a bar at the foot sends open findings and the user's
- * own comments to the implementation agent.
+ * The Review tab: what changed, read in the order that matters, with the
+ * reviewer's findings and the person's own comments on the code they are about.
+ * A brief states the facts first; the navigator lists files or feedback; the
+ * foot holds the request and the tab's one decision.
  */
 export function ReviewWorkspace(props: ReviewWorkspaceProps) {
-  const { review, findings } = props;
+  const { review, findings, draft, plan } = props;
   const current = useDiffArtifact(props.historical ? undefined : props.currentDiffArtifactId, props.artifacts);
   const historical = useDiffArtifact(props.historical ? props.currentDiffArtifactId : undefined, props.artifacts);
   const reviewed = useDiffArtifact(props.reviewedDiffArtifactId, props.artifacts);
@@ -111,34 +153,73 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
   const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings), [files, visibleFindings]);
-  const index = useMemo(() => buildReviewIndex(files, anchored), [files, anchored]);
+  const anchoredComments = useMemo(() => anchorReviewComments(files, draft.comments), [files, draft.comments]);
+  const findingsByFile = useMemo(() => new Map(buildReviewIndex(files, anchored).map((entry) => [entry.file.id, entry.findings])), [files, anchored]);
+  const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);
+  const ordered = useMemo(() => orderReviewFiles(files, findingsByFile, order), [files, findingsByFile, order]);
   const openFindings = findings.filter((finding) => finding.state === 'OPEN');
   const findingsActionable = !stale && review?.status !== 'RUNNING' && !props.historical;
+  const canComment = !props.historical;
+  const included = useMemo(() => new Set(plan.send.map((finding) => finding.id)), [plan.send]);
 
   const [viewed, setViewed] = useState<Record<string, string>>(() => readViewedFiles(props.taskId));
   const isViewed = (file: DiffFile) => viewed[file.path] === diffFileSignature(file);
-  const toggleViewed = (file: DiffFile) => {
+  const setFileViewed = (file: DiffFile, next: boolean) => {
     setViewed((currentViewed) => {
-      const next = { ...currentViewed };
-      if (next[file.path] === diffFileSignature(file)) delete next[file.path];
-      else next[file.path] = diffFileSignature(file);
-      writeViewedFiles(props.taskId, next);
-      return next;
+      const updated = { ...currentViewed };
+      if (next) updated[file.path] = diffFileSignature(file);
+      else delete updated[file.path];
+      writeViewedFiles(props.taskId, updated);
+      return updated;
     });
   };
   const viewedCount = files.filter(isViewed).length;
+  // Collapsing is the person's choice per file; a viewed or generated file starts collapsed.
+  const [collapsedOverride, setCollapsedOverride] = useState<Record<string, boolean>>({});
+  const isCollapsed = (entry: OrderedReviewFile) =>
+    collapsedOverride[entry.file.id] ?? (isViewed(entry.file) || entry.role === 'generated');
 
+  const [rail, setRail] = useState<'files' | 'feedback'>('files');
   const [focusedFindingId, setFocusedFindingId] = useState<string>();
+  const [dismissingId, setDismissingId] = useState<string>();
   const [activeFileId, setActiveFileId] = useState<string>();
-  const [commentDraft, setCommentDraft] = useState<{ anchor: string; path: string; line?: number; text: string; editingId?: string }>();
+  const [selection, setSelection] = useState<LineSelection>();
+  const [commentDraft, setCommentDraft] = useState<CommentDraft>();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const briefRound = review?.runId ?? 'none';
+  const [briefFolded, setBriefFolded] = useState(() => readBriefFolded(props.taskId, briefRound));
   const [pathMenu, setPathMenu] = useState<{ target: OpenTargetRef; position: { x: number; y: number } }>();
   const closePathMenu = useCallback(() => setPathMenu(undefined), []);
   const notify = useNotify();
   const diffRef = useRef<HTMLDivElement>(null);
-  const noteId = useId();
-  const requestReasonId = useId();
+  const reading = useRef(false);
+  // Reading starts past the first lines and ends back at the top. Only a diff with
+  // room to spare counts, so the head folding away never leaves nothing to scroll.
+  const onDiffScroll = (pane: HTMLElement) => {
+    const next = reading.current ? pane.scrollTop > 8 : pane.scrollTop > 48 && pane.scrollHeight - pane.clientHeight > 240;
+    if (next === reading.current) return;
+    reading.current = next;
+    props.onReadingChange?.(next);
+  };
+  const composerId = useId();
+  // A jump into a collapsed file expands it first, then scrolls once it renders.
+  const [pendingScroll, setPendingScroll] = useState<{ attribute: string; value: string; focus?: boolean }>();
+  const elementBy = (attribute: string, value: string) => [...(diffRef.current?.querySelectorAll<HTMLElement>(`[${attribute}]`) ?? [])]
+    .find((element) => element.getAttribute(attribute) === value);
 
-  // The index follows the reading position.
+  useEffect(() => {
+    if (props.requestSheetToken) setSheetOpen(true);
+  }, [props.requestSheetToken]);
+
+  useEffect(() => {
+    if (!pendingScroll) return;
+    const element = elementBy(pendingScroll.attribute, pendingScroll.value);
+    element?.scrollIntoView?.({ block: 'center' });
+    if (pendingScroll.focus) element?.focus({ preventScroll: true });
+    setPendingScroll(undefined);
+  }, [pendingScroll]);
+
+  // The navigator follows the reading position.
   useEffect(() => {
     const root = diffRef.current;
     if (!root || typeof IntersectionObserver === 'undefined') return;
@@ -156,26 +237,109 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     }, { root, rootMargin: '0px 0px -70% 0px' });
     root.querySelectorAll('[data-file-id]').forEach((element) => observer.observe(element));
     return () => observer.disconnect();
-  }, [files]);
+  }, [ordered]);
 
+  const fileOfFinding = (findingId: string) =>
+    ordered.find((entry) => (findingsByFile.get(entry.file.id) ?? []).some((finding) => finding.id === findingId));
+  const expand = (fileId: string) => setCollapsedOverride((currentOverride) => ({ ...currentOverride, [fileId]: false }));
   const scrollToFile = (fileId: string) => {
-    diffRef.current?.querySelector(`[data-file-id="${CSS.escape(fileId)}"]`)?.scrollIntoView({ block: 'start' });
+    elementBy('data-file-id', fileId)?.scrollIntoView?.({ block: 'start' });
     setActiveFileId(fileId);
   };
   const scrollToFinding = (findingId: string) => {
     setFocusedFindingId(findingId);
-    const element = diffRef.current?.querySelector<HTMLElement>(`[data-finding-id="${CSS.escape(findingId)}"]`);
-    element?.scrollIntoView({ block: 'center' });
-    element?.focus({ preventScroll: true });
+    const entry = fileOfFinding(findingId);
+    if (entry && isCollapsed(entry)) expand(entry.file.id);
+    setPendingScroll({ attribute: 'data-finding-id', value: findingId, focus: true });
+  };
+  const scrollToComment = (commentId: string) => {
+    const comment = draft.comments.find((candidate) => candidate.id === commentId);
+    const entry = comment ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(comment.path)) : undefined;
+    if (entry && isCollapsed(entry)) expand(entry.file.id);
+    setPendingScroll({ attribute: 'data-comment-id', value: commentId });
   };
 
-  // J/K move between files, N/P between findings, V marks the current file viewed.
+  const updateDraft = (patch: Partial<TaskReviewDraft>) => props.onDraftChange({ ...draft, ...patch });
+  const setIncluded = (findingId: string, include: boolean) => {
+    const runId = review?.runId;
+    const ids = draft.reviewRunId === runId ? draft.includedFindingIds : [];
+    updateDraft({
+      reviewRunId: runId,
+      includedFindingIds: include ? [...new Set([...ids, findingId])] : ids.filter((id) => id !== findingId)
+    });
+  };
+  const toggleIncluded = (findingId: string) => setIncluded(findingId, !included.has(findingId));
+  const openDismiss = (findingId: string) => {
+    setSheetOpen(false);
+    setDismissingId(findingId);
+    scrollToFinding(findingId);
+  };
+
+  const openComposer = (file: DiffFile, block: DiffBlock, rowIndex: number) => {
+    const inSelection = selection && selection.fileId === file.id && selection.blockId === block.id &&
+      rowIndex >= selection.start && rowIndex <= selection.end;
+    const start = inSelection ? selection.start : rowIndex;
+    const end = inSelection ? selection.end : rowIndex;
+    const clicked = block.lines[rowIndex]!;
+    const side: ReviewComment['side'] = clicked.kind === 'deletion' ? 'OLD' : 'NEW';
+    const numbers = block.lines.slice(start, end + 1)
+      .map((line) => (side === 'OLD' ? (line.kind === 'deletion' ? line.oldLine : undefined) : line.newLine))
+      .filter((value): value is number => value !== undefined);
+    const line = Math.min(...numbers);
+    const last = Math.max(...numbers);
+    setCommentDraft({ key: lineAnchorKey(file.id, block.id, end), path: file.path, side, line, endLine: last > line ? last : undefined, text: '' });
+  };
+  const selectRow = (file: DiffFile, block: DiffBlock, rowIndex: number, extend: boolean) => {
+    setSelection((currentSelection) => {
+      if (extend && currentSelection && currentSelection.fileId === file.id && currentSelection.blockId === block.id) {
+        const anchor = currentSelection.start;
+        return { fileId: file.id, blockId: block.id, start: Math.min(anchor, rowIndex), end: Math.max(anchor, rowIndex) };
+      }
+      if (currentSelection?.fileId === file.id && currentSelection.blockId === block.id && currentSelection.start === rowIndex && currentSelection.end === rowIndex) return undefined;
+      return { fileId: file.id, blockId: block.id, start: rowIndex, end: rowIndex };
+    });
+  };
+  const saveComment = () => {
+    if (!commentDraft?.text.trim()) { setCommentDraft(undefined); return; }
+    const text = commentDraft.text.trim();
+    updateDraft({
+      comments: commentDraft.editingId
+        ? draft.comments.map((comment) => (comment.id === commentDraft.editingId ? { ...comment, text } : comment))
+        : [...draft.comments, {
+          id: crypto.randomUUID(),
+          path: commentDraft.path,
+          side: commentDraft.side,
+          ...(commentDraft.line ? { line: commentDraft.line } : {}),
+          ...(commentDraft.endLine ? { endLine: commentDraft.endLine } : {}),
+          text
+        }]
+    });
+    setCommentDraft(undefined);
+    setSelection(undefined);
+  };
+  const deleteComment = (commentId: string) => updateDraft({ comments: draft.comments.filter((comment) => comment.id !== commentId) });
+
+  const readingOrderFindings = [
+    ...anchored.general,
+    ...ordered.flatMap((entry) => findingsByFile.get(entry.file.id) ?? [])
+  ].filter((finding) => finding.state === 'OPEN');
+  const focusedFinding = findings.find((finding) => finding.id === focusedFindingId);
+  const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy &&
+    ((props.findingsSendable && plan.send.length) || draft.comments.length || props.requestChanges.reviewNotes));
+
+  // J/K files, N/P open findings, V viewed and on, D/A/F the focused finding, C the selected lines.
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     const target = event.target as HTMLElement;
-    if (event.metaKey || event.ctrlKey || event.altKey || target.closest('input, textarea, [contenteditable="true"], [role="menu"]')) return;
+    if (target.closest('input, textarea, [contenteditable="true"], [role="menu"]')) return;
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      if (sheetOpen && canSubmit) props.requestChanges?.onSubmit();
+      else setSheetOpen(true);
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
     const key = event.key.toLowerCase();
-    const fileIds = index.map((entry) => entry.file.id);
-    const findingIds = index.flatMap((entry) => entry.findings.map((finding) => finding.id));
+    const fileIds = ordered.map((entry) => entry.file.id);
     const step = (list: string[], currentId: string | undefined, delta: number) => {
       if (list.length === 0) return undefined;
       const position = currentId ? list.indexOf(currentId) : -1;
@@ -185,11 +349,31 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       const next = step(fileIds, activeFileId ?? fileIds[0], key === 'j' ? 1 : -1);
       if (next) { event.preventDefault(); scrollToFile(next); }
     } else if (key === 'n' || key === 'p') {
-      const next = step(findingIds, focusedFindingId, key === 'n' ? 1 : -1);
+      const next = step(readingOrderFindings.map((finding) => finding.id), focusedFindingId, key === 'n' ? 1 : -1);
       if (next) { event.preventDefault(); scrollToFinding(next); }
     } else if (key === 'v') {
-      const file = files.find((candidate) => candidate.id === (activeFileId ?? files[0]?.id));
-      if (file) { event.preventDefault(); toggleViewed(file); }
+      const entry = ordered.find((candidate) => candidate.file.id === (activeFileId ?? fileIds[0]));
+      if (!entry) return;
+      event.preventDefault();
+      const nowViewed = !isViewed(entry.file);
+      setFileViewed(entry.file, nowViewed);
+      const next = nowViewed ? ordered.slice(ordered.indexOf(entry) + 1).find((candidate) => !isViewed(candidate.file)) : undefined;
+      if (next) window.requestAnimationFrame(() => scrollToFile(next.file.id));
+    } else if (key === 'd' && focusedFinding?.state === 'OPEN' && findingsActionable && props.onDismissFinding) {
+      event.preventDefault();
+      setDismissingId(focusedFinding.id);
+    } else if (key === 'a' && focusedFinding && findingsActionable && props.onAskAboutFinding) {
+      event.preventDefault();
+      props.onAskAboutFinding(focusedFinding.id);
+    } else if (key === 'f' && focusedFinding?.state === 'OPEN' && !isBlockingFinding(focusedFinding) && findingsActionable) {
+      event.preventDefault();
+      toggleIncluded(focusedFinding.id);
+    } else if (key === 'c' && selection && canComment) {
+      const entry = ordered.find((candidate) => candidate.file.id === selection.fileId);
+      const block = entry?.file.blocks.find((candidate) => candidate.id === selection.blockId);
+      if (entry && block) { event.preventDefault(); openComposer(entry.file, block, selection.end); }
+    } else if (key === 'escape' && selection) {
+      setSelection(undefined);
     }
   };
 
@@ -202,15 +386,6 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     });
   };
 
-  const saveComment = () => {
-    if (!commentDraft?.text.trim()) { setCommentDraft(undefined); return; }
-    const text = commentDraft.text.trim();
-    props.onCommentsChange(commentDraft.editingId
-      ? props.comments.map((comment) => (comment.id === commentDraft.editingId ? { ...comment, text } : comment))
-      : [...props.comments, { id: `${Date.now().toString(36)}-${props.comments.length}`, path: commentDraft.path, line: commentDraft.line, text }]);
-    setCommentDraft(undefined);
-  };
-
   const scopeItems: ActionMenuItem[] = [
     ...(['all', 'committed', 'uncommitted'] as const).map((value) => ({
       id: value, label: SCOPE_LABELS[value], pressed: effectiveScope === value, onSelect: () => setScope(value)
@@ -221,6 +396,19 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       disabled: Boolean(props.comparison.disabledReason), disabledReason: props.comparison.disabledReason, onSelect: props.comparison.onChange
     }] : [])
   ];
+  const changeOrder = (next: ReviewFileOrder) => { setOrder(next); writeReviewFileOrder(next); };
+  const viewItems: ActionMenuItem[] = [
+    { id: 'importance', label: 'By importance', description: 'Findings first, then code with its tests', pressed: order === 'importance', onSelect: () => changeOrder('importance') },
+    { id: 'path', label: 'By path', pressed: order === 'path', onSelect: () => changeOrder('path') },
+    { id: 'expand', label: 'Expand all files', separated: true, onSelect: () => setCollapsedOverride(Object.fromEntries(ordered.map((entry) => [entry.file.id, false]))) },
+    { id: 'collapse', label: 'Collapse all files', onSelect: () => setCollapsedOverride(Object.fromEntries(ordered.map((entry) => [entry.file.id, true]))) }
+  ];
+  const toggleCollapsed = (entry: OrderedReviewFile, all: boolean) => {
+    const next = !isCollapsed(entry);
+    setCollapsedOverride((currentOverride) => (all
+      ? Object.fromEntries(ordered.map((candidate) => [candidate.file.id, next]))
+      : { ...currentOverride, [entry.file.id]: next }));
+  };
 
   const unavailable = loading ? 'Loading changes…'
     : diff.error ? 'The captured diff could not be read.'
@@ -232,14 +420,24 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     ? diff.inspection.completeness === 'INCOMPLETE' ? 'No paths could be confirmed from the incomplete capture.'
       : effectiveScope === 'since-review' ? 'Nothing changed since the review.' : 'No changes in this scope.'
     : undefined;
-  const commentCount = props.comments.length;
-  const requestSummary = [
-    openFindings.length ? `${openFindings.length} finding${openFindings.length === 1 ? '' : 's'}` : '',
-    commentCount ? `${commentCount} comment${commentCount === 1 ? '' : 's'}` : ''
-  ].filter(Boolean).join(' and ') || 'Review notes';
-  const showRequestBar = Boolean(props.requestChanges) && (openFindings.length > 0 || commentCount > 0 || Boolean(props.requestChanges?.reviewNotes));
-  // The bar animates in only when it appears while the tab is open.
-  const requestBarAtMount = useRef(showRequestBar);
+
+  const headline = reviewHeadline(review?.status, openFindings.length);
+  const settledCount = findings.length - openFindings.length;
+  const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer) && !props.historical
+    ? {
+      ...props.brief,
+      reviewer: props.brief.reviewer ? {
+        ...props.brief.reviewer,
+        status: headline.label,
+        counts: [findingWords(findings), settledCount ? `${settledCount} settled` : ''].filter(Boolean).join(' · ') || undefined
+      } : undefined,
+      scope: files.length && effectiveScope === 'all' ? {
+        files: files.length,
+        additions: files.reduce((sum, file) => sum + file.additions, 0),
+        deletions: files.reduce((sum, file) => sum + file.deletions, 0)
+      } : undefined
+    }
+    : undefined;
 
   const renderThreads = (items: ReviewFindingView[] | undefined) => items?.map((finding) => (
     <ReviewFindingThread
@@ -247,51 +445,75 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       finding={finding}
       focused={focusedFindingId === finding.id}
       actionable={findingsActionable}
+      inRequest={included.has(finding.id)}
+      dismissing={dismissingId === finding.id}
+      onDismissingChange={(open) => setDismissingId(open ? finding.id : undefined)}
       onFocus={() => setFocusedFindingId(finding.id)}
       onDismiss={props.onDismissFinding}
       onRestore={props.onRestoreFinding}
       onAsk={props.onAskAboutFinding}
+      onToggleInclude={props.findingsSendable ? toggleIncluded : undefined}
     />
   ));
 
-  const renderComments = (path: string, line?: number) => props.comments
-    .filter((comment) => comment.path === path && comment.line === line && comment.id !== commentDraft?.editingId)
-    .map((comment) => (
-      <div key={comment.id} className="tm-review-comment">
-        <p>{comment.text}</p>
-        <div className="tm-review-comment__actions">
-          <button type="button" className="ghost-button" onClick={() => setCommentDraft({ anchor: `${path}:${line ?? ''}`, path, line, text: comment.text, editingId: comment.id })}>Edit</button>
-          <button type="button" className="ghost-button" onClick={() => props.onCommentsChange(props.comments.filter((candidate) => candidate.id !== comment.id))}>Delete</button>
-        </div>
-      </div>
-    ));
-
-  // A line comment is written in the app's composer: the field, then a toolbar with the shortcut and the actions.
-  const renderComposer = (anchor: string) => commentDraft?.anchor === anchor ? (
-    <form className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
-      <label className="tm-visually-hidden" htmlFor={`${noteId}-comment`}>Comment</label>
+  // A comment is written in the app's composer: what it is about, the field, then the actions.
+  const composerForm = (draftComment: CommentDraft) => (
+    <form key="composer" className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
+      <span className="tm-review-comment-composer__about">{commentAbout(draftComment)}</span>
+      <label className="tm-visually-hidden" htmlFor={`${composerId}-comment`}>Comment</label>
       <textarea
-        id={`${noteId}-comment`}
+        id={`${composerId}-comment`}
         className="tm-composer__input"
         autoFocus
         rows={2}
-        value={commentDraft.text}
+        value={draftComment.text}
         placeholder="Add a comment"
-        onChange={(event) => setCommentDraft({ ...commentDraft, text: event.target.value })}
+        onChange={(event) => setCommentDraft({ ...draftComment, text: event.target.value })}
         onKeyDown={(event) => {
           if (event.key === 'Escape') { event.preventDefault(); setCommentDraft(undefined); }
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); saveComment(); }
         }}
       />
       <div className="tm-composer__toolbar">
-        <span className="tm-composer__hint">{SUBMIT_SHORTCUT} to {commentDraft.editingId ? 'save' : 'comment'}</span>
+        <span className="tm-composer__hint">Saved to your review; sent with Request changes</span>
         <button type="button" className="ghost-button" onClick={() => setCommentDraft(undefined)}>Cancel</button>
-        <button type="submit" className="primary-button button--sm" disabled={!commentDraft.text.trim()}>
-          {commentDraft.editingId ? 'Save' : 'Comment'}
-        </button>
+        <Tooltip label={draftComment.editingId ? 'Save' : 'Add comment'} shortcut={SUBMIT_SHORTCUT}>
+          <button type="submit" className="primary-button button--sm" disabled={!draftComment.text.trim()}>
+            {draftComment.editingId ? 'Save' : 'Add comment'}
+          </button>
+        </Tooltip>
       </div>
     </form>
-  ) : null;
+  );
+  const renderComposer = (key: string) =>
+    commentDraft && !commentDraft.editingId && commentDraft.key === key ? composerForm(commentDraft) : null;
+
+  // A comment being edited gives its place to the composer.
+  const renderComments = (items: ReviewComment[] | undefined) => items?.map((comment) => (
+    commentDraft?.editingId === comment.id ? <Fragment key={comment.id}>{composerForm(commentDraft)}</Fragment> : (
+      <div key={comment.id} className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
+        <div className="tm-review-comment__body">
+          {comment.endLine || comment.side === 'OLD' || !comment.line ? (
+            <span className="tm-review-comment__about">{commentAbout(comment)}</span>
+          ) : null}
+          <p>{comment.text}</p>
+        </div>
+        {canComment ? (
+          <div className="tm-review-comment__actions">
+            <button type="button" className="ghost-button" onClick={() => setCommentDraft({
+              key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, text: comment.text, editingId: comment.id
+            })}>Edit</button>
+            <button type="button" className="ghost-button" onClick={() => deleteComment(comment.id)}>Delete</button>
+          </div>
+        ) : null}
+      </div>
+    )
+  ));
+
+  const compareMeta = effectiveScope === 'all' && props.worktree
+    ? `${props.worktree.baseRef ?? 'base'}@${props.worktree.baseSha.slice(0, 7)} → working tree`
+    : undefined;
+  const feedbackCount = (props.findingsSendable ? plan.send.length + plan.suggestions.length : openFindings.length) + draft.comments.length;
 
   return (
     <section className="tm-review" aria-label="Review" onKeyDown={onKeyDown}>
@@ -309,8 +531,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           </>
         ) : (
           <>
-            <span className={`tm-review__headline${review?.status === 'RUNNING' ? ' tm-shimmer' : ''}`}>
-              {reviewHeadline(review?.status, openFindings.length)}
+            <span className={`tm-review__headline${review?.status === 'RUNNING' ? ' tm-shimmer' : ''}`} data-tone={headline.tone}>
+              {headline.label}
             </span>
             {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' ? (
               <span className="tm-review__meta">Reviewed <MessageTime value={review.reviewedAt} /></span>
@@ -320,8 +542,15 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               label="Changes to show"
               selection="single"
               side="bottom"
-              trigger={<>{SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} aria-hidden="true" /></>}
+              trigger={<>{SCOPE_LABELS[effectiveScope]}{compareMeta ? <span className="tm-review__compare">{compareMeta}</span> : null}<ChevronDown size={13} aria-hidden="true" /></>}
               items={scopeItems}
+            />
+            <ActionMenu
+              className="tm-review__view"
+              label="View options"
+              side="bottom"
+              trigger={<>View<ChevronDown size={13} aria-hidden="true" /></>}
+              items={viewItems}
             />
             {props.runReview ? (
               <span className="tm-actiontitle" title={props.runReview.disabledReason}>
@@ -344,62 +573,130 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       ) : null}
 
       <div className="tm-review__work">
-        <nav className="tm-review__index" aria-label="Files and findings">
+        <nav className="tm-review__index" aria-label="Files and feedback">
+          <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
+            <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => setRail('files')}>
+              Files<span className="tm-review__rail-count">{files.length}</span>
+            </button>
+            <button type="button" className="segmented__btn" aria-pressed={rail === 'feedback'} onClick={() => setRail('feedback')}>
+              Feedback<span className="tm-review__rail-count">{feedbackCount}</span>
+            </button>
+          </div>
+          <div className="tm-review__index-list">
+            {rail === 'files' ? ordered.map((entry) => {
+              const fileFindings = findingsByFile.get(entry.file.id) ?? [];
+              const words = findingWords(fileFindings);
+              const comments = draft.comments.filter((comment) => normalizeReviewPath(comment.path) === normalizeReviewPath(entry.file.path)).length;
+              const sub = [words, comments ? `${comments} comment${comments === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ')
+                || roleWord(entry);
+              return (
+                <button
+                  key={entry.file.id}
+                  type="button"
+                  className={`tm-review__index-file${activeFileId === entry.file.id ? ' tm-review__index-file--active' : ''}${isViewed(entry.file) ? ' tm-review__index-file--viewed' : ''}`}
+                  onClick={() => { if (isCollapsed(entry)) expand(entry.file.id); scrollToFile(entry.file.id); }}
+                >
+                  <span className="tm-review__index-path">{indexLabel(entry.file, files)}</span>
+                  {isViewed(entry.file) ? <Check size={13} aria-label="Viewed" /> : <DiffStat file={entry.file} />}
+                  {sub ? <span className="tm-review__index-sub" data-tone={fileFindings.some((finding) => finding.state === 'OPEN' && isBlockingFinding(finding)) ? 'blocked' : undefined}>{sub}</span> : null}
+                </button>
+              );
+            }) : (
+              <FeedbackList
+                plan={plan}
+                findingsSendable={props.findingsSendable}
+                findings={findings}
+                comments={draft.comments}
+                focusedFindingId={focusedFindingId}
+                onShowFinding={scrollToFinding}
+                onShowComment={scrollToComment}
+              />
+            )}
+          </div>
           {files.length > 0 ? (
-            <div className="tm-review__index-head">
-              <span>{files.length} file{files.length === 1 ? '' : 's'}</span>
-              {viewedCount > 0 ? <span>{viewedCount} viewed</span> : null}
+            <div className="tm-review__progress">
+              <span>{viewedCount} of {files.length} viewed</span>
+              <span className="tm-review__meter" aria-hidden="true"><span style={{ width: `${(viewedCount / files.length) * 100}%` }} /></span>
             </div>
           ) : null}
-          {anchored.general.length > 0 ? (
-            <>
-              <div className="tm-review__index-file tm-review__index-file--general">General</div>
-              {anchored.general.map((finding) => (
-                <IndexFinding key={finding.id} finding={finding} active={focusedFindingId === finding.id} onSelect={() => scrollToFinding(finding.id)} />
-              ))}
-            </>
-          ) : null}
-          {index.map(({ file, findings: fileFindings }) => (
-            <div key={file.id} className="tm-review__index-group">
-              <button
-                type="button"
-                className={`tm-review__index-file${activeFileId === file.id ? ' tm-review__index-file--active' : ''}${isViewed(file) ? ' tm-review__index-file--viewed' : ''}`}
-                title={file.path}
-                onClick={() => scrollToFile(file.id)}
-              >
-                <span className="tm-review__index-path">{indexLabel(file, files)}</span>
-                {isViewed(file) ? <Check size={13} aria-label="Viewed" /> : <DiffStat file={file} />}
-              </button>
-              {fileFindings.map((finding) => (
-                <IndexFinding key={finding.id} finding={finding} active={focusedFindingId === finding.id} onSelect={() => scrollToFinding(finding.id)} />
-              ))}
-            </div>
-          ))}
         </nav>
 
-        <div ref={diffRef} className="tm-review__diff" tabIndex={-1}>
+        <div ref={diffRef} className="tm-review__diff" tabIndex={-1} onScroll={(event) => onDiffScroll(event.currentTarget)}>
+          {briefContent ? (
+            <ReviewBrief
+              content={briefContent}
+              folded={briefFolded}
+              onFoldedChange={(folded) => { setBriefFolded(folded); writeBriefFolded(props.taskId, briefRound, folded); }}
+            />
+          ) : null}
           {unavailable || emptyScope ? <p className="tm-review__empty">{unavailable ?? emptyScope}</p> : null}
           {anchored.general.length > 0 ? (
             <section className="tm-review-general" aria-label="Findings without a location">
               {renderThreads(anchored.general)}
             </section>
           ) : null}
-          {files.map((file) => {
+          {ordered.map((entry) => {
+            const { file } = entry;
             const fileViewed = isViewed(file);
+            const collapsed = isCollapsed(entry);
+            const fileFindings = findingsByFile.get(file.id) ?? [];
+            const blocking = fileFindings.some((finding) => finding.state === 'OPEN' && isBlockingFinding(finding));
+            const parts = file.path.split('/');
+            const name = parts.pop() ?? file.path;
+            const fileKey = `file:${file.id}`;
             return (
-              <section key={file.id} className="tm-review-file" data-file-id={file.id} aria-label={file.path}>
+              <section key={file.id} className={`tm-review-file${collapsed ? ' tm-review-file--collapsed' : ''}`} data-file-id={file.id} aria-label={file.path}>
                 <header className="tm-review-file__head" onContextMenu={(event) => openPathMenu(file.path, event)}>
-                  <span className="tm-review-file__path" title={file.path}>{file.path}</span>
-                  {file.oldPath ? <span className="tm-review-file__renamed" title={file.oldPath}>renamed</span> : null}
+                  <Tooltip label={collapsed ? 'Expand' : 'Collapse'} shortcut="⌥-click: all files">
+                    <button
+                      type="button"
+                      className="tm-iconbtn tm-review-file__toggle"
+                      aria-expanded={!collapsed}
+                      aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${file.path}`}
+                      onClick={(event) => toggleCollapsed(entry, event.altKey)}
+                    >
+                      <ChevronRight size={14} aria-hidden="true" />
+                    </button>
+                  </Tooltip>
+                  <span className="tm-review-file__path">
+                    {parts.length ? <span className="tm-review-file__dir">{parts.join('/')}/</span> : null}
+                    <span className="tm-review-file__name">{name}</span>
+                  </span>
+                  {file.oldPath ? <span className="tm-review-file__word">Renamed from <code>{file.oldPath}</code></span>
+                    : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'Added' : 'Deleted'}</span> : null}
+                  {roleWord(entry) ? <span className="tm-review-file__word">{roleWord(entry)}</span> : null}
+                  <span className="tm-review-file__spacer" />
+                  {findingWords(fileFindings) ? <span className="tm-review-file__count" data-tone={blocking ? 'blocked' : undefined}>{findingWords(fileFindings)}</span> : null}
                   <DiffStat file={file} />
                   <label className="tm-review-file__viewed">
-                    <input type="checkbox" checked={fileViewed} onChange={() => toggleViewed(file)} />
+                    <input type="checkbox" checked={fileViewed} onChange={() => setFileViewed(file, !fileViewed)} />
                     Viewed
                   </label>
+                  <FileMenu
+                    path={file.path}
+                    target={props.worktree && !props.historical ? { type: 'worktreeFile', taskId: props.worktree.taskId, worktreeId: props.worktree.id, relativePath: file.path } : undefined}
+                    onComment={canComment ? () => {
+                      if (collapsed) expand(file.id);
+                      setCommentDraft({ key: fileKey, path: file.path, side: 'NEW', text: '' });
+                    } : undefined}
+                    onError={(message) => notify(message, 'error')}
+                  />
                 </header>
-                {fileViewed ? null : (
+                {collapsed ? (
+                  // A collapsed file still states its open findings: Viewed never hides one.
+                  fileFindings.filter((finding) => finding.state === 'OPEN').map((finding) => (
+                    <div key={finding.id} className="tm-review-checkpoint">
+                      <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
+                      <span className="tm-review-checkpoint__title">{finding.title}</span>
+                      <span className="tm-review-checkpoint__state">{included.has(finding.id) ? 'In the request' : 'Suggestion'}</span>
+                      <button type="button" className="tm-osection__link" onClick={() => scrollToFinding(finding.id)}>Show</button>
+                    </div>
+                  ))
+                ) : (
                   <>
                     {renderThreads(anchored.byFile.get(file.id))}
+                    {renderComments(anchoredComments.byFile.get(file.id))}
+                    {renderComposer(fileKey)}
                     {file.blocks.map((block) => (
                       <div key={block.id} className="tm-review-block">
                         {file.blocks.length > 1 ? <div className="tm-review-block__label">{block.label}</div> : null}
@@ -407,7 +704,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           if (row.kind === 'gap') {
                             if (row.hidden === 0 && !row.heading) return null;
                             return (
-                              <div key={`gap-${rowIndex}`} className="tm-review-gap" title={row.raw}>
+                              <div key={`gap-${rowIndex}`} className="tm-review-gap">
                                 {row.hidden > 0 ? <span>{row.hidden} unchanged line{row.hidden === 1 ? '' : 's'}</span> : null}
                                 {row.heading ? <code>{row.heading}</code> : null}
                               </div>
@@ -415,24 +712,25 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           }
                           const anchor = lineAnchorKey(file.id, block.id, row.index);
                           const line = row.line;
-                          const targetLine = line.newLine ?? line.oldLine;
-                          const commentKey = `${file.path}:${line.newLine ?? ''}`;
+                          const number = line.kind === 'deletion' ? line.oldLine : line.newLine;
+                          const selected = selection?.fileId === file.id && selection.blockId === block.id &&
+                            row.index >= selection.start && row.index <= selection.end;
                           return (
                             <div key={anchor} className="tm-review-line-group">
                               <div
-                                className={`tm-diffline tm-diffline--${line.kind} tm-diffline--annotated`}
-                                onContextMenu={(event) => openPathMenu(file.path, event, targetLine)}
+                                className={`tm-diffline tm-diffline--${line.kind} tm-diffline--annotated${selected ? ' tm-diffline--selected' : ''}`}
+                                onContextMenu={(event) => openPathMenu(file.path, event, line.newLine ?? line.oldLine)}
                               >
-                                <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
-                                <span className="tm-diffline__num">{line.newLine ?? ''}</span>
+                                {/* The number selects the line; shift-click extends the range a comment covers. */}
+                                <span className="tm-diffline__num" onClick={(event) => selectRow(file, block, row.index, event.shiftKey)}>{number ?? ''}</span>
                                 {/* The note column is reserved on every row, so the "+" never covers a number. */}
                                 <span className="tm-diffline__note">
-                                  {line.newLine !== undefined && !props.historical && props.requestChanges ? (
+                                  {canComment && number !== undefined ? (
                                     <button
                                       type="button"
                                       className="tm-review-line__comment"
-                                      aria-label={`Comment on line ${line.newLine}`}
-                                      onClick={() => setCommentDraft({ anchor: commentKey, path: file.path, line: line.newLine, text: '' })}
+                                      aria-label={`Comment on ${line.kind === 'deletion' ? 'removed ' : ''}line ${number}`}
+                                      onClick={() => openComposer(file, block, row.index)}
                                     >
                                       <Plus size={12} aria-hidden="true" />
                                     </button>
@@ -449,8 +747,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                 </code>
                               </div>
                               {renderThreads(anchored.byLine.get(anchor))}
-                              {line.newLine !== undefined ? renderComments(file.path, line.newLine) : null}
-                              {line.newLine !== undefined ? renderComposer(commentKey) : null}
+                              {renderComments(anchoredComments.byLine.get(anchor))}
+                              {renderComposer(anchor)}
                             </div>
                           );
                         })}
@@ -464,43 +762,43 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         </div>
       </div>
 
-      {showRequestBar && props.requestChanges ? (
-        <div className={`tm-review__request${requestBarAtMount.current ? '' : ' tm-review__request--enter'}`}>
-          <span className="tm-review__request-summary">{requestSummary}</span>
-          <label className="tm-review__note">
-            <span className="tm-visually-hidden">Review note</span>
-            <input
-              id={noteId}
-              type="text"
-              value={props.note}
-              placeholder="Add a note"
-              onChange={(event) => props.onNoteChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !props.requestChanges?.disabledReason) {
-                  event.preventDefault();
-                  props.requestChanges?.onSubmit();
-                }
-              }}
-            />
-          </label>
-          {props.requestChanges.disabledReason ? (
-            <span id={requestReasonId} className="tm-review__request-reason">{props.requestChanges.disabledReason}</span>
-          ) : null}
-          <button
-            type="button"
-            className="primary-button"
-            disabled={Boolean(props.requestChanges.disabledReason) || props.requestChanges.busy}
-            aria-describedby={props.requestChanges.disabledReason ? requestReasonId : undefined}
-            onClick={props.requestChanges.onSubmit}
-          >
-            Request changes
-          </button>
-        </div>
-      ) : null}
+      {props.historical ? null : (
+        <ReviewOutcome
+          plan={plan}
+          findingsSendable={props.findingsSendable}
+          comments={draft.comments}
+          note={draft.note}
+          onNoteChange={(note) => updateDraft({ note })}
+          reviewNotes={Boolean(props.requestChanges?.reviewNotes)}
+          request={props.requestChanges}
+          finish={props.finish}
+          sheetOpen={sheetOpen}
+          onSheetOpenChange={setSheetOpen}
+          onIncludeFinding={setIncluded}
+          onDismissFinding={openDismiss}
+          onDeleteComment={deleteComment}
+          onShowFinding={(findingId) => { setSheetOpen(false); scrollToFinding(findingId); }}
+          onShowComment={(commentId) => { setSheetOpen(false); scrollToComment(commentId); }}
+        />
+      )}
 
       {pathMenu ? <OpenTargetContextMenu target={pathMenu.target} position={pathMenu.position} onClose={closePathMenu} onError={(message) => notify(message, 'error')} /> : null}
     </section>
   );
+}
+
+/** What a comment is about, when its row does not already say it. */
+function commentAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>): string {
+  if (!comment.line) return 'Whole file';
+  const lines = comment.endLine ? `Lines ${comment.line}–${comment.endLine}` : `Line ${comment.line}`;
+  return comment.side === 'OLD' ? `Removed ${lines.toLowerCase()}` : lines;
+}
+
+/** A file's part in the change, when it is worth saying: the code a test covers, or generated output. */
+function roleWord(entry: OrderedReviewFile): string {
+  if (entry.subject) return `Test for ${entry.subject.path.split('/').at(-1)}`;
+  if (entry.role === 'generated') return 'Generated';
+  return '';
 }
 
 function lineCode(content: string, kind: string): string {
@@ -519,7 +817,7 @@ function DiffStat({ file }: { file: DiffFile }) {
   );
 }
 
-/** A file's name in the index, with its folder only when another file shares the name. */
+/** A file's name in the navigator, with its folder only when another file shares the name. */
 function indexLabel(file: DiffFile, files: readonly DiffFile[]): string {
   const parts = file.path.split('/');
   const name = parts.at(-1) ?? file.path;
@@ -527,133 +825,88 @@ function indexLabel(file: DiffFile, files: readonly DiffFile[]): string {
   return shared && parts.length > 1 ? `${parts.at(-2)}/${name}` : name;
 }
 
-function severityLabel(finding: ReviewFindingView): string {
-  return findingLevel(finding.severity).label;
-}
-
-function IndexFinding({ finding, active, onSelect }: { finding: ReviewFindingView; active: boolean; onSelect(): void }) {
+/** A file's "…" menu: comment on the whole file, then where it opens. */
+function FileMenu({ path, target, onComment, onError }: {
+  path: string;
+  target?: OpenTargetRef;
+  onComment?(): void;
+  onError(message: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const openTargetItems = useOpenTargetMenuItems(target, open, onError);
+  const items: ActionMenuItem[] = [
+    ...(onComment ? [{ id: 'comment', label: 'Comment on file', onSelect: onComment }] : []),
+    ...openTargetItems.map((item, index) => (index === 0 && onComment ? { ...item, separated: true } : item))
+  ];
+  if (!items.length) return null;
   return (
-    <button
-      type="button"
-      className={`tm-review__index-finding${active ? ' tm-review__index-finding--active' : ''}`}
-      data-state={finding.state}
-      onClick={onSelect}
-    >
-      <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
-      <span className="tm-review__index-title">{finding.title}</span>
-    </button>
+    <ActionMenu
+      className="tm-review-file__menu"
+      label={`Options for ${path}`}
+      tooltip="File options"
+      side="bottom"
+      open={open}
+      onOpenChange={setOpen}
+      trigger={<MoreHorizontal size={16} aria-hidden="true" />}
+      items={items}
+    />
   );
 }
 
 /**
- * One finding under the line it is about. Open findings show the reasoning
- * and offer Ask and Dismiss; a dismissed or withdrawn finding folds to a line
- * that keeps the note or the reason.
+ * Every finding and comment, grouped by what happens to it: sent with the
+ * request, offered as a suggestion, or settled. A finding of an out-of-date
+ * review is only context, so those are listed apart.
  */
-function ReviewFindingThread({ finding, focused, actionable, onFocus, onDismiss, onRestore, onAsk }: {
-  finding: ReviewFindingView;
-  focused: boolean;
-  actionable: boolean;
-  onFocus(): void;
-  onDismiss?(findingId: string, note?: string): Promise<void>;
-  onRestore?(findingId: string): Promise<void>;
-  onAsk?(findingId: string): void;
+function FeedbackList({ plan, findingsSendable, findings, comments, focusedFindingId, onShowFinding, onShowComment }: {
+  plan: ReviewRequestPlan;
+  findingsSendable: boolean;
+  findings: readonly ReviewFindingView[];
+  comments: readonly ReviewComment[];
+  focusedFindingId?: string;
+  onShowFinding(findingId: string): void;
+  onShowComment(commentId: string): void;
 }) {
-  const [dismissing, setDismissing] = useState(false);
-  const [note, setNote] = useState('');
-  const [busy, setBusy] = useState(false);
-  const noteId = useId();
-
-  const run = async (action: () => Promise<void>) => {
-    setBusy(true);
-    try {
-      await action();
-      setDismissing(false);
-      setNote('');
-    } catch {
-      // The shell reports the error; the thread keeps its input for a retry.
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (finding.state === 'WITHDRAWN') {
-    return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
-        <span className="tm-review-thread__struck">{finding.title}</span>
-        <span>Withdrawn by the reviewer{finding.revision?.reason ? `: ${finding.revision.reason}` : ''}</span>
-      </div>
-    );
-  }
-  if (finding.state === 'DISMISSED') {
-    return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
-        <span className="tm-review-thread__struck">{finding.title}</span>
-        <span>Dismissed{finding.dismissal?.note ? `: ${finding.dismissal.note}` : ''}</span>
-        {actionable && onRestore ? (
-          <button type="button" className="ghost-button tm-review-thread__undo" disabled={busy} onClick={() => void run(() => onRestore(finding.id))}>
-            <Undo2 size={13} aria-hidden="true" />Undo
-          </button>
-        ) : null}
-      </div>
-    );
-  }
-
-  return (
-    <article
-      className={`tm-review-thread${focused ? ' tm-review-thread--focused' : ''}${actionable ? '' : ' tm-review-thread--earlier'}`}
-      data-finding-id={finding.id}
-      tabIndex={-1}
-      onFocus={onFocus}
-      aria-label={`${severityLabel(finding)} finding: ${finding.title}`}
+  const findingRow = (finding: ReviewFindingView, state?: string) => (
+    <button
+      key={finding.id}
+      type="button"
+      className={`tm-review__index-finding${focusedFindingId === finding.id ? ' tm-review__index-finding--active' : ''}`}
+      data-state={finding.state}
+      onClick={() => onShowFinding(finding.id)}
     >
-      <header className="tm-review-thread__head">
-        <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
-        <strong>{finding.title}</strong>
-        {actionable && (onAsk || onDismiss) ? (
-          <span className="tm-review-thread__actions">
-            {onAsk ? (
-              <Tooltip label="Ask the reviewer">
-                <button type="button" className="tm-iconbtn" aria-label="Ask the reviewer about this finding" onClick={() => onAsk(finding.id)}>
-                  <AgentMark />
-                </button>
-              </Tooltip>
-            ) : null}
-            {onDismiss ? (
-              <Tooltip label="Dismiss">
-                <button type="button" className="tm-iconbtn" aria-label="Dismiss this finding" aria-expanded={dismissing} onClick={() => setDismissing((value) => !value)}>
-                  <X size={13} aria-hidden="true" />
-                </button>
-              </Tooltip>
-            ) : null}
-          </span>
-        ) : null}
-      </header>
-      {finding.path && !finding.line ? <span className="tm-review-thread__location">{formatFindingLocation(finding)}</span> : null}
-      <p className="tm-review-thread__why">{finding.explanation}</p>
-      {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
-      {finding.revision && finding.revision.kind !== 'WITHDRAW' ? (
-        <p className="tm-review-thread__revision">
-          {finding.revision.kind === 'ADD' ? 'Added by the reviewer' : `Reviewer changed this from ${findingLevel(finding.originalSeverity ?? finding.severity).label}`}: {finding.revision.reason}
-        </p>
-      ) : null}
-      {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
-      {dismissing && onDismiss ? (
-        <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, note.trim() || undefined)); }}>
-          <label className="tm-visually-hidden" htmlFor={noteId}>Why dismiss it (optional)</label>
-          <input
-            id={noteId}
-            autoFocus
-            type="text"
-            maxLength={500}
-            value={note}
-            placeholder="Why, optionally"
-            onChange={(event) => setNote(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setDismissing(false); } }}
-          />
-          <button type="submit" className="outline-button button--sm" disabled={busy}>Dismiss</button>
-        </form>
-      ) : null}
-    </article>
+      <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
+      <span className="tm-review__index-title">{finding.title}</span>
+      <span className="tm-review__index-loc">{state ?? formatFindingLocation(finding)}</span>
+    </button>
+  );
+  const commentRow = (comment: ReviewComment) => (
+    <button key={comment.id} type="button" className="tm-review__index-finding" onClick={() => onShowComment(comment.id)}>
+      <span className="tm-review__severity">You</span>
+      <span className="tm-review__index-title">{comment.text}</span>
+      <span className="tm-review__index-loc">{formatCommentLocation(comment)}</span>
+    </button>
+  );
+  const groups: Array<{ label: string; rows: ReactElement[] }> = findingsSendable
+    ? [
+      { label: 'To send', rows: [...plan.send.map((finding) => findingRow(finding)), ...comments.map(commentRow)] },
+      { label: 'Suggestions', rows: plan.suggestions.map((finding) => findingRow(finding)) },
+      { label: 'Settled', rows: plan.settled.map((finding) => findingRow(finding, settledLabel(finding))) }
+    ]
+    : [
+      { label: 'Your comments', rows: comments.map(commentRow) },
+      { label: 'From the earlier review', rows: findings.map((finding) => findingRow(finding)) }
+    ];
+  const shown = groups.filter((group) => group.rows.length > 0);
+  if (!shown.length) return <p className="tm-review__index-empty">No findings or comments yet.</p>;
+  return (
+    <>
+      {shown.map((group) => (
+        <div key={group.label} className="tm-review__index-group">
+          <h3 className="tm-review__index-label">{group.label}</h3>
+          {group.rows}
+        </div>
+      ))}
+    </>
   );
 }

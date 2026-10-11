@@ -546,8 +546,12 @@ describe('task card view model', () => {
     expect(
       canRequestReviewChanges({ status: 'NEEDS_CHANGES' })
     ).toBe(true);
+    // An inconclusive review offers changes only through open findings, never its prose.
     expect(
       canRequestReviewChanges({ status: 'INCONCLUSIVE' })
+    ).toBe(false);
+    expect(
+      canRequestReviewChanges({ status: 'INCONCLUSIVE', result: { ...result, verdict: 'INCONCLUSIVE', findings: [{ ...finding, severity: 'MINOR' }] } })
     ).toBe(true);
     expect(
       canRequestReviewChanges({ status: 'CANCELED', result })
@@ -556,7 +560,10 @@ describe('task card view model', () => {
       canRequestReviewChanges({ status: 'STALE', result })
     ).toBe(false);
     expect(
-      canRequestReviewChanges({ status: 'FAILED' }, 'FAILED', true)
+      canRequestReviewChanges({ status: 'FAILED' }, 'FAILED')
+    ).toBe(false);
+    expect(
+      canRequestReviewChanges({ status: 'FAILED', result }, 'FAILED')
     ).toBe(true);
     expect(
       canRequestReviewChanges({ status: 'FAILED' })

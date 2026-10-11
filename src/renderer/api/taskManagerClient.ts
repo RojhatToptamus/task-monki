@@ -87,6 +87,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   SteerRunRequest,
   TestExternalToolRequest,
@@ -478,6 +479,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     sendTaskInstruction: (input: SendTaskInstructionRequest) => post<RunRecord>(baseUrl, '/api/task-instructions/send', input),
     saveTaskPrompt: (input: SaveTaskPromptRequest) => post<void>(baseUrl, '/api/tasks/prompt', input),
     saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => post<void>(baseUrl, '/api/task-instructions/draft', input),
+    saveTaskReviewDraft: (input: SaveTaskReviewDraftRequest) => post<void>(baseUrl, '/api/task-review/draft', input),
     steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
     continueRun: (input: ContinueRunRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/continue', input),

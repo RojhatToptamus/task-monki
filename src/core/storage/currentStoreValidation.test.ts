@@ -56,7 +56,7 @@ describe('validateCurrentStoreRecords', () => {
     const reviewRunId = randomUUID();
     const userDecision = {
       id: randomUUID(), reviewRunId, findingId: 'leak', kind: 'DISMISS' as const,
-      actor: 'USER' as const, note: 'Covered elsewhere.', createdAt: NOW
+      actor: 'USER' as const, dismissReason: 'ACCEPTED' as const, note: 'Covered elsewhere.', createdAt: NOW
     };
     const reviewerDecision = {
       id: randomUUID(), reviewRunId, findingId: 'added-1', kind: 'ADD' as const, actor: 'REVIEWER' as const,
@@ -76,6 +76,9 @@ describe('validateCurrentStoreRecords', () => {
       { ...userDecision, reason: 'A person gives a note, not a reason.' },
       { ...userDecision, kind: 'WITHDRAW' },
       { ...userDecision, note: 'x'.repeat(501) },
+      { ...userDecision, dismissReason: 'LATER' },
+      { ...userDecision, kind: 'RESTORE', note: undefined },
+      { ...reviewerDecision, dismissReason: 'NOT_A_PROBLEM' },
       { ...reviewerDecision, reason: undefined },
       { ...reviewerDecision, questionRunId: undefined },
       { ...reviewerDecision, finding: { ...reviewerDecision.finding, id: 'other' } },

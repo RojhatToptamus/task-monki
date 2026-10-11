@@ -16,6 +16,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   Board,
   BoardSnapshot,
@@ -2854,6 +2855,10 @@ export class TaskManagerService {
 
   async saveTaskAgentDraft(input: SaveTaskAgentDraftRequest): Promise<void> {
     return this.withControlAction(() => this.store.saveTaskAgentDraft(input.taskId, input.text, input.attachmentDraftId));
+  }
+
+  async saveTaskReviewDraft(input: SaveTaskReviewDraftRequest): Promise<void> {
+    return this.withControlAction(() => this.store.saveTaskReviewDraft(input.taskId, input.draft));
   }
 
   async queueTaskInstruction(input: QueueTaskInstructionRequest): Promise<TaskInstruction> {

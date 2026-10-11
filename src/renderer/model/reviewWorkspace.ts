@@ -1,4 +1,5 @@
 import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
+import type { ReviewComment } from '../../shared/reviewDraft';
 import type { DiffFile, DiffLine } from './diffEvidence';
 
 /** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
@@ -45,20 +46,49 @@ export function anchorReviewFindings(files: readonly DiffFile[], findings: reado
       general.push(finding);
       continue;
     }
-    const anchor = finding.line ? findLineAnchor(file, finding.line, finding.endLine) : undefined;
+    const anchor = finding.line ? findRowAnchor(file, 'NEW', finding.line, finding.endLine) : undefined;
     if (anchor) push(byLine, anchor, finding);
     else push(byFile, file.id, finding);
   }
   return { byLine, byFile, general };
 }
 
-function findLineAnchor(file: DiffFile, line: number, endLine?: number): string | undefined {
+/** Where each of the person's comments sits: under its last line, or under its file's header. */
+export interface AnchoredComments {
+  byLine: Map<string, ReviewComment[]>;
+  byFile: Map<string, ReviewComment[]>;
+}
+
+/**
+ * Anchors comments the same way as findings, on the side each was written on: a
+ * removed line is found on the old side. A comment whose lines the diff no longer
+ * shows, or one on the whole file, sits under the file's header. Each comment
+ * anchors once, so a file shown in several blocks never repeats it.
+ */
+export function anchorReviewComments(files: readonly DiffFile[], comments: readonly ReviewComment[]): AnchoredComments {
+  const byLine = new Map<string, ReviewComment[]>();
+  const byFile = new Map<string, ReviewComment[]>();
+  const filesByPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
+  for (const comment of comments) {
+    const file = filesByPath.get(normalizeReviewPath(comment.path));
+    if (!file) continue;
+    const anchor = comment.line ? findRowAnchor(file, comment.side, comment.line, comment.endLine) : undefined;
+    const map = anchor ? byLine : byFile;
+    const key = anchor ?? file.id;
+    map.set(key, [...(map.get(key) ?? []), comment]);
+  }
+  return { byLine, byFile };
+}
+
+/** The last displayed row of a line range on one side, preferring the latest block. */
+function findRowAnchor(file: DiffFile, side: ReviewComment['side'], line: number, endLine?: number): string | undefined {
   const last = endLine && endLine >= line ? endLine : line;
   for (let blockIndex = file.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
     const block = file.blocks[blockIndex]!;
     let anchor: number | undefined;
     block.lines.forEach((candidate, index) => {
-      if (candidate.newLine !== undefined && candidate.newLine >= line && candidate.newLine <= last) anchor = index;
+      const number = side === 'OLD' ? (candidate.kind === 'deletion' ? candidate.oldLine : undefined) : candidate.newLine;
+      if (number !== undefined && number >= line && number <= last) anchor = index;
     });
     if (anchor !== undefined) return lineAnchorKey(file.id, block.id, anchor);
   }
@@ -142,12 +172,4 @@ export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[]
     rows.push({ kind: 'line', line, index });
   });
   return rows;
-}
-
-/** The text the implementation agent receives for the user's own line comments. */
-export interface ReviewLineComment {
-  id: string;
-  path: string;
-  line?: number;
-  text: string;
 }

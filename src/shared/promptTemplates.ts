@@ -603,10 +603,22 @@ function previousReviewSection(review: PreviousReviewContext | undefined): strin
   ];
 }
 
+/** How the person dismissed a finding, in the words the reviewer reads. */
+function dismissalPhrase(dismissal: NonNullable<EffectiveReviewFinding['dismissal']>): string {
+  const how = dismissal.reason === 'NOT_A_PROBLEM' ? 'dismissed by the person as not a problem'
+    : dismissal.reason === 'ACCEPTED' ? 'accepted as is by the person'
+      : 'dismissed by the person';
+  return `${how}${dismissal.note ? `: ${boundedText(dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}`;
+}
+
+function sentenceStart(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function previousFindingLine(finding: EffectiveReviewFinding): string {
   const state =
-    finding.state === 'DISMISSED'
-      ? `dismissed by the person${finding.dismissal?.note ? `: ${boundedText(finding.dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}`
+    finding.state === 'DISMISSED' && finding.dismissal
+      ? dismissalPhrase(finding.dismissal)
       : finding.state === 'WITHDRAWN'
         ? `withdrawn by the reviewer: ${boundedText(finding.revision?.reason ?? '', REVIEW_CONTEXT_TEXT_LIMIT)}`
         : 'open';
@@ -698,7 +710,7 @@ function reviewQuestionFindingBlock(finding: EffectiveReviewFinding): string {
       ? [`  Recommendation: ${boundedText(finding.recommendation, REVIEW_CONTEXT_TEXT_LIMIT)}`]
       : []),
     ...(finding.dismissal
-      ? [`  Dismissed by the person${finding.dismissal.note ? `: ${boundedText(finding.dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : '.'}`]
+      ? [`  ${sentenceStart(dismissalPhrase(finding.dismissal))}${finding.dismissal.note ? '' : '.'}`]
       : []),
     ...(finding.revision
       ? [`  Your earlier revision (${finding.revision.kind}): ${boundedText(finding.revision.reason, REVIEW_CONTEXT_TEXT_LIMIT)}`]

@@ -8,6 +8,7 @@ import type {
   ReviewFindingDecision,
   StopReviewerQuestionRequest
 } from './agentReviewFindings';
+import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -66,6 +67,7 @@ import type {
 
 export * from './agent';
 export * from './agentReviewFindings';
+export * from './reviewDraft';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -494,6 +496,8 @@ export interface SaveTaskAgentDraftRequest {
 export interface Task {
   id: string;
   agentDraft?: string;
+  /** The person's unsent review: comments, chosen suggestions and the note. */
+  reviewDraft?: TaskReviewDraft;
   promptDraft?: string;
   agentAttachmentDraftId?: string;
   initialAttachmentIds?: string[];
@@ -1688,6 +1692,8 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   editTaskInstruction(input: EditTaskInstructionRequest): Promise<void>;
   sendTaskInstruction(input: SendTaskInstructionRequest): Promise<RunRecord>;
   saveTaskAgentDraft(input: SaveTaskAgentDraftRequest): Promise<void>;
+  /** Saves the person's unsent review of the task; an empty draft clears it. */
+  saveTaskReviewDraft(input: SaveTaskReviewDraftRequest): Promise<void>;
   saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void>;
   steerRun(input: SteerRunRequest): Promise<void>;
   continueRun(input: ContinueRunRequest): Promise<RunRecord>;

@@ -1,125 +1,215 @@
 /* ======================================================================= */
-/* Review tab: the diff with the reviewer's findings on it                  */
+/* Review tab: the change in the order that matters, with the reviewer's    */
+/* findings and the person's comments on it, and the request at the foot    */
 /* ======================================================================= */
 
 /* These bodies never scroll; their own panes do, so they reserve no gutter. */
 .tm-detail__body.tm-detail__body--review { display: flex; flex-direction: column; padding: 0; overflow: hidden; scrollbar-gutter: auto; }
 
-.tm-review { --review-code-inset: 124px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+/* One number column (44), the note column (22) and the marker (18) put code,
+   and every thread under it, 84px from a file's inner edge. */
+.tm-review { --review-index-width: 248px; --review-code-inset: 84px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
 
-/* One line of state, the scope menu, and the review action. */
+/* The toolbar: the review's state, what is compared, the view, and the review action. */
 /* The bar spans the page gutter on both sides and reserves the header's scrollbar gutter, so its ends line up with the tab bar's. */
 .tm-review__bar { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; min-height: 44px; padding: 0 var(--tm-gutter); overflow: hidden; scrollbar-gutter: stable; border-bottom: 1px solid var(--hair); }
 .tm-review__headline { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); }
+.tm-review__headline[data-tone='blocked'] { color: var(--blocked-ink); }
+.tm-review__headline[data-tone='waiting'] { color: var(--waiting-ink); }
+.tm-review__headline[data-tone='verified'] { color: var(--verified-ink); }
 .tm-review__meta { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); }
 .tm-review__meta code { font-family: var(--font-mono); }
 .tm-review__bar-end { margin-left: auto; }
-.tm-review__scope .tm-action-menu__trigger { gap: 5px; padding: 0 8px; color: var(--text-soft); }
+:is(.tm-review__scope, .tm-review__view) .tm-action-menu__trigger { gap: 6px; padding: 0 8px; color: var(--text-soft); font-size: var(--t-body); }
+.tm-review__compare { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); }
 .tm-review__notice { margin: 0; padding: 8px var(--tm-gutter); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); }
 
-.tm-review__work { display: grid; flex: 1; grid-template-columns: 248px minmax(0, 1fr); min-height: 0; }
+.tm-review__work { display: grid; flex: 1; grid-template-columns: var(--review-index-width) minmax(0, 1fr); min-height: 0; }
 
-/* The index: files in diff order with their findings nested under them. */
-.tm-review__index { display: flex; flex-direction: column; gap: 1px; min-height: 0; padding: 10px 8px 16px; overflow-y: auto; background: var(--panel); }
-.tm-review__index-head { display: flex; justify-content: space-between; padding: 4px 8px 8px; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+/* The navigator: files in reading order, or every finding and comment by what happens to it. */
+.tm-review__index { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.tm-review__rail-switch { flex: 0 0 auto; margin: 10px 8px 6px; }
+.tm-review__rail-count { margin-left: 6px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.tm-review__index-list { display: flex; flex: 1; flex-direction: column; gap: 1px; min-height: 0; padding: 4px 8px 12px; overflow-y: auto; }
 .tm-review__index-group { display: flex; flex-direction: column; gap: 1px; }
-.tm-review__index-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 28px; padding: 0 8px; border-radius: var(--r-xs); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review__index-label { margin: 10px 8px 4px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-review__index-group:first-child .tm-review__index-label { margin-top: 2px; }
+.tm-review__index-empty { margin: 8px; color: var(--muted); font-size: var(--t-help); }
+.tm-review__index-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 28px; padding: 4px 8px; border-radius: var(--r-xs); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review__index-file:hover { background-color: var(--hover); color: var(--text); }
 .tm-review__index-file--active { background: var(--sel); color: var(--text); }
 .tm-review__index-file--viewed { color: var(--faint); }
-.tm-review__index-file--general { color: var(--faint); font-family: var(--font-ui); }
 .tm-review__index-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-review__index-sub { grid-column: 1 / -1; overflow: hidden; color: var(--muted); font-family: var(--font-ui); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review__index-sub[data-tone='blocked'] { color: var(--blocked-ink); }
 .tm-review-stat { display: inline-flex; gap: 6px; font-family: var(--font-mono); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-review-stat__add { color: var(--verified-ink); }
 .tm-review-stat__del { color: var(--blocked-ink); }
-.tm-review__index-finding { display: grid; grid-template-columns: 40px minmax(0, 1fr); align-items: center; gap: 6px; min-height: 28px; padding: 0 8px 0 18px; border-radius: var(--r-xs); color: var(--text-soft); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review__index-finding { display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: baseline; column-gap: 6px; min-height: 28px; padding: 5px 8px; border-radius: var(--r-xs); color: var(--text-soft); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review__index-finding:hover { background-color: var(--hover); color: var(--text); }
 .tm-review__index-finding--active { background: var(--sel); color: var(--text); }
-.tm-review__index-finding[data-state='DISMISSED'] .tm-review__index-title,
-.tm-review__index-finding[data-state='WITHDRAWN'] .tm-review__index-title { color: var(--faint); text-decoration: line-through; text-decoration-color: var(--edge); }
+.tm-review__index-finding:is([data-state='DISMISSED'], [data-state='WITHDRAWN']) .tm-review__index-title { color: var(--faint); }
+.tm-review__index-finding:is([data-state='DISMISSED'], [data-state='WITHDRAWN']) .tm-review__severity { color: var(--faint); }
 .tm-review__index-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-review__index-loc { grid-column: 2; overflow: hidden; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review__progress { display: grid; flex: 0 0 auto; gap: 6px; padding: 10px 16px 12px; border-top: 1px solid var(--hair); color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-review__meter { display: block; height: 3px; overflow: hidden; border-radius: var(--r-pill); background: var(--field); }
+.tm-review__meter > span { display: block; height: 100%; border-radius: var(--r-pill); background: var(--text-soft); transition: width var(--motion-standard) var(--ease-out); }
 
 /* Severity is a word in ink, never a badge: blockers and majors must be fixed. */
 .tm-review__severity { color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-review__severity[data-severity='BLOCKER'],
 .tm-review__severity[data-severity='MAJOR'] { color: var(--blocked-ink); }
 
-.tm-review__diff { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 32px; outline: none; }
-.tm-review__empty { margin: 0; padding: 32px var(--tm-gutter); color: var(--muted); font-size: var(--t-body); }
+.tm-review__diff { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow-y: auto; padding: 16px 20px 32px; outline: none; }
+.tm-review__empty { margin: 0; padding: 16px 0; color: var(--muted); font-size: var(--t-body); }
 
-.tm-review-general { display: flex; flex-direction: column; padding: 12px 0 4px; border-bottom: 1px solid var(--hair); }
+/* The brief: what was asked, what the agent reported, the scope, then the reviewer. */
+.tm-review-brief { display: grid; gap: 12px; padding: 0 0 4px; }
+.tm-review-brief__head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 2px 0; border: 0; background: none; color: var(--muted); font-size: var(--t-help); text-align: left; }
+.tm-review-brief__head:hover { color: var(--text-soft); }
+.tm-review-brief__head[aria-expanded='true'] .tm-disclosure__chevron { transform: rotate(90deg); }
+.tm-review-brief__label { color: var(--text-soft); font-weight: var(--w-medium); }
+.tm-review-brief__line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-brief__body { display: grid; gap: 12px; padding-left: 21px; }
+.tm-review-brief__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 40px; }
+.tm-review-brief__block { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.tm-review-brief__block-label { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-review-brief__block-label span { color: var(--faint); font-weight: 400; }
+.tm-review-brief__clamp { display: grid; justify-items: start; gap: 2px; }
+.tm-review-brief__text { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
+/* Provider text is quoted: attributed above, with a 2px rule along its left edge. */
+.tm-review-brief__quote { margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__clamped--2,
+.tm-review-brief__clamped--3 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; }
+.tm-review-brief__clamped--2 { -webkit-line-clamp: 2; }
+.tm-review-brief__clamped--3 { -webkit-line-clamp: 3; }
+.tm-review-brief__counts { margin: 2px 0 0; color: var(--muted); font-size: var(--t-help); }
+.tm-review-brief__scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0; color: var(--text-soft); font-size: var(--t-help); }
+.tm-review-brief__scope-label { color: var(--text); font-weight: var(--w-medium); }
 
-.tm-review-file + .tm-review-file { border-top: 1px solid var(--hair); }
-.tm-review-file__head { position: sticky; top: 0; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 var(--tm-gutter) 0 20px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
-.tm-review-file__path { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.tm-review-file__renamed { color: var(--faint); }
-.tm-review-file__viewed { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--muted); user-select: none; }
+.tm-review-general { display: flex; flex-direction: column; }
 
-.tm-review-block__label { padding: 6px 20px; color: var(--muted); font-size: var(--t-meta); }
-.tm-review-gap { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 var(--tm-gutter) 0 24px; background: var(--panel); color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
-.tm-review-gap code { overflow: hidden; color: var(--muted); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+/* A file is a ring with a sticky head; a viewed or generated file starts collapsed. */
+.tm-review-file { flex: 0 0 auto; border-radius: var(--r-md); box-shadow: inset 0 0 0 1px var(--edge-raised); overflow: clip; }
+.tm-review-file__head { position: sticky; top: -16px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 8px 0 8px; border-radius: var(--r-md) var(--r-md) 0 0; background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge-raised); font-size: var(--t-help); }
+.tm-review-file--collapsed .tm-review-file__head { position: static; border-radius: var(--r-md); }
+.tm-review-file__toggle svg { transition: transform var(--motion-fast) var(--ease-out); }
+.tm-review-file__toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+.tm-review-file__path { display: flex; min-width: 0; font-family: var(--font-mono); white-space: nowrap; }
+.tm-review-file__dir { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
+.tm-review-file__name { flex: 0 0 auto; color: var(--text); }
+.tm-review-file__word { color: var(--muted); white-space: nowrap; }
+.tm-review-file__word code { font-family: var(--font-mono); }
+.tm-review-file__spacer { flex: 1; }
+.tm-review-file__count { color: var(--muted); white-space: nowrap; }
+.tm-review-file__count[data-tone='blocked'] { color: var(--blocked-ink); }
+.tm-review-file__viewed { display: inline-flex; align-items: center; gap: 6px; padding: 0 4px; color: var(--muted); user-select: none; }
+.tm-review-file__menu__trigger.tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); }
+.tm-review-checkpoint { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 7px 16px 8px 40px; border-top: 1px solid var(--hair); font-size: var(--t-help); }
+.tm-review-checkpoint__title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-soft); font-size: var(--t-body); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-checkpoint__state { color: var(--muted); white-space: nowrap; }
 
-/* Review rows add a note column between the numbers and the marker: the "+"
-   lives there, so it never covers a line number, and threads, comments and
-   the composer start at the code column that follows it (--review-code-inset). */
-.tm-diffline.tm-diffline--annotated { grid-template-columns: 42px 42px 22px 18px max-content; }
+.tm-review-block__label { padding: 6px 16px; color: var(--muted); font-size: var(--t-meta); }
+.tm-review-gap { display: flex; align-items: center; gap: 12px; min-height: 26px; padding: 0 16px 0 var(--review-code-inset); background: var(--panel); color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
+.tm-review-gap code { min-width: 0; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
+
+/* Review rows: one line number (the new side, or the old side on a removed line),
+   a note column reserved for the "+" so it never covers a number, the marker, and
+   code that wraps instead of running out of view; a continuation has no number. */
+.tm-diffline.tm-diffline--annotated { grid-template-columns: 44px 22px 18px minmax(0, 1fr); }
+.tm-diffline--annotated code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-diffline--annotated .tm-diffline__num { user-select: none; }
+.tm-diffline--selected .tm-diffline__num { background: var(--sel); color: var(--accent-ink); }
+.tm-diffline--selected .tm-diffline__note { box-shadow: inset 2px 0 0 var(--accent); }
 .tm-diffline__note { position: relative; user-select: none; }
 .tm-review-line-group { position: relative; }
 .tm-review-line__comment { position: absolute; top: 1px; left: 2px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
 .tm-review-line__comment:hover { background-color: var(--field-hover); }
 .tm-review-line-group > .tm-diffline:hover .tm-review-line__comment,
+.tm-diffline--selected .tm-review-line__comment,
 .tm-review-line__comment:focus-visible { opacity: 1; }
 
-/* A finding opens under the line it is about: a card on the diff, the
-   reasoning, and Ask and Dismiss on its title line. */
-.tm-review-thread { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); padding: 12px 14px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
-.tm-review-general .tm-review-thread { margin-left: var(--tm-gutter); }
+/* A finding opens under the line it is about, at the code column: a card on the
+   diff, the reasoning, whether it is in the request, and Ask and Dismiss. */
+.tm-review-thread { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px 16px 12px var(--review-code-inset); padding: 12px 14px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
+.tm-review-general .tm-review-thread { margin-left: 0; }
 .tm-review-thread--focused,
 .tm-review-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring), var(--shadow-card); }
 .tm-review-thread__head { display: flex; align-items: center; gap: 8px; min-height: 24px; }
 .tm-review-thread__head strong { flex: 1; min-width: 0; color: var(--text); font-weight: var(--w-medium); }
-.tm-review-thread__actions { display: inline-flex; gap: 2px; margin: -4px -6px -4px 0; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
-.tm-review-thread:hover .tm-review-thread__actions,
-.tm-review-thread:focus-within .tm-review-thread__actions,
-.tm-review-thread--focused .tm-review-thread__actions { opacity: 1; }
+.tm-review-thread__actions { display: inline-flex; gap: 2px; margin: -4px -6px -4px 0; }
 .tm-review-thread__location { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); }
 .tm-review-thread__why { margin: 0; color: var(--text-soft); line-height: 1.6; text-wrap: pretty; }
 .tm-review-thread__fix { margin: 0; color: var(--text); line-height: 1.6; text-wrap: pretty; }
 .tm-review-thread__revision,
 .tm-review-thread__earlier { margin: 0; color: var(--muted); font-size: var(--t-help); }
+.tm-review-thread__request { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--hair); color: var(--muted); font-size: var(--t-help); }
+.tm-review-thread__included { display: inline-flex; align-items: center; gap: 5px; color: var(--text-soft); font-weight: var(--w-medium); }
+.tm-review-thread__included svg { color: var(--verified-ink); }
 .tm-review-thread--earlier { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
-.tm-review-thread__dismiss { display: flex; gap: 8px; margin-top: 4px; }
-.tm-review-thread__dismiss input { flex: 1; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
+.tm-review-thread__dismiss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--hair); }
+.tm-review-thread__dismiss input { flex: 1 1 160px; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
 .tm-review-thread--folded { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 8px 12px; background: var(--panel); box-shadow: none; color: var(--faint); font-size: var(--t-help); }
+.tm-review-thread--folded .tm-review__severity { color: var(--faint); }
 .tm-review-thread__struck { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--edge); }
 .tm-review-thread__undo { margin-left: auto; }
 
-/* The user's own comments read as theirs: the field plane, not a card. Edit and
-   Delete wait at the end of the text and show on hover or focus, as a thread's actions do. */
-.tm-review-comment { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); padding: 10px 8px 10px 12px; border-radius: var(--r); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); }
-.tm-review-comment p { flex: 1; min-width: 0; margin: 0; padding-top: 3px; color: var(--text); line-height: 1.55; white-space: pre-wrap; }
+/* The person's own comments read as theirs: the field plane, not a card. Edit and
+   Delete wait at the end of the text and show on hover or focus. */
+.tm-review-comment { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; margin: 8px 16px 12px var(--review-code-inset); padding: 10px 8px 10px 12px; border-radius: var(--r); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); outline: none; }
+.tm-review-comment:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
+.tm-review-comment__body { display: grid; flex: 1; gap: 2px; min-width: 0; padding-top: 3px; }
+.tm-review-comment__about { color: var(--muted); font-size: var(--t-help); }
+.tm-review-comment p { margin: 0; color: var(--text); line-height: 1.55; white-space: pre-wrap; }
 .tm-review-comment__actions { display: flex; flex: 0 0 auto; gap: 2px; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
 /* Writing one is the app's composer, at the comment's place in the diff. */
-.tm-review-comment-composer { max-width: 760px; margin: 8px var(--tm-gutter) 12px var(--review-code-inset); }
-.tm-review-comment-composer .tm-composer__input { min-height: 64px; }
+.tm-review-comment-composer { max-width: 760px; margin: 8px 16px 12px var(--review-code-inset); }
+.tm-review-comment-composer__about { display: block; padding: 10px 12px 0; color: var(--muted); font-size: var(--t-help); }
+.tm-review-comment-composer .tm-composer__input { min-height: 64px; padding-top: 4px; }
 
-/* The request bar: what will be sent, a note, and the action. */
-/* The request bar's controls end 16px above the sheet, on the same line as an open side panel's composer. */
-.tm-review__request { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; padding: 16px var(--tm-gutter); border-top: 1px solid var(--hair); background: var(--surface); }
-/* It rises only when it appears while the tab is open, never each time the tab opens. */
-.tm-review__request--enter { animation: tm-toast-in var(--motion-standard) var(--ease-out); }
-.tm-review__request-summary { color: var(--text-soft); font-size: var(--t-body); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* The foot: what the request holds, a note, and the tab's one decision. It is
+   always here while a decision is possible, and its controls end 16px above the
+   sheet, on the same line as an open side panel's composer. */
+.tm-review__foot { position: relative; flex: 0 0 auto; }
+.tm-review__request { display: flex; align-items: center; gap: 12px; padding: 16px var(--tm-gutter); border-top: 1px solid var(--hair); background: var(--surface); }
+.tm-review__request-summary { display: inline-flex; align-items: center; gap: 6px; height: var(--h-control); margin-left: -10px; padding: 0 10px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); white-space: nowrap; font-variant-numeric: tabular-nums; transition: background-color var(--motion-fast) var(--ease-out); }
+.tm-review__request-summary:hover,
+.tm-review__request-summary[aria-expanded='true'] { background-color: var(--hover); }
+.tm-review__request-summary svg { color: var(--muted); transition: transform var(--motion-fast) var(--ease-out); }
+.tm-review__request-summary[aria-expanded='true'] svg { transform: rotate(180deg); }
 .tm-review__note { display: flex; flex: 1; min-width: 0; }
-.tm-review__note input { flex: 1; min-width: 0; height: var(--h-control); padding: 0 12px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-body); }
+.tm-review__note textarea { flex: 1; min-width: 0; min-height: var(--h-control); max-height: 104px; padding: 7px 12px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/1.4 var(--font-ui); resize: none; field-sizing: content; }
+.tm-review__note textarea:focus { outline: none; box-shadow: inset 0 0 0 1px var(--field-edge-focus); }
 .tm-review__request-reason { max-width: 280px; color: var(--muted); font-size: var(--t-help); }
 
+/* The request sheet rises over the diff from the foot, without blocking it. */
+.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); left: calc(var(--review-index-width) + 16px); z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(640px, calc(100% - var(--review-index-width) - 32px)); max-height: min(560px, 54vh); border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom left; animation: tm-review-sheet-in var(--motion-standard) var(--ease-out); }
+@keyframes tm-review-sheet-in { from { opacity: 0; transform: scale(0.96); } }
+.tm-review-sheet__head { display: flex; align-items: center; gap: 8px; padding: 12px 10px 8px 16px; }
+.tm-review-sheet__head h2 { flex: 1; margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: var(--w-medium); }
+.tm-review-sheet__body { display: grid; align-content: start; gap: 14px; min-height: 0; padding: 0 16px 14px; overflow-y: auto; }
+.tm-review-sheet__group { display: grid; gap: 2px; }
+.tm-review-sheet__group h3 { margin: 0 0 2px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-review-sheet__item { display: grid; grid-template-columns: 18px 48px minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; min-height: 30px; margin: 0 -6px; padding: 0 0 0 6px; border-radius: var(--r-xs); }
+.tm-review-sheet__item:hover { background: var(--hover); }
+.tm-review-sheet__item--out { grid-template-columns: 48px minmax(0, 1fr) auto auto; }
+.tm-review-sheet__n { color: var(--faint); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-review-sheet__title { min-width: 0; padding: 0; overflow: hidden; border: 0; background: none; color: var(--text); font-size: var(--t-body); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-sheet__item--out .tm-review-sheet__title { color: var(--text-soft); }
+.tm-review-sheet__loc { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); white-space: nowrap; }
+.tm-review-sheet__state { color: var(--muted); font-size: var(--t-help); white-space: nowrap; }
+.tm-review-sheet__fact { margin: 2px 0 0; color: var(--muted); font-size: var(--t-help); }
+.tm-review-sheet__instruction > summary { display: flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-review-sheet__instruction > summary span { color: var(--muted); font-weight: 400; }
+.tm-review-sheet__instruction pre { max-height: 240px; margin: 8px 0 0; padding: 10px 12px; overflow: auto; border-radius: var(--r-sm); background: var(--well); color: var(--text-soft); font: var(--t-meta)/1.55 var(--font-mono); white-space: pre-wrap; }
+.tm-review-sheet__foot { display: flex; align-items: center; gap: 8px; padding: 10px 16px 12px; border-top: 1px solid var(--hair); }
+.tm-review-sheet__why { flex: 1; min-width: 0; color: var(--muted); font-size: var(--t-help); }
+
 @media (max-width: 1100px) {
-  .tm-review__work { grid-template-columns: 208px minmax(0, 1fr); }
-  .tm-review-thread,
-  .tm-review-comment,
-  .tm-review-comment-composer { margin-left: 24px; }
+  .tm-review { --review-index-width: 208px; }
 }
 
 
@@ -130,4 +220,3 @@
 .tm-reviewer__about { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 6px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-reviewer__about span { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
 .tm-reviewer__about .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); margin-left: auto; }
-.tm-review__index-finding:is([data-state='DISMISSED'], [data-state='WITHDRAWN']) .tm-review__severity { color: var(--faint); }

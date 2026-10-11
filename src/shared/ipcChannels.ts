@@ -19,6 +19,7 @@ export const IPC_INVOKE_CHANNELS = [
   'agent:retryRun',
   'agent:runtimeCatalog',
   'agent:saveTaskAgentDraft',
+  'agent:saveTaskReviewDraft',
   'agent:sendTaskInstruction',
   'agent:startReview',
   'agent:startRun',

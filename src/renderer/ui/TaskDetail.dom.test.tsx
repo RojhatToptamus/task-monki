@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
-import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
+import { EMPTY_REVIEW_DRAFT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
 
@@ -14,7 +14,7 @@ vi.mock('../api/taskManagerClient', () => ({
 function detailProps(): ComponentProps<typeof TaskDetail> {
   return {
     attachmentOptions: { enabled: true, onStageBatch: vi.fn(), onDiscard: vi.fn() },
-    agentInstructions: [], agentDraft: '', onPrepareTaskAgent: vi.fn(), onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
+    agentInstructions: [], agentDraft: '', onPrepareTaskAgent: vi.fn(), onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), reviewDraft: EMPTY_REVIEW_DRAFT, onReviewDraftChange: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1', projection: { worktree: 'PRESENT', git: 'DIRTY' } }),
     repository: { id: 'repository-1', kind: 'USER_REGISTERED', name: 'Project', path: '/tmp/project', status: 'AVAILABLE', remotes: [], createdAt: TEST_NOW, updatedAt: TEST_NOW },
     worktree: { id: 'worktree-1', taskId: 'task-1', repositoryId: 'repository-1', iterationId: 'iteration-1', ownership: 'EXTERNAL', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'main', baseSha: 'abc123', status: 'PRESENT', createdAt: TEST_NOW, updatedAt: TEST_NOW },
@@ -165,12 +165,16 @@ describe('imported task actions', () => {
     const mounted = render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Request changes' })).toHaveProperty('disabled', false);
+    // It opens on the request sheet, so the person sees what will be sent.
+    const sheet = screen.getByRole('dialog', { name: 'Request changes' });
+    expect(within(sheet).getByRole('button', { name: 'Request changes' })).toHaveProperty('disabled', false);
 
     mounted.rerender(<TaskDetail {...props} task={{ ...props.task!, projection: { ...props.task!.projection,
       agentReview: { ...props.task!.projection.agentReview!, status: 'STALE' } } }} />);
 
-    expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
+    // An out-of-date review's findings are context only: nothing is left to send.
+    expect(screen.getByRole('button', { name: /^Nothing to send/ })).toBeDefined();
+    expect(screen.queryAllByRole('button', { name: 'Request changes' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
     expect(screen.getByText('From the earlier review')).toBeDefined();
     expect(props.onStart).not.toHaveBeenCalled();
     expect(props.onContinue).not.toHaveBeenCalled();
@@ -191,7 +195,7 @@ describe('imported task actions', () => {
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
       'task-1',
       expect.stringContaining('Invalid input accepted'),

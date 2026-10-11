@@ -5,9 +5,11 @@ import {
   ATTACHMENT_MAX_COUNT,
   DOMAIN_EVENT_TYPES,
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_FINDING_DISMISS_REASONS,
   REVIEW_FINDING_TEXT_MAX_LENGTH,
   TASK_STORE_SCHEMA_VERSION,
-  isTaskCreationToken
+  isTaskCreationToken,
+  reviewDraftProblem
 } from '../../shared/contracts';
 import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
 import type { StoreState } from '../projection/reducer';
@@ -170,6 +172,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     if (task.agentProfile !== undefined) {
       validateAgentProfile(task.agentProfile);
     }
+    if (task.reviewDraft !== undefined && reviewDraftProblem(task.reviewDraft)) invalid('tasks');
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');
@@ -1293,7 +1296,7 @@ function reviewFinding(value: unknown, collection: string): Record<string, unkno
 }
 
 /**
- * A person's decision carries only its dismissal note; a reviewer's revision
+ * A person's dismissal carries only its reason and note; a reviewer's revision
  * carries its reason, its question run, and exactly the fields its kind needs.
  */
 export function validateReviewFindingDecision(value: unknown, collection: string): void {
@@ -1312,13 +1315,14 @@ export function validateReviewFindingDecision(value: unknown, collection: string
     enumField(decision, 'kind', ['DISMISS', 'RESTORE'] as const, collection);
     if (
       has('reason') || has('severity') || has('finding') || has('questionRunId') ||
-      (decision.kind === 'RESTORE' && has('note'))
+      (decision.kind === 'RESTORE' && (has('note') || has('dismissReason')))
     ) invalid(collection);
+    if (has('dismissReason')) enumField(decision, 'dismissReason', REVIEW_FINDING_DISMISS_REASONS, collection);
     return;
   }
   enumField(decision, 'kind', ['WITHDRAW', 'CHANGE_SEVERITY', 'ADD'] as const, collection);
   uuidField(decision, 'questionRunId', collection);
-  if (!has('reason') || has('note')) invalid(collection);
+  if (!has('reason') || has('note') || has('dismissReason')) invalid(collection);
   if ((decision.kind === 'CHANGE_SEVERITY') !== has('severity')) invalid(collection);
   if (has('severity')) enumField(decision, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
   if ((decision.kind === 'ADD') !== has('finding')) invalid(collection);

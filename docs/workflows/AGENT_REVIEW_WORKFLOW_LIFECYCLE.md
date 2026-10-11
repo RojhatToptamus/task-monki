@@ -205,11 +205,13 @@ Expected UI:
     Needs changes.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
-  - Allow request changes only because the output is current to this reviewed
-    diff.
+  - Request changes only through open findings. Prose that explains why the
+    review could not finish ("Git metadata is inaccessible") is not work for
+    the implementation agent, so with no findings the next step is to run the
+    review again (`canRequestReviewChanges`).
 - `FAILED` or `CANCELED`
   - Prefer re-run or inspect debug details.
-  - Request changes is only valid if current review output exists and is useful.
+  - Request changes only through open findings, as for an inconclusive review.
 
 ### Finding decisions
 
@@ -219,9 +221,18 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 `effectiveReviewFindings` derives each finding's state (`OPEN`, `DISMISSED`,
 `WITHDRAWN`) and current severity.
 
-- The person dismisses an open finding with an optional note of at most 500
-  characters, and can restore it (`decideReviewFinding`). Dismissing is how a
-  finding is left out of Request changes; there is no selection step.
+- The person dismisses an open finding with a reason and an optional note of at
+  most 500 characters, and can restore it (`decideReviewFinding`). The reason is
+  `NOT_A_PROBLEM` (the reviewer was wrong) or `ACCEPTED` (real, acceptable as
+  is); the next review is told which. Dismissals recorded before reasons existed
+  carry none.
+- Blocker and Major findings are in Request changes by default; dismissing is
+  the only way to leave one out. Minor and Nit findings are suggestions: they
+  are sent only when the person adds them, and their inclusion is part of the
+  person's review draft for that review run (`planReviewRequest`).
+- The person's review (comments on lines, ranges, removed lines and files, the
+  suggestions they added, and the note) is saved with the task as it is written
+  (`saveTaskReviewDraft`) and cleared once Request changes is sent.
 - Decisions are accepted only for the task's current, finished review. A stale,
   running, or replaced review rejects them, and so does a canceled or archived
   task.
@@ -474,7 +485,11 @@ When the UI shows the wrong state:
 
 ## UI rules
 
-- Do not show Request changes, Dismiss or Ask for a stale review.
+- A stale review's findings are context only: no Dismiss or Ask, and they are
+  never sent. The person's own comments on the current code can still be sent
+  with Request changes.
+- Comments can be written whenever the current diff is shown, including while
+  a review runs; only sending waits for the review.
 - Keep `REVIEW_QUESTION` runs, their sessions and `REVIEW` messages out of the
   Agent tab and the task's run selection (`partitionAgentRecords`); they belong
   to the reviewer panel and to Debug.

@@ -1,4 +1,4 @@
-import { effectiveReviewGateStatus } from '../../shared/agentReviewFindings';
+import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -349,18 +349,20 @@ function describeReviewGateStatus(
   }
 }
 
+/**
+ * Whether the review gives the implementation agent something to act on. A
+ * review that asks for changes does, including one whose notes are only prose.
+ * An inconclusive or failed review does only through open findings: its prose
+ * explains why the review could not finish ("Git metadata is inaccessible"),
+ * which is not work for the agent, so the next step is to run it again.
+ */
 export function canRequestReviewChanges(
   review: NonNullable<Task['projection']['agentReview']>,
-  effectiveStatus = review.status,
-  hasReviewOutput = Boolean(review.result)
+  effectiveStatus = review.status
 ): boolean {
-  if (effectiveStatus === 'NEEDS_CHANGES' || effectiveStatus === 'INCONCLUSIVE') {
-    return true;
-  }
-  return (
-    effectiveStatus === 'FAILED' &&
-    hasReviewOutput
-  );
+  if (effectiveStatus === 'NEEDS_CHANGES') return true;
+  return (effectiveStatus === 'INCONCLUSIVE' || effectiveStatus === 'FAILED') &&
+    openReviewFindings(review.result, review.findingDecisions ?? []).length > 0;
 }
 
 const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([

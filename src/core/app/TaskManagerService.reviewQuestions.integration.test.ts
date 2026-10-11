@@ -67,9 +67,11 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     });
 
     const dismissed = await s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS', note: '  Handled by the caller.  '
+      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS', dismissReason: 'ACCEPTED', note: '  Handled by the caller.  '
     });
-    expect(dismissed).toMatchObject({ actor: 'USER', kind: 'DISMISS', findingId: 'leak', note: 'Handled by the caller.' });
+    expect(dismissed).toMatchObject({
+      actor: 'USER', kind: 'DISMISS', findingId: 'leak', dismissReason: 'ACCEPTED', note: 'Handled by the caller.'
+    });
     await s.service.decideReviewFinding({ taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS' });
     // Dismissing the last open finding means the review no longer asks for changes.
     expect(await boardReview(s, task.id)).toMatchObject({ status: 'NEEDS_CHANGES', effectiveStatus: 'PASSED', findingCounts: {} });
@@ -80,6 +82,9 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE', note: 'Not allowed.'
     })).rejects.toThrow('Only a dismissal takes a note.');
+    await expect(s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE', dismissReason: 'NOT_A_PROBLEM'
+    })).rejects.toThrow('A dismissal reason is either Not a problem or Acceptable as is.');
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'missing', kind: 'DISMISS'
     })).rejects.toThrow('not part of the review');
@@ -121,7 +126,7 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     const rerun = await s.service.startReview({ taskId: task.id, runId: implementation.id });
     expect(reviewOf(await s.store.snapshot(), task.id)).toMatchObject({ runId: rerun.id, findingDecisions: [] });
     const rerunPrompt = await s.runtimeStore.readArtifact(rerun.promptArtifactId);
-    expect(rerunPrompt).toContain('[MAJOR] Listener leaks at feature.ts:2 (dismissed by the person: Handled by the caller.)');
+    expect(rerunPrompt).toContain('[MAJOR] Listener leaks at feature.ts:2 (accepted as is by the person: Handled by the caller.)');
     expect(rerunPrompt).toContain('[NIT] Unclear name (open)');
     expect(rerunPrompt).toContain('Do not raise a dismissed or withdrawn finding again unless the code changed');
   }, 20_000);

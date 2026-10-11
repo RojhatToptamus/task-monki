@@ -43,7 +43,7 @@ function gate(overrides: Partial<AgentReviewGateProjection> = {}): AgentReviewGa
 describe('effectiveReviewFindings', () => {
   it('applies dismissals, restores and reviewer revisions in order', () => {
     const findings = effectiveReviewFindings(result, [
-      decision({ kind: 'DISMISS', findingId: 'naming', note: 'Matches the codebase.' }),
+      decision({ kind: 'DISMISS', findingId: 'naming', dismissReason: 'NOT_A_PROBLEM', note: 'Matches the codebase.' }),
       decision({ kind: 'CHANGE_SEVERITY', findingId: 'leak', severity: 'MINOR', reason: 'Only in tests.' }),
       decision({
         kind: 'ADD',
@@ -65,7 +65,7 @@ describe('effectiveReviewFindings', () => {
       expect.objectContaining({
         id: 'naming',
         state: 'DISMISSED',
-        dismissal: { note: 'Matches the codebase.', decidedAt: AT }
+        dismissal: { reason: 'NOT_A_PROBLEM', note: 'Matches the codebase.', decidedAt: AT }
       }),
       expect.objectContaining({
         id: 'added-1',

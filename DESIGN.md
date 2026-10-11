@@ -761,23 +761,53 @@ once per day, then what happened with its time on the right and who recorded it
 beneath, with each entry's evidence left to the full ledger in Debug. An empty section is never
 rendered: the Now panel offers what has not happened yet.
 
-**The Review tab.** Findings are read on the code. A 248px index on `--panel`
-lists files in diff order with each finding nested under its file (findings
-without a location under General); the diff shows each finding as a thread
-under the last line of its range, on `--card` with the `--edge-raised` ring and
-`--r`, its severity as a word in ink (blocker and major in `--blocked-ink`).
-Ask (the agent mark) and Dismiss sit on the thread's title line, revealed on
-hover and focus. Dismissing takes an optional one-line note and folds the
-thread to one line with Undo; a withdrawn finding folds with the reviewer's
-reason. The user can comment on any new-side line; comments sit on `--field`
-under the line. Files can be marked viewed and fold until their change
-changes. The bar on top states the review in one phrase, then the scope menu
-(All changes, Committed, Uncommitted, and Since the review once the review is
-stale), then the review action. While the review is current, a request bar at
-the foot says what will be sent ("2 findings and 1 comment"), takes a note, and
-holds Request changes, the tab's one primary. A stale review keeps its threads
-as earlier context, without Ask, Dismiss or the request bar. J/K move between
-files, N/P between findings, V marks the file viewed.
+**The Review tab.** The change is read in the order that matters, with the
+reviewer's findings and the person's own comments on the code they are about.
+
+- *Toolbar.* The review in one phrase in its tone's ink and when it ran, then
+  Compare (All changes with its `base@sha → working tree`, Committed,
+  Uncommitted, Since the review once the review is stale), View (By importance,
+  By path; expand or collapse every file), and the review action. Reading down
+  the diff folds the page head away, as scrolling the conversation does.
+- *Navigator* (248px on `--panel`). A segmented switch between Files and
+  Feedback. Files lists the change by importance: files with an open Blocker or
+  Major, then code with each test right after the code it covers, then styles
+  and markup, configuration, documentation, and generated files, collapsed.
+  Each row states its open findings or comments in words, or its part ("Test
+  for server.js"). Feedback lists every finding and comment by what happens to
+  it: To send, Suggestions, Settled. The foot states "N of M viewed".
+- *Brief.* Facts before opinions: what was asked, what the agent reported
+  (quoted), the scope, and only then the reviewer's summary with its findings in
+  words. Open on the first visit to a review run, then one line once folded.
+- *Files.* Each file is an `--edge-raised` ring (`--r-md`) with a sticky head:
+  a collapse chevron (⌥-click: every file), the directory muted before the name,
+  a word for anything but a plain change, the open findings in words, the
+  counts, Viewed (the shared checkbox) and a ⋯ menu (Comment on file, then where
+  it opens). A viewed or generated file collapses, but its open findings stay as
+  one-line checkpoints: Viewed never hides a finding.
+- *Rows.* One line number (the old side's on a removed line), a 22px note column
+  where the "+" appears on hover, the marker, then code that wraps; threads and
+  comments start at the code column. A number click selects a line, shift-click
+  extends the range a comment covers.
+- *Findings.* A thread under the last line of its range, on `--card` with the
+  `--edge-raised` ring, its severity as a word (blocker and major in
+  `--blocked-ink`), Ask and Dismiss always on its title line, and a footer that
+  says whether it is in the request. Blocker and Major are in by default; Minor
+  and Nit are suggestions with Add to request. Dismiss asks why (Not a problem,
+  Acceptable as is) with an optional note, then folds to one line with Restore.
+- *Comments* sit on `--field`; they can be written any time the current diff is
+  shown, on a line, a range, a removed line or the whole file, and are saved
+  with the task as they are written.
+- *Foot.* Always present: the summary ("1 fix, 2 comments"), a note that grows
+  to four lines, and one primary: Request changes when something is queued,
+  otherwise the step that finishes the task, from the Now panel's model. The
+  summary opens the request sheet over the diff: what goes out in send order,
+  what is left out on purpose, and the exact instruction.
+- *Stale.* An out-of-date review keeps its threads as earlier context, without
+  Ask or Dismiss; its findings are never sent, the person's comments still are.
+- *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
+  file, D dismiss, A ask, F add or take out a suggestion, C comment on the
+  selected lines, ⌘↵ the request sheet and then send.
 
 **Side panels.** An assistant panel (Ask reviewer on Review, Side question on
 Agent, Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable
@@ -794,7 +824,7 @@ task's title moves to the window's top bar beside the back and forward arrows
 (it does the same when the title scrolls away on the Agent tab). The head folds
 rather than disappearing, so the tab bar glides up into the shared line. The panel's
 content keeps a 16px inset; its composer has the main composer's height and
-ends 16px above the sheet, as the main composer and the Review request bar do,
+ends 16px above the sheet, as the main composer and the Review foot do,
 so every input box shares one bottom line. Its head is
 48px: mark, name, the runtime that answers, close. Escape closes it and focus
 returns to the toggle. An empty panel says in one muted sentence what it is
