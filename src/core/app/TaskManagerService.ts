@@ -113,6 +113,8 @@ import type {
   TestExternalToolRequest,
   ExternalToolProbeResult,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
+  WorktreeFileRead,
   InteractionRequestRecord,
   OpenTargetInspection,
   OpenTargetRef,
@@ -1196,6 +1198,11 @@ export class TaskManagerService {
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
     return this.openTargets.execute(input, this.openTargetContext());
+  }
+
+  /** A text file in a task's worktree, read only, for the unchanged lines around a captured change. */
+  async readWorktreeFile(input: ReadWorktreeFileRequest): Promise<WorktreeFileRead> {
+    return this.openTargets.readWorktreeFile(input, this.openTargetContext());
   }
 
   private openTargetContext() {

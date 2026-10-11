@@ -343,6 +343,16 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/worktree/read-file') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.readWorktreeFile((await readJson()) as never)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/open-target/execute') {
         sendJson(
           response,

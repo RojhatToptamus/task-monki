@@ -42,6 +42,8 @@ import type {
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
+  WorktreeFileRead,
   ImportDesignReferenceAssetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
@@ -243,6 +245,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
+    readWorktreeFile: (input: ReadWorktreeFileRequest) =>
+      post<WorktreeFileRead>(baseUrl, '/api/worktree/read-file', input),
   getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
     discoverAgentRuntimeModels: (runtimeId) =>
       post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),

@@ -32,9 +32,11 @@ import { useNotify } from './NotifyContext';
 import { OpenTargetContextMenu, useOpenTargetMenuItems } from './OpenTargetMenu';
 import { ReviewBrief, type ReviewBriefContent } from './ReviewBrief';
 import { ReviewFindingThread, settledLabel, severityLabel } from './ReviewFindingThread';
+import { ReviewGap } from './ReviewGap';
 import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from './ReviewRequest';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { useDiffArtifact } from './useDiffArtifact';
+import { useReviewContext } from './useReviewContext';
 
 export type ReviewScope = DiffEvidenceScope | 'since-review';
 
@@ -151,9 +153,17 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [chosenScope, setScope] = useState<ReviewScope>();
   const scope = chosenScope ?? (sinceReviewAvailable ? 'since-review' : 'all');
   const effectiveScope: ReviewScope = scope === 'since-review' && !sinceReviewAvailable ? 'all' : scope;
-  const files: DiffFile[] = useMemo(() => (effectiveScope === 'since-review'
+  const capturedFiles: DiffFile[] = useMemo(() => (effectiveScope === 'since-review'
     ? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
     : diff.filesByScope[effectiveScope]), [changedSinceReview, diff.filesByScope, effectiveScope]);
+  // The checkout's unchanged lines fill each file's gaps, hidden until revealed; never for an earlier capture.
+  const context = useReviewContext({
+    worktree: props.historical ? undefined : props.worktree,
+    captureId: props.historical ? undefined : props.currentDiffArtifactId,
+    artifacts: props.artifacts,
+    files: capturedFiles
+  });
+  const files = context.files;
 
   const gutterWidth = useMemo(() => numberColumnWidth(files), [files]);
   // Until the reviewed diff is read, the default scope is unknown, so the tab is loading, not showing one and then the other.
@@ -701,6 +711,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                       if (collapsed) expand(file.id);
                       setCommentDraft({ key: fileKey, path: file.path, side: 'NEW', text: '' });
                     } : undefined}
+                    wholeFile={context.wholeFileItem(file.id, () => { if (collapsed) expand(file.id); })}
                     onError={(message) => notify(message, 'error')}
                   />
                 </header>
@@ -723,12 +734,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                         {buildReviewDiffRows(block.lines).map((row, rowIndex) => {
                           if (row.kind === 'gap') {
                             if (row.hidden === 0 && !row.heading) return null;
-                            return (
-                              <div key={`gap-${rowIndex}`} className="tm-review-gap">
-                                {row.hidden > 0 ? <span>{row.hidden} unchanged line{row.hidden === 1 ? '' : 's'}</span> : null}
-                                {row.heading ? <code>{row.heading}</code> : null}
-                              </div>
-                            );
+                            // Keyed by the hunk it leads into, so it keeps focus while lines open above it.
+                            return <ReviewGap key={`gap-${row.reveal ? row.raw : rowIndex}`} row={row} onReveal={(from, to) => context.reveal(block.id, from, to)} />;
                           }
                           const anchor = lineAnchorKey(file.id, block.id, row.index);
                           const line = row.line;
@@ -863,18 +870,20 @@ function indexLabel(file: DiffFile, files: readonly DiffFile[]): string {
   return shared && parts.length > 1 ? `${parts.at(-2)}/${name}` : name;
 }
 
-/** A file's "…" menu: comment on the whole file, then where it opens. */
-function FileMenu({ path, target, onComment, onError }: {
+/** A file's "…" menu: comment on the whole file, read it whole, then where it opens. */
+function FileMenu({ path, target, onComment, wholeFile, onError }: {
   path: string;
   target?: OpenTargetRef;
   onComment?(): void;
+  wholeFile?: ActionMenuItem;
   onError(message: string): void;
 }) {
   const [open, setOpen] = useState(false);
   const openTargetItems = useOpenTargetMenuItems(target, open, onError);
   const items: ActionMenuItem[] = [
     ...(onComment ? [{ id: 'comment', label: 'Comment on file', onSelect: onComment }] : []),
-    ...openTargetItems.map((item, index) => (index === 0 && onComment ? { ...item, separated: true } : item))
+    ...(wholeFile ? [wholeFile] : []),
+    ...openTargetItems.map((item, index) => (index === 0 && (onComment || wholeFile) ? { ...item, separated: true } : item))
   ];
   if (!items.length) return null;
   return (

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -14,7 +15,9 @@ import type {
   OpenTargetDetectedApp,
   OpenTargetInspection,
   OpenTargetRef,
+  ReadWorktreeFileRequest,
   Repository,
+  WorktreeFileRead,
   WorktreeRecord
 } from '../../shared/contracts';
 
@@ -140,6 +143,55 @@ export class OpenTargetService {
         message: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+
+  /**
+   * Reads a regular text file inside a task's recorded worktree, for showing the
+   * unchanged lines around a captured change. The path must stay inside the
+   * worktree lexically and after symlinks, and a path through any symlink is not
+   * a file here: Git records a symlink's target, not the file it points to. The
+   * file is opened without following a final symlink, checked to be the file the
+   * path resolved to, and read up to a size cap; anything else is refused.
+   */
+  async readWorktreeFile(
+    input: ReadWorktreeFileRequest,
+    context: OpenTargetContext
+  ): Promise<WorktreeFileRead> {
+    if (typeof input?.taskId !== 'string' || !input.taskId || typeof input.worktreeId !== 'string' || typeof input.relativePath !== 'string') {
+      throw new Error('A task, its worktree and a relative file path are required.');
+    }
+    const target = await this.resolveWorktreeFileTarget(
+      { type: 'worktreeFile', taskId: input.taskId, worktreeId: input.worktreeId, relativePath: input.relativePath },
+      context
+    );
+    if (!target.exists) return { status: 'MISSING' };
+    if (target.kind !== 'file' || !target.rootPath) return { status: 'NOT_FILE' };
+    const [realTarget, realRoot] = await Promise.all([
+      this.host.realpath(target.path),
+      this.host.realpath(target.rootPath)
+    ]);
+    const lexical = this.pathApi.join(realRoot, this.pathApi.relative(target.rootPath, target.path));
+    if (comparablePath(realTarget, this.host.platform) !== comparablePath(lexical, this.host.platform)) {
+      return { status: 'NOT_FILE' };
+    }
+    if ((target.statSize ?? 0) > MAX_COPY_FILE_BYTES) return { status: 'TOO_LARGE' };
+    let buffer: Buffer;
+    try {
+      buffer = await this.host.readFile(target.path, target.rootPath, MAX_COPY_FILE_BYTES);
+    } catch (error) {
+      // It grew past the cap between the size check and the read.
+      if (error instanceof Error && /too large/i.test(error.message)) return { status: 'TOO_LARGE' };
+      throw error;
+    }
+    if (buffer.byteLength > MAX_COPY_FILE_BYTES) return { status: 'TOO_LARGE' };
+    if (buffer.includes(0)) return { status: 'BINARY' };
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
+    } catch {
+      return { status: 'BINARY' };
+    }
+    return { status: 'TEXT', text, blobSha1: gitBlobSha1(buffer) };
   }
 
   private async resolveTarget(
@@ -627,6 +679,11 @@ async function readFileFromVerifiedDescriptor(
   } finally {
     await handle.close();
   }
+}
+
+/** Git's object id for a blob with these bytes: the SHA-1 of "blob <size>\0" followed by the bytes. */
+function gitBlobSha1(bytes: Buffer): string {
+  return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
 }
 
 function assertContainedPath(candidate: string, root: string): void {

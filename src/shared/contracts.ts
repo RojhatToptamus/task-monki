@@ -1461,6 +1461,27 @@ export interface OpenTargetActionResult {
   clipboardText?: string;
 }
 
+/** A file in a task's worktree, read as text to show the unchanged lines around a captured change. */
+export interface ReadWorktreeFileRequest {
+  taskId: string;
+  worktreeId: string;
+  /** Relative to the worktree root; a path that leaves the worktree is refused. */
+  relativePath: string;
+}
+
+export type WorktreeFileRead =
+  | {
+      status: 'TEXT';
+      /** The file's UTF-8 text, exactly as stored (a byte order mark and line endings kept). */
+      text: string;
+      /**
+       * Git's blob id for the bytes read, the SHA-1 of "blob <size>\0<bytes>", so a
+       * caller can tell whether the file is the version a captured diff shows.
+       */
+      blobSha1: string;
+    }
+  | { status: 'MISSING' | 'NOT_FILE' | 'BINARY' | 'TOO_LARGE' };
+
 export interface GitHubPreflightRequest {
   taskId: string;
 }
@@ -1552,6 +1573,7 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult>;
+  readWorktreeFile(input: ReadWorktreeFileRequest): Promise<WorktreeFileRead>;
   getAgentRuntimeCatalog(): Promise<import('./agent').AgentRuntimeCatalog>;
   discoverAgentRuntimeModels(
     runtimeId: import('./agent').AgentRuntimeId

@@ -530,6 +530,101 @@ describe('OpenTargetService', () => {
   });
 });
 
+describe('OpenTargetService worktree file reads', () => {
+  const read = (service: OpenTargetService, relativePath: string, taskId = 'task-1') =>
+    service.readWorktreeFile({ taskId, worktreeId: 'worktree-1', relativePath }, testContext());
+
+  it('returns the text with the Git blob id a captured diff records for the same bytes', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost({
+      '/repo': directory(),
+      '/worktree': directory(),
+      '/worktree/src': directory(),
+      '/worktree/src/app.ts': file('hello\n')
+    }));
+
+    // `git hash-object` of "hello\n".
+    await expect(read(service, 'src/app.ts')).resolves.toEqual({
+      status: 'TEXT',
+      text: 'hello\n',
+      blobSha1: 'ce013625030ba8dba906f756967f9e9ca394464a'
+    });
+  });
+
+  it('says why a path has no text to show instead of failing', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost({
+      '/repo': directory(),
+      '/worktree': directory(),
+      '/worktree/src': directory(),
+      '/worktree/image.bin': file(Buffer.from([1, 0, 2])),
+      '/worktree/latin1.txt': file(Buffer.from([0x63, 0x61, 0x66, 0xe9])),
+      '/worktree/huge.txt': file(Buffer.alloc(512 * 1024 + 1, 0x61))
+    }));
+
+    await expect(read(service, 'gone.ts')).resolves.toEqual({ status: 'MISSING' });
+    await expect(read(service, 'src')).resolves.toEqual({ status: 'NOT_FILE' });
+    await expect(read(service, 'image.bin')).resolves.toEqual({ status: 'BINARY' });
+    await expect(read(service, 'latin1.txt')).resolves.toEqual({ status: 'BINARY' });
+    await expect(read(service, 'huge.txt')).resolves.toEqual({ status: 'TOO_LARGE' });
+  });
+
+  it('refuses paths outside the worktree and worktrees of another task', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost(
+      {
+        '/repo': directory(),
+        '/worktree': directory(),
+        '/worktree/link.ts': file('outside\n'),
+        '/worktree/app.ts': file('inside\n')
+      },
+      { realpaths: { '/worktree/link.ts': '/outside/link.ts' } }
+    ));
+
+    await expect(read(service, '../outside.txt')).rejects.toThrow(/escapes/);
+    await expect(read(service, '/etc/passwd')).rejects.toThrow(/Relative file path/);
+    await expect(read(service, 'link.ts')).rejects.toThrow(/escapes/);
+    await expect(read(service, 'app.ts', 'task-2')).rejects.toThrow(/not recorded/);
+    await expect(read(service, 'app.ts', '')).rejects.toThrow(/required/);
+  });
+
+  it('does not read through a symlink that stays inside the worktree', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost(
+      {
+        '/repo': directory(),
+        '/worktree': directory(),
+        '/worktree/alias.ts': file('target\n'),
+        '/worktree/target.ts': file('target\n')
+      },
+      { realpaths: { '/worktree/alias.ts': '/worktree/target.ts' } }
+    ));
+
+    await expect(read(service, 'alias.ts')).resolves.toEqual({ status: 'NOT_FILE' });
+    await expect(read(service, 'target.ts')).resolves.toMatchObject({ status: 'TEXT' });
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps a byte order mark and CRLF endings, and refuses a symlink out of a real worktree',
+    async () => {
+      const directoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-worktree-read-'));
+      const worktreePath = path.join(directoryPath, 'worktree');
+      await fs.mkdir(worktreePath);
+      await fs.writeFile(path.join(worktreePath, 'bom.txt'), '﻿first\r\nsecond\r\n', 'utf8');
+      await fs.writeFile(path.join(directoryPath, 'secret.txt'), 'outside secret', 'utf8');
+      await fs.symlink(path.join(directoryPath, 'secret.txt'), path.join(worktreePath, 'secret.txt'));
+      const service = new OpenTargetService(createNodeOpenTargetHost());
+      const readReal = (relativePath: string) => service.readWorktreeFile(
+        { taskId: 'task-1', worktreeId: 'worktree-1', relativePath },
+        testContext({ worktreePath })
+      );
+
+      try {
+        await expect(readReal('bom.txt')).resolves.toMatchObject({ status: 'TEXT', text: '﻿first\r\nsecond\r\n' });
+        await expect(readReal('secret.txt')).rejects.toThrow(/escapes/);
+      } finally {
+        await fs.rm(directoryPath, { recursive: true, force: true });
+      }
+    }
+  );
+});
+
 type FakeEntry =
   | { type: 'file'; content: Buffer }
   | { type: 'directory' }
