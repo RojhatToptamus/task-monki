@@ -3,10 +3,10 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { codexCapabilities } from '../../core/agent/codex/codexCapabilities';
-import type { AgentModel, AgentRuntimeState, TaskInstruction } from '../../shared/contracts';
+import type { AgentModel, AgentRuntimeState, AskSubject, TaskInstruction } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
 import type { AgentConversationRecords } from '../model/agentRecords';
-import { SideQuestionPanel, type SideConversation } from './SideQuestionPanel';
+import { AskPanel, type AskConversation } from './AskPanel';
 
 function question(overrides: Partial<TaskInstruction> = {}): TaskInstruction {
   return {
@@ -19,7 +19,7 @@ function question(overrides: Partial<TaskInstruction> = {}): TaskInstruction {
 
 const EMPTY: AgentConversationRecords = { runs: [], items: [], instructions: [], interactions: [], sessions: [], plans: [] };
 
-function conversation(records: AgentConversationRecords = EMPTY): SideConversation {
+function conversation(records: AgentConversationRecords = EMPTY): AskConversation {
   return {
     records,
     ask: vi.fn(async () => undefined),
@@ -44,10 +44,11 @@ function runtime(readiness = createRuntimeReadiness('READY', 'Codex is ready.', 
   } as AgentRuntimeState;
 }
 
-function Harness(props: { conversation: SideConversation; implementationActive?: boolean; runtimes?: AgentRuntimeState[]; onUse?(text: string): void }) {
+function Harness(props: { conversation: AskConversation; implementationActive?: boolean; runtimes?: AgentRuntimeState[]; onUse?(text: string): void; subject?: AskSubject }) {
   const [draft, setDraft] = useState('');
+  const [subject, setSubject] = useState(props.subject);
   return (
-    <SideQuestionPanel
+    <AskPanel
       conversation={props.conversation}
       defaultModel={{ runtimeId: 'codex', model: 'gpt-6.1-sol', modelProvider: 'openai', reasoningEffort: 'low' }}
       models={models}
@@ -56,19 +57,22 @@ function Harness(props: { conversation: SideConversation; implementationActive?:
       implementationActive={props.implementationActive ?? false}
       draft={draft}
       onDraftChange={setDraft}
-      onUseInFollowUp={props.onUse ?? (() => undefined)}
+      subject={subject}
+      onSubjectChange={setSubject}
+      findingTitles={new Map([['f1', 'Retries skip the backoff']])}
+      answerAction={{ label: 'Use in follow-up', onUse: props.onUse ?? (() => undefined) }}
       onClose={() => undefined}
       docked
     />
   );
 }
 
-describe('SideQuestionPanel', () => {
-  it('asks in the open thread, on the model chosen for side questions', async () => {
+describe('AskPanel', () => {
+  it('asks in the open thread, on the model chosen for Ask', async () => {
     const side = conversation();
     render(<Harness conversation={side} implementationActive />);
 
-    expect(screen.getByRole('button', { name: /Side question model reasoning effort: Low/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Ask model reasoning effort: Low/ })).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the work' }), { target: { value: 'Why a Map?' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
 
@@ -77,6 +81,35 @@ describe('SideQuestionPanel', () => {
       text: 'Why a Map?',
       model: { runtimeId: 'codex', model: 'gpt-6.1-sol', modelProvider: 'openai', reasoningEffort: 'low' }
     }));
+  });
+
+  it('asks about a finding until the person clears it, and names it above the question', async () => {
+    const ask = conversation();
+    const { rerender } = render(<Harness conversation={ask} subject={{ kind: 'FINDING', reviewRunId: 'review-1', findingId: 'f1' }} />);
+
+    expect(screen.getByText('Retries skip the backoff')).toBeDefined();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Ask about this finding' }), { target: { value: 'Does this hold?' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
+    expect(ask.ask).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'Does this hold?', subject: { kind: 'FINDING', reviewRunId: 'review-1', findingId: 'f1' }
+    }));
+    // Once asked, the next question is about the whole task again.
+    expect(screen.getByRole('textbox', { name: 'Ask about the work' })).toBeDefined();
+
+    rerender(<Harness conversation={conversation({
+      ...EMPTY,
+      runs: [makeRunRecord({ id: 'side-1', mode: 'SIDE_QUESTION', status: 'COMPLETED', sessionId: 'session-q1', endedAt: '2026-10-10T10:00:00.000Z' } as never)],
+      instructions: [question({ subject: { kind: 'LINES', path: 'src/retry.ts', side: 'NEW', line: 12, endLine: 14 } })]
+    })} />);
+    expect(screen.getByText('src/retry.ts:12-14')).toBeDefined();
+  });
+
+  it('can ask about the whole task instead of a subject', () => {
+    render(<Harness conversation={conversation()} subject={{ kind: 'LINES', path: 'src/retry.ts', side: 'NEW', line: 12 }} />);
+
+    expect(screen.getByRole('textbox', { name: 'Ask about this line' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Ask about the whole task instead' }));
+    expect(screen.getByRole('textbox', { name: 'Ask about the work' })).toBeDefined();
   });
 
   it('offers a finished answer for the follow-up, introduced by its question', () => {

@@ -224,12 +224,3 @@
 @media (max-width: 1100px) {
   .tm-review { --review-index-width: 208px; }
 }
-
-
-/* The reviewer's thread: what each question was about, then the answer and what it changed. */
-.tm-reviewer__about-line { align-self: flex-end; max-width: 88%; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
-.tm-reviewer__revision { margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--panel); color: var(--text-soft); font-size: var(--t-help); }
-.tm-reviewer__revision-action { color: var(--muted); }
-.tm-reviewer__about { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 6px 0 12px; color: var(--muted); font-size: var(--t-help); }
-.tm-reviewer__about span { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
-.tm-reviewer__about .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); margin-left: auto; border-radius: var(--r-xs); }

@@ -1,5 +1,6 @@
-import type { TaskInstruction } from '../../shared/contracts';
+import type { AskSubject, TaskInstruction } from '../../shared/contracts';
 import type { SessionTurn } from './agentSession';
+import { formatCommentLocation } from './reviewFollowUp';
 
 /** The questions asked in one side thread, in the order they were asked. */
 export function sideThreadQuestions(instructions: readonly TaskInstruction[], threadId: string | undefined): TaskInstruction[] {
@@ -7,6 +8,19 @@ export function sideThreadQuestions(instructions: readonly TaskInstruction[], th
   return instructions
     .filter((instruction) => instruction.role === 'SIDE' && instruction.threadId === threadId)
     .sort((a, b) => a.order - b.order);
+}
+
+/** What a question is about, as its line in Ask reads: the finding's title, or the lines' location. */
+export function askSubjectLabel(subject: AskSubject, findingTitles: ReadonlyMap<string, string>): string {
+  if (subject.kind === 'FINDING') return findingTitles.get(subject.findingId) ?? 'A finding from an earlier review';
+  return formatCommentLocation(subject);
+}
+
+/** The field's placeholder, which also names it: what the next question is about. */
+export function askPlaceholder(subject: AskSubject | undefined): string {
+  if (subject?.kind === 'FINDING') return 'Ask about this finding';
+  if (subject?.kind === 'LINES') return subject.endLine && subject.endLine > subject.line ? 'Ask about these lines' : 'Ask about this line';
+  return 'Ask about the work';
 }
 
 /**

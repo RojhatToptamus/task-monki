@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentReviewFinding } from '../../shared/contracts';
-import { buildReviewRequestInstruction, formatCommentLocation, planReviewRequest } from './reviewFollowUp';
+import { buildReviewRequestInstruction, buildReviewRequestRecord, formatCommentLocation, planReviewRequest } from './reviewFollowUp';
 import type { ReviewFindingView } from './reviewWorkspace';
 
 const finding = (id: string, severity: AgentReviewFinding['severity'], extra: Partial<AgentReviewFinding> = {}): AgentReviewFinding => ({
@@ -8,9 +8,10 @@ const finding = (id: string, severity: AgentReviewFinding['severity'], extra: Pa
 });
 
 describe('buildReviewRequestInstruction', () => {
-  it('sends every open finding and comment, and names dismissed findings as off limits', () => {
-    const text = buildReviewRequestInstruction({
+  it('sends every open finding and comment in one numbering, and names dismissed findings as off limits', () => {
+    const input = {
       taskTitle: 'Rate-limit the public API',
+      reviewRunId: 'review-1',
       summary: 'Limiter state is per process.',
       findings: [finding('f1', 'MAJOR', { path: 'src/rateLimit.ts', line: 41, recommendation: 'Use Redis.' })],
       dismissed: [{ finding: finding('f2', 'MINOR'), reason: 'ACCEPTED', note: 'Covered by the auth tests' }],
@@ -19,16 +20,29 @@ describe('buildReviewRequestInstruction', () => {
         { id: 'c2', path: 'src/rateLimit.ts', side: 'OLD', line: 12, endLine: 14, text: 'Keep this guard.' }
       ],
       note: 'Keep the public signature.'
-    });
+    } as const;
+    const text = buildReviewRequestInstruction({ ...input, comments: [...input.comments], findings: [...input.findings], dismissed: [...input.dismissed] });
 
     expect(text).toContain('1. [Major] f1 title');
     expect(text).toContain('Location: src/rateLimit.ts:41');
     expect(text).toContain('Fix: Use Redis.');
-    expect(text).toContain('- src/rateLimit.ts:77: Return seconds here.');
-    expect(text).toContain('- src/rateLimit.ts (removed lines 12-14): Keep this guard.');
-    expect(text).toContain('- [Minor] f2 title (accepted as is: Covered by the auth tests)');
+    expect(text).toContain('2. src/rateLimit.ts:77: Return seconds here.');
+    expect(text).toContain('3. src/rateLimit.ts (removed lines 12-14): Keep this guard.');
+    expect(text).toContain('- [Minor] f2 title (intentional: Covered by the auth tests)');
     expect(text).toContain('Keep the public signature.');
     expect(text).not.toContain('f2 explanation');
+    // The agent answers each numbered item in a block the Review tab reads.
+    expect(text).toContain('End your reply with a task-monki-review-response block that answers every numbered item above');
+
+    expect(buildReviewRequestRecord({ ...input, comments: [...input.comments], findings: [...input.findings], dismissed: [] })).toEqual({
+      reviewRunId: 'review-1',
+      items: [
+        { number: 1, kind: 'FINDING', findingId: 'f1', severity: 'MAJOR', title: 'f1 title', path: 'src/rateLimit.ts', line: 41 },
+        { number: 2, kind: 'COMMENT', path: 'src/rateLimit.ts', side: 'NEW', line: 77, text: 'Return seconds here.' },
+        { number: 3, kind: 'COMMENT', path: 'src/rateLimit.ts', side: 'OLD', line: 12, endLine: 14, text: 'Keep this guard.' }
+      ],
+      note: 'Keep the public signature.'
+    });
   });
 
   it('falls back to the raw review output only when there is nothing structured to send', () => {
@@ -38,8 +52,11 @@ describe('buildReviewRequestInstruction', () => {
     });
 
     expect(raw).toContain('Unstructured review.');
+    // Raw output has no numbered items, so nothing asks for item answers.
+    expect(raw).not.toContain('task-monki-review-response');
+    expect(buildReviewRequestRecord({ taskTitle: 'T', findings: [], dismissed: [], comments: [], reviewOutput: 'Unstructured review.' })).toBeUndefined();
     expect(withComment).not.toContain('Unstructured review.');
-    expect(withComment).toContain('- a.ts (whole file): Rename this.');
+    expect(withComment).toContain('1. a.ts (whole file): Rename this.');
   });
 });
 

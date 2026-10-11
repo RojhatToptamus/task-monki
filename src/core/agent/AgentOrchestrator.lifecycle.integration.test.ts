@@ -1108,7 +1108,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect(adapter.runtimeReleaseCount).toBe(1);
   });
 
-  it('keeps one terminal outcome per review, reviewer question and side question across restarts', async () => {
+  it('keeps one terminal outcome per review and side question across restarts', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-read-only-terminal-restart-')
     );
@@ -1152,17 +1152,6 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: readOnly
     })).rejects.toThrow('provider could not start the turn');
-    const review = (await store.snapshot()).runs.find((run) => run.mode === 'REVIEW')!;
-    await expect(orchestrator.startReviewQuestion({
-      runId: randomUUID(),
-      sessionId: randomUUID(),
-      task,
-      iteration,
-      worktree,
-      reviewRun: review,
-      settings: readOnly,
-      prompt: 'Is the finding real?'
-    })).rejects.toThrow('provider could not start the turn');
     await expect(orchestrator.startSideQuestion({
       runId: randomUUID(),
       sessionId: randomUUID(),
@@ -1173,9 +1162,9 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       prompt: 'Where is the entry point?'
     })).rejects.toThrow('provider could not start the turn');
     const readOnlyRunIds = (await store.snapshot()).runs
-      .filter((run) => ['REVIEW', 'REVIEW_QUESTION', 'SIDE_QUESTION'].includes(run.mode))
+      .filter((run) => ['REVIEW', 'SIDE_QUESTION'].includes(run.mode))
       .map((run) => run.id);
-    expect(readOnlyRunIds).toHaveLength(3);
+    expect(readOnlyRunIds).toHaveLength(2);
     const outcomes = async (taskStore: SqliteTaskStore) =>
       (await taskStore.snapshot()).events.filter(
         (event) =>
@@ -1183,7 +1172,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
           ['AGENT_RUN_FAILED', 'ARTIFACT_CREATED'].includes(event.type)
       );
     const recorded = await outcomes(store);
-    expect(recorded.filter((event) => event.type === 'AGENT_RUN_FAILED')).toHaveLength(3);
+    expect(recorded.filter((event) => event.type === 'AGENT_RUN_FAILED')).toHaveLength(2);
     await orchestrator.shutdown();
     await persistenceByTaskStore.get(store)!.close();
 

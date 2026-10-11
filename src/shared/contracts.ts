@@ -3,12 +3,11 @@ import type {
   AgentReviewFindingSeverity,
   AgentReviewGateProjection,
   AgentReviewGateStatus,
-  AskReviewerRequest,
   DecideReviewFindingRequest,
-  ReviewFindingDecision,
-  StopReviewerQuestionRequest
+  ReviewFindingDecision
 } from './agentReviewFindings';
 import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
+import type { ReviewRequestRecord } from './reviewRounds';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -68,6 +67,7 @@ import type {
 export * from './agent';
 export * from './agentReviewFindings';
 export * from './reviewDraft';
+export * from './reviewRounds';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -454,6 +454,10 @@ export interface TaskInstruction extends InstructionAttachments {
   snapshotTakenAt?: string;
   /** SIDE only: untracked files left out of that snapshot by its size limits. */
   snapshotOmittedFileCount?: number;
+  /** SIDE only: what the question is about, when it was asked from a finding or from lines of the diff. */
+  subject?: AskSubject;
+  /** A follow-up sent from the Review tab: the request item by item, which the agent answers by number. */
+  reviewRequest?: ReviewRequestRecord;
   /** Reserved before admission; may be absent from runtime storage after a crash. */
   runId?: string;
   detail?: string;
@@ -1123,6 +1127,8 @@ export interface ContinueRunRequest extends InstructionAttachments {
   taskId: string;
   runId: string;
   instruction?: string;
+  /** Sent from the Review tab with its instruction: the request item by item. */
+  reviewRequest?: ReviewRequestRecord;
   settings?: AgentExecutionSettings;
 }
 
@@ -1155,7 +1161,16 @@ export interface AskSideQuestionRequest {
    * main conversation; the task's own when absent. The answer is read-only whatever it is.
    */
   model?: SideQuestionModelChoice;
+  subject?: AskSubject;
 }
+
+/**
+ * What an Ask question is about: a finding of the task's current review, or a line
+ * range of the current diff (the old side's numbers on removed lines).
+ */
+export type AskSubject =
+  | { kind: 'FINDING'; reviewRunId: string; findingId: string }
+  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number };
 
 export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
   runtimeId: AgentRuntimeId;
@@ -1702,8 +1717,6 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   /** Dismisses or restores a finding of the current, completed review. */
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
   /** Records a question to the reviewer and starts its read-only answer run. */
-  askReviewer(input: AskReviewerRequest): Promise<TaskInstruction>;
-  stopReviewerQuestion(input: StopReviewerQuestionRequest): Promise<void>;
   /** Records a side question to the task's implementation agent and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;

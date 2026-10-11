@@ -55,10 +55,8 @@ import type {
   SendPreviewAgentMessageRequest,
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
-  AskReviewerRequest,
   DecideReviewFindingRequest,
   ReviewFindingDecision,
-  StopReviewerQuestionRequest,
   AskSideQuestionRequest,
   SideQuestionModelChoice,
   EndSideThreadRequest,
@@ -182,7 +180,7 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
-import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot } from '../git/GitSnapshotService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
 import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
 import {
   buildContinuationPrompt,
@@ -223,6 +221,7 @@ import { AgentReviewCoordinator } from '../review/AgentReviewCoordinator';
 import { SideQuestionCoordinator } from '../sideQuestion/SideQuestionCoordinator';
 import { ReadOnlySnapshotService } from '../git/ReadOnlySnapshotService';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
+import { assertReviewRequestRecord, parseReviewResponse, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -480,17 +479,7 @@ export class TaskManagerService {
         await this.assertRuntimeAllowedInCurrentSurface(adapter);
       }
     });
-    this.reviews = new AgentReviewCoordinator({
-      store,
-      agents: {
-        startReviewQuestion: (input) => this.agents.startReviewQuestion(input),
-        interruptRun: (runId) => this.agents.interruptRun(runId)
-      },
-      readRuntimeArtifact: (artifactId) => this.agentRuntimeStore.readArtifact(artifactId),
-      events,
-      questionSettings: (task, reviewRun) => this.reviewQuestionSettings(task, reviewRun),
-      assertRuntimeEnabled: (runtimeId) => this.assertRuntimeEnabled(runtimeId)
-    });
+    this.reviews = new AgentReviewCoordinator({ store, events });
     const clientToolScratchRoot = options.clientToolCredentialRoot ??
       path.join(store.getStorageRoot(), 'client-tool-credentials');
     this.clientToolBridge = new ClientToolBridge({
@@ -2978,7 +2967,8 @@ export class TaskManagerService {
   }
 
   private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
-    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings): Promise<TaskInstruction> {
+    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
+    reviewRequest?: ReviewRequestRecord): Promise<TaskInstruction> {
     const trimmed = this.instructionText(text);
     if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
@@ -2994,6 +2984,7 @@ export class TaskManagerService {
         order: Math.max(0, ...records.map((item) => item.order)) + 1,
         attachmentDraftId: files?.attachmentDraftId, attachmentIds: [...(files?.attachmentIds ?? []), ...addedIds],
         text: trimmed, mode, status, createdAt: now, updatedAt: now,
+        ...(reviewRequest ? { reviewRequest } : {}),
         ...(status === 'SENDING' ? { runId: mode === 'STEER' ? run.id : randomUUID() } : {})
       };
       records.push(record);
@@ -3176,6 +3167,23 @@ export class TaskManagerService {
     }));
   }
 
+  /**
+   * The person's latest request after a review, and the agent's answer to each item
+   * as its finished reply states them. A reply still running, or without the block,
+   * answers nothing.
+   */
+  private async reviewRound(taskId: string, reviewRunId: string): Promise<{ record: ReviewRequestRecord; answers: ReviewResponseAnswer[] } | undefined> {
+    const detail = await this.store.getTaskDetail(taskId);
+    const instruction = detail.taskInstructions
+      .filter((item) => item.reviewRequest?.reviewRunId === reviewRunId && item.runId)
+      .sort((left, right) => right.order - left.order)[0];
+    if (!instruction?.reviewRequest) return undefined;
+    const run = detail.runs.find((candidate) => candidate.id === instruction.runId);
+    const reply = run?.status !== 'COMPLETED' ? ''
+      : run.finalMessage?.trim() || (run.finalArtifactId ? await this.agentRuntimeStore.readArtifact(run.finalArtifactId).catch(() => '') : '');
+    return { record: instruction.reviewRequest, answers: reply ? parseReviewResponse(reply, instruction.reviewRequest).answers : [] };
+  }
+
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent follow-up', () => this.withRuntimeOperation(async () => {
       return this.submitAuthoredTurn(input, 'FOLLOW_UP', (runId) => this.continueRunUnlocked(input, runId));
@@ -3294,6 +3302,10 @@ export class TaskManagerService {
     start: (reservedRunId?: string) => Promise<RunRecord>): Promise<RunRecord> {
     const id = input.clientMessageId ?? randomUUID();
     if ((input.attachmentDraftId || input.attachmentIds?.length) && !input.instruction?.trim()) throw new Error('Write a message to send with these files.');
+    if (input.reviewRequest !== undefined) {
+      if (mode !== 'FOLLOW_UP' || !input.instruction?.trim()) throw new Error('A review request is sent as a follow-up message.');
+      assertReviewRequestRecord(input.reviewRequest);
+    }
     const existing = input.instruction?.trim()
       ? await this.existingInstruction(id, input.taskId, input.instruction, mode, input)
       : undefined;
@@ -3312,7 +3324,7 @@ export class TaskManagerService {
       const current = records.find((item) => item.id === existing.id)!;
       Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
       return current;
-    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings);
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings, input.reviewRequest);
     return this.deliverInstruction(record, () => start(record.runId));
   }
 
@@ -3638,6 +3650,7 @@ export class TaskManagerService {
               });
         await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
         const previousReview = task.projection.agentReview;
+        const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
         return this.agents.startReview({
           task,
           iteration,
@@ -3647,13 +3660,15 @@ export class TaskManagerService {
             ? {
                 verdict: previousReview.result.verdict,
                 summary: previousReview.summary,
-                findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? [])
+                findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? []),
+                ...(previousRequest ? { request: previousRequest } : {})
               }
             : undefined,
-          target: input.target ?? (worktree.ownership === 'EXTERNAL' ? {
+          // Every change since the task's base: a commit made during the task stays in the review.
+          target: input.target ?? {
             type: 'CUSTOM',
             instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
-          } : { type: 'UNCOMMITTED_CHANGES' }),
+          },
           settings,
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id
@@ -3666,46 +3681,6 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Review finding decision', async () => {
       await this.requireNormalTask(input.taskId, 'Review finding decision');
       return this.reviews.decide(input);
-    });
-  }
-
-  askReviewer(input: AskReviewerRequest): Promise<TaskInstruction> {
-    this.assertAgentProviderAvailable();
-    return this.withTaskAction(input.taskId, 'Reviewer question', () =>
-      this.withRuntimeOperation(async () => {
-        await this.assertAgentRuntimeAvailable();
-        await this.requireNormalTask(input.taskId, 'Reviewer question');
-        // Local Git decides whether the review is still current: a changed diff makes it stale.
-        return this.reviews.ask(input, (taskId) =>
-          this.refreshEvidenceInternal({ taskId }, { persistOnlyIfChanged: true }));
-      })
-    );
-  }
-
-  stopReviewerQuestion(input: StopReviewerQuestionRequest): Promise<void> {
-    // A control action, like stopping a side question: another task action holding
-    // the task lock, such as the question still recording its receipt, must not refuse it.
-    return this.withControlAction(() =>
-      this.withRuntimeOperation(() => this.reviews.stop(input))
-    );
-  }
-
-  /**
-   * A question goes to the runtime and model that produced the review, read-only.
-   * Settings for the configured review runtime fill only what the review run lacks.
-   */
-  private reviewQuestionSettings(task: Task, reviewRun: RunRecord): AgentExecutionSettings {
-    const configured =
-      reviewRun.runtimeId === (this.appSettings.reviewRuntimeId ?? task.runtimeId)
-        ? {
-            ...(this.appSettings.reviewModel ? { model: this.appSettings.reviewModel } : {}),
-            ...(this.appSettings.reviewModelProvider ? { modelProvider: this.appSettings.reviewModelProvider } : {}),
-            ...(this.appSettings.reviewReasoningEffort ? { reasoningEffort: this.appSettings.reviewReasoningEffort } : {})
-          }
-        : {};
-    return mergeRunSettings({
-      readOnly: true,
-      settings: [configured, reviewRun.requestedSettings, { runtimeId: reviewRun.runtimeId }]
     });
   }
 
@@ -4346,6 +4321,8 @@ export class TaskManagerService {
     }
     await git(worktree.worktreePath, ['commit', '-m', `Task: ${task.title}`], 120_000);
     const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    // The committed tree is what was reviewed; edits after the commit change this fingerprint.
+    const dirtyFingerprint = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
     await this.store.appendEvent(
       createDomainEvent({
         type: 'DELIVERY_COMMIT_CREATED',
@@ -4353,7 +4330,7 @@ export class TaskManagerService {
         iterationId: worktree.iterationId,
         worktreeId: worktree.id,
         source: 'git',
-        payload: { headSha, branchName: worktree.branchName }
+        payload: { headSha, dirtyFingerprint, branchName: worktree.branchName }
       })
     );
     return this.refreshEvidenceInternal({ taskId: task.id });
@@ -4570,7 +4547,7 @@ export class TaskManagerService {
         snapshot.runs.some((run) =>
           run.taskId === task.id && run.mode === 'SIDE_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))
       ) {
-        throw new Error('Wait for the side question to finish, or stop it, before archiving this task.');
+        throw new Error('Wait for the answer in Ask, or stop it, before archiving this task.');
       }
       const latestGit = snapshot.gitSnapshots
         .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
@@ -5612,7 +5589,7 @@ export class TaskManagerService {
       throw new Error(`Wait for the reviewer to answer, or stop the question, before ${action}.`);
     }
     if (activeRun.mode === 'SIDE_QUESTION') {
-      throw new Error(`Wait for the side question to finish, or stop it, before ${action}.`);
+      throw new Error(`Wait for the answer in Ask, or stop it, before ${action}.`);
     }
     throw new Error(`Stop or let the active agent run finish before ${action}.`);
   }

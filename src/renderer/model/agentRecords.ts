@@ -22,10 +22,10 @@ export type AgentConversationOwner = 'task' | 'preview' | 'reviewer' | 'side';
 /**
  * Splits a task's agent records between the conversations that render them.
  * A PREVIEW run, its session, items, questions and messages belong to the
- * Preview tab; a REVIEW_QUESTION run and the REVIEW messages that asked it
- * belong to the reviewer panel; a SIDE_QUESTION run and its SIDE messages
- * belong to the side question panel. None ever reaches the Agent tab or the
- * task's run selection. Review runs themselves stay with the task.
+ * Preview tab; a SIDE_QUESTION run and its SIDE messages belong to Ask; a
+ * REVIEW_QUESTION run and its REVIEW messages, from the retired reviewer
+ * conversation, are kept apart and shown nowhere. None ever reaches the Agent
+ * tab or the task's run selection. Review runs themselves stay with the task.
  */
 export function partitionAgentRecords(records: AgentConversationRecords): Record<AgentConversationOwner, AgentConversationRecords> {
   const runOwner = (run: RunRecord): AgentConversationOwner =>

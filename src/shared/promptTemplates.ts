@@ -5,14 +5,12 @@ import type {
   AgentReviewResult,
   EffectiveReviewFinding,
   GitSnapshotRecord,
+  ReviewRequestRecord,
+  ReviewResponseAnswer,
   RunRecord,
   Task,
   WorktreeRecord
 } from './contracts';
-import {
-  REVIEW_REVISIONS_FENCE_TAG,
-  REVIEW_REVISIONS_MAX_ENTRIES
-} from './agentReviewFindings';
 import { DESIGN_LIMITS } from './design';
 
 export const TASK_MONKI_CONTEXT_LINE =
@@ -545,6 +543,8 @@ export interface PreviousReviewContext {
   verdict?: AgentReviewResult['verdict'];
   summary?: string;
   findings: readonly EffectiveReviewFinding[];
+  /** The person's request after that review, and the implementation agent's answer to each item. */
+  request?: { record: ReviewRequestRecord; answers: readonly ReviewResponseAnswer[] };
 }
 
 export function buildAgentReviewPrompt(input: {
@@ -584,11 +584,9 @@ export function buildAgentReviewPrompt(input: {
 
 const PREVIOUS_REVIEW_FINDING_LIMIT = 50;
 const REVIEW_CONTEXT_TEXT_LIMIT = 1_200;
-const REVIEW_QUESTION_HISTORY_LIMIT = 6;
-const REVIEW_QUESTION_HISTORY_TEXT_LIMIT = 4_000;
 
 function previousReviewSection(review: PreviousReviewContext | undefined): string[] {
-  if (!review || review.findings.length === 0) return [];
+  if (!review || (review.findings.length === 0 && !review.request)) return [];
   const listed = review.findings.slice(0, PREVIOUS_REVIEW_FINDING_LIMIT);
   return [
     '',
@@ -599,15 +597,39 @@ function previousReviewSection(review: PreviousReviewContext | undefined): strin
     ...(review.findings.length > listed.length
       ? [`- … and ${review.findings.length - listed.length} more findings`]
       : []),
-    'Do not raise a dismissed or withdrawn finding again unless the code changed in a way that makes it relevant; if you do, say why.'
+    ...(review.findings.length > 0
+      ? ['The person decided on these findings. Never raise one they marked incorrect, or one withdrawn, again. Raise one they marked intentional again only if the code around it changed materially, and say why. Do not raise one they deferred again.']
+      : []),
+    ...(review.request ? previousRequestLines(review.request) : []),
+    '',
+    'This is a re-review. In the JSON, give a finding that is an earlier open finding still unresolved that finding\'s id as "previousFindingId", and list each earlier open finding the code now resolves in "resolvedFindings": [{"previousFindingId": "earlier-id", "title": "Its title", "note": "How it was resolved."}]. Report a new finding, one without previousFindingId, only when it is BLOCKER or MAJOR.'
   ];
 }
 
-/** How the person dismissed a finding, in the words the reviewer reads. */
+function previousRequestLines(request: NonNullable<PreviousReviewContext['request']>): string[] {
+  const answers = new Map(request.answers.map((answer) => [answer.item, answer]));
+  const outcome = { FIXED: 'fixed', NOT_CHANGED: 'not changed', NEEDS_DECISION: 'needs the person\'s decision' } as const;
+  return [
+    '',
+    'The person then asked the implementation agent for these changes, and it answered:',
+    ...request.record.items.map((item) => {
+      const subject = item.kind === 'FINDING'
+        ? `Finding ${item.findingId}, [${item.severity}] ${boundedText(item.title, REVIEW_CONTEXT_TEXT_LIMIT)}${findingLocation(item)}`
+        : `Comment on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
+      const answer = answers.get(item.number);
+      return `${item.number}. ${subject}. Agent: ${answer ? `${outcome[answer.outcome]}${answer.note ? `. ${boundedText(answer.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}` : 'no answer'}.`;
+    }),
+    ...(request.record.note ? [`Note from the person: ${boundedText(request.record.note, REVIEW_CONTEXT_TEXT_LIMIT)}`] : []),
+    'An answer is the agent\'s claim, not evidence; check each one against the code.'
+  ];
+}
+
+/** How the person dismissed a finding, in the words an agent reads. */
 function dismissalPhrase(dismissal: NonNullable<EffectiveReviewFinding['dismissal']>): string {
-  const how = dismissal.reason === 'NOT_A_PROBLEM' ? 'dismissed by the person as not a problem'
-    : dismissal.reason === 'ACCEPTED' ? 'accepted as is by the person'
-      : 'dismissed by the person';
+  const how = dismissal.reason === 'NOT_A_PROBLEM' ? 'marked incorrect by the person'
+    : dismissal.reason === 'ACCEPTED' ? 'marked intentional by the person'
+      : dismissal.reason === 'DEFERRED' ? 'deferred by the person'
+        : 'dismissed by the person';
   return `${how}${dismissal.note ? `: ${boundedText(dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}`;
 }
 
@@ -626,94 +648,22 @@ function previousFindingLine(finding: EffectiveReviewFinding): string {
     finding.state !== 'WITHDRAWN' && finding.revision
       ? ` The reviewer ${finding.revision.kind === 'ADD' ? 'added it' : 'changed its severity'}: ${boundedText(finding.revision.reason, REVIEW_CONTEXT_TEXT_LIMIT)}`
       : '';
-  return `[${finding.severity}] ${finding.title}${findingLocation(finding)} (${state}).${revision}`;
+  return `id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)} (${state}).${revision}`;
 }
 
-/** Everything a reviewer question needs; the prompt is rebuilt in full for every question. */
-export interface ReviewQuestionPromptContext {
-  taskTitle: string;
-  review: {
-    status: AgentReviewGateStatus;
-    verdict?: AgentReviewResult['verdict'];
-    summary?: string;
-  };
-  findings: readonly EffectiveReviewFinding[];
-  focusedFinding?: { finding: EffectiveReviewFinding; diff?: string };
-  diffStat: string;
-  /** Earlier questions on this review with prose-only answers, oldest first. */
-  history: ReadonlyArray<{ question: string; answer: string; findingId?: string }>;
-  question: string;
-}
-
-export const REVIEW_QUESTION_READ_ONLY_CONTRACT =
+export const READ_ONLY_TURN_CONTRACT =
   'You are working read-only. Never modify, create or delete files, apply patches, run formatters or generators, install packages, or change Git state. Only inspect, analyze, explain and suggest. When a change is needed, describe it or show it as a suggested diff in your reply.';
 
-export const REVIEW_QUESTION_REVISION_CONTRACT = `Answer in plain prose. If, and only if, the answer changes a finding, end the reply with exactly one fenced block tagged \`${REVIEW_REVISIONS_FENCE_TAG}\` containing a JSON array of at most ${REVIEW_REVISIONS_MAX_ENTRIES} objects: \`{ "finding": "<id>", "action": "withdraw", "reason": "…" }\`, \`{ "finding": "<id>", "action": "severity", "severity": "BLOCKER|MAJOR|MINOR|NIT", "reason": "…" }\`, or \`{ "action": "add", "finding": { "severity", "title", "explanation", "path", "line"?, "recommendation"? }, "reason": "…" }\`. Never revise a finding in prose alone.`;
-
-/**
- * One question to a review's reviewer in a fresh read-only session. No provider
- * memory carries between questions, so the context is complete and bounded.
- */
-export function buildReviewQuestionPrompt(context: ReviewQuestionPromptContext): string {
-  const history = context.history.slice(-REVIEW_QUESTION_HISTORY_LIMIT);
+/** One finding of the current review, as an Ask answer reads it. */
+function askFindingBlock(finding: EffectiveReviewFinding): string {
   return [
-    'You are the reviewer of a Task Monki agent review. The person is asking you about your review.',
-    TASK_MONKI_CONTEXT_LINE,
-    '',
-    REVIEW_QUESTION_READ_ONLY_CONTRACT,
-    '',
-    `Task: ${context.taskTitle}`,
-    `Review status: ${context.review.status}${context.review.verdict ? `; verdict ${context.review.verdict}` : ''}.`,
-    ...(context.review.summary
-      ? [`Review summary: ${boundedText(context.review.summary, REVIEW_CONTEXT_TEXT_LIMIT)}`]
-      : []),
-    '',
-    'Findings:',
-    ...(context.findings.length > 0
-      ? context.findings.map(reviewQuestionFindingBlock)
-      : ['No structured findings.']),
-    ...(context.focusedFinding
-      ? [
-          '',
-          `The question is about finding ${context.focusedFinding.finding.id}: ${context.focusedFinding.finding.title}.`,
-          ...(context.focusedFinding.diff
-            ? ['Reviewed diff for this finding:', '```diff', context.focusedFinding.diff, '```']
-            : ['The reviewed diff has no hunk for this finding.'])
-        ]
-      : []),
-    '',
-    'Reviewed diff stat:',
-    context.diffStat,
-    ...(history.length > 0
-      ? [
-          '',
-          'Earlier questions about this review, oldest first:',
-          ...history.flatMap((exchange, index) => [
-            `Question ${index + 1}${exchange.findingId ? ` (finding ${exchange.findingId})` : ''}: ${boundedText(exchange.question, REVIEW_QUESTION_HISTORY_TEXT_LIMIT)}`,
-            `Your answer ${index + 1}: ${boundedText(exchange.answer, REVIEW_QUESTION_HISTORY_TEXT_LIMIT)}`
-          ])
-        ]
-      : []),
-    '',
-    'Question:',
-    context.question.trim(),
-    '',
-    REVIEW_QUESTION_REVISION_CONTRACT
-  ].join('\n');
-}
-
-function reviewQuestionFindingBlock(finding: EffectiveReviewFinding): string {
-  return [
-    `- id ${finding.id}: [${finding.severity}${finding.originalSeverity ? `, originally ${finding.originalSeverity}` : ''}] ${finding.title}${findingLocation(finding)}; state ${finding.state}${finding.addedByReviewer ? '; added by you in an earlier answer' : ''}.`,
+    `- id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)}; ${finding.state === 'OPEN' ? 'open' : finding.state === 'WITHDRAWN' ? 'withdrawn by the reviewer' : 'dismissed'}.`,
     `  Explanation: ${boundedText(finding.explanation, REVIEW_CONTEXT_TEXT_LIMIT)}`,
     ...(finding.recommendation
       ? [`  Recommendation: ${boundedText(finding.recommendation, REVIEW_CONTEXT_TEXT_LIMIT)}`]
       : []),
     ...(finding.dismissal
       ? [`  ${sentenceStart(dismissalPhrase(finding.dismissal))}${finding.dismissal.note ? '' : '.'}`]
-      : []),
-    ...(finding.revision
-      ? [`  Your earlier revision (${finding.revision.kind}): ${boundedText(finding.revision.reason, REVIEW_CONTEXT_TEXT_LIMIT)}`]
       : [])
   ].join('\n');
 }
@@ -743,6 +693,10 @@ const SIDE_QUESTION_OMITTED_FILE_LIMIT = 20;
 
 const SIDE_QUESTION_INSTRUCTION =
   'You are answering a side question about a task another agent is working on. Do not continue that work; answer the question.';
+const SIDE_QUESTION_FINDING_INSTRUCTION =
+  'The question is about a finding an independent reviewer raised. Check it against the code yourself and say plainly whether it holds, citing files and lines. Decide from the code, not from how the question is phrased; the person decides what to do with the finding.';
+const SIDE_QUESTION_REVIEW_FINDING_LIMIT = 30;
+const SIDE_QUESTION_SUBJECT_DIFF_LIMIT = 6_000;
 
 /** Everything a side question needs; the prompt is rebuilt in full for every question. */
 export interface SideQuestionPromptContext {
@@ -770,12 +724,22 @@ export interface SideQuestionPromptContext {
   };
   /** Earlier answered questions in this side thread, oldest first. */
   history: ReadonlyArray<{ question: string; answer: string }>;
+  /** The task's current agent review, when it has findings or a summary. */
+  review?: {
+    status: AgentReviewGateStatus;
+    summary?: string;
+    findings: readonly EffectiveReviewFinding[];
+  };
+  /** What the question is about, with the diff around it. */
+  subject?:
+    | { kind: 'FINDING'; finding: EffectiveReviewFinding; diff?: string }
+    | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number; diff?: string };
   question: string;
 }
 
 /**
- * One side question to the task's implementation runtime in a fresh read-only session.
- * No provider memory carries between questions, so the context is complete and bounded.
+ * One Ask question to the task's runtime in a fresh read-only session. No provider
+ * memory carries between questions, so the context is complete and bounded.
  */
 export function buildSideQuestionPrompt(context: SideQuestionPromptContext): string {
   const conversation = context.conversation.slice(-SIDE_QUESTION_CONVERSATION_LIMIT * 2);
@@ -783,11 +747,12 @@ export function buildSideQuestionPrompt(context: SideQuestionPromptContext): str
   const omitted = context.checkout.snapshot?.omittedFiles ?? [];
   const listedOmitted = omitted.slice(0, SIDE_QUESTION_OMITTED_FILE_LIMIT);
   const history = context.history.slice(-SIDE_QUESTION_HISTORY_LIMIT);
+  const reviewFindings = context.review?.findings.slice(0, SIDE_QUESTION_REVIEW_FINDING_LIMIT) ?? [];
   return [
-    'The person is asking the task\'s implementation agent a side question.',
+    'The person is asking a side question about the task. It does not reach the implementation agent.',
     TASK_MONKI_CONTEXT_LINE,
     '',
-    REVIEW_QUESTION_READ_ONLY_CONTRACT,
+    READ_ONLY_TURN_CONTRACT,
     '',
     SIDE_QUESTION_INSTRUCTION,
     '',
@@ -836,6 +801,35 @@ export function buildSideQuestionPrompt(context: SideQuestionPromptContext): str
             : [])
         ]
       : []),
+    ...(context.review
+      ? [
+          '',
+          `Current agent review (status ${context.review.status}), from an independent reviewer:`,
+          ...(context.review.summary ? [`Summary: ${boundedText(context.review.summary, REVIEW_CONTEXT_TEXT_LIMIT)}`] : []),
+          ...(reviewFindings.length > 0 ? reviewFindings.map(askFindingBlock) : ['No structured findings.']),
+          ...(context.review.findings.length > reviewFindings.length
+            ? [`- … and ${context.review.findings.length - reviewFindings.length} more findings`]
+            : [])
+        ]
+      : []),
+    ...(context.subject?.kind === 'FINDING'
+      ? [
+          '',
+          `The question is about finding ${context.subject.finding.id}: ${context.subject.finding.title}.`,
+          SIDE_QUESTION_FINDING_INSTRUCTION,
+          ...(context.subject.diff
+            ? ['Diff for this finding:', '```diff', boundedText(context.subject.diff, SIDE_QUESTION_SUBJECT_DIFF_LIMIT), '```']
+            : [])
+        ]
+      : context.subject?.kind === 'LINES'
+        ? [
+            '',
+            `The question is about ${context.subject.path}, ${context.subject.side === 'OLD' ? 'removed ' : ''}${context.subject.endLine ? `lines ${context.subject.line}-${context.subject.endLine}` : `line ${context.subject.line}`}.`,
+            ...(context.subject.diff
+              ? ['Diff around those lines:', '```diff', boundedText(context.subject.diff, SIDE_QUESTION_SUBJECT_DIFF_LIMIT), '```']
+              : [])
+          ]
+        : []),
     ...(history.length > 0
       ? [
           '',

@@ -79,7 +79,7 @@ describe('TaskManagerService side questions', () => {
     // One question at a time per task; repeating a message returns the recorded question.
     await expect(s.service.askSideQuestion({
       taskId: task.id, threadId, messageId: randomUUID(), text: 'Another one?'
-    })).rejects.toThrow('Wait for the current side question to finish, or stop it.');
+    })).rejects.toThrow('Wait for the current answer to finish, or stop it.');
     await expect(s.service.askSideQuestion({
       taskId: task.id, threadId, messageId, text: 'Which file holds the feature?'
     })).resolves.toMatchObject({ id: messageId, runId: question.runId });
@@ -198,7 +198,7 @@ describe('TaskManagerService side questions', () => {
     expect(followUpPrompt).toContain('Your answer 1: The listener is removed when the view closes.');
     await expect(s.service.continueRun({
       taskId: task.id, runId: implementation.id, instruction: 'Fix the review findings.'
-    })).rejects.toThrow('Wait for the side question to finish, or stop it, before starting follow-up work.');
+    })).rejects.toThrow('Wait for the answer in Ask, or stop it, before starting follow-up work.');
     await s.service.stopSideQuestion({ taskId: task.id, runId: pending.runId! });
     await s.waitForSnapshot((state) => runOf(state, pending.runId)?.status === 'INTERRUPTED');
 
@@ -216,6 +216,49 @@ describe('TaskManagerService side questions', () => {
     expect(restored.runs.filter((run) => run.mode === 'SIDE_QUESTION')).toHaveLength(2);
     expect(restored.agentSessions.filter((session) => session.role === 'SIDE')).toHaveLength(2);
     await reopened.close();
+  }, 30_000);
+
+  it('asks about a finding or lines with the current review and that diff in context', async () => {
+    const s = await scenarios.create({ name: 'task-monki-ask-subject' });
+    const task = await s.createTask({ title: 'Ask about a finding', prompt: 'Add the feature module.' });
+    const worktree = await prepareTestWorktree(s.service, task.id);
+    const implementation = await s.service.startRun({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'window.addEventListener("x", () => {});\n');
+    await s.completeRun(implementation.id, 'Implemented the feature module.');
+    s.agent.nextRuntimeTurnResult = { output: REVIEW_OUTPUT };
+    const review = await s.service.startReview({ taskId: task.id, runId: implementation.id });
+    await s.waitForSnapshot((state) =>
+      state.tasks.find((candidate) => candidate.id === task.id)?.projection.agentReview?.status === 'NEEDS_CHANGES' &&
+      Boolean(runOf(state, review.id)?.afterGitSnapshotId));
+    const threadId = randomUUID();
+    const ask = async (text: string, subject: Parameters<typeof s.service.askSideQuestion>[0]['subject']) => {
+      s.agent.nextRuntimeTurnResult = { output: 'It holds.' };
+      const question = await s.service.askSideQuestion({ taskId: task.id, threadId, messageId: randomUUID(), text, subject });
+      const answered = await s.waitForSnapshot((state) =>
+        state.events.some((event) => event.type === 'AGENT_RUN_COMPLETED' && event.runId === question.runId));
+      return { question, prompt: await s.runtimeStore.readArtifact(runOf(answered, question.runId)!.promptArtifactId) };
+    };
+
+    const finding = await ask('Does this hold?', { kind: 'FINDING', reviewRunId: review.id, findingId: 'leak' });
+    expect(finding.question.subject).toEqual({ kind: 'FINDING', reviewRunId: review.id, findingId: 'leak' });
+    expect(finding.prompt).toContain('Current agent review (status NEEDS_CHANGES), from an independent reviewer:');
+    expect(finding.prompt).toContain('- id leak: [MAJOR] Listener leaks; open.');
+    expect(finding.prompt).toContain('The question is about finding leak: Listener leaks.');
+    expect(finding.prompt).toContain('Check it against the code yourself and say plainly whether it holds');
+
+    const lines = await ask('Why the window?', { kind: 'LINES', path: 'feature.ts', side: 'NEW', line: 1 });
+    expect(lines.prompt).toContain('The question is about feature.ts, line 1.');
+    expect(lines.prompt).toContain('window.addEventListener');
+
+    await expect(s.service.askSideQuestion({
+      taskId: task.id, threadId, messageId: randomUUID(), text: 'And this one?', subject: { kind: 'FINDING', reviewRunId: review.id, findingId: 'missing' }
+    })).rejects.toThrow('This finding is not part of the review.');
+    await expect(s.service.askSideQuestion({
+      taskId: task.id, threadId, messageId: randomUUID(), text: 'And this one?', subject: { kind: 'FINDING', reviewRunId: randomUUID(), findingId: 'leak' }
+    })).rejects.toThrow('This finding is no longer part of the task’s current review.');
+    await expect(s.service.askSideQuestion({
+      taskId: task.id, threadId, messageId: randomUUID(), text: 'Which lines?', subject: { kind: 'LINES', path: 'feature.ts', side: 'NEW', line: 3, endLine: 2 }
+    })).rejects.toThrow();
   }, 30_000);
 
   it('answers with the model chosen for the question, read-only whatever the task uses', async () => {
@@ -242,7 +285,7 @@ describe('TaskManagerService side questions', () => {
     });
     await expect(s.service.askSideQuestion({
       taskId: task.id, threadId: randomUUID(), messageId: randomUUID(), text: 'And now?', model: { runtimeId: '' }
-    })).rejects.toThrow('Choose a valid model for the side question.');
+    })).rejects.toThrow('Choose a valid model to ask.');
   });
 
   it('admits a side question only on one of the profile\'s own read-only snapshots', async () => {

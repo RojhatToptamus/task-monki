@@ -229,6 +229,11 @@
 /* The Preview renders its agent into the sheet's slot; the slot itself takes no box. */
 .tm-side-sheet__slot { display: contents; }
 .tm-side-conversation__exchange > .ghost-button { align-self: flex-start; }
+/* Ask: what the next question is about, above the field, and what each asked one was about, above it. */
+.tm-ask__subject { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 6px 0 12px; color: var(--muted); font-size: var(--t-help); }
+.tm-ask__subject span { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
+.tm-ask__subject .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); margin-left: auto; border-radius: var(--r-xs); }
+.tm-ask__about { align-self: flex-end; max-width: 88%; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 
 /* An assistant's own sheet beside the page (DESIGN.md Appendix B, side panels). Docked,
    it is a sibling of the page's sheet; floating, it slides over the page. */

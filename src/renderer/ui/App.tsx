@@ -37,6 +37,7 @@ import {
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
   type SideQuestionModelChoice,
+  type ReviewRequestRecord,
   type TaskReviewDraft,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
@@ -1603,7 +1604,7 @@ export function App() {
     () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
     [enabledRuntimeIds, runtimeModels]
   );
-  // Side questions start on their own default from Settings, else the implementation default.
+  // Ask starts on its own default from Settings, else the implementation default.
   const sideQuestionDefault = useMemo((): SideQuestionModelChoice => appSettings.sideQuestionRuntimeId
     ? {
         runtimeId: appSettings.sideQuestionRuntimeId,
@@ -1696,30 +1697,33 @@ export function App() {
       enabledRuntimeModels
     ]
   );
-  const reviewExecutionSettings = useMemo(
-    () =>
-      resolveModelExecutionSettings(
-        enabledRuntimeModels,
-        appSettings.reviewModel ?? appSettings.defaultModel,
-        appSettings.reviewReasoningEffort,
-        reviewRuntime?.preflight.runtime.id ??
-          appSettings.reviewRuntimeId ??
-          selectedTask?.runtimeId ??
-          appSettings.defaultRuntimeId,
-        appSettings.reviewModelProvider
-      ),
-    [
-      appSettings.defaultModel,
-      appSettings.defaultRuntimeId,
-      appSettings.reviewModel,
-      appSettings.reviewModelProvider,
-      appSettings.reviewReasoningEffort,
-      appSettings.reviewRuntimeId,
-      reviewRuntime?.preflight.runtime.id,
-      selectedTask?.runtimeId,
-      enabledRuntimeModels
-    ]
-  );
+  // The review runs on the model chosen in Settings › Review, else on the task's own
+  // model when it reviews on the task's runtime.
+  const reviewExecutionSettings = useMemo(() => {
+    const runtimeId = reviewRuntime?.preflight.runtime.id ??
+      appSettings.reviewRuntimeId ??
+      selectedTask?.runtimeId ??
+      appSettings.defaultRuntimeId;
+    const taskModel = !appSettings.reviewModel && selectedTask?.runtimeId === runtimeId ? selectedTask.agentSettings : undefined;
+    return resolveModelExecutionSettings(
+      enabledRuntimeModels,
+      appSettings.reviewModel ?? taskModel?.model ?? appSettings.defaultModel,
+      appSettings.reviewReasoningEffort ?? taskModel?.reasoningEffort,
+      runtimeId,
+      appSettings.reviewModelProvider ?? taskModel?.modelProvider
+    );
+  }, [
+    appSettings.defaultModel,
+    appSettings.defaultRuntimeId,
+    appSettings.reviewModel,
+    appSettings.reviewModelProvider,
+    appSettings.reviewReasoningEffort,
+    appSettings.reviewRuntimeId,
+    reviewRuntime?.preflight.runtime.id,
+    selectedTask?.runtimeId,
+    selectedTask?.agentSettings,
+    enabledRuntimeModels
+  ]);
 
   const openTaskDetail = useCallback(
     (taskId: string, trigger?: HTMLElement) => {
@@ -2186,7 +2190,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments) => {
+  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments, reviewRequest?: ReviewRequestRecord) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2196,7 +2200,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files }));
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files, ...(reviewRequest ? { reviewRequest } : {}) }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2274,7 +2278,6 @@ export function App() {
       await withAppAction(() => taskManagerApi.startReview({
         taskId: run?.taskId ?? selectedTask.id,
         runId,
-        target: selectedWorktree?.ownership === 'EXTERNAL' ? undefined : { type: 'UNCOMMITTED_CHANGES' },
         settings: reviewExecutionSettings
       }));
       // Confirm only what happened: a start that fails reports its error instead.
@@ -2836,17 +2839,7 @@ export function App() {
               ? previewAgentConversation(selectedTask.id, selectedRecords.preview, respondToInteraction)
               : undefined}
             previewProposals={selectedTask ? previewProposalActions(selectedTask.id) : undefined}
-            reviewer={selectedTask && selectedRecords ? {
-              records: selectedRecords.reviewer,
-              ask: async (input) => {
-                await withAppAction(() => taskManagerApi.askReviewer({ taskId: selectedTask.id, ...input }));
-              },
-              stop: async (runId) => {
-                await withAppAction(() => taskManagerApi.stopReviewerQuestion({ taskId: selectedTask.id, runId }));
-              },
-              readArtifact
-            } : undefined}
-            sideQuestion={selectedTask && selectedRecords ? {
+            ask={selectedTask && selectedRecords ? {
               records: selectedRecords.side,
               defaultModel: sideQuestionDefault,
               ask: async (input) => {
@@ -2868,6 +2861,7 @@ export function App() {
             onCancel={cancelRun}
             onSteer={steerRun}
             onContinue={continueRun}
+            onSendReviewRequest={(runId, instruction, request) => continueRun(runId, instruction, undefined, undefined, request)}
             onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
             onReconnectWorktree={reconnectWorktree}
             onUpdateWorktreeComparison={updateWorktreeComparison}

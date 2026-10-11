@@ -137,14 +137,14 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     };
 
     const menu = await openDismiss(thread);
-    await act(async () => { fireEvent.click(within(menu).getByRole('menuitem', { name: 'Not a problem' })); });
+    await act(async () => { fireEvent.click(within(menu).getByRole('menuitem', { name: 'Incorrect' })); });
     expect(onDismiss).toHaveBeenLastCalledWith('f1', 'NOT_A_PROBLEM');
 
     // D on the focused finding opens the reason and note.
     const minor = screen.getByRole('article', { name: 'Minor finding: Name the limit' });
     act(() => minor.focus());
     fireEvent.keyDown(minor, { key: 'd' });
-    fireEvent.click(within(minor).getByRole('button', { name: 'Acceptable as is' }));
+    fireEvent.click(within(minor).getByRole('button', { name: 'Intentional' }));
     fireEvent.change(within(minor).getByLabelText('A note for the next review (optional)'), { target: { value: 'Matches the codebase' } });
     await act(async () => { fireEvent.click(within(minor).getByRole('button', { name: 'Dismiss' })); });
     expect(onDismiss).toHaveBeenLastCalledWith('f2', 'ACCEPTED', 'Matches the codebase');
@@ -241,7 +241,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(within(within(sheet).getByRole('region', { name: 'To fix' })).getByText('Limiter state is per process')).toBeDefined();
     const leftOut = within(sheet).getByRole('region', { name: 'Left out' });
     expect(within(leftOut).getByText('Suggestion')).toBeDefined();
-    expect(within(leftOut).getByText('Dismissed: not a problem')).toBeDefined();
+    expect(within(leftOut).getByText('Marked incorrect')).toBeDefined();
     expect(within(sheet).getByText('Address the review.')).toBeDefined();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Request changes' })).toBeNull();

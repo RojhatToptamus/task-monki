@@ -2594,8 +2594,8 @@
 .tm-reviewcard__counts[data-earlier] [data-severity] { color: var(--muted); }
 .tm-reviewcard__closed { color: var(--muted); }
 
-/* The tab's assistant panel toggle, at the right end of the tab bar: Ask
-   reviewer, Side question, Preview agent. */
+/* The tab's assistant panel toggle, at the right end of the tab bar: Ask on
+   Overview, Agent and Review, the Preview agent on Preview. */
 .tm-detail__assistant { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: var(--h-toolbar); margin-left: auto; padding: 0 10px; border-radius: var(--r-sm); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
 .tm-detail__assistant svg { color: var(--accent-ink); }
 .tm-detail__assistant:hover { background-color: var(--hover); color: var(--text); }

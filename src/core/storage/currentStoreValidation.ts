@@ -12,6 +12,7 @@ import {
   reviewDraftProblem
 } from '../../shared/contracts';
 import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
+import { assertReviewRequestRecord } from '../../shared/reviewRounds';
 import type { StoreState } from '../projection/reducer';
 
 const WORKFLOW_PHASES = [
@@ -1283,13 +1284,21 @@ function reviewResult(value: unknown): void {
   stringField(record, 'summary', 'tasks.projection', true);
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
   for (const finding of record.findings) reviewFinding(finding, 'tasks.projection');
+  if (record.resolvedFindings !== undefined) {
+    if (!Array.isArray(record.resolvedFindings)) invalid('tasks.projection');
+    for (const resolved of record.resolvedFindings) {
+      const item = persistedRecord(resolved, 'tasks.projection');
+      strings(item, 'tasks.projection', ['previousFindingId', 'title']);
+      optionalStrings(item, 'tasks.projection', ['note']);
+    }
+  }
 }
 
 function reviewFinding(value: unknown, collection: string): Record<string, unknown> {
   const item = persistedRecord(value, collection);
   strings(item, collection, ['id', 'title', 'explanation']);
   enumField(item, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
-  optionalStrings(item, collection, ['path', 'recommendation']);
+  optionalStrings(item, collection, ['path', 'recommendation', 'previousFindingId']);
   optionalInteger(item, 'line', collection, 1);
   optionalInteger(item, 'endLine', collection, 1);
   return item;
@@ -1332,8 +1341,9 @@ export function validateReviewFindingDecision(value: unknown, collection: string
 }
 
 /**
- * Only a reviewer question names its review and, optionally, its finding. Only a side
- * question names its thread and, when it read one, its worktree snapshot.
+ * Only a reviewer question (kept from the retired reviewer lane) names its review and,
+ * optionally, its finding. Only a side question (Ask) names its thread, when it read
+ * one its worktree snapshot, and when it was asked about one its subject.
  */
 export function validateTaskInstructionConversation(instruction: Record<string, unknown>): void {
   optionalEnumField(instruction, 'role', ['PREVIEW', 'REVIEW', 'SIDE'] as const, 'taskInstructions');
@@ -1350,13 +1360,44 @@ export function validateTaskInstructionConversation(instruction: Record<string, 
     if (instruction.snapshotOmittedFileCount !== undefined && instruction.snapshotTakenAt === undefined) {
       invalid('taskInstructions');
     }
+    if (instruction.subject !== undefined) askSubject(instruction.subject);
   } else if (
     instruction.threadId !== undefined ||
     instruction.snapshotTakenAt !== undefined ||
-    instruction.snapshotOmittedFileCount !== undefined
+    instruction.snapshotOmittedFileCount !== undefined ||
+    instruction.subject !== undefined
   ) {
     invalid('taskInstructions');
   }
+  // A review request is a follow-up to the task's own agent.
+  if (instruction.reviewRequest !== undefined) {
+    if (instruction.role !== undefined || instruction.mode !== 'FOLLOW_UP') invalid('taskInstructions');
+    try {
+      assertReviewRequestRecord(instruction.reviewRequest);
+    } catch {
+      invalid('taskInstructions');
+    }
+  }
+}
+
+/** An Ask subject: a finding of a review, or a line range of the diff. */
+function askSubject(value: unknown): void {
+  const collection = 'taskInstructions';
+  const subject = persistedRecord(value, collection);
+  enumField(subject, 'kind', ['FINDING', 'LINES'] as const, collection);
+  if (subject.kind === 'FINDING') {
+    uuidField(subject, 'reviewRunId', collection);
+    stringField(subject, 'findingId', collection);
+    if (Object.keys(subject).some((key) => !['kind', 'reviewRunId', 'findingId'].includes(key))) invalid(collection);
+    return;
+  }
+  stringField(subject, 'path', collection);
+  enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
+  optionalInteger(subject, 'line', collection, 1);
+  if (subject.line === undefined) invalid(collection);
+  optionalInteger(subject, 'endLine', collection, 1);
+  if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
+  if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
 }
 
 function settings(value: unknown, collection: string): void {

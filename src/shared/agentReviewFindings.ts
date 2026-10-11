@@ -35,6 +35,15 @@ export interface AgentReviewFinding {
   line?: number;
   endLine?: number;
   recommendation?: string;
+  /** A re-review only: the earlier review's finding this one is, still open. Absent for a new finding. */
+  previousFindingId?: string;
+}
+
+/** A re-review only: an earlier review's finding the code now resolves. */
+export interface AgentReviewResolvedFinding {
+  previousFindingId: string;
+  title: string;
+  note?: string;
 }
 
 export interface AgentReviewResult {
@@ -43,6 +52,8 @@ export interface AgentReviewResult {
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
   findings: AgentReviewFinding[];
+  /** A re-review only: the earlier findings it found resolved. */
+  resolvedFindings?: AgentReviewResolvedFinding[];
 }
 
 export interface AgentReviewGateProjection {
@@ -68,18 +79,20 @@ export interface AgentReviewGateProjection {
 export const REVIEW_FINDING_TEXT_MAX_LENGTH = 500;
 /** Decisions kept per review; a review that reaches it must be run again. */
 export const REVIEW_FINDING_DECISION_LIMIT = 200;
-/** The fence tag of the block a reviewer uses to revise findings. */
-export const REVIEW_REVISIONS_FENCE_TAG = 'task-monki-revisions';
-/** Revisions accepted in one answer. */
-export const REVIEW_REVISIONS_MAX_ENTRIES = 8;
-
+/**
+ * Decisions on a finding. The person dismisses and restores; WITHDRAW, CHANGE_SEVERITY
+ * and ADD are revisions an earlier reviewer-question lane recorded, kept so stored
+ * reviews read as they did.
+ */
 export type ReviewFindingDecisionKind = 'DISMISS' | 'RESTORE' | 'WITHDRAW' | 'CHANGE_SEVERITY' | 'ADD';
 /**
- * Why the person left a finding out: the reviewer was wrong (NOT_A_PROBLEM), or
- * the finding is real but acceptable as it is (ACCEPTED). The next review is told
- * which, so only a false positive asks it not to raise the finding again.
+ * Why the person left a finding out, which decides what the next review may raise:
+ * the reviewer was wrong (NOT_A_PROBLEM, shown as Incorrect: never raised again), the
+ * code is intentional (ACCEPTED, shown as Intentional: raised again only if the code
+ * around it changes), or it is real and deferred (DEFERRED, shown as Won't fix now:
+ * not raised again in this task, and listed when the task finishes).
  */
-export const REVIEW_FINDING_DISMISS_REASONS = ['NOT_A_PROBLEM', 'ACCEPTED'] as const;
+export const REVIEW_FINDING_DISMISS_REASONS = ['NOT_A_PROBLEM', 'ACCEPTED', 'DEFERRED'] as const;
 export type ReviewFindingDismissReason = (typeof REVIEW_FINDING_DISMISS_REASONS)[number];
 export type ReviewFindingDecisionActor = 'USER' | 'REVIEWER';
 
@@ -103,17 +116,6 @@ export interface ReviewFindingDecision {
   questionRunId?: string;
   createdAt: string;
 }
-
-/**
- * What Task Monki did with the revision block of a reviewer's answer. It is the
- * `reviewerRevisions` field of a completed REVIEW_QUESTION run's AGENT_RUN_COMPLETED
- * event payload: NONE when the answer had no block, APPLIED with the recorded
- * decision ids, or REJECTED with the reason nothing was applied.
- */
-export type ReviewerRevisionsOutcome =
-  | { status: 'NONE' }
-  | { status: 'APPLIED'; decisionIds: string[] }
-  | { status: 'REJECTED'; reason: string };
 
 export type ReviewFindingState = 'OPEN' | 'DISMISSED' | 'WITHDRAWN';
 
@@ -211,10 +213,12 @@ export function reviewGateStatusFor(
  * decisions move it both ways: a BLOCKER or MAJOR finding added or raised by the
  * reviewer makes a passed or inconclusive review ask for changes, and dismissing,
  * withdrawing or downgrading those findings returns it to its verdict. A
- * NEEDS_CHANGES verdict reads as passed once every finding is dismissed or
- * withdrawn, and keeps asking when the review recorded no findings at all
- * (raw-output reviews). An inconclusive verdict never reads as passed. Every
- * other status, stale included, is returned unchanged.
+ * NEEDS_CHANGES verdict with findings asks for changes only while a request
+ * would carry one by default, an open BLOCKER or MAJOR finding; open MINOR and
+ * NIT findings are suggestions, so it otherwise reads as passed. It keeps asking
+ * when the review recorded no findings at all (raw-output reviews). An
+ * inconclusive verdict never reads as passed. Every other status, stale
+ * included, is returned unchanged.
  */
 export function effectiveReviewGateStatus(gate: AgentReviewGateProjection | undefined): AgentReviewGateStatus {
   if (!gate) return 'NOT_RUN';
@@ -224,27 +228,15 @@ export function effectiveReviewGateStatus(gate: AgentReviewGateProjection | unde
   const findings = effectiveReviewFindings(gate.result, gate.findingDecisions ?? []);
   const open = findings.filter((finding) => finding.state === 'OPEN');
   const verdict = gate.result?.verdict ?? gate.status;
-  if (verdict === 'NEEDS_CHANGES' && findings.length > 0 && open.length === 0) return 'PASSED';
+  if (verdict === 'NEEDS_CHANGES' && findings.length > 0) {
+    return open.some((finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR') ? 'NEEDS_CHANGES' : 'PASSED';
+  }
   return reviewGateStatusFor(verdict, open);
 }
 
 /** True when the current (non-stale) review asks for changes once its decisions apply. */
 export function reviewAsksForChanges(gate: AgentReviewGateProjection | undefined): boolean {
   return effectiveReviewGateStatus(gate) === 'NEEDS_CHANGES';
-}
-
-/**
- * Splits a reviewer answer into the prose shown to the user and the trailing
- * ```task-monki-revisions``` block, if any. Only a block that ends the reply counts.
- */
-export function splitReviewerReply(text: string): { prose: string; revisionsJson?: string } {
-  const reply = text.trimEnd();
-  const opening = '```' + REVIEW_REVISIONS_FENCE_TAG;
-  const start = reply.lastIndexOf(opening);
-  if (start < 0 || (start > 0 && reply[start - 1] !== '\n')) return { prose: text.trim() };
-  const block = /^[ \t]*\r?\n([\s\S]*?)\r?\n```$/u.exec(reply.slice(start + opening.length));
-  if (!block) return { prose: text.trim() };
-  return { prose: reply.slice(0, start).trim(), revisionsJson: block[1]!.trim() };
 }
 
 export interface DecideReviewFindingRequest {
@@ -256,21 +248,6 @@ export interface DecideReviewFindingRequest {
   note?: string;
   /** DISMISS only. */
   dismissReason?: ReviewFindingDismissReason;
-}
-
-export interface AskReviewerRequest {
-  taskId: string;
-  reviewRunId: string;
-  /** Client message UUID. Repeating it with the same question returns the recorded question. */
-  messageId: string;
-  text: string;
-  /** The finding the question is about. */
-  findingId?: string;
-}
-
-export interface StopReviewerQuestionRequest {
-  taskId: string;
-  runId: string;
 }
 
 function applyDecision(

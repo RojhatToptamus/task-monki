@@ -31,7 +31,7 @@ export interface ConversationPanelComposer {
  * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
  * The caller owns the thread and what sending means.
  */
-export function ConversationPanel({ title, meta, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, children }: {
+export function ConversationPanel({ title, meta, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, focusToken, children }: {
   title: string;
   /** Who answers here, such as the runtime's name, beside the title. */
   meta?: string;
@@ -46,6 +46,8 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
   docked?: boolean;
   /** Docked only: move focus to the composer when the panel mounts, because the person opened it. */
   autoFocus?: boolean;
+  /** Changes when the caller hands the panel a question from elsewhere; the composer takes focus. */
+  focusToken?: number;
   children: ReactNode;
 }) {
   const fieldId = useId();
@@ -62,6 +64,9 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
   useEffect(() => {
     if (focusOnMount.current) field.current?.focus({ preventScroll: true });
   }, []);
+  useEffect(() => {
+    if (focusToken) field.current?.focus({ preventScroll: true });
+  }, [focusToken]);
   const closeFromInside = (event: KeyboardEvent<HTMLElement>) => {
     if (!docked || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
     event.preventDefault();

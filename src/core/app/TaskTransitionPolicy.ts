@@ -50,7 +50,7 @@ export function taskDeletionBlocker(
   );
   if (activeRuns.length > 0) {
     return activeRuns.every((run) => run.mode === 'SIDE_QUESTION')
-      ? 'Wait for the side question to finish, or stop it, before deleting this task.'
+      ? 'Wait for the answer in Ask, or stop it, before deleting this task.'
       : 'Stop or let the active agent run finish before deleting this task.';
   }
 

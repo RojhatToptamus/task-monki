@@ -14,7 +14,9 @@ import {
   EMPTY_REVIEW_DRAFT,
   getImplementationRetryReason,
   normalizePullRequestTitle,
+  type AskSubject,
   type DecideReviewFindingRequest,
+  type ReviewRequestRecord,
   type TaskReviewDraft
 } from '../../shared/contracts';
 import { effectiveReviewFindings, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
@@ -61,8 +63,7 @@ import { AgentSession, type AgentSessionProps } from './AgentSession';
 import { PreRunSetup } from './PreRunSetup';
 import { ReviewWorkspace } from './ReviewWorkspace';
 import { AgentMark } from './UiIcons';
-import { ReviewerPanel, type ReviewerConversation } from './ReviewerPanel';
-import { SideQuestionPanel, type SideConversation } from './SideQuestionPanel';
+import { AskPanel, type AskConversation } from './AskPanel';
 import { appendToDraft } from '../model/sideQuestions';
 import { persistPreviewAgentOpen, previewAgentOpen as storedPreviewAgentOpen } from '../model/workspaceLayout';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
@@ -75,7 +76,7 @@ import { TaskActionsMenu } from './TaskActionsMenu';
 import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
-import { buildReviewRequestInstruction, planReviewRequest } from '../model/reviewFollowUp';
+import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import {
   findCompletedCurrentImplementationRun,
@@ -219,10 +220,8 @@ interface TaskDetailProps {
   reviewDisabledReason?: string;
   /** The task's Preview conversation; absent for tasks that cannot converse. */
   previewAgent?: PreviewAgentConversation;
-  /** Questions about the current review and the reviewer's answers. */
-  reviewer?: ReviewerConversation;
-  /** Side questions to the task's agent, kept out of the main conversation. */
-  sideQuestion?: SideConversation;
+  /** Ask: read-only questions about the task, kept out of the agent's conversation. */
+  ask?: AskConversation;
   previewProposals?: PreviewProposalActions;
   onPrepareWorktree(taskId: string): Promise<void>;
   /** Restores a missing managed worktree at its recorded commit without a confirmation dialog; the Preview block carries the consent. */
@@ -236,6 +235,8 @@ interface TaskDetailProps {
   onCancel(runId: string): Promise<void>;
   onSteer(runId: string, instruction: string, id?: string): Promise<void>;
   onContinue: AgentSessionProps['onContinue'];
+  /** Sends a request from the Review tab as a follow-up that carries it item by item. */
+  onSendReviewRequest(runId: string, instruction: string, request: ReviewRequestRecord): Promise<void>;
   onRetry: AgentSessionProps['onRetry'];
   onReview(runId?: string): Promise<void>;
   onDecideReviewFinding?(input: DecideReviewFindingRequest): Promise<void>;
@@ -308,27 +309,25 @@ export function TaskDetail(props: TaskDetailProps) {
   // while they move between tabs and cleared when the request is sent.
   // Bumped by the Overview's Request changes, which opens the Review tab's request sheet.
   const [requestSheetToken, setRequestSheetToken] = useState(0);
-  // The reviewer panel: open state, the finding the next question is about, and the unsent question.
-  const [reviewerOpen, setReviewerOpen] = useState(false);
-  const [reviewerFocusId, setReviewerFocusId] = useState<string>();
-  const [reviewerDraft, setReviewerDraft] = useState('');
-  const reviewerToggleRef = useRef<HTMLButtonElement>(null);
-  // The side question thread: one per open panel. Closing the panel or leaving
-  // the task ends it, which removes its snapshot; the end call is kept from the
-  // task that opened it.
-  const [sideThread, setSideThread] = useState<{ id: string; end(threadId: string): Promise<void> }>();
-  const [sideDraft, setSideDraft] = useState('');
-  const sideToggleRef = useRef<HTMLButtonElement>(null);
-  const sideThreadRef = useRef(sideThread);
-  sideThreadRef.current = sideThread;
-  const endSideThread = useCallback(() => {
-    const thread = sideThreadRef.current;
+  // Ask: one thread per open panel. Closing the panel or leaving the task ends it,
+  // which removes its snapshot; the end call is kept from the task that opened it.
+  // The subject is what the next question is about: a finding or lines of the diff.
+  const [askThread, setAskThread] = useState<{ id: string; end(threadId: string): Promise<void> }>();
+  const [askDraft, setAskDraft] = useState('');
+  const [askSubject, setAskSubject] = useState<AskSubject>();
+  const [askFocusToken, setAskFocusToken] = useState(0);
+  const askToggleRef = useRef<HTMLButtonElement>(null);
+  const askThreadRef = useRef(askThread);
+  askThreadRef.current = askThread;
+  const endAskThread = useCallback(() => {
+    const thread = askThreadRef.current;
+    setAskSubject(undefined);
     if (!thread) return;
-    sideThreadRef.current = undefined;
-    setSideThread(undefined);
+    askThreadRef.current = undefined;
+    setAskThread(undefined);
     void thread.end(thread.id).catch(() => undefined);
   }, []);
-  useEffect(() => endSideThread, [endSideThread]);
+  useEffect(() => endAskThread, [endAskThread]);
   // The Preview agent's sheet: whether it is open persists across tasks; the
   // Preview renders the conversation into the sheet's slot.
   const [previewAgentOpen, setPreviewAgentOpen] = useState(() => {
@@ -426,11 +425,8 @@ export function TaskDetail(props: TaskDetailProps) {
   useEffect(() => {
     setExistingWorkModal(undefined);
     setReviewStartPending(false);
-    setReviewerOpen(false);
-    setReviewerFocusId(undefined);
-    setReviewerDraft('');
-    endSideThread();
-    setSideDraft('');
+    endAskThread();
+    setAskDraft('');
     setDraftPrModalOpen(false);
     setEvidenceGitSnapshotId(undefined);
   }, [task?.id]);
@@ -490,10 +486,10 @@ export function TaskDetail(props: TaskDetailProps) {
       ? buildTaskActivityLedger({
         task,
         events: props.events,
-        runs: [...props.runs, ...(props.previewAgent?.runs ?? []), ...(props.reviewer?.records.runs ?? [])]
+        runs: [...props.runs, ...(props.previewAgent?.runs ?? [])]
       })
       : undefined,
-    [task, props.events, props.runs, props.previewAgent?.runs, props.reviewer?.records.runs]
+    [task, props.events, props.runs, props.previewAgent?.runs]
   );
   const overviewActivity = useMemo(
     () => taskActivityLedger && projectOverviewTaskActivity(taskActivityLedger),
@@ -550,12 +546,10 @@ export function TaskDetail(props: TaskDetailProps) {
   const hasHistoricalReviewContext =
     reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
-  // A reviewer question, or a side question reading the live worktree, holds the
-  // worktree; core refuses other agent work and Git actions until it ends.
-  const sideQuestionHoldsWorktree = Boolean(props.sideQuestion?.records.runs.some((sideRun) =>
-    isActiveRunStatus(sideRun.status) && runHoldsTaskWorktree(sideRun, props.sideQuestion!.records.instructions)));
-  const questionHoldsWorktree = sideQuestionHoldsWorktree ||
-    Boolean(props.reviewer?.records.runs.some((questionRun) => isActiveRunStatus(questionRun.status)));
+  // A question in Ask reading the live worktree holds it; core refuses other agent
+  // work and Git actions until it ends.
+  const questionHoldsWorktree = Boolean(props.ask?.records.runs.some((askRun) =>
+    isActiveRunStatus(askRun.status) && runHoldsTaskWorktree(askRun, props.ask!.records.instructions)));
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
     : reviewPending
@@ -677,8 +671,10 @@ export function TaskDetail(props: TaskDetailProps) {
   // A review whose notes are only prose (no structured findings) sends those notes.
   const reviewSendsNotes = reviewIsCurrent && reviewHasActionableFindings && reviewFindingViews.length === 0;
 
-  const buildRequestInstruction = (reviewOutput?: string) => buildReviewRequestInstruction({
+  const requestInput = (reviewOutput?: string): ReviewRequestInput => ({
     taskTitle: task.title,
+    // The request follows the latest review, current or not; the next review reads both.
+    reviewRunId: reviewGate.runId,
     // Only a current review's summary is the agent's context; a running one has none yet.
     summary: reviewIsCurrent ? reviewGate.result?.summary ?? reviewGate.summary : undefined,
     // An out-of-date review's findings are context only; the person's comments still go.
@@ -692,6 +688,7 @@ export function TaskDetail(props: TaskDetailProps) {
     note: props.reviewDraft.note,
     reviewOutput
   });
+  const buildRequestInstruction = (reviewOutput?: string) => buildReviewRequestInstruction(requestInput(reviewOutput));
 
   const submitRequestChanges = async () => {
     if (reviewActionsPaused || reviewIsRunning || reviewPending || !hasActionableReviewSource) {
@@ -710,11 +707,15 @@ export function TaskDetail(props: TaskDetailProps) {
         return;
       }
     }
-    const instruction = buildRequestInstruction(reviewOutput);
+    const input = requestInput(reviewOutput);
+    const instruction = buildReviewRequestInstruction(input);
+    const request = buildReviewRequestRecord(input);
     await runReviewAction(async () => {
       try {
         if (actionableReviewSourceRun) {
-          await props.onContinue(actionableReviewSourceRun.id, instruction);
+          await (request
+            ? props.onSendReviewRequest(actionableReviewSourceRun.id, instruction, request)
+            : props.onContinue(actionableReviewSourceRun.id, instruction));
         } else {
           await startWithSettings(task.id, instruction);
         }
@@ -1430,69 +1431,75 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
       </div>
   );
-  const reviewerAvailable = Boolean(
-    props.reviewer && reviewGate.runId && reviewGate.status !== 'RUNNING' && reviewGate.status !== 'NOT_RUN'
-  );
-  const reviewerPanel = tab === 'review' && reviewerOpen && reviewerAvailable && props.reviewer && reviewGate.runId ? (
-    <ReviewerPanel
-      conversation={props.reviewer}
-      reviewerName={reviewerName}
-      reviewRunId={reviewGate.runId}
-      stale={reviewGate.status === 'STALE'}
-      findings={reviewFindingViews}
-      decisions={reviewGate.findingDecisions ?? []}
-      focusFinding={reviewFindingViews.find((finding) => finding.id === reviewerFocusId)}
-      onClearFocus={() => setReviewerFocusId(undefined)}
-      draft={reviewerDraft}
-      onDraftChange={setReviewerDraft}
-      onRunReviewAgain={hasActionableReviewSource ? () => void runReview(actionableReviewSourceRun?.id) : undefined}
-      onClose={() => setReviewerOpen(false)}
-      returnFocusRef={reviewerToggleRef}
-      docked={sidePanelLayout.docked}
-      autoFocus
-    />
-  ) : null;
   const runtimeUnavailable = props.runtimeState && !props.runtimeState.preflight.readiness.canStart
     ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
     : undefined;
-  // A side question is about work in progress: it needs the worktree and a run.
-  const sideQuestionAvailable = Boolean(props.sideQuestion && worktree && run);
-  const sideQuestionPanel = tab === 'agent' && sideThread && sideQuestionAvailable && props.sideQuestion ? (
-    <SideQuestionPanel
-      conversation={props.sideQuestion}
-      defaultModel={(props.sideQuestion.defaultModel?.runtimeId === task.runtimeId ? props.sideQuestion.defaultModel : undefined) ?? {
+  // Ask is about work in progress: it needs the worktree and a run. It opens on
+  // every tab but Preview, which has its own agent, and keeps its thread across them.
+  const askAvailable = Boolean(props.ask && worktree && run);
+  const askOpensHere = tab === 'overview' || tab === 'agent' || tab === 'review';
+  const openAsk = (subject?: AskSubject, text?: string) => {
+    if (!props.ask || !askAvailable) return;
+    if (!askThreadRef.current) {
+      const thread = { id: crypto.randomUUID(), end: props.ask.end };
+      askThreadRef.current = thread;
+      setAskThread(thread);
+    }
+    if (subject) setAskSubject(subject);
+    if (text?.trim()) setAskDraft((current) => appendToDraft(current, text.trim()));
+    setAskFocusToken((value) => value + 1);
+  };
+  const reviewFindingTitles = new Map(reviewFindingViews.map((finding) => [finding.id, finding.title]));
+  const askPanel = askOpensHere && askThread && askAvailable && props.ask ? (
+    <AskPanel
+      conversation={props.ask}
+      defaultModel={(props.ask.defaultModel?.runtimeId === task.runtimeId ? props.ask.defaultModel : undefined) ?? {
         runtimeId: task.runtimeId,
         model: task.agentSettings?.model,
         modelProvider: task.agentSettings?.modelProvider,
         reasoningEffort: task.agentSettings?.reasoningEffort
       }}
       models={props.models ?? props.runtimeState?.models ?? []}
-      // A side question runs on the task's own runtime (core refuses any other), so only its models are offered.
+      // Ask runs on the task's own runtime (core refuses any other), so only its models are offered.
       runtimes={(props.runtimes ?? (props.runtimeState ? [props.runtimeState] : []))
         .filter((candidate) => candidate.preflight.runtime.id === task.runtimeId)}
       onDiscoverModels={props.onDiscoverAgentRuntimeModels}
-      threadId={sideThread.id}
+      threadId={askThread.id}
       implementationActive={Boolean(activeImplementationRun)}
-      draft={sideDraft}
-      onDraftChange={setSideDraft}
-      onUseInFollowUp={(text) => {
-        props.onAgentDraftChange(appendToDraft(props.agentDraft, text));
-        document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true });
+      draft={askDraft}
+      onDraftChange={setAskDraft}
+      subject={askSubject}
+      onSubjectChange={setAskSubject}
+      findingTitles={reviewFindingTitles}
+      // On Review an answer joins the request being written; elsewhere it starts a follow-up.
+      answerAction={tab === 'review' && hasActionableReviewSource ? {
+        label: 'Add to request',
+        onUse: (text) => {
+          props.onReviewDraftChange({ ...props.reviewDraft, note: appendToDraft(props.reviewDraft.note, text) });
+          setRequestSheetToken((value) => value + 1);
+        }
+      } : {
+        label: 'Use in follow-up',
+        onUse: (text) => {
+          props.onAgentDraftChange(appendToDraft(props.agentDraft, text));
+          setTab('agent');
+          requestAnimationFrame(() => document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true }));
+        }
       }}
-      onClose={endSideThread}
-      returnFocusRef={sideToggleRef}
+      focusToken={askFocusToken}
+      onClose={endAskThread}
+      returnFocusRef={askToggleRef}
       docked={sidePanelLayout.docked}
       autoFocus
     />
   ) : null;
-  // One assistant panel per tab: the reviewer on Review, side questions on
-  // Agent, the Preview agent on Preview (rendered into this slot by the Preview).
+  // One assistant panel at a time: Ask, or the Preview agent on Preview
+  // (rendered into this slot by the Preview).
   const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent
     ? <div ref={setPreviewAgentSlot} className="tm-side-sheet__slot" />
     : null;
-  const sidePanel = reviewerPanel
-    ? { label: 'Reviewer', element: reviewerPanel }
-    : sideQuestionPanel ? { label: 'Side question', element: sideQuestionPanel }
+  const sidePanel = askPanel
+    ? { label: 'Ask', element: askPanel }
     : previewAgentSheet ? { label: 'Preview agent', element: previewAgentSheet } : undefined;
   // With a side panel docked, the page keeps only its tab bar, which then shares
   // the panel head's 48px line; the title moves to the window's top bar. The
@@ -1543,30 +1550,16 @@ export function TaskDetail(props: TaskDetailProps) {
             />
           ) : null}
         </div>
-        {tab === 'review' && reviewerAvailable ? (
+        {askOpensHere && askAvailable ? (
           <button
-            ref={reviewerToggleRef}
+            ref={askToggleRef}
             type="button"
             className="tm-detail__assistant"
-            aria-pressed={reviewerOpen}
-            onClick={() => setReviewerOpen((open) => !open)}
+            aria-pressed={Boolean(askThread)}
+            onClick={() => (askThread ? endAskThread() : openAsk())}
           >
             <AgentMark />
-            Ask reviewer
-          </button>
-        ) : null}
-        {tab === 'agent' && sideQuestionAvailable ? (
-          <button
-            ref={sideToggleRef}
-            type="button"
-            className="tm-detail__assistant"
-            aria-pressed={Boolean(sideThread)}
-            onClick={() => (sideThread || !props.sideQuestion
-              ? endSideThread()
-              : setSideThread({ id: crypto.randomUUID(), end: props.sideQuestion.end }))}
-          >
-            <AgentMark />
-            Side question
+            Ask
           </button>
         ) : null}
         {tab === 'preview' && props.previewAgent ? (
@@ -1701,7 +1694,7 @@ export function TaskDetail(props: TaskDetailProps) {
           instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired} failure={runFailure}
           runtimeUnavailable={runtimeUnavailable}
           steeringSupported={activeTurnSteeringSupported} draft={props.agentDraft} draftError={props.agentDraftError}
-          worktreeHeld={sideQuestionHoldsWorktree ? 'Wait for the side question to finish, or stop it.' : undefined}
+          worktreeHeld={questionHoldsWorktree ? 'Wait for the answer in Ask, or stop it.' : undefined}
           onDraftChange={props.onAgentDraftChange} onFlushDraft={props.onFlushAgentDraft}
           onQueue={props.onQueueInstruction} onEditQueue={props.onEditInstruction} onSendQueue={props.onSendInstruction}
           onSteer={props.onSteer} onContinue={props.onContinue} onRetry={props.onRetry} onStop={props.onCancel}
@@ -1821,11 +1814,9 @@ export function TaskDetail(props: TaskDetailProps) {
             onRestoreFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId) => props.onDecideReviewFinding!({
               taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'RESTORE'
             }) : undefined}
-            onAskAboutFinding={reviewerAvailable ? (findingId) => {
-              setReviewerFocusId(findingId);
-              setReviewerOpen(true);
-            } : undefined}
-            runReview={hasActionableReviewSource && (reviewGate.status === 'NOT_RUN' || reviewGate.status === 'STALE' || reviewGate.status === 'FAILED' || reviewGate.status === 'CANCELED') ? {
+            onAskAboutFinding={askAvailable && reviewGate.runId ? (findingId) => openAsk({ kind: 'FINDING', reviewRunId: reviewGate.runId!, findingId }) : undefined}
+            onAskAboutLines={askAvailable ? (lines, text) => openAsk({ kind: 'LINES', ...lines }, text) : undefined}
+            runReview={hasActionableReviewSource && reviewGate.status !== 'RUNNING' ? {
               label: reviewGate.status === 'NOT_RUN' ? 'Run review' : 'Run review again',
               disabledReason: reviewActionsPaused ? reviewActionPauseTitle : undefined,
               busy: reviewActionBusy || reviewPending,

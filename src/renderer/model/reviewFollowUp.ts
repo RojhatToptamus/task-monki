@@ -1,4 +1,4 @@
-import type { AgentReviewFinding, ReviewComment, ReviewFindingDismissReason, TaskReviewDraft } from '../../shared/contracts';
+import { REVIEW_RESPONSE_BLOCK, type AgentReviewFinding, type ReviewComment, type ReviewFindingDismissReason, type ReviewRequestRecord, type TaskReviewDraft } from '../../shared/contracts';
 import { formatFindingLocation } from './findings';
 import { humanizeEnum } from './formatting';
 import type { ReviewFindingView } from './reviewWorkspace';
@@ -44,12 +44,15 @@ export function formatCommentLocation(comment: Pick<ReviewComment, 'path' | 'sid
 }
 
 const DISMISS_REASON_WORDS: Record<ReviewFindingDismissReason, string> = {
-  NOT_A_PROBLEM: 'not a problem',
-  ACCEPTED: 'accepted as is'
+  NOT_A_PROBLEM: 'incorrect',
+  ACCEPTED: 'intentional',
+  DEFERRED: 'not now'
 };
 
 export interface ReviewRequestInput {
   taskTitle: string;
+  /** The review the findings come from; absent when only comments are sent. */
+  reviewRunId?: string;
   summary?: string;
   /** The findings to fix: open Blocker and Major, plus the suggestions the person added. */
   findings: readonly AgentReviewFinding[];
@@ -63,10 +66,41 @@ export interface ReviewRequestInput {
 }
 
 /**
+ * The request item by item, numbered as the agent reads them: the findings to fix,
+ * then the person's comments. Absent when nothing is itemised, such as a request
+ * made of the review's raw output alone.
+ */
+export function buildReviewRequestRecord(input: ReviewRequestInput): ReviewRequestRecord | undefined {
+  const findings = input.findings.map((finding, index) => ({
+    number: index + 1,
+    kind: 'FINDING' as const,
+    findingId: finding.id,
+    severity: finding.severity,
+    title: finding.title,
+    ...(finding.path ? { path: finding.path } : {}),
+    ...(finding.line ? { line: finding.line } : {}),
+    ...(finding.line && finding.endLine && finding.endLine >= finding.line ? { endLine: finding.endLine } : {})
+  }));
+  const comments = input.comments.map((comment, index) => ({
+    number: findings.length + index + 1,
+    kind: 'COMMENT' as const,
+    path: comment.path,
+    side: comment.side,
+    ...(comment.line ? { line: comment.line } : {}),
+    ...(comment.line && comment.endLine && comment.endLine >= comment.line ? { endLine: comment.endLine } : {}),
+    text: comment.text.trim()
+  }));
+  const items = [...findings, ...comments];
+  if (items.length === 0) return undefined;
+  return { ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}), items, ...(input.note?.trim() ? { note: input.note.trim() } : {}) };
+}
+
+/**
  * The follow-up instruction "Request changes" sends to the implementation
- * agent: the findings to fix and every comment, the dismissed findings as
- * context not to act on, and the person's note. Suggestions the person did not
- * add are not mentioned.
+ * agent: the findings to fix and every comment, numbered in one sequence, the
+ * dismissed findings as context not to act on, and the person's note. Suggestions
+ * the person did not add are not mentioned. With numbered items, the agent is
+ * asked to answer each one in a block the Review tab reads.
  */
 export function buildReviewRequestInstruction(input: ReviewRequestInput): string {
   const lines = [`Address the review of "${input.taskTitle}".`];
@@ -87,9 +121,9 @@ export function buildReviewRequestInstruction(input: ReviewRequestInput): string
   }
   if (input.comments.length > 0) {
     lines.push('', 'Comments from the person reviewing:');
-    for (const comment of input.comments) {
-      lines.push(`- ${formatCommentLocation(comment)}: ${comment.text.trim()}`);
-    }
+    input.comments.forEach((comment, index) => {
+      lines.push(`${input.findings.length + index + 1}. ${formatCommentLocation(comment)}: ${comment.text.trim()}`);
+    });
   }
   if (input.dismissed.length > 0) {
     lines.push('', 'Left out on purpose; do not change these:');
@@ -103,5 +137,15 @@ export function buildReviewRequestInstruction(input: ReviewRequestInput): string
     '',
     'Fix only the findings and comments above unless the root cause requires a scoped adjacent change. Preserve the task intent and stop when the follow-up is ready for review again.'
   );
+  if (input.findings.length + input.comments.length > 0) {
+    lines.push(
+      '',
+      `End your reply with a ${REVIEW_RESPONSE_BLOCK} block that answers every numbered item above, for example:`,
+      `\`\`\`${REVIEW_RESPONSE_BLOCK}`,
+      '[{"item": 1, "outcome": "FIXED", "note": "What you changed."}, {"item": 2, "outcome": "NOT_CHANGED", "note": "Why you left it as it is."}]',
+      '```',
+      'Use FIXED when the change is made, NOT_CHANGED when you leave the code as it is and say why, and NEEDS_DECISION when the person must decide first; the note then asks the question.'
+    );
+  }
   return lines.join('\n');
 }

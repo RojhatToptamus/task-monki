@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
   TASK_INSTRUCTION_MAX_LENGTH,
+  effectiveReviewFindings,
+  effectiveReviewGateStatus,
   isImplementationRunMode,
   type AgentExecutionSettings,
   type AskSideQuestionRequest,
+  type AskSubject,
   type EndSideThreadRequest,
   type RunRecord,
   type SideQuestionModelChoice,
@@ -31,9 +34,10 @@ import type {
 } from '../git/ReadOnlySnapshotService';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
+import { parseReviewedDiff, reviewedDiffExcerpt } from '../review/ReviewedDiff';
 
 export interface SideQuestionCoordinatorOptions {
-  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions'>;
+  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions' | 'readArtifact'>;
   agents: Pick<AgentOrchestrator, 'startSideQuestion' | 'interruptRun'>;
   snapshots: Pick<ReadOnlySnapshotService, 'prepare' | 'remove' | 'removeTask'>;
   /** Reads a runtime-owned or Task-owned artifact, such as a run's final answer. */
@@ -69,11 +73,13 @@ interface QuestionTarget {
 }
 
 /**
- * Side questions to a task's implementation agent. Questions are durable `TaskInstruction`
- * records with role SIDE and a renderer-owned thread ID. Each is answered by one
- * SIDE_QUESTION run in a fresh read-only session on the task's runtime and model, beside
- * the main conversation. The run reads the live worktree, or a read-only snapshot of it
- * while implementation work can change the checkout. A thread's snapshot lives until the
+ * Ask: side questions about a task, on every task tab. Questions are durable
+ * `TaskInstruction` records with role SIDE and a renderer-owned thread ID, optionally
+ * about a subject (a finding of the current review, or lines of the diff). Each is
+ * answered by one SIDE_QUESTION run in a fresh read-only session on the task's runtime,
+ * beside the main conversation, with the recent conversation and the current review in
+ * its prompt. The run reads the live worktree, or a read-only snapshot of it while
+ * implementation work can change the checkout. A thread's snapshot lives until the
  * thread ends, the task is archived or deleted, or the app stops.
  */
 export class SideQuestionCoordinator {
@@ -89,12 +95,16 @@ export class SideQuestionCoordinator {
     const threadId = requireUuid(input.threadId, 'thread');
     const text = questionText(input.text);
     const choice = modelChoice(input.model);
+    const subject = askSubject(input.subject);
     return this.serialize(input.taskId, async () => {
       const detail = await this.options.store.getTaskDetail(input.taskId);
       const task = detail.task;
-      if (task.kind !== 'NORMAL') throw new Error('Side questions are available only for tasks.');
+      if (task.kind !== 'NORMAL') throw new Error('Ask is available only for tasks.');
       const existing = detail.taskInstructions.find((record) => record.id === messageId);
-      if (existing && (existing.role !== 'SIDE' || existing.text !== text || existing.threadId !== threadId)) {
+      if (existing && (
+        existing.role !== 'SIDE' || existing.text !== text || existing.threadId !== threadId ||
+        JSON.stringify(existing.subject) !== JSON.stringify(subject)
+      )) {
         throw new Error('This message ID has already been used for different content.');
       }
       const retry = Boolean(
@@ -103,8 +113,9 @@ export class SideQuestionCoordinator {
       if (existing && !retry) return existing;
 
       const { iteration, worktree } = questionWorktree(detail);
+      if (subject?.kind === 'FINDING') findingSubject(detail, subject);
       if (detail.runs.some((run) => run.mode === 'SIDE_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
-        throw new Error('Wait for the current side question to finish, or stop it.');
+        throw new Error('Wait for the current answer to finish, or stop it.');
       }
       const settings = this.options.questionSettings(detail, choice);
       this.options.assertRuntimeEnabled(settings.runtimeId ?? task.runtimeId);
@@ -141,6 +152,7 @@ export class SideQuestionCoordinator {
           status: 'SENDING',
           role: 'SIDE',
           threadId,
+          ...(subject ? { subject } : {}),
           runId,
           createdAt: at,
           updatedAt: at
@@ -166,7 +178,7 @@ export class SideQuestionCoordinator {
   async stop(input: StopSideQuestionRequest): Promise<void> {
     const run = await this.options.store.getRun(input.runId);
     if (!run || run.taskId !== input.taskId || run.mode !== 'SIDE_QUESTION') {
-      throw new Error('This side question is unavailable.');
+      throw new Error('This question is unavailable.');
     }
     if (!ACTIVE_AGENT_RUN_STATUSES.has(run.status)) return;
     await this.options.agents.interruptRun(run.id);
@@ -342,8 +354,36 @@ export class SideQuestionCoordinator {
           : {})
       },
       history: await this.threadHistory(detail, record),
+      ...reviewContext(detail),
+      ...(record.subject ? { subject: await this.subjectContext(detail, record.subject) } : {}),
       question: record.text
     };
+  }
+
+  /** The subject with the diff around it: the reviewed capture for a finding, the latest capture for lines. */
+  private async subjectContext(
+    detail: TaskDetailSnapshot,
+    subject: AskSubject
+  ): Promise<NonNullable<SideQuestionPromptContext['subject']>> {
+    if (subject.kind === 'FINDING') {
+      const { finding, reviewedSnapshotId } = findingSubject(detail, subject);
+      const snapshot = detail.gitSnapshots.find((candidate) => candidate.id === reviewedSnapshotId);
+      const diff = finding.path ? await this.diffExcerpt(snapshot?.diffArtifactId, finding.path, finding.line) : undefined;
+      return { kind: 'FINDING', finding, ...(diff ? { diff } : {}) };
+    }
+    const latest = detail.gitSnapshots
+      .filter((item) => item.iterationId === detail.task.currentIterationId)
+      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
+      .at(-1);
+    const diff = await this.diffExcerpt(latest?.diffArtifactId, subject.path, subject.side === 'NEW' ? subject.line : undefined);
+    return { ...subject, ...(diff ? { diff } : {}) };
+  }
+
+  private async diffExcerpt(artifactId: string | undefined, path: string, line?: number): Promise<string | undefined> {
+    if (!artifactId) return undefined;
+    const text = await this.options.store.readArtifact(artifactId).catch(() => '');
+    const file = parseReviewedDiff(text).find((candidate) => candidate.path === path);
+    return file ? reviewedDiffExcerpt(file, line) : undefined;
   }
 
   /** Earlier answered questions in the thread, oldest first. */
@@ -404,14 +444,14 @@ function isWriterRun(run: RunRecord): boolean {
 
 function questionWorktree(detail: TaskDetailSnapshot) {
   const task = detail.task;
-  if (task.workflowPhase === 'ARCHIVED') throw new Error('Side questions are unavailable for an archived task.');
+  if (task.workflowPhase === 'ARCHIVED') throw new Error('Ask is unavailable for an archived task.');
   const iteration = detail.iterations.find((candidate) => candidate.id === task.currentIterationId);
   const worktree = detail.worktrees.find((candidate) => candidate.id === task.currentWorktreeId);
   if (!iteration || !worktree || worktree.iterationId !== iteration.id) {
-    throw new Error('Prepare the task worktree before asking a side question.');
+    throw new Error('Prepare the task worktree before asking.');
   }
   if (worktree.status !== 'PRESENT') {
-    throw new Error(worktree.error ?? 'The task worktree is unavailable. Restore it before asking a side question.');
+    throw new Error(worktree.error ?? 'The task worktree is unavailable. Restore it before asking.');
   }
   return { iteration, worktree };
 }
@@ -430,13 +470,13 @@ const MODEL_CHOICE_FIELD_MAX_LENGTH = 200;
 /** A chosen runtime and model, checked for shape; whether they can run is the runtime's to say. */
 function modelChoice(value: unknown): SideQuestionModelChoice | undefined {
   if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Choose a valid model for the side question.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Choose a valid model to ask.');
   const record = value as Record<string, unknown>;
   const field = (key: string, required: boolean): string | undefined => {
     const item = record[key];
     if (item === undefined && !required) return undefined;
     if (typeof item !== 'string' || !item.trim() || item.length > MODEL_CHOICE_FIELD_MAX_LENGTH) {
-      throw new Error('Choose a valid model for the side question.');
+      throw new Error('Choose a valid model to ask.');
     }
     return item.trim();
   };
@@ -457,4 +497,59 @@ function questionText(text: unknown): string {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+/** The task's finished review, as an Ask answer reads it: its status after decisions, summary and findings. */
+function reviewContext(detail: TaskDetailSnapshot): Pick<SideQuestionPromptContext, 'review'> {
+  const gate = detail.task.projection.agentReview;
+  if (!gate?.runId || gate.status === 'NOT_RUN' || gate.status === 'RUNNING') return {};
+  const findings = effectiveReviewFindings(gate.result, gate.findingDecisions ?? []);
+  const summary = gate.result?.summary ?? gate.summary;
+  if (findings.length === 0 && !summary) return {};
+  return { review: { status: effectiveReviewGateStatus(gate), ...(summary ? { summary } : {}), findings } };
+}
+
+/** A finding subject names a finding of the task's current review, out of date or not. */
+function findingSubject(detail: TaskDetailSnapshot, subject: Extract<AskSubject, { kind: 'FINDING' }>) {
+  const gate = detail.task.projection.agentReview;
+  if (!gate?.runId || gate.runId !== subject.reviewRunId) {
+    throw new Error('This finding is no longer part of the task’s current review.');
+  }
+  const finding = effectiveReviewFindings(gate.result, gate.findingDecisions ?? [])
+    .find((candidate) => candidate.id === subject.findingId);
+  if (!finding) throw new Error('This finding is not part of the review.');
+  return { finding, reviewedSnapshotId: gate.reviewedGitSnapshotId };
+}
+
+const SUBJECT_TEXT_MAX_LENGTH = 1_000;
+const SUBJECT_LINE_MAX = 10_000_000;
+
+/** A subject checked for shape; whether a finding still exists is checked against the task. */
+function askSubject(value: unknown): AskSubject | undefined {
+  if (value === undefined) return undefined;
+  const invalid = () => new Error('Ask about a valid finding or line range.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
+  const record = value as Record<string, unknown>;
+  const text = (key: string) => {
+    const item = record[key];
+    if (typeof item !== 'string' || !item.trim() || item.length > SUBJECT_TEXT_MAX_LENGTH || item.trim() !== item) throw invalid();
+    return item;
+  };
+  const line = (key: string, required: boolean) => {
+    const item = record[key];
+    if (item === undefined && !required) return undefined;
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < 1 || item > SUBJECT_LINE_MAX) throw invalid();
+    return item;
+  };
+  if (record.kind === 'FINDING') {
+    return { kind: 'FINDING', reviewRunId: requireUuid(record.reviewRunId, 'review run'), findingId: text('findingId') };
+  }
+  if (record.kind === 'LINES') {
+    if (record.side !== 'NEW' && record.side !== 'OLD') throw invalid();
+    const start = line('line', true)!;
+    const end = line('endLine', false);
+    if (end !== undefined && end <= start) throw invalid();
+    return { kind: 'LINES', path: text('path'), side: record.side, line: start, ...(end !== undefined ? { endLine: end } : {}) };
+  }
+  throw invalid();
 }

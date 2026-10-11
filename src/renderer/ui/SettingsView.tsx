@@ -355,7 +355,7 @@ function ModelSettings({
     <SettingsPane
       id="models"
       title="Models"
-      detail="Defaults for implementation, prompt refinement, the Preview agent, review, and side questions."
+      detail="Defaults for implementation, prompt refinement, the Preview agent, review, and Ask."
     >
       <div className="tm-settings__list tm-model-defaults">
         <AgentModelSetting
@@ -487,9 +487,9 @@ function ModelSettings({
             onSetAppSettings({ reviewReasoningEffort: reasoningEffort || null })
           }
         />
-        {/* Side questions start here; each question can still pick another model in its panel. */}
+        {/* Ask starts here; each question can still pick another model in its panel. */}
         <AgentModelSetting
-          label="Side questions"
+          label="Ask"
           runtimeId={selected.sideQuestionRuntimeId}
           modelId={selected.selectedSideQuestionModel?.id ?? ''}
           reasoningEffort={selected.selectedSideQuestionEffort}
@@ -590,7 +590,7 @@ export function selectSettingsModels(
       : reviewRuntimeIds.has(defaultRuntimeId)
         ? defaultRuntimeId
         : ([...reviewRuntimeIds][0] ?? defaultRuntimeId);
-  // Side questions follow the implementation default until a model is chosen for them.
+  // Ask follows the implementation default until a model is chosen for it.
   const sideQuestionChosen = Boolean(appSettings.sideQuestionRuntimeId && availableRuntimeIds.has(appSettings.sideQuestionRuntimeId));
   const sideQuestionRuntimeId = sideQuestionChosen
     ? appSettings.sideQuestionRuntimeId!

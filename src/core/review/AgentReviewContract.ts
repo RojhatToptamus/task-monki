@@ -3,6 +3,7 @@ import {
   type AgentReviewFinding,
   type AgentReviewFindingSeverity,
   type AgentReviewGateStatus,
+  type AgentReviewResolvedFinding,
   type AgentReviewResult
 } from '../../shared/contracts';
 
@@ -45,12 +46,25 @@ export function normalizeReviewResult(value: unknown): AgentReviewResult | undef
     typeof value.summary === 'string' && value.summary.trim()
       ? value.summary.trim()
       : defaultSummary(verdict, findings);
+  const resolvedFindings = (Array.isArray(value.resolvedFindings) ? value.resolvedFindings : [])
+    .map(normalizeResolvedFinding)
+    .filter((finding): finding is AgentReviewResolvedFinding => Boolean(finding));
   return {
     schemaVersion: AGENT_REVIEW_RESULT_SCHEMA_VERSION,
     verdict,
     summary,
-    findings
+    findings,
+    ...(resolvedFindings.length > 0 ? { resolvedFindings } : {})
   };
+}
+
+function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefined {
+  if (!isRecord(value)) return undefined;
+  const previousFindingId = stringValue(value.previousFindingId) ?? stringValue(value.id);
+  const title = stringValue(value.title);
+  if (!previousFindingId || !title) return undefined;
+  const note = stringValue(value.note);
+  return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
 function extractJsonBlock(text: string): string | undefined {
@@ -102,7 +116,8 @@ function normalizeFinding(value: unknown, index: number): AgentReviewFinding | u
     path,
     line,
     endLine: numberValue(value.endLine),
-    recommendation: stringValue(value.recommendation) ?? stringValue(value.fix)
+    recommendation: stringValue(value.recommendation) ?? stringValue(value.fix),
+    ...(stringValue(value.previousFindingId) ? { previousFindingId: stringValue(value.previousFindingId) } : {})
   };
 }
 

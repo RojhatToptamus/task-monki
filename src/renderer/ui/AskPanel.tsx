@@ -1,20 +1,21 @@
 import { useMemo, useState, type RefObject } from 'react';
-import { CornerDownLeft } from 'lucide-react';
-import type { AgentModel, AgentRuntimeState, SideQuestionModelChoice } from '../../shared/contracts';
+import { CornerDownLeft, CornerUpLeft, X } from 'lucide-react';
+import type { AgentModel, AgentRuntimeState, AskSubject, SideQuestionModelChoice } from '../../shared/contracts';
 import type { AgentConversationRecords } from '../model/agentRecords';
 import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
 import { AgentModelSelector } from './AgentModelSelector';
 import { isActiveRunStatus } from '../model/agentSession';
-import { sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } from '../model/sideQuestions';
+import { askPlaceholder, askSubjectLabel, sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } from '../model/sideQuestions';
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
+import { Tooltip } from './Tooltip';
 import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, WorkingLine } from './SessionTurns';
 
-export interface SideConversation {
+export interface AskConversation {
   records: AgentConversationRecords;
-  /** Where a new thread's model starts: the Settings default for side questions. */
+  /** Where a new thread's model starts: the Settings default for Ask. */
   defaultModel?: SideQuestionModelChoice;
-  ask(input: { threadId: string; text: string; messageId: string; model?: SideQuestionModelChoice }): Promise<void>;
+  ask(input: { threadId: string; text: string; messageId: string; model?: SideQuestionModelChoice; subject?: AskSubject }): Promise<void>;
   stop(runId: string): Promise<void>;
   /** Ends the thread: its read-only snapshot is removed; its runs stay in Debug. */
   end(threadId: string): Promise<void>;
@@ -22,13 +23,17 @@ export interface SideConversation {
 }
 
 /**
- * A side question about the task: asked of a fresh read-only session on the model
- * chosen here, the task's own by default, so the implementation keeps working.
- * Nothing here reaches the main conversation unless the person uses an answer in a
- * follow-up. While the agent works, questions read a snapshot of the worktree.
+ * Ask: questions about the task, answered by a fresh read-only session on the model
+ * chosen here, the task's own by default, so the implementation keeps working. A
+ * question can be about a finding or lines of the diff. Nothing here reaches the
+ * agent unless the person uses an answer; while the agent works, answers read a
+ * snapshot of the worktree.
  */
-export function SideQuestionPanel({ conversation, defaultModel, models, runtimes, onDiscoverModels, threadId, implementationActive, draft, onDraftChange, onUseInFollowUp, onClose, returnFocusRef, docked, autoFocus }: {
-  conversation: SideConversation;
+export function AskPanel({
+  conversation, defaultModel, models, runtimes, onDiscoverModels, threadId, implementationActive, draft, onDraftChange,
+  subject, onSubjectChange, findingTitles, answerAction, focusToken, onClose, returnFocusRef, docked, autoFocus
+}: {
+  conversation: AskConversation;
   /** The task's runtime and model, which answer until another is chosen. */
   defaultModel: SideQuestionModelChoice;
   models: AgentModel[];
@@ -39,7 +44,15 @@ export function SideQuestionPanel({ conversation, defaultModel, models, runtimes
   implementationActive: boolean;
   draft: string;
   onDraftChange(text: string): void;
-  onUseInFollowUp(text: string): void;
+  /** What the next question is about; cleared once it is asked. */
+  subject?: AskSubject;
+  onSubjectChange(subject: AskSubject | undefined): void;
+  /** The current review's finding titles, so a question names the finding it was about. */
+  findingTitles: ReadonlyMap<string, string>;
+  /** What an answer can be used for where the panel is open: a follow-up, or the review request. */
+  answerAction: { label: string; onUse(text: string): void };
+  /** Changes when the person asks from elsewhere, such as a finding, so the field takes focus. */
+  focusToken?: number;
   onClose(): void;
   returnFocusRef?: RefObject<HTMLElement | null>;
   docked?: boolean;
@@ -65,18 +78,20 @@ export function SideQuestionPanel({ conversation, defaultModel, models, runtimes
   });
   const active = runs.find((run) => isActiveRunStatus(run.status));
   const unattached = unattachedInstructions(questions, runs);
+  const placeholder = askPlaceholder(subject);
 
   return (
     <ConversationPanel
-      title="Side question"
-      label="Side question"
+      title="Ask"
+      label="Ask about the task"
       onClose={onClose}
       returnFocusRef={returnFocusRef}
       docked={docked}
       autoFocus={autoFocus}
+      focusToken={focusToken}
       tools={
         <AgentModelSelector
-          label="Side question model"
+          label="Ask model"
           presentation="compact"
           runtimeId={choice.runtimeId}
           modelId={chosenModel?.id ?? ''}
@@ -96,31 +111,47 @@ export function SideQuestionPanel({ conversation, defaultModel, models, runtimes
         />
       }
       composer={{
-        placeholder: 'Ask about the work',
+        placeholder,
         hint: unavailable ?? '',
         disabled: Boolean(active || unavailable),
         draft,
         onDraftChange,
-        onSubmit: (text) => conversation.ask({ threadId, text, messageId: crypto.randomUUID(), model: choice }),
+        onSubmit: async (text) => {
+          await conversation.ask({ threadId, text, messageId: crypto.randomUUID(), model: choice, ...(subject ? { subject } : {}) });
+          onSubjectChange(undefined);
+        },
         secondary: active && canStopTaskRun(active)
           ? { label: 'Stop', disabled: busy || active.status === 'INTERRUPTING', onClick: async () => {
               setBusy(true);
               try { await conversation.stop(active.id); } finally { setBusy(false); }
             } }
-          : undefined
+          : undefined,
+        above: subject ? (
+          <div className="tm-ask__subject">
+            <CornerUpLeft size={13} aria-hidden="true" />
+            <span>{askSubjectLabel(subject, findingTitles)}</span>
+            <Tooltip label="Ask about the whole task instead">
+              <button type="button" className="tm-iconbtn" aria-label="Ask about the whole task instead" onClick={() => onSubjectChange(undefined)}>
+                <X size={13} aria-hidden="true" />
+              </button>
+            </Tooltip>
+          </div>
+        ) : undefined
       }}
     >
       {turns.map((turn) => {
-        const followUp = turn.state === 'completed' ? sideQuestionFollowUp(turn) : undefined;
-        const snapshot = sideQuestionSnapshotNote(questions.find((question) => question.id === turn.opener?.key));
+        const question = questions.find((candidate) => candidate.id === turn.opener?.key);
+        const answer = turn.state === 'completed' ? sideQuestionFollowUp(turn) : undefined;
+        const snapshot = sideQuestionSnapshotNote(question);
         return (
           <div key={turn.key} className="tm-side-conversation__exchange">
+            {question?.subject ? <p className="tm-ask__about">{askSubjectLabel(question.subject, findingTitles)}</p> : null}
             <Turn turn={turn} onReadArtifact={conversation.readArtifact} />
             {snapshot ? <p className="tm-side-conversation__note">{snapshot}</p> : null}
-            {followUp ? (
-              <button type="button" className="ghost-button" onClick={() => onUseInFollowUp(followUp)}>
+            {answer ? (
+              <button type="button" className="ghost-button" onClick={() => answerAction.onUse(answer)}>
                 <CornerDownLeft size={13} aria-hidden="true" />
-                Use in follow-up
+                {answerAction.label}
               </button>
             ) : null}
           </div>

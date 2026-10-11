@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
-import { Check, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Pencil, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2 } from 'lucide-react';
 import type {
   AgentReviewGateStatus,
   ArtifactRecord,
@@ -34,6 +34,7 @@ import { ReviewBrief, type ReviewBriefContent } from './ReviewBrief';
 import { ReviewFindingThread, settledLabel, severityLabel } from './ReviewFindingThread';
 import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from './ReviewRequest';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
+import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
 
 export type ReviewScope = DiffEvidenceScope | 'since-review';
@@ -69,11 +70,13 @@ export interface ReviewWorkspaceProps {
   requestChanges?: ReviewRequestAction & { reviewNotes: boolean };
   /** With nothing to send, the step that finishes the task. */
   finish?: ReviewFinishAction;
-  /** Present when a review can run: none yet, or the code changed since it. */
+  /** Present when a review can run: none yet, the code changed since it, or a finished one to run again. */
   runReview?: { label: string; disabledReason?: string; busy: boolean; onRun(): void };
   onDismissFinding?(findingId: string, reason: ReviewFindingDismissReason, note?: string): Promise<void>;
   onRestoreFinding?(findingId: string): Promise<void>;
   onAskAboutFinding?(findingId: string): void;
+  /** Hands the selected lines, and what was typed about them, to Ask instead of the request. */
+  onAskAboutLines?(lines: { path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }, text: string): void;
   /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
   requestSheetToken?: number;
   /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
@@ -435,6 +438,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     : undefined;
 
   const headline = reviewHeadline(review?.status, openFindings.length, review?.working);
+  // A review that finished and still matches the code needs no call to run again.
+  const rerunSettled = Boolean(review && !review.working && (review.status === 'PASSED' || review.status === 'NEEDS_CHANGES' || review.status === 'INCONCLUSIVE'));
   const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer) && !props.historical
     ? props.brief
     : undefined;
@@ -475,6 +480,21 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
         }}
       />
       <div className="tm-composer__toolbar">
+        {/* A question about the lines goes to Ask; a comment goes in the request. */}
+        {props.onAskAboutLines && !draftComment.editingId && draftComment.line ? (
+          <button type="button" className="ghost-button" onClick={() => {
+            props.onAskAboutLines!({
+              path: draftComment.path,
+              side: draftComment.side,
+              line: draftComment.line!,
+              ...(draftComment.endLine && draftComment.endLine > draftComment.line! ? { endLine: draftComment.endLine } : {})
+            }, draftComment.text);
+            closeComposer();
+          }}>
+            <AgentMark />
+            Ask
+          </button>
+        ) : null}
         <span className="tm-review-comment-composer__spacer" />
         <button type="button" className="ghost-button" onClick={closeComposer}>Cancel</button>
         <Tooltip label={draftComment.editingId ? 'Save' : 'Comment'} shortcut={SUBMIT_SHORTCUT}>
@@ -556,6 +576,14 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                 {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' && !review.working ? (
                   <span className="tm-review__meta"><MessageTime value={review.reviewedAt} /></span>
                 ) : null}
+                {/* A finished, current review can run again from beside its time. */}
+                {rerunSettled && props.runReview && !props.runReview.disabledReason ? (
+                  <Tooltip label={props.runReview.label}>
+                    <button type="button" className="tm-iconbtn" aria-label={props.runReview.label} disabled={props.runReview.busy} onClick={props.runReview.onRun}>
+                      <RefreshCw size={16} aria-hidden="true" />
+                    </button>
+                  </Tooltip>
+                ) : null}
               </>
             )}
             <ActionMenu
@@ -574,7 +602,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               trigger={<SlidersHorizontal size={16} aria-hidden="true" />}
               items={viewItems}
             />
-            {props.runReview ? (
+            {props.runReview && !rerunSettled ? (
               <span className="tm-actiontitle" title={props.runReview.disabledReason}>
                 <button
                   type="button"

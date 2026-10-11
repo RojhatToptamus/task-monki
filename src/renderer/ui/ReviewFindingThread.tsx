@@ -8,9 +8,17 @@ import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
+/** Why a finding is dismissed: the reviewer is wrong, the code is so on purpose, or it waits. */
 export const DISMISS_REASON_LABELS: Record<ReviewFindingDismissReason, string> = {
-  NOT_A_PROBLEM: 'Not a problem',
-  ACCEPTED: 'Acceptable as is'
+  NOT_A_PROBLEM: 'Incorrect',
+  ACCEPTED: 'Intentional',
+  DEFERRED: 'Won’t fix now'
+};
+
+const SETTLED_LABELS: Record<ReviewFindingDismissReason, string> = {
+  NOT_A_PROBLEM: 'Marked incorrect',
+  ACCEPTED: 'Marked intentional',
+  DEFERRED: 'Won’t fix now'
 };
 
 export function severityLabel(finding: Pick<ReviewFindingView, 'severity'>): string {
@@ -20,17 +28,16 @@ export function severityLabel(finding: Pick<ReviewFindingView, 'severity'>): str
 /** How a settled finding reads: dismissed with its reason and note, or withdrawn by the reviewer. */
 export function settledLabel(finding: ReviewFindingView): string {
   if (finding.state === 'WITHDRAWN') return `Withdrawn by the reviewer${finding.revision?.reason ? `: ${finding.revision.reason}` : ''}`;
-  const reason = finding.dismissal?.reason ? DISMISS_REASON_LABELS[finding.dismissal.reason].toLowerCase() : '';
-  const why = [reason, finding.dismissal?.note ?? ''].filter(Boolean).join(': ');
-  return `Dismissed${why ? `: ${why}` : ''}`;
+  const label = finding.dismissal?.reason ? SETTLED_LABELS[finding.dismissal.reason] : 'Dismissed';
+  return finding.dismissal?.note ? `${label}: ${finding.dismissal.note}` : label;
 }
 
 /**
  * One finding under the line it is about: the reasoning, and Ask and Dismiss on
  * its title line, always visible. Blocker and Major go in the request; a Minor or
- * Nit is added from its title line. Dismissing asks why (the reviewer was wrong,
- * or it is acceptable as is), optionally with a note. A dismissed or withdrawn
- * finding folds to a line that keeps the reason.
+ * Nit is added from its title line. Dismissing asks why (incorrect, intentional,
+ * or not now), optionally with a note; the next review honours the reason. A
+ * dismissed or withdrawn finding folds to a line that keeps the reason.
  */
 export function ReviewFindingThread({
   finding, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
@@ -109,8 +116,8 @@ export function ReviewFindingThread({
               </Tooltip>
             ) : null}
             {onAsk ? (
-              <Tooltip label="Ask the reviewer" shortcut="A">
-                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__ask" aria-label="Ask the reviewer about this finding" onClick={() => onAsk(finding.id)}>
+              <Tooltip label="Ask about this finding" shortcut="A">
+                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__ask" aria-label="Ask about this finding" onClick={() => onAsk(finding.id)}>
                   <AgentMark />
                 </button>
               </Tooltip>

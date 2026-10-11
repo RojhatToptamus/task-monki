@@ -1,6 +1,7 @@
 import type {
   DomainEvent,
   AgentReviewFinding,
+  AgentReviewResolvedFinding,
   AgentReviewResult,
   ReviewFindingDecision,
   Finding,
@@ -1122,6 +1123,8 @@ function reduceAgentReview(
       }
       return { ...base, findingDecisions: [...decisions, decision] };
     }
+    // Committing the reviewed changes moves the reviewed state to the new commit;
+    // the clean tree's fingerprint keeps edits made after it counting.
     case 'DELIVERY_COMMIT_CREATED': {
       const headSha = getString(event.payload, 'headSha');
       if (!isTerminalReviewGate(base) || !headSha) {
@@ -1130,7 +1133,7 @@ function reduceAgentReview(
       return {
         ...base,
         reviewedHeadSha: headSha,
-        reviewedDirtyFingerprint: undefined,
+        reviewedDirtyFingerprint: getString(event.payload, 'dirtyFingerprint'),
         updatedAt: event.receivedAt
       };
     }
@@ -1261,11 +1264,15 @@ function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {
   const findings = findingsValue
     .map(getAgentReviewFinding)
     .filter((finding): finding is AgentReviewFinding => Boolean(finding));
+  const resolvedFindings = (Array.isArray(record.resolvedFindings) ? record.resolvedFindings : [])
+    .map(getResolvedFinding)
+    .filter((finding): finding is AgentReviewResolvedFinding => Boolean(finding));
   return {
     schemaVersion: 'agent-review/v1',
     verdict,
     summary,
-    findings
+    findings,
+    ...(resolvedFindings.length > 0 ? { resolvedFindings } : {})
   };
 }
 
@@ -1294,8 +1301,18 @@ function getAgentReviewFinding(value: unknown): AgentReviewFinding | undefined {
     path: getString(record, 'path'),
     line: getNumber(record, 'line'),
     endLine: getNumber(record, 'endLine'),
-    recommendation: getString(record, 'recommendation')
+    recommendation: getString(record, 'recommendation'),
+    ...(getString(record, 'previousFindingId') ? { previousFindingId: getString(record, 'previousFindingId') } : {})
   };
+}
+
+function getResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const previousFindingId = getString(value, 'previousFindingId');
+  const title = getString(value, 'title');
+  if (!previousFindingId || !title) return undefined;
+  const note = getString(value, 'note');
+  return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {

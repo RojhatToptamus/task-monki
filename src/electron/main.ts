@@ -66,9 +66,7 @@ import type {
   ReconnectRepositoryRequest,
   StartRunRequest,
   StartReviewRequest,
-  AskReviewerRequest,
   DecideReviewFindingRequest,
-  StopReviewerQuestionRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -807,12 +805,6 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
     service.decideReviewFinding(input));
-
-  handleTrustedIpc('agent:askReviewer', async (_, input: AskReviewerRequest) =>
-    service.askReviewer(input));
-
-  handleTrustedIpc('agent:stopReviewerQuestion', async (_, input: StopReviewerQuestionRequest) =>
-    service.stopReviewerQuestion(input));
 
   handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
     service.askSideQuestion(input));

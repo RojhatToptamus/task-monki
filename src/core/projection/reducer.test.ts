@@ -779,6 +779,7 @@ describe('projection reducer', () => {
       {
         ...createEvent('DELIVERY_COMMIT_CREATED', {
           headSha: 'commit-1',
+          dirtyFingerprint: 'clean-fp',
           branchName: 'task/task-1'
         }),
         runId: undefined
@@ -797,10 +798,22 @@ describe('projection reducer', () => {
 
     expect(committed.tasks[0].projection.agentReview).toMatchObject({
       status: 'PASSED',
-      reviewedHeadSha: 'commit-1'
+      reviewedHeadSha: 'commit-1',
+      reviewedDirtyFingerprint: 'clean-fp'
     });
-    expect(committed.tasks[0].projection.agentReview?.reviewedDirtyFingerprint).toBeUndefined();
     expect(refreshed.tasks[0].projection.agentReview?.status).toBe('PASSED');
+
+    // An edit after the commit changes the working tree, so the review no longer covers it.
+    const edited = applyEventToState(refreshed, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', {
+        id: 'git-edited',
+        headSha: 'commit-1',
+        dirtyFingerprint: 'edited-fp',
+        status: 'DIRTY'
+      }),
+      runId: undefined
+    });
+    expect(edited.tasks[0].projection.agentReview?.status).toBe('STALE');
   });
 
   it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {

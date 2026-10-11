@@ -2,60 +2,27 @@ import { randomUUID } from 'node:crypto';
 import {
   REVIEW_FINDING_DISMISS_REASONS,
   REVIEW_FINDING_TEXT_MAX_LENGTH,
-  TASK_INSTRUCTION_MAX_LENGTH,
   effectiveReviewFindings,
   reviewAcceptsDecisions,
-  splitReviewerReply,
-  type AgentExecutionSettings,
   type AgentReviewGateProjection,
-  type AskReviewerRequest,
   type DecideReviewFindingRequest,
-  type EffectiveReviewFinding,
   type ReviewFindingDecision,
-  type RunRecord,
-  type StopReviewerQuestionRequest,
-  type Task,
-  type TaskDetailSnapshot,
-  type TaskInstruction
+  type Task
 } from '../../shared/contracts';
-import {
-  buildReviewQuestionPrompt,
-  type ReviewQuestionPromptContext
-} from '../../shared/promptTemplates';
-import type { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import { ACTIVE_AGENT_RUN_STATUSES } from '../app/TaskTransitionPolicy';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
-import {
-  formatReviewedDiffStat,
-  parseReviewedDiff,
-  reviewedDiffExcerpt
-} from './ReviewedDiff';
 
 export interface AgentReviewCoordinatorOptions {
-  store: Pick<
-    SqliteTaskStore,
-    'getTaskDetail' | 'getRun' | 'updateTaskInstructions' | 'recordReviewFindingDecisions' | 'readArtifact'
-  >;
-  agents: Pick<AgentOrchestrator, 'startReviewQuestion' | 'interruptRun'>;
-  /** Reads a runtime-owned artifact, such as a question run's answer output. */
-  readRuntimeArtifact(artifactId: string): Promise<string>;
+  store: Pick<SqliteTaskStore, 'recordReviewFindingDecisions'>;
   events: Pick<AppEventBus, 'emit'>;
-  /** The review's runtime, model and read-only settings for a question about it. */
-  questionSettings(task: Task, reviewRun: RunRecord): AgentExecutionSettings;
-  assertRuntimeEnabled(runtimeId: string): void;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ID_MAX_LENGTH = 200;
-const INSTRUCTION_HISTORY_LIMIT = 1_000;
 
 /**
- * The person's side of a completed review: dismissing and restoring findings, and
- * asking the reviewer. Questions are durable `TaskInstruction` records with role
- * REVIEW. Each is answered by one REVIEW_QUESTION run in a fresh read-only session
- * on the review's runtime and model; the answer may revise findings only through
- * the validated revision block the orchestrator applies when the run completes.
+ * The person's side of a completed review: dismissing a finding with its reason, and
+ * restoring it. The reviewer is not a conversation; questions about a finding go to
+ * Ask (the side-question lane) with the finding as their subject.
  */
 export class AgentReviewCoordinator {
   constructor(private readonly options: AgentReviewCoordinatorOptions) {}
@@ -72,7 +39,7 @@ export class AgentReviewCoordinator {
     if (input.dismissReason !== undefined && (
       input.kind !== 'DISMISS' || !(REVIEW_FINDING_DISMISS_REASONS as readonly unknown[]).includes(input.dismissReason)
     )) {
-      throw new Error('A dismissal reason is either Not a problem or Acceptable as is.');
+      throw new Error('A dismissal reason is Incorrect, Intentional or Won\'t fix now.');
     }
     if (note && note.length > REVIEW_FINDING_TEXT_MAX_LENGTH) {
       throw new Error(`Keep the note to at most ${REVIEW_FINDING_TEXT_MAX_LENGTH} characters.`);
@@ -104,205 +71,8 @@ export class AgentReviewCoordinator {
       };
       return [decision];
     });
-    this.emitTaskUpdate(input.taskId, { reviewFindingsDecided: true });
+    this.options.events.emit({ type: 'task.updated', taskId: input.taskId, payload: { reviewFindingsDecided: true }, at: new Date().toISOString() });
     return decision!;
-  }
-
-  /**
-   * Records the question, then starts its answer run. A repeated message ID returns
-   * the recorded question. Before a new question is admitted, `observeGit` records
-   * the worktree's current Git state, so a diff that changed since the review makes
-   * the review stale and the question is refused.
-   */
-  async ask(
-    input: AskReviewerRequest,
-    observeGit: (taskId: string) => Promise<unknown>
-  ): Promise<TaskInstruction> {
-    if (typeof input.messageId !== 'string' || !UUID.test(input.messageId)) {
-      throw new Error('A valid message ID is required.');
-    }
-    const reviewRunId = requireId(input.reviewRunId, 'review run');
-    const text = questionText(input.text);
-    const findingId = input.findingId === undefined ? undefined : requireId(input.findingId, 'finding');
-    const recorded = await this.options.store.getTaskDetail(input.taskId);
-    if (recorded.task.kind !== 'NORMAL') throw new Error('Only a task review has a reviewer to ask.');
-    const existing = recorded.taskInstructions.find((record) => record.id === input.messageId);
-    if (
-      existing &&
-      (existing.role !== 'REVIEW' ||
-        existing.text !== text ||
-        existing.reviewRunId !== reviewRunId ||
-        existing.findingId !== findingId)
-    ) {
-      throw new Error('This message ID has already been used for different content.');
-    }
-    const retry = Boolean(
-      existing?.status === 'FAILED' && existing.runId && !recorded.runs.some((run) => run.id === existing.runId)
-    );
-    if (existing && !retry) return existing;
-
-    assertTaskTakesReviewWork(recorded.task);
-    await observeGit(input.taskId);
-    const detail = await this.options.store.getTaskDetail(input.taskId);
-    const task = detail.task;
-    const gate = task.projection.agentReview;
-    assertCurrentReview(gate, reviewRunId);
-    const findings = effectiveReviewFindings(gate?.result, gate?.findingDecisions ?? []);
-    const focused = findingId ? findings.find((finding) => finding.id === findingId) : undefined;
-    if (findingId && !focused) throw new Error('This finding is not part of the review.');
-    if (detail.runs.some((run) => run.mode === 'REVIEW_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
-      throw new Error('Wait for the reviewer to answer the current question.');
-    }
-    const reviewRun = detail.runs.find((run) => run.id === reviewRunId && run.mode === 'REVIEW');
-    const iteration = detail.iterations.find((candidate) => candidate.id === reviewRun?.iterationId);
-    const worktree = detail.worktrees.find((candidate) => candidate.id === reviewRun?.worktreeId);
-    if (!reviewRun || !iteration || !worktree) throw new Error('The review run is unavailable.');
-    if (iteration.id !== task.currentIterationId || worktree.id !== task.currentWorktreeId) {
-      throw new Error('The task worktree changed after this review. Run the review again.');
-    }
-    const settings = this.options.questionSettings(task, reviewRun);
-    this.options.assertRuntimeEnabled(settings.runtimeId ?? reviewRun.runtimeId);
-    const prompt = buildReviewQuestionPrompt(
-      await this.questionContext(detail, gate!, findings, focused, text)
-    );
-
-    const runId = existing?.runId ?? randomUUID();
-    const sessionId = existing?.sessionId ?? randomUUID();
-    const record = await this.update(task.id, (records) => {
-      if (existing) {
-        const current = records.find((item) => item.id === existing.id);
-        if (current?.status !== 'FAILED') throw new Error('The question is no longer waiting to send.');
-        return Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: now() });
-      }
-      if (records.some((item) => item.id === input.messageId)) throw new Error('Message already exists.');
-      if (records.length >= INSTRUCTION_HISTORY_LIMIT) {
-        throw new Error('This task has reached its message history limit. Start a new task.');
-      }
-      const at = now();
-      const question: TaskInstruction = {
-        id: input.messageId,
-        taskId: task.id,
-        iterationId: iteration.id,
-        worktreeId: worktree.id,
-        sourceRunId: reviewRun.id,
-        sessionId,
-        order: Math.max(0, ...records.map((item) => item.order)) + 1,
-        text,
-        mode: 'FOLLOW_UP',
-        status: 'SENDING',
-        role: 'REVIEW',
-        reviewRunId: reviewRun.id,
-        ...(findingId ? { findingId } : {}),
-        runId,
-        createdAt: at,
-        updatedAt: at
-      };
-      records.push(question);
-      return question;
-    });
-    try {
-      const run = await this.options.agents.startReviewQuestion({
-        runId,
-        sessionId,
-        task,
-        iteration,
-        worktree,
-        reviewRun,
-        settings,
-        prompt
-      });
-      await this.receipt(record, { status: 'SUBMITTED', runId: run.id, sessionId: run.sessionId });
-    } catch (error) {
-      const admitted = await this.options.store.getRun(runId);
-      await this.receipt(record, admitted
-        ? { status: 'SUBMITTED' }
-        : { status: 'FAILED', detail: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-    return (await this.options.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === record.id)!;
-  }
-
-  async stop(input: StopReviewerQuestionRequest): Promise<void> {
-    const run = await this.options.store.getRun(input.runId);
-    if (!run || run.taskId !== input.taskId || run.mode !== 'REVIEW_QUESTION') {
-      throw new Error('This reviewer question is unavailable.');
-    }
-    if (!ACTIVE_AGENT_RUN_STATUSES.has(run.status)) return;
-    await this.options.agents.interruptRun(run.id);
-  }
-
-  private async questionContext(
-    detail: TaskDetailSnapshot,
-    gate: AgentReviewGateProjection,
-    findings: EffectiveReviewFinding[],
-    focused: EffectiveReviewFinding | undefined,
-    question: string
-  ): Promise<ReviewQuestionPromptContext> {
-    const snapshot = detail.gitSnapshots.find((candidate) => candidate.id === gate.reviewedGitSnapshotId);
-    const diff = snapshot?.diffArtifactId
-      ? await this.options.store.readArtifact(snapshot.diffArtifactId).catch(() => '')
-      : '';
-    const files = parseReviewedDiff(diff);
-    const focusedFile = focused?.path ? files.find((file) => file.path === focused.path) : undefined;
-    return {
-      taskTitle: detail.task.title,
-      review: {
-        status: gate.status,
-        ...(gate.result ? { verdict: gate.result.verdict } : {}),
-        ...(gate.summary ? { summary: gate.summary } : {})
-      },
-      findings,
-      ...(focused
-        ? { focusedFinding: { finding: focused, diff: focusedFile ? reviewedDiffExcerpt(focusedFile, focused.line) : undefined } }
-        : {}),
-      diffStat: files.length > 0
-        ? formatReviewedDiffStat(files)
-        : snapshot?.diffStat.trim() || 'No diff stat was recorded.',
-      history: await this.questionHistory(detail, gate.runId!),
-      question
-    };
-  }
-
-  /** Earlier answered questions about this review, oldest first, with prose-only answers. */
-  private async questionHistory(
-    detail: TaskDetailSnapshot,
-    reviewRunId: string
-  ): Promise<ReviewQuestionPromptContext['history']> {
-    const answered = detail.taskInstructions
-      .filter((item) => item.role === 'REVIEW' && item.reviewRunId === reviewRunId && item.status === 'SUBMITTED')
-      .sort((left, right) => left.order - right.order)
-      .flatMap((item) => {
-        const run = detail.runs.find((candidate) => candidate.id === item.runId);
-        return run?.mode === 'REVIEW_QUESTION' && run.status === 'COMPLETED' ? [{ item, run }] : [];
-      })
-      .slice(-6);
-    return Promise.all(answered.map(async ({ item, run }) => ({
-      question: item.text,
-      answer: splitReviewerReply(await this.options.readRuntimeArtifact(run.outputArtifactId).catch(() => '')).prose ||
-        '(No answer text was recorded.)',
-      ...(item.findingId ? { findingId: item.findingId } : {})
-    })));
-  }
-
-  private receipt(
-    record: TaskInstruction,
-    update: Partial<Pick<TaskInstruction, 'status' | 'runId' | 'sessionId' | 'detail'>>
-  ): Promise<TaskInstruction> {
-    return this.update(record.taskId, (records) => {
-      const current = records.find((item) => item.id === record.id);
-      if (!current) throw new Error('The question receipt is missing.');
-      return Object.assign(current, { detail: undefined, ...update, updatedAt: now() });
-    });
-  }
-
-  private async update<T>(taskId: string, mutate: (records: TaskInstruction[]) => T): Promise<T> {
-    const result = await this.options.store.updateTaskInstructions(taskId, (records) => mutate(records));
-    this.emitTaskUpdate(taskId, { instructionsChanged: true });
-    return structuredClone(result);
-  }
-
-  private emitTaskUpdate(taskId: string, payload: Record<string, boolean>): void {
-    this.options.events.emit({ type: 'task.updated', taskId, payload, at: now() });
   }
 }
 
@@ -314,18 +84,11 @@ function assertCurrentReview(gate: AgentReviewGateProjection | undefined, review
   throw new Error('The code changed after this review. Run the review again.');
 }
 
-function questionText(text: unknown): string {
-  if (typeof text !== 'string' || !text.trim() || text.length > TASK_INSTRUCTION_MAX_LENGTH) {
-    throw new Error(`Write a question of at most ${TASK_INSTRUCTION_MAX_LENGTH.toLocaleString()} characters.`);
-  }
-  return text.trim();
-}
-
-/** An archived or canceled task keeps its review as a record; it takes no new questions or decisions. */
+/** An archived or canceled task keeps its review as a record; it takes no new decisions. */
 function assertTaskTakesReviewWork(task: Task): void {
   if (task.workflowPhase === 'ARCHIVED' || task.workflowPhase === 'CANCELED') {
     throw new Error(
-      `This task is ${task.workflowPhase === 'ARCHIVED' ? 'archived' : 'canceled'}, so its review takes no questions or decisions.`
+      `This task is ${task.workflowPhase === 'ARCHIVED' ? 'archived' : 'canceled'}, so its review takes no decisions.`
     );
   }
 }
@@ -335,8 +98,4 @@ function requireId(value: unknown, label: string): string {
     throw new Error(`A valid ${label} ID is required.`);
   }
   return value;
-}
-
-function now(): string {
-  return new Date().toISOString();
 }

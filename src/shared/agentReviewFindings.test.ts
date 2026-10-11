@@ -5,7 +5,6 @@ import {
   openReviewFindings,
   reviewAcceptsDecisions,
   reviewAsksForChanges,
-  splitReviewerReply,
   type AgentReviewGateProjection,
   type AgentReviewResult,
   type ReviewFindingDecision
@@ -117,8 +116,10 @@ describe('effectiveReviewFindings', () => {
 });
 
 describe('reviewAsksForChanges', () => {
-  it('asks for changes while a NEEDS_CHANGES verdict has an open finding, and never for a stale or failed review', () => {
+  it('asks for changes while a NEEDS_CHANGES verdict has an open Blocker or Major, and never for a stale or failed review', () => {
     expect(reviewAsksForChanges(gate())).toBe(true);
+    // The open Nit alone is a suggestion: nothing would be sent by default.
+    expect(reviewAsksForChanges(gate({ findingDecisions: [decision({ kind: 'DISMISS', findingId: 'leak' })] }))).toBe(false);
     expect(reviewAsksForChanges(gate({
       findingDecisions: [
         decision({ kind: 'DISMISS', findingId: 'leak' }),
@@ -128,8 +129,7 @@ describe('reviewAsksForChanges', () => {
     expect(reviewAsksForChanges(gate({
       findingDecisions: [
         decision({ kind: 'DISMISS', findingId: 'leak' }),
-        decision({ kind: 'DISMISS', findingId: 'naming' }),
-        decision({ kind: 'RESTORE', findingId: 'naming' })
+        decision({ kind: 'RESTORE', findingId: 'leak' })
       ]
     }))).toBe(true);
     expect(reviewAsksForChanges(gate({ status: 'STALE' }))).toBe(false);
@@ -188,8 +188,9 @@ describe('reviewAsksForChanges', () => {
       result: majorFindings('INCONCLUSIVE'),
       findingDecisions: [decision({ kind: 'DISMISS', findingId: 'leak' }), decision({ kind: 'DISMISS', findingId: 'naming' })]
     }))).toBe('INCONCLUSIVE');
-    // A NEEDS_CHANGES verdict keeps asking while any finding stays open, whatever its severity.
-    expect(effectiveReviewGateStatus(gate({ findingDecisions: downgraded }))).toBe('NEEDS_CHANGES');
+    // A NEEDS_CHANGES verdict asks only while a Blocker or Major stays open; Minor and Nit are suggestions.
+    expect(effectiveReviewGateStatus(gate({ findingDecisions: downgraded }))).toBe('PASSED');
+    expect(effectiveReviewGateStatus(gate({ result: majorFindings('NEEDS_CHANGES') }))).toBe('NEEDS_CHANGES');
     expect(effectiveReviewGateStatus(gate({ status: 'STALE', findingDecisions: downgraded }))).toBe('STALE');
   });
 
@@ -205,25 +206,5 @@ describe('reviewAsksForChanges', () => {
     expect(reviewAcceptsDecisions(gate({ status: 'STALE' }), REVIEW_RUN)).toBe(false);
     expect(reviewAcceptsDecisions(gate({ status: 'RUNNING' }), REVIEW_RUN)).toBe(false);
     expect(reviewAcceptsDecisions({ status: 'NOT_RUN' })).toBe(false);
-  });
-});
-
-describe('splitReviewerReply', () => {
-  const block = '```task-monki-revisions\n[{"finding":"leak","action":"withdraw","reason":"Removed in dispose."}]\n```';
-
-  it('separates a revision block that ends the reply', () => {
-    expect(splitReviewerReply(`The listener is removed.\n\n${block}\n`)).toEqual({
-      prose: 'The listener is removed.',
-      revisionsJson: '[{"finding":"leak","action":"withdraw","reason":"Removed in dispose."}]'
-    });
-    expect(splitReviewerReply(`Removed.\r\n${block.replaceAll('\n', '\r\n')}`).revisionsJson).toContain('"withdraw"');
-  });
-
-  it('treats a block followed by more prose, or a differently tagged block, as prose', () => {
-    const trailing = `Answer.\n${block}\nOne more thing.`;
-    expect(splitReviewerReply(trailing)).toEqual({ prose: trailing });
-    const tagged = 'Answer.\n```task-monki-revisions json\n[]\n```';
-    expect(splitReviewerReply(tagged)).toEqual({ prose: tagged });
-    expect(splitReviewerReply('Only prose.')).toEqual({ prose: 'Only prose.' });
   });
 });
