@@ -3666,7 +3666,8 @@ export class TaskManagerService {
           previousReview: previousReview?.result
             ? {
                 verdict: previousReview.result.verdict,
-                summary: previousReview.summary,
+                // The reviewer's own summary; the gate's may only say the review went out of date.
+                summary: previousReview.result.summary || previousReview.summary,
                 findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? []),
                 ...(previousRequest ? { request: previousRequest } : {})
               }

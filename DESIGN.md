@@ -1062,7 +1062,7 @@ repeats what the rail already says. A task's context line is its lifecycle track
 then its repository and branch, each marked by an icon instead of a separator.
 A task page has two kinds of tab. The reading tabs (Overview, Debug) keep the
 page head (title, lifecycle track, repository and branch, task menu), which
-scrolls with the page. The working tabs (Agent, Review, Preview) have no head:
+scrolls with the page while the tab bar stays pinned at the sheet's top. The working tabs (Agent, Review, Preview) have no head:
 their title row stands in the window's top bar from the moment the tab opens,
 and the tab bar is the sheet's first line, so it sits in the same place on all
 three and shares a docked side panel's 48px head line. The lifecycle, repository

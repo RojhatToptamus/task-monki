@@ -57,9 +57,10 @@
   height: calc(100vh - max(48px, 10vh) - 48px);
 }
 
+/* The description grows into the room; on a short window it keeps its own
+   height and the body scrolls, so its toolbar never leaves the field. */
 .newtask-modal__panel--expanded :is(.newtask-section, .field--prompt, .field--prompt > .tm-composer) {
   flex: 1 1 auto;
-  min-height: 0;
 }
 
 .newtask-modal__panel--expanded .field--prompt > .tm-composer {

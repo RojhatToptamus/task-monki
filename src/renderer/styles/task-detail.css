@@ -12,8 +12,11 @@
   flex-direction: column;
 }
 
+/* The reading tabs scroll as a whole. As a page sheet in the canvas they also
+   outrank the sheet's clip (app-shell.css), which would otherwise stop the wheel. */
 .tm-detail--overview,
-.tm-detail--debug { overflow-y: auto; scrollbar-gutter: stable; }
+.tm-detail--debug,
+.tm-canvas__content > :is(.tm-detail--overview, .tm-detail--debug) { overflow-y: auto; scrollbar-gutter: stable; }
 .tm-detail--overview > .tm-detail__body,
 .tm-detail--debug > .tm-detail__body { flex: 0 0 auto; overflow: visible; }
 
@@ -21,6 +24,13 @@
   flex: 0 0 auto;
   background: var(--surface);
 }
+
+/* On a reading tab the head scrolls away with the page while the tab bar stays
+   pinned at the sheet's top, as it sits on every working tab; the title has
+   risen into the window's top bar by then. */
+.tm-detail:is(.tm-detail--overview, .tm-detail--debug) > .tm-detail__chrome { display: contents; }
+.tm-detail:is(.tm-detail--overview, .tm-detail--debug) > .tm-detail__chrome > * { flex: 0 0 auto; }
+.tm-detail:is(.tm-detail--overview, .tm-detail--debug) .tm-detail__nav { position: sticky; top: 0; z-index: var(--layer-sticky); }
 
 /* The Overview scrolls as a whole and reserves a scrollbar gutter; the tab bar
    of a tab whose panes scroll on their own reserves the same, so the assistant
@@ -266,6 +276,8 @@
   overflow-y: auto;
   padding: 24px var(--tm-gutter) 40px;
   scrollbar-gutter: stable;
+  /* The page's own width decides its columns, so a docked side panel counts. */
+  container: task-body / inline-size;
 }
 
 /* The story beside the record. The record column is a fixed measure so the
@@ -277,10 +289,16 @@
   align-items: start;
 }
 
-@media (max-width: 1279px) {
+@container task-body (max-width: 1215px) {
   .tm-overview {
     grid-template-columns: minmax(0, 1fr) 260px;
     gap: 32px;
+  }
+}
+
+@container task-body (max-width: 879px) {
+  .tm-overview {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2449,12 +2467,6 @@
 .tm-healthfindings .tm-finding__ref {
   white-space: normal;
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 1080px) {
-  .tm-overview {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 720px) {

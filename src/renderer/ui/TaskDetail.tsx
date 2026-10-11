@@ -310,8 +310,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   // The review request in progress: the user's note and line comments, kept
   // while they move between tabs and cleared when the request is sent.
-  // Bumped by the Overview's Request changes, which opens the Review tab's request sheet.
-  const [requestSheetToken, setRequestSheetToken] = useState(0);
+  // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
+  const [requestSheetPending, setRequestSheetPending] = useState(false);
   // Ask: one thread per open panel. Closing the panel or leaving the task ends it,
   // which removes its snapshot; the end call is kept from the task that opened it.
   // The subject is what the next question is about: a finding or lines of the diff.
@@ -689,7 +689,7 @@ export function TaskDetail(props: TaskDetailProps) {
   // person sees exactly what will be sent before sending it.
   const openRequestChanges = () => {
     setTab('review');
-    setRequestSheetToken((token) => token + 1);
+    setRequestSheetPending(true);
   };
 
   const reviewIsCurrent = reviewAcceptsDecisions(reviewGate);
@@ -1507,7 +1507,7 @@ export function TaskDetail(props: TaskDetailProps) {
         label: 'Add to request',
         onUse: (text) => {
           props.onReviewDraftChange({ ...props.reviewDraft, note: appendToDraft(props.reviewDraft.note, text) });
-          setRequestSheetToken((value) => value + 1);
+          setRequestSheetPending(true);
         }
       } : {
         label: 'Use in follow-up',
@@ -1862,7 +1862,8 @@ export function TaskDetail(props: TaskDetailProps) {
               busy: false,
               onRun: () => onNextAction(nextAction.primary!.id)
             } : undefined}
-            requestSheetToken={requestSheetToken}
+            requestSheetPending={requestSheetPending}
+            onRequestSheetOpened={() => setRequestSheetPending(false)}
             agentRequest={pendingInteraction ? {
               label: interactionHeadline(pendingInteraction, runtimeName),
               action: 'Go to request',

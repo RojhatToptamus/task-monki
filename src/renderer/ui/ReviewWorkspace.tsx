@@ -86,8 +86,9 @@ export interface ReviewWorkspaceProps {
   resolvedFindings?: readonly AgentReviewResolvedFinding[];
   /** Hands the selected lines, and what was typed about them, to Ask instead of the request. */
   onAskAboutLines?(lines: { path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }, text: string): void;
-  /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
-  requestSheetToken?: number;
+  /** Another surface asked to see the request, such as the Overview's Request changes; cleared once it opens. */
+  requestSheetPending?: boolean;
+  onRequestSheetOpened?(): void;
   /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
   agentRequest?: { label: string; action: string; onOpen(): void };
 }
@@ -235,9 +236,12 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const elementBy = (attribute: string, value: string) => [...(diffRef.current?.querySelectorAll<HTMLElement>(`[${attribute}]`) ?? [])]
     .find((element) => element.getAttribute(attribute) === value);
 
+  // Another surface asked to see the request; it opens once, so coming back to the tab does not reopen it.
   useEffect(() => {
-    if (props.requestSheetToken) setSheetOpen(true);
-  }, [props.requestSheetToken]);
+    if (!props.requestSheetPending) return;
+    setSheetOpen(true);
+    props.onRequestSheetOpened?.();
+  }, [props.requestSheetPending]);
 
   useEffect(() => {
     if (!pendingScroll) return;

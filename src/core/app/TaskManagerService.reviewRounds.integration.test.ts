@@ -87,8 +87,9 @@ describe('TaskManagerService review rounds', () => {
     const second = await s.service.startReview({ taskId: task.id, runId: reply.id });
     const prompt = await s.runtimeStore.readArtifact(second.promptArtifactId);
     expect(prompt).toContain('- id leak: [MAJOR] Listener leaks at feature.ts:1 (open).');
-    expect(prompt).toContain('1. Finding leak, [MAJOR] Listener leaks at feature.ts:1. Agent: fixed. Removed on close..');
-    expect(prompt).toContain('2. Comment on feature.ts:1: Should this be a named handler?. Agent: needs the person\'s decision. Name it onResize or onX?.');
+    expect(prompt).toContain('Summary: One leak.');
+    expect(prompt).toContain('1. Finding leak, [MAJOR] Listener leaks at feature.ts:1. Agent: fixed. Removed on close.');
+    expect(prompt).toContain('2. Comment on feature.ts:1: Should this be a named handler? Agent: needs the person\'s decision. Name it onResize or onX?');
     expect(prompt).toContain('Report a new finding, one without previousFindingId, only when it is BLOCKER or MAJOR.');
     const rereviewed = await s.waitForSnapshot((state) => reviewOf(state, task.id)?.status === 'PASSED');
     expect(reviewOf(rereviewed, task.id)?.result?.resolvedFindings).toEqual([

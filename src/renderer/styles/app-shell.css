@@ -359,6 +359,7 @@
   width: var(--h-compact);
   height: var(--h-compact);
   margin-left: 14px;
+  border-radius: var(--r-xs);
 }
 
 .tm-tab .tm-board-color {

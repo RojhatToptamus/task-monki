@@ -273,8 +273,10 @@
 .tm-round__where { align-self: flex-start; max-width: 100%; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; text-align: left; }
 .tm-round__where--link { padding: 0; border-radius: var(--r-xs); background: none; }
 .tm-round__where--link:hover { color: var(--text); text-decoration: underline; }
-.tm-round__answer { color: var(--text-soft); }
-.tm-round__note { margin: 8px 0 0; white-space: pre-wrap; }
+/* In the answers the item is a reference, one line; the agent's answer is what is read. */
+.tm-round__answers .tm-round__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-round__answer { color: var(--text); }
+.tm-round__note { margin: 12px 0 0; white-space: pre-wrap; }
 .tm-round__answers li[data-outcome='FIXED'] .tm-round__outcome { color: var(--verified-ink); }
 .tm-round__answers li[data-outcome='NEEDS_DECISION'] .tm-round__outcome { color: var(--waiting-ink); }
 .tm-round__answers li[data-outcome='NONE'] .tm-round__outcome { color: var(--faint); }

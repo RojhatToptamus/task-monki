@@ -617,7 +617,7 @@ function previousRequestLines(request: NonNullable<PreviousReviewContext['reques
         ? `Finding ${item.findingId}, [${item.severity}] ${boundedText(item.title, REVIEW_CONTEXT_TEXT_LIMIT)}${findingLocation(item)}`
         : `Comment on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
       const answer = answers.get(item.number);
-      return `${item.number}. ${subject}. Agent: ${answer ? `${outcome[answer.outcome]}${answer.note ? `. ${boundedText(answer.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}` : 'no answer'}.`;
+      return `${item.number}. ${asSentence(subject)} Agent: ${asSentence(answer ? `${outcome[answer.outcome]}${answer.note ? `. ${boundedText(answer.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}` : 'no answer')}`;
     }),
     ...(request.record.note ? [`Note from the person: ${boundedText(request.record.note, REVIEW_CONTEXT_TEXT_LIMIT)}`] : []),
     'An answer is the agent\'s claim, not evidence; check each one against the code.'
@@ -631,6 +631,11 @@ function dismissalPhrase(dismissal: NonNullable<EffectiveReviewFinding['dismissa
       : dismissal.reason === 'DEFERRED' ? 'deferred by the person'
         : 'dismissed by the person';
   return `${how}${dismissal.note ? `: ${boundedText(dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}`;
+}
+
+/** Text closed with a full stop unless it already ends a sentence. */
+function asSentence(text: string): string {
+  return /[.?!…]$/u.test(text.trim()) ? text.trim() : `${text.trim()}.`;
 }
 
 function sentenceStart(text: string): string {
