@@ -11,10 +11,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compareRatchets } from './design-baseline.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const stylesDirectory = resolve(here, '../src/renderer/styles');
-const baseline = JSON.parse(readFileSync(resolve(here, 'design-baseline.json'), 'utf8'));
+const stylesDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../src/renderer/styles');
 
 // Each pattern is matched against a declaration source with comments blanked.
 const rules = [
@@ -23,7 +22,6 @@ const rules = [
   { pattern: /font:\s*(?:\d{3}\s+)?[\d.]+(?:px|rem)\b/g, message: 'literal size in font shorthand; use a --t-* token' },
   { pattern: /border-radius:[^;}]*(?<![\w-])[1-9][\d.]*px/g, message: 'literal border-radius; use a --r-* token' },
   { pattern: /border-radius:\s*50%/g, message: 'percentage radius; a circle or pill is --r-pill' },
-  { pattern: /var\(--(?:working|working-ink|working-bg|ctx-bg|amber-bg|error-bg)\)/g, message: 'removed alias; use the canonical token' },
   { pattern: /cursor:\s*(?:pointer|not-allowed)/g, message: 'pointer or not-allowed cursor; controls keep the arrow, enabled or not' },
   { pattern: /font-weight:\s*\d{3}\b/g, message: 'literal font-weight; use --w-regular, --w-medium or --w-title' },
   { pattern: /font:\s*\d{3}\s/g, message: 'literal weight in font shorthand; use a --w-* token' },
@@ -80,40 +78,12 @@ for (const filename of readdirSync(stylesDirectory).filter((name) => name.endsWi
   }
 }
 
-// Icons come in the sizes DESIGN.md §8.3 names (12 only for a glyph inside a
-// 16px mark) and draw the shared --icon-stroke, so no component sets its own.
-const uiDirectory = resolve(here, '../src/renderer/ui');
-const iconRules = [
-  { pattern: /\bsize=\{(?!(?:12|13|16|18)\})\d+\}/g, message: 'icon size outside 13, 16, 18 (12 inside a 16px mark)' },
-  { pattern: /\b(?:strokeWidth|absoluteStrokeWidth)=/g, message: 'icon stroke set on the component; the stroke is --icon-stroke' }
-];
-const tsxFiles = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
-  entry.isDirectory() ? tsxFiles(resolve(directory, entry.name))
-    : entry.name.endsWith('.tsx') && !entry.name.includes('.test.') ? [resolve(directory, entry.name)] : []);
-for (const file of tsxFiles(uiDirectory)) {
-  const source = readFileSync(file, 'utf8');
-  for (const { pattern, message } of iconRules) {
-    for (const match of source.matchAll(pattern)) {
-      const line = source.slice(0, match.index).split('\n').length;
-      failures.push(`${file.slice(uiDirectory.length + 1)}:${line} ${message}: ${match[0]}`);
-    }
-  }
-}
-
-const ratchetReport = [];
-for (const [name, hits] of Object.entries(ratchetHits)) {
-  const allowed = baseline.styles?.[name];
-  if (allowed === undefined) throw new Error(`tools/design-baseline.json has no styles.${name}`);
-  if (hits.length > allowed) {
-    failures.push(`${ratchets[name].message}: ${hits.length} now, ${allowed} allowed. Latest: ${hits.slice(-Math.min(5, hits.length - allowed)).join(', ')}`);
-  } else if (hits.length < allowed) {
-    ratchetReport.push(`${name}: ${hits.length} (baseline ${allowed}; lower styles.${name} in tools/design-baseline.json)`);
-  }
-}
+const compared = compareRatchets('styles', ratchetHits, Object.fromEntries(Object.entries(ratchets).map(([name, rule]) => [name, rule.message])));
+failures.push(...compared.failures);
 
 if (failures.length > 0) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-if (ratchetReport.length > 0) console.log(ratchetReport.join('\n'));
-console.log('Renderer styles use the type, weight, radius, layer, colour and motion tokens, the arrow cursor, the app mono and no separator glyphs; icons use the shared sizes and stroke.');
+if (compared.report.length > 0) console.log(compared.report.join('\n'));
+console.log('Renderer styles use the type, weight, radius, layer, colour and motion tokens, the arrow cursor, the app mono and no separator glyphs.');

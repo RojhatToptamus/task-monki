@@ -11,7 +11,6 @@ import {
   PanelRight,
   Pin,
   Reply,
-  Settings2,
   Users,
   X
 } from 'lucide-react';
@@ -30,16 +29,12 @@ export function DiscourseRepositoryIcon() {
   return <UiLucideIcon component={Folder} size={13} />;
 }
 
-export function DiscoursePanelRightIcon(_props: { expanded?: boolean }) {
+export function DiscoursePanelRightIcon() {
   return <UiLucideIcon component={PanelRight} />;
 }
 
 export function DiscourseContextPreviewIcon() {
   return <UiLucideIcon component={FileText} />;
-}
-
-export function DiscourseSlidersIcon() {
-  return <UiLucideIcon component={Settings2} size={16} />;
 }
 
 export function DiscourseReplyIcon() {
@@ -64,10 +59,6 @@ export function DiscourseChevronDownIcon() {
 
 export function DiscourseCloseIcon() {
   return <UiLucideIcon component={X} size={16} />;
-}
-
-export function DiscourseNavIcon() {
-  return <UiLucideIcon component={MessageSquare} />;
 }
 
 export function DiscourseModeIcon({ policy }: { policy: DiscourseDefaultPolicy }) {

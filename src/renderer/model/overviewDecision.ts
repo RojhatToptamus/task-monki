@@ -1,5 +1,6 @@
 import type { WorkflowPhase } from '../../shared/contracts';
 import type { PrStatusKind } from './prStatus';
+import { isClosedPhase } from './taskPhase';
 
 /**
  * Which surface owns the task Overview's Now panel — the one raised
@@ -46,12 +47,10 @@ export interface OverviewDecisionInput {
   setupAvailable: boolean;
 }
 
-const CLOSED_PHASES = new Set<WorkflowPhase>(['DONE', 'CANCELED', 'ARCHIVED']);
-
 export function selectOverviewDecisionOwner(
   input: OverviewDecisionInput
 ): OverviewDecisionOwner | undefined {
-  if (CLOSED_PHASES.has(input.workflowPhase)) return 'closed';
+  if (isClosedPhase(input.workflowPhase)) return 'closed';
   if (input.interactionPending) return 'interaction';
   if (input.checkoutUnavailable) return 'checkout';
   if (input.recoveryRequired) return 'recovery';
@@ -68,7 +67,6 @@ export interface PullRequestPlacementInput {
   /** PR Status has something the Overview should show. */
   overviewRelevant: boolean;
   canCreateDraftPr: boolean;
-  workflowPhase: WorkflowPhase;
 }
 
 export interface PullRequestPlacement {
@@ -92,7 +90,7 @@ export function selectPullRequestPlacement(input: PullRequestPlacementInput): Pu
   const none = { section: false, createInNowPanel: false };
   if (input.owner === 'delivery' || !input.overviewRelevant) return none;
   if (input.prKind !== 'NO_PR') return { section: true, createInNowPanel: false };
-  if (!input.owner || OWNERS_BEFORE_SHIPPING.has(input.owner) || CLOSED_PHASES.has(input.workflowPhase)) return none;
+  if (!input.owner || OWNERS_BEFORE_SHIPPING.has(input.owner)) return none;
   if (input.owner === 'finish') return { section: false, createInNowPanel: input.canCreateDraftPr };
   return { section: true, createInNowPanel: false };
 }

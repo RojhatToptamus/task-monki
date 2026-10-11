@@ -13,7 +13,7 @@ import type { AppEventBus } from '../runner/AppEventBus';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 
 export interface AgentReviewCoordinatorOptions {
-  store: Pick<SqliteTaskStore, 'recordReviewFindingDecisions'>;
+  store: Pick<SqliteTaskStore, 'recordReviewFindingDecision'>;
   events: Pick<AppEventBus, 'emit'>;
 }
 
@@ -35,44 +35,35 @@ export class AgentReviewCoordinator {
     const findingId = requireId(input.findingId, 'finding');
     if (input.note !== undefined && typeof input.note !== 'string') throw new Error('A note must be text.');
     const note = input.note?.trim();
-    if (input.kind === 'RESTORE' && note) throw new Error('Only a dismissal takes a note.');
-    if (input.dismissReason !== undefined && (
-      input.kind !== 'DISMISS' || !(REVIEW_FINDING_DISMISS_REASONS as readonly unknown[]).includes(input.dismissReason)
-    )) {
+    if (input.kind === 'RESTORE' && (note || input.dismissReason !== undefined)) {
+      throw new Error('Only a dismissal takes a reason and a note.');
+    }
+    if (input.kind === 'DISMISS' && !(REVIEW_FINDING_DISMISS_REASONS as readonly unknown[]).includes(input.dismissReason)) {
       throw new Error('A dismissal reason is Incorrect, Intentional or Won\'t fix now.');
     }
     if (note && note.length > REVIEW_FINDING_TEXT_MAX_LENGTH) {
       throw new Error(`Keep the note to at most ${REVIEW_FINDING_TEXT_MAX_LENGTH} characters.`);
     }
-    let decision: ReviewFindingDecision | undefined;
-    await this.options.store.recordReviewFindingDecisions(input.taskId, (task) => {
+    const decision = await this.options.store.recordReviewFindingDecision(input.taskId, (task) => {
       assertTaskTakesReviewWork(task);
       const gate = task.projection.agentReview;
       assertCurrentReview(gate, reviewRunId);
       const finding = effectiveReviewFindings(gate?.result, gate?.findingDecisions ?? [])
         .find((candidate) => candidate.id === findingId);
       if (!finding) throw new Error('This finding is not part of the review.');
-      if (finding.state === 'WITHDRAWN') throw new Error('The reviewer withdrew this finding.');
       if (input.kind === 'DISMISS' && finding.state !== 'OPEN') {
         throw new Error('This finding is already dismissed.');
       }
       if (input.kind === 'RESTORE' && finding.state !== 'DISMISSED') {
         throw new Error('Only a dismissed finding can be restored.');
       }
-      decision = {
-        id: randomUUID(),
-        reviewRunId,
-        findingId: finding.id,
-        kind: input.kind,
-        actor: 'USER',
-        ...(input.kind === 'DISMISS' && input.dismissReason ? { dismissReason: input.dismissReason } : {}),
-        ...(input.kind === 'DISMISS' && note ? { note } : {}),
-        createdAt: new Date().toISOString()
-      };
-      return [decision];
+      const base = { id: randomUUID(), reviewRunId, findingId: finding.id, createdAt: new Date().toISOString() };
+      return input.kind === 'DISMISS'
+        ? { ...base, kind: 'DISMISS', dismissReason: input.dismissReason!, ...(note ? { note } : {}) }
+        : { ...base, kind: 'RESTORE' };
     });
     this.options.events.emit({ type: 'task.updated', taskId: input.taskId, payload: { reviewFindingsDecided: true }, at: new Date().toISOString() });
-    return decision!;
+    return decision;
   }
 }
 

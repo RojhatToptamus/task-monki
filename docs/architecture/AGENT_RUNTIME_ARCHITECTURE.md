@@ -170,15 +170,12 @@ generic client-tool bridge. See `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
 
 ### Review and side questions
 
-Two task-bound question lanes use the shared read-only turn path with a fresh
-session per question and approval policy never. Their runs are detached: they
+The task-bound question lane uses the shared read-only turn path with a fresh
+session per question and approval policy never. Its runs are detached: they
 never change the workflow phase, `currentRunId`, `projection.agentRun`,
 attention, delivery, or in-flight state, and the renderer keeps them out of the
 main conversation.
 
-- `REVIEW_QUESTION` (purpose `TASK_REVIEW_QUESTION`, session role `REVIEW`)
-  is the retired reviewer conversation. Nothing starts one; a stored run settles
-  as it ran, and reviewer decisions it recorded still apply.
 - `SIDE_QUESTION` (purpose `TASK_SIDE_QUESTION`, session role `SIDE`) answers a
   question about the task on the runtime and model the request names (the task's
   own when it names none), always read-only, one at a time per task.

@@ -19,7 +19,6 @@
  * task page's side sheet (TaskDetail). __main is positioned so visually hidden labels inside it
  * scroll with it instead of extending the document (see .tm-app in app-shell.css).
  */
-.tm-detail__body.tm-detail__body--preview { padding: 0; overflow: hidden; scrollbar-gutter: auto; display: flex; flex-direction: column; }
 .tm-application-preview { --preview-head-top: 8px; --preview-statusrow: 44px; --preview-sections: 32px; position: relative; display: grid; flex: 1; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
 .tm-application-preview__main { position: relative; container: application-preview / inline-size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 /* The top padding gives the status row's controls the same space above as below, before the sections. */
@@ -64,7 +63,6 @@
 .tm-application-preview__services :is(th, td):last-child { width: 64px; }
 .tm-modal__panel.tm-application-preview__dialog { display: flex; flex-direction: column; max-height: calc(100vh - 48px); overflow: hidden; padding: 0; }
 .tm-application-preview__dialog--compact { max-width: 440px; }
-.tm-application-preview__dialog--review { max-width: 720px; }
 .tm-application-preview__dialog { font-size: var(--t-body); }
 .tm-application-preview__dialog-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 24px 16px; }
 .tm-application-preview__dialog-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 24px 16px; }
@@ -119,24 +117,6 @@
 
 .tm-preview-disclosure[open] > summary {
   margin-bottom: 10px;
-}
-
-.tm-preview-icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--h-icon);
-  height: var(--h-icon);
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--muted);
-}
-
-.tm-preview-icon-button:not(:disabled):hover {
-  background-color: var(--hover);
-  color: var(--text);
 }
 
 .tm-preview-keyvalues {

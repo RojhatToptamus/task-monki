@@ -3,7 +3,8 @@ import type { Repository } from '../../shared/contracts';
 import { abbreviateHomePath, type RepositoryOption } from '../model/repositories';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { SettingsPane } from './SettingsPane';
-import { Chip, type StatusPillTone } from './StatusBadge';
+import { Chip } from './StatusBadge';
+import type { Tone } from '../model/viewTypes';
 
 export interface RepositorySettingsActions {
   addingRepository: boolean;
@@ -15,7 +16,7 @@ export interface RepositorySettingsActions {
   onRevealRepository(repositoryId: string): Promise<void>;
 }
 
-const STATUS: Record<Repository['status'], { label: string; tone: StatusPillTone }> = {
+const STATUS: Record<Repository['status'], { label: string; tone: Tone }> = {
   AVAILABLE: { label: 'Ready', tone: 'neutral' },
   MISSING: { label: 'Missing', tone: 'error' },
   INVALID: { label: 'Not a Git repository', tone: 'error' },

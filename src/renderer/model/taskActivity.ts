@@ -11,6 +11,7 @@ import type {
   WorktreeStatus
 } from '../../shared/contracts';
 import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
+import { pluralize, shortSha } from './formatting';
 
 export type TaskActivityActor =
   | 'User'
@@ -131,10 +132,6 @@ export function buildOverviewTaskActivityViewModel(
   input: OverviewTaskActivityInput
 ): TaskActivityViewModel {
   return projectOverviewTaskActivity(buildTaskActivityLedger(input), { limit: input.limit });
-}
-
-export function buildDebugTaskActivityViewModel(input: TaskActivityInput): TaskActivityViewModel {
-  return projectDebugTaskActivity(buildTaskActivityLedger(input));
 }
 
 export function projectOverviewTaskActivity(
@@ -319,7 +316,7 @@ function itemForEvent(
         'review',
         'Agent',
         waiting > 0 ? 'Agent asked for your decision' : 'Agent answered your request',
-        fact(waiting > 0 ? `${waiting} item${waiting === 1 ? '' : 's'} wait on you` : undefined),
+        fact(waiting > 0 ? `${pluralize(waiting, 'item')} wait on you` : undefined),
         waiting > 0 ? 'action' : 'info'
       );
     }
@@ -1394,12 +1391,4 @@ function numberField(payload: Record<string, unknown>, key: string): number | un
 function booleanField(payload: Record<string, unknown>, key: string): boolean | undefined {
   const value = payload[key];
   return typeof value === 'boolean' ? value : undefined;
-}
-
-function shortSha(value: string | undefined): string | undefined {
-  return value ? value.slice(0, 7) : undefined;
-}
-
-function pluralize(count: number, label: string): string {
-  return `${count} ${label}${count === 1 ? '' : 's'}`;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActionButtonTitle } from './ActionButtonTitle';
 import type { Tone } from '../model/viewTypes';
-import { StatusGlyph, statusKindForTone } from './StatusBadge';
+import { StatusGlyph, statusGlyphFor } from './StatusBadge';
 
 /**
  * Shared header for long-running agent operations: one semantic status mark,
@@ -31,7 +31,7 @@ export function RunHeader({
   const elapsed = useElapsed(startedAt, running);
   return (
     <div className="tm-runheader">
-      <StatusGlyph kind={statusKindForTone(tone, running)} />
+      <StatusGlyph kind={statusGlyphFor(tone, running) ?? 'idle'} />
       <h3 className={`tm-runheader__name${running ? ' tm-shimmer' : ''}`}>{operationName}</h3>
       {scope ? <span className="tm-runheader__scope">{scope}</span> : null}
       <span className="tm-runheader__spacer" />

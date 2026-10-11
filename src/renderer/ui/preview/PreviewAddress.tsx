@@ -3,7 +3,7 @@ import { taskManagerApi as api } from '../../api/taskManagerClient';
 import type { PreviewAddress } from '../../model/applicationPreviewRuns';
 import { CopyIconButton } from '../CopyIconButton';
 import { Tooltip } from '../Tooltip';
-import { usePreviewNotify } from './previewPresentation';
+import { useNotify } from '../NotifyContext';
 
 /**
  * Opens a serving address through the runtime, which checks it is this preview's own address.
@@ -28,7 +28,7 @@ export function PreviewAddressActions({ name, address, label, onOpen }: {
   /** Absent where the address cannot be opened from here. */
   onOpen?(address: PreviewAddress): void;
 }) {
-  const notify = usePreviewNotify();
+  const notify = useNotify();
   return (
     <span className="tm-preview-address">
       <span className="tm-preview-address__label" title={address.url}>{label ?? address.text}</span>

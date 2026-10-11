@@ -62,19 +62,34 @@ describe('buildReviewRequestInstruction', () => {
 
 describe('planReviewRequest', () => {
   const view = (id: string, severity: ReviewFindingView['severity'], state: ReviewFindingView['state'] = 'OPEN'): ReviewFindingView => ({
-    ...finding(id, severity), state, addedByReviewer: false
+    ...finding(id, severity), state
   });
   const findings = [view('leak', 'MAJOR'), view('year', 'MINOR'), view('color', 'NIT'), view('test', 'MINOR', 'DISMISSED')];
+  const draft = { includedFindingIds: [], reviewRunId: 'review-2', comments: [], note: '' };
+  const current = { runId: 'review-2', findingsSendable: true, asksForChanges: true };
 
   it('sends blocking findings and the suggestions the person added in this review', () => {
-    const plan = planReviewRequest(findings, { includedFindingIds: ['year'], reviewRunId: 'review-2' }, 'review-2');
+    const plan = planReviewRequest(findings, { ...draft, includedFindingIds: ['year'], reviewRunId: 'review-2' }, current);
     expect(plan.send.map((item) => item.id)).toEqual(['leak', 'year']);
     expect(plan.suggestions.map((item) => item.id)).toEqual(['color']);
     expect(plan.settled.map((item) => item.id)).toEqual(['test']);
+    expect(plan.queued).toBe(true);
+  });
+
+  it('sends only comments and the note for a review that is context only', () => {
+    const plan = planReviewRequest(findings, draft, { ...current, findingsSendable: false });
+    expect([...plan.send, ...plan.suggestions, ...plan.settled]).toEqual([]);
+    expect(plan.queued).toBe(false);
+    expect(planReviewRequest(findings, { ...draft, note: 'Keep the API.' }, { ...current, findingsSendable: false }).queued).toBe(true);
+  });
+
+  it('sends the notes of a review that asks for changes without structured findings', () => {
+    const plan = planReviewRequest([], draft, current);
+    expect(plan).toMatchObject({ reviewNotes: true, queued: true });
   });
 
   it('drops inclusions made in an earlier review', () => {
-    const plan = planReviewRequest(findings, { includedFindingIds: ['year'], reviewRunId: 'review-1' }, 'review-2');
+    const plan = planReviewRequest(findings, { ...draft, includedFindingIds: ['year'], reviewRunId: 'review-1' }, current);
     expect(plan.send.map((item) => item.id)).toEqual(['leak']);
   });
 

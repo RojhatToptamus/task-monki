@@ -2,7 +2,7 @@ import { useId, useState } from 'react';
 import { Check, Undo2, X } from 'lucide-react';
 import type { ReviewFindingDismissReason } from '../../shared/contracts';
 import { findingLevel, formatFindingLocation } from '../model/findings';
-import { isBlockingFinding } from '../model/reviewFollowUp';
+import { isBlockingFinding } from '../../shared/contracts';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { Tooltip } from './Tooltip';
@@ -25,10 +25,9 @@ export function severityLabel(finding: Pick<ReviewFindingView, 'severity'>): str
   return findingLevel(finding.severity).label;
 }
 
-/** How a settled finding reads: dismissed with its reason and note, or withdrawn by the reviewer. */
+/** How a dismissed finding reads: its reason, and its note when it has one. */
 export function settledLabel(finding: ReviewFindingView): string {
-  if (finding.state === 'WITHDRAWN') return `Withdrawn by the reviewer${finding.revision?.reason ? `: ${finding.revision.reason}` : ''}`;
-  const label = finding.dismissal?.reason ? SETTLED_LABELS[finding.dismissal.reason] : 'Dismissed';
+  const label = finding.dismissal ? SETTLED_LABELS[finding.dismissal.reason] : 'Dismissed';
   return finding.dismissal?.note ? `${label}: ${finding.dismissal.note}` : label;
 }
 
@@ -37,7 +36,7 @@ export function settledLabel(finding: ReviewFindingView): string {
  * its title line, always visible. Blocker and Major go in the request; a Minor or
  * Nit is added from its title line. Dismissing asks why (incorrect, intentional,
  * or not now), optionally with a note; the next review honours the reason. A
- * dismissed or withdrawn finding folds to a line that keeps the reason.
+ * dismissed finding folds to a line that keeps the reason.
  */
 export function ReviewFindingThread({
   finding, round, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
@@ -141,11 +140,6 @@ export function ReviewFindingThread({
       {finding.path && !finding.line ? <span className="tm-review-thread__location">{formatFindingLocation(finding)}</span> : null}
       <p className="tm-review-thread__why">{finding.explanation}</p>
       {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
-      {finding.revision ? (
-        <p className="tm-review-thread__revision">
-          {finding.revision.kind === 'ADD' ? 'Added by the reviewer' : `Reviewer changed this from ${findingLevel(finding.originalSeverity ?? finding.severity).label}`}: {finding.revision.reason}
-        </p>
-      ) : null}
       {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>

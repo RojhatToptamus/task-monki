@@ -33,9 +33,9 @@ import type { PreviewAgentConversation, PreviewAgentHost, PreviewProposalActions
 import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { PreviewDiagnosisBlock, PreviewProjectFacts, PreviewRequirementsBlock, PreviewRunApprovalBlock, PreviewWorktreeBlock } from './PreviewDecisionBlocks';
 import { openPreviewAddress, PreviewAddressActions } from './PreviewAddress';
-import { expected, message, PreviewDialog, PreviewNotifyContext, type PreviewNotify } from './previewPresentation';
+import { expected, message, PreviewDialog } from './previewPresentation';
+import { useNotify } from '../NotifyContext';
 
-const silent: PreviewNotify = () => undefined;
 const STATIC_DRAFT = '# Describe the services this project needs.\nname: application\ntype: static\ndirectory: .\n';
 
 function useApplicationPreview(taskId: string, enabled: boolean) {
@@ -98,12 +98,12 @@ export function worktreeAvailability(worktree: WorktreeRecord | undefined, pendi
  * The Overview's Preview section: the state and since when, then the serving addresses. Without a
  * serving run, the line says how the last run ended. The section link opens the Preview tab.
  */
-export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskId: string; onOpen(): void; onNotify?: PreviewNotify }) {
+export function ApplicationPreviewOverview({ taskId, onOpen }: { taskId: string; onOpen(): void }) {
   const { snapshot, error } = useApplicationPreview(taskId, true);
+  const notify = useNotify();
   if (!snapshot?.status && !error) return null;
   const status = snapshot?.status;
   const serving = status?.active;
-  const notify = onNotify ?? silent;
   const services = serving
     ? Object.keys(serving.services ?? {}).flatMap((id) => {
         const address = previewAddress(status, id);
@@ -125,7 +125,6 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
     if (serving) void openPreviewAddress(taskId, serving.id, address).catch((cause) => notify(message(cause), 'error'));
   };
   return (
-    <PreviewNotifyContext.Provider value={notify}>
       <OverviewSection
         title="Preview"
         inset
@@ -150,7 +149,6 @@ export function ApplicationPreviewOverview({ taskId, onOpen, onNotify }: { taskI
         ) : null}
         {services.length > 3 ? <p className="tm-preview-overview__more">{services.length - 3} more in Preview</p> : null}
       </OverviewSection>
-    </PreviewNotifyContext.Provider>
   );
 }
 
@@ -168,13 +166,10 @@ export function ApplicationPreviewPanel({
   onPrepareWorktree,
   onReconnectCheckout,
   onModalOpenChange,
-  onNotify,
   agentHost
 }: {
   taskId: string;
   projectName?: string;
-  /** The app's toast, for completed actions nothing else on screen confirms. */
-  onNotify?: PreviewNotify;
   /** The task worktree: the folder commands run in, and the state that decides whether Preview can run at all. */
   worktree?: WorktreeRecord;
   worktreePending?: boolean;
@@ -191,7 +186,7 @@ export function ApplicationPreviewPanel({
   agentHost?: PreviewAgentHost;
 }) {
   const availability = worktreeAvailability(worktree, worktreePending);
-  const notify = onNotify ?? silent;
+  const notify = useNotify();
   const { snapshot, error: readError, refresh } = useApplicationPreview(taskId, !!worktree);
   const projectDirectory = snapshot?.projectDirectory ?? worktree?.worktreePath;
   const root = useRef<HTMLElement>(null);
@@ -901,5 +896,5 @@ export function ApplicationPreviewPanel({
       ) : null}
     </section>
   );
-  return <PreviewNotifyContext.Provider value={notify}>{workspace}</PreviewNotifyContext.Provider>;
+  return workspace;
 }

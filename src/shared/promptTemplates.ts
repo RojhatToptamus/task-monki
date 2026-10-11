@@ -538,7 +538,7 @@ export function buildSteerInstruction(input: {
     .join('\n');
 }
 
-/** The earlier review's findings as the person and its reviewer left them. */
+/** The earlier review's findings as the person left them. */
 export interface PreviousReviewContext {
   verdict?: AgentReviewResult['verdict'];
   summary?: string;
@@ -598,7 +598,7 @@ function previousReviewSection(review: PreviousReviewContext | undefined): strin
       ? [`- … and ${review.findings.length - listed.length} more findings`]
       : []),
     ...(review.findings.length > 0
-      ? ['The person decided on these findings. Never raise one they marked incorrect, or one withdrawn, again. Raise one they marked intentional again only if the code around it changed materially, and say why. Do not raise one they deferred again.']
+      ? ['The person decided on these findings. Never raise one they marked incorrect again. Raise one they marked intentional again only if the code around it changed materially, and say why. Do not raise one they deferred again.']
       : []),
     ...(review.request ? previousRequestLines(review.request) : []),
     '',
@@ -628,8 +628,7 @@ function previousRequestLines(request: NonNullable<PreviousReviewContext['reques
 function dismissalPhrase(dismissal: NonNullable<EffectiveReviewFinding['dismissal']>): string {
   const how = dismissal.reason === 'NOT_A_PROBLEM' ? 'marked incorrect by the person'
     : dismissal.reason === 'ACCEPTED' ? 'marked intentional by the person'
-      : dismissal.reason === 'DEFERRED' ? 'deferred by the person'
-        : 'dismissed by the person';
+      : 'deferred by the person';
   return `${how}${dismissal.note ? `: ${boundedText(dismissal.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}`;
 }
 
@@ -643,17 +642,8 @@ function sentenceStart(text: string): string {
 }
 
 function previousFindingLine(finding: EffectiveReviewFinding): string {
-  const state =
-    finding.state === 'DISMISSED' && finding.dismissal
-      ? dismissalPhrase(finding.dismissal)
-      : finding.state === 'WITHDRAWN'
-        ? `withdrawn by the reviewer: ${boundedText(finding.revision?.reason ?? '', REVIEW_CONTEXT_TEXT_LIMIT)}`
-        : 'open';
-  const revision =
-    finding.state !== 'WITHDRAWN' && finding.revision
-      ? ` The reviewer ${finding.revision.kind === 'ADD' ? 'added it' : 'changed its severity'}: ${boundedText(finding.revision.reason, REVIEW_CONTEXT_TEXT_LIMIT)}`
-      : '';
-  return `id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)} (${state}).${revision}`;
+  const state = finding.dismissal ? dismissalPhrase(finding.dismissal) : 'open';
+  return `id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)} (${state}).`;
 }
 
 export const READ_ONLY_TURN_CONTRACT =
@@ -662,7 +652,7 @@ export const READ_ONLY_TURN_CONTRACT =
 /** One finding of the current review, as an Ask answer reads it. */
 function askFindingBlock(finding: EffectiveReviewFinding): string {
   return [
-    `- id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)}; ${finding.state === 'OPEN' ? 'open' : finding.state === 'WITHDRAWN' ? 'withdrawn by the reviewer' : 'dismissed'}.`,
+    `- id ${finding.id}: [${finding.severity}] ${finding.title}${findingLocation(finding)}; ${finding.state === 'OPEN' ? 'open' : 'dismissed'}.`,
     `  Explanation: ${boundedText(finding.explanation, REVIEW_CONTEXT_TEXT_LIMIT)}`,
     ...(finding.recommendation
       ? [`  Recommendation: ${boundedText(finding.recommendation, REVIEW_CONTEXT_TEXT_LIMIT)}`]
@@ -688,7 +678,7 @@ function boundedText(value: string, limit: number): string {
 
 export const SIDE_QUESTION_CONVERSATION_LIMIT = 6;
 const SIDE_QUESTION_CONVERSATION_TEXT_LIMIT = 2_000;
-const SIDE_QUESTION_HISTORY_LIMIT = 6;
+export const SIDE_QUESTION_HISTORY_LIMIT = 6;
 const SIDE_QUESTION_HISTORY_TEXT_LIMIT = 4_000;
 const SIDE_QUESTION_REQUEST_TEXT_LIMIT = 6_000;
 const SIDE_QUESTION_DIFF_STAT_LIMIT = 4_000;
@@ -789,7 +779,7 @@ export function buildSideQuestionPrompt(context: SideQuestionPromptContext): str
       : 'The implementation agent is not running.',
     '',
     'Diff stat from Task Monki\'s latest Git capture:',
-    boundedText(context.diffStat, SIDE_QUESTION_DIFF_STAT_LIMIT) || 'No changes were recorded.',
+    boundedText(context.diffStat, SIDE_QUESTION_DIFF_STAT_LIMIT),
     '',
     `Checkout: ${context.checkout.path}`,
     ...(context.checkout.snapshot

@@ -49,6 +49,7 @@ import {
 } from './theme';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
+import { FactLine } from './FactLine';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
@@ -285,11 +286,7 @@ function AgentRuntimeSetting({
         <div className="tm-agent-setting__identity">
           <div>
             <h3>{runtime.preflight.runtime.displayName}</h3>
-            <p id={statusId} className="tm-agent-setting__facts">
-              {statusDetail.map((part, index) => (
-                <span key={index}>{index > 0 ? ' ' : null}{part}</span>
-              ))}
-            </p>
+            <p id={statusId}><FactLine facts={statusDetail} /></p>
           </div>
         </div>
         <SettingsSwitch

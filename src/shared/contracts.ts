@@ -436,16 +436,11 @@ export interface TaskInstruction extends InstructionAttachments {
   status: 'QUEUED' | 'HELD' | 'SENDING' | 'SUBMITTED' | 'FAILED' | 'UNCERTAIN';
   /**
    * The conversation this message belongs to; absent for the task's primary agent session.
-   * PREVIEW is the Preview agent conversation. REVIEW is a question to the reviewer of
-   * `reviewRunId`, answered by its own read-only REVIEW_QUESTION run (`runId`). SIDE is a
-   * side question to the task's implementation agent in thread `threadId`, answered by its
-   * own read-only SIDE_QUESTION run (`runId`); it never joins the main conversation.
+   * PREVIEW is the Preview agent conversation. SIDE is a question in Ask, thread
+   * `threadId`, answered by its own read-only SIDE_QUESTION run (`runId`); it never joins
+   * the main conversation.
    */
-  role?: 'PREVIEW' | 'REVIEW' | 'SIDE';
-  /** REVIEW only: the review run the question is about. */
-  reviewRunId?: string;
-  /** REVIEW only: the finding the question is about. */
-  findingId?: string;
+  role?: 'PREVIEW' | 'SIDE';
   /** SIDE only: the side thread (one per open side panel) the question belongs to. */
   threadId?: string;
   /**
@@ -950,13 +945,10 @@ export interface BoardAgentReviewSummary {
   status: AgentReviewGateStatus;
   runId?: string;
   hasResult: boolean;
-  /** Open findings by their current severity, after the person's and reviewer's decisions. */
+  /** Open findings by severity, after the person's decisions. */
   findingCounts: Partial<Record<AgentReviewFindingSeverity, number>>;
-  /**
-   * `effectiveReviewGateStatus` of the review: the status once every decision applies,
-   * which can differ from `status` both ways. Task Monki always sets it.
-   */
-  effectiveStatus?: AgentReviewGateStatus;
+  /** `effectiveReviewGateStatus` of the review: the status once every decision applies, which can differ from `status` both ways. */
+  effectiveStatus: AgentReviewGateStatus;
   /** The agent answered the request after this review; true when an item waits on the person's decision. */
   requestAnswered?: { awaitingDecision: boolean };
 }
@@ -1345,8 +1337,6 @@ export interface UpdateAppSettingsRequest {
   discourseDefaults?: import('./discourse').DiscourseDefaults;
   theme?: import('./agent').TaskManagerThemePreference;
   themePreset?: import('./agent').TaskManagerThemePreset;
-  sidebarCollapsed?: boolean;
-  showMascot?: boolean;
   autoInstallUpdatesOnQuit?: boolean;
   firstLaunchSetupCompleted?: boolean;
   disabledRuntimeIds?: import('./agent').AgentRuntimeId[];
@@ -1744,8 +1734,7 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
   /** What changed from the code a review read to the worktree now. */
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
-  /** Records a question to the reviewer and starts its read-only answer run. */
-  /** Records a side question to the task's implementation agent and starts its read-only answer run. */
+  /** Records a question in Ask and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;
   /** Ends a side thread: stops its active question and removes its worktree snapshot. */

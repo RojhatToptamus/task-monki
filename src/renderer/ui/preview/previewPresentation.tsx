@@ -1,6 +1,4 @@
 import {
-  createContext,
-  useContext,
   useLayoutEffect,
   useRef,
   type FormEventHandler,
@@ -21,6 +19,7 @@ import { FactLine } from '../FactLine';
 import { Tooltip } from '../Tooltip';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { SourceFolderActions } from './PreviewSourceFolder';
+import { useNotify } from '../NotifyContext';
 
 export const message = (error: unknown) =>
   error instanceof Error
@@ -101,13 +100,9 @@ export function folderName(directory: string, projectDirectory?: string): string
   return directory.split('/').filter(Boolean).at(-1) ?? directory;
 }
 
-/** The app's toast, for completed actions nothing else on screen confirms. Silent when absent. */
-export type PreviewNotify = (message: string, tone?: 'info' | 'success' | 'error') => void;
-export const PreviewNotifyContext = createContext<PreviewNotify>(() => undefined);
-export const usePreviewNotify = () => useContext(PreviewNotifyContext);
 
 export function CopyPath({ path }: { path: string }) {
-  const notify = usePreviewNotify();
+  const notify = useNotify();
   return (
     <button
       type="button"
@@ -187,7 +182,7 @@ export function PreviewDialog({
   fallbackReturnFocusRef,
   returnFocus
 }: {
-  size?: 'compact' | 'form' | 'review';
+  size?: 'compact' | 'form';
   returnFocus?: HTMLElement | null;
   fallbackReturnFocusRef?: RefObject<HTMLElement | null>;
   title: string;
@@ -231,7 +226,7 @@ export function PreviewDialog({
           <h3>{title}</h3>
           <Tooltip label="Close"><button
             type="button"
-            className="tm-preview-icon-button"
+            className="tm-iconbtn"
             disabled={busy}
             onClick={onClose}
             aria-label="Close"

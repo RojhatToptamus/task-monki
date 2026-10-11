@@ -594,7 +594,7 @@ function DesignTurnMessages({
 
       {entry.userInputInteractions?.filter((interaction) => !['PENDING', 'RESPONDING'].includes(interaction.status))
         .map((interaction) => <UserInputSummary key={interaction.id} interaction={interaction} />)}
-      <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
+      <Message from="agent" label="Design agent">
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
         ) : null}

@@ -8,7 +8,7 @@ function file(path: string, additions = 1, deletions = 0): DiffFile {
 }
 
 function finding(severity: ReviewFindingView['severity'], state: ReviewFindingView['state'] = 'OPEN'): ReviewFindingView {
-  return { id: `${severity}-${state}`, severity, title: 'A finding', explanation: 'Because.', state, addedByReviewer: false };
+  return { id: `${severity}-${state}`, severity, title: 'A finding', explanation: 'Because.', state };
 }
 
 describe('review file order', () => {

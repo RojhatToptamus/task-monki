@@ -110,7 +110,7 @@ ambiguous mutation is never replayed automatically.
 Terminal reconciliation preserves the recorded run completion time. The time
 of event receipt does not replace that historical value, and later updates to a
 settled run, such as its post-run Git snapshot, keep it. Startup identifies a
-review, reviewer question, or side question outcome by its run: when the Task
+review or side question outcome by its run: when the Task
 store already records that outcome, under whichever operation recorded it,
 startup only settles the runtime record and does not publish the result or
 capture post-run evidence again.

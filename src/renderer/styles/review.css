@@ -3,9 +3,6 @@
 /* findings and the person's comments on it, and the request at the foot    */
 /* ======================================================================= */
 
-/* These bodies never scroll; their own panes do, so they reserve no gutter. */
-.tm-detail__body.tm-detail__body--review { display: flex; flex-direction: column; padding: 0; overflow: hidden; scrollbar-gutter: auto; }
-
 /* --review-num is the review's gutter: wide enough for its largest line number and
    the comment "+" beside it, the same for every file. Threads start at the code
    column after the marker. */
@@ -13,7 +10,7 @@
 
 /* The toolbar: the rail's switch over the rail, then the review's state, what is
    compared, the view, and the review action. */
-.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: 40px; padding: 0 16px 0 0; border-bottom: 1px solid var(--hair); }
+.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 0; border-bottom: 1px solid var(--hair); }
 .tm-review__rail-switch { flex: 0 0 auto; width: calc(var(--review-index-width) - 16px); margin: 0 8px; }
 .tm-review__rail-switch .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review__rail-count { margin-left: 5px; color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -46,13 +43,10 @@
 .tm-review__index-feedback { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 3px; color: var(--muted); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-review__index-feedback[data-tone='blocked'] { color: var(--blocked-ink); }
 .tm-review__index-viewed { flex: 0 0 auto; color: var(--faint); }
-.tm-review-stat { display: inline-flex; flex: 0 0 auto; gap: 6px; font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
-.tm-review-stat__add { color: var(--verified-ink); }
-.tm-review-stat__del { color: var(--blocked-ink); }
 .tm-review__index-finding { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: baseline; column-gap: 6px; padding: 5px 8px; border-radius: var(--r-xs); color: var(--text-soft); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review__index-finding:hover { background-color: var(--hover); color: var(--text); }
 .tm-review__index-finding--active { background: var(--sel); color: var(--text); }
-.tm-review__index-finding:is([data-state='DISMISSED'], [data-state='WITHDRAWN']) :is(.tm-review__index-title, .tm-review__severity) { color: var(--faint); }
+.tm-review__index-finding[data-state='DISMISSED'] :is(.tm-review__index-title, .tm-review__severity) { color: var(--faint); }
 .tm-review__index-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review__index-loc { grid-column: 2; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
 
@@ -94,7 +88,7 @@
 /* The edge is a border, not an inset ring: rows paint their tints to the card's
    sides, and a border stays above them while the clip rounds them at the corners. */
 .tm-review-file { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); flex: 0 0 auto; border: 1px solid var(--edge-raised); border-radius: var(--r-sm); overflow: clip; }
-.tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
+.tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: var(--h-row); padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
 .tm-review-file--collapsed .tm-review-file__head { position: static; border-bottom: 0; }
 /* Full screen: the file takes the whole page sheet. The task's tab bar (in
    TaskDetail), the toolbar, the navigator, the brief, findings without a
@@ -180,7 +174,6 @@
 .tm-review-thread__location { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); }
 .tm-review-thread__why { margin: 0; color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
 .tm-review-thread__fix { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
-.tm-review-thread__revision,
 .tm-review-thread__earlier { margin: 0; color: var(--muted); font-size: var(--t-help); }
 .tm-review-thread--earlier { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
 .tm-review-thread__dismiss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }

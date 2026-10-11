@@ -15,6 +15,7 @@ import { MessageMarkdown } from './MessageMarkdown';
 import { PlanCard } from './Plan';
 import { ReviewAnswers, ReviewRequestCard } from './ReviewRound';
 import { UserInputSummary } from './UserInputSummary';
+import { ReportedQuote } from './ReportedQuote';
 
 /**
  * Projects each run into a turn. Task detail arrives as a fresh snapshot on
@@ -121,10 +122,7 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
     {failure ? <div className="tm-turn__notice" data-status={failure.status}>
       <CircleAlert size={16} aria-hidden="true" />
       <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
-        {failure.reportedReason ? <figure className="tm-turn__reported">
-          <figcaption>{sourceName ?? 'Agent'}</figcaption>
-          <blockquote>{failure.reportedReason}</blockquote>
-        </figure> : null}</div>
+        {failure.reportedReason ? <ReportedQuote className="tm-turn__reported" source={sourceName ?? 'Agent'}>{failure.reportedReason}</ReportedQuote> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}
     {live ? null : <TurnFooter turn={turn} noticeShown={Boolean(failure)} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}

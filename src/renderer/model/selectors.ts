@@ -113,15 +113,6 @@ export function canCreateDeliveryCommit(task: Task, worktree?: WorktreeRecord): 
   );
 }
 
-export function canCancelRun(run: RunRecord | undefined): boolean {
-  return Boolean(
-    run &&
-      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
-        run.status
-      )
-  );
-}
-
 export function formatShortId(id: string): string {
   return id.slice(0, 8);
 }

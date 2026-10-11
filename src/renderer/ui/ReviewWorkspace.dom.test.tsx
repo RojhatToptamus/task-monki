@@ -27,16 +27,17 @@ function diffFor(path: string, added = 'new'): string {
 
 const finding: ReviewFindingView = {
   id: 'f1', severity: 'MAJOR', title: 'Limiter state is per process', explanation: 'Each replica keeps its own buckets.',
-  recommendation: 'Keep buckets in Redis.', path: 'src/rateLimit.ts', line: 1, state: 'OPEN', addedByReviewer: false
+  recommendation: 'Keep buckets in Redis.', path: 'src/rateLimit.ts', line: 1, state: 'OPEN'
 };
 const suggestion: ReviewFindingView = {
-  id: 'f2', severity: 'MINOR', title: 'Name the limit', explanation: 'A bare number.', path: 'src/rateLimit.ts', line: 1, state: 'OPEN', addedByReviewer: false
+  id: 'f2', severity: 'MINOR', title: 'Name the limit', explanation: 'A bare number.', path: 'src/rateLimit.ts', line: 1, state: 'OPEN'
 };
 
 function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(draft: TaskReviewDraft): void }) {
   const [draft, setDraft] = useState<TaskReviewDraft>(EMPTY_REVIEW_DRAFT);
   const review = 'review' in overrides ? overrides.review : { status: 'NEEDS_CHANGES' as const, reviewedAt: '2026-07-07T10:12:00.000Z', runId: 'review-1' };
   const findings = overrides.findings ?? [finding];
+  const findingsSendable = review?.status !== 'STALE' && review?.status !== 'RUNNING';
   return (
     <ReviewWorkspace
       taskId={`task-${Math.random()}`}
@@ -44,9 +45,9 @@ function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(draft: T
       artifacts={[artifact()]}
       draft={draft}
       onDraftChange={setDraft}
-      plan={planReviewRequest(findings, draft, review?.runId)}
-      findingsSendable={review?.status !== 'STALE'}
-      requestChanges={{ busy: false, reviewNotes: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
+      plan={planReviewRequest(findings, draft, { runId: review?.runId, findingsSendable, asksForChanges: false })}
+      findingsSendable={findingsSendable}
+      requestChanges={{ busy: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
       {...overrides}
       review={review}
       findings={findings}

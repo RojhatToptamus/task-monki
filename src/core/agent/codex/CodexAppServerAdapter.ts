@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { mkdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
@@ -7277,7 +7279,6 @@ function isSharedReadOnlyRuntimePurpose(
 ): boolean {
   return (
     purpose === 'TASK_REVIEW' ||
-    purpose === 'TASK_REVIEW_QUESTION' ||
     purpose === 'TASK_SIDE_QUESTION' ||
     purpose === 'PROMPT_REFINEMENT' ||
     purpose === 'PREVIEW_RECIPE_GENERATION' ||
@@ -7752,6 +7753,21 @@ function isRuntimeRevisionConflict(error: unknown): boolean {
   );
 }
 
+/**
+ * An empty home for isolated shells. Tools that write under `~` (npm's cache and
+ * logs, for one) then write here, never into the checkout a read-only turn must
+ * leave unchanged.
+ */
+let isolatedHome: string | undefined;
+function isolatedHomeDirectory(): string {
+  if (!isolatedHome) {
+    const directory = path.join(os.tmpdir(), 'task-monki-isolated-home');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    isolatedHome = directory;
+  }
+  return isolatedHome;
+}
+
 function codexGitSubprocessConfig(input: {
   worktreePath: string;
   isolateHome: boolean;
@@ -7767,8 +7783,8 @@ function codexGitSubprocessConfig(input: {
       set: {
         ...(input.isolateHome
           ? {
-              HOME: input.worktreePath,
-              XDG_CONFIG_HOME: path.join(input.worktreePath, '.config')
+              HOME: isolatedHomeDirectory(),
+              XDG_CONFIG_HOME: path.join(isolatedHomeDirectory(), '.config')
             }
           : {}),
         GIT_CONFIG_GLOBAL: nullDevice,

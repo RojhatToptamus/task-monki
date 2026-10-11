@@ -1,12 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Tone } from '../model/viewTypes';
 import { DisclosureChevron } from './DisclosureChevron';
-export {
-  FINDING_LEVELS,
-  findingLevel,
-  formatFindingLocation,
-  shortFindingRef
-} from '../model/findings';
 
 export interface FindingRowProps {
   tone: Tone;

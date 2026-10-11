@@ -5038,7 +5038,6 @@ function taskPurposeFromMode(mode: AgentRunMode): AgentRuntimeRunRecord['purpose
     case 'FOLLOW_UP': return 'TASK_FOLLOW_UP';
     case 'RETRY': return 'TASK_RETRY';
     case 'REVIEW': return 'TASK_REVIEW';
-    case 'REVIEW_QUESTION': return 'TASK_REVIEW_QUESTION';
     case 'SIDE_QUESTION': return 'TASK_SIDE_QUESTION';
     case 'DESIGN': return 'TASK_DESIGN';
     case 'PREVIEW': return 'TASK_PREVIEW';
@@ -5056,7 +5055,6 @@ function taskModeFromPurpose(
     case 'TASK_FOLLOW_UP': return 'FOLLOW_UP';
     case 'TASK_RETRY': return 'RETRY';
     case 'TASK_REVIEW': return 'REVIEW';
-    case 'TASK_REVIEW_QUESTION': return 'REVIEW_QUESTION';
     case 'TASK_SIDE_QUESTION': return 'SIDE_QUESTION';
     case 'TASK_DESIGN': return 'DESIGN';
     case 'TASK_PREVIEW': return 'PREVIEW';

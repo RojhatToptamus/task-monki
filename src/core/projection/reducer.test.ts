@@ -76,7 +76,7 @@ describe('projection reducer', () => {
     expect(completed.runs[0].status).toBe('COMPLETED');
   });
 
-  it.each(['REVIEW_QUESTION', 'SIDE_QUESTION'] as const)(
+  it.each(['SIDE_QUESTION'] as const)(
     'keeps a %s run beside the task without staling its review',
     (mode) => {
       const task = createTask({
@@ -107,7 +107,7 @@ describe('projection reducer', () => {
 
   it('records finding decisions only for the current review and resets them for a new review', () => {
     const decision = (id: string, reviewRunId: string) => ({
-      id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, actor: 'USER' as const, createdAt: now
+      id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, dismissReason: 'ACCEPTED' as const, createdAt: now
     });
     const task = createTask({
       workflowPhase: 'REVIEW',

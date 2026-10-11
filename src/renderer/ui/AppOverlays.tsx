@@ -343,7 +343,7 @@ export function DesignExternalLinkModal({
         </div>
         <p>Only open destinations that you trust.</p>
         {error ? (
-          <p className="tm-design-external__error" role="alert">
+          <p className="tm-error tm-modal__error" role="alert">
             {error}
           </p>
         ) : null}

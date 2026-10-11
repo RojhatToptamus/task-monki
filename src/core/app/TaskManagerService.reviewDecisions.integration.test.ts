@@ -64,7 +64,7 @@ describe('TaskManagerService review finding decisions', () => {
       taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS', dismissReason: 'ACCEPTED', note: '  Handled by the caller.  '
     });
     expect(dismissed).toMatchObject({
-      actor: 'USER', kind: 'DISMISS', findingId: 'leak', dismissReason: 'ACCEPTED', note: 'Handled by the caller.'
+      kind: 'DISMISS', findingId: 'leak', dismissReason: 'ACCEPTED', note: 'Handled by the caller.'
     });
     // With the Major dismissed, nothing would be sent by default: the review no longer asks for changes.
     expect(await boardReview(s, task.id)).toMatchObject({ status: 'NEEDS_CHANGES', effectiveStatus: 'PASSED', findingCounts: { MINOR: 1, NIT: 1 } });
@@ -73,23 +73,26 @@ describe('TaskManagerService review finding decisions', () => {
     expect(await boardReview(s, task.id)).toMatchObject({ status: 'NEEDS_CHANGES', effectiveStatus: 'PASSED', findingCounts: {} });
 
     await expect(s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS'
+      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS', dismissReason: 'ACCEPTED'
     })).rejects.toThrow('already dismissed');
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE', note: 'Not allowed.'
-    })).rejects.toThrow('Only a dismissal takes a note.');
+    })).rejects.toThrow('Only a dismissal takes a reason and a note.');
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE', dismissReason: 'NOT_A_PROBLEM'
-    })).rejects.toThrow('A dismissal reason is Incorrect, Intentional or Won\'t fix now.');
+    })).rejects.toThrow('Only a dismissal takes a reason and a note.');
     await expect(s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'missing', kind: 'DISMISS'
+      taskId: task.id, reviewRunId: review.id, findingId: 'missing', kind: 'DISMISS', dismissReason: 'ACCEPTED'
     })).rejects.toThrow('not part of the review');
+    await expect(s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS'
+    })).rejects.toThrow('A dismissal reason is Incorrect, Intentional or Won\'t fix now.');
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: randomUUID(), findingId: 'leak', kind: 'RESTORE'
     })).rejects.toThrow('no longer the task’s current review');
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE', note: 'x'.repeat(501)
-    })).rejects.toThrow('Only a dismissal takes a note.');
+    })).rejects.toThrow('Only a dismissal takes a reason and a note.');
     // A missing review or finding ID is refused up front, never treated as "the current review".
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: undefined as unknown as string, findingId: 'naming', kind: 'DISMISS'
@@ -102,10 +105,10 @@ describe('TaskManagerService review finding decisions', () => {
     await s.service.decideReviewFinding({ taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE' });
     expect(await boardReview(s, task.id)).toMatchObject({ effectiveStatus: 'PASSED', findingCounts: { NIT: 1 } });
     await expect(s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS', note: 'x'.repeat(501)
+      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS', dismissReason: 'ACCEPTED', note: 'x'.repeat(501)
     })).rejects.toThrow('at most 500 characters');
     const recorded = reviewOf(await s.store.snapshot(), task.id)?.findingDecisions ?? [];
-    expect(recorded.map((decision) => `${decision.kind}:${decision.findingId}:${decision.dismissReason ?? ''}`)).toEqual([
+    expect(recorded.map((decision) => `${decision.kind}:${decision.findingId}:${decision.kind === 'DISMISS' ? decision.dismissReason : ''}`)).toEqual([
       'DISMISS:leak:ACCEPTED', 'DISMISS:docs:DEFERRED', 'DISMISS:naming:NOT_A_PROBLEM', 'RESTORE:naming:'
     ]);
 
@@ -113,7 +116,7 @@ describe('TaskManagerService review finding decisions', () => {
     await s.service.refreshEvidence({ taskId: task.id });
     expect(reviewOf(await s.store.snapshot(), task.id)?.status).toBe('STALE');
     await expect(s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS'
+      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS', dismissReason: 'ACCEPTED'
     })).rejects.toThrow('The code changed after this review.');
 
     // The next review starts with no decisions and is told how each earlier finding was left.
@@ -123,14 +126,14 @@ describe('TaskManagerService review finding decisions', () => {
     expect(rerunPrompt).toContain('[MAJOR] Listener leaks at feature.ts:2 (marked intentional by the person: Handled by the caller.)');
     expect(rerunPrompt).toContain('[MINOR] Missing docs (deferred by the person)');
     expect(rerunPrompt).toContain('[NIT] Unclear name (open)');
-    expect(rerunPrompt).toContain('Never raise one they marked incorrect, or one withdrawn, again.');
+    expect(rerunPrompt).toContain('Never raise one they marked incorrect again.');
     expect(rerunPrompt).toContain('Raise one they marked intentional again only if the code around it changed materially');
   }, 20_000);
 
   it('keeps the review of a canceled or archived task as a record that takes no decisions', async () => {
     const { s, task, review } = await reviewedTask('task-monki-review-decisions-closed-task');
     const dismiss = () => s.service.decideReviewFinding({
-      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS'
+      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS', dismissReason: 'ACCEPTED'
     });
 
     await s.service.transitionTask({ taskId: task.id, toPhase: 'CANCELED' });

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES, SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES } from '../../shared/sideQuestions';
 import type { ReviewChangesResult } from '../../shared/contracts';
 import { git, gitResult } from './gitCli';
+import { planUntrackedFiles } from './ReadOnlySnapshotService';
 
 const GIT_TIMEOUT_MS = 120_000;
 /** A diff of changes since a review larger than this is not shown; the full diff still is. */
@@ -101,7 +101,7 @@ export class ReviewSnapshotStore {
       if (await exists(ownIndex)) await fs.copyFile(ownIndex, index);
       else await git(worktreePath, ['read-tree', 'HEAD'], { timeout: GIT_TIMEOUT_MS, env });
       await git(worktreePath, ['add', '--update', '--', '.'], { timeout: GIT_TIMEOUT_MS, env });
-      const untracked = await untrackedWithinLimits(worktreePath, env);
+      const untracked = (await planUntrackedFiles(worktreePath)).files.map((file) => file.relative);
       if (untracked.length) {
         await git(worktreePath, ['add', '--pathspec-from-file=-', '--pathspec-file-nul'], { timeout: GIT_TIMEOUT_MS, env, stdin: untracked.join('\0') });
       }
@@ -118,22 +118,6 @@ export class ReviewSnapshotStore {
     this.queues.set(key, next.catch(() => undefined));
     return next;
   }
-}
-
-/** Untracked files Git does not ignore, within the same limits as a side question's snapshot. */
-async function untrackedWithinLimits(worktreePath: string, env: NodeJS.ProcessEnv): Promise<string[]> {
-  const listed = (await git(worktreePath, ['ls-files', '--others', '--exclude-standard', '-z'], { timeout: GIT_TIMEOUT_MS, env }))
-    .split('\0').filter(Boolean);
-  const kept: string[] = [];
-  let total = 0;
-  for (const relative of listed) {
-    const stat = await fs.lstat(path.join(worktreePath, relative)).catch(() => undefined);
-    if (!stat || !(stat.isFile() || stat.isSymbolicLink())) continue;
-    if (stat.size > SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES || total + stat.size > SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES) continue;
-    total += stat.size;
-    kept.push(relative);
-  }
-  return kept;
 }
 
 function reviewRef(taskId: string, reviewRunId: string): string {

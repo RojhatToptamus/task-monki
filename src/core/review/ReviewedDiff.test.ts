@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatReviewedDiffStat, parseReviewedDiff, reviewedDiffExcerpt } from './ReviewedDiff';
+import { parseReviewedDiff, reviewedDiffExcerpt } from './ReviewedDiff';
 
 const DIFF = [
   '# Git diff evidence',
@@ -36,12 +36,8 @@ const DIFF = [
 ].join('\n');
 
 describe('reviewed diff evidence', () => {
-  it('reads every changed path, including untracked files, with its counts', () => {
-    expect(parseReviewedDiff(DIFF).map(({ path, additions, deletions }) => ({ path, additions, deletions }))).toEqual([
-      { path: 'src/a.ts', additions: 1, deletions: 1 },
-      { path: 'src/new.ts', additions: 1, deletions: 0 }
-    ]);
-    expect(formatReviewedDiffStat(parseReviewedDiff(DIFF))).toBe('- src/a.ts (+1 -1)\n- src/new.ts (+1 -0)');
+  it('reads every changed path, including untracked files, once', () => {
+    expect(parseReviewedDiff(DIFF).map(({ path, hunks }) => [path, hunks.length])).toEqual([['src/a.ts', 1], ['src/new.ts', 1]]);
   });
 
   it('prints one file’s hunks as an excerpt', () => {

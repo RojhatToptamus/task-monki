@@ -203,7 +203,6 @@ export type AgentRuntimePurpose =
   | 'TASK_FOLLOW_UP'
   | 'TASK_RETRY'
   | 'TASK_REVIEW'
-  | 'TASK_REVIEW_QUESTION'
   | 'TASK_SIDE_QUESTION'
   | 'TASK_DESIGN'
   | 'TASK_PREVIEW'

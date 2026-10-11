@@ -256,7 +256,7 @@ function RepositorySearch({
       {query ? (
         <button
           type="button"
-          className="tm-filefilter__clear"
+          className="tm-iconbtn"
           aria-label="Clear repository search"
           disabled={disabled}
           onClick={() => onQueryChange('')}

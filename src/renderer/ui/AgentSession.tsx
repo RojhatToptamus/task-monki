@@ -71,8 +71,7 @@ const READING_KEY = 'task-monki:agent-reading';
 export function AgentSession(props: AgentSessionProps) {
   const { task, run, draft } = props;
   const [choice, setChoice] = useState<{ runId: string; mode: SendMode }>();
-  const [pendingAction, setPendingAction] = useState<'submit' | 'other'>();
-  const busy = pendingAction !== undefined;
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ runId?: string; text: string }>();
   const [reading] = useState(() => savedReading(task.id));
   const scroller = useConversationScroll({ startAtBottom: !reading || reading.following });
@@ -200,13 +199,13 @@ export function AgentSession(props: AgentSessionProps) {
       });
   }, [busy, props.instructions, draft, props.onDraftChange, props.onFlushDraft, files.finishAdoption, files.closedRef, run?.id]);
 
-  async function act(action: () => Promise<void>, kind: 'submit' | 'other' = 'other') {
+  async function act(action: () => Promise<void>) {
     if (inFlight.current) return;
     inFlight.current = true;
-    setPendingAction(kind); setError(undefined);
+    setBusy(true); setError(undefined);
     try { await action(); }
     catch (caught) { setError({ runId: run?.id, text: caught instanceof Error ? caught.message : String(caught) }); }
-    finally { inFlight.current = false; setPendingAction(undefined); }
+    finally { inFlight.current = false; setBusy(false); }
   }
   async function submit() {
     if (!run || !mode || blocked || busy || files.busy || files.hasErrors || files.modelError || (needsText && !draft.trim())) return;
@@ -231,7 +230,7 @@ export function AgentSession(props: AgentSessionProps) {
       messageId.current = undefined;
       void scroller.scrollToBottom();
       composer.current?.focus();
-    }, 'submit');
+    });
   }
 
   const cancelEdit = () => {

@@ -9,11 +9,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compareRatchets } from './design-baseline.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const uiDirectory = resolve(here, '../src/renderer/ui');
 const modelDirectory = resolve(here, '../src/renderer/model');
-const baseline = JSON.parse(readFileSync(resolve(here, 'design-baseline.json'), 'utf8'));
 
 // A string literal, template or JSX text that carries the pattern.
 const inCopy = (inner) => new RegExp(`[\`'">][^\`'"<\\n]*${inner}`, 'gu');
@@ -25,7 +25,11 @@ const rules = [
   { pattern: />[^<{]*\b(?:Click|Please|successfully|Oops|Simply|Tip:|Note:)\b[^<]*</g, message: 'banned word in interface copy (DESIGN.md §5)' },
   { pattern: /placeholder=["'{`][^"'}`]*(?:…|\.\.\.)["'}`]/g, message: 'placeholder ending in an ellipsis (DESIGN.md §5)' },
   { pattern: /\b(?:Loader2?|LoaderCircle|LoaderPinwheel)\b/g, message: 'spinner icon; work in flight is the still StatusGlyph and a shimmer (DESIGN.md §6.6)' },
-  { pattern: /import[^;]*\bBot\w*\b[^;]*from\s+['"]lucide-react['"]/g, message: 'robot icon; every agent is AgentMark (DESIGN.md §8.3)' }
+  { pattern: /import[^;]*\bBot\w*\b[^;]*from\s+['"]lucide-react['"]/g, message: 'robot icon; every agent is AgentMark (DESIGN.md §8.3)' },
+  // Icons come in the sizes DESIGN.md §8.3 names (12 only for a glyph inside a
+  // 16px mark) and draw the shared --icon-stroke, so no component sets its own.
+  { pattern: /\bsize=\{(?!(?:12|13|16|18)\})\d+\}/g, message: 'icon size outside 13, 16, 18 (12 inside a 16px mark)' },
+  { pattern: /\b(?:strokeWidth|absoluteStrokeWidth)=/g, message: 'icon stroke set on the component; the stroke is --icon-stroke' }
 ];
 const ratchets = {
   'native-title-on-button': { pattern: /<button\b[^>]*\btitle=/g, message: 'native title on a button; name it with Tooltip and state a disabled reason beside the actions (DESIGN.md §4, §10)' }
@@ -60,20 +64,12 @@ for (const file of sourceFiles(uiDirectory, '.tsx')) {
   }
 }
 
-const report = [];
-for (const [rule, hits] of Object.entries(ratchetHits)) {
-  const allowed = baseline.renderer?.[rule];
-  if (allowed === undefined) throw new Error(`tools/design-baseline.json has no renderer.${rule}`);
-  if (hits.length > allowed) {
-    failures.push(`${ratchets[rule].message}: ${hits.length} now, ${allowed} allowed. Latest: ${hits.slice(-Math.min(5, hits.length - allowed)).join(', ')}`);
-  } else if (hits.length < allowed) {
-    report.push(`${rule}: ${hits.length} (baseline ${allowed}; lower renderer.${rule} in tools/design-baseline.json)`);
-  }
-}
+const compared = compareRatchets('renderer', ratchetHits, Object.fromEntries(Object.entries(ratchets).map(([name, rule]) => [name, rule.message])));
+failures.push(...compared.failures);
 
 if (failures.length > 0) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-if (report.length > 0) console.log(report.join('\n'));
-console.log('Renderer copy has no em-dash, emoji, banned word, separator glyph or ellipsis placeholder, and components use no spinner and one agent mark.');
+if (compared.report.length > 0) console.log(compared.report.join('\n'));
+console.log('Renderer copy has no em-dash, emoji, banned word, separator glyph or ellipsis placeholder; components use no spinner, one agent mark, and the shared icon sizes and stroke.');

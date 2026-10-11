@@ -114,11 +114,11 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
     ['agent-review:NEEDS_CHANGES']
   ),
   scenario(
-    'review-questions',
+    'review-finding-dismissed',
     'review',
-    'Review with questions and decisions',
-    'Findings on the diff; the reviewer withdrew one in answer to a question and one is dismissed with a note.',
-    ['agent-review:NEEDS_CHANGES', 'review-question:COMPLETED', 'finding-decisions:2']
+    'Review with a dismissed finding',
+    'Findings on the diff; one is dismissed as intentional with a note.',
+    ['agent-review:NEEDS_CHANGES', 'finding-decisions:1']
   ),
   scenario(
     'review-inconclusive',

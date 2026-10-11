@@ -17,7 +17,7 @@ describe('CompletedChangeSummaryCard', () => {
 
     expect(html).toContain('Captured Git changes in 4 files');
     expect(html).toContain('+278');
-    expect(html).toContain('-12');
+    expect(html).toContain('−12');
     expect(html).toContain('src/core/app/TaskManagerService.progress.integration.test.ts');
     expect(html).toContain('src/dev/seedData.integration.test.ts');
     expect(html).toContain('src/renderer/model/overviewRunActivity.test.ts');

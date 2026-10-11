@@ -651,7 +651,7 @@ function EnvironmentTable({ labelId, entry, entries, text, busy, write }: {
             <span role="cell">
               <Tooltip label="Remove"><button
                 type="button"
-                className="tm-preview-icon-button"
+                className="tm-iconbtn"
                 aria-label={`Remove ${name}`}
                 disabled={busy}
                 onClick={() => (added ? setPending(undefined) : write(() => removeEnvironmentBinding(text, entry.path, binding.key)))}

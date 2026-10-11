@@ -1,11 +1,6 @@
 import { isDetachedRunMode } from './agent';
 import type { RunRecord, TaskInstruction } from './contracts';
 
-/** Untracked files larger than this are left out of a side question's worktree snapshot. */
-export const SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES = 5 * 1024 * 1024;
-/** Untracked files beyond this total are left out of a side question's worktree snapshot. */
-export const SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
-
 /** The SIDE question that a SIDE_QUESTION run answers. */
 export function sideQuestionForRun(
   instructions: readonly TaskInstruction[],

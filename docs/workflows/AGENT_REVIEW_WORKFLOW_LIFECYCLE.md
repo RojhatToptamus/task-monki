@@ -63,16 +63,14 @@ The important product rule is:
     the old side is the reviewed code, so the review's findings anchor to the
     line numbers it read there.
   - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
-    the person's request after this review settles (`runId`, items answered,
-    items that need the person's decision); cleared when the next turn starts.
+    the person's request after this review settles, with whether an item waits
+    on the person's decision; cleared when the next turn starts.
 - `RunRecord.mode`
   - `IMPLEMENTATION`, `FOLLOW_UP`, and `RETRY` modify the task worktree.
   - `REVIEW` inspects a diff and must use read-only settings.
   - `SIDE_QUESTION` answers a question in Ask, on the same read-only lane. It
     never changes workflow, `currentRunId`, `projection.agentRun` or the review
     gate, and never makes a review stale.
-  - `REVIEW_QUESTION` is the retired reviewer conversation. Stored runs keep
-    the mode and settle as they ran; nothing starts one any more.
 - `AgentSessionRecord`
   - Primary sessions back implementation/follow-up/retry runs.
   - Review sessions use `role: "REVIEW"` and one ordinary read-only turn.
@@ -241,18 +239,17 @@ Expected UI:
 
 ### Finding decisions
 
-The person can change what a current review asks for. (Reviewer revisions
-recorded by the retired reviewer conversation still apply.) Every
-change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
+The person can change what a current review asks for. Every change is an
+`AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 `findingDecisions`; the review result itself is never rewritten, and
-`effectiveReviewFindings` derives each finding's state (`OPEN`, `DISMISSED`,
-`WITHDRAWN`) and current severity.
+`effectiveReviewFindings` derives each finding's state (`OPEN` or
+`DISMISSED`).
 
 - The person dismisses an open finding with a reason and an optional note of at
   most 500 characters, and can restore it (`decideReviewFinding`). The reason is
   `NOT_A_PROBLEM` (shown as Incorrect: the reviewer was wrong), `ACCEPTED`
   (Intentional: real, and the code is so on purpose) or `DEFERRED` (Won't fix
-  now). Dismissals recorded before reasons existed carry none.
+  now).
 - Blocker and Major findings are in Request changes by default; dismissing is
   the only way to leave one out. Minor and Nit findings are suggestions: they
   are sent only when the person adds them, and their inclusion is part of the
@@ -553,9 +550,8 @@ When the UI shows the wrong state:
   with Request changes.
 - Comments can be written whenever the current diff is shown, including while
   a review runs; only sending waits for the review.
-- Keep `SIDE_QUESTION` runs and `SIDE` messages in Ask, and stored
-  `REVIEW_QUESTION` runs and `REVIEW` messages nowhere but Debug, out of the
-  Agent tab and the task's run selection (`partitionAgentRecords`).
+- Keep `SIDE_QUESTION` runs and `SIDE` messages in Ask, out of the Agent tab
+  and the task's run selection (`partitionAgentRecords`).
 - Show a reply to a review request as its prose, with the
   `task-monki-review-response` block taken out and shown as the answer list.
 - Derive every review entry action from the exact current completed

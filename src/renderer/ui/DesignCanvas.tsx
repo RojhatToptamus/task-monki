@@ -355,7 +355,7 @@ export function DesignCanvas({
           <span className="tm-design-canvas__device-size">{selectedDevice.size}</span>
           <Tooltip label="Reload preview"><button
             type="button"
-            className="tm-design-canvas__tool"
+            className="tm-iconbtn tm-design-canvas__tool"
             aria-label="Reload preview"
             disabled={!generationId || operation !== undefined}
             onClick={() => void refreshPreview()}
@@ -364,7 +364,7 @@ export function DesignCanvas({
           </button></Tooltip>
           <Tooltip label="Open preview in browser"><button
             type="button"
-            className="tm-design-canvas__tool"
+            className="tm-iconbtn tm-design-canvas__tool"
             aria-label="Open preview in browser"
             disabled={
               !generationId ||

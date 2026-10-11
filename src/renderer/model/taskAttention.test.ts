@@ -151,10 +151,10 @@ describe('describeTaskAttention', () => {
     const blocking = { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'One leak.',
       findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'Never removed.' }] };
 
-    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { runId: 'run-2', answered: 2, needsDecision: 1 } })))
+    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { awaitingDecision: true } })))
       .toEqual({ label: 'Agent asked a question', kind: 'question', tone: 'warning' });
     expect(describeTaskAttention(reviewed({ status: 'FAILED' }))).toEqual({ label: 'Review failed', kind: 'failure', tone: 'error' });
-    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { runId: 'run-2', answered: 2, needsDecision: 0 } })))
+    expect(describeTaskAttention(reviewed({ status: 'STALE', requestAnswer: { awaitingDecision: false } })))
       .toEqual({ label: 'Fixes ready for review', kind: 'review', tone: 'info' });
     expect(describeTaskAttention(reviewed({ status: 'NEEDS_CHANGES', result: blocking })))
       .toEqual({ label: 'Needs changes', kind: 'review', tone: 'warning' });

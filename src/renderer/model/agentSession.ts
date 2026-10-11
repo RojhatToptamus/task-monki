@@ -1,6 +1,7 @@
 import { parseReviewResponse, type AgentItemRecord, type AgentPlanRevisionRecord, type AgentReviewGateProjection, type ReviewRequestRecord, type ReviewResponseAnswer, type RunRecord, type TaskInstruction, type InteractionRequestRecord } from '../../shared/contracts';
 import { buildRunActivityProjection } from './runActivity';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
+import { pluralize } from './formatting';
 
 export type SessionStep =
   | { key: string; at: string; kind: 'tool'; row: OverviewActivityRow }
@@ -223,15 +224,15 @@ export function stepsSummary(steps: SessionStep[]): string {
   const phrases = [...counts].filter(([kind]) => kind !== 'reasoning' || counts.size === 1).map(([kind, value]) => {
     const count = size(value);
     switch (kind) {
-      case 'read': return `read ${count} ${plural(count, 'file')}`;
+      case 'read': return `read ${pluralize(count, 'file')}`;
       case 'search': return count === 1 ? 'searched the code' : `searched ${count} times`;
       case 'list': return count === 1 ? 'listed files' : `listed ${count} directories`;
-      case 'file': return `edited ${count} ${plural(count, 'file')}`;
-      case 'command': return `ran ${count} ${plural(count, 'command')}`;
+      case 'file': return `edited ${pluralize(count, 'file')}`;
+      case 'command': return `ran ${pluralize(count, 'command')}`;
       case 'permission': return count === 1 ? 'requested approval' : `requested ${count} approvals`;
-      case 'question': return `asked ${count} ${plural(count, 'question')}`;
+      case 'question': return `asked ${pluralize(count, 'question')}`;
       case 'reasoning': return reasoningLabel(steps.reduce((total, step) => total + (step.kind === 'reasoning' ? step.seconds ?? 0 : 0), 0) || undefined, false).toLowerCase();
-      default: return `used ${count} ${plural(count, 'tool')}`;
+      default: return `used ${pluralize(count, 'tool')}`;
     }
   });
   const text = phrases.join(', ');
@@ -300,19 +301,20 @@ export function reviewTurnOutcome(
   review: Pick<AgentReviewGateProjection, 'runId' | 'status' | 'result'> | undefined
 ): string | undefined {
   if (turn.state === 'active') return undefined;
-  if (review?.runId === turn.run.id) {
-    switch (review.result?.verdict) {
-      case 'PASSED': return 'Passed';
-      case 'NEEDS_CHANGES': return 'Needs changes';
-      case 'INCONCLUSIVE': return 'Inconclusive';
-    }
+  const latest = review?.runId === turn.run.id;
+  // The latest review's verdict, or its status when it recorded none (a review with no structured result).
+  switch (latest ? review.result?.verdict ?? review.status : undefined) {
+    case 'PASSED': return 'Passed';
+    case 'NEEDS_CHANGES': return 'Needs changes';
+    case 'INCONCLUSIVE': return 'Inconclusive';
+    case 'FAILED': return 'Failed';
   }
   switch (turn.state) {
     case 'stopped': return 'Stopped';
     case 'failed': return 'Failed';
     case 'interrupted': return 'Interrupted';
     // A later review replaced this one; its verdict is no longer recorded, so it says that much.
-    case 'completed': return review?.runId ? 'Earlier review' : undefined;
+    case 'completed': return review?.runId && !latest ? 'Earlier review' : undefined;
     default: return undefined;
   }
 }
@@ -346,8 +348,4 @@ function reasoningSeconds(item: AgentItemRecord): number | undefined {
   const start = Date.parse(item.providerStartedAt ?? item.createdAt);
   const end = Date.parse(item.providerCompletedAt ?? (item.status === 'COMPLETED' ? item.updatedAt : ''));
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? Math.round((end - start) / 1000) : undefined;
-}
-
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
 }

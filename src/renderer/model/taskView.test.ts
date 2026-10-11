@@ -304,7 +304,7 @@ describe('task card view model', () => {
     expect(inReview({ worktree: 'MISSING' })).toBe('Checkout missing');
   });
 
-  it('reads the board summary\'s effective review status, which reviewer revisions move both ways', () => {
+  it('reads the board summary\'s effective review status, which decisions move both ways', () => {
     // A board summary carries the status once every decision applies, so the card follows it.
     const summarized = (agentReview: Record<string, unknown>) => describeTaskStatus(createTask({
       projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', agentReview: agentReview as never },
@@ -317,8 +317,6 @@ describe('task card view model', () => {
       .toBe('Inconclusive');
     expect(summarized({ status: 'NEEDS_CHANGES', hasResult: true, findingCounts: {}, effectiveStatus: 'PASSED' }))
       .toBe('Review passed');
-    // A summary from before the field existed keeps its stored status.
-    expect(summarized({ status: 'NEEDS_CHANGES', hasResult: true, findingCounts: {} })).toBe('Needs changes');
   });
 
   it('names a card pull request by number and state, and says delivery progress once', () => {
@@ -560,10 +558,10 @@ describe('task card view model', () => {
       canRequestReviewChanges({ status: 'STALE', result })
     ).toBe(false);
     expect(
-      canRequestReviewChanges({ status: 'FAILED' }, 'FAILED')
+      canRequestReviewChanges({ status: 'FAILED' })
     ).toBe(false);
     expect(
-      canRequestReviewChanges({ status: 'FAILED', result }, 'FAILED')
+      canRequestReviewChanges({ status: 'FAILED', result })
     ).toBe(true);
     expect(
       canRequestReviewChanges({ status: 'FAILED' })
@@ -588,45 +586,12 @@ describe('task finish policy', () => {
       workflowPhase: 'REVIEW'
     });
     const open = review([]);
-    const dismissed = review([{ id: 'd1', reviewRunId: 'review-1', findingId: 'f1', kind: 'DISMISS', actor: 'USER', note: 'One replica', createdAt: now }]);
+    const dismissed = review([{ id: 'd1', reviewRunId: 'review-1', findingId: 'f1', kind: 'DISMISS', dismissReason: 'ACCEPTED', note: 'One replica', createdAt: now }]);
 
     expect(getFinishEvidenceState(open).mode).toBe('override');
     expect(describeTaskStatus(open).label).toBe('Needs changes');
     expect(getFinishEvidenceState(dismissed)).toEqual({ mode: 'clean', warnings: [] });
     expect(describeTaskStatus(dismissed).label).not.toBe('Needs changes');
-  });
-
-  it('follows reviewer revisions both ways when deciding whether finishing is clean', () => {
-    const style = { id: 'style', severity: 'MAJOR' as const, title: 'Long function', explanation: 'Split it.', path: 'src/a.ts' };
-    const review = (
-      status: 'PASSED' | 'NEEDS_CHANGES',
-      findings: typeof style[],
-      decisions: NonNullable<Task['projection']['agentReview']>['findingDecisions']
-    ) => createTask({
-      projection: {
-        ...createInitialProjection(now),
-        git: 'CLEAN',
-        agentReview: {
-          status, runId: 'review-1', findingDecisions: decisions,
-          result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Looks good.', findings }
-        }
-      },
-      workflowPhase: 'REVIEW'
-    });
-    const reviewer = { reviewRunId: 'review-1', actor: 'REVIEWER' as const, reason: 'Seen while answering.', questionRunId: 'question-1', createdAt: now };
-    const addedBlocker = review('PASSED', [], [{
-      ...reviewer, id: 'd1', kind: 'ADD', findingId: 'added-1',
-      finding: { id: 'added-1', severity: 'BLOCKER', title: 'Missing guard', explanation: 'Null input crashes.', path: 'src/a.ts' }
-    }]);
-    const downgraded = review('NEEDS_CHANGES', [style], [{
-      ...reviewer, id: 'd2', kind: 'CHANGE_SEVERITY', findingId: 'style', severity: 'MINOR'
-    }]);
-
-    expect(getFinishEvidenceState(addedBlocker)).toMatchObject({
-      mode: 'override',
-      warnings: [expect.objectContaining({ title: 'Review requested changes.' })]
-    });
-    expect(getFinishEvidenceState(downgraded)).toEqual({ mode: 'clean', warnings: [] });
   });
 
   it('allows clean local completion only when review and Git evidence are healthy', () => {
@@ -680,8 +645,8 @@ describe('task finish policy', () => {
     );
 
     expect(requirements).toEqual([
-      { label: 'Review', detail: 'needs changes', fact: 'Agent review requested changes', tone: 'error', unresolved: true },
-      { label: 'Tree', detail: '2 dirty', fact: '2 uncommitted files', tone: 'action', unresolved: true }
+      { label: 'Review', fact: 'Agent review requested changes', tone: 'error', unresolved: true },
+      { label: 'Tree', fact: '2 uncommitted files', tone: 'action', unresolved: true }
     ]);
   });
 
@@ -707,8 +672,8 @@ describe('task finish policy', () => {
 
     expect(finishEvidence).toEqual({ mode: 'clean', warnings: [] });
     expect(requirements).toEqual([
-      { label: 'Review', detail: 'passed', fact: 'Agent review passed', tone: 'success', unresolved: false },
-      { label: 'Tree', detail: 'pushed', fact: 'Pushed', tone: 'success', unresolved: false }
+      { label: 'Review', fact: 'Agent review passed', tone: 'success', unresolved: false },
+      { label: 'Tree', fact: 'Pushed', tone: 'success', unresolved: false }
     ]);
   });
 
@@ -743,7 +708,6 @@ describe('task finish policy', () => {
     });
     expect(requirements).toContainEqual({
       label: 'Merge',
-      detail: 'ready, not merged',
       fact: 'Ready to merge',
       tone: 'action',
       unresolved: true
@@ -773,7 +737,6 @@ describe('task finish policy', () => {
     expect(finishEvidence).toEqual({ mode: 'clean', warnings: [] });
     expect(requirements).toContainEqual({
       label: 'Merge',
-      detail: 'merged',
       fact: 'Merged',
       tone: 'success',
       unresolved: false
@@ -825,14 +788,12 @@ describe('task finish policy', () => {
     );
     expect(requirements).toContainEqual({
       label: 'Merge',
-      detail: 'ready, not merged',
       fact: 'Ready to merge',
       tone: 'action',
       unresolved: true
     });
     expect(requirements).toContainEqual({
       label: 'Checks',
-      detail: 'passing',
       fact: 'Checks passed',
       tone: 'success',
       unresolved: false
@@ -868,7 +829,6 @@ describe('task finish policy', () => {
     });
     expect(finishRequirementsForTask(task, 'PASSED', 0, 'MERGED', 'FAILING')).toContainEqual({
       label: 'Checks',
-      detail: 'failing',
       fact: 'Checks failed',
       tone: 'error',
       unresolved: true
@@ -915,7 +875,6 @@ describe('task finish policy', () => {
       finishRequirementsForTask(task, 'PASSED', 0, 'MERGED', 'PASSING', staleChecksEvidence)
     ).toContainEqual({
       label: 'Checks',
-      detail: 'not current',
       fact: 'Checks passed on an older head',
       tone: 'action',
       unresolved: true
@@ -953,7 +912,6 @@ describe('task finish policy', () => {
       finishRequirementsForTask(task, 'PASSED', 0, 'MERGED', 'PASSING', currentChecksEvidence)
     ).toContainEqual({
       label: 'Checks',
-      detail: 'passing',
       fact: 'Checks passed',
       tone: 'success',
       unresolved: false

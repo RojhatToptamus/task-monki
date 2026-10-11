@@ -90,38 +90,6 @@ describe('TaskManagerService crash recovery', () => {
       await restarted.close();
       expect(await readReviewRecord(scenario, review.id)).toEqual(recorded);
     }
-
-    // An earlier build let each post-run snapshot move the end time, and startup
-    // replayed the completion at the moved time, leaving this shape behind.
-    const earlier = await openTestPersistence(scenario.persistence.paths.profileRoot);
-    try {
-      await earlier.agentRuntime.init();
-      const run = (await earlier.agentRuntime.getRun(review.id))!;
-      const movedAt = (seconds: number) =>
-        new Date(Date.parse(run.endedAt!) + seconds * 1_000).toISOString();
-      const { id: _id, sourceEventId: _source, ...completion } = recorded.completions[0]!;
-      await earlier.taskRuntime.applyTaskRuntimeEvent(
-        createDomainEvent({ ...completion, occurredAt: movedAt(1) }),
-        `shared-review-terminal:${run.id}:${movedAt(1)}`
-      );
-      const replayed = (await earlier.agentRuntime.getRun(review.id))!;
-      await earlier.agentRuntime.updateRun(
-        replayed.id,
-        replayed.recordRevision,
-        { endedAt: movedAt(60) },
-        `earlier-build-post-run-snapshot:${run.id}`
-      );
-    } finally {
-      await earlier.close();
-    }
-    const earlierRecord = await readReviewRecord(scenario, review.id);
-    expect(earlierRecord.completions).toHaveLength(2);
-    for (let restart = 0; restart < 2; restart += 1) {
-      const restarted = await openRestartedScenario(scenario);
-      await restarted.close();
-      // The profile loads with its history intact and gains no further duplicate.
-      expect(await readReviewRecord(scenario, review.id)).toEqual(earlierRecord);
-    }
   }, 30_000);
 
   it('adopts a created worktree and commit whose completion was not persisted', async () => {

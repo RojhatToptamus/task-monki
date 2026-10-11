@@ -1,6 +1,6 @@
 import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
 import type { ReviewComment } from '../../shared/reviewDraft';
-import type { DiffFile, DiffLine } from './diffEvidence';
+import { parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
 
 /** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
 export type ReviewFindingView = EffectiveReviewFinding;
@@ -191,7 +191,6 @@ export type ReviewDiffRow =
  */
 export interface GapReveal { from: number; to: number; edge: 'start' | 'middle' | 'end' }
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 
 export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
   const rows: ReviewDiffRow[] = [];
@@ -207,12 +206,12 @@ export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[]
       let next = end + 1;
       while (lines[next]?.expansion === 'shown') next += 1;
       const header = lines[next]?.kind === 'hunk' ? lines[next]! : undefined;
-      const match = header ? HUNK_HEADER.exec(header.content) : null;
+      const parsed = header ? parseHunkHeader(header.content) : undefined;
       const from = line.newLine ?? 0;
       rows.push({
         kind: 'gap',
         hidden: end - index + 1,
-        heading: match?.[5]?.trim() || undefined,
+        heading: parsed?.heading,
         raw: header?.content ?? '',
         reveal: { from, to: lines[end]!.newLine ?? from, edge: from === 1 ? 'start' : header ? 'middle' : 'end' }
       });
@@ -221,10 +220,9 @@ export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[]
     }
     if (line.kind === 'hunk') {
       if (filled) continue;
-      const match = HUNK_HEADER.exec(line.content);
-      const start = match ? Number(match[3]) : undefined;
-      const hidden = start !== undefined ? Math.max(0, start - lastNewLine - 1) : 0;
-      rows.push({ kind: 'gap', hidden, heading: match?.[5]?.trim() || undefined, raw: line.content });
+      const parsed = parseHunkHeader(line.content);
+      const hidden = parsed ? Math.max(0, parsed.newStart - lastNewLine - 1) : 0;
+      rows.push({ kind: 'gap', hidden, heading: parsed?.heading, raw: line.content });
       continue;
     }
     if (line.newLine !== undefined) lastNewLine = line.newLine;

@@ -1,4 +1,4 @@
-import type { DiffBlock, DiffFile, DiffLine } from './diffEvidence';
+import { parseHunkHeader, type DiffBlock, type DiffFile, type DiffLine } from './diffEvidence';
 import { reviewFileRole } from './reviewOrder';
 import type { GapReveal } from './reviewWorkspace';
 
@@ -18,22 +18,19 @@ export const GAP_STEP = 20;
 /** At most this many files of one capture are read for their unchanged lines. */
 export const MAX_CONTEXT_FILES = 150;
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 const INDEX_LINE = /^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: [0-7]+)?$/;
 
 interface HunkRange { oldStart: number; oldCount: number; newStart: number; newCount: number }
 
 /** A hunk header's ranges; with a zero count, Git names the line before the hunk, so the start moves past it. */
 function hunkRange(content: string): HunkRange | undefined {
-  const match = HUNK_HEADER.exec(content);
-  if (!match) return undefined;
-  const oldCount = match[2] === undefined ? 1 : Number(match[2]);
-  const newCount = match[4] === undefined ? 1 : Number(match[4]);
+  const header = parseHunkHeader(content);
+  if (!header) return undefined;
   return {
-    oldStart: Number(match[1]) + (oldCount === 0 ? 1 : 0),
-    oldCount,
-    newStart: Number(match[3]) + (newCount === 0 ? 1 : 0),
-    newCount
+    oldStart: header.oldStart + (header.oldCount === 0 ? 1 : 0),
+    oldCount: header.oldCount,
+    newStart: header.newStart + (header.newCount === 0 ? 1 : 0),
+    newCount: header.newCount
   };
 }
 

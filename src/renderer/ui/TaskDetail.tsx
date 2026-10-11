@@ -20,7 +20,7 @@ import {
   type ReviewRequestRecord,
   type TaskReviewDraft
 } from '../../shared/contracts';
-import { effectiveReviewFindings, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
+import { effectiveReviewFindings, effectiveReviewGateStatus, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -101,7 +101,6 @@ import {
   stateRestatesColumn
 } from '../model/taskView';
 import {
-  effectiveReviewStatus,
   finishRequirementsForTask,
   getFinishEvidenceState,
   taskReviewGate
@@ -150,18 +149,18 @@ import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationAnswer, conversationPreview, isActiveRunStatus, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
 import { ApplicationPreviewOverview, ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
-import type { NotificationTone } from './AppOverlays';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import {
-  isReviewPhase,
   shouldShowMoveToReviewHeaderAction,
   canReviewExistingWork
 } from '../model/taskReviewActions';
+import { isReviewPhase } from '../model/taskPhase';
 import {
   CreateDraftPrModal,
   ExistingWorkModal,
   MarkDoneModal
 } from './TaskDetailModals';
+import { ReportedQuote } from './ReportedQuote';
 
 interface TaskDetailProps {
   attachmentOptions: AgentSessionProps['attachmentOptions'];
@@ -169,7 +168,6 @@ interface TaskDetailProps {
   agentDraft: string;
   onPrepareTaskAgent(text: string): Promise<void>;
   /** The app's shared toast, for completed actions nothing else on screen confirms. */
-  onNotify?(message: string, tone?: NotificationTone): void;
   onSavePrompt: import('react').ComponentProps<typeof PreRunSetup>['onSavePrompt'];
   onReadAttachment: import('react').ComponentProps<typeof PreRunSetup>['onReadAttachment'];
   agentDraftError?: string;
@@ -308,8 +306,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
-  // The review request in progress: the user's note and line comments, kept
-  // while they move between tabs and cleared when the request is sent.
   // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
   const [requestSheetPending, setRequestSheetPending] = useState(false);
   // A Review file shown full screen takes the page, tab bar included.
@@ -437,11 +433,6 @@ export function TaskDetail(props: TaskDetailProps) {
     setDraftPrModalOpen(false);
     setEvidenceGitSnapshotId(undefined);
   }, [task?.id]);
-
-  // A renamed task offers its new title for a draft pull request; nothing else resets.
-  useEffect(() => {
-    setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
-  }, [task?.id, task?.title]);
 
   useEffect(() => {
     setLoadedReviewOutput(undefined);
@@ -591,7 +582,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
   const reviewHasActionableFindings =
     hasActionableReviewSource &&
-    canRequestReviewChanges(reviewGate, effectiveReviewStatus(reviewGate));
+    canRequestReviewChanges(reviewGate);
   const deliverySourceRun =
     (task.currentRunId
       ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
@@ -687,6 +678,18 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
+  // The Agent tab, scrolled to the agent's pending request.
+  const goToRequest = () => {
+    setTab('agent');
+    setAgentAttentionRequest((value) => value + 1);
+  };
+  // The Agent tab with its draft focused, to reply.
+  const focusAgentDraft = () => {
+    setTab('agent');
+    requestAnimationFrame(() => document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true }));
+  };
+  const goToRequestButton = <button type="button" className="tm-detail__attention" onClick={goToRequest}>Go to request</button>;
+
   // Request changes lives in the Review tab: it opens there with the request sheet, so the
   // person sees exactly what will be sent before sending it.
   const openRequestChanges = () => {
@@ -704,9 +707,11 @@ export function TaskDetail(props: TaskDetailProps) {
     : reviewIsCurrent && previousReviewRun
       ? { reviewRunId: previousReviewRun.id, label: 'Since the last review', refreshKey: gitSnapshot?.id }
       : undefined;
-  const reviewPlan = planReviewRequest(reviewFindingViews, props.reviewDraft, reviewGate.runId);
-  // A review whose notes are only prose (no structured findings) sends those notes.
-  const reviewSendsNotes = reviewIsCurrent && reviewHasActionableFindings && reviewFindingViews.length === 0;
+  const reviewPlan = planReviewRequest(reviewFindingViews, props.reviewDraft, {
+    runId: reviewGate.runId,
+    findingsSendable: reviewIsCurrent,
+    asksForChanges: reviewHasActionableFindings
+  });
 
   const requestInput = (reviewOutput?: string): ReviewRequestInput => ({
     taskTitle: task.title,
@@ -714,13 +719,8 @@ export function TaskDetail(props: TaskDetailProps) {
     reviewRunId: reviewGate.runId,
     // Only a current review's summary is the agent's context; a running one has none yet.
     summary: reviewIsCurrent ? reviewGate.result?.summary ?? reviewGate.summary : undefined,
-    // An out-of-date review's findings are context only; the person's comments still go.
-    findings: reviewIsCurrent ? reviewPlan.send : [],
-    dismissed: reviewIsCurrent
-      ? reviewPlan.settled
-        .filter((finding) => finding.state === 'DISMISSED')
-        .map((finding) => ({ finding, reason: finding.dismissal?.reason, note: finding.dismissal?.note }))
-      : [],
+    findings: reviewPlan.send,
+    dismissed: reviewPlan.settled.map((finding) => ({ finding, reason: finding.dismissal?.reason, note: finding.dismissal?.note })),
     comments: props.reviewDraft.comments,
     note: props.reviewDraft.note,
     reviewOutput
@@ -731,13 +731,11 @@ export function TaskDetail(props: TaskDetailProps) {
     if (reviewActionsPaused || reviewIsRunning || reviewPending || !hasActionableReviewSource) {
       return;
     }
-    const findings = reviewIsCurrent ? reviewPlan.send : [];
-    const comments = props.reviewDraft.comments;
-    if (findings.length === 0 && comments.length === 0 && !props.reviewDraft.note.trim() && !reviewSendsNotes) {
+    if (!reviewPlan.queued) {
       return;
     }
     let reviewOutput: string | undefined;
-    if (findings.length === 0 && comments.length === 0) {
+    if (reviewPlan.send.length === 0 && props.reviewDraft.comments.length === 0) {
       try {
         reviewOutput = await loadAvailableReviewOutput();
       } catch {
@@ -959,7 +957,7 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   const finishEvidence = getFinishEvidenceState(
     task,
-    effectiveReviewStatus(reviewGate),
+    effectiveReviewGateStatus(reviewGate),
     dirtyFileCount,
     finishMergeStatus,
     finishCiStatus,
@@ -967,7 +965,7 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   const finishRequirements = finishRequirementsForTask(
     task,
-    reviewPending ? 'RUNNING' : effectiveReviewStatus(reviewGate),
+    reviewPending ? 'RUNNING' : effectiveReviewGateStatus(reviewGate),
     dirtyFileCount,
     finishMergeStatus,
     finishCiStatus,
@@ -979,7 +977,7 @@ export function TaskDetail(props: TaskDetailProps) {
   // run surface, and rail all agree instead of each inventing an action.
   const nextAction = selectNextAction({
     task,
-    reviewStatus: reviewPending ? 'RUNNING' : effectiveReviewStatus(reviewGate),
+    reviewStatus: reviewPending ? 'RUNNING' : effectiveReviewGateStatus(reviewGate),
     finishEvidence,
     hasReviewSource: hasActionableReviewSource,
     reviewHasActionableFindings,
@@ -989,14 +987,6 @@ export function TaskDetail(props: TaskDetailProps) {
     implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
     implementationRetryRequired
   });
-
-  // A turn after the review that stopped (failed, interrupted, lost) waits on the person
-  // before the review can move; the Review tab says so, since it has no page head.
-  const implementationNeedsYou = Boolean(run && run.mode !== 'REVIEW' && (
-    implementationRetryRequired || ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(run.status)
-  ));
-
-  const detailHeadClassName = 'tm-detail__masthead';
 
   // The Overview's decision slot: one owner, chosen in PRODUCT_WORKFLOW's UI
   // priority, holds the step the task needs now (overviewDecision.ts).
@@ -1019,6 +1009,8 @@ export function TaskDetail(props: TaskDetailProps) {
     headerState.label,
     lifecycle.find((step) => step.state === 'current')?.key
   );
+  // A turn that stopped (failed, interrupted, lost) waits on the person; the
+  // Overview offers recovery, and the Review tab says so since it has no page head.
   const recoveryRun =
     implementationRun &&
     (implementationRetryRequired ||
@@ -1046,8 +1038,7 @@ export function TaskDetail(props: TaskDetailProps) {
     owner: decisionOwner,
     prKind: prStatus.kind,
     overviewRelevant: shouldShowPrStatusOnOverview(prStatus),
-    canCreateDraftPr: prStatus.canCreateDraftPr,
-    workflowPhase: task.workflowPhase
+    canCreateDraftPr: prStatus.canCreateDraftPr
   });
   const prSectionVisible = prPlacement.section;
   const finishSectionVisible =
@@ -1107,16 +1098,16 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   };
 
+  const reviewerName = reviewRun?.runtimeId
+    ? props.runtimes?.find((candidate) => candidate.preflight.runtime.id === reviewRun.runtimeId)?.preflight.runtime.displayName ?? runtimeName
+    : runtimeName;
   const runningDecision = () => {
     if (reviewIsRunning || reviewPending) {
-      const reviewer =
-        props.runtimes?.find((candidate) => candidate.preflight.runtime.id === reviewRun?.runtimeId)
-          ?.preflight.runtime.displayName ?? runtimeName;
       const canStop = Boolean(reviewRun && reviewIsRunning);
       return (
         <DecisionSlot>
           <SlotContent
-            headline={reviewPending ? 'Starting the agent review' : `${reviewer} is reviewing`}
+            headline={reviewPending ? 'Starting the agent review' : `${reviewerName} is reviewing`}
             reported={!reviewPending && reviewActivity?.label ? { text: reviewActivity.label } : undefined}
             secondary={canStop ? [{
               label: 'Stop review',
@@ -1261,9 +1252,6 @@ export function TaskDetail(props: TaskDetailProps) {
     />
   );
 
-  const reviewerName = reviewRun?.runtimeId
-    ? props.runtimes?.find((candidate) => candidate.preflight.runtime.id === reviewRun.runtimeId)?.preflight.runtime.displayName ?? runtimeName
-    : runtimeName;
   const reviewPanel = (
     <ReviewPanel
       reviewGate={reviewGate}
@@ -1332,10 +1320,7 @@ export function TaskDetail(props: TaskDetailProps) {
             worktreePath={worktree?.worktreePath}
             agentName={runtimeName}
             onRespond={props.onRespondToInteraction}
-            onOpenConversation={() => {
-              setTab('agent');
-              setAgentAttentionRequest((value) => value + 1);
-            }}
+            onOpenConversation={goToRequest}
           />
         ) : null;
       case 'recovery':
@@ -1425,7 +1410,7 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   const taskMasthead = (
       <div
-        className={detailHeadClassName}
+        className="tm-detail__masthead"
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
@@ -1456,12 +1441,8 @@ export function TaskDetail(props: TaskDetailProps) {
               </span>
             ) : null}
           </div>
-          {/* The Overview's Now panel and the Agent tab hold the request itself. */}
-          {pendingInteraction && tab !== 'overview' && tab !== 'agent' ? (
-            <button type="button" className="tm-detail__attention" onClick={() => {
-              setTab('agent'); setAgentAttentionRequest((value) => value + 1);
-            }}>Go to request</button>
-          ) : null}
+          {/* The Overview's Now panel holds the request itself. */}
+          {pendingInteraction && tab !== 'overview' ? goToRequestButton : null}
         </div>
         {awaitingMoveToReview && tab !== 'overview' ? (
           <NextActionPanel
@@ -1474,9 +1455,6 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
       </div>
   );
-  const runtimeUnavailable = props.runtimeState && !props.runtimeState.preflight.readiness.canStart
-    ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
-    : undefined;
   // Ask is about work in progress: it needs the worktree and a run. It opens on
   // every tab but Preview, which has its own agent, and keeps its thread across them.
   const askAvailable = Boolean(props.ask && worktree && run);
@@ -1525,8 +1503,7 @@ export function TaskDetail(props: TaskDetailProps) {
         label: 'Use in follow-up',
         onUse: (text) => {
           props.onAgentDraftChange(appendToDraft(props.agentDraft, text));
-          setTab('agent');
-          requestAnimationFrame(() => document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true }));
+          focusAgentDraft();
         }
       }}
       focusToken={askFocusToken}
@@ -1647,11 +1624,7 @@ export function TaskDetail(props: TaskDetailProps) {
         <h1 ref={props.headingRef} className="tm-titlebar__title" tabIndex={-1} title={task.title}>{task.title}</h1>
       )}
       {taskMenu('titlebar')}
-      {titleRowRequest ? (
-        <button type="button" className="tm-detail__attention" onClick={() => {
-          setTab('agent'); setAgentAttentionRequest((value) => value + 1);
-        }}>Go to request</button>
-      ) : null}
+      {titleRowRequest ? goToRequestButton : null}
       {titleRowSteps.map((action) => stepButton(action, 'titlebar'))}
     </div>,
     props.titlebarSlot
@@ -1665,7 +1638,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       <div
         id="task-detail-panel"
-        className={`tm-detail__body${tab === 'agent' || tab === 'preview' || tab === 'review' ? ` tm-detail__body--${tab}` : ''}`}
+        className={`tm-detail__body${tab === 'agent' || tab === 'preview' || tab === 'review' ? ' tm-detail__body--pane' : ''}`}
         ref={bodyRef}
         role="tabpanel"
         aria-labelledby={`task-detail-tab-${tab}`}
@@ -1697,10 +1670,7 @@ export function TaskDetail(props: TaskDetailProps) {
                     }
                   >
                     {resultReport ? (
-                      <figure className="tm-oresult__report">
-                        <figcaption>{runtimeName}</figcaption>
-                        <blockquote>{resultReport}</blockquote>
-                      </figure>
+                      <ReportedQuote source={runtimeName}>{resultReport}</ReportedQuote>
                     ) : null}
                     <CompletedChangeSummaryPanel compact run={progressRun}
                       capturePending={props.postRunEvidencePendingRunIds?.includes(progressRun.id)} gitSnapshots={gitSnapshots} artifacts={props.artifacts}
@@ -1740,7 +1710,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 {detailsRows}
               </OverviewSection>
               {worktree?.status === 'PRESENT' ? (
-                <ApplicationPreviewOverview key={task.id} taskId={task.id} onOpen={() => setTab('preview')} onNotify={props.onNotify} />
+                <ApplicationPreviewOverview key={task.id} taskId={task.id} onOpen={() => setTab('preview')} />
               ) : null}
               <TaskActivityPanel
                 view={overviewActivity}
@@ -1759,7 +1729,7 @@ export function TaskDetail(props: TaskDetailProps) {
           runtimeName={props.runtimeState?.preflight.runtime.displayName}
           sessions={sessions} items={props.items} plans={planRevisions} interactions={interactions}
           instructions={props.agentInstructions} requiresRecovery={implementationRetryRequired} failure={runFailure}
-          runtimeUnavailable={runtimeUnavailable}
+          runtimeUnavailable={runtimeBlockedReason}
           steeringSupported={activeTurnSteeringSupported} draft={props.agentDraft} draftError={props.agentDraftError}
           worktreeHeld={questionHoldsWorktree ? 'Wait for the answer in Ask, or stop it.' : undefined}
           onDraftChange={props.onAgentDraftChange} onFlushDraft={props.onFlushAgentDraft}
@@ -1796,15 +1766,14 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('review'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name} onNotify={props.onNotify}
+        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
           worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
           onRestoreWorktree={() => props.onRestoreWorktree(task.id)}
           onPrepareWorktree={() => props.onPrepareWorktree(task.id)}
           onReconnectCheckout={() => setExistingWorkModal('reconnect')}
           onTaskAgent={async text => {
             await props.onPrepareTaskAgent(text);
-            setTab('agent');
-            setAgentAttentionRequest(value => value + 1);
+            goToRequest();
           }}
           agent={props.previewAgent} proposals={props.previewProposals}
           agentHost={{
@@ -1822,7 +1791,7 @@ export function TaskDetail(props: TaskDetailProps) {
             taskId={task.id}
             onFullScreenChange={setReviewFullScreen}
             changesSince={reviewChangesSince}
-            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
+            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewGateStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
             reviewedDiffArtifactId={reviewGate.status === 'STALE'
@@ -1852,10 +1821,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 key: reviewRound.key,
                 request: reviewRound.request,
                 answers: reviewRound.answers,
-                onReply: reviewRound.answers.some((answer) => answer.outcome === 'NEEDS_DECISION') ? () => {
-                  setTab('agent');
-                  requestAnimationFrame(() => document.getElementById(`agent-draft-${task.id}`)?.focus({ preventScroll: true }));
-                } : undefined
+                onReply: reviewRound.answers.some((answer) => answer.outcome === 'NEEDS_DECISION') ? focusAgentDraft : undefined
               } : undefined
             }}
             draft={props.reviewDraft}
@@ -1866,14 +1832,12 @@ export function TaskDetail(props: TaskDetailProps) {
               disabledReason: reviewIsRunning || reviewPending ? 'Sending waits for the review'
                 : reviewActionsPaused ? reviewActionPauseTitle : props.reviewDraftError,
               busy: reviewActionBusy,
-              reviewNotes: reviewSendsNotes,
               instruction: () => buildRequestInstruction(loadedReviewOutput),
               onSubmit: () => void submitRequestChanges()
             } : undefined}
             finish={nextAction.primary && (nextAction.primary.id === 'commit' || nextAction.primary.id === 'mark-done') ? {
               label: nextAction.primary.label,
               disabledReason: nextActionState(nextAction.primary.id).disabled ? nextActionState(nextAction.primary.id).title : undefined,
-              busy: false,
               onRun: () => onNextAction(nextAction.primary!.id)
             } : undefined}
             requestSheetPending={requestSheetPending}
@@ -1881,8 +1845,8 @@ export function TaskDetail(props: TaskDetailProps) {
             agentRequest={pendingInteraction ? {
               label: interactionHeadline(pendingInteraction, runtimeName),
               action: 'Go to request',
-              onOpen: () => { setTab('agent'); setAgentAttentionRequest((value) => value + 1); }
-            } : implementationNeedsYou ? {
+              onOpen: goToRequest
+            } : recoveryRun ? {
               label: nextAction.title,
               action: 'Go to agent',
               onOpen: () => setTab('agent')

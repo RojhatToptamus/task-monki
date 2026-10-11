@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { FilePlus2 } from 'lucide-react';
 import type {
   ArtifactRecord,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
-import { taskManagerApi } from '../api/taskManagerClient';
 import {
   buildCompletedChangeSummary,
   hasNewerGitEvidence,
@@ -13,8 +12,10 @@ import {
   type CompletedChangeFile,
   type CompletedChangeSummary
 } from '../model/completedChangeSummary';
-import { inspectGitDiffEvidence } from '../model/diffEvidence';
+import { DiffStat } from './DiffStat';
 import { DisclosureChevron } from './DisclosureChevron';
+import { useDiffArtifact } from './useDiffArtifact';
+import { plural, pluralize } from '../model/formatting';
 
 interface CompletedChangeSummaryPanelProps {
   run?: RunRecord;
@@ -35,12 +36,6 @@ type CaptureStatus =
   | 'UNINTERPRETABLE'
   | 'CAPTURED';
 
-type DiffArtifactLoadState =
-  | { status: 'IDLE' }
-  | { status: 'LOADING'; artifactId: string }
-  | { status: 'LOADED'; artifactId: string; text: string }
-  | { status: 'FAILED'; artifactId: string };
-
 export function CompletedChangeSummaryPanel({
   run,
   capturePending = false,
@@ -53,56 +48,13 @@ export function CompletedChangeSummaryPanel({
     () => selectCompletedRunChangeSnapshot(run, gitSnapshots),
     [run, gitSnapshots]
   );
-  const diffArtifact = snapshot?.diffArtifactId
-    ? artifacts.find((artifact) => artifact.id === snapshot.diffArtifactId)
-    : undefined;
-  const [artifactLoad, setArtifactLoad] = useState<DiffArtifactLoadState>({
-    status: 'IDLE'
-  });
-
-  useEffect(() => {
-    let canceled = false;
-
-    if (!diffArtifact) {
-      setArtifactLoad({ status: 'IDLE' });
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setArtifactLoad({ status: 'LOADING', artifactId: diffArtifact.id });
-    void taskManagerApi
-      .readArtifact({ artifactId: diffArtifact.id })
-      .then((text) => {
-        if (!canceled) {
-          setArtifactLoad({ status: 'LOADED', artifactId: diffArtifact.id, text });
-        }
-      })
-      .catch(() => {
-        if (!canceled) {
-          setArtifactLoad({ status: 'FAILED', artifactId: diffArtifact.id });
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [diffArtifact?.id, diffArtifact?.byteCount, diffArtifact?.updatedAt]);
-
-  const artifactText =
-    artifactLoad.status === 'LOADED' && artifactLoad.artifactId === diffArtifact?.id
-      ? artifactLoad.text
-      : undefined;
-  const capturedDiff = useMemo(
-    () => (artifactText === undefined ? undefined : inspectGitDiffEvidence(artifactText)),
-    [artifactText]
-  );
+  const diff = useDiffArtifact(snapshot?.diffArtifactId, artifacts);
+  const loaded = !diff.missing && !diff.loading && !diff.error;
   const summary = useMemo(
-    () =>
-      capturedDiff === undefined ? undefined : buildCompletedChangeSummary(capturedDiff.files),
-    [capturedDiff]
+    () => (loaded ? buildCompletedChangeSummary(diff.inspection.files) : undefined),
+    [loaded, diff.inspection.files]
   );
-  const completeness = capturedDiff?.completeness;
+  const completeness = loaded ? diff.inspection.completeness : undefined;
 
   if (!run || run.status !== 'COMPLETED') {
     return null;
@@ -113,18 +65,15 @@ export function CompletedChangeSummaryPanel({
     captureStatus = 'CAPTURE_PENDING';
   } else if (!snapshot) {
     captureStatus = 'NOT_CAPTURED';
-  } else if (!diffArtifact) {
+  } else if (diff.missing) {
     captureStatus = 'DIFF_UNAVAILABLE';
-  } else if (
-    artifactLoad.status === 'FAILED' &&
-    artifactLoad.artifactId === diffArtifact.id
-  ) {
+  } else if (diff.error) {
     captureStatus = 'READ_FAILED';
   } else if (completeness === 'UNINTERPRETABLE') {
     captureStatus = 'UNINTERPRETABLE';
   } else if (summary) {
     captureStatus = 'CAPTURED';
-  } else if (artifactText !== undefined) {
+  } else if (loaded) {
     captureStatus = 'NO_CHANGES';
   }
 
@@ -170,7 +119,7 @@ export function CompletedChangeSummaryCard({
     return <section className="tm-changes" aria-label="Changed files">
       <header className="tm-changes__head">
         <FilePlus2 size={13} aria-hidden="true" />
-        <span className="tm-changes__title">{summary.fileCount} {plural(summary.fileCount, 'file')} changed</span>
+        <span className="tm-changes__title">{pluralize(summary.fileCount, 'file')} changed</span>
         {/* One file's row already carries its counts. */}
         {summary.fileCount > 1 ? <DiffStat additions={summary.additions} deletions={summary.deletions} /> : null}
         {note ? <span className="tm-changes__note" title={historical
@@ -189,7 +138,7 @@ export function CompletedChangeSummaryCard({
   }
   const title =
     incomplete && summary
-      ? `Incomplete captured diff, ${summary.fileCount} ${plural(summary.fileCount, 'file')} observed`
+      ? `Incomplete captured diff, ${pluralize(summary.fileCount, 'file')} observed`
       : summary?.title ?? 'Captured Git changes';
 
   return (
@@ -308,20 +257,7 @@ function ChangeFileRow({ file }: { file: CompletedChangeFile }) {
 }
 
 /** Lines added and removed; a side with nothing to count is left out. */
-function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
-  return (
-    <span className="tm-diffstat">
-      {additions || !deletions ? <span className="tm-diffstat__added">+{additions}</span> : null}
-      {deletions ? <span className="tm-diffstat__removed">-{deletions}</span> : null}
-    </span>
-  );
-}
-
 function formatCaptureTime(value: string): string {
   const timestamp = new Date(value);
   return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
-}
-
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
 }

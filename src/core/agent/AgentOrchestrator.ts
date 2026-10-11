@@ -19,6 +19,7 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import { reviewGateStatusFromResult } from '../../shared/contracts';
 import type {
   AgentAttachmentSelection,
   TaskAttachmentRecord
@@ -54,6 +55,7 @@ import {
   assertBrowserDevRuntimeIsolation,
   assertBrowserDevSettingsSafe,
   BROWSER_DEV_BOUNDARY_MESSAGE,
+  BROWSER_DEV_PREVIEW_AGENT_MESSAGE,
   browserDevCapabilities,
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
@@ -75,10 +77,7 @@ import {
   createAgentSessionAccessEpoch
 } from './AgentRuntimeOwnership';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
-import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../review/AgentReviewContract';
+import { parseAgentReviewResult } from '../review/AgentReviewContract';
 import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
@@ -120,16 +119,12 @@ function isReadOnlyRuntimePurpose(
   );
 }
 
-/**
- * A review, the questions to its reviewer and side questions to the task's agent share
- * the Task read-only turn projection on the shared runtime-turn lane.
- */
+/** A review and a question in Ask share the Task read-only turn projection on the shared runtime-turn lane. */
 function isTaskReadOnlyTurnPurpose(
   purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
 ): boolean {
   return (
     purpose === 'TASK_REVIEW' ||
-    purpose === 'TASK_REVIEW_QUESTION' ||
     purpose === 'TASK_SIDE_QUESTION'
   );
 }
@@ -397,8 +392,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   }
 
   /**
-   * The execution context every read-only lane (agent review, reviewer questions, side
-   * questions) runs in: the task checkout, or a read-only snapshot of it, as the only read
+   * The execution context every read-only lane (agent review and Ask) runs in: the task checkout, or a read-only snapshot of it, as the only read
    * root. Runtimes receive the checkout with its parent folders resolved; the session's
    * Task context keeps the worktree path the task records, which the store requires.
    */
@@ -1267,7 +1261,6 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     ) {
       return;
     }
-    const question = runtimeRun.purpose === 'TASK_REVIEW_QUESTION';
     const side = runtimeRun.purpose === 'TASK_SIDE_QUESTION';
     const run = await this.taskRuntime.getRun(runtimeRun.id);
     if (!run) return;
@@ -1314,11 +1307,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       run.id,
       output.trim() ||
         event.error ||
-        (question
-          ? 'The reviewer returned no answer.'
-          : side
-            ? 'The agent returned no answer.'
-            : 'The review returned no final response.'),
+        (side ? 'The agent returned no answer.' : 'The review returned no final response.'),
       `shared-review-final:${run.id}`
     );
     await this.taskRuntime.applyTaskRuntimeEvent(
@@ -1345,16 +1334,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           ? 'AGENT_RUN_INTERRUPTED'
           : 'AGENT_RUN_FAILED';
     let outcome: Record<string, unknown>;
-    if (question) {
-      // A question from the retired reviewer lane that was still running settles as it ran.
-      outcome = { mode: 'REVIEW_QUESTION' };
-    } else if (side) {
+    if (side) {
       outcome = { mode: 'SIDE_QUESTION' };
     } else {
       const reviewResult =
         event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
       outcome = {
-        agentReviewStatus: agentReviewStatusFromResult(reviewResult),
+        agentReviewStatus: reviewGateStatusFromResult(reviewResult),
         agentReviewResult: reviewResult
       };
     }
@@ -1504,8 +1490,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
 
   private async appendRuntimeDiagnostic(
     run: import('../../shared/agentRuntime').AgentRuntimeRunRecord,
-    message: string,
-    clientOperationId = `repository-integrity-diagnostic:${run.id}`
+    message: string
   ): Promise<void> {
     const artifact = await this.runtimeStore.getArtifact(run.diagnosticArtifactId);
     if (!artifact) return;
@@ -1513,7 +1498,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     await this.runtimeStore.updateArtifact({
       artifactId: artifact.id,
       expectedRevision: artifact.recordRevision,
-      clientOperationId,
+      clientOperationId: `repository-integrity-diagnostic:${run.id}`,
       content: `${current}${current ? '\n' : ''}${message}`
     });
   }
@@ -1725,8 +1710,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         ? `shared-review-terminal:${run.id}:${observedAt}`
         : `shared-review-recovery:${run.id}:${observedAt}`;
       // The outcome is identified by its run: another writer (a start failure, the
-      // browser-development boundary) or an earlier build may have recorded it under
-      // a different operation or completion time than this record now carries.
+      // browser-development boundary) may have recorded it under a different
+      // operation or completion time than this record now carries.
       const taskOutcomeRecorded =
         run.owner.kind === 'TASK' &&
         isTaskReadOnlyTurnPurpose(run.purpose) &&
@@ -2299,10 +2284,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (input.snapshotPath !== undefined && !this.options.ownsReadOnlySnapshot?.(input.snapshotPath)) {
       throw new Error('A side question can read only a Task Monki read-only snapshot of its worktree.');
     }
-    const runtimeId = input.task.runtimeId;
-    if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
-      throw new Error('A side question uses the task runtime.');
-    }
+    // The question runs on the runtime its request names, the task's by default.
+    const runtimeId = input.settings.runtimeId ?? input.task.runtimeId;
     const adapter = this.runtimes.require(runtimeId);
     const support = projectAgentExecutionSupport(await adapter.capabilities(), 'SIDE_QUESTION');
     if (!support.supported) throw new Error(support.reason);
@@ -2466,11 +2449,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (canonical && isTaskReadOnlyTurnPurpose(canonical.purpose)) {
       const interrupted = await this.interruptTurn(
         run.id,
-        canonical.purpose === 'TASK_REVIEW_QUESTION'
-          ? 'The reviewer question was stopped.'
-          : canonical.purpose === 'TASK_SIDE_QUESTION'
-            ? 'The question was stopped.'
-            : 'The review was canceled.',
+        canonical.purpose === 'TASK_SIDE_QUESTION' ? 'The question was stopped.' : 'The review was canceled.',
         `cancel-shared-review:${run.id}`
       );
       if (interrupted.status === 'RECOVERY_REQUIRED') {
@@ -2970,11 +2949,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (this.options.allowNetworkAccess === false) {
       const capabilities = await adapter.capabilities();
       assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
-      if (mode === 'PREVIEW') {
-        // Names the reason instead of the approval policy the person cannot change.
-        const support = projectAgentExecutionSupport(browserDevCapabilities(capabilities), 'PREVIEW_AGENT');
-        if (!support.supported) throw new Error(support.reason);
-      }
+      // Names the reason instead of the approval policy the person cannot change.
+      if (mode === 'PREVIEW') throw new Error(BROWSER_DEV_PREVIEW_AGENT_MESSAGE);
     }
     const resolved = await adapter.resolveExecution({ settings, attachments });
     const resolvedSettings = resolved.settings;

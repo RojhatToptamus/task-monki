@@ -50,8 +50,3 @@ export function AccessMenu({ presets, selected, networkOn, disabled = false, onP
     />
   );
 }
-
-/** Whether network access is on for these settings under their matching preset. */
-export function presetNetworkOn(preset: AgentExecutionPolicyPreset | undefined, requested: boolean | undefined): boolean {
-  return preset?.networkAccess === 'REQUIRED' || (preset?.networkAccess !== 'DISABLED' && requested === true);
-}

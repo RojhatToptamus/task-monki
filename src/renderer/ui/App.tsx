@@ -140,6 +140,7 @@ import {
 } from './AppNavigation';
 import { Tooltip, TooltipProvider } from './Tooltip';
 import { NotifyProvider } from './NotifyContext';
+import { appendToDraft } from '../model/sideQuestions';
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
@@ -194,7 +195,7 @@ const REVIEW_STARTED_NOTICE = 'Review started';
 /** What a finished review says in a notice; a stopped review was the person's own doing. */
 function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
   const title = task.title.length > 60 ? `${task.title.slice(0, 59).trimEnd()}…` : task.title;
-  switch (task.projection.agentReview.effectiveStatus ?? task.projection.agentReview.status) {
+  switch (task.projection.agentReview.effectiveStatus) {
     case 'PASSED': return { message: `Review passed for ${title}`, tone: 'success' };
     case 'NEEDS_CHANGES': return { message: `Review of ${title} needs changes`, tone: 'info' };
     case 'INCONCLUSIVE': return { message: `Review of ${title} was inconclusive`, tone: 'info' };
@@ -2781,15 +2782,14 @@ export function App() {
               }
             }}
             onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
-            onNotify={notify}
             onPrepareTaskAgent={async (text) => {
               if (taskDetail.runs.length) {
                 const draft = agentDrafts.values[selectedTask.id] ?? selectedTask.agentDraft ?? '';
-                agentDrafts.save(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
+                agentDrafts.save(selectedTask.id, appendToDraft(draft, text));
                 await agentDrafts.flush(selectedTask.id);
               } else {
                 const prompt = selectedTask.promptDraft ?? selectedTask.prompt;
-                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: `${prompt}\n\n${text}`, draftOnly: true });
+                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: appendToDraft(prompt, text), draftOnly: true });
                 await refresh();
               }
             }}
@@ -2955,7 +2955,6 @@ export function App() {
               ? previewAgentConversation(designDetail.design.id, designDetail.previewAgent ?? EMPTY_PREVIEW_AGENT_RECORDS, respondToDesignInteraction)
               : undefined}
             previewProposals={selectedDesignId ? previewProposalActions(selectedDesignId) : undefined}
-            onNotify={notify}
             draft={designDraft}
             models={designRuntimeCatalog?.models ?? []}
             runtimes={designRuntimeCatalog?.runtimes ?? []}

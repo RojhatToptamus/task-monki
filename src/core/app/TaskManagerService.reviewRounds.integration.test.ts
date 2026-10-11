@@ -87,7 +87,7 @@ describe('TaskManagerService review rounds', () => {
     ].join('\n'));
     const answered = await s.waitForSnapshot((state) => Boolean(reviewOf(state, task.id)?.requestAnswer));
     expect(reviewOf(answered, task.id)).toMatchObject({
-      status: 'STALE', requestAnswer: { runId: followUp.id, answered: 2, needsDecision: 1 }
+      status: 'STALE', requestAnswer: { awaitingDecision: true }
     });
     expect((await s.service.getBoardSnapshot()).tasks.find((candidate) => candidate.id === task.id)?.projection.agentReview)
       .toMatchObject({ requestAnswered: { awaitingDecision: true } });

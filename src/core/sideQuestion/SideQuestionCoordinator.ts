@@ -16,17 +16,14 @@ import {
 } from '../../shared/contracts';
 import {
   SIDE_QUESTION_CONVERSATION_LIMIT,
+  SIDE_QUESTION_HISTORY_LIMIT,
   buildSideQuestionPrompt,
   type SideQuestionPromptContext
 } from '../../shared/promptTemplates';
-import {
-  SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES,
-  SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES,
-  runMayWriteTaskWorktree,
-  sideQuestionForRun
-} from '../../shared/sideQuestions';
+import { sideQuestionForRun } from '../../shared/sideQuestions';
+import { UNTRACKED_SNAPSHOT_MAX_FILE_BYTES, UNTRACKED_SNAPSHOT_MAX_TOTAL_BYTES } from '../git/ReadOnlySnapshotService';
 import type { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import { ACTIVE_AGENT_RUN_STATUSES } from '../app/TaskTransitionPolicy';
+import { ACTIVE_AGENT_RUN_STATUSES, isActiveWorktreeWriter } from '../app/TaskTransitionPolicy';
 import type {
   ReadOnlySnapshot,
   ReadOnlySnapshotOmissionReason,
@@ -35,11 +32,12 @@ import type {
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import { parseReviewedDiff, reviewedDiffExcerpt } from '../review/ReviewedDiff';
+import { runReplyText } from '../agent/runReply';
 
 export interface SideQuestionCoordinatorOptions {
-  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions' | 'readArtifact'>;
+  store: Pick<SqliteTaskStore, 'getTaskDetail' | 'getRun' | 'updateTaskInstructions'>;
   agents: Pick<AgentOrchestrator, 'startSideQuestion' | 'interruptRun'>;
-  snapshots: Pick<ReadOnlySnapshotService, 'prepare' | 'remove' | 'removeTask'>;
+  snapshots: Pick<ReadOnlySnapshotService, 'prepare' | 'remove'>;
   /** Reads a runtime-owned or Task-owned artifact, such as a run's final answer. */
   readArtifact(artifactId: string): Promise<string>;
   events: Pick<AppEventBus, 'emit'>;
@@ -58,10 +56,9 @@ export interface SideQuestionCoordinatorOptions {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const INSTRUCTION_HISTORY_LIMIT = 1_000;
-const THREAD_HISTORY_LIMIT = 6;
 const OMISSION_REASONS: Record<ReadOnlySnapshotOmissionReason, string> = {
-  LARGER_THAN_FILE_LIMIT: `larger than ${SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES / 1024 / 1024} MiB`,
-  TOTAL_LIMIT_REACHED: `the ${SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES / 1024 / 1024} MiB snapshot limit was reached`,
+  LARGER_THAN_FILE_LIMIT: `larger than ${UNTRACKED_SNAPSHOT_MAX_FILE_BYTES / 1024 / 1024} MiB`,
+  TOTAL_LIMIT_REACHED: `the ${UNTRACKED_SNAPSHOT_MAX_TOTAL_BYTES / 1024 / 1024} MiB snapshot limit was reached`,
   NOT_A_FILE: 'not a regular file',
   CHANGED_DURING_SNAPSHOT: 'changed while the snapshot was taken'
 };
@@ -224,7 +221,7 @@ export class SideQuestionCoordinator {
     for (const key of [...this.endedThreads]) {
       if (key.startsWith(`${taskId}:`)) this.endedThreads.delete(key);
     }
-    await this.options.snapshots.removeTask(taskId);
+    await this.options.snapshots.remove(taskId);
   }
 
   /**
@@ -235,10 +232,10 @@ export class SideQuestionCoordinator {
    */
   private async admit(target: QuestionTarget, initial: TaskDetailSnapshot): Promise<RunRecord> {
     const taskId = target.record.taskId;
-    if (!initial.runs.some(isWriterRun)) {
+    if (!initial.runs.some(isActiveWorktreeWriter)) {
       const live = await this.options.withTaskLock(taskId, async () => {
         const current = await this.options.store.getTaskDetail(taskId);
-        if (current.runs.some(isWriterRun)) return undefined;
+        if (current.runs.some(isActiveWorktreeWriter)) return undefined;
         return this.start(current, target);
       });
       if (live) return live;
@@ -319,8 +316,7 @@ export class SideQuestionCoordinator {
         .slice(-SIDE_QUESTION_CONVERSATION_LIMIT)
         .map(async (run) => ({
           author: 'AGENT' as const,
-          text: run.finalMessage?.trim() ||
-            (run.finalArtifactId ? (await this.options.readArtifact(run.finalArtifactId).catch(() => '')).trim() : ''),
+          text: await runReplyText(run, this.options.readArtifact),
           at: run.endedAt ?? run.startedAt
         }))
     )).filter((entry) => entry.text);
@@ -340,7 +336,7 @@ export class SideQuestionCoordinator {
       task: { title: detail.task.title, request: detail.task.prompt },
       conversation,
       ...(plan ? { plan: { ...(plan.explanation ? { explanation: plan.explanation } : {}), steps: plan.steps } } : {}),
-      implementationActive: detail.runs.some(isWriterRun),
+      implementationActive: detail.runs.some(isActiveWorktreeWriter),
       diffStat: git?.diffStat.trim() || 'No diff stat was recorded.',
       checkout: {
         path: snapshot?.path ?? worktree.worktreePath,
@@ -381,7 +377,7 @@ export class SideQuestionCoordinator {
 
   private async diffExcerpt(artifactId: string | undefined, path: string, line?: number): Promise<string | undefined> {
     if (!artifactId) return undefined;
-    const text = await this.options.store.readArtifact(artifactId).catch(() => '');
+    const text = await this.options.readArtifact(artifactId).catch(() => '');
     const file = parseReviewedDiff(text).find((candidate) => candidate.path === path);
     return file ? reviewedDiffExcerpt(file, line) : undefined;
   }
@@ -399,7 +395,7 @@ export class SideQuestionCoordinator {
         const run = detail.runs.find((candidate) => candidate.id === item.runId);
         return run?.mode === 'SIDE_QUESTION' && run.status === 'COMPLETED' ? [{ item, run }] : [];
       })
-      .slice(-THREAD_HISTORY_LIMIT);
+      .slice(-SIDE_QUESTION_HISTORY_LIMIT);
     return Promise.all(answered.map(async ({ item, run }) => ({
       question: item.text,
       answer: (await this.options.readArtifact(run.outputArtifactId).catch(() => '')).trim() ||
@@ -438,10 +434,6 @@ export class SideQuestionCoordinator {
 }
 
 /** An active run that can change the task's live worktree. */
-function isWriterRun(run: RunRecord): boolean {
-  return ACTIVE_AGENT_RUN_STATUSES.has(run.status) && runMayWriteTaskWorktree(run);
-}
-
 function questionWorktree(detail: TaskDetailSnapshot) {
   const task = detail.task;
   if (task.workflowPhase === 'ARCHIVED') throw new Error('Ask is unavailable for an archived task.');

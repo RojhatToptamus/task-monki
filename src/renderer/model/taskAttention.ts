@@ -1,12 +1,11 @@
 import {
   effectiveReviewGateStatus,
   getImplementationRetryReason,
-  type AgentReviewGateProjection,
-  type BoardAgentReviewSummary,
   type BoardTaskSummary,
   type Task
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
+import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
 
@@ -36,7 +35,7 @@ const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
   'INTERRUPTING'
 ]);
 
-const FINISHED_PHASES = new Set<TaskAttentionSource['workflowPhase']>(['DONE', 'CANCELED', 'ARCHIVED']);
+const REVIEW_ATTENTION_PHASES = new Set<TaskAttentionSource['workflowPhase']>(['IN_PROGRESS', 'REVIEW', 'IN_REVIEW']);
 
 /**
  * The most urgent child state for a task, used to drive the "Needs you" inbox,
@@ -45,7 +44,7 @@ const FINISHED_PHASES = new Set<TaskAttentionSource['workflowPhase']>(['DONE', '
 export function describeTaskAttention(
   task: TaskAttentionSource
 ): TaskAttentionDescriptor | undefined {
-  if (FINISHED_PHASES.has(task.workflowPhase)) {
+  if (isClosedPhase(task.workflowPhase)) {
     return undefined;
   }
   switch (task.projection.agentRun) {
@@ -142,21 +141,24 @@ function describeGitAttention(
 /**
  * A finished review the person acts on: the agent's question about a request, a
  * failed review, fixes to review again, or findings to decide. Auto re-review is
- * off, so each waits on the person; a review or run in flight waits on nobody.
+ * off, so each waits on the person; a review or run in flight waits on nobody,
+ * and neither does a merged pull request.
  */
 function describeReviewAttention(
   task: TaskAttentionSource
 ): TaskAttentionDescriptor | undefined {
-  if (!['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) || IN_FLIGHT_RUNS.has(task.projection.agentRun)) {
+  if (!REVIEW_ATTENTION_PHASES.has(task.workflowPhase) || isMerged(task.projection) || IN_FLIGHT_RUNS.has(task.projection.agentRun)) {
+    return undefined;
+  }
+  const review = task.projection.agentReview;
+  if (!review || review.status === 'NOT_RUN' || review.status === 'RUNNING') {
     return undefined;
   }
   // A board summary carries the review's facts; a full task carries the gate they come from.
-  const review = task.projection.agentReview as Partial<AgentReviewGateProjection & BoardAgentReviewSummary> | undefined;
-  if (!review?.status || review.status === 'NOT_RUN' || review.status === 'RUNNING') {
-    return undefined;
-  }
-  const answered = review.requestAnswered ??
-    (review.requestAnswer ? { awaitingDecision: review.requestAnswer.needsDecision > 0 } : undefined);
+  const board = 'findingCounts' in review;
+  const answered = board
+    ? review.requestAnswered
+    : review.requestAnswer;
   if (answered?.awaitingDecision) {
     return { label: 'Agent asked a question', kind: 'question', tone: 'warning' };
   }
@@ -166,7 +168,7 @@ function describeReviewAttention(
   if (answered && review.status === 'STALE') {
     return { label: 'Fixes ready for review', kind: 'review', tone: 'info' };
   }
-  const effective = review.effectiveStatus ?? effectiveReviewGateStatus(review as AgentReviewGateProjection);
+  const effective = board ? review.effectiveStatus : effectiveReviewGateStatus(review);
   if (effective === 'NEEDS_CHANGES') {
     return { label: 'Needs changes', kind: 'review', tone: 'warning' };
   }
@@ -199,9 +201,8 @@ function describeDeliveryAttention(
   if (projection.merge === 'BLOCKED') {
     return { label: 'Merge blocked', kind: 'delivery', tone: 'error' };
   }
-  // UNLINKED is the initial value of every task: it is not delivery evidence.
   const hasDeliveryEvidence =
-    !['NOT_CREATED', 'UNLINKED'].includes(projection.githubPullRequest) ||
+    hasPullRequest(projection) ||
     projection.ciChecks !== 'NOT_APPLICABLE' ||
     projection.reviews !== 'NOT_APPLICABLE' ||
     projection.merge !== 'NOT_APPLICABLE';

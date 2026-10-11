@@ -104,7 +104,6 @@ import {
 import { AttachmentStoreError } from './AttachmentErrors';
 import {
   validateCurrentStoreRecords,
-  validateReviewFindingDecision,
   validateTaskInstructionConversation
 } from './currentStoreValidation';
 import {
@@ -1888,11 +1887,6 @@ export class SqliteTaskStore {
           (!options.runtimeId || run.runtimeId === options.runtimeId)
       )
     );
-  }
-
-  async getIteration(iterationId: string): Promise<TaskIteration | undefined> {
-    await this.init();
-    return clone(this.state.iterations.find((iteration) => iteration.id === iterationId));
   }
 
   async getWorktree(worktreeId: string): Promise<WorktreeRecord | undefined> {
@@ -4195,51 +4189,39 @@ export class SqliteTaskStore {
   }
 
   /**
-   * Records decisions on the current review's findings. `decide` runs inside the
+   * Records a decision on the current review's findings. `decide` runs inside the
    * serialized mutation against the current task, so its checks and the recorded
-   * events cannot interleave with another change to the review. It throws to refuse.
+   * event cannot interleave with another change to the review. It throws to refuse.
    */
-  async recordReviewFindingDecisions(
+  async recordReviewFindingDecision(
     taskId: string,
-    decide: (task: Task) => ReviewFindingDecision[]
-  ): Promise<ReviewFindingDecision[]> {
+    decide: (task: Task) => ReviewFindingDecision
+  ): Promise<ReviewFindingDecision> {
     return this.serializeMutation(async () => {
       await this.init();
       await this.refreshAgentRuntimeProjectionInternal();
       const task = this.state.tasks.find((candidate) => candidate.id === taskId);
       if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
-      const decisions = decide(clone(task));
-      if (decisions.length === 0) return [];
+      const decision = decide(clone(task));
       const review = task.projection.agentReview;
-      const reviewRun = review?.runId
-        ? this.state.runs.find((run) => run.id === review.runId && run.taskId === task.id && run.mode === 'REVIEW')
-        : undefined;
-      const recorded = review?.findingDecisions ?? [];
+      const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
       if (!review || !reviewRun) throw new Error('This review is no longer current.');
-      if (recorded.length + decisions.length > REVIEW_FINDING_DECISION_LIMIT) {
+      if ((review.findingDecisions ?? []).length >= REVIEW_FINDING_DECISION_LIMIT) {
         throw new Error('This review has reached its decision limit. Run the review again.');
       }
-      for (const decision of decisions) {
-        validateReviewFindingDecision(decision, 'events');
-        if (decision.reviewRunId !== reviewRun.id || recorded.some((candidate) => candidate.id === decision.id)) {
-          throw new Error('The decision does not belong to the current review.');
-        }
-      }
-      for (const decision of decisions) {
-        await this.appendEventInternal(
-          createDomainEvent({
-            type: 'AGENT_REVIEW_FINDING_DECIDED',
-            taskId: task.id,
-            iterationId: reviewRun.iterationId,
-            worktreeId: reviewRun.worktreeId,
-            source: decision.actor === 'USER' ? 'ui' : 'provider',
-            payload: { decision }
-          }),
-          false
-        );
-      }
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'AGENT_REVIEW_FINDING_DECIDED',
+          taskId: task.id,
+          iterationId: reviewRun.iterationId,
+          worktreeId: reviewRun.worktreeId,
+          source: 'ui',
+          payload: { decision }
+        }),
+        false
+      );
       await this.persistSnapshot();
-      return clone(decisions);
+      return clone(decision);
     });
   }
 
@@ -5833,7 +5815,8 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       run.runtimeId !== session.runtimeId ||
       (run.runtimeId !== task.runtimeId &&
         !(
-          ((run.mode === 'REVIEW' || run.mode === 'REVIEW_QUESTION') && session.role === 'REVIEW') ||
+          (run.mode === 'REVIEW' && session.role === 'REVIEW') ||
+          (run.mode === 'SIDE_QUESTION' && session.role === 'SIDE') ||
           (run.mode === 'PREVIEW' && session.role === 'PREVIEW') ||
           (run.mode === 'SUBAGENT' &&
             session.role === 'SUBAGENT' &&
@@ -5991,7 +5974,7 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
   }
 }
 
-/** Reviews and Preview conversations may run on another runtime than the task; their subagents inherit that. */
+/** Reviews, questions in Ask and Preview conversations may run on another runtime than the task; their subagents inherit that. */
 function belongsToDetachedLineage(
   session: AgentSessionRecord,
   sessions: ReadonlyMap<string, AgentSessionRecord>,
@@ -7437,7 +7420,7 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         hasResult: Boolean(review?.result),
         findingCounts,
         effectiveStatus: effectiveReviewGateStatus(review),
-        ...(review?.requestAnswer ? { requestAnswered: { awaitingDecision: review.requestAnswer.needsDecision > 0 } } : {})
+        ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
       }
     }
   };

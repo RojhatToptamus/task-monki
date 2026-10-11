@@ -2437,7 +2437,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   ) {
     if (
       this.readOnlyStartFailure &&
-      ['TASK_REVIEW', 'TASK_REVIEW_QUESTION', 'TASK_SIDE_QUESTION'].includes(input.run.purpose)
+      ['TASK_REVIEW', 'TASK_SIDE_QUESTION'].includes(input.run.purpose)
     ) {
       throw new AgentRuntimeDeliveryError('NOT_DELIVERED', this.readOnlyStartFailure);
     }

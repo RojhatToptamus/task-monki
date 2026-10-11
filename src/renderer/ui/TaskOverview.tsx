@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import type {
   AgentCommandApprovalRequest,
   AgentInteractionDecision,
@@ -11,6 +11,8 @@ import { displayApprovalCommand, isWithinWorktree } from '../model/approvalComma
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { ActionMenu } from './ActionMenu';
+import { useClampOverflow } from './useClampOverflow';
+import { ReportedQuote } from './ReportedQuote';
 
 /**
  * The Overview's one raised element: what the task needs now. Every owner —
@@ -64,10 +66,7 @@ export function SlotContent({
       {detail ? <p className="tm-slot__detail">{detail}</p> : null}
       {meta ? <p className="tm-slot__meta">{meta}</p> : null}
       {reported?.source ? (
-        <figure className="tm-oresult__report">
-          <figcaption>{reported.source}</figcaption>
-          <blockquote>{reported.text}</blockquote>
-        </figure>
+        <ReportedQuote source={reported.source}>{reported.text}</ReportedQuote>
       ) : reported ? (
         <blockquote className="tm-slot__quote">{reported.text}</blockquote>
       ) : null}
@@ -316,21 +315,9 @@ export function OverviewRequest({
   attachments: TaskAttachmentRecord[];
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
   const bodyId = useId();
   const body = useRef<HTMLParagraphElement>(null);
-  // Whether the clamp hides anything depends on the width the text gets, so it
-  // is measured, and measured again when the column resizes.
-  useLayoutEffect(() => {
-    const element = body.current;
-    if (!element || expanded) return;
-    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight + 1);
-    measure();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [prompt, expanded]);
+  const overflowing = useClampOverflow(body, expanded, prompt);
   const long = overflowing || expanded;
   return (
     <OverviewSection

@@ -1,13 +1,10 @@
 import {
-  reviewGateStatusFor,
+  AGENT_REVIEW_FINDING_SEVERITIES,
   type AgentReviewFinding,
   type AgentReviewFindingSeverity,
-  type AgentReviewGateStatus,
   type AgentReviewResolvedFinding,
   type AgentReviewResult
 } from '../../shared/contracts';
-
-const SEVERITIES: AgentReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'];
 
 export const AGENT_REVIEW_RESULT_SCHEMA_VERSION = 'agent-review/v1' as const;
 
@@ -24,13 +21,6 @@ export function parseAgentReviewResult(text: string | undefined): AgentReviewRes
   } catch {
     return parseNativeAgentReviewResult(text);
   }
-}
-
-/** The gate status a completed review records, before any finding decision. */
-export function agentReviewStatusFromResult(
-  result: AgentReviewResult | undefined
-): Extract<AgentReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> | undefined {
-  return result ? reviewGateStatusFor(result.verdict, result.findings) : undefined;
 }
 
 export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {
@@ -123,7 +113,7 @@ function normalizeFinding(value: unknown, index: number): AgentReviewFinding | u
 
 function normalizeSeverity(value: unknown): AgentReviewFindingSeverity | undefined {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
-  return SEVERITIES.includes(normalized as AgentReviewFindingSeverity)
+  return AGENT_REVIEW_FINDING_SEVERITIES.includes(normalized as AgentReviewFindingSeverity)
     ? (normalized as AgentReviewFindingSeverity)
     : undefined;
 }

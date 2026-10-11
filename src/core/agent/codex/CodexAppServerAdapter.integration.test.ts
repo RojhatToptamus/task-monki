@@ -663,7 +663,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         const { checkout, config } = await review(label, kind);
         expect(config.permissions[config.default_permissions]!.filesystem).toMatchObject({ [checkout]: 'read', [commonDir]: 'read' });
         expect(config.allow_login_shell).toBe(false);
-        expect(config.shell_environment_policy.set).toMatchObject({ GIT_CONFIG_GLOBAL: '/dev/null', HOME: checkout });
+        // Tools that write under ~ write outside the checkout the review must leave unchanged.
+        expect(config.shell_environment_policy.set).toMatchObject({ GIT_CONFIG_GLOBAL: '/dev/null', HOME: path.join(os.tmpdir(), 'task-monki-isolated-home') });
       }
     } finally {
       await snapshots.sweep([repositoryDir]);

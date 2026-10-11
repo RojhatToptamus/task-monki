@@ -464,10 +464,6 @@ export class ApplicationPreviewService {
     return affected;
   }
 
-  /**
-   * Starts the latest run's configuration again. `assertStartable` refuses an attempt the
-   * caller does not own, such as a saved Design capture under the same runtime name.
-   */
   private async diagnose(name: string, status: PreviewStatus, description?: PreviewDescription) {
     const key = [status.latest?.id, status.latest?.state, status.active?.id, status.url].join('\0');
     const cached = this.diagnoses.get(name);
@@ -477,7 +473,11 @@ export class ApplicationPreviewService {
     return diagnosis;
   }
 
-  async startRetained(worktree: WorktreeRecord, assertStartable?: (attemptId: string) => Promise<void>) {
+  /**
+   * Starts the latest run's configuration again. `assertStartable` refuses an attempt the
+   * caller does not own, such as a saved Design capture under the same runtime name.
+   */
+  async startRetained(worktree: WorktreeRecord, assertStartable: (attemptId: string) => Promise<void>) {
     if (await readPreviewRecipeFile(worktree.worktreePath))
       throw new Error('preview.yaml exists. Start from the current file.');
     await this.allowWorktree(worktree);
@@ -485,7 +485,7 @@ export class ApplicationPreviewService {
     const latest = current.status?.latest;
     if (!latest)
       throw new Error('There is no previous configuration to start.');
-    await assertStartable?.(latest.id);
+    await assertStartable(latest.id);
     await this.owner().startAgain(current.name, latest.id);
     return this.read(worktree);
   }

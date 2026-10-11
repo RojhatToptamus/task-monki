@@ -4,6 +4,7 @@ import { ArrowDownFromLine, ArrowUpFromLine } from 'lucide-react';
 import { gapSteps } from '../model/reviewContext';
 import type { ReviewDiffRow } from '../model/reviewWorkspace';
 import { Tooltip } from './Tooltip';
+import { pluralize } from '../model/formatting';
 
 type GapRow = Extract<ReviewDiffRow, { kind: 'gap' }>;
 
@@ -15,7 +16,7 @@ type GapRow = Extract<ReviewDiffRow, { kind: 'gap' }>;
  * lines become ordinary rows and the gap shrinks, or goes when none are left.
  */
 export function ReviewGap({ row, onReveal }: { row: GapRow; onReveal?(from: number, to: number): void }) {
-  const words = `${row.hidden} unchanged line${row.hidden === 1 ? '' : 's'}`;
+  const words = pluralize(row.hidden, 'unchanged line');
   const heading = row.heading ? <code>{row.heading}</code> : null;
   if (!row.reveal || !onReveal) {
     return (

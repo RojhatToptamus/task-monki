@@ -32,7 +32,7 @@ const rateLimit = file('src/middleware/rateLimit.ts', [
 ]);
 
 function finding(id: string, extra: Partial<ReviewFindingView> = {}): ReviewFindingView {
-  return { id, severity: 'MAJOR', title: id, explanation: 'Why.', state: 'OPEN', addedByReviewer: false, ...extra };
+  return { id, severity: 'MAJOR', title: id, explanation: 'Why.', state: 'OPEN', ...extra };
 }
 
 describe('anchorReviewFindings', () => {

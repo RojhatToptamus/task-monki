@@ -1588,7 +1588,7 @@ async function seedScenario(
     case 'review-running':
     case 'review-passed':
     case 'review-needs-changes':
-    case 'review-questions':
+    case 'review-finding-dismissed':
     case 'review-inconclusive':
     case 'review-failed':
     case 'review-canceled':
@@ -2084,8 +2084,8 @@ async function createReviewScenario(
     return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, review.id) };
   }
 
-  if (definition.slug === 'review-questions') {
-    return createReviewQuestionsScenario(ctx, state);
+  if (definition.slug === 'review-finding-dismissed') {
+    return createReviewFindingDismissedScenario(ctx, state);
   }
 
   const result = reviewResultFor(definition.slug);
@@ -2146,14 +2146,13 @@ const SEED_RATE_LIMIT_SOURCE = [
 ].join('\n');
 
 /**
- * A review whose findings sit on real diff lines, with one question answered:
- * the reviewer withdrew a finding through its revision block, and the person
- * dismissed another with a note.
+ * A review whose findings sit on real diff lines, one of which the person
+ * dismissed with its reason and a note.
  */
-async function createReviewQuestionsScenario(ctx: SeedContext, state: SeededTaskState): Promise<SeededTaskState> {
+async function createReviewFindingDismissedScenario(ctx: SeedContext, state: SeededTaskState): Promise<SeededTaskState> {
   await writeWorktreeFile(state.worktree, 'src/middleware/rateLimit.ts', SEED_RATE_LIMIT_SOURCE);
   const gitSnapshot = await captureGitSnapshot(ctx, state.worktree);
-  const review = await createRun(ctx, { ...state, gitSnapshot }, 'REVIEW', 'Review review-questions.', {
+  const review = await createRun(ctx, { ...state, gitSnapshot }, 'REVIEW', 'Review review-finding-dismissed.', {
     role: 'REVIEW',
     continuedFromRunId: state.run?.id,
     beforeGitSnapshotId: gitSnapshot.id
@@ -2183,39 +2182,10 @@ async function createReviewQuestionsScenario(ctx: SeedContext, state: SeededTask
   };
   await completeRun(ctx, review, result.summary, gitSnapshot.id, { agentReviewResult: result });
 
-  const question = await createRun(ctx, { ...state, gitSnapshot }, 'REVIEW_QUESTION', 'Seeded reviewer question.', {
-    role: 'REVIEW',
-    continuedFromRunId: review.id
-  });
-  const asked = new Date().toISOString();
-  await ctx.store.updateTaskInstructions(state.task.id, (records) => {
-    records.push({
-      id: randomUUID(), taskId: state.task.id, iterationId: state.iteration.id, worktreeId: state.worktree.id,
-      sourceRunId: review.id, sessionId: question.sessionId, order: records.length + 1,
-      text: 'msUntilNextToken already returns seconds; it divides by 1000.',
-      mode: 'FOLLOW_UP', status: 'SUBMITTED', role: 'REVIEW', reviewRunId: review.id, findingId: 'retry-after-ms',
-      runId: question.id, createdAt: asked, updatedAt: asked
-    });
-  });
-  const answer = [
-    "You're right. `msUntilNextToken` in `src/middleware/tokens.ts` divides by 1000 before returning, so the header is already in seconds. I withdrew the finding.",
-    '',
-    '```task-monki-revisions',
-    '[{ "finding": "retry-after-ms", "action": "withdraw", "reason": "msUntilNextToken returns seconds." }]',
-    '```'
-  ].join('\n');
-  await seedAgentMessage(ctx, question, answer, 'reviewer-answer');
-  const decided = new Date().toISOString();
-  const decisions = await ctx.store.recordReviewFindingDecisions(state.task.id, () => [
-    { id: randomUUID(), reviewRunId: review.id, findingId: 'retry-after-ms', kind: 'WITHDRAW', actor: 'REVIEWER',
-      reason: 'msUntilNextToken returns seconds.', questionRunId: question.id, createdAt: decided },
-    { id: randomUUID(), reviewRunId: review.id, findingId: 'missing-key-test', kind: 'DISMISS', actor: 'USER',
-      note: 'Covered by the auth tests', createdAt: decided }
-  ]);
-  await completeRun(ctx, question, answer, undefined, {
-    mode: 'REVIEW_QUESTION',
-    reviewerRevisions: { status: 'APPLIED', decisionIds: decisions.filter((decision) => decision.actor === 'REVIEWER').map((decision) => decision.id) }
-  });
+  await ctx.store.recordReviewFindingDecision(state.task.id, () => (
+    { id: randomUUID(), reviewRunId: review.id, findingId: 'missing-key-test', kind: 'DISMISS', dismissReason: 'ACCEPTED',
+      note: 'Covered by the auth tests', createdAt: new Date().toISOString() }
+  ));
   return { ...state, gitSnapshot, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, review.id) };
 }
 

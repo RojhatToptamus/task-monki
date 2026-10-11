@@ -21,6 +21,7 @@ import {
   isInFlightTask
 } from './taskAttention';
 import { humanizeEnum } from './formatting';
+import { hasPullRequest, isClosedPhase, isMerged, isReviewPhase } from './taskPhase';
 import type { Tone } from './viewTypes';
 
 /** A task's pull request as a board card shows it: GitHub's number and state. */
@@ -91,7 +92,7 @@ export function describeTaskCompletionEvidence(
   }
   if (
     completionPolicyRequiresMerge(task.completionPolicy) &&
-    (task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED')
+    isMerged(task.projection)
   ) {
     return {
       label: 'Auto-completed',
@@ -116,7 +117,7 @@ export function describeTaskClosure(
   task: Pick<Task, 'id' | 'workflowPhase' | 'completionPolicy' | 'projection'>,
   events: readonly DomainEvent[]
 ): TaskClosureViewModel | undefined {
-  if (!['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)) {
+  if (!isClosedPhase(task.workflowPhase)) {
     return undefined;
   }
   const closing = events
@@ -259,7 +260,7 @@ export function describeTaskStatus(task: TaskCardSource): { label: string; tone:
   if (attention) {
     return describeAttentionStatus(attention);
   }
-  if (REVIEW_PHASES.includes(task.workflowPhase)) {
+  if (isReviewPhase(task.workflowPhase)) {
     const status = cardReviewStatus(task);
     return describeDeliveryProgress(task, status) ?? describeReviewGateStatus(task, status);
   }
@@ -294,7 +295,7 @@ function describeDeliveryProgress(
   status: AgentReviewGateStatus
 ): { label: string; tone: Tone } | undefined {
   const projection = task.projection;
-  if (projection.merge === 'MERGED' || projection.githubPullRequest === 'MERGED') {
+  if (isMerged(projection)) {
     return { label: 'Merged', tone: 'neutral' };
   }
   const open = projection.githubPullRequest === 'OPEN_DRAFT' || projection.githubPullRequest === 'OPEN_READY';
@@ -321,9 +322,7 @@ function describeReviewGateStatus(
   task: TaskCardSource,
   status: AgentReviewGateStatus
 ): { label: string; tone: Tone } {
-  const delivering =
-    task.workflowPhase === 'IN_REVIEW' ||
-    !['UNLINKED', 'NOT_CREATED'].includes(task.projection.githubPullRequest);
+  const delivering = task.workflowPhase === 'IN_REVIEW' || hasPullRequest(task.projection);
   switch (status) {
     case 'PASSED':
       return delivering
@@ -356,10 +355,8 @@ function describeReviewGateStatus(
  * explains why the review could not finish ("Git metadata is inaccessible"),
  * which is not work for the agent, so the next step is to run it again.
  */
-export function canRequestReviewChanges(
-  review: NonNullable<Task['projection']['agentReview']>,
-  effectiveStatus = review.status
-): boolean {
+export function canRequestReviewChanges(review: NonNullable<Task['projection']['agentReview']>): boolean {
+  const effectiveStatus = effectiveReviewGateStatus(review);
   if (effectiveStatus === 'NEEDS_CHANGES') return true;
   return (effectiveStatus === 'INCONCLUSIVE' || effectiveStatus === 'FAILED') &&
     openReviewFindings(review.result, review.findingDecisions ?? []).length > 0;
@@ -410,7 +407,7 @@ export function cardPullRequestForTask(
   stateLabel = describeTaskStatus(task).label
 ): TaskCardPullRequest | undefined {
   const projection = task.projection;
-  if (projection.githubPullRequest === 'UNLINKED' || projection.githubPullRequest === 'NOT_CREATED') {
+  if (!hasPullRequest(projection)) {
     return undefined;
   }
   const state = cardPullRequestState(projection);
@@ -428,7 +425,7 @@ export function cardPullRequestForTask(
 function cardPullRequestState(
   projection: TaskCardSource['projection']
 ): TaskCardPullRequest['state'] | undefined {
-  if (projection.merge === 'MERGED' || projection.githubPullRequest === 'MERGED') return 'merged';
+  if (isMerged(projection)) return 'merged';
   if (projection.merge === 'CLOSED_UNMERGED' || projection.githubPullRequest === 'CLOSED_UNMERGED') return 'closed';
   if (projection.githubPullRequest === 'OPEN_DRAFT') return 'draft';
   if (projection.githubPullRequest === 'OPEN_READY') return 'open';
@@ -571,9 +568,6 @@ export function isTasksView(view: string): view is TasksView {
   return view === 'board' || view === 'active' || view === 'review' || view === 'done';
 }
 
-const REVIEW_PHASES: WorkflowPhase[] = ['REVIEW', 'IN_REVIEW'];
-const DONE_PHASES: WorkflowPhase[] = ['DONE', 'CANCELED', 'ARCHIVED'];
-
 export interface NavCounts {
   inbox: number;
   active: number;
@@ -586,7 +580,7 @@ export function computeNavCounts(tasks: TaskCardSource[]): NavCounts {
     inbox: tasks.filter(isAttentionTask).length,
     active: tasks.filter(isInFlightTask).length,
     review: tasks.filter(isReviewQueueTask).length,
-    done: tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)).length
+    done: tasks.filter((task) => isClosedPhase(task.workflowPhase)).length
   };
 }
 
@@ -603,7 +597,7 @@ export function tasksForView(
     case 'review':
       return sorted(tasks.filter(isReviewQueueTask));
     case 'done':
-      return sorted(tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)));
+      return sorted(tasks.filter((task) => isClosedPhase(task.workflowPhase)));
     default:
       return sorted(tasks);
   }
@@ -640,25 +634,25 @@ export function columnTasks(
 }
 
 function isReviewQueueTask(task: TaskCardSource): boolean {
-  return REVIEW_PHASES.includes(task.workflowPhase) || taskCardReview(task).status === 'RUNNING';
+  return isReviewPhase(task.workflowPhase) || taskCardReview(task).status === 'RUNNING';
 }
 
 function taskCardReview(task: TaskCardSource) {
   return task.projection.agentReview ?? {
     status: 'NOT_RUN' as const,
+    effectiveStatus: 'NOT_RUN' as const,
     hasResult: false,
     findingCounts: {}
   };
 }
 
 /**
- * The review status a task's word reflects: the gate rule applied once every
- * finding decision applies, so the reviewer's revisions move it both ways. The
- * board's summary carries that answer; a full projection is asked directly.
+ * The review status a task's word reflects: the gate rule once every finding
+ * decision applies. The board's summary carries it; a full projection is asked directly.
  */
 function cardReviewStatus(task: TaskCardSource): AgentReviewGateStatus {
   const review = taskCardReview(task);
-  return 'findingCounts' in review ? review.effectiveStatus ?? review.status : effectiveReviewGateStatus(review);
+  return 'findingCounts' in review ? review.effectiveStatus : effectiveReviewGateStatus(review);
 }
 
 function reviewHasResult(review: ReturnType<typeof taskCardReview>): boolean {
@@ -671,7 +665,7 @@ function reviewFindingCounts(
   const review = taskCardReview(task);
   if ('findingCounts' in review) return review.findingCounts;
   const counts: Partial<Record<AgentReviewFinding['severity'], number>> = {};
-  for (const finding of review.result?.findings ?? []) {
+  for (const finding of openReviewFindings(review.result, review.findingDecisions ?? [])) {
     counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
   }
   return counts;

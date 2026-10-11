@@ -273,7 +273,8 @@ import {
   type DesignBrowserOwner
 } from '../design/AgentBrowserRuntime';
 import { ClientToolBridge } from '../agent/clientTools/ClientToolBridge';
-import { LEGACY_CLIENT_TOOL_SCRATCH_DIRECTORY, resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
+import { resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
+import { runReplyText } from '../agent/runReply';
 import {
   INSPECT_DESIGN_TOOL_DEFINITION,
   safeDesignClientToolFailure
@@ -494,8 +495,6 @@ export class TaskManagerService {
         options.clientToolMcpServerPath ??
         resolveClientToolMcpServerPath({ isPackaged: false, resourcesPath: '', appPath: process.cwd() }),
       scratchRoot: clientToolScratchRoot,
-      // Earlier releases kept the Design tool's grants beside it.
-      legacyScratchRoot: path.join(path.dirname(clientToolScratchRoot), LEGACY_CLIENT_TOOL_SCRATCH_DIRECTORY),
       runtimeStore: this.agentRuntimeStore,
       handlers: [
         {
@@ -2927,9 +2926,9 @@ export class TaskManagerService {
   }
 
   private async isPendingInstruction(record: TaskInstruction): Promise<boolean> {
-    // Reviewer and side questions are answered by their own runs; they never become
-    // instructions for the task's agent.
-    if (record.role === 'REVIEW' || record.role === 'SIDE') return false;
+    // Questions in Ask are answered by their own runs; they never become instructions
+    // for the task's agent.
+    if (record.role === 'SIDE') return false;
     return ['QUEUED', 'HELD'].includes(record.status) ||
       (record.status === 'FAILED' && record.mode !== 'STEER' && record.runId !== undefined && !await this.store.getRun(record.runId));
   }
@@ -3098,10 +3097,7 @@ export class TaskManagerService {
     if (!waiting) return;
     try {
       await this.withRuntimeOperation(async () => {
-        while (this.taskActionLocks.has(run.taskId)) {
-          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
-        }
-        await this.withTaskAction(run.taskId, 'Queued instruction', async () => {
+        await this.withQueuedTaskAction(run.taskId, 'Queued instruction', async () => {
           await this.ensurePostRunEvidence(runId);
           const detail = await this.store.getTaskDetail(run.taskId);
           const next = detail.taskInstructions.filter((item) => item.status === 'QUEUED' && item.sourceRunId === runId).sort((a, b) => a.order - b.order)[0];
@@ -3193,8 +3189,7 @@ export class TaskManagerService {
       .sort((left, right) => right.order - left.order)[0];
     if (!instruction?.reviewRequest) return undefined;
     const run = detail.runs.find((candidate) => candidate.id === instruction.runId);
-    const reply = run?.status !== 'COMPLETED' ? ''
-      : run.finalMessage?.trim() || (run.finalArtifactId ? await this.agentRuntimeStore.readArtifact(run.finalArtifactId).catch(() => '') : '');
+    const reply = run?.status === 'COMPLETED' ? await runReplyText(run, (id) => this.agentRuntimeStore.readArtifact(id)) : '';
     return { record: instruction.reviewRequest, answers: reply ? parseReviewResponse(reply, instruction.reviewRequest).answers : [] };
   }
 
@@ -3734,7 +3729,7 @@ export class TaskManagerService {
     const task = await this.requireNormalTask(input.taskId, 'Review changes');
     const review = typeof input.reviewRunId === 'string' ? await this.store.getRun(input.reviewRunId) : undefined;
     if (!review || review.taskId !== task.id || review.mode !== 'REVIEW') throw new Error('This review is not part of the task.');
-    const worktree = (await this.store.snapshot()).worktrees.find((candidate) => candidate.id === review.worktreeId);
+    const worktree = await this.store.getWorktree(review.worktreeId);
     if (!worktree || worktree.status !== 'PRESENT') return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
     const gate = task.projection.agentReview;
     return this.reviewSnapshots.changesSince(
@@ -4099,10 +4094,7 @@ export class TaskManagerService {
     if (!run || run.mode !== 'PREVIEW') return;
     try {
       await this.withRuntimeOperation(async () => {
-        while (this.taskActionLocks.has(run.taskId)) {
-          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
-        }
-        await this.withTaskAction(run.taskId, 'Preview agent completion', async () => {
+        await this.withQueuedTaskAction(run.taskId, 'Preview agent completion', async () => {
           const integrityFailure = await this.agents.verifyPreviewRepositoryBoundary(runId);
           if (integrityFailure) {
             this.previewRecipeGenerator.discard(run.taskId);
@@ -4874,8 +4866,7 @@ export class TaskManagerService {
     const request = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest)?.reviewRequest;
     if (!request?.reviewRunId) return;
     const completed = detail.runs.find((candidate) => candidate.id === run.id) ?? run;
-    const reply = completed.finalMessage?.trim() ||
-      (completed.finalArtifactId ? await this.agentRuntimeStore.readArtifact(completed.finalArtifactId).catch(() => '') : '');
+    const reply = await runReplyText(completed, (id) => this.agentRuntimeStore.readArtifact(id));
     const { answers } = parseReviewResponse(reply, request);
     await this.store.appendEvent(
       createDomainEvent({
@@ -4888,7 +4879,6 @@ export class TaskManagerService {
         source: 'provider',
         payload: {
           reviewRunId: request.reviewRunId,
-          answered: answers.length,
           needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length
         }
       })
@@ -5682,9 +5672,6 @@ export class TaskManagerService {
     }
     if (activeRun.mode === 'REVIEW') {
       throw new Error(`Wait for the agent review to finish before ${action}.`);
-    }
-    if (activeRun.mode === 'REVIEW_QUESTION') {
-      throw new Error(`Wait for the reviewer to answer, or stop the question, before ${action}.`);
     }
     if (activeRun.mode === 'SIDE_QUESTION') {
       throw new Error(`Wait for the answer in Ask, or stop it, before ${action}.`);

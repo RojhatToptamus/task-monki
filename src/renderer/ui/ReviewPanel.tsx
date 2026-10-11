@@ -9,10 +9,10 @@ import type { ReviewActivityViewModel } from '../model/reviewActivity';
 import { FINDING_LEVELS } from '../model/findings';
 import { formatTaskActivityTimestamp } from './TaskActivityPanel';
 import { RunHeader } from './RunHeader';
-import { StatusGlyph, type StatusGlyphKind } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
 import { reviewedCode, reviewedCodeText, type ReviewedCode } from '../model/reviewedCode';
 import type { Tone } from '../model/viewTypes';
+import { ReportedQuote } from './ReportedQuote';
 
 export type ReviewActionPauseReason =
   | 'review-starting'
@@ -103,9 +103,6 @@ export function ReviewPanel({
         </div>
       ) : (
         <div className="tm-reviewcard__head">
-          {ui.mark !== 'idle' ? (
-            <StatusGlyph className="tm-reviewcard__glyph" kind={ui.mark} />
-          ) : null}
           <div>
             <h3 className="tm-panel__title tm-panel__title--flush">
               Agent review
@@ -136,10 +133,7 @@ export function ReviewPanel({
         ) : (
           <div className="tm-reviewcard__summary">
             {body?.source === 'reviewer' ? (
-              <figure className="tm-oresult__report">
-                <figcaption>{reviewerName}</figcaption>
-                <blockquote>{body.text}</blockquote>
-              </figure>
+              <ReportedQuote source={reviewerName}>{body.text}</ReportedQuote>
             ) : body ? (
               <p>{body.text}</p>
             ) : null}
@@ -227,16 +221,16 @@ function RawReviewOutput({
   );
 }
 
-/**
- * "1 major, 2 minor · 1 closed": the open findings by severity, then how many
- * were dismissed or withdrawn. Earlier findings carry no tone.
- */
 /** The commit in mono, then the uncommitted changes in words when they came with it. */
 function ReviewedCodeLabel({ code }: { code: ReviewedCode }) {
   if (!code.head) return <>uncommitted changes</>;
   return <><code>{code.head}</code>{code.uncommitted ? ' and uncommitted changes' : null}</>;
 }
 
+/**
+ * The open findings by severity ("1 major, 2 minor"), then how many were
+ * dismissed. Earlier findings carry no tone.
+ */
 function SeverityDistribution({ findings, earlier }: { findings: EffectiveReviewFinding[]; earlier: boolean }) {
   const open = findings.filter((finding) => finding.state === 'OPEN');
   const closed = findings.length - open.length;
@@ -267,26 +261,25 @@ function reviewGateUi(
 ): {
   label: string;
   tone: Tone;
-  mark: StatusGlyphKind;
 } {
   switch (status) {
     case 'RUNNING':
-      return { label: 'Reviewing', tone: 'info', mark: 'working' };
+      return { label: 'Reviewing', tone: 'info' };
     case 'PASSED':
-      return { label: 'Passed', tone: 'success', mark: 'idle' };
+      return { label: 'Passed', tone: 'success' };
     case 'NEEDS_CHANGES':
-      return { label: 'Needs changes', tone: 'action', mark: 'waiting' };
+      return { label: 'Needs changes', tone: 'action' };
     case 'INCONCLUSIVE':
-      return { label: 'Inconclusive', tone: 'action', mark: 'waiting' };
+      return { label: 'Inconclusive', tone: 'action' };
     case 'FAILED':
-      return { label: 'Failed', tone: 'error', mark: 'blocked' };
+      return { label: 'Failed', tone: 'error' };
     case 'CANCELED':
-      return { label: 'Stopped', tone: 'action', mark: 'idle' };
+      return { label: 'Stopped', tone: 'action' };
     // A stale review has one state word; its old verdict is context in the body.
     case 'STALE':
-      return { label: 'Needs re-review', tone: 'neutral', mark: 'idle' };
+      return { label: 'Needs re-review', tone: 'neutral' };
     case 'NOT_RUN':
-      return { label: 'Not run', tone: 'neutral', mark: 'idle' };
+      return { label: 'Not run', tone: 'neutral' };
   }
 }
 

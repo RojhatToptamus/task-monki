@@ -133,7 +133,6 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
   color: var(--verified-ink);
 }
 
-.status-pill--warning,
 .status-pill--action {
   background: var(--waiting-bg);
   color: var(--waiting-ink);
@@ -147,10 +146,6 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
 .status-pill--info {
   background: var(--accent-soft);
   color: var(--accent-ink);
-}
-
-.tm-panel__title.tm-panel__title--flush {
-  margin: 0;
 }
 
 .tm-panel-resize {
@@ -442,8 +437,6 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   .tm-detail__assistant,
   .tm-listrail__new,
   .tm-prstatus__refresh,
-  .tm-preview-icon-button,
-  .tm-design-canvas__tool,
   .tm-preview-follow,
   .tm-discourse-new-responses
 ):not(:disabled):active {
@@ -565,8 +558,11 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 }
 
 /* FactLine: one fact per span, 8px apart; inline, so a parent's ellipsis still applies. */
-.tm-fact-line > span + span {
-  margin-left: 8px;
+.tm-fact-line > span + span::before {
+  content: " ";
+  display: inline-block;
+  width: 8px;
+  white-space: pre;
 }
 
 .interaction-card--question { padding: 12px; }
@@ -1010,7 +1006,6 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-action-menu__item[data-disabled] .tm-action-menu__meta { color: var(--text-disabled); }
 .tm-action-menu__separator { height: 1px; margin: 4px 2px; background: var(--hair); }
 .tm-action-menu__note { margin: 0; padding: 5px 8px 4px; color: var(--muted); font-size: var(--t-meta); line-height: 1.4; }
-.tm-action-menu__note[data-tone='blocked'] { color: var(--blocked-ink); }
 /* A submenu row: its chevron sits where a check would, and the row stays lit while its submenu is open. */
 .tm-action-menu__subchevron { flex: 0 0 auto; color: var(--muted); }
 .tm-action-menu__subtrigger[data-state='open'] { background: var(--hover); }
@@ -1049,12 +1044,12 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-table { position: relative; border-radius: var(--r-md); }
 .tm-table::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--edge-raised); pointer-events: none; }
 .tm-table table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: auto; font-size: var(--t-body); }
-.tm-table th { height: 36px; padding: 0 12px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); text-align: left; white-space: nowrap; }
+.tm-table th { height: var(--h-row); padding: 0 12px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); text-align: left; white-space: nowrap; }
 .tm-table th:first-child,
 .tm-table td:first-child { padding-left: 16px; }
 .tm-table th:last-child,
 .tm-table td:last-child { padding-right: 10px; }
-.tm-table td { height: 48px; padding: 0 12px; border-top: 1px solid var(--hair); color: var(--text-soft); vertical-align: middle; transition: background-color var(--motion-fast) var(--ease-out); }
+.tm-table td { height: var(--h-row-tall); padding: 0 12px; border-top: 1px solid var(--hair); color: var(--text-soft); vertical-align: middle; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-table tbody tr:hover td { background: var(--hover); }
 .tm-table tbody tr:last-child td:first-child { border-bottom-left-radius: var(--r-md); }
 .tm-table tbody tr:last-child td:last-child { border-bottom-right-radius: var(--r-md); }
@@ -1078,7 +1073,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 :is(.tm-designs--compact .tm-designs-rail--open, .tm-discourse--compact .tm-discourse-rail--open) { transform: translateX(0); visibility: visible; transition-delay: 0s; }
 /* The head shares the 48px line of the workspace head beside it. */
 /* Boxes in the rail sit 8px in; their words start 16px in, on the head's line. */
-.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 6px 16px; margin-bottom: 4px; }
+.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--h-head); padding: 6px 16px; margin-bottom: 4px; }
 .tm-listrail__head h2 { margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: var(--w-medium); letter-spacing: -0.01em; }
 .tm-listrail__head-actions { display: flex; align-items: center; gap: 4px; }
 .tm-listrail__new { display: inline-flex; align-items: center; gap: 6px; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); font-weight: var(--w-medium); }
@@ -1090,7 +1085,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .app-shell .tm-listrail__search input:focus { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font: var(--t-help) var(--font-ui); }
 .tm-listrail__filter { margin: 0 8px 12px; }
 .tm-listrail__list { min-height: 0; flex: 1; overflow-y: auto; padding: 0 0 12px 8px; scrollbar-gutter: stable; }
-.tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: 48px; margin: 1px 0; padding: 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
+.tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: var(--h-row-tall); margin: 1px 0; padding: 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
 .tm-listrail__item:hover { background-color: var(--hover); }
 .tm-listrail__item--active,
 .tm-listrail__item--active:hover { background: var(--sel); color: var(--text); }

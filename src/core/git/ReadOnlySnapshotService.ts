@@ -4,10 +4,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES,
-  SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES
-} from '../../shared/sideQuestions';
-import {
   canonicalPath,
   enforcePosixMode,
   isOwnedByCurrentUser
@@ -41,8 +37,6 @@ export interface ReadOnlySnapshot {
   takenAt: string;
   /** Untracked files the size limits left out. */
   omitted: ReadOnlySnapshotOmission[];
-  /** Whether `prepare` returned the thread's existing snapshot. */
-  reused: boolean;
 }
 
 export interface ReadOnlySnapshotServiceOptions {
@@ -53,7 +47,7 @@ export interface ReadOnlySnapshotServiceOptions {
   now?: () => Date;
 }
 
-interface SnapshotEntry extends Omit<ReadOnlySnapshot, 'reused'> {
+interface SnapshotEntry extends ReadOnlySnapshot {
   liveWorktreePath: string;
 }
 
@@ -99,8 +93,8 @@ export class ReadOnlySnapshotService {
 
   constructor(options: ReadOnlySnapshotServiceOptions) {
     this.root = path.resolve(options.root);
-    this.maxFileBytes = options.maxFileBytes ?? SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES;
-    this.maxTotalBytes = options.maxTotalBytes ?? SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES;
+    this.maxFileBytes = options.maxFileBytes ?? UNTRACKED_SNAPSHOT_MAX_FILE_BYTES;
+    this.maxTotalBytes = options.maxTotalBytes ?? UNTRACKED_SNAPSHOT_MAX_TOTAL_BYTES;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -135,7 +129,7 @@ export class ReadOnlySnapshotService {
         existing.fingerprint === fingerprint &&
         (await isDirectory(existing.path))
       ) {
-        return { ...snapshotFromEntry(existing), reused: true };
+        return snapshotFromEntry(existing);
       }
       // A stale snapshot of the same thread is refreshed in place, which rewrites only
       // what changed; a fresh checkout replaces it if that fails.
@@ -155,7 +149,7 @@ export class ReadOnlySnapshotService {
         created = await this.create(taskId, threadId, live, headSha, fingerprint, false);
       }
       this.entries.set(taskId, created);
-      return { ...snapshotFromEntry(created), reused: false };
+      return snapshotFromEntry(created);
     });
   }
 
@@ -181,10 +175,6 @@ export class ReadOnlySnapshotService {
       }
       await removeEmptyDirectory(path.join(this.root, taskId));
     });
-  }
-
-  removeTask(taskId: string): Promise<void> {
-    return this.remove(taskId);
   }
 
   /** Whether `candidate` names a snapshot location of this service: `<root>/<taskId>/<threadId>`. */
@@ -264,7 +254,7 @@ export class ReadOnlySnapshotService {
       // Patches go through files so binary and non-UTF-8 content stays byte-exact.
       await git(live, ['diff', '--cached', ...DIFF_ARGS, `--output=${patches.staged}`, headSha, '--'], GIT_TIMEOUT_MS);
       await git(live, ['diff', ...DIFF_ARGS, `--output=${patches.working}`, headSha, '--'], GIT_TIMEOUT_MS);
-      const untracked = await listUntracked(live);
+      const untracked = await planUntrackedFiles(live, { maxFileBytes: this.maxFileBytes, maxTotalBytes: this.maxTotalBytes });
       this.repositories.add(live);
       if (refresh) {
         await setWritable(target, true);
@@ -299,43 +289,18 @@ export class ReadOnlySnapshotService {
   }
 
   /**
-   * Copies the untracked files in path order within the size limits. The agent keeps
-   * changing the live worktree meanwhile, so the listing only plans the copy:
-   * `copyUntrackedEntry` checks each entry again as it copies.
+   * Copies the planned untracked files. The agent keeps changing the live worktree
+   * meanwhile, so the plan only reserves each copy: `copyUntrackedEntry` checks each
+   * entry again as it copies.
    */
   private async copyUntracked(
     live: string,
     target: string,
-    relativePaths: readonly string[]
+    plan: UntrackedSnapshotPlan
   ): Promise<ReadOnlySnapshotOmission[]> {
-    const inspected = await mapConcurrent(relativePaths, async (relative) => {
-      const source = path.resolve(live, relative);
-      const destination = path.resolve(target, relative);
-      if (relative.endsWith('/') || !isInside(live, source) || !isInside(target, destination)) {
-        return { relative, kind: 'OTHER' as const, size: 0 };
-      }
-      const stat = await fs.lstat(source).catch(() => undefined);
-      if (!stat) return undefined;
-      const kind = stat.isSymbolicLink() ? 'LINK' as const : stat.isFile() ? 'FILE' as const : 'OTHER' as const;
-      return { relative, kind, size: kind === 'FILE' ? stat.size : 0 };
-    });
-    const omitted: ReadOnlySnapshotOmission[] = [];
-    const copies: Array<{ relative: string; kind: 'FILE' | 'LINK'; size: number }> = [];
-    let total = 0;
-    for (const file of inspected) {
-      if (!file) continue;
-      if (file.kind === 'OTHER') {
-        omitted.push({ path: file.relative.replace(/\/$/u, ''), reason: 'NOT_A_FILE' });
-      } else if (file.size > this.maxFileBytes) {
-        omitted.push({ path: file.relative, reason: 'LARGER_THAN_FILE_LIMIT' });
-      } else if (total + file.size > this.maxTotalBytes) {
-        omitted.push({ path: file.relative, reason: 'TOTAL_LIMIT_REACHED' });
-      } else {
-        total += file.size;
-        copies.push({ relative: file.relative, kind: file.kind, size: file.size });
-      }
-    }
-    const skipped = await mapConcurrent(copies, async (file) => {
+    const omitted = [...plan.omitted];
+    const skipped = await mapConcurrent(plan.files, async (file) => {
+      if (!isInside(target, path.resolve(target, file.relative))) return { path: file.relative, reason: 'NOT_A_FILE' as const };
       const result = await copyUntrackedEntry({
         liveRoot: live,
         snapshotRoot: target,
@@ -538,7 +503,7 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code;
 }
 
-function snapshotFromEntry(entry: SnapshotEntry): Omit<ReadOnlySnapshot, 'reused'> {
+function snapshotFromEntry(entry: SnapshotEntry): ReadOnlySnapshot {
   return {
     taskId: entry.taskId,
     threadId: entry.threadId,
@@ -554,6 +519,50 @@ async function resolveHead(worktreePath: string): Promise<string> {
   const sha = (await git(worktreePath, ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])).trim();
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sha)) throw new Error('Git did not report the worktree HEAD.');
   return sha;
+}
+
+/** Untracked files larger than this are left out of a worktree snapshot. */
+export const UNTRACKED_SNAPSHOT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+/** Untracked files beyond this total are left out of a worktree snapshot. */
+export const UNTRACKED_SNAPSHOT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+
+export interface UntrackedSnapshotPlan {
+  files: Array<{ relative: string; kind: 'FILE' | 'LINK'; size: number }>;
+  omitted: ReadOnlySnapshotOmission[];
+}
+
+/**
+ * A worktree's untracked files that Git does not ignore, in path order: those
+ * within the size limits, and the rest with why they were left out.
+ */
+export async function planUntrackedFiles(
+  worktreePath: string,
+  limits = { maxFileBytes: UNTRACKED_SNAPSHOT_MAX_FILE_BYTES, maxTotalBytes: UNTRACKED_SNAPSHOT_MAX_TOTAL_BYTES }
+): Promise<UntrackedSnapshotPlan> {
+  const inspected = await mapConcurrent(await listUntracked(worktreePath), async (relative) => {
+    const source = path.resolve(worktreePath, relative);
+    if (relative.endsWith('/') || !isInside(worktreePath, source)) return { relative, kind: 'OTHER' as const, size: 0 };
+    const stat = await fs.lstat(source).catch(() => undefined);
+    if (!stat) return undefined;
+    const kind = stat.isSymbolicLink() ? 'LINK' as const : stat.isFile() ? 'FILE' as const : 'OTHER' as const;
+    return { relative, kind, size: kind === 'FILE' ? stat.size : 0 };
+  });
+  const plan: UntrackedSnapshotPlan = { files: [], omitted: [] };
+  let total = 0;
+  for (const file of inspected) {
+    if (!file) continue;
+    if (file.kind === 'OTHER') {
+      plan.omitted.push({ path: file.relative.replace(/\/$/u, ''), reason: 'NOT_A_FILE' });
+    } else if (file.size > limits.maxFileBytes) {
+      plan.omitted.push({ path: file.relative, reason: 'LARGER_THAN_FILE_LIMIT' });
+    } else if (total + file.size > limits.maxTotalBytes) {
+      plan.omitted.push({ path: file.relative, reason: 'TOTAL_LIMIT_REACHED' });
+    } else {
+      total += file.size;
+      plan.files.push({ relative: file.relative, kind: file.kind, size: file.size });
+    }
+  }
+  return plan;
 }
 
 async function listUntracked(worktreePath: string): Promise<string[]> {

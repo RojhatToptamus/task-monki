@@ -12,6 +12,7 @@ import {
   isImplementationRunMode,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import { runMayWriteTaskWorktree } from '../../shared/sideQuestions';
 
 export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'QUEUED',
@@ -22,6 +23,11 @@ export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new S
   'INTERRUPTING',
   'RECOVERY_REQUIRED'
 ]);
+
+/** An active run that may be changing the task's worktree. */
+export function isActiveWorktreeWriter(run: RunRecord): boolean {
+  return ACTIVE_AGENT_RUN_STATUSES.has(run.status) && runMayWriteTaskWorktree(run);
+}
 
 export interface TaskTransitionEvidence {
   hasWorktree: boolean;

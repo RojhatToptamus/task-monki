@@ -84,15 +84,15 @@ function MenuItems({ items, options }: { items: ActionMenuItem[]; options: MenuB
     : <>{items.map(renderItem)}</>;
 }
 
-function MenuNote({ id, note, tone }: { id: string; note: string; tone?: 'blocked' }) {
+function MenuNote({ id, note }: { id: string; note: string }) {
   return <>
     <DropdownMenu.Separator className="tm-action-menu__separator" />
-    <p className="tm-action-menu__note" id={`${id}-note`} data-tone={tone} role={tone === 'blocked' ? 'alert' : undefined}>{note}</p>
+    <p className="tm-action-menu__note" id={`${id}-note`}>{note}</p>
   </>;
 }
 
 /** shadcn's Radix menu foundation, styled with Task Monki's shared tokens. */
-export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', disabled, label, tooltip, trigger, items, note, noteTone, open, closeOnSelect = true, onOpenChange }: {
+export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', disabled, label, tooltip, trigger, items, note, open, closeOnSelect = true, onOpenChange }: {
   className?: string;
   selection?: 'single' | 'multiple';
   align?: 'start' | 'end';
@@ -106,7 +106,6 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
   items: ActionMenuItem[];
   /** One muted line after the items that explains a limit shared by several of them, or an error. */
   note?: string;
-  noteTone?: 'blocked';
   open?: boolean;
   closeOnSelect?: boolean;
   onOpenChange?(open: boolean): void;
@@ -122,7 +121,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
     <DropdownMenu.Portal>
       <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} aria-describedby={note ? `${id}-note` : undefined} side={side} align={align} sideOffset={6} collisionPadding={8}>
         <MenuItems items={items} options={{ id, selection, closeOnSelect }} />
-        {note ? <MenuNote id={id} note={note} tone={noteTone} /> : null}
+        {note ? <MenuNote id={id} note={note} /> : null}
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
   </DropdownMenu.Root>;
@@ -132,12 +131,10 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
  * The same menu opened at a point, for a right-click: an invisible anchor at the pointer
  * stands in for the trigger. Scrolling anything outside the menu closes it.
  */
-export function ActionContextMenu({ label, position, items, note, noteTone, onClose }: {
+export function ActionContextMenu({ label, position, items, onClose }: {
   label: string;
   position: { x: number; y: number };
   items: ActionMenuItem[];
-  note?: string;
-  noteTone?: 'blocked';
   onClose(): void;
 }) {
   const id = useId();
@@ -157,9 +154,8 @@ export function ActionContextMenu({ label, position, items, note, noteTone, onCl
       <span className="tm-action-menu__anchor" aria-hidden="true" style={{ left: position.x, top: position.y }} />
     </DropdownMenu.Trigger>
     <DropdownMenu.Portal>
-      <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} aria-describedby={note ? `${id}-note` : undefined} side="bottom" align="start" sideOffset={2} collisionPadding={8}>
+      <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} side="bottom" align="start" sideOffset={2} collisionPadding={8}>
         <MenuItems items={items} options={{ id, selection: 'multiple', closeOnSelect: true }} />
-        {note ? <MenuNote id={id} note={note} tone={noteTone} /> : null}
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
   </DropdownMenu.Root>;

@@ -11,9 +11,8 @@ export async function readTaskUserContext(
   options: { throughRunId?: string; beforeDesignTurnOrder?: number } = {}
 ): Promise<string> {
   const detail = await store.getTaskDetail(taskId);
-  // Questions to a reviewer, and side questions to the agent, are separate conversations, not task intent.
-  const runs = detail.runs.filter((run) =>
-    run.mode !== 'REVIEW' && run.mode !== 'REVIEW_QUESTION' && run.mode !== 'SIDE_QUESTION');
+  // Reviews and questions in Ask are separate from the task's conversation, not task intent.
+  const runs = detail.runs.filter((run) => run.mode !== 'REVIEW' && run.mode !== 'SIDE_QUESTION');
   const sourceRun = options.throughRunId ? runs.find((run) => run.id === options.throughRunId) : undefined;
   if (options.throughRunId && !sourceRun) throw new Error('User context source run is unavailable.');
   // Runtime projections can reload in a different order. The source run owns the cutoff.

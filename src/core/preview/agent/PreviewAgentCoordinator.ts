@@ -20,8 +20,7 @@ import type { AgentRuntimeRegistry } from '../../agent/AgentRuntimeRegistry';
 import type { ClientToolHandler } from '../../agent/clientTools/ClientToolBridge';
 import { projectAgentExecutionSupport } from '../../../shared/agentExecutionSupport';
 import { mergeRunSettings } from '../../app/AgentRunSettingsPolicy';
-import { ACTIVE_AGENT_RUN_STATUSES } from '../../app/TaskTransitionPolicy';
-import { runMayWriteTaskWorktree } from '../../../shared/sideQuestions';
+import { ACTIVE_AGENT_RUN_STATUSES, isActiveWorktreeWriter } from '../../app/TaskTransitionPolicy';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import type { ApplicationPreviewService } from '../ApplicationPreviewService';
@@ -316,7 +315,7 @@ export function activePreviewRun(detail: Pick<TaskDetailSnapshot, 'runs'>): RunR
  * changes under it, so none starts beside one.
  */
 function activeWorktreeWriter(detail: Pick<TaskDetailSnapshot, 'runs'>): RunRecord | undefined {
-  return detail.runs.find((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status) && runMayWriteTaskWorktree(run));
+  return detail.runs.find(isActiveWorktreeWriter);
 }
 
 /** The conversation for this runtime and model on the current worktree, if one exists. */

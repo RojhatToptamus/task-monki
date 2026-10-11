@@ -8,8 +8,9 @@ import { previewFolderUsage, type PreviewWorktreeAvailability } from '../../mode
 import type { PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
-import { basename, CopyPath, DisclosureSummary, expected, GroupLabel, message, parentPath, PreviewRunReview, Row, shortenPath, usePreviewNotify } from './previewPresentation';
+import { basename, CopyPath, DisclosureSummary, expected, GroupLabel, message, parentPath, PreviewRunReview, Row, shortenPath } from './previewPresentation';
 import { PreviewSecretDialog } from './PreviewSecretDialog';
+import { useNotify } from '../NotifyContext';
 
 /** The worktree is gone, broken or not yet created: the block carries the consent the restore needs. The primary is in the status row. */
 export function PreviewWorktreeBlock({ worktree, availability }: { worktree?: WorktreeRecord; availability: Exclude<PreviewWorktreeAvailability, { state: 'available' }> }) {
@@ -62,7 +63,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   onSecretReferences(references: string[] | undefined): void;
   refresh(): void;
 }) {
-  const notify = usePreviewNotify();
+  const notify = useNotify();
   const [chosenFolders, setChosenFolders] = useState<Record<string, string>>({});
   const [allSecrets, setAllSecrets] = useState(false);
   // "Add all values" decides the form once: saving one value makes it available on the next poll,

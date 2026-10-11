@@ -54,15 +54,11 @@ describe('validateCurrentStoreRecords', () => {
 
   it('accepts durable review finding decisions and rejects decisions outside their contract', () => {
     const reviewRunId = randomUUID();
-    const userDecision = {
+    const dismissal = {
       id: randomUUID(), reviewRunId, findingId: 'leak', kind: 'DISMISS' as const,
-      actor: 'USER' as const, dismissReason: 'ACCEPTED' as const, note: 'Covered elsewhere.', createdAt: NOW
+      dismissReason: 'ACCEPTED' as const, note: 'Covered elsewhere.', createdAt: NOW
     };
-    const reviewerDecision = {
-      id: randomUUID(), reviewRunId, findingId: 'added-1', kind: 'ADD' as const, actor: 'REVIEWER' as const,
-      reason: 'Found while answering.', questionRunId: randomUUID(), createdAt: NOW,
-      finding: { id: 'added-1', severity: 'MAJOR' as const, title: 'Guard', explanation: 'Null crashes.', path: 'src/a.ts' }
-    };
+    const restoral = { id: randomUUID(), reviewRunId, findingId: 'leak', kind: 'RESTORE' as const, createdAt: NOW };
     const withDecisions = (decisions: unknown[]) => {
       const task = validTask();
       task.projection.agentReview = { status: 'NEEDS_CHANGES', runId: reviewRunId, findingDecisions: decisions as never };
@@ -71,18 +67,14 @@ describe('validateCurrentStoreRecords', () => {
       return state;
     };
 
-    expect(() => validateCurrentStoreRecords(withDecisions([userDecision, reviewerDecision]))).not.toThrow();
+    expect(() => validateCurrentStoreRecords(withDecisions([dismissal, restoral]))).not.toThrow();
     for (const malformed of [
-      { ...userDecision, reason: 'A person gives a note, not a reason.' },
-      { ...userDecision, kind: 'WITHDRAW' },
-      { ...userDecision, note: 'x'.repeat(501) },
-      { ...userDecision, dismissReason: 'LATER' },
-      { ...userDecision, kind: 'RESTORE', note: undefined },
-      { ...reviewerDecision, dismissReason: 'NOT_A_PROBLEM' },
-      { ...reviewerDecision, reason: undefined },
-      { ...reviewerDecision, questionRunId: undefined },
-      { ...reviewerDecision, finding: { ...reviewerDecision.finding, id: 'other' } },
-      { ...reviewerDecision, kind: 'CHANGE_SEVERITY', finding: undefined }
+      { ...dismissal, kind: 'WITHDRAW' },
+      { ...dismissal, note: 'x'.repeat(501) },
+      { ...dismissal, dismissReason: 'LATER' },
+      { ...dismissal, dismissReason: undefined },
+      { ...restoral, note: 'A restore takes no note.' },
+      { ...restoral, dismissReason: 'ACCEPTED' }
     ]) {
       expect(() => validateCurrentStoreRecords(withDecisions([malformed]))).toThrow(
         'tasks.projection contains a malformed record'
@@ -92,14 +84,14 @@ describe('validateCurrentStoreRecords', () => {
     const event = {
       id: randomUUID(), type: 'AGENT_REVIEW_FINDING_DECIDED' as const, taskId: randomUUID(),
       source: 'ui' as const, sourceEventId: 'decision', occurredAt: NOW, receivedAt: NOW,
-      payload: { decision: { ...userDecision, actor: 'REVIEWER' } }
+      payload: { decision: { ...dismissal, dismissReason: undefined } }
     };
     const eventState = createEmptyState();
     eventState.events = [event];
     expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
   });
 
-  it('requires reviewer and side questions to name their conversation and keeps those fields off other messages', () => {
+  it('requires a side question to name its thread and keeps its fields off other messages', () => {
     const task = validTask();
     const iteration = {
       id: randomUUID(), taskId: task.id, actionRequestId: randomUUID(), generationKey: randomUUID(),
@@ -110,11 +102,11 @@ describe('validateCurrentStoreRecords', () => {
       worktreePath: '/tmp/task-monki-validation-worktree', branchName: 'task', baseSha: 'a'.repeat(40),
       status: 'PRESENT' as const, ownership: 'MANAGED' as const, createdAt: NOW, updatedAt: NOW
     };
-    const question = {
+    const base = {
       id: randomUUID(), taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
       sourceRunId: randomUUID(), sessionId: randomUUID(), runId: randomUUID(), order: 1,
       text: 'Is this listener really leaked?', mode: 'FOLLOW_UP' as const, status: 'SUBMITTED' as const,
-      role: 'REVIEW' as const, reviewRunId: randomUUID(), findingId: 'leak', createdAt: NOW, updatedAt: NOW
+      createdAt: NOW, updatedAt: NOW
     };
     const stateWith = (instruction: unknown) => {
       const state = createEmptyState();
@@ -124,22 +116,11 @@ describe('validateCurrentStoreRecords', () => {
       state.taskInstructions = [instruction as never];
       return state;
     };
-
-    expect(() => validateCurrentStoreRecords(stateWith(question))).not.toThrow();
-    for (const malformed of [
-      { ...question, reviewRunId: undefined },
-      { ...question, findingId: '' },
-      { ...question, role: 'PREVIEW' },
-      { ...question, role: 'OTHER' },
-      { ...question, threadId: randomUUID() }
-    ]) {
-      expect(() => validateCurrentStoreRecords(stateWith(malformed))).toThrow(
-        'taskInstructions contains a malformed record'
-      );
-    }
+    expect(() => validateCurrentStoreRecords(stateWith({ ...base, role: 'OTHER' }))).toThrow(
+      'taskInstructions contains a malformed record'
+    );
 
     // A side question names its thread and, when it read one, its snapshot.
-    const { reviewRunId: _reviewRunId, findingId: _findingId, ...base } = question;
     const side = { ...base, role: 'SIDE' as const, threadId: randomUUID(), snapshotTakenAt: NOW, snapshotOmittedFileCount: 2 };
     expect(() => validateCurrentStoreRecords(stateWith(side))).not.toThrow();
     expect(() => validateCurrentStoreRecords(stateWith({ ...base, role: 'SIDE', threadId: randomUUID() }))).not.toThrow();
@@ -149,7 +130,6 @@ describe('validateCurrentStoreRecords', () => {
       { ...side, snapshotTakenAt: 'yesterday' },
       { ...side, snapshotTakenAt: undefined },
       { ...side, snapshotOmittedFileCount: 0 },
-      { ...side, reviewRunId: randomUUID() },
       { ...base, snapshotTakenAt: NOW }
     ]) {
       expect(() => validateCurrentStoreRecords(stateWith(malformed))).toThrow(

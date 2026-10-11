@@ -1,6 +1,7 @@
 import type { AskSubject, TaskInstruction } from '../../shared/contracts';
 import type { SessionTurn } from './agentSession';
 import { formatCommentLocation } from './reviewFollowUp';
+import { pluralize } from './formatting';
 
 /** The questions asked in one side thread, in the order they were asked. */
 export function sideThreadQuestions(instructions: readonly TaskInstruction[], threadId: string | undefined): TaskInstruction[] {
@@ -51,5 +52,5 @@ export function sideQuestionSnapshotNote(question: Pick<TaskInstruction, 'snapsh
   if (Number.isNaN(taken.getTime())) return undefined;
   const time = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(taken);
   const omitted = question.snapshotOmittedFileCount ?? 0;
-  return `Read a snapshot from ${time}${omitted > 0 ? `, without ${omitted} large untracked file${omitted === 1 ? '' : 's'}` : ''}`;
+  return `Read a snapshot from ${time}${omitted > 0 ? `, without ${pluralize(omitted, 'large untracked file')}` : ''}`;
 }

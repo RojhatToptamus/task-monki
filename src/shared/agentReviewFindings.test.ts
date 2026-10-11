@@ -4,7 +4,6 @@ import {
   effectiveReviewGateStatus,
   openReviewFindings,
   reviewAcceptsDecisions,
-  reviewAsksForChanges,
   type AgentReviewGateProjection,
   type AgentReviewResult,
   type ReviewFindingDecision
@@ -24,15 +23,13 @@ const result: AgentReviewResult = {
 };
 
 let sequence = 0;
-function decision(input: Partial<ReviewFindingDecision> & Pick<ReviewFindingDecision, 'kind' | 'findingId'>): ReviewFindingDecision {
+function dismiss(findingId: string, note?: string): ReviewFindingDecision {
   sequence += 1;
-  return {
-    id: `decision-${sequence}`,
-    reviewRunId: REVIEW_RUN,
-    actor: input.kind === 'DISMISS' || input.kind === 'RESTORE' ? 'USER' : 'REVIEWER',
-    createdAt: AT,
-    ...input
-  };
+  return { id: `decision-${sequence}`, reviewRunId: REVIEW_RUN, findingId, kind: 'DISMISS', dismissReason: 'NOT_A_PROBLEM', ...(note ? { note } : {}), createdAt: AT };
+}
+function restore(findingId: string): ReviewFindingDecision {
+  sequence += 1;
+  return { id: `decision-${sequence}`, reviewRunId: REVIEW_RUN, findingId, kind: 'RESTORE', createdAt: AT };
 }
 
 function gate(overrides: Partial<AgentReviewGateProjection> = {}): AgentReviewGateProjection {
@@ -40,163 +37,75 @@ function gate(overrides: Partial<AgentReviewGateProjection> = {}): AgentReviewGa
 }
 
 describe('effectiveReviewFindings', () => {
-  it('applies dismissals, restores and reviewer revisions in order', () => {
-    const findings = effectiveReviewFindings(result, [
-      decision({ kind: 'DISMISS', findingId: 'naming', dismissReason: 'NOT_A_PROBLEM', note: 'Matches the codebase.' }),
-      decision({ kind: 'CHANGE_SEVERITY', findingId: 'leak', severity: 'MINOR', reason: 'Only in tests.' }),
-      decision({
-        kind: 'ADD',
-        findingId: 'added-1',
-        reason: 'Found while answering.',
-        finding: { id: 'added-1', severity: 'MAJOR', title: 'Missing guard', explanation: 'Null input crashes.', path: 'src/a.ts' }
-      })
-    ]);
-
+  it('applies dismissals and restores in order', () => {
+    const findings = effectiveReviewFindings(result, [dismiss('naming', 'Matches the codebase.')]);
     expect(findings).toEqual([
-      expect.objectContaining({
-        id: 'leak',
-        severity: 'MINOR',
-        originalSeverity: 'BLOCKER',
-        state: 'OPEN',
-        addedByReviewer: false,
-        revision: { kind: 'CHANGE_SEVERITY', reason: 'Only in tests.', decidedAt: AT }
-      }),
+      expect.objectContaining({ id: 'leak', state: 'OPEN' }),
       expect.objectContaining({
         id: 'naming',
         state: 'DISMISSED',
         dismissal: { reason: 'NOT_A_PROBLEM', note: 'Matches the codebase.', decidedAt: AT }
-      }),
-      expect.objectContaining({
-        id: 'added-1',
-        state: 'OPEN',
-        addedByReviewer: true,
-        revision: { kind: 'ADD', reason: 'Found while answering.', decidedAt: AT }
       })
     ]);
 
-    const restored = effectiveReviewFindings(result, [
-      decision({ kind: 'DISMISS', findingId: 'naming' }),
-      decision({ kind: 'RESTORE', findingId: 'naming' })
-    ]);
+    const restored = effectiveReviewFindings(result, [dismiss('naming'), restore('naming')]);
     expect(restored[1]).toMatchObject({ state: 'OPEN' });
     expect(restored[1]).not.toHaveProperty('dismissal');
   });
 
-  it('keeps a withdrawn finding withdrawn and ignores decisions that cannot apply', () => {
+  it('ignores decisions that cannot apply', () => {
     const findings = effectiveReviewFindings(result, [
-      decision({ kind: 'WITHDRAW', findingId: 'leak', reason: 'The listener is removed in dispose.' }),
-      decision({ kind: 'DISMISS', findingId: 'leak' }),
-      decision({ kind: 'RESTORE', findingId: 'naming' }),
-      decision({ kind: 'DISMISS', findingId: 'unknown' }),
-      decision({ kind: 'CHANGE_SEVERITY', findingId: 'leak', severity: 'NIT', reason: 'Late.' })
+      restore('naming'),
+      dismiss('unknown'),
+      dismiss('leak', 'First.'),
+      dismiss('leak', 'Second.')
     ]);
-
-    expect(findings[0]).toMatchObject({
-      state: 'WITHDRAWN',
-      severity: 'BLOCKER',
-      revision: { kind: 'WITHDRAW', reason: 'The listener is removed in dispose.' }
-    });
-    expect(findings[0]).not.toHaveProperty('dismissal');
+    expect(findings[0]).toMatchObject({ state: 'DISMISSED', dismissal: { note: 'First.' } });
     expect(findings[1]).toMatchObject({ state: 'OPEN' });
     expect(findings).toHaveLength(2);
   });
 
-  it('lists open findings in review order, then added order', () => {
-    const open = openReviewFindings(result, [
-      decision({ kind: 'DISMISS', findingId: 'leak' }),
-      decision({
-        kind: 'ADD',
-        findingId: 'added-1',
-        reason: 'New.',
-        finding: { id: 'added-1', severity: 'MINOR', title: 'Added', explanation: 'Added.', path: 'src/b.ts' }
-      })
-    ]);
-    expect(open.map((finding) => finding.id)).toEqual(['naming', 'added-1']);
+  it('lists open findings in review order', () => {
+    expect(openReviewFindings(result, [dismiss('leak')]).map((finding) => finding.id)).toEqual(['naming']);
   });
 });
 
-describe('reviewAsksForChanges', () => {
+const asksForChanges = (review: AgentReviewGateProjection | undefined) => effectiveReviewGateStatus(review) === 'NEEDS_CHANGES';
+
+describe('effectiveReviewGateStatus', () => {
   it('asks for changes while a NEEDS_CHANGES verdict has an open Blocker or Major, and never for a stale or failed review', () => {
-    expect(reviewAsksForChanges(gate())).toBe(true);
+    expect(asksForChanges(gate())).toBe(true);
     // The open Nit alone is a suggestion: nothing would be sent by default.
-    expect(reviewAsksForChanges(gate({ findingDecisions: [decision({ kind: 'DISMISS', findingId: 'leak' })] }))).toBe(false);
-    expect(reviewAsksForChanges(gate({
-      findingDecisions: [
-        decision({ kind: 'DISMISS', findingId: 'leak' }),
-        decision({ kind: 'WITHDRAW', findingId: 'naming', reason: 'Style only.' })
-      ]
-    }))).toBe(false);
-    expect(reviewAsksForChanges(gate({
-      findingDecisions: [
-        decision({ kind: 'DISMISS', findingId: 'leak' }),
-        decision({ kind: 'RESTORE', findingId: 'leak' })
-      ]
-    }))).toBe(true);
-    expect(reviewAsksForChanges(gate({ status: 'STALE' }))).toBe(false);
-    expect(reviewAsksForChanges(gate({ status: 'FAILED' }))).toBe(false);
-    expect(reviewAsksForChanges(undefined)).toBe(false);
+    expect(asksForChanges(gate({ findingDecisions: [dismiss('leak')] }))).toBe(false);
+    expect(asksForChanges(gate({ findingDecisions: [dismiss('leak'), restore('leak')] }))).toBe(true);
+    expect(asksForChanges(gate({ status: 'STALE' }))).toBe(false);
+    expect(asksForChanges(gate({ status: 'FAILED' }))).toBe(false);
+    expect(asksForChanges(undefined)).toBe(false);
   });
 
-  it('asks for changes once the reviewer adds or raises a BLOCKER or MAJOR finding on a passed or inconclusive review', () => {
-    const passed: AgentReviewResult = {
-      schemaVersion: 'agent-review/v1',
-      verdict: 'PASSED',
-      summary: 'Looks good.',
-      findings: [{ id: 'style', severity: 'MINOR', title: 'Long function', explanation: 'Split it.', path: 'src/a.ts' }]
-    };
-    const added = (severity: AgentReviewResult['findings'][number]['severity']) => decision({
-      kind: 'ADD',
-      findingId: 'added-1',
-      reason: 'Found while answering.',
-      finding: { id: 'added-1', severity, title: 'Missing guard', explanation: 'Null input crashes.', path: 'src/a.ts' }
-    });
-    const passedGate = (findingDecisions: ReviewFindingDecision[]) =>
-      gate({ status: 'PASSED', result: passed, findingDecisions });
-
-    expect(effectiveReviewGateStatus(passedGate([]))).toBe('PASSED');
-    expect(effectiveReviewGateStatus(passedGate([added('MINOR')]))).toBe('PASSED');
-    expect(effectiveReviewGateStatus(passedGate([added('BLOCKER')]))).toBe('NEEDS_CHANGES');
-    expect(reviewAsksForChanges(passedGate([added('BLOCKER')]))).toBe(true);
-    expect(effectiveReviewGateStatus(passedGate([
-      decision({ kind: 'CHANGE_SEVERITY', findingId: 'style', severity: 'MAJOR', reason: 'Reachable in production.' })
-    ]))).toBe('NEEDS_CHANGES');
-    // Dismissing the added blocker returns the review to its passing verdict.
-    expect(effectiveReviewGateStatus(passedGate([added('BLOCKER'), decision({ kind: 'DISMISS', findingId: 'added-1' })])))
-      .toBe('PASSED');
-    expect(effectiveReviewGateStatus(gate({
-      status: 'INCONCLUSIVE',
-      result: { ...passed, verdict: 'INCONCLUSIVE' },
-      findingDecisions: [added('MAJOR')]
-    }))).toBe('NEEDS_CHANGES');
-  });
-
-  it('stops asking for changes once the findings that caused it are downgraded, returning to the verdict', () => {
+  it('returns to the verdict once the findings that asked for changes are dismissed', () => {
     const majorFindings = (verdict: AgentReviewResult['verdict']): AgentReviewResult => ({
       ...result,
       verdict,
       findings: [{ ...result.findings[0]!, severity: 'MAJOR' }, result.findings[1]!]
     });
-    const downgraded = [decision({ kind: 'CHANGE_SEVERITY', findingId: 'leak', severity: 'MINOR', reason: 'Only in tests.' })];
 
     expect(effectiveReviewGateStatus(gate({ result: majorFindings('PASSED') }))).toBe('NEEDS_CHANGES');
-    expect(effectiveReviewGateStatus(gate({ result: majorFindings('PASSED'), findingDecisions: downgraded }))).toBe('PASSED');
-    expect(reviewAsksForChanges(gate({ result: majorFindings('PASSED'), findingDecisions: downgraded }))).toBe(false);
+    expect(effectiveReviewGateStatus(gate({ result: majorFindings('PASSED'), findingDecisions: [dismiss('leak')] }))).toBe('PASSED');
     // The reviewer never reached a verdict, so clearing its findings never reads as passed.
-    expect(effectiveReviewGateStatus(gate({ result: majorFindings('INCONCLUSIVE'), findingDecisions: downgraded })))
-      .toBe('INCONCLUSIVE');
     expect(effectiveReviewGateStatus(gate({
       result: majorFindings('INCONCLUSIVE'),
-      findingDecisions: [decision({ kind: 'DISMISS', findingId: 'leak' }), decision({ kind: 'DISMISS', findingId: 'naming' })]
+      findingDecisions: [dismiss('leak'), dismiss('naming')]
     }))).toBe('INCONCLUSIVE');
     // A NEEDS_CHANGES verdict asks only while a Blocker or Major stays open; Minor and Nit are suggestions.
-    expect(effectiveReviewGateStatus(gate({ findingDecisions: downgraded }))).toBe('PASSED');
+    expect(effectiveReviewGateStatus(gate({ findingDecisions: [dismiss('leak')] }))).toBe('PASSED');
     expect(effectiveReviewGateStatus(gate({ result: majorFindings('NEEDS_CHANGES') }))).toBe('NEEDS_CHANGES');
-    expect(effectiveReviewGateStatus(gate({ status: 'STALE', findingDecisions: downgraded }))).toBe('STALE');
+    expect(effectiveReviewGateStatus(gate({ status: 'STALE', findingDecisions: [dismiss('leak')] }))).toBe('STALE');
   });
 
   it('keeps a raw-output review without findings asking for changes', () => {
-    expect(reviewAsksForChanges({ status: 'NEEDS_CHANGES', runId: REVIEW_RUN })).toBe(true);
-    expect(reviewAsksForChanges(gate({ result: { ...result, findings: [] } }))).toBe(true);
+    expect(asksForChanges({ status: 'NEEDS_CHANGES', runId: REVIEW_RUN })).toBe(true);
+    expect(asksForChanges(gate({ result: { ...result, findings: [] } }))).toBe(true);
   });
 
   it('accepts decisions only for the current, finished review', () => {

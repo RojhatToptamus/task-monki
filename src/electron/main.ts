@@ -20,6 +20,7 @@ import { TaskManagerService } from '../core/app/TaskManagerService';
 import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
 import { resolveDevSeedProfile } from './devSeedProfile';
+import { DEV_SEED_AGENTS_DISABLED_REASON } from '../shared/devSeed';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
@@ -188,11 +189,6 @@ const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
 
-/**
- * Development only: with the environment `npm run dev:seed` writes, the desktop
- * shell opens the deterministic seed profile with live agents off, as the seeded
- * dev API does, so its synthetic runs keep their state. Packaged builds ignore it.
- */
 const devSeedProfile = resolveDevSeedProfile({ isPackaged: app.isPackaged, env: process.env });
 const devSeedProfileRoot = devSeedProfile.profileRoot;
 if (devSeedProfileRoot) {
@@ -1171,8 +1167,7 @@ void app.whenReady().then(async () => {
       appSettingsStore: persistence.settings,
       ...(devSeedProfileRoot
         ? {
-            agentProviderStartupDisabledReason:
-              'Live agents are off for the development seed so its synthetic runs keep their state.',
+            agentProviderStartupDisabledReason: DEV_SEED_AGENTS_DISABLED_REASON,
             allowAgentNetworkAccess: false
           }
         : {}),

@@ -149,6 +149,9 @@ describe('agent session history', () => {
     expect(reviewTurnOutcome(turn('review-1', 'failed'), verdict('PASSED'))).toBe('Failed');
     // A live review is announced by the working line, not twice.
     expect(reviewTurnOutcome(turn('review-2', 'active'), verdict('PASSED'))).toBeUndefined();
+    // The latest review without a structured result says its status, never "Earlier review".
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), { runId: 'review-2', status: 'INCONCLUSIVE' })).toBe('Inconclusive');
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), { runId: 'review-2', status: 'FAILED' })).toBe('Failed');
   });
 });
 

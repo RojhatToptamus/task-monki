@@ -160,6 +160,7 @@ function board(title: string): BoardSnapshot {
         updatedAt: '2026-07-26T00:00:00.000Z',
         agentReview: {
           status: 'NOT_RUN',
+          effectiveStatus: 'NOT_RUN',
           hasResult: false,
           findingCounts: {}
         }

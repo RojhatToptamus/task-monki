@@ -31,10 +31,8 @@ import {
   type DevSeedManifest
 } from './seedData';
 import { DEV_SEED_SCENARIOS } from './seedScenarios';
-import {
-  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
-  deterministicDevSeedProviderDisabledReason
-} from './devSeedEnvironment';
+import { DEV_SEED_AGENTS_DISABLED_REASON } from '../shared/devSeed';
+import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -94,7 +92,7 @@ describe('Task Monki development seed data', () => {
         TASK_MANAGER_DEV_SEED_MODE: '1'
       });
       expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
-        DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+        DEV_SEED_AGENTS_DISABLED_REASON
       );
       expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 

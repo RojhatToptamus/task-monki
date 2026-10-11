@@ -178,9 +178,9 @@ export const ALPHA = {
   light: { hover: 0.04, press: 0.075 }
 };
 
-/* The keyboard focus halo is the one loud state (DESIGN §2.6) and a non-text
+/* The keyboard focus halo is the one loud state (DESIGN §7.5) and a non-text
  * indicator, so it must clear 3:1 against whatever plane it is drawn over
- * (§8). Like a line, it is accent at an alpha solved per theme per mode — a
+ * (§13). Like a line, it is accent at an alpha solved per theme per mode — a
  * fixed 0.18–0.22 measured 1.2–1.6:1 everywhere. */
 export const FOCUS_RING_FLOOR = 3;
 

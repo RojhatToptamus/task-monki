@@ -2,22 +2,22 @@ import { expect, it } from 'vitest';
 import type { AgentConversationRecords } from './agentRecords';
 import { partitionAgentRecords } from './agentRecords';
 
-it('keeps Preview and reviewer-question runs, records and messages out of the task conversation', () => {
+it('keeps Preview runs, records and messages out of the task conversation', () => {
   const records = {
     runs: [
       { id: 'impl', mode: 'IMPLEMENTATION', sessionId: 's1' }, { id: 'prev', mode: 'PREVIEW', sessionId: 's2' },
-      { id: 'review', mode: 'REVIEW', sessionId: 's3' }, { id: 'ask', mode: 'REVIEW_QUESTION', sessionId: 's4' }
+      { id: 'review', mode: 'REVIEW', sessionId: 's3' }
     ],
-    items: [{ id: 'i1', runId: 'impl' }, { id: 'i2', runId: 'prev' }, { id: 'i3', runId: 'ask' }],
+    items: [{ id: 'i1', runId: 'impl' }, { id: 'i2', runId: 'prev' }],
     instructions: [
-      { id: 'm1', runId: 'impl' }, { id: 'm2', runId: 'prev', role: 'PREVIEW' }, { id: 'm3', role: 'PREVIEW', status: 'QUEUED' },
-      { id: 'm4', runId: 'ask', role: 'REVIEW', reviewRunId: 'review' }
+      { id: 'm1', runId: 'impl' }, { id: 'm2', runId: 'prev', role: 'PREVIEW' }, { id: 'm3', role: 'PREVIEW', status: 'QUEUED' }
     ],
     interactions: [{ id: 'q1', runId: 'prev' }, { id: 'q2', runId: 'impl' }],
-    sessions: [{ id: 's1', role: 'PRIMARY' }, { id: 's2', role: 'PREVIEW' }, { id: 's3', role: 'REVIEW' }, { id: 's4', role: 'REVIEW' }],
+    sessions: [{ id: 's1', role: 'PRIMARY' }, { id: 's2', role: 'PREVIEW' }, { id: 's3', role: 'REVIEW' }],
     plans: [{ id: 'p1', runId: 'prev' }]
   } as unknown as AgentConversationRecords;
-  const { task, preview, reviewer } = partitionAgentRecords(records);
+  const { task, preview } = partitionAgentRecords(records);
+  // The review run stays with the task.
   expect(task.runs.map((run) => run.id)).toEqual(['impl', 'review']);
   expect(task.items.map((item) => item.id)).toEqual(['i1']);
   expect(task.instructions.map((item) => item.id)).toEqual(['m1']);
@@ -30,11 +30,6 @@ it('keeps Preview and reviewer-question runs, records and messages out of the ta
   expect(preview.interactions.map((item) => item.id)).toEqual(['q1']);
   expect(preview.sessions.map((item) => item.id)).toEqual(['s2']);
   expect(preview.plans.map((item) => item.id)).toEqual(['p1']);
-  // The review run stays with the task; the questions asked about it do not.
-  expect(reviewer.runs.map((run) => run.id)).toEqual(['ask']);
-  expect(reviewer.items.map((item) => item.id)).toEqual(['i3']);
-  expect(reviewer.instructions.map((item) => item.id)).toEqual(['m4']);
-  expect(reviewer.sessions.map((item) => item.id)).toEqual(['s4']);
 });
 
 it('gives side questions their own conversation, even while the implementation run is active', () => {
@@ -46,7 +41,7 @@ it('gives side questions their own conversation, even while the implementation r
     items: [{ id: 'i1', runId: 'impl' }, { id: 'i4', runId: 'side' }],
     instructions: [{ id: 'm1', runId: 'impl' }, { id: 'm5', runId: 'side', role: 'SIDE', threadId: 't1' }],
     interactions: [],
-    sessions: [{ id: 's1', role: 'PRIMARY' }, { id: 's5', role: 'PRIMARY' }],
+    sessions: [{ id: 's1', role: 'PRIMARY' }, { id: 's5', role: 'SIDE' }],
     plans: []
   } as unknown as AgentConversationRecords;
   const { task, side } = partitionAgentRecords(records);

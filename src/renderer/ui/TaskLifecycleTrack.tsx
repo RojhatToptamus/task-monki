@@ -1,6 +1,6 @@
 import { ChevronRight } from 'lucide-react';
 import type { TaskLifecycleStep } from '../model/taskLifecycle';
-import { StatusGlyph, taskStatusGlyph } from './StatusBadge';
+import { StatusGlyph, statusGlyphFor } from './StatusBadge';
 
 /**
  * The task's path through the board's lanes, always in the same four words.
@@ -11,7 +11,7 @@ export function TaskLifecycleTrack({ steps }: { steps: TaskLifecycleStep[] }) {
   return (
     <ol className="tm-lifecycle" aria-label="Lifecycle">
       {steps.map((step, index) => {
-        const glyph = step.status ? taskStatusGlyph(step.status.tone, Boolean(step.inFlight)) : undefined;
+        const glyph = step.status ? statusGlyphFor(step.status.tone, Boolean(step.inFlight)) : undefined;
         return (
           <li
             key={step.key}

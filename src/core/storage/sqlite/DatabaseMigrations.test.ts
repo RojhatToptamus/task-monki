@@ -39,8 +39,8 @@ it('replaces retired runtime storage while preserving tasks and exact Design sou
   const database = await AppDatabase.open(fixture.file, { acquireLease: false, beforeSchemaUpgrade: async ({ database }) => { await database.backup(path.join(fixture.directory, 'before.sqlite')); } });
   try {
     expect(await database.read(reader => reader.get('SELECT * FROM tasks'))).toEqual(fixture.task);
-    const { previewGateway: _gateway, schemaVersion: _version, ...preferences } = fixture.settings;
-    expect(await new AppSettingsStore(database).get()).toEqual({ ...preferences, schemaVersion: 14 });
+    const { previewGateway: _gateway, showMascot: _mascot, schemaVersion: _version, ...preferences } = fixture.settings;
+    expect(await new AppSettingsStore(database).get()).toEqual({ ...preferences, schemaVersion: 15 });
     expect(await database.read(reader => reader.all('PRAGMA foreign_key_check'))).toEqual([]);
     const rows = await database.read(reader => reader.all<{ payload_json: string }>('SELECT payload_json FROM preview_generations'));
     expect(JSON.parse(rows[0]!.payload_json)).toEqual({ id: 'generation', source: { type: 'EXACT_COMMIT', repositoryId: 'repo', commitSha: 'a'.repeat(40) } });

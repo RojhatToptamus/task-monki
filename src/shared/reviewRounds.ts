@@ -1,4 +1,4 @@
-import type { AgentReviewFindingSeverity } from './agentReviewFindings';
+import { AGENT_REVIEW_FINDING_SEVERITIES, type AgentReviewFindingSeverity } from './agentReviewFindings';
 
 /**
  * A review round: the person's request after a review, numbered item by item,
@@ -122,7 +122,7 @@ export function assertReviewRequestRecord(value: unknown): asserts value is Revi
     if (entry.kind === 'FINDING') {
       if (Object.keys(entry).some((key) => !['number', 'kind', 'findingId', 'severity', 'title', 'path', 'line', 'endLine'].includes(key))) fail();
       if (!boundedString(entry.findingId, 200) || !boundedString(entry.title, REVIEW_REQUEST_TEXT_LIMIT)) fail();
-      if (!['BLOCKER', 'MAJOR', 'MINOR', 'NIT'].includes(entry.severity as string)) fail();
+      if (!(AGENT_REVIEW_FINDING_SEVERITIES as readonly unknown[]).includes(entry.severity)) fail();
       if (entry.path !== undefined && !boundedString(entry.path, PATH_LIMIT)) fail();
     } else if (entry.kind === 'COMMENT') {
       if (Object.keys(entry).some((key) => !['number', 'kind', 'path', 'side', 'line', 'endLine', 'text'].includes(key))) fail();

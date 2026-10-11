@@ -120,7 +120,7 @@ describe('filled gaps', () => {
     expect(diffFileSignature(filledFile)).toBe(diffFileSignature(file));
     expect(diffFileSignature(revealedFile)).toBe(diffFileSignature(file));
 
-    const finding: ReviewFindingView = { id: 'f', severity: 'MINOR', title: 'Unchanged but wrong', explanation: 'Why.', path: file.path, line: 20, state: 'OPEN', addedByReviewer: false };
+    const finding: ReviewFindingView = { id: 'f', severity: 'MINOR', title: 'Unchanged but wrong', explanation: 'Why.', path: file.path, line: 20, state: 'OPEN' };
     expect(anchorReviewFindings([filledFile], [finding]).byFile.get(file.id)?.map((item) => item.id)).toEqual(['f']);
     const index = revealedFile.blocks[0]!.lines.findIndex((line) => line.newLine === 20);
     expect(anchorReviewFindings([revealedFile], [finding]).byLine.get(lineAnchorKey(file.id, filled.id, revealedFile.blocks[0]!.lines[index]!, index))?.map((item) => item.id)).toEqual(['f']);

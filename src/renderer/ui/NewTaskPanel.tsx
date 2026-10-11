@@ -32,6 +32,7 @@ import {
   type StageTaskAttachmentBatchRequest
 } from '../../shared/attachments';
 import {
+  presetNetworkAccess,
   settingsForExecutionPolicyPreset
 } from '../model/agentPermissions';
 import {
@@ -279,7 +280,6 @@ export function NewTaskPanel({
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
   const effectiveReasoningEffort =
     resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
-  const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
   const availableRepositories = repositories.filter(
     (repository) => repository.status === 'AVAILABLE'
   );
@@ -379,9 +379,7 @@ export function NewTaskPanel({
     drop: dropAttachments,
     close: closeAttachments
   } = attachments;
-  const effectiveNetworkAccess =
-    networkRequiredByPreset ||
-    (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess);
+  const effectiveNetworkAccess = presetNetworkAccess(permissionPreset, networkAccess);
   const selectedModelRejectsImages = Boolean(attachmentModelError);
   const selectedRuntimeRejectsAttachments =
     activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;

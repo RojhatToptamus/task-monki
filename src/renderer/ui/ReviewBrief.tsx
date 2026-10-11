@@ -1,7 +1,8 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer } from '../../shared/contracts';
 import { ReviewAnswers } from './ReviewRound';
+import { useClampOverflow } from './useClampOverflow';
 
 export interface ReviewBriefContent {
   /** The task as asked. */
@@ -89,19 +90,8 @@ function BriefBlock({ label, meta = [], children }: { label: string; meta?: stri
 /** Text clamped to a few lines; a click on it shows the rest when the clamp hides anything. */
 function ClampedText({ lines, className, children }: { lines: 2 | 3; className: string; children: string }) {
   const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
   const text = useRef<HTMLParagraphElement>(null);
-  // Whether the clamp hides anything depends on the column's width, so it is measured again on resize.
-  useLayoutEffect(() => {
-    const element = text.current;
-    if (!element || expanded) return;
-    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight + 1);
-    measure();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [children, expanded]);
+  const overflowing = useClampOverflow(text, expanded, children);
   const clampable = overflowing || expanded;
   return (
     <p

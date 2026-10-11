@@ -74,7 +74,7 @@ describe('ReadOnlySnapshotService', () => {
 
     const snapshot = await snapshots.prepare(taskId, threadId, { worktreePath: live });
 
-    expect(snapshot).toMatchObject({ reused: false, path: path.join(root, 'snapshots', taskId, threadId) });
+    expect(snapshot).toMatchObject({ path: path.join(root, 'snapshots', taskId, threadId) });
     expect(snapshot.headSha).toBe((await git(live, ['rev-parse', 'HEAD'])).trim());
     const read = (file: string) => fs.readFile(path.join(snapshot.path, file), 'utf8');
     expect(await read('committed.txt')).toBe('committed change\n');
@@ -127,13 +127,15 @@ describe('ReadOnlySnapshotService', () => {
 
     const first = await snapshots.prepare(taskId, threadId, { worktreePath: live });
     const again = await snapshots.prepare(taskId, threadId, { worktreePath: live });
-    expect(again).toMatchObject({ reused: true, path: first.path, takenAt: first.takenAt });
+    // The unchanged worktree reuses the thread's snapshot as it was taken.
+    expect(again).toMatchObject({ path: first.path, takenAt: first.takenAt });
 
     await fs.writeFile(path.join(live, 'unstaged.txt'), 'changed again\n');
     await fs.rm(path.join(live, 'notes'), { recursive: true });
     await git(live, ['commit', '-q', '-m', 'commit the staged work']);
     const replaced = await snapshots.prepare(taskId, threadId, { worktreePath: live });
-    expect(replaced).toMatchObject({ reused: false, headSha: (await git(live, ['rev-parse', 'HEAD'])).trim() });
+    expect(replaced).toMatchObject({ headSha: (await git(live, ['rev-parse', 'HEAD'])).trim() });
+    expect(replaced.takenAt).not.toBe(first.takenAt);
     expect(await fs.readFile(path.join(replaced.path, 'unstaged.txt'), 'utf8')).toBe('changed again\n');
     expect(await fs.readFile(path.join(replaced.path, 'staged.txt'), 'utf8')).toBe('staged change\n');
     await expect(fs.access(path.join(replaced.path, 'notes'))).rejects.toThrow();

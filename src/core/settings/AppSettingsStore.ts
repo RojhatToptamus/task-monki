@@ -226,8 +226,6 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: record.theme,
     themePreset: record.themePreset,
-    sidebarCollapsed: record.sidebarCollapsed,
-    showMascot: record.showMascot,
     autoInstallUpdatesOnQuit: record.autoInstallUpdatesOnQuit,
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
     disabledRuntimeIds: [...record.disabledRuntimeIds],
@@ -273,12 +271,6 @@ export function mergeAppSettings(
   }
   if (input.themePreset !== undefined) {
     patch.themePreset = normalizeThemePreset(input.themePreset);
-  }
-  if (input.sidebarCollapsed !== undefined) {
-    patch.sidebarCollapsed = requireBoolean(input.sidebarCollapsed, 'sidebarCollapsed');
-  }
-  if (input.showMascot !== undefined) {
-    patch.showMascot = requireBoolean(input.showMascot, 'showMascot');
   }
   if (input.autoInstallUpdatesOnQuit !== undefined) {
     patch.autoInstallUpdatesOnQuit = requireBoolean(
@@ -500,8 +492,6 @@ function isCurrentAppSettingsRecord(
     'discourseDefaults',
     'theme',
     'themePreset',
-    'sidebarCollapsed',
-    'showMascot',
     'autoInstallUpdatesOnQuit',
     'firstLaunchSetupCompleted',
     'disabledRuntimeIds',
@@ -554,8 +544,6 @@ function isCurrentAppSettingsRecord(
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     (record.theme === 'light' || record.theme === 'dark' || record.theme === 'device') &&
     isTaskManagerThemePreset(record.themePreset) &&
-    typeof record.sidebarCollapsed === 'boolean' &&
-    typeof record.showMascot === 'boolean' &&
     typeof record.autoInstallUpdatesOnQuit === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&
     Array.isArray(record.agentProfiles) &&

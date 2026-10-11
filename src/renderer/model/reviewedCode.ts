@@ -1,4 +1,5 @@
 import type { GitSnapshotRecord } from '../../shared/contracts';
+import { shortSha } from './formatting';
 
 /**
  * The code a review read, or will read. A review reads the worktree as it is,
@@ -21,7 +22,7 @@ export function hasUncommittedChanges(counts: WorktreeCounts): boolean {
 
 /** From the commit the review recorded and the Git snapshot it read (or will read). */
 export function reviewedCode(headSha: string | undefined, snapshot: (WorktreeCounts & Pick<GitSnapshotRecord, 'headSha'>) | undefined): ReviewedCode | undefined {
-  const head = (headSha ?? snapshot?.headSha)?.slice(0, 7);
+  const head = shortSha(headSha ?? snapshot?.headSha);
   const uncommitted = snapshot ? hasUncommittedChanges(snapshot) : false;
   return head || uncommitted ? { head, uncommitted } : undefined;
 }

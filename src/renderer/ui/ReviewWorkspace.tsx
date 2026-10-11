@@ -13,10 +13,10 @@ import type {
 } from '../../shared/contracts';
 import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
-import { formatCommentLocation, isBlockingFinding, type ReviewRequestPlan } from '../model/reviewFollowUp';
+import { isBlockingFinding } from '../../shared/contracts';
+import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
 import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
-import { readBriefFolded, readReviewFileOrder, writeBriefFolded, writeReviewFileOrder } from '../model/reviewPreferences';
-import { readViewedFiles, writeViewedFiles } from '../model/reviewViewed';
+import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
 import {
   anchorReviewComments,
   anchorReviewFindings,
@@ -44,6 +44,7 @@ import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
 import { useReviewChanges } from './useReviewChanges';
 import { useReviewContext } from './useReviewContext';
+import { DiffStat } from './DiffStat';
 
 export type ReviewScope = DiffEvidenceScope | 'since-review';
 
@@ -71,8 +72,7 @@ export interface ReviewWorkspaceProps {
   worktree?: WorktreeRecord;
   /** Imported work compares against a chosen base; the menu can change it. */
   comparison?: { label: string; onChange(): void; disabledReason?: string };
-  /** What was asked, what the agent reported, and the reviewer's summary. */
-  /** The brief; its round, keyed by the request it answers, takes its links from the workspace. */
+  /** What was asked, what the agent reported, and the reviewer's summary; its round, keyed by the request it answers, takes its links from the workspace. */
   brief?: Omit<ReviewBriefContent, 'round'> & { round?: Omit<NonNullable<ReviewBriefContent['round']>, 'onShowItem'> & { key: string } };
   /** The person's unsent review, saved with the task as it changes. */
   draft: TaskReviewDraft;
@@ -82,7 +82,7 @@ export interface ReviewWorkspaceProps {
   /** False for an out-of-date review: its findings stay context and only comments are sent. */
   findingsSendable: boolean;
   /** Present while a request can be made: sends the findings to fix and the person's comments. */
-  requestChanges?: ReviewRequestAction & { reviewNotes: boolean };
+  requestChanges?: ReviewRequestAction;
   /** With nothing to send, the step that finishes the task. */
   finish?: ReviewFinishAction;
   /** Present when a review can run: none yet, the code changed since it, or a finished one to run again. */
@@ -140,8 +140,10 @@ function findingWords(findings: readonly ReviewFindingView[]): string {
     .join(', ');
 }
 
-/** Rows of one block chosen in the gutter; the anchor is where the drag began. */
-/** Chosen lines by identity (`diffLineId`), so the choice holds while unchanged lines open around it. */
+/**
+ * Rows of one block chosen in the gutter, by identity (`diffLineId`) so the
+ * choice holds while unchanged lines open around it; the anchor is where the drag began.
+ */
 interface LineSelection { fileId: string; blockId: string; start: string; end: string; anchor: string }
 /** A selection's positions in the block as it is now. */
 function selectionRange(block: DiffBlock, selection: Pick<LineSelection, 'start' | 'end' | 'anchor'>): { start: number; end: number; anchor: number } | undefined {
@@ -168,17 +170,15 @@ interface CommentDraft {
  */
 export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const { review, findings, draft, plan } = props;
-  const current = useDiffArtifact(props.historical ? undefined : props.currentDiffArtifactId, props.artifacts);
-  const historical = useDiffArtifact(props.historical ? props.currentDiffArtifactId : undefined, props.artifacts);
+  const diff = useDiffArtifact(props.currentDiffArtifactId, props.artifacts);
   const reviewed = useDiffArtifact(props.reviewedDiffArtifactId, props.artifacts);
-  const diff = props.historical ? historical : current;
   const stale = review?.status === 'STALE';
   const canCompareSinceReview = stale && !props.historical && !reviewed.missing && !reviewed.error;
   // Exactly what changed since the review, from the code it read; without that code, the files whose diff changed.
   const changes = useReviewChanges(props.taskId, props.historical ? undefined : props.changesSince?.reviewRunId, props.changesSince?.refreshKey);
   const changedSinceReview = useMemo(
-    () => (canCompareSinceReview && !reviewed.loading && !current.loading ? filesChangedSinceReview(reviewed.filesByScope.all, current.filesByScope.all) : undefined),
-    [canCompareSinceReview, current.filesByScope.all, current.loading, reviewed.filesByScope.all, reviewed.loading]
+    () => (canCompareSinceReview && !reviewed.loading && !diff.loading ? filesChangedSinceReview(reviewed.filesByScope.all, diff.filesByScope.all) : undefined),
+    [canCompareSinceReview, diff.filesByScope.all, diff.loading, reviewed.filesByScope.all, reviewed.loading]
   );
   // The scope is offered only when something changed since the review, and leads while the review is out of date; never an empty scope.
   const sinceReviewAvailable = changes.files ? changes.files.length > 0 : Boolean(changedSinceReview?.size);
@@ -213,7 +213,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);
   const ordered = useMemo(() => orderReviewFiles(files, findingsByFile, order), [files, findingsByFile, order]);
   const openFindings = findings.filter((finding) => finding.state === 'OPEN');
-  const findingsActionable = !stale && review?.status !== 'RUNNING' && !props.historical;
+  const findingsActionable = props.findingsSendable && !props.historical;
   const canComment = !props.historical;
   const included = useMemo(() => new Set(plan.send.map((finding) => finding.id)), [plan.send]);
 
@@ -249,7 +249,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [sheetOpen, setSheetOpen] = useState(false);
   // The brief's fold is kept per review, and opens again when new answers arrive.
   const briefRound = `${review?.runId ?? 'none'}${props.brief?.round ? `:${props.brief.round.key}` : ''}`;
-  const [briefFolded, setBriefFolded] = useState(() => readBriefFolded(props.taskId, briefRound));
+  const [briefFold, setBriefFold] = useState(() => ({ round: briefRound, folded: readBriefFolded(props.taskId, briefRound) }));
+  const briefFolded = briefFold.round === briefRound ? briefFold.folded : readBriefFolded(props.taskId, briefRound);
   const [pathMenu, setPathMenu] = useState<{ target: OpenTargetRef; position: { x: number; y: number } }>();
   const closePathMenu = useCallback(() => setPathMenu(undefined), []);
   const notify = useNotify();
@@ -426,8 +427,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     ...ordered.flatMap((entry) => findingsByFile.get(entry.file.id) ?? [])
   ].filter((finding) => finding.state === 'OPEN');
   const focusedFinding = findings.find((finding) => finding.id === focusedFindingId);
-  const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy &&
-    ((props.findingsSendable && plan.send.length) || draft.comments.length || draft.note.trim() || props.requestChanges.reviewNotes));
+  const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy && plan.queued);
 
   // J/K files, N/P open findings, V viewed and on, D/A/F the focused finding, C the selected lines.
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -752,7 +752,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     <span className="tm-visually-hidden"> {feedback === 1 ? 'note' : 'notes'}</span>
                   </span>
                 ) : null}
-                {isViewed(entry.file) ? <Check size={13} className="tm-review__index-viewed" aria-label="Viewed" /> : <DiffStat file={entry.file} />}
+                {isViewed(entry.file) ? <Check size={13} className="tm-review__index-viewed" aria-label="Viewed" /> : <DiffStat additions={entry.file.additions} deletions={entry.file.deletions} />}
               </button>
             );
           }) : (
@@ -774,7 +774,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             <ReviewBrief
               content={briefContent}
               folded={briefFolded}
-              onFoldedChange={(folded) => { setBriefFolded(folded); writeBriefFolded(props.taskId, briefRound, folded); }}
+              onFoldedChange={(folded) => { setBriefFold({ round: briefRound, folded }); writeBriefFolded(props.taskId, briefRound, folded); }}
             />
           ) : null}
           {unavailable || emptyScope ? <p className="tm-review__empty">{unavailable ?? emptyScope}</p> : null}
@@ -824,7 +824,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                   {openHere.length ? (
                     <span className="tm-review-file__count" data-tone={openHere.some(isBlockingFinding) ? 'blocked' : undefined}>{findingWords(openHere)}</span>
                   ) : null}
-                  <DiffStat file={file} />
+                  <DiffStat additions={file.additions} deletions={file.deletions} />
                   <Tooltip label="Viewed" shortcut="V">
                     {/* The 16px mark sits in a 24px target, like every control in the head. */}
                     <label className="tm-review-file__viewed">
@@ -876,6 +876,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                           const anchor = lineAnchorKey(file.id, block.id, row.line, row.index);
                           const line = row.line;
                           const number = line.kind === 'deletion' ? line.oldLine : line.newLine;
+                          const commentable = canComment && number !== undefined && !(exactChanges && line.kind === 'deletion');
                           const range = selection?.fileId === file.id && selection.blockId === block.id ? selectionRange(block, selection) : undefined;
                           const selected = Boolean(range && row.index >= range.start && row.index <= range.end);
                           return (
@@ -887,10 +888,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                 {/* The number is the comment control: press or drag across numbers to comment on a range. */}
                                 <span
                                   className="tm-diffline__num"
-                                  onPointerDown={number !== undefined ? (event) => beginSelect(file, block, row.index, event) : undefined}
+                                  onPointerDown={commentable ? (event) => beginSelect(file, block, row.index, event) : undefined}
                                   onPointerEnter={() => extendSelect(file, block, row.index)}
                                 >
-                                  {canComment && number !== undefined && !(exactChanges && line.kind === 'deletion') ? (
+                                  {commentable ? (
                                     <button
                                       type="button"
                                       className="tm-review-line__comment"
@@ -936,11 +937,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       {props.historical ? null : (
         <ReviewOutcome
           plan={plan}
-          findingsSendable={props.findingsSendable}
           comments={draft.comments}
           note={draft.note}
           onNoteChange={(note) => updateDraft({ note })}
-          reviewNotes={Boolean(props.requestChanges?.reviewNotes)}
           request={props.requestChanges}
           finish={props.finish}
           sheetOpen={sheetOpen}
@@ -958,10 +957,6 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   );
 }
 
-/**
- * The gutter is wide enough for the file's largest line number and the comment
- * "+" beside it, so the two never overlap and short files keep a narrow gutter.
- */
 /** One gutter for every file, wide enough for the largest line number and the "+", so code starts on one column. */
 function numberColumnWidth(files: readonly DiffFile[]): number {
   let largest = 0;
@@ -991,23 +986,6 @@ function lineCode(content: string, kind: string): string {
     return content.slice(1);
   }
   return content;
-}
-
-function DiffStat({ file }: { file: DiffFile }) {
-  return (
-    <span className="tm-review-stat">
-      {file.additions ? <span className="tm-review-stat__add">+{file.additions}</span> : null}
-      {file.deletions ? <span className="tm-review-stat__del">−{file.deletions}</span> : null}
-    </span>
-  );
-}
-
-/** A file's name in the navigator, with its folder only when another file shares the name. */
-function indexLabel(file: DiffFile, files: readonly DiffFile[]): string {
-  const parts = file.path.split('/');
-  const name = parts.at(-1) ?? file.path;
-  const shared = files.some((other) => other !== file && other.path.split('/').at(-1) === name);
-  return shared && parts.length > 1 ? `${parts.at(-2)}/${name}` : name;
 }
 
 /** A file's "…" menu: comment on the whole file, read it whole, then where it opens. */

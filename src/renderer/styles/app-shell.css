@@ -1293,7 +1293,7 @@
 /* A table row (DESIGN.md 9.1): 48 tall, so a 32px control has 8px above and below. */
 .tm-settings__row {
   display: flex;
-  min-height: 48px;
+  min-height: var(--h-row-tall);
   align-items: center;
   justify-content: space-between;
   gap: 20px;
@@ -1661,7 +1661,7 @@
 /* A two-line row (DESIGN.md 9.1): the agent's name and its status over a switch. */
 .tm-agent-setting__summary {
   display: flex;
-  min-height: 48px;
+  min-height: var(--h-row-tall);
   align-items: center;
   justify-content: space-between;
   gap: 24px;
@@ -1693,14 +1693,6 @@
   font-size: var(--t-meta);
   line-height: var(--lh-meta);
   text-overflow: ellipsis;
-}
-
-/* The runtime's facts (state, version, next step) stand apart by space, never
-   a separator glyph (DESIGN.md 5). */
-.tm-agent-setting__facts {
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: 12px;
 }
 
 .tm-agent-setting__details {

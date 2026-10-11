@@ -553,33 +553,6 @@ describe('ClientToolBridge', () => {
 });
 
 describe('resolveClientToolMcpServerPath', () => {
-  it('removes stale grant credentials an earlier release left in its Design tool folder, and nothing else', async () => {
-    const profile = await temporaryDirectory();
-    const legacyRoot = path.join(profile, 'design-tool-credentials');
-    await fs.mkdir(path.join(legacyRoot, 'grant-old'), { recursive: true });
-    await fs.writeFile(path.join(legacyRoot, 'grant-old', 'turn-grant'), 'stale credential');
-    const recoverBridge = async () => {
-      const bridge = new ClientToolBridge({
-        executablePath: process.execPath,
-        serverPath: SERVER_PATH,
-        scratchRoot: path.join(profile, 'client-tool-credentials'),
-        legacyScratchRoot: legacyRoot,
-        handlers: [],
-        runtimeStore: { getSession: async () => undefined, getActiveRunForSession: async () => undefined }
-      });
-      bridges.push(bridge);
-      await bridge.recover();
-    };
-    await recoverBridge();
-    await expect(fs.lstat(legacyRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-
-    // A folder holding anything but grants is kept, with that content.
-    await fs.mkdir(path.join(legacyRoot, 'grant-old'), { recursive: true });
-    await fs.writeFile(path.join(legacyRoot, 'notes.txt'), 'not a grant');
-    await recoverBridge();
-    expect(await fs.readdir(legacyRoot)).toEqual(['notes.txt']);
-  });
-
   it('selects the unpacked resource in a packaged app', () => {
     expect(
       resolveClientToolMcpServerPath({

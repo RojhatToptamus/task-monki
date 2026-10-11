@@ -1,5 +1,6 @@
 import type { GitSnapshotRecord, RunRecord } from '../../shared/contracts';
 import type { DiffFile } from './diffEvidence';
+import { pluralize } from './formatting';
 
 export interface CompletedChangeFile {
   path: string;
@@ -42,7 +43,7 @@ export function buildCompletedChangeSummary(
 
   return {
     fileCount: files.length,
-    title: `Captured Git changes in ${files.length} ${plural(files.length, 'file')}`,
+    title: `Captured Git changes in ${pluralize(files.length, 'file')}`,
     additions,
     deletions,
     previewFiles,
@@ -105,8 +106,4 @@ export function conversationCaptureRunIds(
     previous = capture;
   }
   return visible;
-}
-
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
 }

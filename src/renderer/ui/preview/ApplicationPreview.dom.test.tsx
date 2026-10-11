@@ -23,6 +23,7 @@ import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
+import { NotifyProvider } from '../NotifyContext';
 import { useRef, useState, type ComponentProps } from 'react';
 import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
 import { createRuntimeReadiness } from '../../../core/agent/AgentRuntimeReadiness';
@@ -975,7 +976,7 @@ it('reverts unsaved edits to the file without writing it', async () => {
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: { name: 'fixture', busy: false, latest: { ...initial.active!, state: 'stopped' } } });
   api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text } });
   const onNotify = vi.fn();
-  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} onNotify={onNotify} />);
+  render(<NotifyProvider value={onNotify}><ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} /></NotifyProvider>);
   fireEvent.click(await screen.findByRole('tab', { name: 'Configuration' }));
   fireEvent.click(await screen.findByRole('button', { name: 'YAML' }));
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: `${text}# not wanted\n` } });

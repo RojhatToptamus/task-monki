@@ -28,7 +28,7 @@ const COMPLETION_POLICIES = [
 // Records keyed by the contract unions, so a new mode or role cannot be left out.
 const RUN_MODES = Object.keys({
   ANALYSIS: true, IMPLEMENTATION: true, FOLLOW_UP: true, RETRY: true, REVIEW: true,
-  REVIEW_QUESTION: true, SIDE_QUESTION: true, DESIGN: true, PREVIEW: true, COMPACTION: true, SUBAGENT: true
+  SIDE_QUESTION: true, DESIGN: true, PREVIEW: true, COMPACTION: true, SUBAGENT: true
 } satisfies Record<AgentRunMode, true>);
 const RUN_STATUSES = [
   'QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT',
@@ -1260,11 +1260,7 @@ function projection(value: unknown): void {
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
     if (review.requestAnswer !== undefined) {
-      const answer = persistedRecord(review.requestAnswer, 'tasks.projection');
-      uuidField(answer, 'runId', 'tasks.projection');
-      optionalInteger(answer, 'answered', 'tasks.projection', 0);
-      optionalInteger(answer, 'needsDecision', 'tasks.projection', 0);
-      if (answer.answered === undefined || answer.needsDecision === undefined) invalid('tasks.projection');
+      booleanField(persistedRecord(review.requestAnswer, 'tasks.projection'), 'awaitingDecision', 'tasks.projection');
     }
     if (review.result !== undefined) reviewResult(review.result);
     if (review.findingDecisions !== undefined) {
@@ -1290,7 +1286,14 @@ function reviewResult(value: unknown): void {
   );
   stringField(record, 'summary', 'tasks.projection', true);
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
-  for (const finding of record.findings) reviewFinding(finding, 'tasks.projection');
+  for (const finding of record.findings) {
+    const item = persistedRecord(finding, 'tasks.projection');
+    strings(item, 'tasks.projection', ['id', 'title', 'explanation']);
+    enumField(item, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, 'tasks.projection');
+    optionalStrings(item, 'tasks.projection', ['path', 'recommendation', 'previousFindingId']);
+    optionalInteger(item, 'line', 'tasks.projection', 1);
+    optionalInteger(item, 'endLine', 'tasks.projection', 1);
+  }
   if (record.resolvedFindings !== undefined) {
     if (!Array.isArray(record.resolvedFindings)) invalid('tasks.projection');
     for (const resolved of record.resolvedFindings) {
@@ -1301,65 +1304,30 @@ function reviewResult(value: unknown): void {
   }
 }
 
-function reviewFinding(value: unknown, collection: string): Record<string, unknown> {
-  const item = persistedRecord(value, collection);
-  strings(item, collection, ['id', 'title', 'explanation']);
-  enumField(item, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
-  optionalStrings(item, collection, ['path', 'recommendation', 'previousFindingId']);
-  optionalInteger(item, 'line', collection, 1);
-  optionalInteger(item, 'endLine', collection, 1);
-  return item;
-}
-
-/**
- * A person's dismissal carries only its reason and note; a reviewer's revision
- * carries its reason, its question run, and exactly the fields its kind needs.
- */
-export function validateReviewFindingDecision(value: unknown, collection: string): void {
+/** A dismissal carries its reason and, optionally, a note; a restore carries neither. */
+function validateReviewFindingDecision(value: unknown, collection: string): void {
   const decision = persistedRecord(value, collection);
   uuidFields(decision, collection, ['id', 'reviewRunId']);
   stringField(decision, 'findingId', collection);
-  enumField(decision, 'actor', ['USER', 'REVIEWER'] as const, collection);
   timestamp(decision, 'createdAt', collection);
-  for (const key of ['note', 'reason'] as const) {
-    if (decision[key] === undefined) continue;
-    stringField(decision, key, collection);
-    if ((decision[key] as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
-  }
-  const has = (key: string) => decision[key] !== undefined;
-  if (decision.actor === 'USER') {
-    enumField(decision, 'kind', ['DISMISS', 'RESTORE'] as const, collection);
-    if (
-      has('reason') || has('severity') || has('finding') || has('questionRunId') ||
-      (decision.kind === 'RESTORE' && (has('note') || has('dismissReason')))
-    ) invalid(collection);
-    if (has('dismissReason')) enumField(decision, 'dismissReason', REVIEW_FINDING_DISMISS_REASONS, collection);
+  enumField(decision, 'kind', ['DISMISS', 'RESTORE'] as const, collection);
+  if (decision.kind === 'RESTORE') {
+    if (decision.note !== undefined || decision.dismissReason !== undefined) invalid(collection);
     return;
   }
-  enumField(decision, 'kind', ['WITHDRAW', 'CHANGE_SEVERITY', 'ADD'] as const, collection);
-  uuidField(decision, 'questionRunId', collection);
-  if (!has('reason') || has('note') || has('dismissReason')) invalid(collection);
-  if ((decision.kind === 'CHANGE_SEVERITY') !== has('severity')) invalid(collection);
-  if (has('severity')) enumField(decision, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, collection);
-  if ((decision.kind === 'ADD') !== has('finding')) invalid(collection);
-  if (has('finding') && reviewFinding(decision.finding, collection).id !== decision.findingId) {
-    invalid(collection);
+  enumField(decision, 'dismissReason', REVIEW_FINDING_DISMISS_REASONS, collection);
+  if (decision.note !== undefined) {
+    stringField(decision, 'note', collection);
+    if ((decision.note as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
   }
 }
 
 /**
- * Only a reviewer question (kept from the retired reviewer lane) names its review and,
- * optionally, its finding. Only a side question (Ask) names its thread, when it read
- * one its worktree snapshot, and when it was asked about one its subject.
+ * Only a side question (Ask) names its thread, when it read one its worktree
+ * snapshot, and when it was asked about one its subject.
  */
 export function validateTaskInstructionConversation(instruction: Record<string, unknown>): void {
-  optionalEnumField(instruction, 'role', ['PREVIEW', 'REVIEW', 'SIDE'] as const, 'taskInstructions');
-  if (instruction.role === 'REVIEW') {
-    uuidField(instruction, 'reviewRunId', 'taskInstructions');
-    optionalStrings(instruction, 'taskInstructions', ['findingId']);
-  } else if (instruction.reviewRunId !== undefined || instruction.findingId !== undefined) {
-    invalid('taskInstructions');
-  }
+  optionalEnumField(instruction, 'role', ['PREVIEW', 'SIDE'] as const, 'taskInstructions');
   if (instruction.role === 'SIDE') {
     uuidField(instruction, 'threadId', 'taskInstructions');
     optionalTimestamp(instruction, 'snapshotTakenAt', 'taskInstructions');
@@ -1400,8 +1368,7 @@ function askSubject(value: unknown): void {
   }
   stringField(subject, 'path', collection);
   enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
-  optionalInteger(subject, 'line', collection, 1);
-  if (subject.line === undefined) invalid(collection);
+  integer(subject, 'line', collection, 1);
   optionalInteger(subject, 'endLine', collection, 1);
   if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
   if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);

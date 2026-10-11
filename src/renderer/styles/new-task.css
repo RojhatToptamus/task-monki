@@ -2,13 +2,6 @@
 /* New task: a focused modal over the app                                  */
 /* ----------------------------------------------------------------------- */
 
-/* Anchored near the top so switching New work and Import never moves the
-   header under the pointer. The shared modal centres; this variant wins. */
-.tm-modal.tm-modal--top {
-  align-items: flex-start;
-  padding-top: max(48px, 10vh);
-}
-
 .newtask-modal__panel {
   position: relative;
   z-index: var(--layer-sticky);
@@ -35,7 +28,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 48px;
+  height: var(--h-head);
   flex: 0 0 auto;
   padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--hair);

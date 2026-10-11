@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, type RefObject } from 'react';
 import { ChevronUp, X } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import { formatFindingLocation } from '../model/findings';
-import { formatCommentLocation, isBlockingFinding, type ReviewRequestPlan } from '../model/reviewFollowUp';
+import { isBlockingFinding } from '../../shared/contracts';
+import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
 import { DisclosureChevron } from './DisclosureChevron';
 import { settledLabel, severityLabel } from './ReviewFindingThread';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
@@ -18,19 +19,14 @@ export interface ReviewRequestAction {
 export interface ReviewFinishAction {
   label: string;
   disabledReason?: string;
-  busy: boolean;
   onRun(): void;
 }
 
 export interface ReviewOutcomeProps {
   plan: ReviewRequestPlan;
-  /** False for an out-of-date review: its findings stay context and only comments are sent. */
-  findingsSendable: boolean;
   comments: readonly ReviewComment[];
   note: string;
   onNoteChange(note: string): void;
-  /** A review whose notes are only prose: those notes are what gets sent. */
-  reviewNotes: boolean;
   request?: ReviewRequestAction;
   /** With nothing to send, the step that finishes the task: the Overview's next action. */
   finish?: ReviewFinishAction;
@@ -60,13 +56,12 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   const sheetId = useId();
   const reasonId = useId();
   const summaryRef = useRef<HTMLButtonElement>(null);
-  const findings = props.findingsSendable ? plan.send : [];
-  const noted = Boolean(props.note.trim());
-  const queued = findings.length > 0 || comments.length > 0 || noted || props.reviewNotes;
+  const findings = plan.send;
+  const queued = plan.queued;
   const summary = findings.length || comments.length
     ? [findings.length ? count(findings.length, 'fix', 'fixes') : '', comments.length ? count(comments.length, 'comment', 'comments') : '']
       .filter(Boolean).join(', ')
-    : props.reviewNotes ? 'Review notes' : 'Note';
+    : plan.reviewNotes ? 'Review notes' : 'Note';
   const primary = queued && request ? (
     <>
       {request.disabledReason ? <span id={reasonId} className="tm-review__request-reason">{request.disabledReason}</span> : null}
@@ -88,7 +83,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
       <button
         type="button"
         className="primary-button"
-        disabled={Boolean(finish.disabledReason) || finish.busy}
+        disabled={Boolean(finish.disabledReason)}
         aria-describedby={finish.disabledReason ? reasonId : undefined}
         onClick={finish.onRun}
       >
@@ -144,7 +139,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
 function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef: RefObject<HTMLButtonElement | null> }) {
   const { plan, comments, request, onSheetOpenChange, summaryRef } = props;
   const sheetRef = useRef<HTMLDivElement>(null);
-  const findings = props.findingsSendable ? plan.send : [];
+  const findings = plan.send;
   const leftOut = [...plan.suggestions, ...plan.settled];
   const instruction = request?.instruction() ?? '';
 
@@ -222,7 +217,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
                 <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
                 <button type="button" className="tm-review-sheet__title" onClick={() => props.onShowFinding(finding.id)}>{finding.title}</button>
                 <span className="tm-review-sheet__state">{finding.state === 'OPEN' ? 'Suggestion' : settledLabel(finding)}</span>
-                {finding.state === 'OPEN' && props.findingsSendable ? (
+                {finding.state === 'OPEN' ? (
                   <button type="button" className="ghost-button" onClick={() => props.onIncludeFinding(finding.id, true)}>Add</button>
                 ) : <span />}
               </div>
@@ -244,7 +239,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
           <button
             type="button"
             className="primary-button button--sm"
-            disabled={Boolean(request.disabledReason) || request.busy || (!findings.length && !comments.length && !props.note.trim() && !props.reviewNotes)}
+            disabled={Boolean(request.disabledReason) || request.busy || !plan.queued}
             onClick={request.onSubmit}
           >
             Request changes

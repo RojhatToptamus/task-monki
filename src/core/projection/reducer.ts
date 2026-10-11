@@ -18,7 +18,7 @@ import {
   createInitialProjection,
   isDetachedRunMode,
   isImplementationRunMode,
-  reviewGateStatusFor
+  reviewGateStatusFromResult
 } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
@@ -135,7 +135,7 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     ) {
       return next;
     }
-    // A Preview conversation, a reviewer question or a side question is telemetry beside
+    // A Preview conversation or a question in Ask is telemetry beside
     // the task: it never changes the task's workflow, run projection, or review gate.
     if (isConversationRunEvent(event, currentRun)) {
       return next;
@@ -356,7 +356,7 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
   }
 }
 
-const CONVERSATION_RUN_MODES: ReadonlySet<string> = new Set(['PREVIEW', 'REVIEW_QUESTION', 'SIDE_QUESTION']);
+const CONVERSATION_RUN_MODES: ReadonlySet<string> = new Set(['PREVIEW', 'SIDE_QUESTION']);
 
 function isConversationRunEvent(event: DomainEvent, run?: RunRecord): boolean {
   const eventMode = getString(event.payload, 'mode');
@@ -366,7 +366,7 @@ function isConversationRunEvent(event: DomainEvent, run?: RunRecord): boolean {
   );
 }
 
-/** Reviews, reviewer and side questions, and Preview agent turns run beside the task; their events never move its workflow phase. */
+/** Reviews, questions in Ask, and Preview agent turns run beside the task; their events never move its workflow phase. */
 function isDetachedRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
   const eventMode = getString(event.payload, 'mode');
   return (
@@ -1142,13 +1142,9 @@ function reduceAgentReview(
     }
     // The agent's reply to the request after this review settled.
     case 'REVIEW_REQUEST_ANSWERED': {
-      const runId = event.runId;
-      const answered = getNumber(event.payload, 'answered');
       const needsDecision = getNumber(event.payload, 'needsDecision');
-      if (!runId || base.runId !== getString(event.payload, 'reviewRunId') || answered === undefined || needsDecision === undefined) {
-        return base;
-      }
-      return { ...base, requestAnswer: { runId, answered, needsDecision }, updatedAt: event.receivedAt };
+      if (base.runId !== getString(event.payload, 'reviewRunId') || needsDecision === undefined) return base;
+      return { ...base, requestAnswer: { awaitingDecision: needsDecision > 0 }, updatedAt: event.receivedAt };
     }
     // Committing the reviewed changes moves the reviewed state to the new commit;
     // the clean tree's fingerprint keeps edits made after it counting.
@@ -1246,15 +1242,6 @@ function reviewGateStatusFromPayload(
     return value;
   }
   return undefined;
-}
-
-function reviewGateStatusFromResult(
-  result: AgentReviewResult | undefined
-): Extract<
-  NonNullable<StatusProjection['agentReview']>['status'],
-  'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
-> | undefined {
-  return result ? reviewGateStatusFor(result.verdict, result.findings) : undefined;
 }
 
 function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | undefined {

@@ -4,8 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode
+  type KeyboardEvent as ReactKeyboardEvent
 } from 'react';
 import { Brain, Check, ChevronDown, Gauge, RefreshCw, Search, X } from 'lucide-react';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
@@ -24,14 +23,12 @@ interface AgentModelSelectorProps {
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
-  compact?: boolean;
   presentation?: 'full' | 'compact';
   fallbackSummary?: string;
   selectionUnavailable?: boolean;
   showSelectionError?: boolean;
   selectionUnavailableMessage?: string;
   showRuntimeLabel?: boolean;
-  access?: ReactNode;
   runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
   modelUnavailableReason?(
     model: AgentModel,
@@ -86,14 +83,12 @@ export function AgentModelSelector({
   models,
   runtimes,
   disabled = false,
-  compact = false,
-  presentation,
+  presentation = 'full',
   fallbackSummary,
   selectionUnavailable = false,
   showSelectionError = true,
   selectionUnavailableMessage = 'Choose an available provider and model.',
   showRuntimeLabel = true,
-  access,
   runtimeUnavailableReason,
   modelUnavailableReason,
   onDiscoverModels,
@@ -101,7 +96,6 @@ export function AgentModelSelector({
   onSelectionChange,
   onReasoningEffortChange
 }: AgentModelSelectorProps) {
-  const effectivePresentation = presentation ?? (compact ? 'compact' : 'full');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeOptionId, setActiveOptionId] = useState<string>();
@@ -397,7 +391,7 @@ export function AgentModelSelector({
 
   return (
     <div
-      className={`tm-agent-console tm-agent-console--${effectivePresentation}`}
+      className={`tm-agent-console tm-agent-console--${presentation}`}
       ref={rootRef}
     >
       <div
@@ -690,8 +684,6 @@ export function AgentModelSelector({
           </div>
         </div>
       ) : null}
-
-      {access}
     </div>
   );
 }

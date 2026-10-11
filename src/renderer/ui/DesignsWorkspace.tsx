@@ -46,7 +46,6 @@ import {
   type DesignCanvasRefreshRequest,
   type DesignCanvasShowRequest
 } from './DesignCanvas';
-import type { NotificationTone } from './AppOverlays';
 import { DesignRepositorySetup } from './DesignRepositorySetup';
 import { Tooltip } from './Tooltip';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
@@ -109,7 +108,6 @@ export interface DesignsWorkspaceProps {
   previewAgent?: PreviewAgentConversation;
   previewProposals?: PreviewProposalActions;
   /** Confirms completed Preview actions, such as a saved preview.yaml. */
-  onNotify?(message: string, tone?: NotificationTone): void;
   draft?: DesignDraftRecord | null;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
@@ -179,7 +177,6 @@ export function DesignsWorkspace({
   project,
   previewAgent,
   previewProposals,
-  onNotify,
   draft = null,
   models,
   runtimes,
@@ -665,7 +662,7 @@ export function DesignsWorkspace({
                     key={project.design.id}
                     project={project}
                     setup={project.repository.kind === 'USER_REGISTERED' && project.task.workflowPhase !== 'ARCHIVED' && onUpdateProject ? (
-                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject} agent={previewAgent} proposals={previewProposals} onNotify={onNotify}
+                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject} agent={previewAgent} proposals={previewProposals}
                         onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
                         onModalOpenChange={setPreviewSetupModalOpen} />
                     ) : undefined}
@@ -1291,7 +1288,7 @@ function RenameDesignDialog({
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
-        {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={saving} onClick={onCancel}>
             Cancel
@@ -1366,7 +1363,7 @@ function DeleteDesignDialog({
           <p>The repository and Design branch are kept. The workspace stays at <code>{retainedWorkspace}</code>.</p>
           <label><input type="checkbox" checked={removeWorktree} disabled={deleting} onChange={(event) => setRemoveWorktree(event.target.checked)} /> Also remove the workspace if it has no unsaved, untracked, or ignored files.</label>
         </> : <p>Task Monki removes the Design. It removes the managed workspace when that action is safe.</p>}
-        {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button
             ref={cancelRef}

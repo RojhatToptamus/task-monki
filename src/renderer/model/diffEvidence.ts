@@ -284,12 +284,12 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
       }
     }
 
-    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    const hunk = parseHunkHeader(line);
     if (hunk) {
-      oldLine = Number(hunk[1]);
-      newLine = Number(hunk[3]);
-      oldRemaining = hunk[2] === undefined ? 1 : Number(hunk[2]);
-      newRemaining = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      oldLine = hunk.oldStart;
+      newLine = hunk.newStart;
+      oldRemaining = hunk.oldCount;
+      newRemaining = hunk.newCount;
       inHunk = true;
       seenHunk = true;
       parsedLines.push({ kind: 'hunk', content: line });
@@ -360,4 +360,26 @@ function mergeStatus(a: DiffFile['status'], b: DiffFile['status']): DiffFile['st
     return 'renamed';
   }
   return 'modified';
+}
+
+export interface HunkHeader {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  /** The enclosing function or section Git names after the ranges. */
+  heading?: string;
+}
+
+/** A unified diff hunk header's ranges as Git writes them, and its heading. */
+export function parseHunkHeader(content: string): HunkHeader | undefined {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(content);
+  if (!match) return undefined;
+  return {
+    oldStart: Number(match[1]),
+    oldCount: match[2] === undefined ? 1 : Number(match[2]),
+    newStart: Number(match[3]),
+    newCount: match[4] === undefined ? 1 : Number(match[4]),
+    heading: match[5]?.trim() || undefined
+  };
 }

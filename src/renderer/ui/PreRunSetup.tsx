@@ -10,9 +10,9 @@ import {
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
-import { matchingExecutionPolicyPreset, settingsForExecutionPolicyPreset } from '../model/agentPermissions';
+import { matchingExecutionPolicyPreset, presetNetworkAccess, settingsForExecutionPolicyPreset } from '../model/agentPermissions';
 import { AgentModelSelector } from './AgentModelSelector';
-import { AccessMenu, presetNetworkOn } from './AccessMenu';
+import { AccessMenu } from './AccessMenu';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { StoredAttachmentChip } from './AttachmentChip';
 import { useTaskAttachments, type UseTaskAttachmentsOptions } from './useTaskAttachments';
@@ -135,7 +135,7 @@ export function PreRunSetup({
           {presets.length ? <AccessMenu
             presets={presets}
             selected={preset}
-            networkOn={presetNetworkOn(preset, settings.networkAccess)}
+            networkOn={presetNetworkAccess(preset, settings.networkAccess)}
             disabled={disabled}
             onPresetChange={(next) => onSettingsChange({ ...settings, ...settingsForExecutionPolicyPreset(next, { networkAccess: settings.networkAccess }) })}
             onNetworkChange={(networkAccess) => onSettingsChange({ ...settings, networkAccess })}

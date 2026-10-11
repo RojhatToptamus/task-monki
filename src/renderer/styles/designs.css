@@ -73,7 +73,7 @@
 /* A workspace head (Designs, New Design, Discourse) is one 48px line: the panel
    toggle, a 15px title with its state beside it, then the actions. */
 .tm-designs-header {
-  min-height: 48px;
+  min-height: var(--h-head);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -224,7 +224,7 @@
 /* The toolbar under a head is 40px (DESIGN.md 9.1): 28px controls, words from
    the 16px edge of the stage below. */
 .tm-design-canvas__toolbar {
-  min-height: 40px;
+  min-height: var(--h-bar);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -321,12 +321,6 @@
   color: var(--blocked-ink);
 }
 
-.tm-design-message--agent .tm-message-markdown {
-  color: var(--text-soft);
-  font-size: var(--t-body);
-  line-height: var(--lh-prose);
-}
-
 .tm-design-message__detail {
   margin: 2px 0 0;
   color: var(--muted);
@@ -419,8 +413,6 @@
 
 .tm-design-composer__error,
 .tm-design-create__error,
-.tm-design-delete__error,
-.tm-design-external__error,
 .tm-design-canvas__error {
   margin: 8px 0 0;
   color: var(--blocked-ink);
@@ -901,22 +893,6 @@
   white-space: nowrap;
 }
 
-/* An icon button: 28 square, --r-sm, beside the 28px segments. */
-.tm-design-canvas__tool {
-  width: var(--h-icon);
-  height: var(--h-icon);
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-sm);
-  color: var(--muted);
-}
-
-.tm-design-canvas__tool:hover:not(:disabled) {
-  background-color: var(--hover);
-  color: var(--text);
-}
-
 .tm-design-canvas__stage {
   position: relative;
   min-height: 0;
@@ -1175,18 +1151,6 @@
 
 .tm-design-delete {
   width: min(440px, 100%);
-}
-
-/* The inline notice (DESIGN.md 10): --r-sm, 8 by 12, help text in its tone. */
-.tm-design-delete__error,
-.tm-modal__panel .tm-design-external__error {
-  margin: 8px 0 0;
-  padding: 8px 12px;
-  border-radius: var(--r-sm);
-  background: var(--blocked-bg);
-  color: var(--blocked-ink);
-  font-size: var(--t-help);
-  line-height: var(--lh-ui);
 }
 
 .tm-design-rename h3 {

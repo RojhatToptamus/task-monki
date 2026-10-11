@@ -1891,7 +1891,7 @@ export function DiscourseWorkspace({
               aria-expanded={inspectorOpen}
               onClick={() => setInspectorOpen((value) => !value)}
             >
-              <DiscoursePanelRightIcon expanded={inspectorOpen} />
+              <DiscoursePanelRightIcon />
             </button></Tooltip>
             {aggregate ? (
               <ActionMenu

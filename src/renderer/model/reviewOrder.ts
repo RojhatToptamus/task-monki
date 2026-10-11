@@ -1,3 +1,4 @@
+import { isBlockingFinding } from '../../shared/contracts';
 import type { DiffFile } from './diffEvidence';
 import type { ReviewFindingView } from './reviewWorkspace';
 
@@ -76,7 +77,7 @@ export function orderReviewFiles(
   }
 
   const open = (file: DiffFile) => (findingsByFile.get(file.id) ?? []).filter((finding) => finding.state === 'OPEN');
-  const blocking = (file: DiffFile) => open(file).some((finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR');
+  const blocking = (file: DiffFile) => open(file).some(isBlockingFinding);
   // A file and the tests that cover it read as one unit, placed by its most pressing member.
   const units = entries.filter((entry) => !subjectOf.has(entry.file)).map((entry) => {
     const members = [entry, ...tests.filter((test) => subjectOf.get(test.file) === entry.file)];

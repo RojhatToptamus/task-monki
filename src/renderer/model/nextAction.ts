@@ -9,6 +9,7 @@ import {
   isImplementationRunMode
 } from '../../shared/contracts';
 import type { FinishEvidenceState } from './taskFinish';
+import { isMerged, isReviewPhase } from './taskPhase';
 
 /**
  * The single "what should I do next?" answer for a task: a short factual title
@@ -79,7 +80,7 @@ function markDone(withIssues: boolean): NextActionChoice {
  * that still needs merge evidence blocks Mark done; Commit stays available.
  */
 function finishOverrides(input: NextActionInput): NextActionChoice[] {
-  if (!input.hasReviewSource || !inReviewPhase(input.task)) {
+  if (!input.hasReviewSource || !isReviewPhase(input.task.workflowPhase)) {
     return [];
   }
   return [
@@ -88,15 +89,6 @@ function finishOverrides(input: NextActionInput): NextActionChoice[] {
       ? []
       : [markDone(input.finishEvidence.mode !== 'clean')])
   ];
-}
-
-/** Finishing belongs to the Review phases; In Progress work is not finished. */
-function inReviewPhase(task: Task): boolean {
-  return task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW';
-}
-
-function isMerged(task: Task): boolean {
-  return task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED';
 }
 
 export function isActiveNonReviewRun(
@@ -210,7 +202,7 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
   // leads; what remains is finishing under the task's completion policy.
   // Marking done despite open evidence is an owner override, never the
   // recommended step, so it is offered but never leads.
-  if (isMerged(task)) {
+  if (isMerged(task.projection)) {
     return finishEvidence.mode === 'clean'
       ? { title: 'Merged', primary: markDone(false), secondaries: [] }
       : { title: 'Merged', secondaries: finishEvidence.mode === 'override' ? [markDone(true)] : [] };
@@ -220,7 +212,7 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     case 'NOT_RUN': {
       return {
         // Outside the Review phases, a review source with nothing completed is imported work.
-        title: !hasReviewSource ? 'No completed implementation' : inReviewPhase(task) ? 'Ready for review' : 'No agent run yet',
+        title: !hasReviewSource ? 'No completed implementation' : isReviewPhase(task.workflowPhase) ? 'Ready for review' : 'No agent run yet',
         primary: hasReviewSource ? RUN_REVIEW : undefined,
         secondaries: finishOverrides(input)
       };

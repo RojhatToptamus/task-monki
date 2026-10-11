@@ -1,37 +1,44 @@
-import { REVIEW_RESPONSE_BLOCK, type AgentReviewFinding, type ReviewComment, type ReviewFindingDismissReason, type ReviewRequestRecord, type TaskReviewDraft } from '../../shared/contracts';
+import { REVIEW_RESPONSE_BLOCK, isBlockingFinding, type AgentReviewFinding, type ReviewComment, type ReviewFindingDismissReason, type ReviewRequestRecord, type TaskReviewDraft } from '../../shared/contracts';
 import { formatFindingLocation } from './findings';
 import { humanizeEnum } from './formatting';
 import type { ReviewFindingView } from './reviewWorkspace';
 
-/** Blocker and Major findings go in the request by default; the gate says they must change. */
-export function isBlockingFinding(finding: Pick<AgentReviewFinding, 'severity'>): boolean {
-  return finding.severity === 'BLOCKER' || finding.severity === 'MAJOR';
-}
-
-/** What happens to each finding of the current review when the person requests changes. */
+/**
+ * What Request changes sends. A review that no longer accepts decisions, such as
+ * one the code has moved past, is context only: its findings are neither sent
+ * nor left out, and only the person's comments and note go.
+ */
 export interface ReviewRequestPlan {
   /** Open Blocker and Major findings, and the Minor and Nit findings the person added. */
   send: ReviewFindingView[];
   /** Open Minor and Nit findings not added: not sent. */
   suggestions: ReviewFindingView[];
-  /** Dismissed and withdrawn findings. */
+  /** Dismissed findings. */
   settled: ReviewFindingView[];
+  /** The review has prose notes and no structured findings, so the notes are sent. */
+  reviewNotes: boolean;
+  /** Request changes has something to send. */
+  queued: boolean;
 }
 
 export function planReviewRequest(
   findings: readonly ReviewFindingView[],
-  draft: Pick<TaskReviewDraft, 'includedFindingIds' | 'reviewRunId'>,
-  reviewRunId: string | undefined
+  draft: Pick<TaskReviewDraft, 'includedFindingIds' | 'reviewRunId' | 'comments' | 'note'>,
+  review: { runId?: string; findingsSendable: boolean; asksForChanges: boolean }
 ): ReviewRequestPlan {
   // Inclusions belong to the review they were made in; a new review starts without them.
-  const included = new Set(draft.reviewRunId === reviewRunId ? draft.includedFindingIds : []);
-  const plan: ReviewRequestPlan = { send: [], suggestions: [], settled: [] };
-  for (const finding of findings) {
-    if (finding.state !== 'OPEN') plan.settled.push(finding);
-    else if (isBlockingFinding(finding) || included.has(finding.id)) plan.send.push(finding);
-    else plan.suggestions.push(finding);
+  const included = new Set(draft.reviewRunId === review.runId ? draft.includedFindingIds : []);
+  const send: ReviewFindingView[] = [];
+  const suggestions: ReviewFindingView[] = [];
+  const settled: ReviewFindingView[] = [];
+  for (const finding of review.findingsSendable ? findings : []) {
+    if (finding.state !== 'OPEN') settled.push(finding);
+    else if (isBlockingFinding(finding) || included.has(finding.id)) send.push(finding);
+    else suggestions.push(finding);
   }
-  return plan;
+  const reviewNotes = review.findingsSendable && review.asksForChanges && findings.length === 0;
+  const queued = send.length > 0 || draft.comments.length > 0 || Boolean(draft.note.trim()) || reviewNotes;
+  return { send, suggestions, settled, reviewNotes, queued };
 }
 
 /** Where a comment points, as the agent reads it. */

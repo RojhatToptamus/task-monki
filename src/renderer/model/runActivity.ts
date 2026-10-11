@@ -4,6 +4,7 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
+import { pluralize } from './formatting';
 
 export type RunActivityCategory =
   | 'read'
@@ -597,10 +598,10 @@ function contextGroupCopy(
   count: number
 ): Pick<RunActivityRow, 'label' | 'detail'> {
   if (category === 'read') {
-    return { label: 'Read', detail: `${count} ${plural(count, 'file')}` };
+    return { label: 'Read', detail: pluralize(count, 'file') };
   }
   if (category === 'search') {
-    return { label: 'Searched', detail: `${count} ${plural(count, 'time')}` };
+    return { label: 'Searched', detail: pluralize(count, 'time') };
   }
   return {
     label: 'Listed',
@@ -784,7 +785,7 @@ function commandActivityMetric(
 
 function lineCountMetric(output: string | undefined): string | undefined {
   const lineCount = outputLineCount(output);
-  return lineCount > 0 ? `${lineCount} ${plural(lineCount, 'line')}` : undefined;
+  return lineCount > 0 ? pluralize(lineCount, 'line') : undefined;
 }
 
 function outputLineCount(output: string | undefined): number {
@@ -1105,10 +1106,6 @@ function compactAbsolutePath(value: string): string {
     return `//${segments.slice(0, 2).join('/')}/…/${segments.slice(-3).join('/')}`;
   }
   return `/…/${segments.slice(-3).join('/')}`;
-}
-
-function plural(count: number, word: string): string {
-  return count === 1 ? word : `${word}s`;
 }
 
 function unique(values: string[]): string[] {

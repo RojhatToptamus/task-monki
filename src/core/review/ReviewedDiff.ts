@@ -13,8 +13,6 @@ export interface ReviewedDiffHunk {
 
 export interface ReviewedDiffFile {
   path: string;
-  additions: number;
-  deletions: number;
   hunks: ReviewedDiffHunk[];
 }
 
@@ -40,16 +38,6 @@ export function parseReviewedDiff(text: string): ReviewedDiffFile[] {
   }
   flush();
   return [...files.values()];
-}
-
-/** One line per changed file with its added and removed line counts. */
-export function formatReviewedDiffStat(files: readonly ReviewedDiffFile[], maxFiles = 200): string {
-  if (files.length === 0) return 'No changed files were recorded.';
-  const lines = files
-    .slice(0, maxFiles)
-    .map((file) => `- ${file.path} (+${file.additions} -${file.deletions})`);
-  if (files.length > maxFiles) lines.push(`- … and ${files.length - maxFiles} more files`);
-  return lines.join('\n');
 }
 
 /**
@@ -107,7 +95,7 @@ function windowAround(hunk: ReviewedDiffHunk, line: number | undefined, size: nu
 function addChunk(files: Map<string, ReviewedDiffFile>, chunk: readonly string[]): void {
   const path = chunkPath(chunk);
   if (!path) return;
-  const file = files.get(path) ?? { path, additions: 0, deletions: 0, hunks: [] };
+  const file = files.get(path) ?? { path, hunks: [] };
   files.set(path, file);
   let hunk: ReviewedDiffHunk | undefined;
   for (const line of chunk) {
@@ -122,10 +110,7 @@ function addChunk(files: Map<string, ReviewedDiffFile>, chunk: readonly string[]
       file.hunks.push(hunk);
       continue;
     }
-    if (!hunk) continue;
-    hunk.lines.push(line);
-    if (line.startsWith('+')) file.additions += 1;
-    else if (line.startsWith('-')) file.deletions += 1;
+    hunk?.lines.push(line);
   }
 }
 

@@ -1,9 +1,8 @@
 import { CircleCheck, CircleChevronRight, CircleX } from 'lucide-react';
-
-export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
+import type { Tone } from '../model/viewTypes';
 
 /** A badge: the state word on a tint of its tone. Nothing in it moves (DESIGN.md 6.6). */
-export function Chip({ tone, label }: { tone: StatusPillTone; label: string }) {
+export function Chip({ tone, label }: { tone: Tone; label: string }) {
   return (
     <span className={`status-pill status-pill--${tone}`}>
       <span className="status-pill__label">{label}</span>
@@ -12,11 +11,11 @@ export function Chip({ tone, label }: { tone: StatusPillTone; label: string }) {
 }
 
 /**
- * The glyph beside a task's status word. A state that needs the user or has
- * failed takes its mark, and it outranks work in flight: a task that needs an
- * approval never shows the working circle. Anything else is a word alone.
+ * The glyph beside a status word. A state that needs the user or has failed
+ * takes its mark, and it outranks work in flight: a task that needs an approval
+ * never shows the working circle. Anything else is a word alone.
  */
-export function taskStatusGlyph(tone: StatusPillTone, inFlight: boolean): StatusGlyphKind | undefined {
+export function statusGlyphFor(tone: Tone, inFlight: boolean): StatusGlyphKind | undefined {
   if (tone === 'action') return 'waiting';
   if (tone === 'error') return 'blocked';
   return inFlight ? 'working' : undefined;
@@ -45,15 +44,4 @@ export function StatusGlyph({
   }
   const Component = kind === 'waiting' ? CircleChevronRight : kind === 'blocked' ? CircleX : CircleCheck;
   return <Component aria-hidden="true" className={classes} size={13} />;
-}
-
-export function statusKindForTone(
-  tone: StatusPillTone | 'warning',
-  running: boolean
-): StatusGlyphKind {
-  if (running) return 'working';
-  if (tone === 'action' || tone === 'warning') return 'waiting';
-  if (tone === 'error') return 'blocked';
-  if (tone === 'success') return 'verified';
-  return 'idle';
 }

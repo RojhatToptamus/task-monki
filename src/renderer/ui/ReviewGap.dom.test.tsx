@@ -53,9 +53,9 @@ function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(draft: T
       worktree={worktree}
       draft={draft}
       onDraftChange={setDraft}
-      plan={planReviewRequest([], draft, 'review-1')}
+      plan={planReviewRequest([], draft, { runId: 'review-1', findingsSendable: true, asksForChanges: false })}
       findingsSendable
-      requestChanges={{ busy: false, reviewNotes: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
+      requestChanges={{ busy: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
       {...overrides}
     />
   );
