@@ -21,6 +21,7 @@ export type ReviewActionPauseReason =
   | 'review-starting'
   | 'review-running'
   | 'implementation-running'
+  | 'question-running'
   | 'delivery-running';
 
 export function ReviewPanel({
@@ -146,7 +147,8 @@ export function ReviewPanel({
             ) : (
               <p className="tm-reviewcard__meta">
                 Reviewed {reviewedHead ? <><code>{reviewedHead}</code>, </> : null}
-                {formatReviewTime(reviewGate.updatedAt)}
+                {/* When the review ran; the gate's own time moves when it goes out of date or back. */}
+                {formatReviewTime(reviewRun?.endedAt ?? reviewGate.updatedAt)}
               </p>
             )}
             {findings.length > 0 ? (

@@ -196,7 +196,11 @@ function RawEventAudit({ events }: { events: DomainEvent[] }) {
     .sort((a, b) => compareTimeAscending(a.event.receivedAt, b.event.receivedAt) || a.index - b.index);
   return (
     <details className="tm-eventaudit">
-      <summary><DisclosureChevron /><span>Full event audit · {events.length} events</span></summary>
+      <summary>
+        <DisclosureChevron />
+        <span>Full event audit</span>
+        <span className="tm-eventaudit__count">{events.length} events</span>
+      </summary>
       <div className="tm-eventaudit__list">
         {sortedEvents.map(({ event }) => {
           const summary = summarizeEvent(event);

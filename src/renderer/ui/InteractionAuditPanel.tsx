@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type {
   AgentSessionRecord,
   InteractionRequestRecord
@@ -39,9 +40,12 @@ export function InteractionAuditPanel({
                 <DisclosureChevron />
                 <span className="interaction-audit__summary-copy">
                   <strong>{humanizeEnum(interaction.type)}</strong>
-                  <small>
-                    {new Date(interaction.requestedAt).toLocaleString()} · request{' '}
-                    {String(interaction.providerRequestId)}
+                  <small className="provider-meta">
+                    <span>{new Date(interaction.requestedAt).toLocaleString()}</span>
+                    <span>
+                      request{' '}
+                      <span className="provider-meta__id">{String(interaction.providerRequestId)}</span>
+                    </span>
                   </small>
                 </span>
               </span>
@@ -67,13 +71,13 @@ export function InteractionAuditPanel({
                 <dd>
                   {interaction.decision
                     ? <StructuredData value={interaction.decision} />
-                    : 'No response was sent'}
+                    : <span className="provider-kv__text">No response was sent</span>}
                 </dd>
                 <dt>Resolution</dt>
                 <dd>
                   {interaction.resolution
                     ? <StructuredData value={interaction.resolution} />
-                    : humanizeEnum(interaction.status)}
+                    : <span className="provider-kv__text">{humanizeEnum(interaction.status)}</span>}
                 </dd>
               </dl>
               <RawProviderMessage reference={interaction.requestRawMessage} />
@@ -88,16 +92,21 @@ export function InteractionAuditPanel({
   );
 }
 
+/** Who sent the request, in words, then the id to copy. */
 function formatSessionSource(
   session: AgentSessionRecord | undefined,
   fallbackId: string
-): string {
-  if (!session) {
-    return `Unknown local session ${fallbackId.slice(0, 8)}`;
-  }
-  const label =
-    session.providerNickname ??
-    session.providerRole ??
-    (session.role === 'SUBAGENT' ? 'Subagent' : 'Primary agent');
-  return `${label} · ${session.providerSessionId ?? session.id}`;
+): ReactNode {
+  const label = session
+    ? session.providerNickname ??
+      session.providerRole ??
+      (session.role === 'SUBAGENT' ? 'Subagent' : 'Primary agent')
+    : 'Unknown local session';
+  const id = session ? session.providerSessionId ?? session.id : fallbackId.slice(0, 8);
+  return (
+    <span className="provider-meta">
+      <span className="provider-kv__text">{label}</span>
+      <span>{id}</span>
+    </span>
+  );
 }

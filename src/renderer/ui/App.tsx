@@ -2678,7 +2678,7 @@ export function App() {
               <button
                 ref={newTaskButtonRef}
                 type="button"
-                className="tm-newtask"
+                className="primary-button button--sm tm-newtask"
                 onClick={openNewTask}
                 disabled={!canCreateTask}
                 title={canCreateTask ? undefined : 'Finish setup before creating tasks'}
@@ -2901,7 +2901,7 @@ export function App() {
                 </span>
               </div>
             </div>
-            {error ? <div className="tm-error">{error}</div> : null}
+            {error ? <div className="tm-error tm-error--page">{error}</div> : null}
           </main>
         ) : view === 'previews' ? (
           <PreviewsPage

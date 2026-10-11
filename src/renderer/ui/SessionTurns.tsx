@@ -166,7 +166,7 @@ function TurnFooter({ turn, noticeShown, onReadArtifact, onShowDebug }: {
       {outcome ? <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{outcome}</span> : null}
       {end ? <MessageTime value={end} /> : null}
       {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={13} className="tm-iconbtn tm-turn__action" /> : null}
-      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" tooltip="Response details" trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={details} /> : null}
+      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" tooltip="Response details" trigger={<MoreHorizontal size={13} aria-hidden="true" />} items={details} /> : null}
     </div>
     {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">
       {prompt.error ? <p role="alert">{prompt.error}</p> : prompt.text === undefined ? <p>Loading prompt…</p> : <pre>{prompt.text}</pre>}

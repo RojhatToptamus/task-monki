@@ -621,8 +621,9 @@ export function AgentModelSelector({
       {onReasoningEffortChange && efforts.length > 0 ? (
         <div className="tm-agent-console__row">
           <span className="tm-agent-console__label">Reasoning</span>
+          {/* The one segmented control (DESIGN.md 5), filling the row. */}
           <div
-            className="tm-agent-console__reasoning"
+            className="segmented segmented--fill tm-agent-console__reasoning"
             role="group"
             aria-label={`${label} reasoning`}
             data-many-options={reasoningChoiceCount > 4 || undefined}
@@ -631,7 +632,7 @@ export function AgentModelSelector({
               {includesProviderDefaultReasoning ? (
                 <button
                   type="button"
-                  className={reasoningEffort === '' ? 'is-selected' : ''}
+                  className={`segmented__btn${reasoningEffort === '' ? ' is-selected' : ''}`}
                   aria-pressed={reasoningEffort === ''}
                   aria-label="Default reasoning"
                   disabled={disabled}
@@ -644,7 +645,7 @@ export function AgentModelSelector({
               {efforts.map((effort) => (
                 <button
                   type="button"
-                  className={effort === reasoningEffort ? 'is-selected' : ''}
+                  className={`segmented__btn${effort === reasoningEffort ? ' is-selected' : ''}`}
                   aria-pressed={effort === reasoningEffort}
                   aria-label={`${formatReasoningEffort(effort)} reasoning`}
                   disabled={disabled}

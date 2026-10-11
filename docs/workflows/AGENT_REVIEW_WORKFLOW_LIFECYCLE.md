@@ -167,7 +167,8 @@ check does not prove the review findings or attribute edits to the agent.
 
 Only events for the current review run can update its projection. Late events
 for earlier reviews remain in their run history. Terminal events cannot make a
-stale review current again. A new review requires an explicit start.
+stale review current again; only a Git snapshot of exactly the reviewed diff
+can (see Staleness rules). A new review requires an explicit start.
 
 When the review run emits a terminal event:
 
@@ -285,14 +286,17 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run.
 4. Reducer moves the task to `IN_PROGRESS`.
-5. Reducer marks the old agent review `STALE`.
-6. The old review findings remain visible only as previous-review context.
+5. The review stays as it was: a follow-up continues the reviewed work, and only
+   a diff that differs from the reviewed one makes the review stale.
+6. Review actions pause until the follow-up ends.
 
 Expected UI while follow-up is active:
 
 - Board column: In Progress.
 - Card chip: Fixing review feedback.
-- Old review panel: visible as read-only context if a previous review exists.
+- Review tab: the diff and findings stay; the headline says Fixing review
+  feedback, or the agent's pending request ("Codex asked a question") with Go to
+  request, since the page head that otherwise carries it is folded there.
 - Review actions hidden or disabled:
   - no Request changes
   - no Run review again
@@ -318,17 +322,18 @@ is still changing the implementation.
 When the follow-up completes successfully:
 
 1. Reducer moves the task from `IN_PROGRESS` back to `REVIEW`.
-2. The old agent review remains `STALE`.
-3. The task needs a fresh review because the implementation diff changed.
+2. The post-run Git snapshot decides the review: a changed diff makes it
+   `STALE` and the task needs a fresh review; a follow-up that changed nothing
+   (it answered or asked a question, say) leaves the review current.
 
-Expected UI:
+Expected UI when the diff changed:
 
 - Board column: Review.
 - Card chip: Needs re-review.
-- Review tab: Review out of date, scoped to the files that changed since the
-  reviewed capture; the earlier findings stay on the code as context without
-  Ask or Dismiss, and the reviewer panel keeps earlier answers but takes no new
-  question.
+- Review tab: Review out of date, leading with the files that changed since the
+  reviewed capture (All changes when nothing did; never an empty scope); the
+  earlier findings stay on the code as context without Ask or Dismiss, and the
+  reviewer panel keeps earlier answers but takes no new question.
 - Primary next action: Run review again.
 
 If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
@@ -341,10 +346,16 @@ only.
 
 An agent review becomes stale when:
 
-- a new non-review agent run starts after a terminal review result; or
 - a new Git snapshot has a different head SHA or dirty fingerprint than the
   reviewed diff, except when a Task Monki delivery commit records the
-  still-current reviewed worktree into Git.
+  still-current reviewed worktree into Git; or
+- a non-review run that is not an implementation turn (analysis, compaction)
+  starts after a terminal review result, leaving the review with no
+  implementation run to belong to.
+
+A follow-up or retry starting never makes a review stale by itself. A Git
+snapshot that matches the reviewed head SHA and dirty fingerprint again makes a
+stale review with a result current again, with its decisions intact.
 
 Stale findings must not be treated as current findings. They are useful context
 for what was previously wrong, but the correct action is to re-run review on the
@@ -366,7 +377,8 @@ Expected behavior:
   - Interrupt controls belong to the active agent controls, not the review
     panel.
   - The task stays In Progress until the interruption is terminally recorded.
-  - Terminal interruption keeps it In Progress and leaves the review gate stale.
+  - Terminal interruption keeps it In Progress; the review gate is whatever the
+    last Git snapshot decided.
 
 Provider edge cases:
 

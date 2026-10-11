@@ -104,7 +104,7 @@ export function ReviewFindingThread({
             {!blocking && onToggleInclude ? (
               <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
                 <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => onToggleInclude(finding.id)}>
-                  {inRequest ? <><Check size={12} aria-hidden="true" />In request</> : 'Add to request'}
+                  {inRequest ? <><Check size={13} aria-hidden="true" />In request</> : 'Add to request'}
                 </button>
               </Tooltip>
             ) : null}

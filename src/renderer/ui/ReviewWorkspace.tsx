@@ -44,6 +44,8 @@ export interface ReviewWorkspaceProps {
     status: AgentReviewGateStatus;
     reviewedAt?: string;
     runId?: string;
+    /** The implementation agent is taking a turn after the review, such as fixing a request. */
+    working?: boolean;
   };
   findings: ReviewFindingView[];
   currentDiffArtifactId?: string;
@@ -74,6 +76,8 @@ export interface ReviewWorkspaceProps {
   onAskAboutFinding?(findingId: string): void;
   /** Changes when another surface asks to see the request, such as the Overview's Request changes. */
   requestSheetToken?: number;
+  /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
+  agentRequest?: { label: string; action: string; onOpen(): void };
 }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
@@ -85,10 +89,11 @@ const SCOPE_LABELS: Record<ReviewScope, string> = {
   'since-review': 'Since the review'
 };
 
-function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number): { label: string; tone?: 'blocked' | 'waiting' | 'verified' } {
+function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number, working?: boolean): { label: string; tone?: 'blocked' | 'waiting' | 'verified' } {
+  if (working && status !== 'RUNNING') return { label: 'Fixing review feedback' };
   switch (status) {
     case 'RUNNING': return { label: 'Reviewing' };
-    // A run after the review makes it out of date, whether or not files changed.
+    // The diff changed after the review.
     case 'STALE': return { label: 'Review out of date', tone: 'waiting' };
     case 'PASSED': return { label: 'Review passed', tone: 'verified' };
     case 'NEEDS_CHANGES': return openCount > 0 ? { label: 'Needs changes', tone: 'blocked' } : { label: 'No open findings', tone: 'verified' };
@@ -137,18 +142,22 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const diff = props.historical ? historical : current;
   const stale = review?.status === 'STALE';
   const canCompareSinceReview = stale && !props.historical && !reviewed.missing && !reviewed.error;
-  const [scope, setScope] = useState<ReviewScope>(canCompareSinceReview ? 'since-review' : 'all');
-  const effectiveScope: ReviewScope = scope === 'since-review' && !canCompareSinceReview ? 'all' : scope;
   const changedSinceReview = useMemo(
-    () => (canCompareSinceReview && !reviewed.loading ? filesChangedSinceReview(reviewed.filesByScope.all, current.filesByScope.all) : undefined),
-    [canCompareSinceReview, current.filesByScope.all, reviewed.filesByScope.all, reviewed.loading]
+    () => (canCompareSinceReview && !reviewed.loading && !current.loading ? filesChangedSinceReview(reviewed.filesByScope.all, current.filesByScope.all) : undefined),
+    [canCompareSinceReview, current.filesByScope.all, current.loading, reviewed.filesByScope.all, reviewed.loading]
   );
+  // "Since the review" is offered, and leads, only when something changed since it; never an empty scope.
+  const sinceReviewAvailable = Boolean(changedSinceReview?.size);
+  const [chosenScope, setScope] = useState<ReviewScope>();
+  const scope = chosenScope ?? (sinceReviewAvailable ? 'since-review' : 'all');
+  const effectiveScope: ReviewScope = scope === 'since-review' && !sinceReviewAvailable ? 'all' : scope;
   const files: DiffFile[] = useMemo(() => (effectiveScope === 'since-review'
     ? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
     : diff.filesByScope[effectiveScope]), [changedSinceReview, diff.filesByScope, effectiveScope]);
 
-  // "Since the review" also needs the reviewed diff; until both are read, the scope is loading, not empty.
-  const loading = diff.loading || (effectiveScope === 'since-review' && reviewed.loading);
+  const gutterWidth = useMemo(() => numberColumnWidth(files), [files]);
+  // Until the reviewed diff is read, the default scope is unknown, so the tab is loading, not showing one and then the other.
+  const loading = diff.loading || (canCompareSinceReview && !chosenScope && reviewed.loading);
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
   const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings), [files, visibleFindings]);
@@ -394,7 +403,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     ...(['all', 'committed', 'uncommitted'] as const).map((value) => ({
       id: value, label: SCOPE_LABELS[value], pressed: effectiveScope === value, onSelect: () => setScope(value)
     })),
-    ...(canCompareSinceReview ? [{ id: 'since-review', label: SCOPE_LABELS['since-review'], pressed: effectiveScope === 'since-review', onSelect: () => setScope('since-review') }] : []),
+    ...(sinceReviewAvailable ? [{ id: 'since-review', label: SCOPE_LABELS['since-review'], pressed: effectiveScope === 'since-review', onSelect: () => setScope('since-review') }] : []),
     ...(props.comparison ? [{
       id: 'comparison', label: 'Change comparison…', meta: props.comparison.label, separated: true,
       disabled: Boolean(props.comparison.disabledReason), disabledReason: props.comparison.disabledReason, onSelect: props.comparison.onChange
@@ -425,7 +434,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       : effectiveScope === 'since-review' ? 'Nothing changed since the review.' : 'No changes in this scope.'
     : undefined;
 
-  const headline = reviewHeadline(review?.status, openFindings.length);
+  const headline = reviewHeadline(review?.status, openFindings.length, review?.working);
   const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer) && !props.historical
     ? props.brief
     : undefined;
@@ -534,12 +543,21 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           </>
         ) : (
           <>
-            <span className={`tm-review__headline${review?.status === 'RUNNING' ? ' tm-shimmer' : ''}`} data-tone={headline.tone}>
-              {headline.label}
-            </span>
-            {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' ? (
-              <span className="tm-review__meta"><MessageTime value={review.reviewedAt} /></span>
-            ) : null}
+            {props.agentRequest ? (
+              <>
+                <span className="tm-review__headline" data-tone="waiting">{props.agentRequest.label}</span>
+                <button type="button" className="ghost-button button--sm" onClick={props.agentRequest.onOpen}>{props.agentRequest.action}</button>
+              </>
+            ) : (
+              <>
+                <span className={`tm-review__headline${review?.status === 'RUNNING' || review?.working ? ' tm-shimmer' : ''}`} data-tone={headline.tone}>
+                  {headline.label}
+                </span>
+                {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' && !review.working ? (
+                  <span className="tm-review__meta"><MessageTime value={review.reviewedAt} /></span>
+                ) : null}
+              </>
+            )}
             <ActionMenu
               className="tm-review__scope tm-review__bar-end"
               label="Changes to show"
@@ -597,7 +615,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                 </span>
                 {feedback ? (
                   <span className="tm-review__index-feedback" data-tone={fileFindings.some(isBlockingFinding) ? 'blocked' : undefined}>
-                    <MessageSquare size={12} aria-hidden="true" />{feedback}
+                    <MessageSquare size={13} aria-hidden="true" />{feedback}
                     <span className="tm-visually-hidden"> {feedback === 1 ? 'note' : 'notes'}</span>
                   </span>
                 ) : null}
@@ -617,7 +635,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           )}
         </nav>
 
-        <div ref={diffRef} className="tm-review__diff" tabIndex={-1}>
+        <div ref={diffRef} className="tm-review__diff" tabIndex={-1} style={{ '--review-num': `${gutterWidth}px` } as CSSProperties}>
           {briefContent ? (
             <ReviewBrief
               content={briefContent}
@@ -646,7 +664,6 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                 className={`tm-review-file${collapsed ? ' tm-review-file--collapsed' : ''}`}
                 data-file-id={file.id}
                 aria-label={file.path}
-                style={{ '--review-num': `${numberColumnWidth(file)}px` } as CSSProperties}
               >
                 <header className="tm-review-file__head" onContextMenu={(event) => openPathMenu(file.path, event)}>
                   <Tooltip label={collapsed ? 'Expand' : 'Collapse'} shortcut="⌥ all files">
@@ -657,7 +674,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                       aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${file.path}`}
                       onClick={(event) => toggleCollapsed(entry, event.altKey)}
                     >
-                      <ChevronRight size={12} aria-hidden="true" />
+                      <ChevronRight size={13} aria-hidden="true" />
                       <span className="tm-review-file__path">
                         {parts.length ? <span className="tm-review-file__dir">{parts.join('/')}/</span> : null}
                         <span className="tm-review-file__name">{name}</span>
@@ -672,7 +689,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                   ) : null}
                   <DiffStat file={file} />
                   <Tooltip label="Viewed" shortcut="V">
-                    <input type="checkbox" className="tm-review-file__viewed" aria-label="Viewed" checked={fileViewed} onChange={() => setFileViewed(file, !fileViewed)} />
+                    {/* The 16px mark sits in a 24px target, like every control in the head. */}
+                    <label className="tm-review-file__viewed">
+                      <input type="checkbox" aria-label="Viewed" checked={fileViewed} onChange={() => setFileViewed(file, !fileViewed)} />
+                    </label>
                   </Tooltip>
                   <FileMenu
                     path={file.path}
@@ -735,7 +755,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                       // A pointer comments through the gutter press; this handles the keyboard.
                                       onClick={(event) => { if (event.detail === 0) openComposer(file, block, { start: row.index, end: row.index, anchor: row.index }); }}
                                     >
-                                      <Plus size={11} aria-hidden="true" />
+                                      <Plus size={12} aria-hidden="true" />
                                     </button>
                                   ) : null}
                                   {number ?? ''}
@@ -795,10 +815,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
  * The gutter is wide enough for the file's largest line number and the comment
  * "+" beside it, so the two never overlap and short files keep a narrow gutter.
  */
-function numberColumnWidth(file: DiffFile): number {
+/** One gutter for every file, wide enough for the largest line number and the "+", so code starts on one column. */
+function numberColumnWidth(files: readonly DiffFile[]): number {
   let largest = 0;
-  for (const block of file.blocks) {
-    for (const line of block.lines) largest = Math.max(largest, line.newLine ?? 0, line.oldLine ?? 0);
+  for (const file of files) {
+    for (const block of file.blocks) {
+      for (const line of block.lines) largest = Math.max(largest, line.newLine ?? 0, line.oldLine ?? 0);
+    }
   }
   return Math.max(44, 32 + String(largest).length * 7);
 }

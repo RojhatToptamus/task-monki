@@ -393,7 +393,9 @@ function isFixingReviewFeedback(task: TaskCardSource): boolean {
   return (
     task.workflowPhase === 'IN_PROGRESS' &&
     REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
-    review.status === 'STALE' &&
+    // A turn after a finished review; the review goes stale only once the diff changes.
+    review.status !== 'NOT_RUN' &&
+    review.status !== 'RUNNING' &&
     Boolean(review.runId || reviewHasResult(review))
   );
 }

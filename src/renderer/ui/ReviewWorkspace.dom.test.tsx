@@ -265,4 +265,44 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(onSubmit).toHaveBeenCalledOnce();
   });
+
+  it('shows every change for an out-of-date review when nothing changed since it, never an empty scope', async () => {
+    api.readArtifact.mockImplementation(async () => diffFor('src/rateLimit.ts'));
+    render(<Harness
+      review={{ status: 'STALE', runId: 'review-1' }}
+      artifacts={[artifact('diff-1'), artifact('diff-0')]}
+      reviewedDiffArtifactId="diff-0"
+    />);
+
+    expect(await screen.findByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
+    expect(screen.queryByText('Nothing changed since the review.')).toBeNull();
+    expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('All changes');
+  });
+
+  it('leads with the changes since an out-of-date review when there are some', async () => {
+    api.readArtifact.mockImplementation(async ({ artifactId }: { artifactId: string }) => artifactId === 'diff-0'
+      ? `# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')}\n${fileDiff('src/other.ts', '@@ -1 +1 @@\n-a\n+b')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`
+      : `# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+newer')}\n${fileDiff('src/other.ts', '@@ -1 +1 @@\n-a\n+b')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    render(<Harness
+      review={{ status: 'STALE', runId: 'review-1' }}
+      artifacts={[artifact('diff-1'), artifact('diff-0')]}
+      reviewedDiffArtifactId="diff-0"
+    />);
+
+    expect(await screen.findByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('Since the review');
+  });
+
+  it('says when the agent is waiting on the person instead of the review’s verdict', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const onOpen = vi.fn();
+    const { rerender } = render(<Harness review={{ status: 'NEEDS_CHANGES', runId: 'review-1', working: true }} />);
+    expect(await screen.findByText('Fixing review feedback')).toBeDefined();
+
+    rerender(<Harness review={{ status: 'NEEDS_CHANGES', runId: 'review-1', working: true }} agentRequest={{ label: 'Codex asked a question', action: 'Go to request', onOpen }} />);
+    expect(screen.getByText('Codex asked a question')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Go to request' }));
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
 });

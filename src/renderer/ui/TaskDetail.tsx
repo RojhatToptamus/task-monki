@@ -136,6 +136,7 @@ import { TaskActivityPanel, formatTaskActivityTimestamp } from './TaskActivityPa
 import {
   DecisionSlot,
   InteractionDecision,
+  interactionHeadline,
   OverviewRequest,
   OverviewSection,
   SlotActions,
@@ -549,13 +550,21 @@ export function TaskDetail(props: TaskDetailProps) {
   const hasHistoricalReviewContext =
     reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
+  // A reviewer question, or a side question reading the live worktree, holds the
+  // worktree; core refuses other agent work and Git actions until it ends.
+  const sideQuestionHoldsWorktree = Boolean(props.sideQuestion?.records.runs.some((sideRun) =>
+    isActiveRunStatus(sideRun.status) && runHoldsTaskWorktree(sideRun, props.sideQuestion!.records.instructions)));
+  const questionHoldsWorktree = sideQuestionHoldsWorktree ||
+    Boolean(props.reviewer?.records.runs.some((questionRun) => isActiveRunStatus(questionRun.status)));
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
     : reviewPending
       ? 'review-starting'
       : activeImplementationRun
         ? 'implementation-running'
-        : undefined;
+        : questionHoldsWorktree
+          ? 'question-running'
+          : undefined;
   const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
     deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
@@ -799,6 +808,7 @@ export function TaskDetail(props: TaskDetailProps) {
         'review-starting': 'Review is starting.',
         'review-running': 'Review is running.',
         'implementation-running': 'Implementation is running.',
+        'question-running': 'Waiting for the answer to a question.',
         'delivery-running': 'A delivery action is in progress.'
       }[reviewActionsPausedReason]
     : undefined;
@@ -941,6 +951,12 @@ export function TaskDetail(props: TaskDetailProps) {
     implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
     implementationRetryRequired
   });
+
+  // A turn after the review that stopped (failed, interrupted, lost) waits on the person
+  // before the review can move; the Review tab says so, since its page head is folded.
+  const implementationNeedsYou = Boolean(run && run.mode !== 'REVIEW' && (
+    implementationRetryRequired || ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(run.status)
+  ));
 
   const detailHeadClassName = 'tm-detail__masthead';
 
@@ -1439,23 +1455,21 @@ export function TaskDetail(props: TaskDetailProps) {
   const runtimeUnavailable = props.runtimeState && !props.runtimeState.preflight.readiness.canStart
     ? props.runtimeState.preflight.readiness.detail ?? props.runtimeState.preflight.readiness.summary
     : undefined;
-  // A side question that reads the live worktree, because nothing was writing
-  // it when asked, holds other agent work until it finishes.
-  const sideQuestionHoldsWorktree = Boolean(props.sideQuestion?.records.runs.some((sideRun) =>
-    isActiveRunStatus(sideRun.status) && runHoldsTaskWorktree(sideRun, props.sideQuestion!.records.instructions)));
   // A side question is about work in progress: it needs the worktree and a run.
   const sideQuestionAvailable = Boolean(props.sideQuestion && worktree && run);
   const sideQuestionPanel = tab === 'agent' && sideThread && sideQuestionAvailable && props.sideQuestion ? (
     <SideQuestionPanel
       conversation={props.sideQuestion}
-      defaultModel={props.sideQuestion.defaultModel ?? {
+      defaultModel={(props.sideQuestion.defaultModel?.runtimeId === task.runtimeId ? props.sideQuestion.defaultModel : undefined) ?? {
         runtimeId: task.runtimeId,
         model: task.agentSettings?.model,
         modelProvider: task.agentSettings?.modelProvider,
         reasoningEffort: task.agentSettings?.reasoningEffort
       }}
       models={props.models ?? props.runtimeState?.models ?? []}
-      runtimes={props.runtimes ?? (props.runtimeState ? [props.runtimeState] : [])}
+      // A side question runs on the task's own runtime (core refuses any other), so only its models are offered.
+      runtimes={(props.runtimes ?? (props.runtimeState ? [props.runtimeState] : []))
+        .filter((candidate) => candidate.preflight.runtime.id === task.runtimeId)}
       onDiscoverModels={props.onDiscoverAgentRuntimeModels}
       threadId={sideThread.id}
       implementationActive={Boolean(activeImplementationRun)}
@@ -1598,7 +1612,7 @@ export function TaskDetail(props: TaskDetailProps) {
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
-        {error ? <div className="tm-error">{error}</div> : null}
+        {error ? <div className="tm-error tm-error--page">{error}</div> : null}
 
         {tab === 'overview' ? (
           <div className="tm-overview">
@@ -1747,7 +1761,7 @@ export function TaskDetail(props: TaskDetailProps) {
           <ReviewWorkspace
             key={task.id}
             taskId={task.id}
-            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: reviewGate.status, reviewedAt: reviewGate.updatedAt, runId: reviewGate.runId }}
+            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
             reviewedDiffArtifactId={reviewGate.status === 'STALE'
@@ -1792,6 +1806,15 @@ export function TaskDetail(props: TaskDetailProps) {
               onRun: () => onNextAction(nextAction.primary!.id)
             } : undefined}
             requestSheetToken={requestSheetToken}
+            agentRequest={pendingInteraction ? {
+              label: interactionHeadline(pendingInteraction, runtimeName),
+              action: 'Go to request',
+              onOpen: () => { setTab('agent'); setAgentAttentionRequest((value) => value + 1); }
+            } : implementationNeedsYou ? {
+              label: nextAction.title,
+              action: 'Go to agent',
+              onOpen: () => setTab('agent')
+            } : undefined}
             onDismissFinding={props.onDecideReviewFinding && reviewGate.runId ? (findingId, reason, note) => props.onDecideReviewFinding!({
               taskId: task.id, reviewRunId: reviewGate.runId!, findingId, kind: 'DISMISS', dismissReason: reason, note
             }) : undefined}

@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react';
-import { ArrowUp, Square, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Square, X } from 'lucide-react';
 import type {
   ConversationContextReferenceSnapshot,
   DiscourseConversationAggregateRecord,
@@ -2094,7 +2094,8 @@ export function DiscourseWorkspace({
                 setNewResponses(false);
               }}
             >
-              New responses ↓
+              New responses
+              <ArrowDown size={16} aria-hidden="true" />
             </button>
           ) : null}
         </div>
@@ -2139,7 +2140,7 @@ export function DiscourseWorkspace({
                 <button
                   ref={previewButtonRef}
                   type="button"
-                  className="tm-discourse-preview-button"
+                  className="ghost-button tm-discourse-preview-button"
                   aria-label={previewLoading ? 'Resolving agent context' : 'Context'}
                   aria-expanded={Boolean(preview)}
                   disabled={previewLoading || composerUnavailable}

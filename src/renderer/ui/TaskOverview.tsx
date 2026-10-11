@@ -257,7 +257,7 @@ export function InteractionDecision({
   );
 }
 
-function interactionHeadline(interaction: InteractionRequestRecord, agent: string): string {
+export function interactionHeadline(interaction: InteractionRequestRecord, agent: string): string {
   switch (interaction.type) {
     case 'COMMAND_APPROVAL':
       return `${agent} wants to run a command`;

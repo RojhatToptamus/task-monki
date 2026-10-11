@@ -24,7 +24,7 @@ export function MessageQueue({ items, editingId, disabled = false, continueDisab
     <div className="tm-queue__head">
       <span className="tm-queue__title">{items.length} {held ? 'pending' : 'queued'}</span>
       <span className="tm-queue__hint">{held
-        ? queued ? `${queued} queued · ${held} paused` : 'Paused · continue when ready'
+        ? queued ? `${queued} queued, ${held} paused` : 'Paused until you continue'
         : 'Sends after this response'}</span>
     </div>
     <ol aria-label="Pending instructions">{items.map((item, index) => <li key={item.id} className="tm-queue__item" aria-current={editingId === item.id ? true : undefined}>

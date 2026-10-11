@@ -216,7 +216,10 @@ planes.
   | `--field-edge` | the **resting boundary of a filled control** | input, textarea, composer, select trigger, segmented track, secondary button |
   | `--field-edge-focus` | the same rim while the control **holds focus** — one notch darker/lighter, same hue-free ink | focused input, textarea, composer |
   | `--edge-raised` | the boundary of an **object** resting on its plane | card, panel, response, decision block |
-  | `--edge` | a **seam** between structural planes, and **floating** layers | rail↔sheet, drawer edge, menu, popover, modal, tooltip |
+  | `--edge` | a **floating** layer's boundary, and a drawer's edge | drawer edge, menu, popover, modal, tooltip |
+
+  Two structural planes meet on a `--hair` seam (the rail and a sheet, a sheet
+  and a docked side panel); `--edge` is only for what floats or slides over.
 
   `--control-edge` is separate from these five: an opaque 3:1 line for a control
   with no fill at all to be identified by (an unchecked checkbox, a radio, a
@@ -249,7 +252,7 @@ planes.
   more expensive tool, not the cheaper one — reach for the plane first, and let
   the object's own edge do the boundary work.
 - **Elevation:** `--shadow-card` for things resting on the sheet,
-  `--shadow-card-hover` one step up, `--shadow-panel`, then `--shadow-pop` for
+  `--shadow-panel`, then `--shadow-pop` for
   menus and popovers and `--shadow-modal`. **Light mode only** — in dark, cards
   and panels cast nothing, because a shadow on near-black is invisible and the
   attempt produces mud. A hover never crosses shadow tiers: `--shadow-pop` on a
@@ -278,6 +281,14 @@ planes.
      control, and a pointer click must never produce it. Like a line, the halo
      is accent at an alpha solved per theme and mode to clear 3:1 over every
      plane (§8); an accent seed that cannot carry it fails the build.
+
+  The halo is a token, `--focus-halo`, and it **adds** to a control's resting
+  rim: a control that rests on a rim (a secondary button, the selected segment)
+  writes `box-shadow: <its rim>, var(--focus-halo)`, so focus never erases the
+  edge. A row inside a scrolling or clipped list, where an outside halo would be
+  cut, takes `--focus-halo-inset` (2px, inward). Finding threads and comments
+  keep their 1px `--focus-ring` rim. One mechanism: keyboard modality on
+  `.app-shell`, never a workspace-wide copy.
 
   **The accent hue is not a focus cue on a resting control.** A coloured rim
   around whatever the caret happens to be in reads as an alert, not as focus: it
@@ -442,10 +453,18 @@ Interface type is one sans; machine values are one mono. No third family.
 | Page title | `--t-title` | 22 / 500 · `-0.02em` |
 | Section heading | `--t-heading` | 15 / 500 |
 | Panel title, control label | `--t-label` | 13 / 500 |
-| Body, prose | `--t-body` | 13 / 400 |
+| Body, prose | `--t-body` | 13 / 400 — the body's own size, so text with no size of its own is 13, never the browser's 16 |
 | Secondary, helper | `--t-help` | 12 / 400 `--text-soft` |
 | Metadata, counts | `--t-meta` | 11.5 / 400 `--muted` |
-| Group label | `--t-group` | 12 / 500 `--muted` |
+| Group and section label | `--t-group` | 12 / 500 `--muted` |
+
+Line boxes are whole pixels in single-line controls, rows, headings and code:
+`--lh-meta` 16, `--lh-ui` 18, `--lh-body` 20 (13px text in a control or row, a
+15px heading, and 12px code, so a diff row is exactly 20), and `--lh-title` 28
+for a page title. Only multi-line
+reading text uses the `--lh-prose` factor (1.55). A single-line control's height
+comes from its height token, never from a line-height times a size plus padding.
+The regular weight is `--w-regular` (400), never a literal.
 
 Every label is sentence case. Nothing is set in capitals with added tracking: an
 eyebrow in caps reads as a web template, and a group label is quiet because it is
@@ -493,7 +512,12 @@ learns "an agent answers here".
 Icons are decoration next to a label and information when alone: an icon-only
 control carries an `aria-label` and a `Tooltip`; a native `title` is not a
 tooltip. Optically centre against text
-rather than aligning boxes, and keep 8–9px between icon and label.
+rather than aligning boxes. An icon sits 6px from its label inside a button,
+chip or trigger, and 8px from a block of text in a row or a disclosure label.
+
+A glyph inside a 16px mark (a checkbox's check, the diff's comment "+") is 12px,
+so it lands on whole pixels; a mark always sits in a hit area of at least 24px,
+its label's or a 24px wrapper's.
 
 ---
 
@@ -506,28 +530,59 @@ including expanded and error states. Place actions beside the content they affec
 or in its established footer. Add a container only when it communicates a
 meaningful grouping or boundary.
 
+Spacing comes from one scale: **2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48**.
+10 is for compact controls only: `button--sm`, composer toolbar buttons and
+textarea padding. A value off
+it is drift, with two exceptions: one pixel less beside a 1px border or ring,
+which keeps the visual distance on the scale, and a value derived for alignment
+(an indent equal to a 13px icon plus its 8px gap, say), commented where it is set.
+
 | Thing | Padding / gap |
 |---|---|
-| Card | 11–12 pad, 6–8 internal gap |
-| Panel / settings block | 16–18 pad, 15 row rhythm |
-| List row | 8 horizontal, 26–30 tall |
-| Sheet | 14–16 pad |
-| Between cards | 10–12 |
+| Card | 12 pad, 6–8 internal gap |
+| Panel / settings block | 16 pad, 16 row rhythm |
+| List row | 8 horizontal |
+| Sheet | 16 pad |
+| Between cards | 12 |
 | Section separation | 24–32 |
 
 Radii are tokens, not literals, and each step has one job:
 
 | Token | Radius | Used for |
 |---|---|---|
-| `--r-2xs` | 4 | keyboard keys, tiny inline marks |
+| `--r-2xs` | 4 | keyboard keys, checkboxes, tiny inline marks such as the diff's comment "+" |
 | `--r-xs` | 6 | badges, menu items, list and index rows |
-| `--r-sm` | 8 | buttons, fields, icon buttons, rail items |
-| `--r` | 10 | menus, finding threads, comments |
-| `--r-md` | 12 | sheets, side panels, cards, composers, tables |
+| `--r-sm` | 8 | buttons, fields, icon buttons, rail items; review files and everything in the diff |
+| `--r` | 10 | menus and anchored popovers, the Review request sheet included |
+| `--r-md` | 12 | sheets, side panels, cards, composers, tables, a floating side sheet |
 | `--r-lg` | 14 | modals |
-| `--r-pill` | 999 | counts and dots |
+| `--r-pill` | 999 | counts, dots and radios |
 
-Concentric things step inward; never nest equal radii.
+Floating surfaces: a tooltip is `--r-xs`, a toast `--r-sm`, a menu or popover
+`--r`, a modal `--r-lg`.
+
+Concentric things step inward; never nest equal radii. A corner follows the
+smallest height its element can take: anything that can be shorter than 40px, such
+as a review file collapsed to its head, takes `--r-sm` or less, because a 12px
+corner on a row that short reads as a pill.
+
+Nested corners follow a formula: the inner radius is the outer radius minus the
+inset (and minus a border), rounded down to a token and never below `--r-2xs`;
+when the inset is as large as the outer radius, the inner element takes its own
+role's token. So a 28px icon button is `--r-sm`, a 24px one `--r-xs`, and a
+segment in its track `--r-xs`. A full-bleed child (a row, a head, a band) has no
+radius of its own: the container's clip rounds it.
+
+**Sticky heads in rounded containers** are square, paint the host plane, own
+only a bottom `--hair`, and take their corners from the container's clip at
+rest. Their `top` is the negative of the scroller's top padding, so they pin
+flush to the scrollport and never show content above or beside their corners.
+
+**Edges over painted children.** A container whose children paint to its edges
+(tinted diff rows, a sticky head, hovered table rows) draws its edge above them:
+a 1px border with `overflow: clip`, or the ring on `::after` as `tm-table` does.
+Never an inset ring its children cover, and never a second ring on a child to
+redraw the container's edge; a child marks a division with a `--hair` seam.
 
 Control heights are tokens too: `--h-control` 32 decision surface ·
 `--h-toolbar` 28 toolbar and compact buttons · `--h-compact` 24 inline ·
@@ -547,15 +602,18 @@ These are settled. Use the value, don't re-derive it.
 | Rail | 56 wide, icon-only, permanent; 36px items |
 | Content sheet | inset 8px from the window's right and bottom edges, `--r-md` |
 | Secondary list column | 268 default, resizable 220–360 |
-| Toolbar / panel header | 48 tall |
+| Workspace / panel head | 48 tall |
+| Toolbar under a head | 40 tall (the Review bar) |
 | Page gutter | 24 at minimum width · 32 wide |
 | Reading column (settings, prose) | 880 max; tables and lists go full width |
-| List row | 26 compact · 30 default · 36 two-line |
-| Button | 32 tall (28 with `button--sm`), 12 horizontal pad, 64 min width |
+| Row | 28 in rails, indexes and menus · 36 in content lists and table heads · 48 two-line and table rows · 60 Inbox items (title, detail and inline approvals) |
+| Button | 32 tall with 12 horizontal pad and 64 min width; `button--sm` 28 tall with 10 pad |
 | Icon button | 28 square (24 compact, `--h-compact`), 16 glyph (13 compact) |
-| Single-line field | 32 tall, 12 horizontal pad |
-| Textarea / composer | 88 min body plus the 42 toolbar, 10–12 pad |
-| Popover / menu | 220–280 wide, 4 pad, 28 rows |
+| Single-line field | 32 tall, 12 horizontal pad, value text 13/400 on `--lh-body` (field-style triggers too; a composer chip is 12/400, the ghost label size) |
+| Textarea / composer | 88 min body plus the 42 toolbar, 10–12 pad, text on `--lh-body` |
+| Popover / menu | 220–280 wide, 4 pad, rows at least 28 (4×8 padding around a 20 line; a two-line row grows) |
+| Pane status footer | 28 tall, 16 side pad |
+| Floating control (jump to latest, new responses) | 28 tall, `--r-sm`, `--card` with the `--edge` ring and `--shadow-pop` |
 | Modal | 440 confirm · 560 form · 640 creation · 720 payload |
 | Side panel | 380 docked, resizable 320–560; floats over the content below a 560px content floor |
 | Settings section list | 212 |
@@ -578,7 +636,8 @@ replacing the runtime.
 **Buttons — four families, no fifth.** Primary (`--primary` fill, `--on-primary`
 ink; one per surface), secondary (`--field` fill with the `--field-edge` rim),
 ghost (transparent, `--hover` on hover; the compact toolbar family, 28 tall),
-destructive (soft tint, never a filled red block). Labels are 13/500. Primary,
+destructive (soft tint, never a filled red block). Labels are 13/500 at the
+decision height and 12/500 on `button--sm` and ghost (`--t-help`). Primary,
 secondary and destructive share the decision geometry so a pair aligns;
 `button--sm` puts any of them on the toolbar height. Choose button emphasis by
 action priority, not by whether the button contains an icon or a label.
@@ -651,9 +710,45 @@ prompt, saved attachments, and the toolbar with model and access chips and the
 step (Prepare worktree or Start). Starting saves the prompt; there is no
 separate save. New task uses the same chips in its description's toolbar.
 
+**Counts.** One neutral count: 18 tall, `--r-pill`, `--field` with `--muted`
+ink, `--t-meta`/500 with tabular figures. A plain-text count in `--faint` is
+allowed only beside a heading, a segment's label, or inside a filled button
+(where a pill would have no edge against the button's own fill).
+
+**Drop targets.** A surface that takes dropped files shows it while a file is
+over it: `--field-focus` fill and a 1px `--accent` line, the composer's
+treatment, easing at `--motion-fast`. It is the one place hue marks a control's
+boundary for something other than its value, because the drop is about to set
+the value.
+
+**Notices.** One inline notice for a warning or an error inside a surface:
+`--r-sm`, 8×12 padding, `--t-help` on `--lh-ui`, the tone's `-bg` and `-ink`, and
+an optional 16px glyph. Everything inside it, a quoted reason or a caption
+included, takes the tone's ink: `--muted` and `--text-soft` are not solved
+against tints. A full-bleed notice across a pane (Stale) is square.
+
+**Wells.** A code or payload block is `--well`, `--r-sm`, mono `--t-meta` on
+`--lh-meta` at 400, padded 8×12; inline code is `--r-2xs`. A well that is itself
+a working surface (the log surface) is `--r-md`. `--well` holds code and raw
+payloads (commands and their output, JSON, protocol messages, logs), never
+notices, metrics, prose, or structured records that render as fields.
+
+**Quoting provider text.** An agent's own words, quoted, sit behind a 2px
+`--edge-raised` rule with 12px padding, attributed above.
+
+**Cards whose head paints to the edge** (a summary band, a sticky head) draw
+the card's edge as a 1px `--edge-raised` border with `overflow: clip`, per
+"Edges over painted children"; every other card uses the inset ring.
+
 **Badges.** A state word on a 12–14% tint of its tone (`status-pill`, the
-`Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, no border, no dot, and
-nothing in it moves. One size everywhere.
+`Chip` component): 20 tall, `--r-xs`, `--t-meta`/500, 8px side padding and a 6px
+glyph gap, no border, no dot, and nothing in it moves. One size everywhere. A
+neutral label (a source, a kind) is the same shape on `--field` with `--muted`
+ink.
+
+**Key and value lists** inside a card or panel (read-only facts) take the table
+container's `--edge-raised` ring and `--hair` seams with 36px rows and no hover;
+they are not clickable, so nothing lights up.
 
 **Tables and comparable lists.** One container (`tm-table`, and the Inbox list):
 the `--edge-raised` ring drawn over the rows, `--r-md`, no fill of its own,
@@ -769,8 +864,12 @@ control's icon, state or tooltip already carries.
 
 - *Toolbar* (40px). The navigator's switch (Files, with viewed progress as
   "2/7", and Feedback) sits over the navigator; then the review in one phrase in
-  its tone's ink and its time; then Compare (All changes, Committed,
-  Uncommitted, Since the review once the review is stale), a View icon (By
+  its tone's ink and its time (Fixing review feedback while the agent takes a
+  turn after the review; the agent's request, such as "Codex asked a question",
+  with Go to request while it waits on the person; a turn that stopped, such as
+  "Recovery required", with Go to agent); then Compare (All changes,
+  Committed, Uncommitted, and Since the review once something changed since the
+  review, which it then leads with; never an empty scope), a View icon (By
   importance, By path; expand or collapse every file), and the review action.
   A stale review keeps Run review again as the primary there.
 - *Navigator* (248px on `--panel`). Files by importance: files with an open
@@ -783,34 +882,41 @@ control's icon, state or tooltip already carries.
 - *Brief.* Facts before opinions: the request, what the agent reported (quoted),
   then the review's summary. Open on the first visit to a review run; folded, it
   is the request's first line.
-- *Files.* Each file is an `--edge-raised` ring (`--r-md`) with a 36px sticky
-  head at table-row scale: the chevron and path as one toggle (⌥: every file),
+- *Files.* Each file is a 1px `--edge-raised` border (`--r-sm`; it collapses to
+  its 36px head) with a sticky head at table-row scale and no edge of its own,
+  only a `--hair` seam under it while open: the chevron and path as one toggle (⌥: every file),
   the directory muted before the name, a word only for New, Deleted or a rename,
   the open findings in words, the counts, the shared checkbox for viewed (no
   label), and ⋯ (Comment on file, then where it opens). A viewed or generated
   file collapses, but its open findings stay as one-line rows: Viewed never
   hides a finding.
 - *Rows.* The gutter is the line number (the old side's on a removed line),
-  sized per file so the comment "+" fits beside the largest number; the "+"
+  one width for the whole review so the comment "+" (16px, `--r-2xs`, its
+  glyph centered) fits beside the largest number and code starts on one column; the "+"
   shows on the row under the pointer and fills when the pointer is on the
   number. Pressing a number, or dragging across several, opens one comment for
   that line or range. Then the marker and code that wraps; the gutter takes the
   row's tint. Threads and comments start at the code column.
 - *Findings.* A thread under the last line of its range, on `--card` with the
-  `--edge-raised` ring, its severity as a word (blocker and major in
+  `--edge-raised` ring (`--r-sm`), its severity as a word (blocker and major in
   `--blocked-ink`), and its actions on the title line: Add to request on a Minor
   or Nit (Blocker and Major are in by default), Ask, and Dismiss, a menu of
   reasons (Not a problem, Acceptable as is, With a note…). A dismissed finding
   folds to one line with Restore.
-- *Comments* sit on `--field` with icon-only Edit and Delete; they can be written
+- *Comments* sit on `--field` (`--r-sm`, as does the composer in the diff) with icon-only Edit and Delete; they can be written
   any time the current diff is shown and are saved with the task as written.
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   comments"), which opens the request sheet; a note that grows to four lines;
   and one primary: Request changes when something is queued, otherwise the step
   that finishes the task. The sheet lists what goes out in send order, what is
   left out, and the instruction, one disclosure away.
-- *Stale.* An out-of-date review keeps its threads as earlier context, without
-  Ask or Dismiss; its findings are never sent, the person's comments still are.
+- *Stale.* A review goes out of date only when the diff differs from the one it
+  reviewed, which the next Git snapshot decides; a follow-up or retry that
+  changes nothing leaves it current, and a diff back to exactly what was
+  reviewed makes it current again. Any other turn (analysis, compaction) leaves
+  it with no implementation run to belong to, so it becomes earlier context. An
+  out-of-date review keeps its threads as earlier context, without Ask or
+  Dismiss; its findings are never sent, the person's comments still are.
 - *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
   file, D dismiss, A ask, F add or take out a suggestion, C comment on the
   chosen lines, ⌘↵ the request sheet and then send.
@@ -1037,7 +1143,7 @@ brief, the model and profile chips, the reason a run cannot start, and Create.
 - Related tabs share the same shell geometry. Switching tabs must not introduce
   unexplained gutters, background seams, or header movement.
 - Every boundary between two panels is a resize handle: an 8px hit area on the
-  boundary's hairline that draws a 2px `--edge` line on hover and focus, with a
+  boundary's `--hair` seam that draws a 2px `--edge` line on hover and focus, with a
   keyboard-reachable equivalent. A handle on the edge of a
   sheet that clips its overflow lies inside that edge, or nothing can grab it.
 - **Degrade by dropping, not by shrinking.** As width goes, the secondary column
@@ -1135,7 +1241,7 @@ an hour are instant. Nothing loops unless work is actually running.
 | Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
 | Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
-| Something moving on screen | its current position | 200ms | `--ease-in-out` |
+| Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
 
 Nothing animates because a tab or page was opened: a surface that is already
 there when its tab mounts (a request bar, a disclosure mounted open, the task
@@ -1201,7 +1307,7 @@ correct answer far more often than a border is).
 | Element | Background | Border | Shadow |
 |---|---|---|---|
 | Card | `--card` | `--edge-raised` | `--shadow-card` |
-| Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card-hover` |
+| Card, hover (clickable) | `--card-hover` | `--edge-raised` | `--shadow-card` (unchanged: hover is a fill step) |
 | Card internal divider | — | `--hair` | — |
 | Settings panel / large settings group | — | `--edge-raised` ring, as `tm-table` | — |
 | Settings row separator | — | `--hair` | — |
@@ -1243,13 +1349,13 @@ correct answer far more often than a border is).
 | Any button, focus (pointer) | unchanged | unchanged | — |
 | Any button, focus-visible | unchanged | unchanged | `--focus-ring` 3px |
 | Primary button, disabled | `--primary-disabled` | `--text-disabled` | `--field-edge` inset 1px — the fill alone reads absent on its host |
-| Any other button, disabled | `--field-disabled` | `--text-disabled` | — |
+| Any other button, disabled | `--field-disabled` | `--text-disabled` | its resting rim, unchanged (§2.4) |
 | Input / textarea, rest | `--field` | `--text` | `--field-edge` inset 1px |
 | Input, hover (single-line only) | `--field-hover` | `--text` | — |
 | Input, focus (any) | `--field-focus` | `--text` | `--field-edge-focus` inset 1px (neutral) |
 | Input, focus-visible | `--field-focus` | `--text` | + `--focus-ring` 3px |
 | Input, error | `--field` | `--text` | `--blocked` inset 1px |
-| Input, disabled | `--field-disabled` | `--text-disabled` | — |
+| Input, disabled | `--field-disabled` | `--text-disabled` | `--field-edge`, unchanged (§2.4) |
 | Placeholder | — | `--placeholder` | — |
 | Composer surface | `--card` | `--text` | edge as input, no hover |
 | Composer hint / affordance row | — | `--muted` | — |

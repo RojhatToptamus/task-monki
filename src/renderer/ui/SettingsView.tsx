@@ -269,16 +269,15 @@ function AgentRuntimeSetting({
 }) {
   const readiness = runtimeReadinessView(runtime);
   const statusId = `agent-runtime-${runtime.preflight.runtime.id}-status`;
+  // Each fact is its own word group, set apart by space rather than a separator.
   const statusDetail = enabled
     ? [
         readiness.label,
         runtime.preflight.runtimeVersion,
         !readiness.canStart ? readiness.nextAction : undefined,
         toggleDisabledReason
-      ]
-        .filter(Boolean)
-        .join(' · ')
-    : 'Disabled';
+      ].filter((part): part is string => Boolean(part))
+    : ['Disabled'];
 
   return (
     <article className="tm-agent-setting">
@@ -286,7 +285,11 @@ function AgentRuntimeSetting({
         <div className="tm-agent-setting__identity">
           <div>
             <h3>{runtime.preflight.runtime.displayName}</h3>
-            <p id={statusId}>{statusDetail}</p>
+            <p id={statusId} className="tm-agent-setting__facts">
+              {statusDetail.map((part, index) => (
+                <span key={index}>{index > 0 ? ' ' : null}{part}</span>
+              ))}
+            </p>
           </div>
         </div>
         <SettingsSwitch
@@ -1279,7 +1282,7 @@ export function ExecutablePathEditor({
     (mode === 'auto' && value !== null) ||
     (mode === 'custom' && Boolean(normalizedDraft) && normalizedDraft !== savedPath);
   const displayStatus = selectExecutableDisplayStatus(status, testResult);
-  const metadata = [displayStatus?.resolvedPath, displayStatus?.version].filter(Boolean).join(' · ');
+  const metadata = [displayStatus?.resolvedPath, displayStatus?.version].filter((part): part is string => Boolean(part));
 
   const runTest = async () => {
     if (!tool) return;
@@ -1309,7 +1312,11 @@ export function ExecutablePathEditor({
 
   return (
     <div className="tm-executable-editor">
-      {metadata ? <div className="tm-executable-editor__meta">{metadata}</div> : null}
+      {metadata.length ? (
+        <div className="tm-executable-editor__meta">
+          {metadata.map((part, index) => <span key={index}>{index > 0 ? ' ' : null}{part}</span>)}
+        </div>
+      ) : null}
       <div className="tm-executable-editor__controls">
         <select
           className="tm-settings__select tm-settings__select--compact"
@@ -1381,7 +1388,7 @@ export function ExecutablePathEditor({
             ? 'Testing…'
             : feedback.state === 'passed'
               ? 'Test passed'
-              : `Test failed · ${feedback.message}`}
+              : `Test failed: ${feedback.message}`}
         </div>
       ) : null}
     </div>

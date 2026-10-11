@@ -1001,11 +1001,19 @@ function reduceAgentReview(
           updatedAt: event.receivedAt
         };
       }
+      // An implementation turn (a follow-up or retry) continues the reviewed work,
+      // so the review stays current until the diff differs from the reviewed one,
+      // which the next Git snapshot decides. Any other turn leaves the review with
+      // no implementation run to belong to, so it becomes earlier context.
+      const startedMode = (run?.mode ?? eventMode) as RunRecord['mode'] | undefined;
+      if (startedMode && isImplementationRunMode(startedMode)) {
+        return base;
+      }
       if (base.status !== 'NOT_RUN' && base.status !== 'RUNNING') {
         return {
           ...base,
           status: 'STALE',
-          summary: 'Implementation changed after this agent review.',
+          summary: 'Newer work started after this agent review.',
           updatedAt: event.receivedAt
         };
       }
@@ -1081,6 +1089,15 @@ function reduceAgentReview(
         updatedAt: event.receivedAt
       };
     case 'GIT_SNAPSHOT_CAPTURED':
+      // A diff back to exactly what was reviewed makes the review current again.
+      if (base.status === 'STALE' && base.result && reviewedStateRecorded(base) && !snapshotDiffersFromReview(base, event.payload)) {
+        return {
+          ...base,
+          status: reviewGateStatusFromResult(base.result) ?? 'INCONCLUSIVE',
+          summary: base.result.summary,
+          updatedAt: event.receivedAt
+        };
+      }
       if (!isTerminalReviewGate(base) || !snapshotDiffersFromReview(base, event.payload)) {
         return base;
       }
@@ -1163,6 +1180,10 @@ function isTerminalReviewGate(
         'CANCELED'
       ].includes(review.status)
   );
+}
+
+function reviewedStateRecorded(review: NonNullable<StatusProjection['agentReview']>): boolean {
+  return Boolean(review.reviewedHeadSha || review.reviewedDirtyFingerprint);
 }
 
 function snapshotDiffersFromReview(

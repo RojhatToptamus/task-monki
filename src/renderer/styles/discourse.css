@@ -12,12 +12,6 @@
   background: var(--surface);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-discourse button:focus,
-.app-shell[data-input-modality='keyboard'] .tm-discourse [role='menu']:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
 .tm-discourse--inspector-open {
   grid-template-columns: var(--discourse-history-width, 268px) 1px minmax(0, 1fr) 1px min(var(--discourse-inspector-width, 320px), 42cqw);
 }
@@ -75,6 +69,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   min-width: 0;
   min-height: 48px;
   padding: 6px 16px;
@@ -97,7 +92,7 @@
 .tm-discourse-header__title h1 {
   font-size: var(--t-heading);
   font-weight: var(--w-medium);
-  line-height: 1.3;
+  line-height: var(--lh-body);
 }
 
 .tm-discourse-title-form h1 {
@@ -122,38 +117,27 @@
   text-underline-offset: 4px;
 }
 
+/* Renaming puts a single-line field in the title's place: 32px, --r-sm, 12px
+   in. It holds focus while it is open; focus comes from the shared rule. */
 .tm-discourse-header__title input {
   width: min(520px, 56vw);
-  height: 31px;
+  height: var(--h-control);
   border: 0;
-  border-radius: var(--r-xs);
-  padding: 0 8px;
-  background: var(--field-focus);
+  border-radius: var(--r-sm);
+  padding: 0 12px;
+  background-color: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   font: var(--w-medium) var(--t-heading) var(--font-ui);
-  outline: 0;
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-discourse-header__title input:focus {
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
 }
 
 .tm-discourse-header__meta {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   margin-top: 4px;
   color: var(--muted);
   font-size: var(--t-meta);
-}
-
-.tm-discourse-header__meta span + span::before {
-  content: '·';
-  margin-right: 7px;
-  color: var(--muted);
 }
 
 .tm-discourse-header__actions {
@@ -192,6 +176,8 @@
   font-weight: var(--w-medium);
 }
 
+/* The inline notice (DESIGN.md 5): --r-sm, 8 by 12, help text in its tone.
+   Its actions are ghost buttons in the notice's ink. */
 .tm-discourse-status-banner {
   position: sticky;
   top: 4px;
@@ -199,16 +185,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
   max-width: 760px;
-  margin: 0 auto 10px;
-  padding: 9px 11px;
-  border: 0;
+  margin: 0 auto 12px;
+  padding: 8px 12px;
   border-radius: var(--r-sm);
   background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font-size: var(--t-meta);
-  line-height: 1.4;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-discourse-status-banner--error {
@@ -218,40 +203,33 @@
 
 .tm-discourse-status-banner span {
   display: grid;
-  gap: 1px;
+  gap: 2px;
 }
 
 .tm-discourse-status-banner button {
   flex: 0 0 auto;
   min-height: var(--h-toolbar);
   padding: 0 8px;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: transparent;
+  border-radius: var(--r-sm);
   color: inherit;
-  font-size: var(--t-meta);
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
 }
 
 .tm-discourse-status-banner button:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
 }
 
 .tm-discourse-status-banner__actions {
   display: flex;
   flex: 0 0 auto;
-  gap: 6px;
-}
-
-.tm-discourse-status-banner button:disabled {
-  color: var(--text-disabled);
-  cursor: wait;
+  gap: 4px;
 }
 
 .tm-discourse-workspace-error {
   display: grid;
   justify-items: center;
-  gap: 7px;
+  gap: 8px;
   max-width: 380px;
   padding: 16px;
   color: var(--text);
@@ -261,11 +239,11 @@
 .tm-discourse-workspace-error span {
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.5;
+  line-height: var(--lh-ui);
 }
 
 .tm-discourse-workspace-error button {
-  margin-top: 5px;
+  margin-top: 4px;
 }
 
 .tm-discourse-empty {
@@ -273,15 +251,14 @@
   justify-items: center;
   align-content: center;
   min-height: 100%;
-  gap: 5px;
-  padding: 32px 16px 54px;
+  gap: 4px;
+  padding: 32px 16px 48px;
   text-align: center;
 }
 
 .tm-discourse-empty h2 {
   margin: 0;
   font-size: var(--t-heading);
-  letter-spacing: -0.018em;
 }
 
 /* Loading is a still, muted line: the shimmer is kept for live work. */
@@ -294,11 +271,7 @@
   margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.5;
-}
-
-.tm-discourse-empty kbd {
-  font: var(--w-medium) var(--t-meta) var(--font-mono);
+  line-height: var(--lh-ui);
 }
 
 .tm-discourse-messages {
@@ -311,7 +284,7 @@
 }
 
 .tm-discourse-messages--unanchored-wave {
-  padding-block: 0 14px;
+  padding-block: 0 12px;
 }
 
 .tm-discourse-message {
@@ -320,7 +293,7 @@
   gap: 12px;
   padding: 0;
   border: 0;
-  transition: background-color var(--motion-standard) var(--ease-out);
+  transition: background-color var(--motion-fast) var(--ease-out);
   scroll-margin: 68px;
 }
 
@@ -329,7 +302,7 @@
 }
 
 .tm-discourse-message--highlight {
-  background: var(--accent-soft);
+  background-color: var(--accent-soft);
 }
 
 .tm-discourse-message article {
@@ -345,7 +318,7 @@
   margin: 0;
   color: var(--text-soft);
   font-size: var(--t-body);
-  line-height: 1.62;
+  line-height: var(--lh-prose);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -354,22 +327,21 @@
   color: var(--muted);
 }
 
+/* A deleted message is a muted line, set upright: italic is for quoted prose. */
 .tm-discourse-message__tombstone {
-  margin: 5px 0;
+  margin: 4px 0;
   color: var(--muted);
   font-size: var(--t-help);
-  font-style: italic;
 }
 
 .tm-discourse-message__stale-note {
-  margin: 7px 0 2px;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: var(--r-xs);
+  margin: 8px 0 2px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
   background: var(--waiting-bg);
   color: var(--waiting-ink);
-  font-size: var(--t-meta);
-  line-height: 1.4;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-discourse-message__updated-note {
@@ -381,6 +353,7 @@
 .tm-discourse-reply-reference {
   display: block;
   width: 100%;
+  min-height: var(--h-compact);
   margin: 0 0 8px;
   padding: 4px 0;
   overflow: hidden;
@@ -395,8 +368,8 @@
 .tm-discourse-reply-reference span {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-right: 7px;
+  gap: 6px;
+  margin-right: 8px;
   color: var(--text-soft);
   font-weight: var(--w-medium);
 }
@@ -405,11 +378,12 @@
   flex: 0 0 auto;
 }
 
+/* Context chips take the badge geometry: 20 tall, --r-xs, no border. */
 .tm-discourse-message__context {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 9px;
+  gap: 4px;
+  margin-top: 8px;
 }
 
 .tm-discourse-message__context span {
@@ -417,10 +391,9 @@
   align-items: center;
   gap: 4px;
   max-width: 260px;
-  height: 22px;
-  padding: 0 7px;
+  height: 20px;
+  padding: 0 6px;
   overflow: hidden;
-  border: 0;
   border-radius: var(--r-xs);
   background: var(--field);
   color: var(--muted);
@@ -447,15 +420,15 @@
   opacity: 1;
 }
 
+/* 28px icon buttons: --r-sm around a 16px glyph. */
 .tm-discourse-message footer > button,
 .tm-discourse-message-menu__trigger {
   display: grid;
-  width: 28px;
-  height: var(--h-toolbar);
+  width: var(--h-icon);
+  height: var(--h-icon);
   place-items: center;
-  min-height: var(--h-toolbar);
   padding: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   color: var(--muted);
 }
 
@@ -468,18 +441,16 @@
 
 .tm-discourse-message-action svg,
 .tm-discourse-message-menu__trigger svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
 }
 
 .tm-discourse-message-menu {
   position: relative;
 }
 
-.tm-discourse-message-menu__trigger {
-  letter-spacing: 0;
-}
-
+/* A floating control: the card plane lifted by the --edge ring and the pop
+   shadow; the overlay plane is kept for tooltips and toasts. */
 .tm-discourse-new-responses {
   position: absolute;
   left: 50%;
@@ -487,15 +458,25 @@
   z-index: var(--layer-sticky);
   /* Centred with translate, so the press scale composes with it. */
   translate: -50% 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: var(--h-toolbar);
   padding: 0 12px;
-  border: 0;
   border-radius: var(--r-pill);
-  background: var(--overlay);
+  background-color: var(--card);
   color: var(--accent-ink);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
-  font-size: var(--t-meta);
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
+}
+
+.tm-discourse-new-responses:hover {
+  background-color: var(--card-hover);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-discourse-new-responses:focus {
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop), var(--focus-halo);
 }
 
 .tm-discourse-response__concerns {
@@ -503,7 +484,7 @@
 }
 
 .tm-discourse-response__concerns details {
-  padding: 0 11px;
+  padding: 0 12px;
 }
 
 .tm-discourse-response__concerns details + details {
@@ -512,9 +493,9 @@
 
 .tm-discourse-response__concerns summary {
   display: grid;
-  grid-template-columns: 12px auto minmax(0, 1fr) auto;
+  grid-template-columns: 13px auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-height: 32px;
   list-style: none;
   color: var(--text-soft);
@@ -544,10 +525,10 @@
   display: grid;
   grid-template-columns: minmax(84px, 0.28fr) minmax(0, 1fr);
   gap: 8px;
-  margin: 7px 0 3px;
+  margin: 8px 0 4px;
   color: var(--text-soft);
   font-size: var(--t-meta);
-  line-height: 1.45;
+  line-height: var(--lh-meta);
 }
 
 .tm-discourse-response__concerns p strong {
@@ -558,7 +539,10 @@
 
 /* Comparison explanations are prose, not the legacy review label/value grid. */
 .tm-discourse-team__details > summary {
+  display: flex;
+  align-items: center;
   width: fit-content;
+  min-height: var(--h-compact);
   margin-top: 8px;
   color: var(--muted);
   font-size: var(--t-help);
@@ -604,51 +588,47 @@
   margin: 0 auto;
 }
 
+/* An accent-tinted bar over the composer; Clear is a ghost button in its ink. */
 .tm-discourse-selection-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 7px 10px;
-  border: 0;
+  gap: 12px;
+  padding: 4px 4px 4px 12px;
   border-radius: var(--r-sm) var(--r-sm) 0 0;
   background: var(--accent-soft);
   color: var(--accent-ink);
-  font-size: var(--t-meta);
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
 }
 
 .tm-discourse-selection-bar > div {
   display: flex;
-  gap: 5px;
+  gap: 4px;
 }
 
 .tm-discourse-selection-bar button {
   height: var(--h-toolbar);
-  padding: 0 7px;
-  border: 0;
-  background: var(--accent-soft);
-  border-radius: var(--r-xs);
-  color: var(--accent-ink);
-  font-size: var(--t-meta);
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: inherit;
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
 }
 
-.tm-discourse-composer {
-  padding: 0;
+.tm-discourse-selection-bar button:not(:disabled):hover {
+  background-color: var(--hover);
 }
 
+/* Words start 12px in, on the composer text's line. */
 .tm-discourse-composer-target {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 6px;
-  padding: 7px 10px;
-  border: 0;
+  padding: 6px 8px 6px 12px;
   border-bottom: 1px solid var(--hair);
-  border-radius: 0;
-  background: transparent;
 }
 
 .tm-discourse-composer-target > span {
@@ -669,9 +649,20 @@
   white-space: nowrap;
 }
 
+/* A compact icon button: 24 square, --r-xs, a 13px glyph. */
 .tm-discourse-composer-target button {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--h-compact);
+  height: var(--h-compact);
+  border-radius: var(--r-xs);
   color: var(--muted);
-  font-size: var(--t-heading);
+}
+
+.tm-discourse-composer-target button:not(:disabled):hover {
+  background-color: var(--hover);
+  color: var(--text);
 }
 
 .tm-discourse-agent-config {
@@ -737,13 +728,19 @@
   font-size: var(--t-help);
 }
 
+/* The reasoning switch here is the one segmented control (DESIGN.md 5): a
+   field track with its rim and --r-sm, 28px items at --r-xs, the chosen item
+   on the card plane with the --edge-raised rim. Keyboard focus adds the halo
+   to that rim and never changes the corner. */
 .tm-discourse-agent-config .tm-agent-console__reasoning {
   align-items: stretch;
   gap: 2px;
+  min-height: 0;
   padding: 2px;
   border: 0;
   border-radius: var(--r-sm);
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning::before {
@@ -756,6 +753,12 @@
   place-items: center;
   padding: 0 2px;
   border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted);
+}
+
+.tm-discourse-agent-config .tm-agent-console__reasoning-options button:not(:disabled):not(.is-selected):hover {
+  color: var(--text-soft);
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning-options button > span {
@@ -764,6 +767,17 @@
 
 .tm-discourse-agent-config .tm-agent-console__reasoning-options button.is-selected {
   background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
+  color: var(--text);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button:focus {
+  border-radius: var(--r-xs);
+  box-shadow: var(--focus-halo);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-discourse-agent-config .tm-agent-console__reasoning-options button.is-selected:focus {
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--focus-halo);
 }
 
 .tm-discourse-agent-config .tm-agent-console__reasoning small {
@@ -789,36 +803,28 @@
   max-height: 180px;
   field-sizing: content;
   resize: none;
-  padding: 12px 14px;
+  padding: 12px;
   overflow-y: auto;
-  border: 0;
-  outline: 0;
-  background: transparent;
   color: var(--text);
-  font: var(--t-body)/1.5 var(--font-ui);
+  font: var(--t-body)/var(--lh-body) var(--font-ui);
   scrollbar-gutter: stable;
 }
 
-.tm-discourse .discourse-mention-input__textarea:focus,
-.tm-discourse .discourse-mention-input__textarea:focus-visible {
-  outline: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
+/* The chosen agents and context sit above the text, starting on its line. */
 .discourse-mention-input__tokens {
   display: flex;
   align-items: flex-start;
-  gap: 7px;
-  padding: 1px 2px 5px;
+  gap: 8px;
+  padding: 8px 12px 0;
 }
 
 .discourse-mention-input__tokens > span {
   flex: 0 0 38px;
-  padding-top: 4px;
+  padding-top: 6px;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
 .discourse-mention-input__tokens ul {
@@ -831,43 +837,36 @@
   list-style: none;
 }
 
+/* A chosen @-mention is an accent-tinted chip (DESIGN.md A.6) at the
+   toolbar height, its remove glyph 6px from the label. */
 .discourse-mention-input__tokens button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   max-width: 220px;
   min-height: var(--h-toolbar);
-  padding: 0 7px;
+  padding: 0 8px;
   overflow: hidden;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: var(--sel);
-  color: var(--text-soft);
-  font-size: var(--t-meta);
+  border-radius: var(--r-sm);
+  background-color: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--t-help);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.app-shell[data-input-modality='keyboard'] .discourse-mention-input__tokens button:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.discourse-mention-input__tokens button span {
-  color: var(--muted);
-  font-size: var(--t-body);
-}
-
+/* The mention list takes the ActionMenu geometry: --card with the --edge ring
+   and the pop shadow, --r, 4px in, 28px rows at --r-xs in --text. The pointer
+   row is --hover; the row the arrow keys reached is --sel with the inset halo. */
 .discourse-mention-input__listbox {
   position: absolute;
-  left: -5px;
-  bottom: calc(100% + 7px);
+  left: 0;
+  bottom: calc(100% + 6px);
   z-index: var(--layer-menu);
   width: min(430px, calc(100vw - 100px));
   max-height: 320px;
   overflow-y: auto;
-  padding: 6px;
-  border: 0;
+  padding: 4px;
   border-radius: var(--r);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
@@ -879,43 +878,44 @@
 }
 
 .discourse-mention-input__group-label {
-  padding: 7px 8px 4px;
+  padding: 8px 8px 4px;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
 .discourse-mention-input__option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px 10px;
-  min-height: 42px;
+  gap: 2px 12px;
+  min-height: var(--h-toolbar);
   width: 100%;
   padding: 6px 8px;
-  border: 0;
   border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--text-soft);
+  color: var(--text);
   text-align: left;
 }
 
 .discourse-mention-input__option:hover,
 .discourse-mention-input__option[aria-selected='true'] {
-  background: var(--hover);
+  background-color: var(--hover);
 }
 
-.discourse-mention-input__option[aria-disabled='true'] {
-  color: var(--text-disabled);
-  cursor: default;
+.app-shell[data-input-modality='keyboard'] .discourse-mention-input__option[aria-selected='true'] {
+  background-color: var(--sel);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .discourse-mention-input__option[aria-disabled='true']:hover {
-  background: transparent;
+  background-color: transparent;
 }
 
 .discourse-mention-input__option strong {
   overflow: hidden;
-  font-size: var(--t-meta);
+  font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -925,6 +925,7 @@
   overflow: hidden;
   color: var(--muted);
   font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -936,29 +937,36 @@
   color: var(--waiting-ink);
 }
 
+/* An empty result is one note line, as in a menu. */
 .discourse-mention-input__empty {
-  padding: 22px 10px;
+  padding: 6px 8px;
   color: var(--muted);
   font-size: var(--t-meta);
-  text-align: center;
+  line-height: var(--lh-meta);
 }
 
+/* Pin actions start on the composer text's 12px line. */
 .tm-discourse-pin-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  padding: 0 2px 7px;
+  gap: 4px;
+  padding: 0 6px 8px;
 }
 
 .tm-discourse-pin-actions button {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-height: var(--h-toolbar);
-  padding: 0 5px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
   color: var(--accent-ink);
-  font-size: var(--t-meta);
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
+}
+
+.tm-discourse-pin-actions button:not(:disabled):hover {
+  background-color: var(--hover);
 }
 
 .tm-discourse-mode-menu__trigger { display: inline-flex; align-items: center; gap: 6px; width: auto; min-height: var(--h-toolbar); padding: 0 8px; color: var(--text-soft); font-size: var(--t-help); }
@@ -969,44 +977,24 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   padding: 0 12px 8px;
   color: var(--waiting-ink);
   font-size: var(--t-meta);
-  line-height: 1.4;
-}
-
-.tm-discourse-composer__requirement button {
-  flex: 0 0 auto;
-  min-height: var(--h-toolbar);
-  padding: 0 7px;
-  border-radius: var(--r-xs);
-  background: var(--waiting-bg);
-  color: var(--waiting-ink);
-  font-size: var(--t-meta);
-  font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
 .tm-discourse-composer__buttons {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
 }
 
-.tm-discourse-preview-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 9px;
-  color: var(--muted);
-  font-size: var(--t-meta);
-  font-weight: var(--w-medium);
-}
-
-.tm-discourse-preview-button:hover {
+/* Context is a ghost button (ghost-button); open, it keeps the hover fill. */
+.tm-discourse-preview-button[aria-expanded='true'] {
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -1015,7 +1003,7 @@
   height: 16px;
 }
 
-.tm-discourse-pin-menu .tm-discourse-message-menu__trigger { display: inline-flex; width: auto; align-items: center; gap: 8px; font-size: var(--t-help); min-height: var(--h-toolbar); }
+.tm-discourse-pin-menu .tm-discourse-message-menu__trigger { display: inline-flex; width: auto; align-items: center; gap: 6px; padding: 0 8px; font-size: var(--t-help); }
 
 /* No reserved gutter: the head's hairline runs to the panel's edge. */
 .tm-discourse-inspector {
@@ -1044,14 +1032,14 @@
 .tm-discourse-inspector__head {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--layer-sticky);
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-height: 48px;
-  padding: 6px 10px 6px 16px;
+  padding: 6px 8px 6px 16px;
+  border-bottom: 1px solid var(--hair);
   background: var(--panel);
-  box-shadow: inset 0 -1px 0 var(--hair);
 }
 
 .tm-discourse-inspector__head h2 {
@@ -1069,14 +1057,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
 }
 
+/* A count beside a heading is plain text in --faint. */
 .tm-discourse-inspector__section > h3 span {
-  color: var(--muted);
+  color: var(--faint);
   font-size: var(--t-meta);
   font-variant-numeric: tabular-nums;
 }
@@ -1085,7 +1074,7 @@
   margin: 0;
   color: var(--muted);
   font-size: var(--t-meta);
-  line-height: 1.48;
+  line-height: var(--lh-meta);
 }
 
 .tm-discourse-context-list {
@@ -1137,11 +1126,19 @@
   font-size: var(--t-meta);
 }
 
+/* Unpin is a compact icon button: 24 square, --r-xs, a 13px glyph. */
 .tm-discourse-context-list li > button {
-  min-width: 28px;
-  min-height: 28px;
+  display: grid;
+  place-items: center;
+  width: var(--h-compact);
+  height: var(--h-compact);
+  border-radius: var(--r-xs);
   color: var(--muted);
-  font-size: var(--t-body);
+}
+
+.tm-discourse-context-list li > button:not(:disabled):hover {
+  background-color: var(--hover);
+  color: var(--text);
 }
 
 .tm-discourse-access-policy {
@@ -1167,7 +1164,7 @@
 .tm-discourse-context-popover {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 10px);
+  bottom: calc(100% + 6px);
   z-index: var(--layer-menu);
   width: min(360px, calc(100vw - 32px));
   max-height: min(480px, calc(100vh - 100px));
@@ -1188,13 +1185,13 @@
   gap: 12px;
 }
 .tm-discourse-preview__head h2 { margin: 0; font-size: var(--t-label); }
-.tm-discourse-preview__summary { margin: 4px 0 12px; color: var(--muted); font-size: var(--t-help); line-height: 1.5; }
+.tm-discourse-preview__summary { margin: 4px 0 12px; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
 .tm-discourse-preview__summary:last-child { margin-bottom: 0; }
 .tm-discourse-preview__exclusions { margin-top: 12px; color: var(--muted); font-size: var(--t-meta); }
-.tm-discourse-preview__exclusions ul { margin: 8px 0 0; padding-left: 16px; line-height: 1.5; }
+.tm-discourse-preview__exclusions ul { margin: 8px 0 0; padding-left: 16px; line-height: var(--lh-meta); }
 .tm-discourse-preview__exclusions li + li { margin-top: 4px; }
 .tm-discourse-confirm h2 { margin: 0; font-size: var(--t-heading); }
-.tm-discourse-confirm > p { margin: 4px 0 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
+.tm-discourse-confirm > p { margin: 4px 0 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 
 .tm-discourse-confirm {
   width: min(440px, calc(100vw - 32px));
@@ -1219,8 +1216,7 @@
 }
 
 .tm-discourse--compact .tm-discourse-header {
-  gap: 8px;
-  padding: 9px 12px;
+  padding: 6px 12px;
 }
 
 .tm-discourse--compact .tm-discourse-rail__close {
@@ -1228,14 +1224,15 @@
 }
 
 .tm-discourse--compact .tm-discourse-transcript {
-  padding-left: clamp(14px, 4vw, 28px);
-  padding-right: clamp(14px, 4vw, 28px);
+  padding-left: clamp(16px, 4vw, 24px);
+  padding-right: clamp(16px, 4vw, 24px);
 }
 
+/* Narrow, the composer still ends 16px above the sheet. */
 .tm-discourse--compact .tm-discourse-composer-wrap {
   padding-left: 8px;
   padding-right: 8px;
-  padding-bottom: 9px;
+  padding-bottom: 16px;
 }
 
 @media (max-width: 560px) {
@@ -1262,7 +1259,7 @@
   }
 
   .tm-discourse-preview-button {
-    width: 30px;
+    width: var(--h-toolbar);
     padding: 0;
     justify-content: center;
   }
@@ -1326,9 +1323,10 @@
   }
 }
 
+/* A peer's answer is a card: --r-md, 12px in, the raised rim and card shadow. */
 .tm-discourse-message--peer .tm-discourse-message__content {
-  padding: 12px 14px;
-  border-radius: var(--r);
+  padding: 12px;
+  border-radius: var(--r-md);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
 }
@@ -1337,7 +1335,7 @@
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  margin-top: 14px;
+  margin-top: 16px;
   color: var(--muted);
   font-size: var(--t-help);
 }

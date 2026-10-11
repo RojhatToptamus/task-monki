@@ -171,7 +171,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
     <div ref={sheetRef} id={props.id} className="tm-review-sheet" role="dialog" aria-label="Request changes">
       <div className="tm-review-sheet__head">
         <h2>Request changes</h2>
-        <button type="button" className="tm-iconbtn" aria-label="Close" onClick={() => onSheetOpenChange(false)}><X size={14} aria-hidden="true" /></button>
+        <button type="button" className="tm-iconbtn" aria-label="Close" onClick={() => onSheetOpenChange(false)}><X size={13} aria-hidden="true" /></button>
       </div>
       <div className="tm-review-sheet__body">
         {findings.length ? (

@@ -327,7 +327,7 @@ export function DesignCanvas({
         <div className="tm-design-canvas__tools">
           {setup ? <button
             type="button"
-            className="outline-button"
+            className="outline-button button--sm"
             aria-expanded={setupVisible}
             aria-controls="design-preview-setup"
             onClick={() => setSetupOpen(!setupVisible)}
@@ -335,13 +335,12 @@ export function DesignCanvas({
             {setupVisible ? 'Back to preview' : 'Preview setup'}
           </button> : null}
           {!setupVisible ? <>
-          <div className="tm-design-canvas__devices" role="group" aria-label="Canvas device">
+          <div className="segmented tm-design-canvas__devices" role="group" aria-label="Canvas device">
             {DEVICE_OPTIONS.map((option) => (
-              <button
+              <Tooltip key={option.id} label={option.label}><button
                 type="button"
-                key={option.id}
+                className="segmented__btn"
                 aria-label={option.label}
-                title={option.label}
                 aria-pressed={device === option.id}
                 onClick={() => setDevice(option.id)}
               >
@@ -350,7 +349,7 @@ export function DesignCanvas({
                   : option.id === 'tablet'
                     ? <UiTabletIcon />
                     : <UiPhoneIcon />}
-              </button>
+              </button></Tooltip>
             ))}
           </div>
           <span className="tm-design-canvas__device-size">{selectedDevice.size}</span>
@@ -392,7 +391,7 @@ export function DesignCanvas({
           <div>
             <button
               type="button"
-              className="outline-button"
+              className="outline-button button--sm"
               disabled={operation !== undefined}
               onClick={() => void runOperation(
                 'select',
@@ -404,7 +403,7 @@ export function DesignCanvas({
             </button>
             {project.actions.canRestore ? <button
               type="button"
-              className="primary-button"
+              className="primary-button button--sm"
               aria-label={`Restore version ${selectedRevision.ordinal} as a new version`}
               disabled={operation !== undefined}
               onClick={() => void runOperation(

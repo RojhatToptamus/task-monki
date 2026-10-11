@@ -101,7 +101,7 @@
   font-size: var(--t-title);
   font-weight: var(--w-title);
   letter-spacing: -0.02em;
-  line-height: 1.22;
+  line-height: var(--lh-title);
   color: var(--text);
   overflow-wrap: anywhere;
   text-wrap: balance;
@@ -777,7 +777,7 @@
 .tm-panel {
   min-width: 0;
   border: 0;
-  border-radius: var(--r);
+  border-radius: var(--r-md);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
   padding: 14px;
@@ -1007,6 +1007,11 @@
   border-top: 1px solid var(--hair);
 }
 
+/* The list's own line is the first check's top; a second would stack 2px. */
+.tm-prcheck:first-child {
+  border-top: 0;
+}
+
 .tm-prcheck > summary {
   display: flex;
   align-items: center;
@@ -1062,7 +1067,8 @@
 .tm-prcheck__status > span:last-child {
   min-width: 46px;
   color: var(--muted);
-  font: var(--w-medium) var(--t-meta)/1.4 var(--font-mono);
+  font: var(--t-meta)/var(--lh-meta) var(--font-ui);
+  font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
@@ -1077,14 +1083,14 @@
 
 .tm-prcheck > pre {
   max-height: 190px;
-  margin: 0 0 9px 26px;
+  margin: 0 0 8px 26px;
   overflow: auto;
-  padding: 9px 11px;
+  padding: 8px 12px;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: var(--well);
   color: var(--text-soft);
-  font: var(--w-medium) var(--t-meta)/1.55 var(--font-mono);
+  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
   white-space: pre-wrap;
 }
 
@@ -1289,26 +1295,10 @@
 /* Agent review gate */
 .tm-reviewcard {
   border: 0;
-  border-radius: var(--r);
+  border-radius: var(--r-md);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
   overflow: hidden;
-}
-
-.tm-reviewcard--info {
-  border-color: var(--hair);
-}
-
-.tm-reviewcard--action {
-  border-color: var(--hair);
-}
-
-.tm-reviewcard--success {
-  border-color: var(--hair);
-}
-
-.tm-reviewcard--error {
-  border-color: var(--hair);
 }
 
 .tm-reviewcard__head {
@@ -1424,7 +1414,8 @@
   min-height: 42px;
   margin: 0 -14px;
   padding: 0 14px;
-  border-radius: var(--r-xs);
+  /* Full-bleed in the card: the card's clip rounds it. */
+  border-radius: 0;
   list-style: none;
   color: var(--muted);
   font-size: var(--t-help);
@@ -1610,9 +1601,9 @@
   display: flex;
   gap: 8px;
   margin-top: 10px;
-  padding: 11px 12px;
+  padding: 8px 12px;
   border: 0;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--waiting-bg);
   color: var(--text-soft);
   font-size: var(--t-body);
@@ -1626,7 +1617,7 @@
 .tm-modal__requirements {
   margin: 4px 0 0;
   padding: 2px 14px;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--well);
   list-style: none;
 }
@@ -1784,19 +1775,18 @@
 .tm-board-editor__option {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   min-width: 0;
   min-height: 36px;
-  padding: 7px 9px;
+  padding: 8px;
   border: 0;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
   background: var(--field);
   color: var(--text-soft);
   font-size: var(--t-help);
 }
 
 .tm-board-editor__option:has(input:checked) {
-  border-color: var(--edge);
   color: var(--text);
 }
 
@@ -1858,7 +1848,7 @@
   margin-top: 14px;
   padding: 12px;
   border: 0;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--well);
 }
 
@@ -1898,7 +1888,7 @@
   margin-top: 14px;
   padding: 13px 14px;
   border: 0;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--field);
   color: var(--text-soft);
 }
@@ -1997,7 +1987,6 @@
 .tm-runheader__elapsed {
   flex: 0 0 auto;
   color: var(--muted);
-  font-family: var(--font-mono);
   font-size: var(--t-help);
   font-variant-numeric: tabular-nums;
 }
@@ -2011,7 +2000,6 @@
 .tm-runheader__trailing {
   flex: 0 0 auto;
   color: var(--muted);
-  font-family: var(--font-mono);
   font-size: var(--t-meta);
 }
 
@@ -2283,10 +2271,10 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 28px;
+  width: var(--h-icon);
   height: var(--h-icon);
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
   font-size: var(--t-help);
@@ -2294,7 +2282,7 @@
 }
 
 .tm-filefilter__clear:hover {
-  background-color: var(--hair);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -2314,10 +2302,10 @@
 .tm-diffstat {
   display: inline-flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
   min-width: 58px;
   color: var(--muted);
-  font: var(--w-medium) var(--t-meta)/1 var(--font-mono);
+  font: var(--t-meta)/1 var(--font-ui);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2345,7 +2333,7 @@
   width: 100%;
   min-width: 100%;
   color: var(--text-soft);
-  font: var(--t-help)/1.7 var(--font-mono);
+  font: var(--t-help)/var(--lh-body) var(--font-mono);
 }
 
 .tm-diffline__num {
@@ -2439,8 +2427,8 @@
 }
 
 .tm-debug > .card {
-  padding: 14px;
-  border-radius: var(--r);
+  padding: 12px;
+  border-radius: var(--r-md);
 }
 
 .tm-debug > .card > .card__header {

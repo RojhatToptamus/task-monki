@@ -167,7 +167,8 @@ describe('Activity Timeline timestamp formatting', () => {
     expect(html).toContain('<h3>Task activity</h3>');
     expect(html).toContain('CI / lint-and-test');
     expect(html).toContain('Blocks PR readiness');
-    expect(html).toContain('Full event audit · 2 events');
+    expect(html).toContain('<span>Full event audit</span>');
+    expect(html).toContain('>2 events</span>');
     expect(html).toContain('Task created');
     expect(html).toContain('Checks synced');
   });

@@ -2107,8 +2107,12 @@ async function createReviewScenario(
     definition.slug === 'review-follow-up-active'
   ) {
     const followUp = await createRun(ctx, { ...state, task: await requireTask(ctx, state.task.id) }, 'FOLLOW_UP', 'Apply review feedback.');
+    // The follow-up changes the diff; that, not the turn starting, makes the review stale.
+    const changed = await recordSyntheticGitSnapshot(ctx, state, {
+      dirtyFingerprint: `${state.gitSnapshot?.dirtyFingerprint ?? 'seed'}:follow-up`
+    });
     if (definition.slug === 'review-stale-after-follow-up') {
-      await completeRun(ctx, followUp, 'Seed follow-up completed.', state.gitSnapshot?.id);
+      await completeRun(ctx, followUp, 'Seed follow-up completed.', changed.id);
     }
   }
 

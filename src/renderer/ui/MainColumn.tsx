@@ -220,7 +220,7 @@ export function MainColumn({
         <PageHead title="Inbox" subtitle={inboxSubtitle(tasks)} />
       ) : null}
 
-      {error ? <div className="tm-error">{error}</div> : null}
+      {error ? <div className="tm-error tm-error--page">{error}</div> : null}
 
       {showRepositorySetup ? (
         <FirstLaunchSetup

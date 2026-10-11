@@ -6,9 +6,10 @@
 /* These bodies never scroll; their own panes do, so they reserve no gutter. */
 .tm-detail__body.tm-detail__body--review { display: flex; flex-direction: column; padding: 0; overflow: hidden; scrollbar-gutter: auto; }
 
-/* --review-num is a file's gutter: wide enough for its largest line number and
-   the comment "+" beside it. Threads start at the code column after the marker. */
-.tm-review { --review-index-width: 248px; --review-marker: 14px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+/* --review-num is the review's gutter: wide enough for its largest line number and
+   the comment "+" beside it, the same for every file. Threads start at the code
+   column after the marker. */
+.tm-review { --review-index-width: 248px; --review-marker: 18px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
 
 /* The toolbar: the rail's switch over the rail, then the review's state, what is
    compared, the view, and the review action. */
@@ -45,7 +46,7 @@
 .tm-review__index-feedback { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 3px; color: var(--muted); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-review__index-feedback[data-tone='blocked'] { color: var(--blocked-ink); }
 .tm-review__index-viewed { flex: 0 0 auto; color: var(--faint); }
-.tm-review-stat { display: inline-flex; flex: 0 0 auto; gap: 6px; font-family: var(--font-mono); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+.tm-review-stat { display: inline-flex; flex: 0 0 auto; gap: 6px; font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-review-stat__add { color: var(--verified-ink); }
 .tm-review-stat__del { color: var(--blocked-ink); }
 .tm-review__index-finding { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: baseline; column-gap: 6px; padding: 5px 8px; border-radius: var(--r-xs); color: var(--text-soft); font-size: var(--t-help); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
@@ -77,7 +78,7 @@
 .tm-review-brief__label span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review-brief__text { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
 /* Provider text is quoted: attributed above, with a 2px rule along its left edge. */
-.tm-review-brief__quote { margin: 0; padding-left: 10px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__quote { margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
 .tm-review-brief__clamped--2,
 .tm-review-brief__clamped--3 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; }
 .tm-review-brief__clamped--2 { -webkit-line-clamp: 2; }
@@ -88,11 +89,14 @@
 .tm-review-general { display: flex; flex-direction: column; }
 .tm-review-general .tm-review-thread { margin-left: 0; }
 
-/* A file is a ring with a sticky head at table-row scale; a viewed or generated file starts collapsed. */
-.tm-review-file { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); flex: 0 0 auto; border-radius: var(--r-md); box-shadow: inset 0 0 0 1px var(--edge-raised); overflow: clip; }
-.tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 4px; border-radius: var(--r-md) var(--r-md) 0 0; background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge-raised); font-size: var(--t-help); }
-.tm-review-file--collapsed .tm-review-file__head { position: static; border-radius: var(--r-md); }
-.tm-review-file__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: var(--h-toolbar); padding: 0 6px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); transition: background-color var(--motion-fast) var(--ease-out); }
+/* A file is an edge with a sticky head at table-row scale; a viewed or generated file starts collapsed.
+   It collapses to a 36px row, so its corners are a control's (8px), and so is everything in the diff. */
+/* The edge is a border, not an inset ring: rows paint their tints to the card's
+   sides, and a border stays above them while the clip rounds them at the corners. */
+.tm-review-file { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); flex: 0 0 auto; border: 1px solid var(--edge-raised); border-radius: var(--r-sm); overflow: clip; }
+.tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
+.tm-review-file--collapsed .tm-review-file__head { position: static; border-bottom: 0; }
+.tm-review-file__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: var(--h-compact); padding: 0 6px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review-file__toggle:hover { background-color: var(--hover); }
 .tm-review-file__toggle > svg { flex: 0 0 auto; color: var(--muted); transition: transform var(--motion-fast) var(--ease-out); }
 .tm-review-file__toggle[aria-expanded='true'] > svg { transform: rotate(90deg); }
@@ -104,7 +108,7 @@
 .tm-review-file__spacer { flex: 1; }
 .tm-review-file__count { color: var(--muted); white-space: nowrap; }
 .tm-review-file__count[data-tone='blocked'] { color: var(--blocked-ink); }
-.tm-review-file__viewed { margin: 0 2px 0 4px; }
+.tm-review-file__viewed { display: grid; flex: 0 0 auto; place-items: center; width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-file__menu__trigger.tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); }
 .tm-review-checkpoint { display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; height: 30px; padding: 0 12px 0 28px; border: 0; border-top: 1px solid var(--hair); background: transparent; text-align: left; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review-checkpoint:hover { background-color: var(--hover); }
@@ -124,7 +128,7 @@
 .tm-diffline--annotated.tm-diffline--deletion .tm-diffline__num { color: var(--blocked-ink); }
 .tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
 .tm-review-line-group { position: relative; }
-.tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 /* The "+" shows on the row under the pointer, and fills when the pointer is on the number itself.
    A chosen range is tinted, not repeated. */
 .tm-review-line-group > .tm-diffline:hover .tm-review-line__comment,
@@ -136,7 +140,7 @@
 
 /* A finding opens under the line it is about: a card on the diff, the reasoning,
    and its actions on the title line. */
-.tm-review-thread { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
+.tm-review-thread { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
 .tm-review-thread--focused,
 .tm-review-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring), var(--shadow-card); }
 .tm-review-thread__head { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); }
@@ -144,7 +148,7 @@
 .tm-review-thread__actions { display: inline-flex; align-items: center; gap: 2px; margin: -2px -4px -2px 0; }
 .tm-review__mini { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-thread__dismiss-menu__trigger.tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); }
-.tm-review-thread__include { height: var(--h-compact); padding: 0 8px; font-weight: 400; }
+.tm-review-thread__include { height: var(--h-compact); padding: 0 8px; border-radius: var(--r-xs); font-weight: var(--w-regular); }
 .tm-review-thread__include[aria-pressed='true'] { color: var(--text-soft); }
 .tm-review-thread__include svg { color: var(--verified-ink); }
 .tm-review-thread__location { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); }
@@ -162,7 +166,7 @@
 .tm-review-thread__undo { margin-left: auto; height: var(--h-compact); }
 
 /* The person's own comments read as theirs: the field plane, not a card. */
-.tm-review-comment { display: flex; align-items: flex-start; gap: 8px; padding: 7px 6px 7px 12px; border-radius: var(--r); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); outline: none; }
+.tm-review-comment { display: flex; align-items: flex-start; gap: 8px; padding: 7px 6px 7px 12px; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); outline: none; }
 .tm-review-comment:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
 .tm-review-comment__body { display: grid; flex: 1; gap: 1px; min-width: 0; padding-top: 2px; }
 .tm-review-comment__about { color: var(--muted); font-size: var(--t-help); }
@@ -171,6 +175,7 @@
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
 /* Writing one is the app's composer, at the comment's place in the diff. */
+.tm-review-comment-composer { border-radius: var(--r-sm); }
 .tm-review-comment-composer > .tm-review-comment__about { display: block; padding: 8px 12px 0; }
 .tm-review-comment-composer .tm-composer__input { min-height: 56px; padding-top: 8px; }
 .tm-review-comment-composer > .tm-review-comment__about + label + .tm-composer__input { padding-top: 4px; }
@@ -184,25 +189,25 @@
 .tm-review__request-summary { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; height: var(--h-control); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); white-space: nowrap; font-variant-numeric: tabular-nums; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review__request-summary:hover,
 .tm-review__request-summary[aria-expanded='true'] { background-color: var(--hover); }
-.tm-review__request-summary svg { color: var(--muted); transition: transform var(--motion-fast) var(--ease-out); }
-.tm-review__request-summary[aria-expanded='true'] svg { transform: rotate(180deg); }
+.tm-review__request-summary svg { color: var(--muted); }
 .tm-review__note { display: flex; flex: 1; min-width: 0; }
-.tm-review__note textarea { flex: 1; min-width: 0; min-height: var(--h-control); max-height: 104px; padding: 7px 12px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/1.4 var(--font-ui); resize: none; field-sizing: content; transition: box-shadow var(--motion-fast) var(--ease-out); }
+.tm-review__note textarea { flex: 1; min-width: 0; min-height: var(--h-control); max-height: 104px; padding: 6px 12px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
 .tm-review__note textarea:focus { outline: none; box-shadow: inset 0 0 0 1px var(--field-edge-focus); }
 .tm-review__request-reason { align-self: center; max-width: 280px; color: var(--muted); font-size: var(--t-help); }
 
 /* The request sheet rises over the diff from the summary that opens it, without blocking it. */
-.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-review-sheet-in var(--motion-standard) var(--ease-out); }
+.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-review-sheet-in var(--motion-standard) var(--ease-out); }
 @keyframes tm-review-sheet-in { from { opacity: 0; transform: scale(0.96); } }
 .tm-review-sheet__head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 4px 14px; }
 .tm-review-sheet__head h2 { flex: 1; margin: 0; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); }
-.tm-review-sheet__head .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); }
+.tm-review-sheet__head .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-sheet__body { display: grid; align-content: start; gap: 12px; min-height: 0; padding: 4px 14px 12px; overflow-y: auto; }
 .tm-review-sheet__group { display: grid; gap: 1px; }
 .tm-review-sheet__group h3 { margin: 0 0 2px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-review-sheet__item { display: grid; grid-template-columns: 16px 44px minmax(0, 1fr) auto auto; align-items: center; column-gap: 8px; min-height: 28px; margin: 0 -6px; padding: 0 0 0 6px; border-radius: var(--r-xs); }
-.tm-review-sheet__item:hover { background: var(--hover); }
-.tm-review-sheet__item .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); }
+.tm-review-sheet__item { transition: background-color var(--motion-fast) var(--ease-out); }
+.tm-review-sheet__item:hover { background-color: var(--hover); }
+.tm-review-sheet__item .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-sheet__item--comment { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
 .tm-review-sheet__item--out { grid-template-columns: 44px minmax(0, 1fr) auto auto; }
 .tm-review-sheet__n { color: var(--faint); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
@@ -227,4 +232,4 @@
 .tm-reviewer__revision-action { color: var(--muted); }
 .tm-reviewer__about { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 6px 0 12px; color: var(--muted); font-size: var(--t-help); }
 .tm-reviewer__about span { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
-.tm-reviewer__about .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); margin-left: auto; }
+.tm-reviewer__about .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); margin-left: auto; border-radius: var(--r-xs); }

@@ -36,7 +36,8 @@ export type PrStatusKind =
 export type PrStatusActionPauseReason =
   | 'review-starting'
   | 'review-running'
-  | 'implementation-running';
+  | 'implementation-running'
+  | 'question-running';
 
 export interface PrStatusViewModel {
   kind: PrStatusKind;
@@ -169,6 +170,8 @@ function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): strin
       return 'Delivery actions pause while review runs.';
     case 'implementation-running':
       return 'Delivery actions pause while the agent runs.';
+    case 'question-running':
+      return 'Delivery actions pause while a question is answered.';
     default:
       return undefined;
   }

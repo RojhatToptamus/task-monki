@@ -13,7 +13,7 @@ export function RawProviderMessage({
   const [loading, setLoading] = useState(false);
 
   if (!reference) {
-    return <span className="provenance-badge">Provider response · journaled</span>;
+    return <span className="provenance-badge">Journaled provider response</span>;
   }
 
   const load = async () => {
@@ -39,7 +39,7 @@ export function RawProviderMessage({
       }
     }}>
       <summary>
-        <DisclosureChevron /><span>Raw provider event · #{reference.sequence}</span>
+        <DisclosureChevron /><span>Raw provider event #{reference.sequence}</span>
       </summary>
       {error ? <p className="form-error">{error}</p> : null}
       <pre>{loading ? 'Loading…' : raw ?? 'Open to load the journal entry.'}</pre>

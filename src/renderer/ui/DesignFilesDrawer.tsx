@@ -13,7 +13,8 @@ import { AttachmentChip } from './AttachmentChip';
 import { PaperclipIcon } from './AttachmentComposerShell';
 import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
-import { UiCheckIcon, UiCloseIcon, UiFileIcon } from './UiIcons';
+import { UiCloseIcon, UiFileIcon } from './UiIcons';
+import { Tooltip } from './Tooltip';
 import { useTaskAttachments } from './useTaskAttachments';
 
 export function DesignFilesDrawer({
@@ -142,9 +143,9 @@ export function DesignFilesDrawer({
           <h2 id="design-files-title">Files and references</h2>
           <p>Select references to include in your next message.</p>
         </div>
-        <button type="button" aria-label="Close files and references" onClick={onClose}>
-          <UiCloseIcon size={13} />
-        </button>
+        <Tooltip label="Close files and references"><button type="button" className="tm-iconbtn" aria-label="Close files and references" onClick={onClose}>
+          <UiCloseIcon />
+        </button></Tooltip>
       </header>
 
       <div className="tm-design-files__body">
@@ -348,15 +349,11 @@ function DesignReferenceRow({
     <li className={`tm-design-reference-row ${selected ? 'tm-design-reference-row--selected' : ''}`}>
       <label>
         <input
-          className="tm-visually-hidden"
           type="checkbox"
           checked={selected}
           disabled={busy}
           onChange={(event) => onSelectedChange(event.target.checked)}
         />
-        <span className="tm-design-reference-row__check" aria-hidden="true">
-          {selected ? <UiCheckIcon /> : null}
-        </span>
         <span className="tm-design-reference-row__preview" aria-hidden="true">
           <UiFileIcon kind={attachment.kind} />
         </span>

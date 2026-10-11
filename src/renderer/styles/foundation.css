@@ -12,6 +12,15 @@
   /* Weights — the interface uses two: 500 for titles and emphasis, 400 for everything else. */
   --w-title: 500;
   --w-medium: 500;
+  --w-regular: 400;
+
+  /* Line boxes in whole pixels: a single-line control, a row or code never lands
+     on a fraction. Long reading text alone uses the --lh-prose factor. */
+  --lh-meta: 16px;
+  --lh-ui: 18px;
+  --lh-body: 20px;
+  --lh-title: 28px;
+  --lh-prose: 1.55;
 
   /* The page gutter: every page's title, tabs and content start here. */
   --tm-gutter: 32px;
@@ -25,12 +34,19 @@
   --h-compact: 24px;
   --h-icon: 28px;
 
+  /* Keyboard focus adds a halo to whatever rim a control has; it never replaces
+     it. Inside a scrolling or clipped list the halo is drawn inward. */
+  --focus-halo: 0 0 0 3px var(--focus-ring);
+  --focus-halo-inset: inset 0 0 0 2px var(--focus-ring);
+
   /* Motion (DESIGN.md 9). Durations by job; easing curves are the only three
      the app uses. Entering surfaces ease out; nothing eases in. */
   --motion-fast: 120ms;
   --motion-standard: 180ms;
   --motion-modal: 220ms;
   --motion-slow: 280ms;
+  /* Something moving on screen (a toggle's knob) eases both ways over this. */
+  --motion-move: 200ms;
   --motion-toast: 240ms;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
@@ -89,8 +105,15 @@ body {
   height: 100%;
 }
 
+/* Body text is 13px; a component that sets no size reads at it, portals included. */
 body {
   background: var(--ground);
+  font-size: var(--t-body);
+}
+
+/* Code-like text is always the app's mono, never the browser's generic one. */
+:where(code, kbd, samp, pre) {
+  font-family: var(--font-mono);
 }
 
 #root {
@@ -216,7 +239,10 @@ textarea {
   font: inherit;
 }
 
+/* No browser padding: a fixed-size button centers its glyph exactly, and a
+   button with words sets its own. */
 button {
+  padding: 0;
   border: 0;
   background: none;
   color: inherit;
@@ -261,7 +287,7 @@ summary,
 
 .app-shell :where(button, [role='button'], input, textarea, select):disabled,
 .app-shell :where(button, [role='button'])[aria-disabled='true'] {
-  cursor: not-allowed;
+  cursor: default;
   color: var(--text-disabled);
 }
 
@@ -380,7 +406,7 @@ summary,
   background-color: var(--field-focus);
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+    var(--focus-halo);
 }
 
 .app-shell[data-input-modality='keyboard'] :where(
@@ -391,7 +417,20 @@ summary,
   [role='separator']
 ):focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo);
+}
+
+/* Controls that rest on a rim keep it under the halo. */
+.app-shell[data-input-modality='keyboard'] :where(.outline-button, .tm-slot-more__trigger):focus {
+  box-shadow: inset 0 0 0 1px var(--field-edge), var(--focus-halo);
+}
+
+.app-shell[data-input-modality='keyboard'] .segmented__btn[aria-pressed='true']:focus {
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--focus-halo);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-send-menu__trigger.tm-action-menu__trigger:focus {
+  box-shadow: inset 1px 0 0 var(--primary-hover), var(--focus-halo);
 }
 
 @media (forced-colors: active) {

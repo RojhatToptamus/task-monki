@@ -79,7 +79,7 @@ export function ImportWorkFields({
       <code title={selected.worktreePath}>{selected.worktreePath}</code>
       <div className="import-work__existing-actions">
         <button ref={existingButtonRef} type="submit" className="primary-button" disabled={locked}>Open existing task</button>
-        <button type="button" className="ghost-button" disabled={locked}
+        <button type="button" className="outline-button" disabled={locked}
           onClick={() => { onQuery(''); onSelect(''); }}>Pick another checkout</button>
       </div>
     </div>;

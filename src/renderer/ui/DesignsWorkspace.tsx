@@ -805,23 +805,22 @@ function DesignHeader({
         </div>
       </div>
       <div className="tm-designs-header__actions">
-        <div className="tm-design-layout" role="group" aria-label="Design layout">
+        <div className="segmented tm-design-layout" role="group" aria-label="Design layout">
           {availableLayouts.map((option) => (
-            <button
+            <Tooltip key={option} label={layoutLabel(option)}><button
               type="button"
-              key={option}
+              className="segmented__btn"
               aria-pressed={layout === option}
               aria-label={layoutLabel(option)}
-              title={layoutLabel(option)}
               onClick={() => onLayoutChange(option)}
             >
               <UiLayoutIcon layout={option} />
-            </button>
+            </button></Tooltip>
           ))}
         </div>
         <button
           type="button"
-          className="tm-designs-header__files"
+          className="outline-button button--sm tm-designs-header__files"
           aria-expanded={filesOpen}
           aria-controls="design-files-drawer"
           onClick={onToggleFiles}

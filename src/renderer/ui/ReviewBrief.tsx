@@ -32,7 +32,7 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
         aria-label={folded ? 'Show the brief' : 'Fold the brief'}
         onClick={() => onFoldedChange(!folded)}
       >
-        <ChevronRight size={12} aria-hidden="true" />
+        <ChevronRight size={13} aria-hidden="true" />
         {folded ? <span className="tm-review-brief__line">{asked ?? report?.text ?? reviewer?.summary}</span> : null}
       </button>
       {folded ? null : (

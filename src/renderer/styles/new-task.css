@@ -29,12 +29,13 @@
   pointer-events: none;
 }
 
+/* The panel head (DESIGN.md 4.1): 48 tall. */
 .newtask-modal__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  height: 52px;
+  gap: 12px;
+  height: 48px;
   flex: 0 0 auto;
   padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--hair);
@@ -82,18 +83,20 @@
   min-width: 0;
 }
 
+/* A single-line field (DESIGN.md 5): 32 tall, 12px inset, the value in body
+   type. Focus is the shared text-entry rule in foundation.css. */
 .tm-repository-select__trigger {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  box-shadow: inset 0 0 0 1px var(--field-edge);
+  grid-template-columns: minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   min-height: var(--h-control);
-  padding: 0 10px;
+  padding: 0 12px;
   border: 0;
   border-radius: var(--r-sm);
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
   transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
@@ -101,26 +104,11 @@
 
 .tm-repository-select__trigger:not(:disabled):hover,
 .tm-repository-select__trigger[aria-expanded='true'] {
-  background: var(--field-hover);
-}
-
-.tm-repository-select__trigger:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-repository-select__trigger:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+  background-color: var(--field-hover);
 }
 
 .tm-repository-select__trigger:disabled {
-  cursor: default;
-  background: var(--field-disabled);
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
@@ -139,6 +127,8 @@
   flex: 0 1 auto;
   min-width: 0;
   font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-body);
 }
 
 .tm-repository-select__trigger .tm-repository-picker__path {
@@ -152,13 +142,14 @@
   transition: transform var(--motion-fast) var(--ease-out);
 }
 
+/* The ActionMenu geometry (DESIGN.md 5): 4px pad, rows with 6px corners. */
 .tm-repository-select__popover {
   position: absolute;
   inset: calc(100% + 6px) 0 auto;
   z-index: var(--layer-menu);
   display: grid;
   gap: 4px;
-  padding: 5px;
+  padding: 4px;
   border: 0;
   border-radius: var(--r);
   background: var(--card);
@@ -168,52 +159,55 @@
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
+/* 4px inside the popover's 10px corner, so the field steps in to 6px. */
 .tm-repository-select__popover .tm-repository-picker__search {
   height: var(--h-control);
-  border-color: transparent;
   border-radius: var(--r-xs);
 }
 
 .tm-repository-select__list {
   display: grid;
-  gap: 1px;
   max-height: min(240px, calc(100vh - 260px));
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
 
+/* A menu row: the name in body type over its path, so it takes two lines. */
 .tm-repository-select__option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  min-height: 44px;
+  min-height: var(--h-toolbar);
   padding: 6px 8px;
   border: 0;
   border-radius: var(--r-xs);
   background: transparent;
-  color: var(--text-soft);
+  color: var(--text);
   text-align: left;
 }
 
+.tm-repository-select__option strong {
+  font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-body);
+}
+
 .tm-repository-select__option:hover {
-  background: var(--hover);
-  color: var(--text);
+  background-color: var(--hover);
 }
 
 .tm-repository-select__option--selected {
-  background: var(--sel);
-  color: var(--text);
+  background-color: var(--sel);
 }
 
+/* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
+   inward, so the scrolling list never cuts it. */
 .app-shell[data-input-modality='keyboard'] .tm-repository-select__option:focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-repository-select__option:disabled {
-  cursor: default;
+  background-color: var(--sel);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .tm-repository-select__check {
@@ -233,7 +227,7 @@
 
 .tm-repository-picker__search {
   width: 100%;
-  height: 36px;
+  height: var(--h-control);
 }
 
 .tm-repository-picker__list {
@@ -246,13 +240,14 @@
   background: var(--field);
 }
 
+/* A two-line row (DESIGN.md 4.1): 48 tall, the mark 12px from its words. */
 .tm-repository-picker__option {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 50px;
-  padding: 7px 10px;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
   color: var(--text-soft);
 }
 
@@ -261,16 +256,16 @@
 }
 
 .tm-repository-picker__option:hover {
-  background: var(--hover);
+  background-color: var(--hover);
 }
 
+/* The list scrolls, so the focused row's halo is drawn inside it. */
 .app-shell[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .tm-repository-picker__option:has(input:disabled) {
-  cursor: default;
   color: var(--text-disabled);
 }
 
@@ -292,7 +287,7 @@
 .tm-repository-picker__path {
   overflow: hidden;
   color: var(--muted);
-  font: var(--t-meta)/1.35 var(--font-mono);
+  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -343,7 +338,7 @@
 .field small {
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.4;
+  line-height: var(--lh-ui);
 }
 
 .field__header {
@@ -356,7 +351,7 @@
 .field__refine {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   border: 0;
   background: transparent;
   color: var(--accent-ink);
@@ -368,10 +363,6 @@
 .field__refine:not(:disabled):hover {
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-.field__refine:disabled {
-  cursor: default;
 }
 
 .field__header-actions {
@@ -452,7 +443,7 @@
 
 .app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo);
 }
 
 .task-attachments {
@@ -483,6 +474,7 @@
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
+/* 6px inside the chip's 8px corner: the nested radius floors at 4px. */
 .task-attachment__preview {
   display: inline-flex;
   align-items: center;
@@ -492,7 +484,7 @@
   flex: 0 0 auto;
   overflow: hidden;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-2xs);
   background: var(--card);
   color: var(--muted);
 }
@@ -527,7 +519,7 @@
   overflow: hidden;
   color: var(--muted);
   font-size: var(--t-meta);
-  line-height: 1.25;
+  line-height: var(--lh-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -536,16 +528,17 @@
   color: var(--blocked-ink);
 }
 
+/* An icon button: 28 square with 8px corners, as `tm-iconbtn`. */
 .task-attachment__remove {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 28px;
+  width: var(--h-icon);
   height: var(--h-icon);
   padding: 0;
   border: 0;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -556,10 +549,10 @@
 }
 
 .task-attachment__remove:disabled {
-  cursor: default;
   color: var(--text-disabled);
 }
 
+/* 8px inside the composer's 12px corner, so its own corner is 4px. */
 .task-attachment-drop {
   position: absolute;
   inset: 8px;
@@ -569,7 +562,7 @@
   justify-content: center;
   gap: 8px;
   border: 1px dashed var(--edge);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-2xs);
   background: var(--surface);
   color: var(--text-soft);
   font-size: var(--t-help);
@@ -580,24 +573,25 @@
 .task-attachment-message {
   display: flex;
   align-items: flex-start;
-  gap: 7px;
+  gap: 6px;
   margin: 0;
   color: var(--muted);
   font-size: var(--t-meta);
-  line-height: 1.4;
+  line-height: var(--lh-meta);
 }
 
 .task-attachment-message--error {
   color: var(--blocked-ink);
 }
 
-/* The refined text shown as a proposal with Accept / Revert. */
+/* The refined text shown as a proposal with Accept / Revert: a recessed group
+   on the panel plane. It is prose, so not a code well and not mono. */
 .field__proposal {
-  margin-top: 10px;
+  margin-top: 12px;
   border: 0;
-  border-radius: var(--r);
-  background: var(--well);
-  padding: 12px 13px;
+  border-radius: var(--r-md);
+  background: var(--panel);
+  padding: 12px;
 }
 
 .field__proposal-head {
@@ -615,13 +609,14 @@
 }
 
 .field__proposal-body {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font: var(--t-help)/1.5 var(--font-mono);
+  font: var(--t-body)/var(--lh-prose) var(--font-ui);
   color: var(--text-soft);
+  text-wrap: pretty;
 }
 
 .field__proposal-actions {
@@ -641,7 +636,7 @@
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   padding: 0 12px;
-  font: 400 var(--t-body)/1.4 var(--font-ui);
+  font: var(--w-regular) var(--t-body)/var(--lh-body) var(--font-ui);
   outline: none;
   transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
@@ -669,15 +664,15 @@
   padding-left: 36px;
 }
 
-.field > input:not(:disabled):hover,
-.field > select:not(:disabled):hover {
+/* A focused field keeps its focus fill under the pointer. */
+.field > input:not(:disabled):not(:focus):hover,
+.field > select:not(:disabled):not(:focus):hover {
   background-color: var(--field-hover);
 }
 
 .field > input:disabled,
 .field textarea:disabled,
 .field select:disabled {
-  cursor: not-allowed;
   background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
@@ -686,30 +681,13 @@
   height: var(--h-control);
 }
 
+/* Focus is the shared text-entry rule in foundation.css. */
 .field textarea {
   min-height: clamp(180px, 26vh, 300px);
-  padding: 11px 13px;
-  line-height: 1.55;
+  padding: 12px;
+  line-height: var(--lh-prose);
   overflow: auto;
   resize: vertical;
-}
-
-.field:not(.field--prompt) > input:focus,
-.field:not(.field--prompt) textarea:focus,
-.field:not(.field--prompt) select:focus {
-  background-color: var(--field-focus);
-  outline: 0;
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) > input:focus,
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) textarea:focus,
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) select:focus {
-  background-color: var(--field-focus);
-  outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
 }
 
 .network-toggle__switch {
@@ -723,6 +701,8 @@
   background: transparent;
 }
 
+/* The knob is something moving on screen (DESIGN.md 9): 200ms on the
+   in-out curve, and the track's fill changes with it. */
 .network-toggle__switch::before {
   position: absolute;
   inset: 5px 4px;
@@ -730,12 +710,12 @@
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--control-edge);
   content: '';
-  transition: background-color var(--motion-standard) var(--ease-out);
+  transition: background-color var(--motion-move) var(--ease-in-out);
 }
 
+/* Drawn after the track, so it sits above it without a z-index. */
 .network-toggle__switch span {
   position: absolute;
-  z-index: 1;
   top: 7px;
   left: 6px;
   width: 14px;
@@ -743,7 +723,7 @@
   border-radius: var(--r-pill);
   background: var(--overlay);
   box-shadow: var(--shadow-card);
-  transition: transform var(--motion-standard) var(--ease-out), background-color var(--motion-standard) var(--ease-out);
+  transition: transform var(--motion-move) var(--ease-in-out), background-color var(--motion-move) var(--ease-in-out);
 }
 
 .network-toggle__switch span::after {
@@ -767,10 +747,6 @@
 .network-toggle__switch:disabled::before {
   background: var(--field-disabled);
   box-shadow: inset 0 0 0 1px var(--control-edge);
-}
-
-.network-toggle__switch:disabled {
-  cursor: default;
 }
 
 .network-toggle__switch:disabled span {
@@ -803,18 +779,20 @@
   font-size: var(--t-help);
 }
 
+/* A key (DESIGN.md A.4): 4px corners, the field fill, the label ink. */
 .newtask-modal__hint kbd {
-  padding: 1px 6px;
-  border-radius: var(--r-xs);
+  padding: 2px 6px;
+  border-radius: var(--r-2xs);
   background: var(--field);
-  color: var(--muted);
+  color: var(--faint);
   font: inherit;
+  line-height: var(--lh-meta);
 }
 
 /* Import uses the same field, selection and focus tokens as the task form. */
 .import-work__picker {
   overflow: hidden;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--field);
 }
 
@@ -824,7 +802,7 @@
   gap: 8px;
   height: var(--h-control);
   padding: 0 8px 0 12px;
-  border-radius: var(--r) var(--r) 0 0;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
   color: var(--muted);
 }
 
@@ -852,7 +830,7 @@
 }
 
 .app-shell[data-input-modality='keyboard'] .import-work__picker:focus-within {
-  outline: 3px solid var(--focus-ring);
+  box-shadow: var(--focus-halo);
 }
 
 .import-work__list {
@@ -862,12 +840,13 @@
   border-top: 1px solid var(--hair);
 }
 
+/* A content-list row (DESIGN.md 4.1): 36 tall, led by the shared radio mark. */
 .import-work__checkout {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px 10px;
-  min-height: 38px;
+  min-height: 36px;
   width: 100%;
   padding: 8px 12px;
   border: 0;
@@ -878,26 +857,42 @@
   text-align: left;
 }
 
-.import-work__checkout:not(:disabled):hover { background: var(--field-hover); }
-.import-work__checkout[aria-selected='true'] { background: var(--sel); color: var(--text); }
-.import-work__checkout:disabled { background: var(--field-disabled); color: var(--text-disabled); }
-/* The list scrolls, so the active option's ring is drawn inside the row. */
+.import-work__checkout:not(:disabled):hover { background-color: var(--field-hover); }
+.import-work__checkout[aria-selected='true'] { background-color: var(--sel); color: var(--text); }
+.import-work__checkout:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
+/* The list scrolls, so the active option's halo is drawn inside the row. */
 .app-shell[data-input-modality='keyboard'] .import-work__checkout:focus {
   outline: 0;
-  box-shadow: inset 0 0 0 2px var(--focus-ring);
+  box-shadow: var(--focus-halo-inset);
 }
 
+/* The shared radio mark (base-components.css, .interaction-choice__mark): a
+   16px field circle on the control edge, accent with a 6px dot when chosen. */
 .import-work__radio {
-  width: 14px;
-  height: 14px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
   border-radius: var(--r-pill);
+  background: var(--field);
   box-shadow: inset 0 0 0 1px var(--control-edge);
 }
 
 .import-work__checkout[aria-selected='true'] .import-work__radio {
-  border: 4px solid var(--accent);
-  background: var(--surface);
+  background: var(--accent);
   box-shadow: none;
+}
+
+.import-work__checkout[aria-selected='true'] .import-work__radio::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--on-primary);
+}
+
+.import-work__checkout:disabled .import-work__radio {
+  background: var(--field-disabled);
 }
 
 .import-work__identity { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -909,24 +904,15 @@
 .import-work__empty { margin: 0; padding: 12px; font-size: var(--t-help); color: var(--muted); }
 .import-work__comparison { display: flex; }
 .import-work__comparison .segmented__btn { flex: 1; }
-.newtask-modal .ghost-button {
-  height: var(--h-control);
-  padding: 0 10px;
-  border-radius: var(--r-sm);
-  color: var(--text-soft);
-  font-size: var(--t-help);
-  white-space: nowrap;
-}
-.newtask-modal .ghost-button:not(:disabled):hover { background: var(--hover); color: var(--text); }
 .import-work__commit { font-family: var(--font-mono); }
 .import-work__preview { border-radius: var(--r-sm); background: var(--well); font-size: var(--t-help); }
 .import-work__preview-summary { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; color: var(--text-soft); }
 .import-work__preview-summary > svg { flex: 0 0 auto; margin-top: 2px; color: var(--muted); }
 .import-work__preview-summary > div { flex: 1; min-width: 0; }
-.import-work__preview-summary p { margin: 0 0 3px; overflow-wrap: anywhere; }
+.import-work__preview-summary p { margin: 0 0 2px; overflow-wrap: anywhere; }
 .import-work__preview-summary code { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-meta); }
 .import-work__preview-summary [role='alert'] { color: var(--blocked-ink); }
-.import-work__preview-summary button { flex: 0 0 auto; height: var(--h-compact); padding: 0 8px; font-size: var(--t-help); }
+.import-work__preview-summary button { flex: 0 0 auto; }
 .import-work__changes { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; padding: 10px 12px; border-top: 1px solid var(--hair); }
 .import-work__change { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 10px; }
 .import-work__change > * { overflow-wrap: anywhere; }
@@ -935,13 +921,14 @@
 .import-work__diffstat span:first-child { color: var(--verified-ink); }
 .import-work__diffstat span:last-child { color: var(--blocked-ink); }
 .import-work__changes p { margin: 0; color: var(--muted); }
-.import-work__existing { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--r); background: var(--well); }
+/* Not code, so not a well: a recessed group on the panel plane. */
+.import-work__existing { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--r-md); background: var(--panel); }
 .import-work__existing-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing strong { font-size: var(--t-heading); }
 .import-work__existing code { overflow-wrap: anywhere; font-size: var(--t-meta); color: var(--muted); }
 .import-work__meta { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-.import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
+.import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 
 @container (max-width: 420px) {
   .import-work__identity { flex-direction: column; gap: 2px; align-items: stretch; }
@@ -983,7 +970,7 @@
   padding: 0;
   border: 0;
   background: none;
-  line-height: 1.5;
+  line-height: var(--lh-ui);
   text-align: start;
 }
 
