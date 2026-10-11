@@ -28,6 +28,10 @@ extraResources:
     to: legal/third-party/OpenAI-Codex-Apache-2.0.txt
   - from: THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt
     to: legal/third-party/Claude-Design-System-MIT.txt
+  - from: THIRD_PARTY_LICENSES/Instrument-Sans-OFL-1.1.txt
+    to: legal/third-party/Instrument-Sans-OFL-1.1.txt
+  - from: THIRD_PARTY_LICENSES/Geist-Mono-OFL-1.1.txt
+    to: legal/third-party/Geist-Mono-OFL-1.1.txt
   - from: node_modules/electron/dist/LICENSE
     to: legal/electron/LICENSE
   - from: node_modules/electron/dist/LICENSES.chromium.html

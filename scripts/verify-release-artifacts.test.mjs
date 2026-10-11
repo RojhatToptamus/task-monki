@@ -15,6 +15,8 @@ const requiredLegalFiles = [
   'legal/THIRD_PARTY_NOTICES.md',
   'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
   'legal/third-party/Claude-Design-System-MIT.txt',
+  'legal/third-party/Instrument-Sans-OFL-1.1.txt',
+  'legal/third-party/Geist-Mono-OFL-1.1.txt',
   'legal/electron/LICENSE',
   'legal/electron/LICENSES.chromium.html'
 ];

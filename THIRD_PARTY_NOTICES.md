@@ -29,6 +29,23 @@ Claude Design System prompt and skills
 
 Copyright 2026 Trystan Sarrade
 
+## Instrument Sans and Geist Mono
+
+Task Monki's interface is set in Instrument Sans and its code in Geist Mono.
+Both fonts are bundled with the app and licensed under the SIL Open Font
+License 1.1. The full licenses are provided at
+`THIRD_PARTY_LICENSES/Instrument-Sans-OFL-1.1.txt` and
+`THIRD_PARTY_LICENSES/Geist-Mono-OFL-1.1.txt` in the source repository and at
+`legal/third-party/` in desktop packages.
+
+Instrument Sans
+
+Copyright 2022 The Instrument Sans Project Authors
+
+Geist Mono
+
+Copyright 2024 The Geist Project Authors
+
 ## Electron and Chromium
 
 Task Monki desktop builds include Electron and Chromium components. Packaged

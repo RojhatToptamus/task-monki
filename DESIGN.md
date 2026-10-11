@@ -420,12 +420,16 @@ better-aimed steps.
 ### 3.1 Families
 
 Two families, both named in the token layer as `--font-ui` and `--font-mono`:
-the platform's own faces (SF Pro and SF Mono on macOS), which need no download
-and render best on the platform. A component references those tokens and never
-a family name; a webfont is adopted only by bundling it with the app. Weights: **400 and
-500** only (`--w-medium`; the page title takes `--w-title`, also 500). Semibold
-reads heavy in the system face, so the hierarchy comes from size and ink, not
-weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
+**Instrument Sans** for the interface and **Geist Mono** for machine values,
+each one variable file bundled with the app (`@fontsource-variable`, Latin and
+Latin Extended; Geist Mono also Cyrillic and box drawing) and never fetched.
+The platform faces follow in each stack as the fallback. Instrument Sans keeps
+SF Pro's density (slightly narrower at 13px) with tabular figures behind
+`tnum`; Geist Mono keeps SF Mono's x-height, slashes its zero and tells I, l
+and 1 apart, and every Mac now renders code in the same face. A component
+references the tokens and never a family name. Weights: **400 and 500** only
+(`--w-medium`; the page title takes `--w-title`, also 500). The hierarchy comes
+from size and ink, not weight. No 300, no 700, no italic outside quoted prose. `font-feature-settings:
 "tnum"` on every number that sits in a column or updates in place, so digits
 don't jitter. Nothing depends on a webfont having loaded to be legible.
 
