@@ -183,6 +183,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
+import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
 import {
   buildContinuationPrompt,
@@ -223,7 +224,7 @@ import { AgentReviewCoordinator } from '../review/AgentReviewCoordinator';
 import { SideQuestionCoordinator } from '../sideQuestion/SideQuestionCoordinator';
 import { ReadOnlySnapshotService } from '../git/ReadOnlySnapshotService';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
-import { assertReviewRequestRecord, parseReviewResponse, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
+import { assertReviewRequestRecord, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -321,6 +322,7 @@ export class TaskManagerService {
   private readonly previewAgent: PreviewAgentCoordinator;
   private readonly reviews: AgentReviewCoordinator;
   private readonly snapshots: ReadOnlySnapshotService;
+  private readonly reviewSnapshots: ReviewSnapshotStore;
   private readonly sideQuestions: SideQuestionCoordinator;
   private readonly designDrafts?: DesignDraftStore;
   private readonly github: GitHubService;
@@ -354,6 +356,8 @@ export class TaskManagerService {
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
+      /** Where the code each review read is kept; under the profile in the app. */
+      reviewSnapshotRoot?: string;
       gitPath?: string;
       ghPath?: string;
       codexPath?: string;
@@ -562,6 +566,9 @@ export class TaskManagerService {
     this.snapshots = new ReadOnlySnapshotService({
       root: path.join(this.worktrees.getRootDir(), 'snapshots', store.getStoreIdentity().slice(0, 16))
     });
+    this.reviewSnapshots = new ReviewSnapshotStore(
+      options.reviewSnapshotRoot ?? path.join(this.worktrees.getRootDir(), 'review-snapshots', store.getStoreIdentity().slice(0, 16))
+    );
     this.sideQuestions = new SideQuestionCoordinator({
       store,
       agents: {
@@ -3655,10 +3662,12 @@ export class TaskManagerService {
                   configuredReviewSettings
                 ]
               });
+        // The exact code the review reads is kept, so later rounds can show what changed since it.
+        const reviewedTree = await this.captureReviewedTree(worktree.worktreePath, gitSnapshot);
         await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
         const previousReview = task.projection.agentReview;
         const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
-        return this.agents.startReview({
+        const review = await this.agents.startReview({
           task,
           iteration,
           worktree,
@@ -3681,7 +3690,55 @@ export class TaskManagerService {
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id
         });
+        if (reviewedTree) await this.recordReviewedTree(task, review, worktree, reviewedTree);
+        return review;
       })
+    );
+  }
+
+  /**
+   * The worktree's content as the review will read it. A capture that does not
+   * match the Git snapshot the review starts from is dropped: a review is only
+   * ever linked to code it read.
+   */
+  private async captureReviewedTree(worktreePath: string, gitSnapshot: GitSnapshotRecord): Promise<string | undefined> {
+    try {
+      const tree = await this.reviewSnapshots.capture(worktreePath);
+      return (await inspectGitWorkingTreeFingerprint(worktreePath)) === gitSnapshot.dirtyFingerprint ? tree : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async recordReviewedTree(task: Task, review: RunRecord, worktree: WorktreeRecord, tree: string): Promise<void> {
+    try {
+      await this.reviewSnapshots.pin(worktree.worktreePath, task.id, review.id, tree);
+    } catch {
+      return;
+    }
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'REVIEW_SNAPSHOT_RECORDED',
+        taskId: task.id,
+        iterationId: review.iterationId,
+        runId: review.id,
+        worktreeId: review.worktreeId,
+        source: 'git',
+        payload: { reviewRunId: review.id, tree }
+      })
+    );
+  }
+
+  /** What changed from the code a review of this task read to the worktree now. */
+  async readReviewChanges(input: ReadReviewChangesRequest): Promise<ReviewChangesResult> {
+    const task = await this.requireNormalTask(input.taskId, 'Review changes');
+    const review = typeof input.reviewRunId === 'string' ? await this.store.getRun(input.reviewRunId) : undefined;
+    if (!review || review.taskId !== task.id || review.mode !== 'REVIEW') throw new Error('This review is not part of the task.');
+    const worktree = (await this.store.snapshot()).worktrees.find((candidate) => candidate.id === review.worktreeId);
+    if (!worktree || worktree.status !== 'PRESENT') return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    const gate = task.projection.agentReview;
+    return this.reviewSnapshots.changesSince(
+      worktree.worktreePath, task.id, review.id, gate?.runId === review.id ? gate.reviewedTreeSha : undefined
     );
   }
 
@@ -4639,6 +4696,11 @@ export class TaskManagerService {
         await this.agents.releaseTask(task.id);
         // Startup and shutdown sweeps retry a removal that fails here.
         await this.sideQuestions.removeTask(task.id).catch(() => undefined);
+        // The code its reviews read goes with the task.
+        for (const repositoryId of new Set(snapshot.worktrees.filter((worktree) => worktree.taskId === task.id).map((worktree) => worktree.repositoryId))) {
+          const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
+          if (repository) await this.reviewSnapshots.removeTask(repository.path, task.id).catch(() => undefined);
+        }
 
         let removedWorktree = false;
         if (input.removeWorktree) {

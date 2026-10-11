@@ -695,6 +695,15 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const reviewIsCurrent = reviewAcceptsDecisions(reviewGate);
+  // What changed between rounds: since the current review once it is out of date,
+  // since the previous review once a re-review is current.
+  const reviewRuns = props.runs.filter((candidate) => candidate.mode === 'REVIEW').sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const previousReviewRun = reviewGate.runId ? reviewRuns[reviewRuns.findIndex((candidate) => candidate.id === reviewGate.runId) - 1] : undefined;
+  const reviewChangesSince = reviewGate.status === 'STALE' && reviewGate.runId
+    ? { reviewRunId: reviewGate.runId, label: 'Since the review', refreshKey: gitSnapshot?.id }
+    : reviewIsCurrent && previousReviewRun
+      ? { reviewRunId: previousReviewRun.id, label: 'Since the last review', refreshKey: gitSnapshot?.id }
+      : undefined;
   const reviewPlan = planReviewRequest(reviewFindingViews, props.reviewDraft, reviewGate.runId);
   // A review whose notes are only prose (no structured findings) sends those notes.
   const reviewSendsNotes = reviewIsCurrent && reviewHasActionableFindings && reviewFindingViews.length === 0;
@@ -1811,6 +1820,7 @@ export function TaskDetail(props: TaskDetailProps) {
             key={task.id}
             taskId={task.id}
             onFullScreenChange={setReviewFullScreen}
+            changesSince={reviewChangesSince}
             review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}

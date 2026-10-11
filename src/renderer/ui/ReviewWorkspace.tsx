@@ -42,6 +42,7 @@ import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useDiffArtifact } from './useDiffArtifact';
+import { useReviewChanges } from './useReviewChanges';
 import { useReviewContext } from './useReviewContext';
 
 export type ReviewScope = DiffEvidenceScope | 'since-review';
@@ -58,6 +59,12 @@ export interface ReviewWorkspaceProps {
   findings: ReviewFindingView[];
   currentDiffArtifactId?: string;
   reviewedDiffArtifactId?: string;
+  /**
+   * The review to measure changes from: the current one once it is out of date,
+   * or the previous round's once a re-review is current. Its code was kept, so the
+   * scope shows exactly what changed since, read again when the capture changes.
+   */
+  changesSince?: { reviewRunId: string; label: string; refreshKey?: string };
   /** Set while showing an earlier capture instead of the current checkout. */
   historical?: { capturedAt?: string; headSha?: string; onBack(): void };
   artifacts: ArtifactRecord[];
@@ -167,18 +174,23 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const diff = props.historical ? historical : current;
   const stale = review?.status === 'STALE';
   const canCompareSinceReview = stale && !props.historical && !reviewed.missing && !reviewed.error;
+  // Exactly what changed since the review, from the code it read; without that code, the files whose diff changed.
+  const changes = useReviewChanges(props.taskId, props.historical ? undefined : props.changesSince?.reviewRunId, props.changesSince?.refreshKey);
   const changedSinceReview = useMemo(
     () => (canCompareSinceReview && !reviewed.loading && !current.loading ? filesChangedSinceReview(reviewed.filesByScope.all, current.filesByScope.all) : undefined),
     [canCompareSinceReview, current.filesByScope.all, current.loading, reviewed.filesByScope.all, reviewed.loading]
   );
-  // "Since the review" is offered, and leads, only when something changed since it; never an empty scope.
-  const sinceReviewAvailable = Boolean(changedSinceReview?.size);
+  // The scope is offered only when something changed since the review, and leads while the review is out of date; never an empty scope.
+  const sinceReviewAvailable = changes.files ? changes.files.length > 0 : Boolean(changedSinceReview?.size);
+  const sinceReviewLabel = props.changesSince?.label ?? SCOPE_LABELS['since-review'];
   const [chosenScope, setScope] = useState<ReviewScope>();
-  const scope = chosenScope ?? (sinceReviewAvailable ? 'since-review' : 'all');
+  const scope = chosenScope ?? (stale && sinceReviewAvailable ? 'since-review' : 'all');
   const effectiveScope: ReviewScope = scope === 'since-review' && !sinceReviewAvailable ? 'all' : scope;
+  // The exact changes' removed lines are the reviewed code's, not the base's, so they take no comments.
+  const exactChanges = effectiveScope === 'since-review' && Boolean(changes.files);
   const capturedFiles: DiffFile[] = useMemo(() => (effectiveScope === 'since-review'
-    ? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
-    : diff.filesByScope[effectiveScope]), [changedSinceReview, diff.filesByScope, effectiveScope]);
+    ? changes.files ?? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
+    : diff.filesByScope[effectiveScope]), [changedSinceReview, changes.files, diff.filesByScope, effectiveScope]);
   // The checkout's unchanged lines fill each file's gaps, hidden until revealed; never for an earlier capture.
   const context = useReviewContext({
     worktree: props.historical ? undefined : props.worktree,
@@ -190,7 +202,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
 
   const gutterWidth = useMemo(() => numberColumnWidth(files), [files]);
   // Until the reviewed diff is read, the default scope is unknown, so the tab is loading, not showing one and then the other.
-  const loading = diff.loading || (canCompareSinceReview && !chosenScope && reviewed.loading);
+  const loading = diff.loading || (canCompareSinceReview && !chosenScope && (reviewed.loading || changes.loading));
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
   const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings), [files, visibleFindings]);
@@ -486,7 +498,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     ...(['all', 'committed', 'uncommitted'] as const).map((value) => ({
       id: value, label: SCOPE_LABELS[value], pressed: effectiveScope === value, onSelect: () => setScope(value)
     })),
-    ...(sinceReviewAvailable ? [{ id: 'since-review', label: SCOPE_LABELS['since-review'], pressed: effectiveScope === 'since-review', onSelect: () => setScope('since-review') }] : []),
+    ...(sinceReviewAvailable ? [{ id: 'since-review', label: sinceReviewLabel, pressed: effectiveScope === 'since-review', onSelect: () => setScope('since-review') }] : []),
     ...(props.comparison ? [{
       id: 'comparison', label: 'Change comparison…', meta: props.comparison.label, separated: true,
       disabled: Boolean(props.comparison.disabledReason), disabledReason: props.comparison.disabledReason, onSelect: props.comparison.onChange
@@ -682,7 +694,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               label="Changes to show"
               selection="single"
               side="bottom"
-              trigger={<>{SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} aria-hidden="true" /></>}
+              trigger={<>{effectiveScope === 'since-review' ? sinceReviewLabel : SCOPE_LABELS[effectiveScope]}<ChevronDown size={13} aria-hidden="true" /></>}
               items={scopeItems}
             />
             <ActionMenu
@@ -876,7 +888,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                   onPointerDown={number !== undefined ? (event) => beginSelect(file, block, row.index, event) : undefined}
                                   onPointerEnter={() => extendSelect(file, block, row.index)}
                                 >
-                                  {canComment && number !== undefined ? (
+                                  {canComment && number !== undefined && !(exactChanges && line.kind === 'deletion') ? (
                                     <button
                                       type="button"
                                       className="tm-review-line__comment"

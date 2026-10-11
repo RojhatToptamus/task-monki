@@ -306,6 +306,7 @@ export const DOMAIN_EVENT_TYPES = [
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
   'REVIEW_REQUEST_ANSWERED',
+  'REVIEW_SNAPSHOT_RECORDED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
   'GITHUB_PREFLIGHT_COMPLETED',
@@ -1741,6 +1742,8 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   startReview(input: StartReviewRequest): Promise<RunRecord>;
   /** Dismisses or restores a finding of the current, completed review. */
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
+  /** What changed from the code a review read to the worktree now. */
+  readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
   /** Records a question to the reviewer and starts its read-only answer run. */
   /** Records a side question to the task's implementation agent and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;

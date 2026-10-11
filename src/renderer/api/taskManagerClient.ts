@@ -2,6 +2,8 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  ReadReviewChangesRequest,
+  ReviewChangesResult,
   ReviewFindingDecision,
   AskSideQuestionRequest,
   EndSideThreadRequest,
@@ -491,6 +493,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/review', input),
     decideReviewFinding: (input: DecideReviewFindingRequest) =>
       post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    readReviewChanges: (input: ReadReviewChangesRequest) =>
+      post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
     askSideQuestion: (input: AskSideQuestionRequest) =>
       post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
     stopSideQuestion: (input: StopSideQuestionRequest) =>

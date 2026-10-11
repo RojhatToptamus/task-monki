@@ -20,6 +20,27 @@ function reviewOf(state: TaskSnapshot, taskId: string) {
 }
 
 describe('TaskManagerService review rounds', () => {
+  it('keeps the exact code each review read and shows what changed since it', async () => {
+    const s = await scenarios.create({ name: 'task-monki-review-snapshot' });
+    const task = await s.createTask({ title: 'Review snapshots', prompt: 'Add the feature module.' });
+    const worktree = await prepareTestWorktree(s.service, task.id);
+    const implementation = await s.service.startRun({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'export const value = 1;\n');
+    await s.completeRun(implementation.id, 'Implemented the feature module.');
+    s.agent.nextRuntimeTurnResult = { output: review({ verdict: 'PASSED', summary: 'Fine.', findings: [] }) };
+    const first = await s.service.startReview({ taskId: task.id, runId: implementation.id });
+    const reviewed = await s.waitForSnapshot((state) => reviewOf(state, task.id)?.status === 'PASSED' && Boolean(reviewOf(state, task.id)?.reviewedTreeSha));
+    const tree = reviewOf(reviewed, task.id)!.reviewedTreeSha!;
+
+    expect(await s.service.readReviewChanges({ taskId: task.id, reviewRunId: first.id })).toEqual({ status: 'READY', reviewRunId: first.id, tree, diff: '' });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'export const value = 2;\n');
+    const changes = await s.service.readReviewChanges({ taskId: task.id, reviewRunId: first.id });
+    expect(changes).toMatchObject({ status: 'READY', tree });
+    expect(changes.status === 'READY' ? changes.diff : '').toContain('-export const value = 1;\n+export const value = 2;');
+    await expect(s.service.readReviewChanges({ taskId: task.id, reviewRunId: implementation.id })).rejects.toThrow('This review is not part of the task.');
+  }, 30_000);
+
+
   it('carries a request item by item, records the agent\'s answers, and gives the next review both', async () => {
     const s = await scenarios.create({ name: 'task-monki-review-round' });
     const task = await s.createTask({ title: 'Review rounds', prompt: 'Add the feature module.' });

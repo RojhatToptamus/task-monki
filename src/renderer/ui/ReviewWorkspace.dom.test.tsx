@@ -6,8 +6,8 @@ import { planReviewRequest } from '../model/reviewFollowUp';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
 
-const api = vi.hoisted(() => ({ readArtifact: vi.fn() }));
-vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: { readArtifact: api.readArtifact } }));
+const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn() }));
+vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: { readArtifact: api.readArtifact, readReviewChanges: api.readReviewChanges } }));
 
 function artifact(id = 'diff-1'): ArtifactRecord {
   return { id, taskId: 'task-1', kind: 'diff', path: `/tmp/${id}.md`, byteCount: 256, createdAt: '2026-07-07T10:10:00.000Z', updatedAt: '2026-07-07T10:10:00.000Z' };
@@ -326,6 +326,34 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(await screen.findByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
     expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
     expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('Since the review');
+  });
+
+  it('shows exactly what changed since the review from the code it read, and the previous round once a re-review is current', async () => {
+    api.readArtifact.mockImplementation(async () => `# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/rateLimit.ts', '@@ -1,2 +1,2 @@\n-old\n+newer\n keep')}\n${fileDiff('src/other.ts', '@@ -1 +1 @@\n-a\n+b')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    // Only the line changed since the review: "new", which the review read, became "newer".
+    api.readReviewChanges.mockResolvedValue({ status: 'READY', reviewRunId: 'review-1', tree: 'tree-1', diff: fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-new\n+newer') });
+    const { rerender } = render(<Harness
+      review={{ status: 'STALE', runId: 'review-1' }}
+      changesSince={{ reviewRunId: 'review-1', label: 'Since the review', refreshKey: 'git-2' }}
+    />);
+
+    const file = await screen.findByRole('region', { name: 'src/rateLimit.ts' });
+    expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('Since the review');
+    expect([...file.querySelectorAll('code')].map((code) => code.textContent)).toEqual(expect.arrayContaining(['Removed: new', 'Added: newer']));
+    expect([...file.querySelectorAll('code')].map((code) => code.textContent)).not.toContain('Removed: old');
+    // A removed line here is the reviewed code's, so it takes no comment; the new line does.
+    expect(within(file).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
+    expect(within(file).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
+    expect(api.readReviewChanges).toHaveBeenCalledWith({ taskId: expect.any(String), reviewRunId: 'review-1' });
+
+    // Once a re-review is current, the previous round is offered, not led with.
+    rerender(<Harness
+      review={{ status: 'PASSED', runId: 'review-2' }}
+      changesSince={{ reviewRunId: 'review-1', label: 'Since the last review', refreshKey: 'git-2' }}
+    />);
+    expect(await screen.findByRole('region', { name: 'src/other.ts' })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('All changes');
   });
 
   it('says when the agent is waiting on the person instead of the review’s verdict', async () => {

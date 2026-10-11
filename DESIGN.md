@@ -1160,7 +1160,7 @@ actually running. Durations and curves are tokens.
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
 | Expanding or collapsing a surface (a side panel, New task) | its old box, its children held at their size | `--motion-slow` 280ms | `--ease-drawer` |
-| A Review file shown alone, and back | its place in the list | `--motion-move` 200ms | `--ease-in-out` |
+| A Review file shown full screen, and back | its place in the list | `--motion-move` 200ms | `--ease-in-out` |
 
 Nothing animates because a tab or page was opened: a surface that is already
 there when its tab mounts (a request bar, a disclosure mounted open, the task
@@ -1566,8 +1566,10 @@ control's icon, state or tooltip already carries.
   turn after the review; the agent's request, such as "Codex asked a question",
   with Go to request while it waits on the person; a turn that stopped, such as
   "Recovery required", with Go to agent); then Compare (All changes,
-  Committed, Uncommitted, and Since the review once something changed since the
-  review, which it then leads with; never an empty scope), a View icon (By
+  Committed, Uncommitted, and the round: Since the review once an out-of-date
+  review has changes since it, which it then leads with, or Since the last review
+  once a re-review is current; each is exactly what changed from the code that
+  review read, kept when it started; never an empty scope), a View icon (By
   importance, By path; expand or collapse every file), and the review action.
   A stale review keeps Run review again as the primary there; a finished,
   current one offers it as an icon beside its time.
@@ -1591,9 +1593,10 @@ control's icon, state or tooltip already carries.
   only a `--hair` seam under it while open: the chevron and path as one toggle (⌥: every file),
   the directory muted before the name, a word only for New, Deleted or a rename,
   the open findings in words, the counts, the shared checkbox for viewed (no
-  label), ⋯ (Comment on file, Show whole file, then where it opens), then Show
-  only this file: the file alone at the top of the column, the navigator
-  beside it; J/K, N/P and the navigator move the focus. A viewed or generated
+  label), ⋯ (Comment on file, Show whole file, then where it opens), then Full
+  screen: the file takes the whole page, its head the sheet's 48px first line,
+  while the tab bar, toolbar, navigator, brief and foot step aside; J/K and N/P
+  move it to the next file or finding, and Escape or the same control returns. A viewed or generated
   file collapses, but its open findings stay as one-line rows: Viewed never
   hides a finding.
 - *Rows.* The gutter is the line number (the old side's on a removed line),
@@ -1649,7 +1652,7 @@ control's icon, state or tooltip already carries.
 - *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
   file, D dismiss, A ask, F add or take out a suggestion, C comment on the
   chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being read
-  alone and every file again (Escape returns).
+  full screen and back (Escape returns).
 
 **Side panels.** An assistant panel (Ask on Overview, Agent and Review, the
 Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable

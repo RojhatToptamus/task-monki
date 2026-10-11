@@ -63,6 +63,11 @@ export interface AgentReviewGateProjection {
   reviewedGitSnapshotId?: string;
   reviewedHeadSha?: string;
   reviewedDirtyFingerprint?: string;
+  /**
+   * The exact content the review read, as a Git tree in the profile's review
+   * snapshot store; changes since the review are measured from it.
+   */
+  reviewedTreeSha?: string;
   finalArtifactId?: string;
   summary?: string;
   result?: AgentReviewResult;

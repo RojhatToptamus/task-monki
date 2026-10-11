@@ -73,6 +73,7 @@ async function start(): Promise<void> {
       taskRuntimeAccess: persistence.taskRuntime,
       discourseStore: persistence.discourse,
       discourseWorkspaceRoot,
+      reviewSnapshotRoot: path.join(profileRoot, 'review-snapshots'),
       designSkillRoot: path.join(process.cwd(), 'resources', 'design-skills'),
       ...(deterministicSeedMode
         ? {

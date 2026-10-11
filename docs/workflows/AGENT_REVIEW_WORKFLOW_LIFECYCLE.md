@@ -49,6 +49,17 @@ The important product rule is:
   - `findingDecisions`: the append-only decisions on this review's findings
     (`src/shared/agentReviewFindings.ts`). Absent in stored projections from
     before decisions existed, which means none.
+  - `reviewedTreeSha`: the exact content the review read, as a Git tree kept
+    in the profile's review snapshot store (`ReviewSnapshotStore`), set by
+    `REVIEW_SNAPSHOT_RECORDED` when the review starts. The store is a private
+    bare repository per source repository under the profile that borrows the
+    source repository's objects read-only, so nothing is written to the user's
+    repository; a ref per task and review keeps each tree, and deleting the task
+    lets them go. A capture that does not match the Git snapshot the review
+    starts from is dropped, so a review is only ever linked to code it read.
+    `readReviewChanges` diffs that tree against the worktree now: the Review
+    tab's Since the review (out of date) and Since the last review (a current
+    re-review) show exactly what changed between rounds.
   - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
     the person's request after this review settles (`runId`, items answered,
     items that need the person's decision); cleared when the next turn starts.

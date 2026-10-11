@@ -49,6 +49,17 @@ export interface ReviewResponseAnswer {
 }
 
 export const REVIEW_RESPONSE_BLOCK = 'task-monki-review-response';
+
+/** What changed since a review: an exact diff from the code it read to the worktree now. */
+export interface ReadReviewChangesRequest {
+  taskId: string;
+  reviewRunId: string;
+}
+
+export type ReviewChangesResult =
+  | { status: 'READY'; reviewRunId: string; /** The tree the review read. */ tree: string; diff: string }
+  /** No tree was recorded for the review, the diff is too large to show, or the tree can no longer be read. */
+  | { status: 'UNAVAILABLE'; reason: 'NOT_RECORDED' | 'TOO_LARGE' | 'UNREADABLE' };
 export const REVIEW_REQUEST_ITEM_LIMIT = 100;
 const REVIEW_REQUEST_TEXT_LIMIT = 4_000;
 const REVIEW_RESPONSE_NOTE_LIMIT = 1_000;

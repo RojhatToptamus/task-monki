@@ -1253,7 +1253,7 @@ function projection(value: unknown): void {
     const review = persistedRecord(record.agentReview, 'tasks.projection');
     enumField(review, 'status', REVIEW_GATE_STATUSES, 'tasks.projection');
     optionalStrings(review, 'tasks.projection', [
-      'reviewedHeadSha', 'reviewedDirtyFingerprint', 'summary'
+      'reviewedHeadSha', 'reviewedDirtyFingerprint', 'reviewedTreeSha', 'summary'
     ], new Set(['summary']));
     optionalUuidFields(review, 'tasks.projection', [
       'runId', 'sourceRunId', 'reviewedGitSnapshotId', 'finalArtifactId'

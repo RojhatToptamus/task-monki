@@ -1035,6 +1035,10 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/review/changes') {
+        sendJson(response, requestId, 200, await options.service.readReviewChanges((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/review/decide-finding') {
         sendJson(
           response,

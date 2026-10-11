@@ -9,6 +9,7 @@ export const IPC_INVOKE_CHANNELS = [
   'agent:cancelRun',
   'agent:continueRun',
   'agent:decideReviewFinding',
+  'agent:readReviewChanges',
   'agent:discoverRuntimeModels',
   'agent:editTaskInstruction',
   'agent:endSideThread',

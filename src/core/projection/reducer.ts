@@ -928,6 +928,8 @@ function reduceReviewProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'REVIEW_SNAPSHOT_RECORDED':
+      return { ...base, agentReview: reduceAgentReview(base.agentReview, event, run), updatedAt: event.receivedAt };
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         ...base,
@@ -1131,6 +1133,12 @@ function reduceAgentReview(
         return base;
       }
       return { ...base, findingDecisions: [...decisions, decision] };
+    }
+    // The exact code the review read was kept.
+    case 'REVIEW_SNAPSHOT_RECORDED': {
+      const tree = getString(event.payload, 'tree');
+      if (!tree || !base.runId || base.runId !== event.runId) return base;
+      return { ...base, reviewedTreeSha: tree };
     }
     // The agent's reply to the request after this review settled.
     case 'REVIEW_REQUEST_ANSWERED': {

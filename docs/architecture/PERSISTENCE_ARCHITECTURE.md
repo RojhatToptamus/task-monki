@@ -205,7 +205,10 @@ Schema 30 adds the `SIDE` message role with `threadId`, `snapshotTakenAt`,
 the `SIDE_QUESTION` run mode, the `SIDE` session role, and the
 `WORKTREE_SNAPSHOT` read-root kind. It also carries review rounds: a follow-up
 message's `reviewRequest`, the `REVIEW_REQUEST_ANSWERED` event and the review
-gate's `requestAnswer`, a review result's `resolvedFindings` and findings'
+gate's `requestAnswer`, the `REVIEW_SNAPSHOT_RECORDED` event and the gate's
+`reviewedTreeSha` (the tree lives in `<profile>/review-snapshots`, a private
+bare repository per source repository, never in the user's repository), a
+review result's `resolvedFindings` and findings'
 `previousFindingId`, and the `DEFERRED` dismissal reason. The reviewer
 conversation is retired: nothing writes `REVIEW` messages or `REVIEW_QUESTION`
 runs any more, and stored ones still load. Older stores load unchanged:

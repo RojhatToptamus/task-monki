@@ -68,6 +68,7 @@ import type {
   StartRunRequest,
   StartReviewRequest,
   DecideReviewFindingRequest,
+  ReadReviewChangesRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -809,6 +810,8 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
     service.decideReviewFinding(input));
+  handleTrustedIpc('agent:readReviewChanges', async (_, input: ReadReviewChangesRequest) =>
+    service.readReviewChanges(input));
 
   handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
     service.askSideQuestion(input));
@@ -1186,6 +1189,7 @@ void app.whenReady().then(async () => {
       taskRuntimeAccess: persistence.taskRuntime,
       discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
+      reviewSnapshotRoot: path.join(userDataDir, 'review-snapshots'),
       clientToolMcpExecutablePath: process.execPath,
       clientToolMcpServerPath: resolveClientToolMcpServerPath({
         isPackaged: app.isPackaged,
