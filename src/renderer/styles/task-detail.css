@@ -1805,7 +1805,10 @@
 .tm-prepare-worktree { display: flex; flex-direction: column; gap: 16px; max-height: calc(100vh - 48px); overflow-y: auto; }
 .tm-prepare-worktree__header { display: grid; gap: 4px; }
 .tm-prepare-worktree__header h3 { margin: 0; font-size: var(--t-heading); }
-.tm-prepare-worktree .tm-prepare-worktree__header p { color: var(--muted); }
+/* The task, then its repository marked by an icon, like the task's header. */
+.tm-prepare-worktree .tm-prepare-worktree__context { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-width: 0; color: var(--muted); }
+.tm-prepare-worktree__repo { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.tm-prepare-worktree__repo > svg { flex: 0 0 auto; color: var(--faint); }
 .tm-prepare-worktree p { margin: 0; font-size: var(--t-help); }
 .tm-prepare-worktree__base { margin: 0; }
 .tm-prepare-worktree__commit { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: baseline; padding-top: 8px; }

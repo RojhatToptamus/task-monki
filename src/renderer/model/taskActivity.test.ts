@@ -327,6 +327,24 @@ describe('task activity model', () => {
     expect(view.items[0].evidence).toBeUndefined();
   });
 
+  it('names the uncommitted changes a running review reads with its commit', () => {
+    const snapshot = (id: string, untrackedCount: number) => event('GIT_SNAPSHOT_CAPTURED', {
+      id, headSha: 'f390644aa', dirtyFingerprint: `fp-${id}`, status: untrackedCount ? 'DIRTY' : 'CLEAN',
+      stagedCount: 0, unstagedCount: 0, untrackedCount
+    });
+    const started = (snapshotId: string, runId: string) => event('AGENT_RUN_STARTED',
+      { mode: 'REVIEW', beforeGitSnapshotId: snapshotId, reviewedHeadSha: 'f390644aa' }, { runId });
+    const ledger = buildTaskActivityLedger({
+      task: taskFixture(),
+      events: [snapshot('dirty', 2), started('dirty', 'review-1'), snapshot('clean', 0), started('clean', 'review-2')]
+    });
+
+    expect(ledger.filter((item) => item.title === 'Review started').map((item) => item.evidence?.summary)).toEqual([
+      'Reviewed f390644 and uncommitted changes',
+      'Reviewed f390644'
+    ]);
+  });
+
   it('surfaces stale local review as current Task Monki state', () => {
     const task = taskFixture({
       projection: {

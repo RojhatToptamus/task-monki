@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
-import { conversationPreview, earlierHistory, reviewTurnOutcome, sessionEntries, sessionTurn, stepsSummary, type SessionEntry, type SessionTurn } from './agentSession';
+import { conversationPreview, earlierHistory, reviewTurnOutcome, sessionEntries, sessionTurn, stepsSummary, workedMs, type SessionEntry, type SessionTurn } from './agentSession';
 
 describe('agent session history', () => {
   it('shows normalized agent messages once without exposing generated user-prompt echoes', () => {
@@ -45,6 +45,27 @@ describe('agent session history', () => {
     expect(entries[1]).toMatchObject({ text: 'Vienna has no matching stock yet.' });
     expect(entries[0]).toMatchObject({ interaction: { decision: { answers: { scope: ['Vienna'] } } } });
     expect(sessionEntries(run, [], [], undefined, [], [{ ...question, status: 'RESPONDING' }])).toEqual([]);
+  });
+
+  it('counts only the time a run worked, not the time it waited on the person', () => {
+    const at = (minutes: number) => `2026-07-19T12:${String(minutes).padStart(2, '0')}:00Z`;
+    // 20 minutes in all: a question open 12:02 to 12:10, an approval 12:08 to 12:12 overlapping it, one still open from 12:18.
+    const waits = [
+      { requestedAt: at(2), respondedAt: at(10) },
+      { requestedAt: at(8), resolvedAt: at(12) },
+      { requestedAt: at(18) }
+    ];
+    expect(workedMs(at(0), Date.parse(at(20)), waits)).toBe(8 * 60_000);
+    expect(workedMs(at(0), Date.parse(at(20)))).toBe(20 * 60_000);
+    expect(workedMs('not a time', Date.parse(at(20)))).toBeUndefined();
+
+    const run = makeRunRecord({ id: 'asked', status: 'COMPLETED', startedAt: at(0), endedAt: at(20) });
+    const question = (id: string, requestedAt: string, respondedAt: string, runId = run.id) => ({
+      ...({} as InteractionRequestRecord), id, runId, type: 'USER_INPUT' as const, status: 'RESOLVED' as const, requestedAt, respondedAt
+    });
+    // A question in another run of the task does not shorten this one.
+    expect(sessionTurn(run, [], [], { interactions: [question('q', at(1), at(16)), question('other', at(0), at(20), 'another-run')] }).durationMs)
+      .toBe(5 * 60_000);
   });
 
   it('stops live activity after interruption while retaining the provider record unchanged', () => {

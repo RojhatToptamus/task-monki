@@ -5,7 +5,7 @@ import type {
   AgentItemRecord, AgentPlanRevisionRecord, InteractionRequestRecord, RunRecord, TaskAttachmentRecord, TaskInstruction
 } from '../../shared/contracts';
 import type { AttachmentContent } from '../../shared/attachments';
-import { formatElapsed, isActiveRunStatus, planMarker, sessionTurn, turnOutcomeLabel, type SessionTurn } from '../model/agentSession';
+import { formatElapsed, isActiveRunStatus, planMarker, sessionTurn, turnOutcomeLabel, workedMs, type PersonWait, type SessionTurn } from '../model/agentSession';
 import type { RunFailureBannerViewModel } from '../model/taskView';
 import { ActionMenu } from './ActionMenu';
 import { ActivitySteps } from './ActivitySteps';
@@ -215,12 +215,13 @@ export function WorkingLine({ label, since }: { label: string; since: string }) 
   );
 }
 
-export function Elapsed({ since }: { since: string }) {
-  const start = Date.parse(since);
+/** How long the work has run; time spent waiting on the person (`waits`) does not count. */
+export function Elapsed({ since, waits }: { since: string; waits?: readonly PersonWait[] }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  return Number.isFinite(start) ? <span className="tm-agent-session__elapsed" aria-hidden="true">{formatElapsed(now - start)}</span> : null;
+  const worked = workedMs(since, now, waits);
+  return worked !== undefined ? <span className="tm-agent-session__elapsed" aria-hidden="true">{formatElapsed(worked)}</span> : null;
 }

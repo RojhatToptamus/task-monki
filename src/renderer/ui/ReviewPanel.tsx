@@ -11,10 +11,7 @@ import { formatTaskActivityTimestamp } from './TaskActivityPanel';
 import { RunHeader } from './RunHeader';
 import { StatusGlyph, type StatusGlyphKind } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
-import {
-  describeGitSnapshot,
-  describeReviewedDiff
-} from './gitSnapshotCopy';
+import { reviewedCode, reviewedCodeText, type ReviewedCode } from '../model/reviewedCode';
 import type { Tone } from '../model/viewTypes';
 
 export type ReviewActionPauseReason =
@@ -28,6 +25,7 @@ export function ReviewPanel({
   reviewGate,
   reviewRun,
   gitSnapshot,
+  reviewedSnapshot,
   reviewActivity,
   actionBusy,
   reviewPending,
@@ -44,6 +42,8 @@ export function ReviewPanel({
   reviewGate: AgentReviewGateProjection;
   reviewRun?: RunRecord;
   gitSnapshot?: GitSnapshotRecord;
+  /** The Git snapshot the review read, so the card says whether uncommitted changes came with its commit. */
+  reviewedSnapshot?: GitSnapshotRecord;
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
@@ -63,9 +63,10 @@ export function ReviewPanel({
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
   const ui = reviewGateUi(effectiveStatus);
   const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
-  const currentDiff = describeGitSnapshot(gitSnapshot);
-  const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
-  const reviewedHead = (reviewGate.reviewedHeadSha ?? gitSnapshot?.headSha)?.slice(0, 7);
+  // What the review read, recorded when it started; one not yet run, or just requested, reads the worktree as it is now.
+  const code = reviewPending || effectiveStatus === 'NOT_RUN'
+    ? reviewedCode(undefined, gitSnapshot)
+    : reviewedCode(reviewGate.reviewedHeadSha, reviewedSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
   const body = reviewBody(reviewGate, reviewRun);
   const findings = effectiveReviewFindings(reviewGate.result, reviewGate.findingDecisions ?? []);
@@ -93,7 +94,7 @@ export function ReviewPanel({
             running
             tone="info"
             operationName="Agent review"
-            scope={reviewedDiff}
+            scope={code ? reviewedCodeText(code) : undefined}
             startedAt={reviewRun?.startedAt}
             onStop={() => reviewRun && onStopReview(reviewRun.id)}
             stopDisabled={!canStopReview || actionBusy || !reviewRun}
@@ -143,10 +144,10 @@ export function ReviewPanel({
               <p>{body.text}</p>
             ) : null}
             {effectiveStatus === 'NOT_RUN' ? (
-              reviewedHead ? <p className="tm-reviewcard__meta">Will review <code>{reviewedHead}</code></p> : null
+              code ? <p className="tm-reviewcard__meta">Will review <ReviewedCodeLabel code={code} /></p> : null
             ) : (
               <p className="tm-reviewcard__meta">
-                Reviewed {reviewedHead ? <><code>{reviewedHead}</code>, </> : null}
+                Reviewed {code ? <><ReviewedCodeLabel code={code} />, </> : null}
                 {/* When the review ran; the gate's own time moves when it goes out of date or back. */}
                 {formatReviewTime(reviewRun?.endedAt ?? reviewGate.updatedAt)}
               </p>
@@ -230,6 +231,12 @@ function RawReviewOutput({
  * "1 major, 2 minor · 1 closed": the open findings by severity, then how many
  * were dismissed or withdrawn. Earlier findings carry no tone.
  */
+/** The commit in mono, then the uncommitted changes in words when they came with it. */
+function ReviewedCodeLabel({ code }: { code: ReviewedCode }) {
+  if (!code.head) return <>uncommitted changes</>;
+  return <><code>{code.head}</code>{code.uncommitted ? ' and uncommitted changes' : null}</>;
+}
+
 function SeverityDistribution({ findings, earlier }: { findings: EffectiveReviewFinding[]; earlier: boolean }) {
   const open = findings.filter((finding) => finding.state === 'OPEN');
   const closed = findings.length - open.length;

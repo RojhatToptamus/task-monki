@@ -10,6 +10,7 @@ import type {
   Task,
   WorktreeStatus
 } from '../../shared/contracts';
+import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
 
 export type TaskActivityActor =
   | 'User'
@@ -83,6 +84,8 @@ interface TaskActivityCandidate extends TaskActivityItem {
 }
 
 interface TaskActivityBuildState {
+  /** Whether each Git snapshot seen so far had uncommitted changes, so a review names what it read. */
+  uncommittedBySnapshotId: Map<string, boolean>;
   lastGitSnapshotSignature?: string;
   lastGitStatus?: GitStatus;
   lastBranchPublicationSignature?: string;
@@ -195,7 +198,7 @@ function buildTaskActivityItems(
       .filter((event) => event.type === 'IMPLEMENTATION_OUTCOME_BLOCKED' && event.runId)
       .map((event) => event.runId as string)
   );
-  const state: TaskActivityBuildState = {};
+  const state: TaskActivityBuildState = { uncommittedBySnapshotId: new Map() };
   const items: BuiltTaskActivityItem[] = [];
   let order = 0;
 
@@ -269,7 +272,7 @@ function itemForEvent(
       if (event.runId && terminalRunIds.has(event.runId)) {
         return undefined;
       }
-      return runStartedItem(event, mode, payload, recoveryContinuation);
+      return runStartedItem(event, mode, payload, recoveryContinuation, state);
     case 'AGENT_RUN_COMPLETED':
       return runCompletedItem(event, run?.mode ?? mode, payload, recoveryContinuation);
     case 'AGENT_RUN_FAILED':
@@ -385,7 +388,8 @@ function runStartedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
   payload: Record<string, unknown>,
-  recoveryContinuation: boolean
+  recoveryContinuation: boolean,
+  state: TaskActivityBuildState
 ): TaskActivityCandidate {
   switch (mode) {
     case 'REVIEW':
@@ -394,7 +398,7 @@ function runStartedItem(
         'review',
         'Reviewer',
         'Review started',
-        reviewStartedEvidence(payload),
+        reviewStartedEvidence(payload, state),
         'info'
       );
     case 'FOLLOW_UP':
@@ -565,6 +569,14 @@ function gitSnapshotItem(
   payload: Record<string, unknown>,
   state: TaskActivityBuildState
 ): TaskActivityCandidate | undefined {
+  const snapshotId = stringField(payload, 'id');
+  if (snapshotId) {
+    state.uncommittedBySnapshotId.set(snapshotId, hasUncommittedChanges({
+      stagedCount: numberField(payload, 'stagedCount') ?? 0,
+      unstagedCount: numberField(payload, 'unstagedCount') ?? 0,
+      untrackedCount: numberField(payload, 'untrackedCount') ?? 0
+    }));
+  }
   const signature = gitSnapshotSignature(payload);
   const status = stringField(payload, 'status') as GitStatus | undefined;
   if (signature === state.lastGitSnapshotSignature) {
@@ -1164,10 +1176,13 @@ function gitSnapshotSignature(payload: Record<string, unknown>): string {
   ].join(':');
 }
 
-function reviewStartedEvidence(payload: Record<string, unknown>): TaskActivityEvidence | undefined {
+/** The commit the review reads, and the uncommitted changes when the snapshot it started from had any. */
+function reviewStartedEvidence(payload: Record<string, unknown>, state: TaskActivityBuildState): TaskActivityEvidence | undefined {
   const head = shortSha(stringField(payload, 'reviewedHeadSha'));
+  const snapshotId = stringField(payload, 'beforeGitSnapshotId');
+  const uncommitted = snapshotId ? state.uncommittedBySnapshotId.get(snapshotId) === true : false;
   return head
-    ? fact(`Reviewed ${head}`)
+    ? fact(`Reviewed ${reviewedCodeText({ head, uncommitted })}`)
     : undefined;
 }
 

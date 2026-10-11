@@ -1269,6 +1269,7 @@ export function TaskDetail(props: TaskDetailProps) {
       reviewGate={reviewGate}
       reviewRun={reviewRun}
       gitSnapshot={gitSnapshot}
+      reviewedSnapshot={gitSnapshots.find((candidate) => candidate.id === reviewGate.reviewedGitSnapshotId)}
       reviewActivity={reviewActivity}
       actionBusy={reviewActionBusy}
       reviewPending={reviewPending}

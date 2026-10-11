@@ -343,7 +343,9 @@ a state on its own. When two surfaces disagree, fix the selector, not the copy.
   the lifecycle track, a status word, a run header. Motion is kept for the one
   line of live text on a surface — a conversation's working line, the running
   step when it is the latest thing said, "Reviewing" — which takes a slow text
-  shimmer (`.tm-shimmer`, 2.4s) beside a ticking elapsed time. The shimmer
+  shimmer (`.tm-shimmer`, 2.4s) beside a ticking elapsed time. That time, and
+  a finished turn's "Worked for", counts the work alone: while a question or an
+  approval waits on the person, it does not count. The shimmer
   clears the glyphs with the text fill colour, so a label's own ink or a hover
   never paints over it; reduced motion leaves the words still in that ink.
   Loading copy ("Loading conversation…") is a still, muted line: loading is not

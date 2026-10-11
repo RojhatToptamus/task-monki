@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
-import { describeGitSnapshot } from './gitSnapshotCopy';
+import { reviewedCode, reviewedCodeText } from './reviewedCode';
 
-describe('describeGitSnapshot', () => {
-  it('renders Git status as human copy while preserving exact values', () => {
-    const description = describeGitSnapshot(gitSnapshot({ status: 'COMMITTED_UNPUSHED' }));
-
-    expect(description).toBe('abc12345 · 1 file · committed, not pushed');
-    expect(description).not.toContain('COMMITTED_UNPUSHED');
-    expect(description).not.toContain('committed_unpushed');
+describe('reviewedCode', () => {
+  it('names the commit, and the uncommitted changes when the worktree had any', () => {
+    expect(reviewedCode(undefined, gitSnapshot())).toEqual({ head: 'abc1234', uncommitted: false });
+    expect(reviewedCode('feedfacecafe', gitSnapshot({ untrackedCount: 2 }))).toEqual({ head: 'feedfac', uncommitted: true });
+    expect(reviewedCodeText({ head: 'feedfac', uncommitted: true })).toBe('feedfac and uncommitted changes');
+    expect(reviewedCodeText({ head: 'feedfac', uncommitted: false })).toBe('feedfac');
+    expect(reviewedCodeText({ uncommitted: true })).toBe('Uncommitted changes');
+    expect(reviewedCode(undefined, undefined)).toBeUndefined();
   });
 });
 

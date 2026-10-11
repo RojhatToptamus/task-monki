@@ -58,13 +58,42 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
   const entries = authored?.reviewRequest ? withReviewAnswers(steps, authored.reviewRequest) : steps;
   const state = turnState(run);
   const end = run.endedAt ?? (state === 'active' ? undefined : run.lastEventAt);
-  const durationMs = end ? Date.parse(end) - Date.parse(run.startedAt) : undefined;
   const answer = state === 'completed'
     ? [...entries].reverse().find((entry) => entry.kind === 'message' && entry.author === 'Agent')
     : undefined;
   return { key: run.id, run, opener, entries, state,
-    durationMs: durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined,
+    durationMs: end ? workedMs(run.startedAt, Date.parse(end), options.interactions?.filter((item) => item.runId === run.id)) : undefined,
     answer: answer?.kind === 'message' ? answer.text : undefined };
+}
+
+/** When a run waited on the person: a question or an approval, from its request until it was answered or closed. */
+export type PersonWait = Pick<InteractionRequestRecord, 'requestedAt' | 'respondedAt' | 'resolvedAt'>;
+
+/**
+ * How long a run worked from its start to `end`: its time less every wait on
+ * the person, so a question left open for an hour does not read as an hour of
+ * work. Waits that overlap count once; a wait still open runs to `end`.
+ */
+export function workedMs(startedAt: string, end: number, waits: readonly PersonWait[] = []): number | undefined {
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+  const spans = waits
+    .map((wait) => {
+      const closed = Date.parse(wait.respondedAt ?? wait.resolvedAt ?? '');
+      return [Math.max(start, Date.parse(wait.requestedAt)), Math.min(end, Number.isFinite(closed) ? closed : end)] as const;
+    })
+    .filter(([from, to]) => Number.isFinite(from) && to > from)
+    .sort((left, right) => left[0] - right[0]);
+  let waited = 0;
+  let reached = start;
+  for (const [from, to] of spans) {
+    const counted = Math.max(from, reached);
+    if (to > counted) {
+      waited += to - counted;
+      reached = to;
+    }
+  }
+  return Math.max(0, end - start - waited);
 }
 
 /** The agent's answers to a review request leave its prose and travel with the message as data. */

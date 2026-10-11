@@ -1,3 +1,4 @@
+import { FolderGit2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import {
   BOARD_COLORS,
@@ -429,7 +430,7 @@ export function PrepareWorktreeModal({
       >
         <header className="tm-prepare-worktree__header">
           <h3 id="prepare-worktree-title">Prepare worktree</h3>
-          <p>{taskTitle} · {inspection.repositoryName}</p>
+          <WorktreeDialogContext taskTitle={taskTitle} repositoryName={inspection.repositoryName} />
         </header>
 
         <label className="field tm-prepare-worktree__base">
@@ -481,6 +482,19 @@ export function PrepareWorktreeModal({
   );
 }
 
+/** Which task and repository a worktree dialog acts on: the title, then the repository marked by its icon, as in the task's header. */
+function WorktreeDialogContext({ taskTitle, repositoryName }: { taskTitle: string; repositoryName: string }) {
+  return (
+    <p className="tm-prepare-worktree__context">
+      <span>{taskTitle}</span>
+      <span className="tm-prepare-worktree__repo">
+        <FolderGit2 size={13} aria-hidden="true" />
+        {repositoryName}
+      </span>
+    </p>
+  );
+}
+
 export function RecoverWorktreeModal({
   inspection,
   taskTitle,
@@ -525,8 +539,10 @@ export function RecoverWorktreeModal({
           if (!busy) onConfirm();
         }}
       >
-        <h3 id="recover-worktree-title">{title}</h3>
-        <p>{taskTitle} · {inspection.repositoryName}</p>
+        <header className="tm-prepare-worktree__header">
+          <h3 id="recover-worktree-title">{title}</h3>
+          <WorktreeDialogContext taskTitle={taskTitle} repositoryName={inspection.repositoryName} />
+        </header>
 
         <div className="tm-prepare-worktree__commit">
           <span>Commit</span>

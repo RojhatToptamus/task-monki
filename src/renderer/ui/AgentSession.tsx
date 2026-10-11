@@ -285,7 +285,7 @@ export function AgentSession(props: AgentSessionProps) {
           ? <div className="tm-agent-session__working">
             {attentionPending ? <StatusGlyph kind="waiting" /> : null}
             <span role="status" className={attentionPending ? undefined : 'tm-shimmer'}>{workingLabel}</span>
-            <Elapsed since={displayedRun.startedAt} />
+            <Elapsed since={displayedRun.startedAt} waits={props.interactions.filter((item) => item.runId === displayedRun.id)} />
           </div> : null}
         <div ref={attention} tabIndex={-1} className="tm-agent-session__requests">
           <InteractionPanel interactions={props.interactions} sessions={props.sessions} onRespond={async (interaction, decision) => {
