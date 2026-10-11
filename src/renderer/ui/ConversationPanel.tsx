@@ -2,6 +2,8 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode,
 import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
+import { useSideSheetExpansion } from './TaskSidePanel';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
@@ -28,8 +30,9 @@ export interface ConversationPanelComposer {
  * A conversation beside a working surface: a 48px head, the shared conversation log, and the
  * shared composer. As an overlay it takes focus and Escape closes it from anywhere; docked
  * beside the surface it is part of the page, so it takes focus only when asked and Escape
- * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
- * The caller owns the thread and what sending means.
+ * closes it only from inside. In a side sheet its head can expand it over the page, and
+ * Escape collapses it before it closes. Focus returns to whatever opened it, or to
+ * `returnFocusRef`. The caller owns the thread and what sending means.
  */
 export function ConversationPanel({ title, meta, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, focusToken, children }: {
   title: string;
@@ -58,7 +61,10 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const scroller = useConversationScroll();
-  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, fallbackReturnFocusRef: returnFocusRef, trapFocus: false, busy: false, onClose, active: !docked });
+  // In a side sheet the panel can take the page's place; Escape gives it back before it closes anything.
+  const sheet = useSideSheetExpansion();
+  const closeOrCollapse = () => (sheet.expanded ? sheet.setExpanded(false, false) : onClose());
+  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, fallbackReturnFocusRef: returnFocusRef, trapFocus: false, busy: false, onClose: closeOrCollapse, active: !docked });
   // Mount-only: a docked panel restored from the person's layout must not steal focus.
   const focusOnMount = useRef(docked && autoFocus);
   useEffect(() => {
@@ -67,8 +73,19 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
   useEffect(() => {
     if (focusToken) field.current?.focus({ preventScroll: true });
   }, [focusToken]);
-  const closeFromInside = (event: KeyboardEvent<HTMLElement>) => {
-    if (!docked || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+  const onPanelKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (sheet.available && isExpandShortcut(event)) {
+      event.preventDefault();
+      sheet.setExpanded(!sheet.expanded, false);
+      return;
+    }
+    if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    if (sheet.expanded) {
+      event.preventDefault();
+      sheet.setExpanded(false, false);
+      return;
+    }
+    if (!docked) return;
     event.preventDefault();
     onClose();
     returnFocusRef?.current?.focus({ preventScroll: true });
@@ -96,16 +113,21 @@ export function ConversationPanel({ title, meta, tools, label, onClose, composer
   };
   const sendLabel = composer.sendLabel ?? 'Send';
   return (
-    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={closeFromInside}>
+    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={onPanelKeyDown}>
       <header className="tm-side-conversation__head">
         <AgentMark className="tm-side-conversation__mark" />
         <strong>{title}</strong>
         {meta ? <span className="tm-side-conversation__meta">{meta}</span> : null}
-        <Tooltip label="Close" shortcut="Esc">
-          <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} onClick={onClose}>
-            <X size={16} aria-hidden="true" />
-          </button>
-        </Tooltip>
+        <span className="tm-side-conversation__actions">
+          {sheet.available ? (
+            <ExpandToggle expanded={sheet.expanded} subject={title} onToggle={(animate) => sheet.setExpanded(!sheet.expanded, animate)} />
+          ) : null}
+          <Tooltip label="Close" shortcut="Esc">
+            <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} onClick={onClose}>
+              <X size={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
+        </span>
       </header>
       <Conversation instance={scroller} label={label} className="tm-side-conversation__log">
         <div className="tm-side-conversation__thread">{children}</div>

@@ -29,6 +29,8 @@ import {
   type ReviewFindingView
 } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
+import { changeWithMotion, type ExpandMotion } from './expandMotion';
+import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
 import { MessageTime } from './Message';
 import { useNotify } from './NotifyContext';
 import { OpenTargetContextMenu, useOpenTargetMenuItems } from './OpenTargetMenu';
@@ -91,6 +93,8 @@ export interface ReviewWorkspaceProps {
 }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
+/** A file shown alone moves to the top of the column, and back to its place. */
+const FILE_MOTION: ExpandMotion = { duration: '--motion-move', easing: '--ease-in-out' };
 
 const SCOPE_LABELS: Record<ReviewScope, string> = {
   all: 'All changes',
@@ -209,6 +213,12 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const [focusedFindingId, setFocusedFindingId] = useState<string>();
   const [dismissingId, setDismissingId] = useState<string>();
   const [activeFileId, setActiveFileId] = useState<string>();
+  // Show only this file: the file alone at the top of the column, the navigator
+  // beside it. Moving to another file moves the focus; leaving returns the list
+  // to where it was read.
+  const [focusedFileId, setFocusedFileId] = useState<string>();
+  const focusedFile = ordered.some((entry) => entry.file.id === focusedFileId) ? focusedFileId : undefined;
+  const listScroll = useRef<{ fileId: string; top: number }>(undefined);
   const [selection, setSelection] = useState<LineSelection>();
   const [commentDraft, setCommentDraft] = useState<CommentDraft>();
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -260,19 +270,41 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const fileOfFinding = (findingId: string) =>
     ordered.find((entry) => (findingsByFile.get(entry.file.id) ?? []).some((finding) => finding.id === findingId));
   const expand = (fileId: string) => setCollapsedOverride((currentOverride) => ({ ...currentOverride, [fileId]: false }));
+  /** Shows `fileId` alone (opening it if collapsed), or every file again when undefined. */
+  const focusFile = (fileId: string | undefined, animate: boolean) => {
+    const leaving = fileId ? undefined : focusedFile;
+    if (fileId && !focusedFile) listScroll.current = { fileId, top: diffRef.current?.scrollTop ?? 0 };
+    changeWithMotion(animate ? elementBy('data-file-id', fileId ?? leaving ?? '') : undefined, () => {
+      if (fileId) { expand(fileId); setActiveFileId(fileId); }
+      setFocusedFileId(fileId);
+    }, FILE_MOTION, () => {
+      const diff = diffRef.current;
+      if (!diff) return;
+      // Focus inside a file that stepped aside stays in the column, so J and K keep working.
+      if (document.activeElement?.closest('[hidden]')) diff.focus({ preventScroll: true });
+      if (fileId) diff.scrollTop = 0;
+      else if (leaving && listScroll.current?.fileId === leaving) diff.scrollTop = listScroll.current.top;
+      else if (leaving) elementBy('data-file-id', leaving)?.scrollIntoView?.({ block: 'start' });
+    });
+  };
+  // While one file is shown alone, going to another file's line takes the focus there.
+  const followFocus = (fileId: string | undefined) => { if (focusedFile && fileId !== focusedFile) focusFile(fileId, false); };
   const scrollToFile = (fileId: string) => {
+    if (focusedFile && fileId !== focusedFile) { focusFile(fileId, false); return; }
     elementBy('data-file-id', fileId)?.scrollIntoView?.({ block: 'start' });
     setActiveFileId(fileId);
   };
   const scrollToFinding = (findingId: string) => {
     setFocusedFindingId(findingId);
     const entry = fileOfFinding(findingId);
+    followFocus(entry?.file.id);
     if (entry && isCollapsed(entry)) expand(entry.file.id);
     setPendingScroll({ attribute: 'data-finding-id', value: findingId, focus: true });
   };
   const scrollToComment = (commentId: string) => {
     const comment = draft.comments.find((candidate) => candidate.id === commentId);
     const entry = comment ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(comment.path)) : undefined;
+    followFocus(entry?.file.id);
     if (entry && isCollapsed(entry)) expand(entry.file.id);
     setPendingScroll({ attribute: 'data-comment-id', value: commentId });
   };
@@ -369,6 +401,11 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       else setSheetOpen(true);
       return;
     }
+    if (isExpandShortcut(event)) {
+      const fileId = focusedFile ? undefined : activeFileId ?? ordered[0]?.file.id;
+      if (focusedFile || fileId) { event.preventDefault(); focusFile(fileId, false); }
+      return;
+    }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     const key = event.key.toLowerCase();
     const fileIds = ordered.map((entry) => entry.file.id);
@@ -406,6 +443,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       if (entry && block) { event.preventDefault(); openComposer(entry.file, block, selection); }
     } else if (key === 'escape' && selection && !commentDraft) {
       applySelection(undefined);
+    } else if (key === 'escape' && focusedFile && !sheetOpen) {
+      event.preventDefault();
+      focusFile(undefined, false);
     }
   };
 
@@ -714,11 +754,14 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             const parts = file.path.split('/');
             const name = parts.pop() ?? file.path;
             const fileKey = `file:${file.id}`;
+            const focused = focusedFile === file.id;
             return (
               <section
                 key={file.id}
                 className={`tm-review-file${collapsed ? ' tm-review-file--collapsed' : ''}`}
                 data-file-id={file.id}
+                data-expanded={focused ? '' : undefined}
+                hidden={Boolean(focusedFile) && !focused}
                 aria-label={file.path}
               >
                 <header className="tm-review-file__head" onContextMenu={(event) => openPathMenu(file.path, event)}>
@@ -759,6 +802,15 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     } : undefined}
                     wholeFile={context.wholeFileItem(file.id, () => { if (collapsed) expand(file.id); })}
                     onError={(message) => notify(message, 'error')}
+                  />
+                  {/* The head's Expand and Collapse are the chevron's, so this control says what it shows. */}
+                  <ExpandToggle
+                    compact
+                    className="tm-review__mini"
+                    expanded={focused}
+                    labels={{ expand: 'Show only this file', collapse: 'Show all files' }}
+                    ariaLabel={focused ? 'Show all files' : `Show only ${file.path}`}
+                    onToggle={(animate) => focusFile(focused ? undefined : file.id, animate)}
                   />
                 </header>
                 {collapsed ? (

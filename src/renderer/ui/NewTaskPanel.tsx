@@ -49,6 +49,9 @@ import {
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { changeWithMotion, type ExpandMotion } from './expandMotion';
+import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
+import { readNewTaskExpanded, writeNewTaskExpanded } from '../model/newTaskLayout';
 import {
   AgentModelSelector,
   type ModelDiscoveryStatus
@@ -56,6 +59,9 @@ import {
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
+
+/** The modal grows to its writing size and back on the drawer curve, its head held at its corner. */
+const PANEL_MOTION: ExpandMotion = { duration: '--motion-slow', easing: '--ease-drawer', scale: true };
 
 export interface NewTaskTextDraft {
   agentProfileId?: string;
@@ -177,6 +183,9 @@ export function NewTaskPanel({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
+  // A writing size for a long description; imported work has none, so it keeps the usual size.
+  const [expandedPreference, setExpandedPreference] = useState(readNewTaskExpanded);
+  const expanded = expandedPreference && !importing;
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
@@ -401,13 +410,19 @@ export function NewTaskPanel({
     onClose();
   }, [closeAttachments, onCancelPromptRefinement, onClose, panelClosedRef]);
 
+  const changeExpanded = (next: boolean, animate: boolean) => changeWithMotion(animate ? panelRef.current : undefined, () => {
+    setExpandedPreference(next);
+    writeNewTaskExpanded(next);
+  }, PANEL_MOTION);
+
   // Creating a task is a short, focused form: a modal keeps focus inside it.
+  // Escape gives back the writing size before it closes the modal.
   useDialogFocusBoundary({
     dialogRef: panelRef,
     initialFocusRef: titleInputRef,
     fallbackReturnFocusRef,
     busy: isSubmitting,
-    onClose: closePanel,
+    onClose: expanded ? () => changeExpanded(false, false) : closePanel,
     returnFocus: returnFocusRef?.current,
     shouldReturnFocus: () => returnFocusAfterCloseRef.current
   });
@@ -681,7 +696,7 @@ export function NewTaskPanel({
       <form
         id="new-task-panel-content"
         ref={panelRef}
-        className="newtask-modal__panel"
+        className={`newtask-modal__panel${expanded ? ' newtask-modal__panel--expanded' : ''}`}
         role="dialog"
         aria-modal="true"
         onDragEnter={enterAttachmentDrag}
@@ -695,6 +710,11 @@ export function NewTaskPanel({
             event.stopPropagation();
             setCheckoutQuery('');
             event.currentTarget.querySelector<HTMLInputElement>('input[aria-label="Filter checkouts"]')?.focus();
+            return;
+          }
+          if (!importing && isExpandShortcut(event)) {
+            event.preventDefault();
+            changeExpanded(!expanded, false);
             return;
           }
           if (
@@ -736,11 +756,14 @@ export function NewTaskPanel({
           ) : <div className="newtask-modal__heading">
             <strong>New task</strong>
           </div>}
-          <Tooltip label="Close" shortcut="Esc">
-            <button type="button" className="tm-iconbtn" aria-label="Close" disabled={isSubmitting} onClick={closePanel}>
-              <X aria-hidden="true" size={16} />
-            </button>
-          </Tooltip>
+          <div className="newtask-modal__head-actions">
+            {!importing ? <ExpandToggle expanded={expanded} onToggle={(animate) => changeExpanded(!expanded, animate)} /> : null}
+            <Tooltip label="Close" shortcut="Esc">
+              <button type="button" className="tm-iconbtn" aria-label="Close" disabled={isSubmitting} onClick={closePanel}>
+                <X aria-hidden="true" size={16} />
+              </button>
+            </Tooltip>
+          </div>
         </header>
 
         <div className="newtask-modal__body">

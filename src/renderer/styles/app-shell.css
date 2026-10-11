@@ -193,6 +193,39 @@
   flex: 0 0 auto;
 }
 
+/* Expanded, the docked sheet covers the page's sheet and its own as one sheet,
+   from the page's left edge (its anchor) to the window margin, above the page's
+   pinned heads while it moves. A stand-in holds its place, so the page under it
+   never reflows and collapsing finds it as it was; once covered, the page
+   leaves the tab order and the accessibility tree. */
+.tm-canvas__content:has(> .tm-side-sheet[data-expanded]) {
+  position: relative;
+}
+
+.tm-canvas__content > .tm-detail {
+  anchor-name: --tm-task-page;
+}
+
+.tm-canvas__content > .tm-side-sheet__room {
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.tm-canvas__content > .tm-side-sheet[data-expanded] {
+  position: absolute;
+  inset: 0;
+  left: anchor(--tm-task-page left);
+  z-index: var(--layer-overlay);
+}
+
+.tm-canvas__content > .tm-side-sheet[data-expand-motion] {
+  z-index: var(--layer-overlay);
+}
+
+.tm-canvas__content:has(> .tm-side-sheet[data-expanded]:not([data-expand-motion])) > .tm-detail {
+  visibility: hidden;
+}
+
 /* ---- Rail ---- */
 
 /* The rail is permanent and icon-only (DESIGN.md 11.2). Names are tooltips; a

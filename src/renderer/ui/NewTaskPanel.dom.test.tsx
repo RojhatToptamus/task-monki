@@ -247,6 +247,37 @@ describe('mounted existing-work import', () => {
 
 const emptyPreview: ImportPreview = { baseRef: 'refs/heads/main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), commitCount: 0, fileCount: 0, commits: [], files: [] };
 
+describe('mounted New task writing size', () => {
+  it('grows for a long description, gives the size back on Escape before closing, and opens at the size it was left', async () => {
+    window.localStorage.clear();
+    const onClose = vi.fn();
+    const { unmount } = renderPanel({ onClose, onImport: async () => undefined });
+
+    const expand = screen.getByRole('button', { name: 'Expand' });
+    expand.focus();
+    fireEvent.click(expand);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Collapse' }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Expand' })).toBeTruthy();
+
+    // The chord works while writing; imported work has no description, so no writing size.
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Description' }), { key: 'F', metaKey: true, shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    expect(screen.queryByRole('button', { name: 'Collapse' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'New work', pressed: false }));
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+
+    unmount();
+    renderPanel({ onClose });
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+});
+
 function renderPanel(overrides: Partial<React.ComponentProps<typeof NewTaskPanel>> = {}) {
   const model: AgentModel = {
     id: 'codex:test-model',

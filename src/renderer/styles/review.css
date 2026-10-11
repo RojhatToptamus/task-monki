@@ -96,6 +96,12 @@
 .tm-review-file { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); flex: 0 0 auto; border: 1px solid var(--edge-raised); border-radius: var(--r-sm); overflow: clip; }
 .tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
 .tm-review-file--collapsed .tm-review-file__head { position: static; border-bottom: 0; }
+/* Show only this file: the brief, findings without a location and the other
+   files (by their hidden attribute) step aside; the file reads from the top of
+   the column with the navigator beside it, and passes over its neighbours
+   while it moves to its place and back. */
+.tm-review__diff:has(> .tm-review-file[data-expanded]) > :not(.tm-review-file) { display: none; }
+.tm-review-file[data-expand-motion] { position: relative; z-index: var(--layer-overlay); }
 .tm-review-file__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: var(--h-compact); padding: 0 6px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review-file__toggle:hover { background-color: var(--hover); }
 .tm-review-file__toggle > svg { flex: 0 0 auto; color: var(--muted); transition: transform var(--motion-fast) var(--ease-out); }

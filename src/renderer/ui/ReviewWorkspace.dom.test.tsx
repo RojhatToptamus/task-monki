@@ -340,3 +340,44 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(onOpen).toHaveBeenCalledOnce();
   });
 });
+
+describe('ReviewWorkspace showing one file', () => {
+  beforeEach(() => {
+    api.readArtifact.mockReset();
+    window.localStorage.clear();
+  });
+
+  it('shows one file alone, takes the focus to the next file with J and to a finding with N, and shows every file on Escape', async () => {
+    api.readArtifact.mockResolvedValueOnce(`# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')}\n${fileDiff('src/other.ts', '@@ -1 +1 @@\n-a\n+b')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    render(<Harness findings={[finding]} />);
+    await screen.findByRole('region', { name: 'src/other.ts' });
+
+    const show = screen.getByRole('button', { name: 'Show only src/rateLimit.ts' });
+    show.focus();
+    fireEvent.click(show);
+    expect(screen.getByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Show all files' }));
+
+    fireEvent.keyDown(document.activeElement!, { key: 'j' });
+    expect(screen.getByRole('region', { name: 'src/other.ts' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'src/rateLimit.ts' })).toBeNull();
+    // Focus in the file that stepped aside stays in the review, so the keys keep working.
+    expect(document.activeElement?.closest('[hidden]')).toBeNull();
+    expect(document.activeElement?.closest('[aria-label="Review"]')).toBeTruthy();
+
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(screen.getByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
+
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(screen.getByRole('region', { name: 'src/rateLimit.ts' })).toBeDefined();
+    expect(screen.getByRole('region', { name: 'src/other.ts' })).toBeDefined();
+
+    // The chord shows the file being read alone, and every file again.
+    fireEvent.keyDown(document.activeElement!, { key: 'F', metaKey: true, shiftKey: true });
+    expect(screen.queryByRole('region', { name: 'src/other.ts' })).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: 'F', metaKey: true, shiftKey: true });
+    expect(screen.getByRole('region', { name: 'src/other.ts' })).toBeDefined();
+  });
+});

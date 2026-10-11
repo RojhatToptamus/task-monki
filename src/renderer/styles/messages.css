@@ -211,7 +211,8 @@
 .tm-side-conversation__head strong { color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-side-conversation__mark { flex: 0 0 auto; color: var(--accent-ink); }
 .tm-side-conversation__meta { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
-.tm-side-conversation__head .tm-iconbtn { margin-left: auto; }
+/* Expand and Close sit together at the head's end, 2px apart like every pair of icon buttons. */
+.tm-side-conversation__actions { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 2px; margin-left: auto; }
 .tm-side-conversation__log { flex: 1; min-height: 0; }
 .tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 16px 20px; }
 .tm-side-conversation__thread > .tm-message--user > .tm-message-content { max-width: 88%; }
@@ -243,6 +244,19 @@
 .tm-side-sheet__resize::before { left: 0; width: 2px; }
 .tm-side-sheet--floating { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: var(--layer-overlay); display: flex; width: min(380px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
 @keyframes tm-panel-in { from { opacity: 0; transform: translateX(8%); } }
+
+/* Expanded, the conversation takes the task page's place. Docked, the sheet
+   covers the page's sheet and its own as one sheet (the canvas rules are in
+   app-shell.css); floating, it fills the page it floated over and becomes its
+   sheet. Once covered, what is under it leaves the tab order and the
+   accessibility tree; it stays in view while the sheet grows over it and from
+   the moment the sheet shrinks. */
+.tm-side-sheet--floating[data-expanded] { inset: 0; width: auto; border-radius: 0; box-shadow: none; }
+:has(> .tm-side-sheet--floating[data-expanded]:not([data-expand-motion])) > :not(.tm-side-sheet) { visibility: hidden; }
+/* The conversation reads in the Agent tab's 760px column, its composer on the
+   same 24px insets; the head keeps the sheet's full width. */
+.tm-side-sheet[data-expanded] .tm-side-conversation__thread { width: 100%; max-width: 760px; margin-inline: auto; padding-inline: 24px; }
+.tm-side-sheet[data-expanded] .tm-side-conversation__composer { width: min(712px, 100% - 32px); margin-inline: auto; }
 
 /* A review round: the request item by item in the person's message, and the
    agent's answer to each under its reply (and on the Review tab). */
