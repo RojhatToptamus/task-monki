@@ -76,6 +76,78 @@ describe('projection reducer', () => {
     expect(completed.runs[0].status).toBe('COMPLETED');
   });
 
+  it.each(['SIDE_QUESTION'] as const)(
+    'keeps a %s run beside the task without staling its review',
+    (mode) => {
+      const task = createTask({
+        workflowPhase: 'REVIEW',
+        currentRunId: 'implementation-run',
+        projection: {
+          ...createInitialProjection(now),
+          agentRun: 'COMPLETED',
+          agentReview: { status: 'NEEDS_CHANGES', runId: 'review-run', findingDecisions: [] }
+        }
+      });
+      const question = createRun({ id: 'question-run', mode, status: 'RUNNING' });
+      const state = {
+        ...createEmptyState(),
+        tasks: [task],
+        runs: [createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }), question]
+      };
+      const started = applyEventToState(state, { ...createEvent('AGENT_RUN_STARTED', { mode }), runId: question.id });
+      const lost = applyEventToState(started, { ...createEvent('AGENT_RUNTIME_LOST', { reason: 'Provider exited.' }), runId: question.id });
+      const completed = applyEventToState(started, { ...createEvent('AGENT_RUN_COMPLETED', { terminalStatus: 'completed' }), runId: question.id });
+      for (const next of [started, lost, completed]) {
+        expect(next.tasks[0]).toMatchObject({ workflowPhase: 'REVIEW', currentRunId: 'implementation-run' });
+        expect(next.tasks[0].projection).toEqual(task.projection);
+      }
+      expect(completed.runs[1].status).toBe('COMPLETED');
+    }
+  );
+
+  it('records finding decisions only for the current review and resets them for a new review', () => {
+    const decision = (id: string, reviewRunId: string) => ({
+      id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, dismissReason: 'ACCEPTED' as const, createdAt: now
+    });
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      projection: {
+        ...createInitialProjection(now),
+        agentReview: { status: 'NEEDS_CHANGES', runId: 'review-run', updatedAt: now }
+      }
+    });
+    const state = {
+      ...createEmptyState(),
+      tasks: [task],
+      runs: [createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })]
+    };
+    const decided = applyEventToState(state, {
+      ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('first', 'review-run') }),
+      id: 'decided-first', runId: undefined, receivedAt: '2026-06-20T11:00:00.000Z'
+    });
+    const ignored = applyEventToState(decided, {
+      ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('other', 'older-review') }),
+      id: 'decided-other', runId: undefined
+    });
+    expect(ignored.tasks[0].projection.agentReview).toEqual({
+      status: 'NEEDS_CHANGES',
+      runId: 'review-run',
+      updatedAt: now,
+      findingDecisions: [decision('first', 'review-run')]
+    });
+
+    const rerun = createRun({ id: 'next-review', mode: 'REVIEW', status: 'RUNNING' });
+    const restarted = applyEventToState(
+      { ...ignored, runs: [...ignored.runs, rerun] },
+      { ...createEvent('AGENT_RUN_STARTED', { mode: 'REVIEW' }), runId: rerun.id }
+    );
+    expect(restarted.tasks[0].projection.agentReview).toMatchObject({
+      status: 'RUNNING',
+      runId: 'next-review',
+      findingDecisions: []
+    });
+  });
+
   it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();
@@ -531,7 +603,7 @@ describe('projection reducer', () => {
     expect(review?.result?.findings[0]?.severity).toBe('BLOCKER');
   });
 
-  it('marks review results stale when the diff changes or follow-up work starts', () => {
+  it('marks review results stale when the diff changes, not when follow-up work starts', () => {
     const task: Task = {
       id: 'task-1',
       kind: 'NORMAL',
@@ -595,7 +667,8 @@ describe('projection reducer', () => {
       }
     );
     expect(followUpState.tasks[0].workflowPhase).toBe('IN_PROGRESS');
-    expect(followUpState.tasks[0].projection.agentReview?.status).toBe('STALE');
+    // A turn that changes nothing leaves the review current.
+    expect(followUpState.tasks[0].projection.agentReview?.status).toBe('INCONCLUSIVE');
 
     const completedFollowUpState = applyEventToState(
       followUpState,
@@ -605,7 +678,62 @@ describe('projection reducer', () => {
       }
     );
     expect(completedFollowUpState.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(completedFollowUpState.tasks[0].projection.agentReview?.status).toBe('STALE');
+    expect(completedFollowUpState.tasks[0].projection.agentReview?.status).toBe('INCONCLUSIVE');
+
+    const changedByFollowUp = applyEventToState(completedFollowUpState, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', { id: 'git-3', headSha: 'abc', dirtyFingerprint: 'fp-3', status: 'DIRTY' }),
+      runId: undefined
+    });
+    expect(changedByFollowUp.tasks[0].projection.agentReview?.status).toBe('STALE');
+  });
+
+  it('makes a stale review current again when the diff returns to exactly what was reviewed', () => {
+    const result = {
+      schemaVersion: 'agent-review/v1' as const,
+      verdict: 'NEEDS_CHANGES' as const,
+      summary: 'One major finding.',
+      findings: [{ id: 'f-1', severity: 'MAJOR' as const, title: 'Missing check', explanation: 'The input is not validated.' }]
+    };
+    const task: Task = {
+      id: 'task-1',
+      kind: 'NORMAL',
+      runtimeId: 'codex',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryId: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      forkedAlternativeTaskIds: [],
+      currentIterationId: 'iteration-1',
+      currentRunId: 'review-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        agentReview: {
+          status: 'NEEDS_CHANGES',
+          runId: 'review-run',
+          reviewedHeadSha: 'abc',
+          reviewedDirtyFingerprint: 'fp-1',
+          result
+        }
+      }
+    };
+    const base = { ...createEmptyState(), tasks: [task], runs: [createRun({ id: 'review-run', mode: 'REVIEW' })] };
+    const changed = applyEventToState(base, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', { id: 'git-2', headSha: 'abc', dirtyFingerprint: 'fp-2', status: 'DIRTY' }),
+      runId: undefined
+    });
+    expect(changed.tasks[0].projection.agentReview?.status).toBe('STALE');
+
+    const reverted = applyEventToState(changed, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', { id: 'git-3', headSha: 'abc', dirtyFingerprint: 'fp-1', status: 'DIRTY' }),
+      runId: undefined
+    });
+    expect(reverted.tasks[0].projection.agentReview).toMatchObject({ status: 'NEEDS_CHANGES', summary: 'One major finding.', result });
   });
 
   it('keeps a current review result fresh when a delivery commit records the reviewed diff', () => {
@@ -651,6 +779,7 @@ describe('projection reducer', () => {
       {
         ...createEvent('DELIVERY_COMMIT_CREATED', {
           headSha: 'commit-1',
+          dirtyFingerprint: 'clean-fp',
           branchName: 'task/task-1'
         }),
         runId: undefined
@@ -669,10 +798,22 @@ describe('projection reducer', () => {
 
     expect(committed.tasks[0].projection.agentReview).toMatchObject({
       status: 'PASSED',
-      reviewedHeadSha: 'commit-1'
+      reviewedHeadSha: 'commit-1',
+      reviewedDirtyFingerprint: 'clean-fp'
     });
-    expect(committed.tasks[0].projection.agentReview?.reviewedDirtyFingerprint).toBeUndefined();
     expect(refreshed.tasks[0].projection.agentReview?.status).toBe('PASSED');
+
+    // An edit after the commit changes the working tree, so the review no longer covers it.
+    const edited = applyEventToState(refreshed, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', {
+        id: 'git-edited',
+        headSha: 'commit-1',
+        dirtyFingerprint: 'edited-fp',
+        status: 'DIRTY'
+      }),
+      runId: undefined
+    });
+    expect(edited.tasks[0].projection.agentReview?.status).toBe('STALE');
   });
 
   it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {

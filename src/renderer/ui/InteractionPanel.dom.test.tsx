@@ -20,7 +20,7 @@ describe('mounted agent user-input interaction', () => {
     const checks = screen.getByRole('group', { name: 'Which checks should run?' });
     fireEvent.click(within(checks).getByRole('checkbox', { name: /Unit/ }));
     expect(screen.queryByRole('textbox', { name: 'Checks other answer' })).toBeNull();
-    fireEvent.click(within(checks).getByRole('checkbox', { name: 'Other…' }));
+    fireEvent.click(within(checks).getByRole('checkbox', { name: 'Other' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Checks other answer' }), {
       target: { value: 'Smoke' }
     });
@@ -115,7 +115,7 @@ describe('mounted agent user-input interaction', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: /New customers/ }));
     const audience = screen.getByRole('group', { name: 'Who is this page for?' });
-    const other = within(audience).getByRole('radio', { name: 'Other…' });
+    const other = within(audience).getByRole('radio', { name: 'Other' });
     other.focus();
     expect(screen.getByRole('radio', { name: /New customers/ })).toHaveProperty('checked', true);
     fireEvent.click(other);

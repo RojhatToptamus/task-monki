@@ -151,6 +151,9 @@ async function packagedDesignResources() {
     path.resolve('THIRD_PARTY_LICENSES/Claude-Design-System-MIT.txt'),
     path.join(resources, 'legal/third-party/Claude-Design-System-MIT.txt')
   );
+  for (const font of ['Instrument-Sans-OFL-1.1.txt', 'Geist-Mono-OFL-1.1.txt']) {
+    await fs.copyFile(path.resolve('THIRD_PARTY_LICENSES', font), path.join(resources, 'legal/third-party', font));
+  }
   await fs.mkdir(path.join(resources, 'legal/electron'), { recursive: true });
   await fs.writeFile(path.join(resources, 'legal/electron/LICENSE'), 'Electron license\n');
   await fs.writeFile(

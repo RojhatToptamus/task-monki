@@ -127,6 +127,8 @@ export class CodexRpcClient {
 
   private readonly pending = new Map<RequestId, PendingRequest>();
   private readonly expiredRequests = new Set<RequestId>();
+  /** Server requests received on this connection that no response has been written for. */
+  private readonly openServerRequests = new Set<RequestId>();
   private readonly reader;
   private readonly closedSignal: Promise<Error>;
   private resolveClosedSignal!: (error: Error) => void;
@@ -234,11 +236,19 @@ export class CodexRpcClient {
     result: unknown,
     onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>
   ): Promise<AgentProtocolMessageReference> {
+    // A request is answered once: a failed write still counts, as its delivery is ambiguous.
+    this.openServerRequests.delete(id);
     return this.write({ id, result }, onJournaled, 'server-request/response');
   }
 
   async respondError(id: RequestId, error: CodexRpcErrorPayload): Promise<void> {
+    this.openServerRequests.delete(id);
     await this.write({ id, error }, undefined, 'server-request/error-response');
+  }
+
+  /** Whether a server request received on this connection still waits for its first response. */
+  awaitsResponse(id: RequestId): boolean {
+    return this.openServerRequests.has(id);
   }
 
   /**
@@ -255,6 +265,7 @@ export class CodexRpcClient {
       return;
     }
     this.closed = true;
+    this.openServerRequests.clear();
     this.reader.close();
     this.resolveClosedSignal(new Error(reason));
     this.input.destroy();
@@ -342,12 +353,17 @@ export class CodexRpcClient {
       const decoded = decodeCodexProtocolMessage(line);
       switch (decoded.kind) {
         case 'notification':
+          if (decoded.notification.method === 'serverRequest/resolved') {
+            this.openServerRequests.delete(decoded.notification.params.requestId);
+          }
           this.events.emit('notification', decoded.notification, rawReference);
           return;
         case 'serverRequest':
+          this.openServerRequests.add(decoded.request.id);
           this.events.emit('serverRequest', decoded.request, rawReference);
           return;
         case 'unsupportedServerRequest':
+          this.openServerRequests.add(decoded.request.id);
           this.events.emit('unsupportedServerRequest', decoded.request, rawReference);
           return;
         case 'response':

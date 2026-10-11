@@ -23,7 +23,7 @@ export function codexCapabilities(input: {
   return {
     runtimeId: CODEX_RUNTIME_ID,
     executionPolicy: {
-      defaultPresetId: 'restricted',
+      defaultPresetId: 'approve-for-me',
       detail:
         'Codex enforces managed filesystem/process boundaries and supports native or Task Monki-reviewed approvals.',
       presets: [
@@ -59,7 +59,7 @@ export function codexCapabilities(input: {
         },
         {
           id: 'approve-for-me',
-          label: 'Approve for me',
+          label: 'Auto review',
           detail: 'Sandboxed; the automatic reviewer evaluates eligible exceptions.',
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'on-request',

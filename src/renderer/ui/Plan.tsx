@@ -1,6 +1,14 @@
 import { useState } from 'react';
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { ListChecks } from 'lucide-react';
+import {
+  Circle,
+  CircleCheck,
+  CircleDashed,
+  CircleDot,
+  CircleStop,
+  CircleX,
+  ListChecks
+} from 'lucide-react';
 import type { AgentPlanStep } from '../../shared/agent';
 import { DisclosureChevron } from './DisclosureChevron';
 
@@ -25,9 +33,23 @@ export interface PlanListMarker {
   kind: PlanStepMarker;
 }
 
+const STEP_MARKS = {
+  COMPLETED: CircleCheck,
+  IN_PROGRESS: CircleDot,
+  PENDING: Circle
+} satisfies Record<PlanStepStatus, unknown>;
+
+const MARKER_MARKS = {
+  failed: CircleX,
+  stopped: CircleStop,
+  unfinished: CircleDashed
+} satisfies Record<PlanStepMarker, unknown>;
+
 /**
- * One plan rendered everywhere the same way. A plan is a collection, so every
- * step names its state with a right-aligned word rather than repeated glyphs.
+ * One plan rendered everywhere the same way: a checklist. Its marks are shapes,
+ * not colours (a check, a dot, a ring), the way every checklist reads. The plan
+ * never spins; the activity beneath it shows the work in flight. A word appears
+ * only on the one step where a run stopped or failed.
  */
 export function PlanList({
   steps,
@@ -38,37 +60,31 @@ export function PlanList({
   marker?: PlanListMarker;
 }) {
   return (
-    <div className="tm-plan__steps" role="list">
+    <ol className="tm-plan__steps">
       {steps.map((step, index) => {
         const stepMarker = marker?.index === index ? marker.kind : undefined;
-        const active = step.status === 'IN_PROGRESS' && !stepMarker;
-        const stateLabel = planStepStatusLabel(step, stepMarker);
-        const labelClass = [
-          'tm-plan__label',
-          active ? 'tm-plan__label--active' : '',
-          stepMarker === 'stopped' ? 'tm-plan__label--stopped' : '',
-          stepMarker === 'failed' ? 'tm-plan__label--failed' : ''
-        ]
-          .filter(Boolean)
-          .join(' ');
+        const Mark = stepMarker ? MARKER_MARKS[stepMarker] : STEP_MARKS[step.status];
         return (
-          <div
+          <li
             className="tm-plan__step"
+            data-state={stepMarker ?? step.status.toLowerCase()}
             key={`${step.status}:${step.step}:${index}`}
-            role="listitem"
-            aria-label={planStepAriaLabel(step, stepMarker)}
           >
-            <span className={labelClass}>{step.step}</span>
-            <span
-              className="tm-plan__state"
-              data-status={stepMarker ?? step.status.toLowerCase()}
-            >
-              {stateLabel}
-            </span>
-          </div>
+            <Mark
+              className="tm-plan__mark"
+              size={13}
+              aria-hidden="true"
+            />
+            <span className="tm-plan__label">{step.step}</span>
+            {stepMarker ? (
+              <span className="tm-plan__state">{planStepStatusLabel(step, stepMarker)}</span>
+            ) : (
+              <span className="tm-visually-hidden">, {planStepStatusLabel(step)}</span>
+            )}
+          </li>
         );
       })}
-    </div>
+    </ol>
   );
 }
 
@@ -85,17 +101,13 @@ export function PlanCard({ steps, marker, live = false }: {
   const done = steps.filter((step) => step.status === 'COMPLETED').length;
   return <Collapsible.Root className="tm-plan-card" open={userOpen ?? (live || Boolean(marker))} onOpenChange={setUserOpen}>
     <Collapsible.Trigger className="tm-plan-card__head" data-disclosure="">
-      <ListChecks size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
+      <ListChecks size={13} aria-hidden="true" />
       <span className="tm-plan-card__title">Plan</span>
       <span className="tm-plan-card__count">{done} of {steps.length} done</span>
       <DisclosureChevron />
     </Collapsible.Trigger>
     <Collapsible.Content className="tm-plan-card__body"><PlanList steps={steps} marker={marker} /></Collapsible.Content>
   </Collapsible.Root>;
-}
-
-function planStepAriaLabel(step: PlanListStep, marker?: PlanStepMarker): string {
-  return `${planStepStatusLabel(step, marker)}: ${step.step}`;
 }
 
 function planStepStatusLabel(step: PlanListStep, marker?: PlanStepMarker): string {

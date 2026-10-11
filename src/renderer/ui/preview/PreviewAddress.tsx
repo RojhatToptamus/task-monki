@@ -2,7 +2,8 @@ import { ExternalLink } from 'lucide-react';
 import { taskManagerApi as api } from '../../api/taskManagerClient';
 import type { PreviewAddress } from '../../model/applicationPreviewRuns';
 import { CopyIconButton } from '../CopyIconButton';
-import { usePreviewNotify } from './previewPresentation';
+import { Tooltip } from '../Tooltip';
+import { useNotify } from '../NotifyContext';
 
 /**
  * Opens a serving address through the runtime, which checks it is this preview's own address.
@@ -27,20 +28,21 @@ export function PreviewAddressActions({ name, address, label, onOpen }: {
   /** Absent where the address cannot be opened from here. */
   onOpen?(address: PreviewAddress): void;
 }) {
-  const notify = usePreviewNotify();
+  const notify = useNotify();
   return (
     <span className="tm-preview-address">
       <span className="tm-preview-address__label" title={address.url}>{label ?? address.text}</span>
       {onOpen ? (
-        <button
-          type="button"
-          className="tm-iconbtn tm-preview-address__action"
-          aria-label={`Open ${name}`}
-          title={`Open ${address.url}`}
-          onClick={() => onOpen(address)}
-        >
-          <ExternalLink size={13} strokeWidth={1.5} aria-hidden="true" />
-        </button>
+        <Tooltip label={`Open ${address.url}`}>
+          <button
+            type="button"
+            className="tm-iconbtn tm-preview-address__action"
+            aria-label={`Open ${name}`}
+            onClick={() => onOpen(address)}
+          >
+            <ExternalLink size={13} aria-hidden="true" />
+          </button>
+        </Tooltip>
       ) : null}
       <CopyIconButton
         value={address.url}

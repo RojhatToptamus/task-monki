@@ -168,6 +168,32 @@ selection in the panel; another selection starts another session.
 `inspect_preview` and `propose_preview_configuration` tools served through the
 generic client-tool bridge. See `docs/architecture/PREVIEW_RECIPE_GENERATION.md`.
 
+### Review and side questions
+
+The task-bound question lane uses the shared read-only turn path with a fresh
+session per question and approval policy never. Its runs are detached: they
+never change the workflow phase, `currentRunId`, `projection.agentRun`,
+attention, delivery, or in-flight state, and the renderer keeps them out of the
+main conversation.
+
+- `SIDE_QUESTION` (purpose `TASK_SIDE_QUESTION`, session role `SIDE`) answers a
+  question about the task on the runtime and model the request names (the task's
+  own when it names none), always read-only, one at a time per task.
+  `SideQuestionCoordinator` owns it. While a run that may write the worktree is
+  active, the question reads a read-only snapshot from
+  `ReadOnlySnapshotService` (read-root kind `WORKTREE_SNAPSHOT`) and blocks
+  nothing; otherwise it reads the live worktree and holds other agent work and
+  Git actions until it settles. The answer streams into one `AGENT_MESSAGE`
+  item; the full text is in the run's artifacts.
+
+A snapshot is a detached Git worktree at the live `HEAD` with the staged,
+unstaged and untracked changes applied (untracked files capped at 5 MiB each and
+256 MiB in total), every file read-only, at most one per task. It is reused
+while `HEAD` and the dirty fingerprint are unchanged and removed when its thread
+ends, when the task is archived or deleted, and by the startup and shutdown
+sweeps. Snapshots live under the worktree root in a per-profile directory, so
+hosts sharing a root never remove each other's.
+
 ### Design
 
 `DesignUpdateCoordinator` owns the Design run and Ready lifecycle.
@@ -336,20 +362,30 @@ Deletion removes unreferenced bytes through the attachment store owner.
 Task Monki cannot revoke bytes after a provider receives them.
 The product must not claim remote deletion or provider forgetting.
 
-## App-owned Design tool
+## App-owned client tools
 
-Task Monki has one app-owned Design tool: `inspect_design`.
-`DesignClientToolContract` owns its name, input schema, and bounded result.
-`DesignClientToolBridge` owns run grants and dispatch.
+Task Monki gives two kinds of runs app-owned tools (`ClientToolSets`):
+
+- Design runs get `inspect_design` (`DesignClientToolContract`).
+- Preview runs get `inspect_preview` and `propose_preview_configuration`
+  (`PreviewClientToolContract`).
+
+Each contract owns its tool names, input schemas, and bounded results.
+`ClientToolBridge` owns run grants and dispatch for both sets.
+A run is granted only its own mode's set.
 
 Provider transport stays local to the adapter:
 
 - Codex uses its native dynamic-tool protocol.
 - OpenCode uses one packaged local stdio MCP bridge.
-- ACP Design sessions use that bridge through ACP setup.
+- ACP sessions use that bridge through ACP setup.
+
+The bridge server's environment variables start with `TASK_MONKI_CLIENT_TOOL_`;
+their values are credentials and are redacted from protocol journals.
 
 The bridge contains no browser or Preview implementation.
-It forwards an authorized request to the existing Design browser owner.
+It forwards an authorized request to the owning handler: the Design browser
+owner, or the Preview agent coordinator.
 
 Each tool call must match the active run, provider session,
 provider tool identity, and short-lived grant.

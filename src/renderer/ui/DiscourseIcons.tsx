@@ -11,7 +11,6 @@ import {
   PanelRight,
   Pin,
   Reply,
-  Settings2,
   Users,
   X
 } from 'lucide-react';
@@ -19,7 +18,7 @@ import type { DiscourseDefaultPolicy } from '../../shared/discourse';
 import { UiLucideIcon } from './UiIcons';
 
 export function DiscoursePinIcon() {
-  return <UiLucideIcon component={Pin} size={12} />;
+  return <UiLucideIcon component={Pin} size={13} />;
 }
 
 export function DiscourseTaskIcon() {
@@ -30,16 +29,12 @@ export function DiscourseRepositoryIcon() {
   return <UiLucideIcon component={Folder} size={13} />;
 }
 
-export function DiscoursePanelRightIcon(_props: { expanded?: boolean }) {
+export function DiscoursePanelRightIcon() {
   return <UiLucideIcon component={PanelRight} />;
 }
 
 export function DiscourseContextPreviewIcon() {
   return <UiLucideIcon component={FileText} />;
-}
-
-export function DiscourseSlidersIcon() {
-  return <UiLucideIcon component={Settings2} size={15} />;
 }
 
 export function DiscourseReplyIcon() {
@@ -51,7 +46,7 @@ export function DiscourseCopyIcon() {
 }
 
 export function DiscourseCheckIcon() {
-  return <UiLucideIcon component={Check} size={14} />;
+  return <UiLucideIcon component={Check} size={13} />;
 }
 
 export function DiscourseMoreIcon() {
@@ -59,19 +54,11 @@ export function DiscourseMoreIcon() {
 }
 
 export function DiscourseChevronDownIcon() {
-  return <UiLucideIcon component={ChevronDown} size={14} />;
+  return <UiLucideIcon component={ChevronDown} size={13} />;
 }
 
 export function DiscourseCloseIcon() {
-  return <UiLucideIcon component={X} size={15} />;
-}
-
-export function DiscourseRoundtableIcon() {
-  return <UiLucideIcon component={MessagesSquare} size={28} />;
-}
-
-export function DiscourseNavIcon() {
-  return <UiLucideIcon component={MessageSquare} />;
+  return <UiLucideIcon component={X} size={16} />;
 }
 
 export function DiscourseModeIcon({ policy }: { policy: DiscourseDefaultPolicy }) {

@@ -6,6 +6,7 @@ import { git } from '../git/gitCli';
 import { parsePrView } from '../github/GitHubService';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { SqliteTaskStore } from '../storage/SqliteTaskStore';
+import { createDomainEvent } from '../storage/domainEvent';
 import {
   createScriptedAgentRuntimeFixture,
   TaskMonkiScenarioRegistry,
@@ -60,6 +61,36 @@ describe('TaskManagerService crash recovery', () => {
       await restarted.close();
     }
   }, 20_000);
+
+  it('keeps a completed review recorded once, with no new Git evidence, across repeated restarts', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-review-restart'
+    });
+    const task = await scenario.createTask();
+    const worktree = await prepareTestWorktree(scenario.service, task.id);
+    const implementation = await scenario.service.startRun({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'export const value = 1;\n');
+    await scenario.completeRun(implementation.id, 'Implemented the feature module.');
+    scenario.agent.nextRuntimeTurnResult = { output: 'Looked at the diff; no structured verdict.' };
+    const review = await scenario.service.startReview({ taskId: task.id, runId: implementation.id });
+    await scenario.waitForSnapshot((state) =>
+      state.tasks.find((candidate) => candidate.id === task.id)?.projection.agentReview?.status ===
+        'INCONCLUSIVE' &&
+      Boolean(state.runs.find((candidate) => candidate.id === review.id)?.afterGitSnapshotId));
+    // Shutdown drains the post-run evidence that a terminal event triggers.
+    await scenario.service.shutdown();
+    await scenario.persistence.close();
+    const recorded = await readReviewRecord(scenario, review.id);
+    expect(recorded.completions).toHaveLength(1);
+    // The run keeps the provider's completion time after post-run evidence is captured.
+    expect(recorded.endedAt).toBe(recorded.completions[0]!.occurredAt);
+
+    for (let restart = 0; restart < 2; restart += 1) {
+      const restarted = await openRestartedScenario(scenario);
+      await restarted.close();
+      expect(await readReviewRecord(scenario, review.id)).toEqual(recorded);
+    }
+  }, 30_000);
 
   it('adopts a created worktree and commit whose completion was not persisted', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -546,6 +577,27 @@ interface RestartedScenario {
   store: SqliteTaskStore;
   service: TaskManagerService;
   close(): Promise<void>;
+}
+
+/** What a review run leaves in History and Git evidence, read from the closed profile. */
+async function readReviewRecord(scenario: TaskMonkiScenario, reviewRunId: string) {
+  const persistence = await openTestPersistence(scenario.persistence.paths.profileRoot);
+  try {
+    await persistence.agentRuntime.init();
+    const state = await persistence.tasks.snapshot();
+    return {
+      completions: state.events.filter(
+        (event) => event.runId === reviewRunId && event.type === 'AGENT_RUN_COMPLETED'
+      ),
+      endedAt: state.runs.find((run) => run.id === reviewRunId)?.endedAt,
+      gitSnapshotIds: state.gitSnapshots.map((snapshot) => snapshot.id),
+      gitEvidenceEvents: state.events.filter((event) =>
+        ['WORKTREE_VERIFIED', 'DIFF_ARTIFACT_CREATED', 'GIT_SNAPSHOT_CAPTURED'].includes(event.type)
+      ).length
+    };
+  } finally {
+    await persistence.close();
+  }
 }
 
 async function writeRecoveryGh(

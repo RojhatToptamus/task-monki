@@ -24,6 +24,7 @@ import {
 import { ActionMenu } from '../ActionMenu';
 import { DiffLines } from '../DiffLines';
 import { DisclosureChevron } from '../DisclosureChevron';
+import { Tooltip } from '../Tooltip';
 import { commandText, GroupLabel, serviceTypeLabel, shortenPath } from './previewPresentation';
 
 export interface PreviewEditorDraft {
@@ -55,7 +56,7 @@ export function ApplicationConfiguration({ draft, previous, view, onView, onChan
   const changed = original !== draft.text;
   const changes = useMemo(() => (view === 'Changes' && changed ? configurationDiff(original, draft.text) : []), [view, changed, original, draft.text]);
   const state = draft.draftId
-    ? draft.original ? 'proposed' : 'proposed · new file'
+    ? draft.original ? 'proposed' : 'proposed new file'
     : draft.text !== draft.original?.text ? (draft.original ? 'unsaved' : 'new file') : undefined;
   const toggle = (next: ConfigurationView) => onView(view === next ? 'Configuration' : next);
   const collapse = (id: string) => {
@@ -67,7 +68,7 @@ export function ApplicationConfiguration({ draft, previous, view, onView, onChan
       <div className="tm-preview-configuration__toolbar">
         <span className="tm-preview-configuration__file">
           <strong>{draft.original?.name ?? 'preview.yaml'}</strong>
-          {state ? ` · ${state}` : ''}
+          {state ? <span>{state}</span> : null}
         </span>
         <div className="tm-preview-configuration__views">
           {changed || view === 'Changes' ? (
@@ -191,7 +192,7 @@ export function ConfigurationGroups({ overview, projectDirectory, entry, folderE
       {group(
         'Secrets',
         overview.secrets.map((secret) => {
-          const uses = secret.uses.map((use) => `${use.entry} · ${use.key}`).join(', ');
+          const uses = secret.uses.map((use) => `${use.key} in ${use.entry}`).join(', ');
           return (
             <EntryBlock key={secret.id}>
               <div className="tm-preview-entry">
@@ -215,13 +216,13 @@ function EntryBlock({ children }: { children: ReactNode }) {
 function entrySummary(entry: ConfigurationEntry): ReactNode {
   const node = entry.node;
   const value = (scalar: unknown) =>
-    typeof scalar === 'string' ? scalar : scalar && typeof scalar === 'object' ? Object.entries(scalar).map(([key, item]) => `${key} ${String(item)}`).join(' · ') : undefined;
+    typeof scalar === 'string' ? scalar : scalar && typeof scalar === 'object' ? Object.entries(scalar).map(([key, item]) => `${key} ${String(item)}`).join(', ') : undefined;
   if (entry.command?.length) return <code>{commandText(entry.command)}</code>;
-  if (entry.type === 'postgres' || entry.type === 'redis') return 'Managed by Preview · data kept after Stop';
+  if (entry.type === 'postgres' || entry.type === 'redis') return 'Managed by Preview, data kept after Stop';
   const text =
     entry.type === 'static' ? entry.folder
       : entry.type === 'external-tcp' ? `${String(node.host ?? '127.0.0.1')}:${String(node.port ?? '')}`
-      : entry.type === 'preview' ? [node.name, node.service].filter(Boolean).map(String).join(' · ')
+      : entry.type === 'preview' ? [node.name, node.service].filter(Boolean).map(String).join(' ')
       : entry.type === 'compose' ? (typeof node.image === 'string' ? node.image : Array.isArray(node.files) ? node.files.join(', ') : undefined)
       : value(node.url);
   return text ? <code>{text}</code> : node.url === undefined && ['attach', 'external-postgres', 'external-redis'].includes(entry.type) ? 'Address required' : null;
@@ -235,7 +236,7 @@ function entryMeta(entry: ConfigurationEntry, projectDirectory?: string): string
     entry.run ? (entry.run === 'once' ? 'once' : 'every start') : undefined
   ]
     .filter(Boolean)
-    .join(' · ');
+    .join(', ');
 }
 
 /** Name and type, then what it runs; the whole row toggles its editor when it has one. */
@@ -346,7 +347,7 @@ function EntryEditor({ entry, entries, text, busy, onChange, onYaml, onDone }: {
             trigger={
               <>
                 <span className={entry.dependsOn.length ? undefined : 'tm-preview-entry-editor__none'}>{entry.dependsOn.join(', ') || 'Nothing'}</span>
-                <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
+                <ChevronDown size={13} aria-hidden="true" />
               </>
             }
             items={others.map((other) => ({
@@ -648,23 +649,22 @@ function EnvironmentTable({ labelId, entry, entries, text, busy, write }: {
               />
             </span>
             <span role="cell">
-              <button
+              <Tooltip label="Remove"><button
                 type="button"
-                className="tm-preview-icon-button"
+                className="tm-iconbtn"
                 aria-label={`Remove ${name}`}
-                title="Remove"
                 disabled={busy}
                 onClick={() => (added ? setPending(undefined) : write(() => removeEnvironmentBinding(text, entry.path, binding.key)))}
               >
-                <X size={16} strokeWidth={1.5} aria-hidden="true" />
-              </button>
+                <X size={16} aria-hidden="true" />
+              </button></Tooltip>
             </span>
           </div>
         );
       })}
       <div className="tm-preview-env__add">
         <button type="button" className="ghost-button" disabled={busy || !!pending} onClick={() => setPending({ kind: 'text', value: '' })}>
-          <Plus size={16} strokeWidth={1.5} aria-hidden="true" />
+          <Plus size={16} aria-hidden="true" />
           Add variable
         </button>
       </div>

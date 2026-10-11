@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
+  DecideReviewFindingRequest,
+  ReadReviewChangesRequest,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   AppUpdateEvent,
   CancelRunRequest,
   CancelDesignTurnRequest,
@@ -23,6 +28,7 @@ import type {
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
   ImportDesignReferenceAssetRequest,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
@@ -42,6 +48,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -164,6 +171,8 @@ const api: TaskManagerApi = {
     invokeIpc('openTarget:inspect', input),
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     invokeIpc('openTarget:execute', input),
+  readWorktreeFile: (input: ReadWorktreeFileRequest) =>
+    invokeIpc('worktree:readFile', input),
   getAgentRuntimeCatalog: () => invokeIpc('agent:runtimeCatalog'),
   discoverAgentRuntimeModels: (runtimeId) =>
     invokeIpc('agent:discoverRuntimeModels', runtimeId),
@@ -288,12 +297,21 @@ const api: TaskManagerApi = {
   sendTaskInstruction: (input: SendTaskInstructionRequest) => invokeIpc('agent:sendTaskInstruction', input),
   saveTaskPrompt: (input: SaveTaskPromptRequest) => invokeIpc('task:savePrompt', input),
   saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => invokeIpc('agent:saveTaskAgentDraft', input),
+  saveTaskReviewDraft: (input: SaveTaskReviewDraftRequest) => invokeIpc('agent:saveTaskReviewDraft', input),
   steerRun: (input: SteerRunRequest) => invokeIpc('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
     invokeIpc('agent:continueRun', input),
   retryRun: (input: RetryRunRequest) => invokeIpc('agent:retryRun', input),
   startReview: (input: StartReviewRequest) =>
     invokeIpc('agent:startReview', input),
+  decideReviewFinding: (input: DecideReviewFindingRequest) =>
+    invokeIpc('agent:decideReviewFinding', input),
+  readReviewChanges: (input: ReadReviewChangesRequest) =>
+    invokeIpc('agent:readReviewChanges', input),
+  askSideQuestion: (input: AskSideQuestionRequest) => invokeIpc('agent:askSideQuestion', input),
+  stopSideQuestion: (input: StopSideQuestionRequest) =>
+    invokeIpc('agent:stopSideQuestion', input),
+  endSideThread: (input: EndSideThreadRequest) => invokeIpc('agent:endSideThread', input),
   syncAgentGoal: (input: SyncAgentGoalRequest) =>
     invokeIpc('agent:syncGoal', input),
   cancelRun: (input: CancelRunRequest) => invokeIpc('agent:cancelRun', input),

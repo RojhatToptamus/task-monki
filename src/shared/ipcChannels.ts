@@ -5,20 +5,26 @@
  * TaskManagerApi and the focused shared contracts it references.
  */
 export const IPC_INVOKE_CHANNELS = [
+  'agent:askSideQuestion',
   'agent:cancelRun',
   'agent:continueRun',
+  'agent:decideReviewFinding',
   'agent:discoverRuntimeModels',
   'agent:editTaskInstruction',
+  'agent:endSideThread',
   'agent:queueTaskInstruction',
   'agent:readProtocolMessage',
+  'agent:readReviewChanges',
   'agent:respondToInteraction',
   'agent:retryRun',
   'agent:runtimeCatalog',
   'agent:saveTaskAgentDraft',
+  'agent:saveTaskReviewDraft',
   'agent:sendTaskInstruction',
   'agent:startReview',
   'agent:startRun',
   'agent:steerRun',
+  'agent:stopSideQuestion',
   'agent:syncGoal',
   'agent:updateNativeSession',
   'application:approveApplicationPreview',
@@ -150,6 +156,7 @@ export const IPC_INVOKE_CHANNELS = [
   'worktree:inspectPreparation',
   'worktree:list',
   'worktree:prepare',
+  'worktree:readFile',
   'worktree:reconnect'
 ] as const;
 

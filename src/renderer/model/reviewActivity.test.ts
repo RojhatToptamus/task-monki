@@ -99,7 +99,7 @@ describe('review activity model', () => {
       ]
     });
 
-    expect(view).toEqual({ label: 'Searching review · src/renderer.' });
+    expect(view).toEqual({ label: 'Searching review in src/renderer.' });
     expect(JSON.stringify(view)).not.toContain('/Users/rojhat/project');
   });
 

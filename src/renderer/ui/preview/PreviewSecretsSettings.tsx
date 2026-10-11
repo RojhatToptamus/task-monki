@@ -1,5 +1,5 @@
 import {
-  Ellipsis,
+  MoreHorizontal,
   KeyRound,
   LockKeyhole,
   Search
@@ -83,7 +83,7 @@ export function PreviewSecretsSettings() {
           <div className="tm-application-preview__toolbar">
             <button
               ref={primaryAction}
-              className="tm-settings__button tm-settings__button--primary"
+              className="primary-button button--sm"
               disabled={busy}
               onClick={() => {
                 setError(undefined);
@@ -94,7 +94,8 @@ export function PreviewSecretsSettings() {
             </button>
             <ActionMenu
               label="Secret storage actions"
-              trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
+              tooltip="More actions"
+              trigger={<MoreHorizontal size={16} aria-hidden="true" />}
               items={[
                 {
                   label: 'Lock storage',
@@ -122,13 +123,13 @@ export function PreviewSecretsSettings() {
       }
     >
       {!api ? (
-        <p>Secret management is available in the desktop application.</p>
+        <p className="tm-settings__empty">Secret management is available in the desktop app.</p>
       ) : !status ? (
-        <p role="status">Loading secret storage…</p>
+        <p className="tm-settings__empty" role="status">Loading secret storage…</p>
       ) : status.state !== 'unlocked' ? (
         <div className="tm-settings__list">
           <div className="tm-application-secrets__empty">
-            <LockKeyhole size={20} strokeWidth={1.5} aria-hidden="true" />
+            <LockKeyhole size={18} aria-hidden="true" />
             <p role="status">
               {status.warning ?? (status.state === 'new'
                 ? 'Store secrets once and use their references in your previews.'
@@ -159,11 +160,11 @@ export function PreviewSecretsSettings() {
             }}
           >
             <label className="field field--search">
-              <Search size={16} strokeWidth={1.5} aria-hidden="true" />
+              <Search size={16} aria-hidden="true" />
               <input
                 aria-label="Search secret references"
                 type="search"
-                placeholder="Search references…"
+                placeholder="Search references"
                 value={query}
                 maxLength={128}
                 onChange={(event) => {
@@ -175,7 +176,7 @@ export function PreviewSecretsSettings() {
                 }}
               />
             </label>
-            <button className="tm-settings__button" disabled={busy || loading}>
+            <button className="outline-button button--sm" disabled={busy || loading}>
               Search
             </button>
             <span className="tm-application-preview__muted" role="status">
@@ -189,7 +190,7 @@ export function PreviewSecretsSettings() {
                   className="tm-settings__row tm-application-secrets__row"
                   key={id}
                 >
-                  <KeyRound size={16} strokeWidth={1.5} aria-hidden="true" />
+                  <KeyRound size={16} aria-hidden="true" />
                   <div className="tm-application-secrets__identity">
                     <code title={id}>{id}</code>
                     {page.usage[id]?.length ? (
@@ -208,7 +209,7 @@ export function PreviewSecretsSettings() {
                     ) : null}
                   </div>
                   <button
-                    className="tm-settings__button"
+                    className="outline-button button--sm"
                     disabled={busy}
                     onClick={() => {
                       setError(undefined);
@@ -219,7 +220,8 @@ export function PreviewSecretsSettings() {
                   </button>
                   <ActionMenu
                     label={`Actions for ${id}`}
-                    trigger={<Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />}
+                    tooltip="More actions"
+                    trigger={<MoreHorizontal size={16} aria-hidden="true" />}
                     items={[
                       {
                         label: 'Delete secret…',

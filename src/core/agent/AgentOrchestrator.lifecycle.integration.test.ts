@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -676,6 +677,105 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect(adapter.runtimeInterruptCount).toBe(1);
   });
 
+  it('hands the reviewer the canonical checkout of a worktree reached through a symlink', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-symlink-'));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    await initializeRepository(repositoryDir);
+    // A worktree root under a symlinked folder, as the macOS temporary folder is.
+    const linkedDir = path.join(dir, 'linked');
+    await fs.symlink(dir, linkedDir);
+    const linkedWorktree = path.join(linkedDir, 'repository');
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review through a symlink',
+      prompt: 'Implement the change.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-symlink',
+      worktreePath: linkedWorktree,
+      baseSha: 'base'
+    });
+    const implemented = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(runtime.task, implemented, 'AGENT_RUN_COMPLETED');
+
+    const reviewed = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: (await store.getRun(implemented.id))!,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+    });
+    const canonical = await fs.realpath(repositoryDir);
+    expect(adapter.lastExecutionContextInput?.primaryCwd).toBe(canonical);
+    expect(adapter.lastExecutionContextInput?.readRoots[0]?.canonicalPath).toBe(canonical);
+    // The session keeps the worktree's recorded path, which the store requires.
+    expect((await store.getAgentSession(reviewed.sessionId))?.worktreePath).toBe(linkedWorktree);
+  });
+
+  it.each([
+    { checkout: 'symlink', description: 'hands a checkout that is itself a symlink to the runtime as named, for its canonical-directory check to refuse' },
+    { checkout: 'missing', description: 'fails clearly when the checkout is missing, before asking the runtime for a context' }
+  ] as const)('$description', async ({ checkout }) => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-checkout-')));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    await initializeRepository(repositoryDir);
+    const checkoutPath = path.join(dir, 'checkout');
+    if (checkout === 'symlink') await fs.symlink(repositoryDir, checkoutPath);
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review checkout',
+      prompt: 'Implement the change.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: `codex/review-${checkout}`,
+      worktreePath: checkoutPath,
+      baseSha: 'base'
+    });
+    const implemented = await orchestrator.startTurn({
+      task, iteration, worktree, mode: 'IMPLEMENTATION', prompt: task.prompt, settings: task.agentSettings
+    });
+    await terminal(runtime.task, implemented, 'AGENT_RUN_COMPLETED');
+    const contextBefore = adapter.lastExecutionContextInput;
+    const review = orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: (await store.getRun(implemented.id))!,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+    });
+    if (checkout === 'symlink') {
+      await review;
+      expect(adapter.lastExecutionContextInput?.primaryCwd).toBe(checkoutPath);
+      expect(adapter.lastExecutionContextInput?.readRoots[0]?.canonicalPath).toBe(checkoutPath);
+    } else {
+      await expect(review).rejects.toThrow(`The task checkout is missing: ${checkoutPath}`);
+      expect(adapter.lastExecutionContextInput).toBe(contextBefore);
+    }
+  });
+
   it('recreates a missing provider session and retries the same follow-up run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -950,7 +1050,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       settings: task.agentSettings
     });
     await terminal(runtime.task, implementation, 'AGENT_RUN_COMPLETED');
-    adapter.reviewStartFailure = 'provider review failed to start';
+    adapter.readOnlyStartFailure = 'provider review failed to start';
 
     await expect(
       orchestrator.startReview({
@@ -1006,6 +1106,90 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       runtimeSnapshot.queueEntries.find((entry) => entry.runId === failedReview.id)
     ).toMatchObject({ status: 'SETTLED' });
     expect(adapter.runtimeReleaseCount).toBe(1);
+  });
+
+  it('keeps one terminal outcome per review and side question across restarts', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-read-only-terminal-restart-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    await initializeRepository(repositoryDir);
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Read-only lanes across restarts',
+      prompt: 'Record each read-only outcome once.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/read-only-terminal-restart',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+    const implementation = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(runtime.task, implementation, 'AGENT_RUN_COMPLETED');
+    const readOnly = { ...task.agentSettings, sandbox: 'READ_ONLY' as const };
+    // Start failures record each outcome under their own operation, not the
+    // completion time the startup check derives from the runtime record.
+    adapter.readOnlyStartFailure = 'provider could not start the turn';
+    await expect(orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: (await store.getRun(implementation.id))!,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: readOnly
+    })).rejects.toThrow('provider could not start the turn');
+    await expect(orchestrator.startSideQuestion({
+      runId: randomUUID(),
+      sessionId: randomUUID(),
+      task,
+      iteration,
+      worktree,
+      settings: task.agentSettings,
+      prompt: 'Where is the entry point?'
+    })).rejects.toThrow('provider could not start the turn');
+    const readOnlyRunIds = (await store.snapshot()).runs
+      .filter((run) => ['REVIEW', 'SIDE_QUESTION'].includes(run.mode))
+      .map((run) => run.id);
+    expect(readOnlyRunIds).toHaveLength(2);
+    const outcomes = async (taskStore: SqliteTaskStore) =>
+      (await taskStore.snapshot()).events.filter(
+        (event) =>
+          readOnlyRunIds.includes(event.runId ?? '') &&
+          ['AGENT_RUN_FAILED', 'ARTIFACT_CREATED'].includes(event.type)
+      );
+    const recorded = await outcomes(store);
+    expect(recorded.filter((event) => event.type === 'AGENT_RUN_FAILED')).toHaveLength(2);
+    await orchestrator.shutdown();
+    await persistenceByTaskStore.get(store)!.close();
+
+    for (let restart = 0; restart < 2; restart += 1) {
+      const reopened = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+      const reopenedRuntime = bindTaskRuntime(reopened);
+      const next = new AgentOrchestrator(
+        reopened,
+        reopenedRuntime.store,
+        new AppEventBus(),
+        new Phase4Adapter(reopenedRuntime.task)
+      );
+      await next.initialize();
+      expect(await outcomes(reopened)).toEqual(recorded);
+      await next.shutdown();
+      await persistenceByTaskStore.get(reopened)!.close();
+    }
   });
 
   it('settles and releases a recovered review after provider termination is known', async () => {
@@ -2122,7 +2306,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   ambiguousStart = false;
   recoveryThenRejectStart = false;
   startFailure?: string;
-  reviewStartFailure?: string;
+  readOnlyStartFailure?: string;
   missingProviderSessionOnStart?: string;
   createdSessionObservedSettings?: AgentExecutionSettings;
   initializeObservedSettings?: {
@@ -2130,6 +2314,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
     settings: AgentExecutionSettings;
   };
   lastStart?: StartAgentTurn;
+  lastExecutionContextInput?: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0];
   startCount = 0;
   runtimeStartCount = 0;
   runtimeInterruptCount = 0;
@@ -2217,6 +2402,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   buildExecutionContext(
     input: Parameters<NonNullable<AgentRuntimeAdapter['buildExecutionContext']>>[0]
   ) {
+    this.lastExecutionContextInput = input;
     return Promise.resolve({
       attestation: { status: 'ATTESTED' as const },
       repositoryAccess: 'READ_ONLY' as const,
@@ -2249,8 +2435,11 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   async startRuntimeTurn(
     input: Parameters<NonNullable<AgentRuntimeAdapter['startRuntimeTurn']>>[0]
   ) {
-    if (this.reviewStartFailure && input.run.purpose === 'TASK_REVIEW') {
-      throw new AgentRuntimeDeliveryError('NOT_DELIVERED', this.reviewStartFailure);
+    if (
+      this.readOnlyStartFailure &&
+      ['TASK_REVIEW', 'TASK_SIDE_QUESTION'].includes(input.run.purpose)
+    ) {
+      throw new AgentRuntimeDeliveryError('NOT_DELIVERED', this.readOnlyStartFailure);
     }
     this.runtimeStartCount += 1;
     return {

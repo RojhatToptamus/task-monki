@@ -15,10 +15,14 @@ describe('ReviewPanel', () => {
           status: 'RUNNING',
           runId: 'review-run',
           sourceRunId: 'source-run',
+          reviewedGitSnapshotId: 'git-1',
+          reviewedHeadSha: 'abc1234567890',
+          reviewedDirtyFingerprint: 'fingerprint-current',
           updatedAt: '2026-07-07T10:00:00.000Z'
         }}
         reviewRun={runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' })}
         gitSnapshot={gitSnapshotFixture()}
+        reviewedSnapshot={gitSnapshotFixture()}
         reviewActivity={{ label: 'Reading src/renderer/ui/TaskDetail.tsx.' }}
         actionBusy={false}
         reviewPending={false}
@@ -27,8 +31,11 @@ describe('ReviewPanel', () => {
     );
 
     expect(html).toContain('Agent review');
-    expect(html).toContain('abc12345');
-    expect(html).toContain('Current activity');
+    // What the review reads: the commit and the worktree's uncommitted changes, never a fingerprint.
+    expect(html).toContain('abc1234 and uncommitted changes');
+    expect(html).not.toContain('fingerprint-current');
+    // Review activity comes from the provider, so it is attributed.
+    expect(html).toContain('Reviewer reported');
     expect(html).toContain('Reading src/renderer/ui/TaskDetail.tsx.');
     expect(html).toContain('Stop');
   });
@@ -61,22 +68,40 @@ describe('ReviewPanel', () => {
         gitSnapshot={gitSnapshotFixture()}
         actionBusy={false}
         reviewPending={false}
-        onReviewAgain={() => {}}
-        action={<button type="button">Run review again</button>}
         onStopReview={() => {}}
       />
     );
 
-    expect(html).toContain('Reviewed diff no longer matches the worktree.');
-    expect(html).toContain('Reviewed diff');
-    expect(html).toContain('feedface');
-    expect(html).toContain('Request can hang');
-    expect(html).not.toContain('Run review again');
-    expect(html.match(/Re-review/gu)).toHaveLength(1);
-    expect(html).toContain('Blocker');
-    expect(html).not.toContain('Major');
-    expect(html).not.toContain('Minor');
-    expect(html).not.toContain('Nit');
+    // One state word; the old verdict is context, never the current state.
+    expect(html).toContain('Needs re-review');
+    expect(html).not.toContain('>Needs changes<');
+    expect(html).toContain('The diff changed after this review, which asked for changes on the earlier version.');
+    // The reviewed commit is named; the dirty-tree fingerprint stays in Debug.
+    // Without the snapshot it read, the worktree's changes now are not claimed for it.
+    expect(html).toContain('Reviewed <code>feedfac</code>, ');
+    expect(html).not.toContain('fingerprint-old');
+    // The Overview names what the earlier review found; the findings live in the Review tab.
+    expect(html).toContain('Earlier: ');
+    expect(html).toContain('1 blocker');
+    expect(html).not.toContain('Request can hang');
+    expect(html).not.toContain('Re-review<');
+    expect(html).not.toMatch(/major|minor|nit/i);
+  });
+
+  it('names the uncommitted changes a finished review read with its commit', () => {
+    const reviewed = (snapshot: GitSnapshotRecord) => renderToStaticMarkup(
+      <ReviewPanel
+        reviewGate={{ ...reviewGateFixture(), reviewedGitSnapshotId: snapshot.id, reviewedHeadSha: 'f390644aa' }}
+        gitSnapshot={{ ...gitSnapshotFixture(), id: 'git-now', stagedCount: 0, unstagedCount: 0, untrackedCount: 0 }}
+        reviewedSnapshot={snapshot}
+        actionBusy={false}
+        reviewPending={false}
+        onStopReview={() => {}}
+      />
+    );
+
+    expect(reviewed(gitSnapshotFixture())).toContain('Reviewed <code>f390644</code> and uncommitted changes, ');
+    expect(reviewed({ ...gitSnapshotFixture(), stagedCount: 0, unstagedCount: 0, untrackedCount: 0 })).toContain('Reviewed <code>f390644</code>, ');
   });
 
   it('keeps the pending review scope without an empty result row', () => {
@@ -90,8 +115,7 @@ describe('ReviewPanel', () => {
       />
     );
 
-    expect(html).toContain('Will review');
-    expect(html).toContain('abc12345 · 3 files · dirty');
+    expect(html).toContain('Will review <code>abc1234</code> and uncommitted changes');
     expect(html).not.toContain('Run a review before marking done or shipping this diff.');
     expect(html).not.toContain('Last result');
     expect(html).not.toContain('>none<');

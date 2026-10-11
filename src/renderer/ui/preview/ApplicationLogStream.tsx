@@ -189,7 +189,7 @@ export function ApplicationLogStream({
       >
         {truncated ? (
           <p className="tm-preview-log-marker">
-            <span>Earlier output evicted · 64 KB limit</span>
+            <span>Earlier output dropped at the 64 KB limit</span>
           </p>
         ) : null}
         {lines.map((line) => (

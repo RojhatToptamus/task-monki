@@ -10,10 +10,6 @@ import {
 } from './OpenTargetService';
 
 describe('OpenTargetService', () => {
-  it('provides an icon reader in the shared Node host', () => {
-    expect(createNodeOpenTargetHost().getFileIconDataUrl).toEqual(expect.any(Function));
-  });
-
   it.runIf(process.platform !== 'win32')(
     'refuses descriptor copy when the selected file is replaced by a symlink',
     async () => {
@@ -85,39 +81,23 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('uses a native app icon when PATH detection can be matched to an app bundle', async () => {
-    const host = new FakeOpenTargetHost(
-      {
-        '/bin/code': executable(),
-        '/Applications/Visual Studio Code.app': directory(),
-        '/repo': directory(),
-        '/worktree': directory()
-      },
-      {
-        iconDataUrls: {
-          '/Applications/Visual Studio Code.app': 'data:image/png;base64,vscode'
-        }
-      }
-    );
-    const service = new OpenTargetService(host);
-
-    const inspection = await service.inspect(
-      {
-        target: {
-          type: 'worktree',
-          worktreeId: 'worktree-1'
-        }
-      },
-      testContext()
-    );
-
-    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({
-      icon: {
-        kind: 'image',
-        dataUrl: 'data:image/png;base64,vscode'
-      }
+  it('reuses the detected editors while the menu opens again within a minute', async () => {
+    const host = new FakeOpenTargetHost({
+      '/bin/code': executable(),
+      '/repo': directory(),
+      '/worktree': directory()
     });
-    expect(inspection.apps.find((app) => app.id === 'default')).not.toHaveProperty('icon');
+    const service = new OpenTargetService(host);
+    const target = { target: { type: 'worktree' as const, worktreeId: 'worktree-1' } };
+
+    const first = await service.inspect(target, testContext());
+    const probes = host.accessCalls;
+    const second = await service.inspect(target, testContext());
+
+    expect(first.apps.map((app) => app.id)).toEqual(['vscode', 'default']);
+    expect(second.apps).toEqual(first.apps);
+    // Only the target is checked again, never each editor's install locations.
+    expect(host.accessCalls - probes).toBeLessThan(probes);
   });
 
   it('rejects worktree file targets that escape the recorded root', async () => {
@@ -334,11 +314,10 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('detects and opens Windows editors from PATH with PATHEXT and native icon paths', async () => {
+  it('detects and opens Windows editors from PATH with PATHEXT', async () => {
     const host = new FakeOpenTargetHost(
       {
         'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.CMD': executable(),
-        'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe': executable(),
         'C:\\repo': directory(),
         'C:\\worktree': directory(),
         'C:\\worktree\\src': directory(),
@@ -349,10 +328,6 @@ describe('OpenTargetService', () => {
           PATH: 'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\bin',
           PATHEXT: '.EXE;.CMD',
           LOCALAPPDATA: 'C:\\Users\\person\\AppData\\Local'
-        },
-        iconDataUrls: {
-          'C:\\Users\\person\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe':
-            'data:image/png;base64,windows-vscode'
         },
         platform: 'win32'
       }
@@ -378,12 +353,7 @@ describe('OpenTargetService', () => {
 
     expect(inspection.preferredAppId).toBe('vscode');
     expect(inspection.revealLabel).toBe('Reveal in File Explorer');
-    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({
-      icon: {
-        kind: 'image',
-        dataUrl: 'data:image/png;base64,windows-vscode'
-      }
-    });
+    expect(inspection.apps.find((app) => app.id === 'vscode')).toMatchObject({ label: 'VS Code' });
 
     await expect(
       service.execute(
@@ -560,6 +530,101 @@ describe('OpenTargetService', () => {
   });
 });
 
+describe('OpenTargetService worktree file reads', () => {
+  const read = (service: OpenTargetService, relativePath: string, taskId = 'task-1') =>
+    service.readWorktreeFile({ taskId, worktreeId: 'worktree-1', relativePath }, testContext());
+
+  it('returns the text with the Git blob id a captured diff records for the same bytes', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost({
+      '/repo': directory(),
+      '/worktree': directory(),
+      '/worktree/src': directory(),
+      '/worktree/src/app.ts': file('hello\n')
+    }));
+
+    // `git hash-object` of "hello\n".
+    await expect(read(service, 'src/app.ts')).resolves.toEqual({
+      status: 'TEXT',
+      text: 'hello\n',
+      blobSha1: 'ce013625030ba8dba906f756967f9e9ca394464a'
+    });
+  });
+
+  it('says why a path has no text to show instead of failing', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost({
+      '/repo': directory(),
+      '/worktree': directory(),
+      '/worktree/src': directory(),
+      '/worktree/image.bin': file(Buffer.from([1, 0, 2])),
+      '/worktree/latin1.txt': file(Buffer.from([0x63, 0x61, 0x66, 0xe9])),
+      '/worktree/huge.txt': file(Buffer.alloc(512 * 1024 + 1, 0x61))
+    }));
+
+    await expect(read(service, 'gone.ts')).resolves.toEqual({ status: 'MISSING' });
+    await expect(read(service, 'src')).resolves.toEqual({ status: 'NOT_FILE' });
+    await expect(read(service, 'image.bin')).resolves.toEqual({ status: 'BINARY' });
+    await expect(read(service, 'latin1.txt')).resolves.toEqual({ status: 'BINARY' });
+    await expect(read(service, 'huge.txt')).resolves.toEqual({ status: 'TOO_LARGE' });
+  });
+
+  it('refuses paths outside the worktree and worktrees of another task', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost(
+      {
+        '/repo': directory(),
+        '/worktree': directory(),
+        '/worktree/link.ts': file('outside\n'),
+        '/worktree/app.ts': file('inside\n')
+      },
+      { realpaths: { '/worktree/link.ts': '/outside/link.ts' } }
+    ));
+
+    await expect(read(service, '../outside.txt')).rejects.toThrow(/escapes/);
+    await expect(read(service, '/etc/passwd')).rejects.toThrow(/Relative file path/);
+    await expect(read(service, 'link.ts')).rejects.toThrow(/escapes/);
+    await expect(read(service, 'app.ts', 'task-2')).rejects.toThrow(/not recorded/);
+    await expect(read(service, 'app.ts', '')).rejects.toThrow(/required/);
+  });
+
+  it('does not read through a symlink that stays inside the worktree', async () => {
+    const service = new OpenTargetService(new FakeOpenTargetHost(
+      {
+        '/repo': directory(),
+        '/worktree': directory(),
+        '/worktree/alias.ts': file('target\n'),
+        '/worktree/target.ts': file('target\n')
+      },
+      { realpaths: { '/worktree/alias.ts': '/worktree/target.ts' } }
+    ));
+
+    await expect(read(service, 'alias.ts')).resolves.toEqual({ status: 'NOT_FILE' });
+    await expect(read(service, 'target.ts')).resolves.toMatchObject({ status: 'TEXT' });
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps a byte order mark and CRLF endings, and refuses a symlink out of a real worktree',
+    async () => {
+      const directoryPath = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-worktree-read-'));
+      const worktreePath = path.join(directoryPath, 'worktree');
+      await fs.mkdir(worktreePath);
+      await fs.writeFile(path.join(worktreePath, 'bom.txt'), '﻿first\r\nsecond\r\n', 'utf8');
+      await fs.writeFile(path.join(directoryPath, 'secret.txt'), 'outside secret', 'utf8');
+      await fs.symlink(path.join(directoryPath, 'secret.txt'), path.join(worktreePath, 'secret.txt'));
+      const service = new OpenTargetService(createNodeOpenTargetHost());
+      const readReal = (relativePath: string) => service.readWorktreeFile(
+        { taskId: 'task-1', worktreeId: 'worktree-1', relativePath },
+        testContext({ worktreePath })
+      );
+
+      try {
+        await expect(readReal('bom.txt')).resolves.toMatchObject({ status: 'TEXT', text: '﻿first\r\nsecond\r\n' });
+        await expect(readReal('secret.txt')).rejects.toThrow(/escapes/);
+      } finally {
+        await fs.rm(directoryPath, { recursive: true, force: true });
+      }
+    }
+  );
+});
+
 type FakeEntry =
   | { type: 'file'; content: Buffer }
   | { type: 'directory' }
@@ -572,14 +637,12 @@ class FakeOpenTargetHost implements OpenTargetHost {
   readonly defaults: string[] = [];
   readonly reveals: string[] = [];
   private readonly entries: Record<string, FakeEntry>;
-  private readonly iconDataUrls: Record<string, string>;
   private readonly realpaths: Record<string, string>;
 
   constructor(
     entries: Record<string, FakeEntry>,
     private readonly options: {
       env?: NodeJS.ProcessEnv;
-      iconDataUrls?: Record<string, string>;
       platform?: NodeJS.Platform;
       realpaths?: Record<string, string>;
     } = {}
@@ -587,7 +650,6 @@ class FakeOpenTargetHost implements OpenTargetHost {
     this.platform = options.platform ?? 'darwin';
     this.env = options.env ?? { PATH: '/bin' };
     this.entries = normalizeRecord(entries, this.platform);
-    this.iconDataUrls = normalizeRecord(options.iconDataUrls ?? {}, this.platform);
     this.realpaths = normalizeRecord(options.realpaths ?? {}, this.platform);
   }
 
@@ -607,7 +669,10 @@ class FakeOpenTargetHost implements OpenTargetHost {
     return this.realpaths[normalize(filePath, this.platform)] ?? normalize(filePath, this.platform);
   }
 
+  accessCalls = 0;
+
   async access(filePath: string) {
+    this.accessCalls += 1;
     return Boolean(this.entries[normalize(filePath, this.platform)]);
   }
 
@@ -631,9 +696,6 @@ class FakeOpenTargetHost implements OpenTargetHost {
     this.reveals.push(filePath);
   }
 
-  async getFileIconDataUrl(filePath: string) {
-    return this.iconDataUrls[normalize(filePath, this.platform)];
-  }
 }
 
 function testContext(input: { repositoryPath?: string; worktreePath?: string } = {}) {

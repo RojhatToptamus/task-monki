@@ -1,4 +1,4 @@
-import { app, shell } from 'electron';
+import { shell } from 'electron';
 import {
   createNodeOpenTargetHost,
   type OpenTargetHost
@@ -16,17 +16,6 @@ export function createElectronOpenTargetHost(): OpenTargetHost {
     },
     async reveal(filePath) {
       shell.showItemInFolder(filePath);
-    },
-    async getFileIconDataUrl(filePath) {
-      try {
-        const icon = await app.getFileIcon(filePath, { size: 'small' });
-        if (!icon.isEmpty()) {
-          return icon.toDataURL();
-        }
-      } catch {
-        // Fall back to the shared Node host below.
-      }
-      return await host.getFileIconDataUrl?.(filePath);
     }
   };
 }

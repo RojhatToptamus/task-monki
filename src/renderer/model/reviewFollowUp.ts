@@ -1,55 +1,158 @@
-import type { AgentReviewFinding, Task } from '../../shared/contracts';
+import { REVIEW_RESPONSE_BLOCK, isBlockingFinding, type AgentReviewFinding, type ReviewComment, type ReviewFindingDismissReason, type ReviewRequestRecord, type TaskReviewDraft } from '../../shared/contracts';
 import { formatFindingLocation } from './findings';
 import { humanizeEnum } from './formatting';
+import type { ReviewFindingView } from './reviewWorkspace';
 
-export function buildReviewFollowUpInstruction(
-  task: Task,
-  reviewGate: NonNullable<Task['projection']['agentReview']>,
-  reviewOutput: string | undefined,
-  selectedFindingIds: string[],
-  note = ''
-): string {
-  const selectedFindings = (reviewGate.result?.findings ?? []).filter((finding) =>
-    selectedFindingIds.includes(finding.id)
-  );
-  const lines = [
-    `Address the review result for "${task.title}".`,
-    '',
-    `Review status: ${humanizeEnum(reviewGate.status)}.`
-  ];
-  if (reviewGate.result?.summary) {
-    lines.push('', `Review summary: ${reviewGate.result.summary}`);
-  } else if (reviewGate.summary) {
-    lines.push('', `Review summary: ${reviewGate.summary}`);
+/**
+ * What Request changes sends. A review that no longer accepts decisions, such as
+ * one the code has moved past, is context only: its findings are neither sent
+ * nor left out, and only the person's comments and note go.
+ */
+export interface ReviewRequestPlan {
+  /** Open Blocker and Major findings, and the Minor and Nit findings the person added. */
+  send: ReviewFindingView[];
+  /** Open Minor and Nit findings not added: not sent. */
+  suggestions: ReviewFindingView[];
+  /** Dismissed findings. */
+  settled: ReviewFindingView[];
+  /** The review has prose notes and no structured findings, so the notes are sent. */
+  reviewNotes: boolean;
+  /** Request changes has something to send. */
+  queued: boolean;
+}
+
+export function planReviewRequest(
+  findings: readonly ReviewFindingView[],
+  draft: Pick<TaskReviewDraft, 'includedFindingIds' | 'reviewRunId' | 'comments' | 'note'>,
+  review: { runId?: string; findingsSendable: boolean; asksForChanges: boolean }
+): ReviewRequestPlan {
+  // Inclusions belong to the review they were made in; a new review starts without them.
+  const included = new Set(draft.reviewRunId === review.runId ? draft.includedFindingIds : []);
+  const send: ReviewFindingView[] = [];
+  const suggestions: ReviewFindingView[] = [];
+  const settled: ReviewFindingView[] = [];
+  for (const finding of review.findingsSendable ? findings : []) {
+    if (finding.state !== 'OPEN') settled.push(finding);
+    else if (isBlockingFinding(finding) || included.has(finding.id)) send.push(finding);
+    else suggestions.push(finding);
   }
-  if (selectedFindings.length > 0) {
-    lines.push('', 'Selected findings to fix:');
-    for (const [index, finding] of selectedFindings.entries()) {
+  const reviewNotes = review.findingsSendable && review.asksForChanges && findings.length === 0;
+  const queued = send.length > 0 || draft.comments.length > 0 || Boolean(draft.note.trim()) || reviewNotes;
+  return { send, suggestions, settled, reviewNotes, queued };
+}
+
+/** Where a comment points, as the agent reads it. */
+export function formatCommentLocation(comment: Pick<ReviewComment, 'path' | 'side' | 'line' | 'endLine'>): string {
+  if (!comment.line) return `${comment.path} (whole file)`;
+  const lines = comment.endLine && comment.endLine > comment.line ? `${comment.line}-${comment.endLine}` : `${comment.line}`;
+  return comment.side === 'OLD'
+    ? `${comment.path} (removed line${comment.endLine && comment.endLine > comment.line ? 's' : ''} ${lines})`
+    : `${comment.path}:${lines}`;
+}
+
+const DISMISS_REASON_WORDS: Record<ReviewFindingDismissReason, string> = {
+  NOT_A_PROBLEM: 'incorrect',
+  ACCEPTED: 'intentional',
+  DEFERRED: 'not now'
+};
+
+export interface ReviewRequestInput {
+  taskTitle: string;
+  /** The review the findings come from; absent when only comments are sent. */
+  reviewRunId?: string;
+  summary?: string;
+  /** The findings to fix: open Blocker and Major, plus the suggestions the person added. */
+  findings: readonly AgentReviewFinding[];
+  /** Dismissed findings, so the agent leaves them alone. */
+  dismissed: ReadonlyArray<{ finding: AgentReviewFinding; reason?: ReviewFindingDismissReason; note?: string }>;
+  /** The person's own comments on lines, ranges and files of the diff. */
+  comments: readonly ReviewComment[];
+  note?: string;
+  /** The review's raw output, used only when it produced no structured findings. */
+  reviewOutput?: string;
+}
+
+/**
+ * The request item by item, numbered as the agent reads them: the findings to fix,
+ * then the person's comments. Absent when nothing is itemised, such as a request
+ * made of the review's raw output alone.
+ */
+export function buildReviewRequestRecord(input: ReviewRequestInput): ReviewRequestRecord | undefined {
+  const findings = input.findings.map((finding, index) => ({
+    number: index + 1,
+    kind: 'FINDING' as const,
+    findingId: finding.id,
+    severity: finding.severity,
+    title: finding.title,
+    ...(finding.path ? { path: finding.path } : {}),
+    ...(finding.line ? { line: finding.line } : {}),
+    ...(finding.line && finding.endLine && finding.endLine >= finding.line ? { endLine: finding.endLine } : {})
+  }));
+  const comments = input.comments.map((comment, index) => ({
+    number: findings.length + index + 1,
+    kind: 'COMMENT' as const,
+    path: comment.path,
+    side: comment.side,
+    ...(comment.line ? { line: comment.line } : {}),
+    ...(comment.line && comment.endLine && comment.endLine >= comment.line ? { endLine: comment.endLine } : {}),
+    text: comment.text.trim()
+  }));
+  const items = [...findings, ...comments];
+  if (items.length === 0) return undefined;
+  return { ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}), items, ...(input.note?.trim() ? { note: input.note.trim() } : {}) };
+}
+
+/**
+ * The follow-up instruction "Request changes" sends to the implementation
+ * agent: the findings to fix and every comment, numbered in one sequence, the
+ * dismissed findings as context not to act on, and the person's note. Suggestions
+ * the person did not add are not mentioned. With numbered items, the agent is
+ * asked to answer each one in a block the Review tab reads.
+ */
+export function buildReviewRequestInstruction(input: ReviewRequestInput): string {
+  const lines = [`Address the review of "${input.taskTitle}".`];
+  if (input.summary?.trim()) lines.push('', `Review summary: ${input.summary.trim()}`);
+  if (input.findings.length > 0) {
+    lines.push('', 'Findings to fix:');
+    input.findings.forEach((finding, index) => {
       lines.push(
         '',
         `${index + 1}. [${humanizeEnum(finding.severity)}] ${finding.title}`,
         `   Location: ${formatFindingLocation(finding)}`,
-        `   Explanation: ${finding.explanation}`
+        `   Why: ${finding.explanation}`
       );
-      if (finding.recommendation) lines.push(`   Recommendation: ${finding.recommendation}`);
-    }
-  } else if (reviewOutput?.trim()) {
-    lines.push('', 'Review output:', reviewOutput.trim());
+      if (finding.recommendation) lines.push(`   Fix: ${finding.recommendation}`);
+    });
+  } else if (input.reviewOutput?.trim() && input.comments.length === 0) {
+    lines.push('', 'Review output:', input.reviewOutput.trim());
   }
-  if (note.trim()) lines.push('', 'Additional note:', note.trim());
+  if (input.comments.length > 0) {
+    lines.push('', 'Comments from the person reviewing:');
+    input.comments.forEach((comment, index) => {
+      lines.push(`${input.findings.length + index + 1}. ${formatCommentLocation(comment)}: ${comment.text.trim()}`);
+    });
+  }
+  if (input.dismissed.length > 0) {
+    lines.push('', 'Left out on purpose; do not change these:');
+    for (const { finding, reason, note } of input.dismissed) {
+      const why = [reason ? DISMISS_REASON_WORDS[reason] : '', note?.trim() ?? ''].filter(Boolean).join(': ');
+      lines.push(`- [${humanizeEnum(finding.severity)}] ${finding.title}${why ? ` (${why})` : ''}`);
+    }
+  }
+  if (input.note?.trim()) lines.push('', 'Note:', input.note.trim());
   lines.push(
     '',
-    [
-      'Fix only the selected findings or review output above unless the root cause requires a scoped adjacent change.',
-      'Preserve the existing task intent and stop when the follow-up is ready for review again.'
-    ].join(' ')
+    'Fix only the findings and comments above unless the root cause requires a scoped adjacent change. Preserve the task intent and stop when the follow-up is ready for review again.'
   );
+  if (input.findings.length + input.comments.length > 0) {
+    lines.push(
+      '',
+      `End your reply with a ${REVIEW_RESPONSE_BLOCK} block that answers every numbered item above, for example:`,
+      `\`\`\`${REVIEW_RESPONSE_BLOCK}`,
+      '[{"item": 1, "outcome": "FIXED", "note": "What you changed."}, {"item": 2, "outcome": "NOT_CHANGED", "note": "Why you left it as it is."}]',
+      '```',
+      'Use FIXED when the change is made, NOT_CHANGED when you leave the code as it is and say why, and NEEDS_DECISION when the person must decide first; the note then asks the question.'
+    );
+  }
   return lines.join('\n');
-}
-
-export function defaultSelectedFindingIds(findings: AgentReviewFinding[]): string[] {
-  const blocking = findings.filter(
-    (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-  );
-  return (blocking.length > 0 ? blocking : findings).map((finding) => finding.id);
 }

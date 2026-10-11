@@ -1,5 +1,4 @@
 import {
-  ArrowRight,
   Check,
   ChevronDown,
   Columns2,
@@ -13,19 +12,19 @@ import {
   Rows2,
   Search,
   Smartphone,
+  Sparkles,
   Tablet,
   X,
   type LucideIcon
 } from 'lucide-react';
 import type { DesignWorkspaceLayoutMode } from '../model/designs';
 
+// The line weight comes from CSS (`--icon-stroke`), the same at every size.
 const iconProps = (size: number, className?: string) => ({
   'aria-hidden': true as const,
-  absoluteStrokeWidth: true,
   className,
   focusable: false as const,
-  size,
-  strokeWidth: 1.5
+  size
 });
 
 export function UiLucideIcon({
@@ -38,6 +37,15 @@ export function UiLucideIcon({
   className?: string;
 }) {
   return <Component {...iconProps(size, className)} />;
+}
+
+/**
+ * The one mark for every agent in the app: the implementation agent's side
+ * question, the reviewer, the Preview agent and prompt refinement. Agents
+ * never get a chat or comment icon (DESIGN.md 8.3).
+ */
+export function AgentMark({ size = 13, className }: { size?: number; className?: string } = {}) {
+  return <UiLucideIcon component={Sparkles} size={size} className={className} />;
 }
 
 export function UiPlusIcon() {
@@ -73,8 +81,8 @@ export function UiPhoneIcon() {
   return <UiLucideIcon component={Smartphone} />;
 }
 
-export function UiRefreshIcon({ busy = false }: { busy?: boolean }) {
-  return <UiLucideIcon component={RefreshCw} className={busy ? 'tm-icon--spinning' : undefined} />;
+export function UiRefreshIcon() {
+  return <UiLucideIcon component={RefreshCw} />;
 }
 
 export function UiExternalLinkIcon() {
@@ -95,13 +103,9 @@ export function UiCheckIcon({ size = 11 }: { size?: number } = {}) {
   return <UiLucideIcon component={Check} size={size} />;
 }
 
-export function UiArrowRightIcon() {
-  return <UiLucideIcon component={ArrowRight} size={12} />;
-}
-
 export function UiChevronDownIcon({
   open = false,
-  size = 12,
+  size = 13,
   className = ''
 }: {
   open?: boolean;

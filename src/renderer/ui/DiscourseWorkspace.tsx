@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react';
-import { ArrowUp, Check, Square, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Square, X } from 'lucide-react';
 import type {
   ConversationContextReferenceSnapshot,
   DiscourseConversationAggregateRecord,
@@ -61,6 +61,7 @@ import {
   discoursePendingConversationFingerprint
 } from '../model/discourseSend';
 import { ActionMenu } from './ActionMenu';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { DiscourseAgentSettings } from './DiscourseAgentSettings';
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
@@ -84,9 +85,9 @@ import {
   InspectorSidebar,
   InspectorSection
 } from './DiscourseOverlays';
+import { DisclosureChevron } from './DisclosureChevron';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { PanelResizeHandle } from './PanelResizeHandle';
-import { StatusGlyph } from './StatusBadge';
 import {
   focusedPanelWidth,
   persistFocusedPanelWidth
@@ -1767,8 +1768,7 @@ export function DiscourseWorkspace({
         aria-label="Loading Discourse"
       >
         <div className="tm-workspace-loading">
-          <StatusGlyph kind="working" />
-          <strong>Loading Discourse</strong>
+          <span>Loading Discourse</span>
         </div>
       </div>
     );
@@ -1829,17 +1829,16 @@ export function DiscourseWorkspace({
 
       <section className="tm-discourse-conversation">
         <header className="tm-discourse-header">
-          <button
+          <Tooltip label={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}><button
             ref={railReturnFocusRef}
             type="button"
             className="tm-iconbtn tm-mode-history-toggle tm-discourse-rail-toggle"
             aria-label={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
             aria-expanded={!effectiveHistoryCollapsed}
-            title={effectiveHistoryCollapsed ? 'Show conversation history' : 'Hide conversation history'}
             onClick={() => setHistoryVisible(effectiveHistoryCollapsed)}
           >
             <PanelIcon />
-          </button>
+          </button></Tooltip>
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
               <form
@@ -1884,17 +1883,16 @@ export function DiscourseWorkspace({
             {aggregate?.conversation.status === 'ARCHIVED' ? <div className="tm-discourse-header__meta">Archived</div> : null}
           </div>
           <div className="tm-discourse-header__actions">
-            <button
+            <Tooltip label={inspectorOpen ? 'Close conversation settings' : 'Open conversation settings'}><button
               ref={inspectorReturnFocusRef}
               type="button"
               className="tm-iconbtn"
               aria-label={inspectorOpen ? 'Close conversation settings' : 'Open conversation settings'}
               aria-expanded={inspectorOpen}
-              title={inspectorOpen ? 'Close conversation details' : 'Open conversation details'}
               onClick={() => setInspectorOpen((value) => !value)}
             >
-              <DiscoursePanelRightIcon expanded={inspectorOpen} />
-            </button>
+              <DiscoursePanelRightIcon />
+            </button></Tooltip>
             {aggregate ? (
               <ActionMenu
                 className="tm-action-menu"
@@ -1916,6 +1914,7 @@ export function DiscourseWorkspace({
                   {
                     label: 'Delete conversation',
                     danger: true,
+                    separated: true,
                     disabled: conversationActionsDisabled,
                     disabledReason: conversationActionsDisabledReason,
                     onSelect: () => setConfirmAction({ type: 'delete-conversation' })
@@ -2017,7 +2016,6 @@ export function DiscourseWorkspace({
             </div>
           ) : conversationPending ? (
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
-              <StatusGlyph kind="working" />
               <h2>Loading conversation…</h2>
             </div>
           ) : messages.length === 0 ? (
@@ -2096,7 +2094,8 @@ export function DiscourseWorkspace({
                 setNewResponses(false);
               }}
             >
-              New responses ↓
+              New responses
+              <ArrowDown size={16} aria-hidden="true" />
             </button>
           ) : null}
         </div>
@@ -2141,7 +2140,7 @@ export function DiscourseWorkspace({
                 <button
                   ref={previewButtonRef}
                   type="button"
-                  className="tm-discourse-preview-button"
+                  className="ghost-button tm-discourse-preview-button"
                   aria-label={previewLoading ? 'Resolving agent context' : 'Context'}
                   aria-expanded={Boolean(preview)}
                   disabled={previewLoading || composerUnavailable}
@@ -2157,17 +2156,17 @@ export function DiscourseWorkspace({
                     onClose={() => setPreview(undefined)}
                   />
                 ) : null}
-                <button
+                <Tooltip label={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Post note' : 'Send'}
+                  shortcut={activeWave ? undefined : SUBMIT_SHORTCUT} side="top"><button
                   type="button"
-                  className={`tm-discourse-send tm-composer-action ${activeWave ? 'tm-discourse-send--stop' : ''}`}
+                  className={`${activeWave ? 'outline-button' : 'primary-button'} tm-composer-action`}
                   disabled={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) : files.busy || files.hasErrors || Boolean(files.modelError) || files.interactionBlocked || !composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                  aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Save' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
-                  title={activeWave ? 'Stop response' : responsePolicy === 'NONE' ? 'Save note · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}
-                  aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
+                  aria-label={activeWave ? ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status) ? 'Stopping…' : 'Stop' : sending ? 'Sending…' : responsePolicy === 'NONE' ? 'Post note' : activeAgentProfileIds.length === 2 ? `Ask ${selectedAgentName(activeAgentProfileIds[1]!, 'peer')}` : 'Send'}
+                  aria-describedby={!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? 'discourse-response-requirement' : undefined}
                   onClick={() => activeWave ? void stopWave(activeWave.id) : void send(composer, files)}
                 >
-                  {sending || (activeWave && ['STOP_REQUESTED', 'STOPPING'].includes(activeWave.status)) ? <StatusGlyph kind="working" /> : activeWave ? <Square size={14} strokeWidth={1.5} aria-hidden="true" /> : responsePolicy === 'NONE' ? <Check size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
-                </button>
+                  {activeWave ? <Square size={13} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
+                </button></Tooltip>
               </div>
             )}
           >
@@ -2188,7 +2187,7 @@ export function DiscourseWorkspace({
                   ? 'Resume or cancel the interrupted response first'
                 : aggregate?.conversation.status === 'ARCHIVED'
                   ? 'Restore this conversation to add a message'
-                  : 'Write a message… Type @ to add context or address an agent'}
+                  : 'Write a message, or type @ for context and agents'}
               onPaste={files.paste}
               onChange={updateComposer}
               onSubmit={(state) => { if (!activeWave) void send(state, files); }}
@@ -2211,7 +2210,8 @@ export function DiscourseWorkspace({
                 })}
               </div>
             ) : null}
-            {!safeResponseReady && responsePolicy !== 'NONE' ? (
+            {/* With the settings open, the agent field there states this itself. */}
+            {!safeResponseReady && responsePolicy !== 'NONE' && !inspectorOpen ? (
               <p id="discourse-response-requirement" className="tm-discourse-composer__requirement" role="status">
                 {responseRequirement}
               </p>
@@ -2253,16 +2253,16 @@ export function DiscourseWorkspace({
               />
             </InspectorSection>
           ) : null}
-          <InspectorSection title="Pinned context" count={pinned.length}>
+          <InspectorSection title="Pinned context" count={pinned.length || undefined}>
             {pinned.length === 0 ? (
               <p className="tm-discourse-inspector__empty">Nothing pinned.</p>
             ) : (
               <ul className="tm-discourse-context-list">
                 {pinned.map((reference) => (
                   <ContextReference key={reference.contextLinkId} kind={reference.entityKind} label={reference.labelSnapshot}
-                    description={`${reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · ${availabilityLabel(reference.availability)}`}>
+                    description={[reference.entityKind === 'TASK' ? 'Task context' : 'Repository context', availabilityLabel(reference.availability)]}>
                     <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
-                      <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+                      <X aria-hidden="true" size={13} />
                     </button>
                   </ContextReference>
                 ))}
@@ -2281,7 +2281,7 @@ export function DiscourseWorkspace({
               <div><dt>Requested access</dt><dd>Read only</dd></div>
               <div><dt>Task Monki tools</dt><dd>Off</dd></div>
             </dl>
-            <details><summary>View details</summary>
+            <details><summary><span className="tm-disclosure__label"><DisclosureChevron />View details</span></summary>
             <p>Provider controls vary. Task Monki checks selected repositories for changes after each turn.</p>
             <dl className="tm-discourse-access-policy">
               <div><dt>Approvals</dt><dd>Never</dd></div>
@@ -2325,7 +2325,7 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
     <div className="tm-discourse-composer-target">
       <span><strong>{label}</strong><small>{compactText(message.body, 120)}</small></span>
       <button type="button" aria-label="Remove reply target" onClick={onRemove}>
-        <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+        <X aria-hidden="true" size={13} />
       </button>
     </div>
   );

@@ -1,11 +1,18 @@
 import { validateAgentProfile } from '../../shared/agentProfiles';
 import {
+  AGENT_REVIEW_FINDING_SEVERITIES,
   ARTIFACT_KINDS,
   ATTACHMENT_MAX_COUNT,
   DOMAIN_EVENT_TYPES,
+  REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_FINDING_DISMISS_REASONS,
+  REVIEW_FINDING_TEXT_MAX_LENGTH,
   TASK_STORE_SCHEMA_VERSION,
-  isTaskCreationToken
+  isTaskCreationToken,
+  reviewDraftProblem
 } from '../../shared/contracts';
+import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
+import { assertReviewRequestRecord } from '../../shared/reviewRounds';
 import type { StoreState } from '../projection/reducer';
 
 const WORKFLOW_PHASES = [
@@ -18,10 +25,11 @@ const RESOLUTIONS = [
 const COMPLETION_POLICIES = [
   'ARTIFACT_ACCEPTANCE', 'LOCAL_ACCEPTANCE', 'MERGED', 'MERGED_AND_VERIFIED', 'MANUAL'
 ] as const;
-const RUN_MODES = [
-  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'DESIGN',
-  'COMPACTION', 'SUBAGENT'
-] as const;
+// Records keyed by the contract unions, so a new mode or role cannot be left out.
+const RUN_MODES = Object.keys({
+  ANALYSIS: true, IMPLEMENTATION: true, FOLLOW_UP: true, RETRY: true, REVIEW: true,
+  SIDE_QUESTION: true, DESIGN: true, PREVIEW: true, COMPACTION: true, SUBAGENT: true
+} satisfies Record<AgentRunMode, true>);
 const RUN_STATUSES = [
   'QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT',
   'INTERRUPTING', 'COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'
@@ -32,7 +40,9 @@ const RECOVERY_STATES = [
 const SERVER_STATUSES = [
   'STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'
 ] as const;
-const SESSION_ROLES = ['PRIMARY', 'ALTERNATIVE', 'REVIEW', 'SUBAGENT'] as const;
+const SESSION_ROLES = Object.keys({
+  PRIMARY: true, ALTERNATIVE: true, REVIEW: true, PREVIEW: true, SIDE: true, SUBAGENT: true
+} satisfies Record<AgentSessionRole, true>);
 const SESSION_STATUSES = [
   'NOT_MATERIALIZED', 'NOT_LOADED', 'IDLE', 'ACTIVE', 'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT', 'SYSTEM_ERROR', 'ARCHIVED', 'DELETED', 'UNKNOWN'
@@ -163,6 +173,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     if (task.agentProfile !== undefined) {
       validateAgentProfile(task.agentProfile);
     }
+    if (task.reviewDraft !== undefined && reviewDraftProblem(task.reviewDraft)) invalid('tasks');
     uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'kind', ['NORMAL', 'DESIGN'] as const, 'tasks');
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');
@@ -191,6 +202,7 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     enumField(instruction, 'mode', ['QUEUE', 'FOLLOW_UP', 'RETRY', 'STEER'], 'taskInstructions');
     enumField(instruction, 'status', ['QUEUED', 'HELD', 'SENDING', 'SUBMITTED', 'FAILED', 'UNCERTAIN'], 'taskInstructions');
     optionalStrings(instruction, 'taskInstructions', ['detail']);
+    validateTaskInstructionConversation(instruction);
     timestamp(instruction, 'createdAt', 'taskInstructions');
     timestamp(instruction, 'updatedAt', 'taskInstructions');
     // A Design's messages belong only to its Preview conversation.
@@ -1090,6 +1102,9 @@ function validateEvents(state: StoreState): void {
     enumField(event, 'source', DOMAIN_EVENT_SOURCES, 'events');
     timestamp(event, 'occurredAt', 'events');
     timestamp(event, 'receivedAt', 'events');
+    if (event.type === 'AGENT_REVIEW_FINDING_DECIDED') {
+      validateReviewFindingDecision(persistedRecord(event.payload, 'events').decision, 'events');
+    }
   });
 }
 
@@ -1238,13 +1253,25 @@ function projection(value: unknown): void {
     const review = persistedRecord(record.agentReview, 'tasks.projection');
     enumField(review, 'status', REVIEW_GATE_STATUSES, 'tasks.projection');
     optionalStrings(review, 'tasks.projection', [
-      'reviewedHeadSha', 'reviewedDirtyFingerprint', 'summary'
+      'reviewedHeadSha', 'reviewedDirtyFingerprint', 'reviewedTreeSha', 'summary'
     ], new Set(['summary']));
     optionalUuidFields(review, 'tasks.projection', [
       'runId', 'sourceRunId', 'reviewedGitSnapshotId', 'finalArtifactId'
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
+    if (review.requestAnswer !== undefined) {
+      booleanField(persistedRecord(review.requestAnswer, 'tasks.projection'), 'awaitingDecision', 'tasks.projection');
+    }
     if (review.result !== undefined) reviewResult(review.result);
+    if (review.findingDecisions !== undefined) {
+      if (
+        !Array.isArray(review.findingDecisions) ||
+        review.findingDecisions.length > REVIEW_FINDING_DECISION_LIMIT
+      ) invalid('tasks.projection');
+      for (const decision of review.findingDecisions) {
+        validateReviewFindingDecision(decision, 'tasks.projection');
+      }
+    }
   }
 }
 
@@ -1262,16 +1289,89 @@ function reviewResult(value: unknown): void {
   for (const finding of record.findings) {
     const item = persistedRecord(finding, 'tasks.projection');
     strings(item, 'tasks.projection', ['id', 'title', 'explanation']);
-    enumField(
-      item,
-      'severity',
-      ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'] as const,
-      'tasks.projection'
-    );
-    optionalStrings(item, 'tasks.projection', ['path', 'recommendation']);
+    enumField(item, 'severity', AGENT_REVIEW_FINDING_SEVERITIES, 'tasks.projection');
+    optionalStrings(item, 'tasks.projection', ['path', 'recommendation', 'previousFindingId']);
     optionalInteger(item, 'line', 'tasks.projection', 1);
     optionalInteger(item, 'endLine', 'tasks.projection', 1);
   }
+  if (record.resolvedFindings !== undefined) {
+    if (!Array.isArray(record.resolvedFindings)) invalid('tasks.projection');
+    for (const resolved of record.resolvedFindings) {
+      const item = persistedRecord(resolved, 'tasks.projection');
+      strings(item, 'tasks.projection', ['previousFindingId', 'title']);
+      optionalStrings(item, 'tasks.projection', ['note']);
+    }
+  }
+}
+
+/** A dismissal carries its reason and, optionally, a note; a restore carries neither. */
+function validateReviewFindingDecision(value: unknown, collection: string): void {
+  const decision = persistedRecord(value, collection);
+  uuidFields(decision, collection, ['id', 'reviewRunId']);
+  stringField(decision, 'findingId', collection);
+  timestamp(decision, 'createdAt', collection);
+  enumField(decision, 'kind', ['DISMISS', 'RESTORE'] as const, collection);
+  if (decision.kind === 'RESTORE') {
+    if (decision.note !== undefined || decision.dismissReason !== undefined) invalid(collection);
+    return;
+  }
+  enumField(decision, 'dismissReason', REVIEW_FINDING_DISMISS_REASONS, collection);
+  if (decision.note !== undefined) {
+    stringField(decision, 'note', collection);
+    if ((decision.note as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
+  }
+}
+
+/**
+ * Only a side question (Ask) names its thread, when it read one its worktree
+ * snapshot, and when it was asked about one its subject.
+ */
+export function validateTaskInstructionConversation(instruction: Record<string, unknown>): void {
+  optionalEnumField(instruction, 'role', ['PREVIEW', 'SIDE'] as const, 'taskInstructions');
+  if (instruction.role === 'SIDE') {
+    uuidField(instruction, 'threadId', 'taskInstructions');
+    optionalTimestamp(instruction, 'snapshotTakenAt', 'taskInstructions');
+    optionalInteger(instruction, 'snapshotOmittedFileCount', 'taskInstructions', 1);
+    if (instruction.snapshotOmittedFileCount !== undefined && instruction.snapshotTakenAt === undefined) {
+      invalid('taskInstructions');
+    }
+    if (instruction.subject !== undefined) askSubject(instruction.subject);
+  } else if (
+    instruction.threadId !== undefined ||
+    instruction.snapshotTakenAt !== undefined ||
+    instruction.snapshotOmittedFileCount !== undefined ||
+    instruction.subject !== undefined
+  ) {
+    invalid('taskInstructions');
+  }
+  // A review request is a follow-up to the task's own agent.
+  if (instruction.reviewRequest !== undefined) {
+    if (instruction.role !== undefined || instruction.mode !== 'FOLLOW_UP') invalid('taskInstructions');
+    try {
+      assertReviewRequestRecord(instruction.reviewRequest);
+    } catch {
+      invalid('taskInstructions');
+    }
+  }
+}
+
+/** An Ask subject: a finding of a review, or a line range of the diff. */
+function askSubject(value: unknown): void {
+  const collection = 'taskInstructions';
+  const subject = persistedRecord(value, collection);
+  enumField(subject, 'kind', ['FINDING', 'LINES'] as const, collection);
+  if (subject.kind === 'FINDING') {
+    uuidField(subject, 'reviewRunId', collection);
+    stringField(subject, 'findingId', collection);
+    if (Object.keys(subject).some((key) => !['kind', 'reviewRunId', 'findingId'].includes(key))) invalid(collection);
+    return;
+  }
+  stringField(subject, 'path', collection);
+  enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
+  integer(subject, 'line', collection, 1);
+  optionalInteger(subject, 'endLine', collection, 1);
+  if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
+  if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
 }
 
 function settings(value: unknown, collection: string): void {

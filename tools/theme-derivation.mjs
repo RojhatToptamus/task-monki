@@ -5,7 +5,7 @@
  * file that touches the filesystem, so this module can also be loaded by tests
  * and by the audit tooling.
  *
- * Design contract (DESIGN.md §2):
+ * Design contract (docs/design/THEMES.md):
  *   1. Surfaces are a strictly monotonic ladder in perceived lightness.
  *   2. An interaction step is always SMALLER than the structural step it sits
  *      inside, so state never reads as elevation.
@@ -174,9 +174,15 @@ export const LADDER = {
 
 /* Alpha overlays for state. Quieter than the structural steps they sit inside. */
 export const ALPHA = {
-  dark: { hover: 0.03, press: 0.075, focusRing: 0.22 },
-  light: { hover: 0.04, press: 0.075, focusRing: 0.18 }
+  dark: { hover: 0.03, press: 0.075 },
+  light: { hover: 0.04, press: 0.075 }
 };
+
+/* The keyboard focus halo is the one loud state (DESIGN §7.5) and a non-text
+ * indicator, so it must clear 3:1 against whatever plane it is drawn over
+ * (§13). Like a line, it is accent at an alpha solved per theme per mode — a
+ * fixed 0.18–0.22 measured 1.2–1.6:1 everywhere. */
+export const FOCUS_RING_FLOOR = 3;
 
 /* Line weights, as CONTRAST TARGETS rather than fixed alphas — five jobs:
  *   hair           a divider INSIDE a surface, where content continues
@@ -506,6 +512,9 @@ export function deriveVariant(seeds, mode) {
   );
   const edgeRaisedA = solveEdgeAlpha(seedInk, [panel, surface, card], target.edgeRaised);
   const edgeA = solveEdgeAlpha(seedInk, [ground, panel, surface], target.edge);
+  /* Solved on the emitted (rounded) colours so the check measures what ships. */
+  const emitted = (rgb) => hexToRgb(rgbToHex(rgb));
+  const focusRingA = solveEdgeAlpha(emitted(accent), planes.map(emitted), FOCUS_RING_FLOOR, true);
 
   const tokens = {
     /* surfaces */
@@ -522,7 +531,7 @@ export function deriveVariant(seeds, mode) {
     '--field-hover': rgbToHex(fieldHover),
     '--field-focus': rgbToHex(fieldFocus),
     '--field-disabled': rgbToHex(fieldDisabled),
-    '--focus-ring': rgba(accent, alpha.focusRing),
+    '--focus-ring': rgba(accent, focusRingA),
     '--field-focus-ring': 'var(--focus-ring)',
 
     /* row and control states */
@@ -537,6 +546,8 @@ export function deriveVariant(seeds, mode) {
     '--control-edge': rgbToHex(
       solveInk({ C: inkOk.C * 0.6, h: inkOk.h }, [field, card, surface], 3, mode, dark ? 45 : 58)
     ),
+    /* A switch knob on the accent track: the light end of the ink ramp in both modes. */
+    '--control-knob-on': rgbToHex(dark ? primary : onPrimary),
 
     /* ink */
     '--text': rgbToHex(text),
@@ -599,15 +610,7 @@ export function deriveVariant(seeds, mode) {
       : `0 2px 6px ${rgba(shadowInk, 0.06)}, 0 16px 36px ${rgba(shadowInk, 0.14)}`,
     '--shadow-modal': dark
       ? `inset 0 1px 0 ${rgba(seedInk, 0.07)}, 0 40px 90px ${rgba(shadowInk, 0.74)}`
-      : `0 4px 12px ${rgba(shadowInk, 0.08)}, 0 32px 72px ${rgba(shadowInk, 0.2)}`,
-
-    /* deprecated aliases — remove once no screen references them */
-    '--working': 'var(--accent)',
-    '--working-ink': 'var(--accent-ink)',
-    '--working-bg': 'var(--accent-soft)',
-    '--ctx-bg': 'var(--accent-soft)',
-    '--amber-bg': 'var(--waiting-bg)',
-    '--error-bg': 'var(--blocked-bg)'
+      : `0 4px 12px ${rgba(shadowInk, 0.08)}, 0 32px 72px ${rgba(shadowInk, 0.2)}`
   };
 
   const planeChromaDeltas = Object.fromEntries(
@@ -651,7 +654,7 @@ export function measureVariant(tokens) {
   const checkEdge = (token, hosts, floor) => {
     const value = tokens[token];
     const match = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/u.exec(value);
-    if (!match) throw new Error(`${token} must be an rgba color derived from ink`);
+    if (!match) throw new Error(`${token} must be an rgba color`);
     const line = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4])];
     const worstHost = hosts.reduce(
       (acc, host) => {
@@ -688,6 +691,7 @@ export function measureVariant(tokens) {
     check('--blocked-ink', 4.5),
     check('--verified-ink', 4.5),
     fieldEdgeFocus,
+    checkEdge('--focus-ring', PLANE_TOKENS, FOCUS_RING_FLOOR),
     ...[1, 2, 3, 4, 5, 6].map((n) => check(`--id-${n}`, 3))
   ];
 

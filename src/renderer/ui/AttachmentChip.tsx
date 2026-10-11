@@ -83,7 +83,7 @@ export function StoredAttachmentChip({
         {onRead ? <AttachmentPreview name={attachment.displayName} read={onRead} onOpenChange={onPreviewOpenChange} /> :
           <span className="task-attachment__name" title={attachment.displayName}>{attachment.displayName}</span>}
         <span className="task-attachment__meta">
-          {label ? `${label} · ` : ''}{formatAttachmentBytes(attachment.byteCount)}
+          {label ? <span className="task-attachment__label">{label}</span> : null}{formatAttachmentBytes(attachment.byteCount)}
         </span>
       </span>
       {onRemove ? <button
@@ -165,13 +165,13 @@ function AttachmentPreviewDialog({ name, onClose, onOpenChange, children }: {
 }
 
 function CloseIcon() {
-  return <X aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
+  return <X aria-hidden="true" size={16} />;
 }
 
 function ImageFileIcon() {
-  return <Image aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <Image aria-hidden="true" size={16} />;
 }
 
 function TextFileIcon() {
-  return <FileText aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
+  return <FileText aria-hidden="true" size={16} />;
 }

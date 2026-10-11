@@ -1,5 +1,14 @@
 import type { ApplicationPreviewApi } from './applicationPreview';
 import type {
+  AgentReviewFindingSeverity,
+  AgentReviewGateProjection,
+  AgentReviewGateStatus,
+  DecideReviewFindingRequest,
+  ReviewFindingDecision
+} from './agentReviewFindings';
+import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
+import type { ReviewRequestRecord } from './reviewRounds';
+import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
   AgentItemRecord,
@@ -56,6 +65,9 @@ import type {
 } from './design';
 
 export * from './agent';
+export * from './agentReviewFindings';
+export * from './reviewDraft';
+export * from './reviewRounds';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -74,7 +86,7 @@ export interface DesignRepositorySetup {
   workspaceSnapshotId?: string;
 }
 
-export const TASK_STORE_SCHEMA_VERSION = 28 as const;
+export const TASK_STORE_SCHEMA_VERSION = 30 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -268,50 +280,6 @@ export type ReviewStatus =
   | 'STALE'
   | 'UNKNOWN';
 
-export type AgentReviewGateStatus =
-  | 'NOT_RUN'
-  | 'RUNNING'
-  | 'PASSED'
-  | 'NEEDS_CHANGES'
-  | 'INCONCLUSIVE'
-  | 'FAILED'
-  | 'CANCELED'
-  | 'STALE';
-
-export type AgentReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
-
-export interface AgentReviewFinding {
-  id: string;
-  severity: AgentReviewFindingSeverity;
-  title: string;
-  explanation: string;
-  path?: string;
-  line?: number;
-  endLine?: number;
-  recommendation?: string;
-}
-
-export interface AgentReviewResult {
-  /** Durable schema-13 wire value for provider-neutral review artifacts. */
-  schemaVersion: 'agent-review/v1';
-  verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
-  summary: string;
-  findings: AgentReviewFinding[];
-}
-
-export interface AgentReviewGateProjection {
-  status: AgentReviewGateStatus;
-  runId?: string;
-  sourceRunId?: string;
-  reviewedGitSnapshotId?: string;
-  reviewedHeadSha?: string;
-  reviewedDirtyFingerprint?: string;
-  finalArtifactId?: string;
-  summary?: string;
-  result?: AgentReviewResult;
-  updatedAt?: string;
-}
-
 export type MergeStatus =
   | 'NOT_APPLICABLE'
   | 'NOT_MERGED'
@@ -337,6 +305,8 @@ export const DOMAIN_EVENT_TYPES = [
   'WORKTREE_FAILED',
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
+  'REVIEW_REQUEST_ANSWERED',
+  'REVIEW_SNAPSHOT_RECORDED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
   'GITHUB_PREFLIGHT_COMPLETED',
@@ -373,6 +343,7 @@ export const DOMAIN_EVENT_TYPES = [
   'IMPLEMENTATION_OUTCOME_BLOCKED',
   'AGENT_MUTATION_AMBIGUOUS',
   'AGENT_REVIEW_POLICY_VIOLATION',
+  'AGENT_REVIEW_FINDING_DECIDED',
   'AGENT_RUNTIME_LOST',
   'AGENT_RUNTIME_RECONCILED',
   'PROCESS_EXITED',
@@ -463,8 +434,27 @@ export interface TaskInstruction extends InstructionAttachments {
   text: string;
   mode: 'QUEUE' | 'FOLLOW_UP' | 'RETRY' | 'STEER';
   status: 'QUEUED' | 'HELD' | 'SENDING' | 'SUBMITTED' | 'FAILED' | 'UNCERTAIN';
-  /** The conversation this message belongs to; absent for the task's primary agent session. */
-  role?: 'PREVIEW';
+  /**
+   * The conversation this message belongs to; absent for the task's primary agent session.
+   * PREVIEW is the Preview agent conversation. SIDE is a question in Ask, thread
+   * `threadId`, answered by its own read-only SIDE_QUESTION run (`runId`); it never joins
+   * the main conversation.
+   */
+  role?: 'PREVIEW' | 'SIDE';
+  /** SIDE only: the side thread (one per open side panel) the question belongs to. */
+  threadId?: string;
+  /**
+   * SIDE only: present when the answer reads a read-only snapshot of the worktree taken at
+   * this time, because implementation work was changing the live checkout. Absent when the
+   * question reads the live checkout.
+   */
+  snapshotTakenAt?: string;
+  /** SIDE only: untracked files left out of that snapshot by its size limits. */
+  snapshotOmittedFileCount?: number;
+  /** SIDE only: what the question is about, when it was asked from a finding or from lines of the diff. */
+  subject?: AskSubject;
+  /** A follow-up sent from the Review tab: the request item by item, which the agent answers by number. */
+  reviewRequest?: ReviewRequestRecord;
   /** Reserved before admission; may be absent from runtime storage after a crash. */
   runId?: string;
   detail?: string;
@@ -507,6 +497,8 @@ export interface SaveTaskAgentDraftRequest {
 export interface Task {
   id: string;
   agentDraft?: string;
+  /** The person's unsent review: comments, chosen suggestions and the note. */
+  reviewDraft?: TaskReviewDraft;
   promptDraft?: string;
   agentAttachmentDraftId?: string;
   initialAttachmentIds?: string[];
@@ -953,7 +945,12 @@ export interface BoardAgentReviewSummary {
   status: AgentReviewGateStatus;
   runId?: string;
   hasResult: boolean;
+  /** Open findings by severity, after the person's decisions. */
   findingCounts: Partial<Record<AgentReviewFindingSeverity, number>>;
+  /** `effectiveReviewGateStatus` of the review: the status once every decision applies, which can differ from `status` both ways. */
+  effectiveStatus: AgentReviewGateStatus;
+  /** The agent answered the request after this review; true when an item waits on the person's decision. */
+  requestAnswered?: { awaitingDecision: boolean };
 }
 
 export type BoardStatusProjection = Pick<
@@ -1126,6 +1123,8 @@ export interface ContinueRunRequest extends InstructionAttachments {
   taskId: string;
   runId: string;
   instruction?: string;
+  /** Sent from the Review tab with its instruction: the request item by item. */
+  reviewRequest?: ReviewRequestRecord;
   settings?: AgentExecutionSettings;
 }
 
@@ -1143,6 +1142,44 @@ export interface StartReviewRequest {
   runId?: string;
   target?: AgentReviewTarget;
   settings?: AgentExecutionSettings;
+}
+
+/** A side question to the task's implementation agent, idempotent by `messageId`. */
+export interface AskSideQuestionRequest {
+  taskId: string;
+  /** Lowercase UUID generated by the renderer for the open side panel. */
+  threadId: string;
+  /** Lowercase UUID; repeating it returns the recorded question. */
+  messageId: string;
+  text: string;
+  /**
+   * The runtime, model and reasoning effort that answer this question, independent of the
+   * main conversation; the task's own when absent. The answer is read-only whatever it is.
+   */
+  model?: SideQuestionModelChoice;
+  subject?: AskSubject;
+}
+
+/**
+ * What an Ask question is about: a finding of the task's current review, or a line
+ * range of the current diff (the old side's numbers on removed lines).
+ */
+export type AskSubject =
+  | { kind: 'FINDING'; reviewRunId: string; findingId: string }
+  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number };
+
+export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
+  runtimeId: AgentRuntimeId;
+};
+
+export interface StopSideQuestionRequest {
+  taskId: string;
+  runId: string;
+}
+
+export interface EndSideThreadRequest {
+  taskId: string;
+  threadId: string;
 }
 
 export interface SyncAgentGoalRequest {
@@ -1300,8 +1337,6 @@ export interface UpdateAppSettingsRequest {
   discourseDefaults?: import('./discourse').DiscourseDefaults;
   theme?: import('./agent').TaskManagerThemePreference;
   themePreset?: import('./agent').TaskManagerThemePreset;
-  sidebarCollapsed?: boolean;
-  showMascot?: boolean;
   autoInstallUpdatesOnQuit?: boolean;
   firstLaunchSetupCompleted?: boolean;
   disabledRuntimeIds?: import('./agent').AgentRuntimeId[];
@@ -1319,6 +1354,10 @@ export interface UpdateAppSettingsRequest {
   reviewRuntimeId?: import('./agent').AgentRuntimeId | null;
   reviewModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewReasoningEffort?: string | null;
+  sideQuestionModel?: string | null;
+  sideQuestionRuntimeId?: import('./agent').AgentRuntimeId | null;
+  sideQuestionModelProvider?: import('./agent').AgentModelProviderId | null;
+  sideQuestionReasoningEffort?: string | null;
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;
@@ -1362,12 +1401,9 @@ export type OpenTargetAppId =
   | 'xcode'
   | 'default';
 
-export type OpenTargetAppIcon = { kind: 'image'; dataUrl: string };
-
 export interface OpenTargetDetectedApp {
   id: OpenTargetAppId;
   label: string;
-  icon?: OpenTargetAppIcon;
 }
 
 export type OpenTargetRef =
@@ -1433,6 +1469,27 @@ export interface OpenTargetActionResult {
   message?: string;
   clipboardText?: string;
 }
+
+/** A file in a task's worktree, read as text to show the unchanged lines around a captured change. */
+export interface ReadWorktreeFileRequest {
+  taskId: string;
+  worktreeId: string;
+  /** Relative to the worktree root; a path that leaves the worktree is refused. */
+  relativePath: string;
+}
+
+export type WorktreeFileRead =
+  | {
+      status: 'TEXT';
+      /** The file's UTF-8 text, exactly as stored (a byte order mark and line endings kept). */
+      text: string;
+      /**
+       * Git's blob id for the bytes read, the SHA-1 of "blob <size>\0<bytes>", so a
+       * caller can tell whether the file is the version a captured diff shows.
+       */
+      blobSha1: string;
+    }
+  | { status: 'MISSING' | 'NOT_FILE' | 'BINARY' | 'TOO_LARGE' };
 
 export interface GitHubPreflightRequest {
   taskId: string;
@@ -1525,6 +1582,7 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult>;
+  readWorktreeFile(input: ReadWorktreeFileRequest): Promise<WorktreeFileRead>;
   getAgentRuntimeCatalog(): Promise<import('./agent').AgentRuntimeCatalog>;
   discoverAgentRuntimeModels(
     runtimeId: import('./agent').AgentRuntimeId
@@ -1665,11 +1723,22 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   editTaskInstruction(input: EditTaskInstructionRequest): Promise<void>;
   sendTaskInstruction(input: SendTaskInstructionRequest): Promise<RunRecord>;
   saveTaskAgentDraft(input: SaveTaskAgentDraftRequest): Promise<void>;
+  /** Saves the person's unsent review of the task; an empty draft clears it. */
+  saveTaskReviewDraft(input: SaveTaskReviewDraftRequest): Promise<void>;
   saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void>;
   steerRun(input: SteerRunRequest): Promise<void>;
   continueRun(input: ContinueRunRequest): Promise<RunRecord>;
   retryRun(input: RetryRunRequest): Promise<RunRecord>;
   startReview(input: StartReviewRequest): Promise<RunRecord>;
+  /** Dismisses or restores a finding of the current, completed review. */
+  decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
+  /** What changed from the code a review read to the worktree now. */
+  readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** Records a question in Ask and starts its read-only answer run. */
+  askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
+  stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;
+  /** Ends a side thread: stops its active question and removes its worktree snapshot. */
+  endSideThread(input: EndSideThreadRequest): Promise<void>;
   syncAgentGoal(input: SyncAgentGoalRequest): Promise<AgentGoalSnapshotRecord>;
   cancelRun(input: CancelRunRequest): Promise<void>;
   respondToInteraction(

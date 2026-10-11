@@ -1,27 +1,26 @@
 import { useState, type ComponentProps } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
-import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
+import { EMPTY_REVIEW_DRAFT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
 
 vi.mock('../api/taskManagerClient', () => ({
-  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n') }
+  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })) }
 }));
 
 function detailProps(): ComponentProps<typeof TaskDetail> {
   return {
     attachmentOptions: { enabled: true, onStageBatch: vi.fn(), onDiscard: vi.fn() },
-    agentInstructions: [], agentDraft: '', onPrepareTaskAgent: vi.fn(), onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
+    agentInstructions: [], agentDraft: '', onPrepareTaskAgent: vi.fn(), onSavePrompt: vi.fn(), onReadAttachment: vi.fn(), onAgentDraftChange: vi.fn(), onFlushAgentDraft: vi.fn(), reviewDraft: EMPTY_REVIEW_DRAFT, onReviewDraftChange: vi.fn(), onQueueInstruction: vi.fn(), onEditInstruction: vi.fn(), onSendInstruction: vi.fn(),
     task: makeTaskRecord({ workflowPhase: 'IN_PROGRESS', currentWorktreeId: 'worktree-1', currentIterationId: 'iteration-1', projection: { worktree: 'PRESENT', git: 'DIRTY' } }),
     repository: { id: 'repository-1', kind: 'USER_REGISTERED', name: 'Project', path: '/tmp/project', status: 'AVAILABLE', remotes: [], createdAt: TEST_NOW, updatedAt: TEST_NOW },
     worktree: { id: 'worktree-1', taskId: 'task-1', repositoryId: 'repository-1', iterationId: 'iteration-1', ownership: 'EXTERNAL', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'main', baseSha: 'abc123', status: 'PRESENT', createdAt: TEST_NOW, updatedAt: TEST_NOW },
     gitSnapshot: makeGitSnapshotRecord({ status: 'DIRTY', untrackedCount: 1 }),
     gitSnapshots: [], events: [], runs: [], sessions: [], items: [], goalSnapshots: [], planRevisions: [], usageSnapshots: [], settingsObservations: [], subagentObservations: [], artifacts: [], attachments: [], interactions: [],
-    showMascot: false,
-    onPrepareWorktree: vi.fn(), onRestoreWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
+    onPrepareWorktree: vi.fn(), onRestoreWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onSendReviewRequest: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
     onListExistingWorktrees: vi.fn(async () => []), onReconnectWorktree: vi.fn(), onUpdateWorktreeComparison: vi.fn(), onRefreshEvidence: vi.fn()
   };
 }
@@ -55,11 +54,11 @@ describe('imported task actions', () => {
     const view = render(<TaskDetail {...props} />);
     fireEvent.click(await screen.findByText('1 file changed'));
     fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
-    expect(screen.getByText('Historical Git capture')).toBeDefined();
-    expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
+    expect(screen.getByText('Earlier capture')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Changes to show' })).toBeNull();
 
     view.rerender(<TaskDetail {...props} gitSnapshots={[]} gitSnapshot={makeGitSnapshotRecord({ headSha: 'newer-head', diffArtifactId: 'newer-diff' })} />);
-    expect(screen.getByText('Historical Git capture unavailable')).toBeDefined();
+    expect(screen.getByText('Earlier capture unavailable')).toBeDefined();
     expect(screen.queryByText(/newer-head/)).toBeNull();
     expect(screen.queryByText('output.txt')).toBeNull();
   });
@@ -98,14 +97,18 @@ describe('imported task actions', () => {
     const props = detailProps();
     props.onUpdateWorktreeComparison = vi.fn().mockRejectedValueOnce(new Error('Comparison was not found.')).mockResolvedValue(undefined);
     render(<TaskDetail {...props} />);
-    expect(screen.queryByRole('button', { name: 'Change comparison' })).toBeNull();
-    fireEvent.click(screen.getByRole('tab', { name: 'Evidence' }));
-    const change = screen.getByRole('button', { name: 'Change comparison' });
-    change.focus();
-    fireEvent.click(change);
+    fireEvent.click(screen.getByRole('tab', { name: 'Review' }));
+    const scope = screen.getByRole('button', { name: 'Changes to show' });
+    const openComparison = async () => {
+      scope.focus();
+      fireEvent.keyDown(scope, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Change comparison…' }));
+    };
+    await openComparison();
+    expect(await screen.findByRole('dialog')).toBeDefined();
     fireEvent.keyDown(window, { key: 'Escape' });
-    await waitFor(() => expect(change).toBe(document.activeElement));
-    fireEvent.click(change);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await openComparison();
     const input = screen.getByRole('textbox', { name: 'Compare against' });
     fireEvent.change(input, { target: { value: 'missing' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Change comparison' }));
@@ -142,54 +145,47 @@ describe('imported task actions', () => {
     expect(props.onUpdateWorktreeComparison).not.toHaveBeenCalled();
   });
 
-  it.each(['stale-review', 'replacement-review', 'new-implementation'] as const)(
-    'blocks an open findings request after %s',
-    async (change) => {
-      HTMLElement.prototype.scrollTo = vi.fn();
-      const props = detailProps();
-      props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', projection: {
-        ...props.task!.projection,
-        agentReview: {
-          status: 'NEEDS_CHANGES', runId: 'review-1',
-          result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.', findings: [
-            { id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.' }
-          ] }
-        }
-      } });
-      props.runs = [makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
-      const mounted = render(<TaskDetail {...props} />);
-      fireEvent.click(screen.getByRole('button', { name: 'Address findings' }));
-      const send = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Send to agent' });
-      expect(send).toHaveProperty('disabled', false);
+  function reviewNeedsChanges(props: ReturnType<typeof detailProps>) {
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', projection: {
+      ...props.task!.projection,
+      agentReview: {
+        status: 'NEEDS_CHANGES', runId: 'review-1',
+        result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.', findings: [
+          { id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.' }
+        ] }
+      }
+    } });
+    props.runs = [makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
+    return props;
+  }
 
-      const currentReview = props.task.projection.agentReview!;
-      mounted.rerender(<TaskDetail {...props}
-        task={{ ...props.task,
-          currentRunId: change === 'new-implementation' ? 'run-2' : undefined,
-          projection: { ...props.task.projection, agentReview: {
-            ...currentReview,
-            status: change === 'stale-review' ? 'STALE' : currentReview.status,
-            runId: change === 'replacement-review' ? 'review-2' : currentReview.runId
-          } }
-        }}
-        runs={change === 'new-implementation'
-          ? [...props.runs, makeRunRecord({ id: 'run-2', mode: 'IMPLEMENTATION', status: 'COMPLETED' })]
-          : props.runs}
-      />);
+  it('withdraws Request changes once the review it would send goes stale', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = reviewNeedsChanges(detailProps());
+    const mounted = render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
+    // It opens on the request sheet, so the person sees what will be sent.
+    const sheet = screen.getByRole('dialog', { name: 'Request changes' });
+    expect(within(sheet).getByRole('button', { name: 'Request changes' })).toHaveProperty('disabled', false);
 
-      expect(send).toHaveProperty('disabled', true);
-      fireEvent.click(send);
-      expect(props.onStart).not.toHaveBeenCalled();
-      expect(props.onContinue).not.toHaveBeenCalled();
-    }
-  );
+    mounted.rerender(<TaskDetail {...props} task={{ ...props.task!, projection: { ...props.task!.projection,
+      agentReview: { ...props.task!.projection.agentReview!, status: 'STALE' } } }} />);
+
+    // An out-of-date review's findings are context only: nothing is left to send.
+    expect(screen.queryByRole('button', { name: /^\d+ fix/ })).toBeNull();
+    expect(screen.queryAllByRole('button', { name: 'Request changes' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.getByText('From the earlier review')).toBeDefined();
+    expect(props.onStart).not.toHaveBeenCalled();
+    expect(props.onContinue).not.toHaveBeenCalled();
+  });
 
   it('starts a detached review without a source run and routes findings to the first coding instruction', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = detailProps();
     props.task!.workflowPhase = 'REVIEW';
     const mounted = render(<TaskDetail {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Run review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run agent review' }));
     await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
     mounted.unmount();
     props.task = makeTaskRecord({ ...props.task, projection: { ...props.task!.projection, agentReview: {
@@ -197,9 +193,9 @@ describe('imported task actions', () => {
     } } });
     props.runs = [makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
     render(<TaskDetail {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Address findings' }));
-    const drawer = await screen.findByRole('dialog');
-    fireEvent.click(within(drawer).getByRole('button', { name: /Start|Send|Address/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
       'task-1',
       expect.stringContaining('Invalid input accepted'),
@@ -207,6 +203,90 @@ describe('imported task actions', () => {
     ));
     expect(props.onContinue).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
+  });
+});
+
+describe('Overview decision slot', () => {
+  function managed(status: 'MISSING' | 'PRUNABLE', workflowPhase: 'REVIEW' | 'IN_REVIEW') {
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', status };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase, projection: { worktree: status, git: 'UNAVAILABLE' } });
+    return props;
+  }
+
+  it.each([
+    ['PRUNABLE', 'REVIEW'],
+    ['MISSING', 'IN_REVIEW']
+  ] as const)('offers restore for a %s task worktree in %s', (status, phase) => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = managed(status, phase);
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('heading', { name: 'Checkout missing' })).toBeTruthy();
+    fireEvent.click(within(slot).getByRole('button', { name: 'Restore worktree' }));
+    expect(props.onPrepareWorktree).toHaveBeenCalledWith('task-1');
+  });
+
+  it('restores a missing checkout before offering to retry a failed run in it', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = managed('MISSING', 'REVIEW');
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_PROGRESS', currentRunId: 'run-1',
+      projection: { worktree: 'MISSING', agentRun: 'FAILED' } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'FAILED' });
+    props.runs = [props.run];
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('button', { name: 'Restore worktree' })).toBeTruthy();
+    expect(within(slot).queryByRole('button', { name: 'Retry implementation' })).toBeNull();
+  });
+
+  it('offers Create draft PR exactly once, with the finishing actions, before a pull request exists', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = managed('MISSING', 'REVIEW');
+    props.worktree = { ...props.worktree!, status: 'PRESENT' };
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'COMMITTED_UNPUSHED', commitsAheadOfBase: 1, committedDiffFileCount: 1 });
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', currentRunId: 'run-1',
+      projection: { worktree: 'PRESENT', git: 'COMMITTED_UNPUSHED', agentRun: 'COMPLETED' } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(screen.getAllByRole('button', { name: 'Create draft PR' })).toHaveLength(1);
+    const labels = within(slot).getAllByRole('button').map((button) => button.textContent);
+    // A way forward comes before marking done despite open evidence, the override.
+    expect(labels.indexOf('Create draft PR')).toBeGreaterThan(-1);
+    expect(labels.indexOf('Create draft PR')).toBeLessThan(labels.indexOf('Mark done anyway'));
+  });
+
+  it('keeps Create draft PR in PR Status while another step holds the Now panel', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = managed('MISSING', 'REVIEW');
+    props.worktree = { ...props.worktree!, status: 'PRESENT' };
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'COMMITTED_UNPUSHED', commitsAheadOfBase: 1, committedDiffFileCount: 1 });
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_PROGRESS', currentRunId: undefined,
+      projection: { worktree: 'PRESENT', git: 'COMMITTED_UNPUSHED' } });
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    const create = screen.getAllByRole('button', { name: 'Create draft PR' });
+    expect(create).toHaveLength(1);
+    expect(slot.contains(create[0])).toBe(false);
+    expect(screen.getByRole('region', { name: 'Pull request' }).contains(create[0])).toBe(true);
+  });
+
+  it('leads with finishing once the pull request is merged, not with a review', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = managed('MISSING', 'REVIEW');
+    props.worktree = { ...props.worktree!, status: 'PRESENT' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', completionPolicy: 'MANUAL', currentRunId: 'run-1',
+      projection: { worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'MERGED', merge: 'MERGED' } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    // Done is the remaining step, but marking it despite open evidence is the
+    // owner's override: offered, never promoted to the recommended action.
+    expect(within(slot).getByRole('button', { name: 'Mark done anyway' }).className).not.toContain('primary-button');
+    expect(within(slot).queryByRole('button', { name: 'Run agent review' })).toBeNull();
   });
 });
 
@@ -241,13 +321,13 @@ describe('Agent pre-run setup', () => {
     const editor = await screen.findByRole('textbox', { name: 'Task prompt' });
     expect((editor as HTMLTextAreaElement).value).toContain('Inspect preview.yaml');
     expect((editor as HTMLTextAreaElement).value).toContain(props.task!.prompt);
-    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false);
-    expect(screen.getByRole('button', { name: 'Start implementation' })).toHaveProperty('disabled', true);
+    // The handoff only drafts the prompt; starting stays the person's step.
+    expect(screen.getByRole('button', { name: 'Start implementation' })).toBeTruthy();
     expect(props.onStart).not.toHaveBeenCalled();
     expect(props.onAgentDraftChange).not.toHaveBeenCalled();
   });
 
-  it('keeps an edited prompt and prevents preparation until an explicit save succeeds', async () => {
+  it('saves an edited prompt before preparing, and keeps it when the save fails', async () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     const props = detailProps();
@@ -262,17 +342,14 @@ describe('Agent pre-run setup', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     const editor = screen.getByRole('textbox', { name: 'Task prompt' });
     fireEvent.change(editor, { target: { value: 'Use the revised request.' } });
-    expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
-    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
     await screen.findByText('Storage unavailable');
     expect(editor).toHaveProperty('value', 'Use the revised request.');
     expect(props.onPrepareWorktree).not.toHaveBeenCalled();
     rejectSave = false;
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
+    await waitFor(() => expect(props.onPrepareWorktree).toHaveBeenCalled());
     expect(props.onSavePrompt).toHaveBeenLastCalledWith('Use the revised request.', false, undefined);
-    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
-    expect(props.onPrepareWorktree).toHaveBeenCalled();
   });
 
   it('validates prompt image drafts against the model selected before the first run', async () => {
@@ -298,11 +375,11 @@ describe('Agent pre-run setup', () => {
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     await screen.findByRole('button', { name: 'reference.png' });
-    expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', true);
-    fireEvent.click(screen.getByRole('button', { name: 'Model: Codex · Test model' }));
+    expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Model: Test model via Codex' }));
     fireEvent.click(screen.getByRole('option', { name: 'Image model via Codex' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save prompt' })).toHaveProperty('disabled', false));
-    fireEvent.click(screen.getByRole('button', { name: 'Save prompt' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
     await waitFor(() => expect(props.onSavePrompt).toHaveBeenCalledWith('Describe the reference.', false, { attachmentDraftId: 'image-draft' }));
     expect(props.attachmentOptions.onStageBatch).not.toHaveBeenCalled();
   });
@@ -345,14 +422,23 @@ describe('Agent pre-run setup', () => {
       projection: { worktree: 'NOT_CREATED' }
     });
     Object.assign(props, readyRuntime());
-    render(<TaskDetail {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Set up worktree' }));
+    // The window's top bar, where the Agent tab's title row sits.
+    const titlebar = document.body.appendChild(document.createElement('div'));
+    render(<TaskDetail {...props} titlebarSlot={titlebar} />);
+    // The Overview's decision slot holds the one setup step, above the request.
     expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
-    expect(screen.getByRole('heading', { name: 'Test task' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Request' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
+    expect(props.onPrepareWorktree).toHaveBeenCalledWith('task-1');
+    // The Agent tab's pre-run setup offers the same single step with its settings.
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    expect(screen.getAllByRole('button', { name: 'Prepare worktree' })).toHaveLength(1);
+    expect(within(titlebar).getByRole('heading', { name: 'Test task' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Start this task' })).toBeTruthy();
     expect(screen.getByText('Add a multiply helper and cover it with tests.')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Request' })).toBeNull();
-    expect(screen.getByRole('switch', { name: 'Network' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Access: / })).toBeTruthy();
+    titlebar.remove();
   });
 
   it('does not present a different permission preset as the saved execution settings', async () => {
@@ -366,7 +452,7 @@ describe('Agent pre-run setup', () => {
     Object.assign(props, readyRuntime());
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
-    expect(screen.getByRole('button', { name: 'Execution policy: Custom settings' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Access: Custom' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings));
   });
@@ -379,11 +465,143 @@ describe('Agent pre-run setup', () => {
     Object.assign(props, readyRuntime());
     render(<TaskDetail {...props} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
-    fireEvent.click(screen.getByRole('switch', { name: 'Network' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Access: / }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemcheckbox', { name: 'Network access' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, {
       networkAccess: true
     }));
     expect(screen.queryByRole('button', { name: 'Prepare worktree' })).toBeNull();
+  });
+});
+
+describe('Task title placement', () => {
+  function titlebar(): HTMLElement {
+    const slot = document.createElement('div');
+    document.body.prepend(slot);
+    return slot;
+  }
+  function selectTab(name: string) {
+    fireEvent.click(screen.getByRole('tab', { name }));
+  }
+  function pageHeading(): HTMLElement {
+    return screen.getByRole('heading', { level: 1, name: 'Test task' });
+  }
+
+  it('keeps the head on the Overview and gives the working tabs the title row in the top bar', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    render(<TaskDetail {...detailProps()} titlebarSlot={slot} />);
+
+    // The Overview's head states the title and the lifecycle; the top bar stays empty.
+    expect(slot.contains(pageHeading())).toBe(false);
+    expect(screen.getByRole('list', { name: 'Lifecycle' })).toBeDefined();
+    expect(within(slot).queryByRole('button', { name: /Task options/ })).toBeNull();
+
+    for (const name of ['Agent', 'Review', 'Preview']) {
+      selectTab(name);
+      // One heading, in the top bar with the task's menu; no head above the tabs.
+      expect(slot.contains(pageHeading())).toBe(true);
+      expect(within(slot).getByRole('button', { name: 'Task options for Test task' })).toBeDefined();
+      expect(screen.queryByRole('list', { name: 'Lifecycle' })).toBeNull();
+      // Opening a tab never animates the title.
+      expect(slot.firstElementChild!.hasAttribute('data-instant')).toBe(true);
+    }
+
+    selectTab('Overview');
+    expect(slot.contains(pageHeading())).toBe(false);
+    slot.remove();
+  });
+
+  it('moves the steps the head offered with the title row, except where the tab offers them itself', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    const props = detailProps();
+    props.initialTab = 'agent';
+    render(<TaskDetail {...props} titlebarSlot={slot} />);
+
+    // Imported work before any run: reviewing it is reachable from the Agent tab's title row.
+    fireEvent.click(within(slot).getByRole('button', { name: 'Run agent review' }));
+    await waitFor(() => expect(props.onReview).toHaveBeenCalledWith(undefined));
+
+    // The Review bar offers its own review step, so the title row does not repeat it.
+    selectTab('Review');
+    expect(within(slot).queryByRole('button', { name: 'Run agent review' })).toBeNull();
+    slot.remove();
+  });
+
+  it('leaves the title in the top bar when a side panel docks beside a working tab', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const slot = titlebar();
+    const props = detailProps();
+    props.initialTab = 'agent';
+    props.run = makeRunRecord({ status: 'COMPLETED', endedAt: TEST_NOW });
+    props.runs = [props.run];
+    props.ask = {
+      records: { runs: [], items: [], instructions: [], interactions: [], sessions: [], plans: [] },
+      ask: vi.fn(async () => undefined), stop: vi.fn(async () => undefined), end: vi.fn(async () => undefined)
+    };
+    render(<TaskDetail {...props} titlebarSlot={slot} />);
+
+    const tabBar = screen.getByRole('tablist', { name: 'Task sections' }).parentElement!;
+    const toggle = within(tabBar).getByRole('button', { name: 'Ask', pressed: false });
+    fireEvent.click(toggle);
+
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(slot.contains(pageHeading())).toBe(true);
+    expect(screen.getByRole('tab', { name: 'Agent', selected: true })).toBeDefined();
+    expect(screen.queryByRole('list', { name: 'Lifecycle' })).toBeNull();
+    slot.remove();
+  });
+
+  it('raises the title row into the top bar once the Overview head scrolls away, and only then animates it', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    let report: ((entries: Array<{ isIntersecting: boolean }>) => void) | undefined;
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) { report = callback; }
+      observe() {} disconnect() {}
+    });
+    const slot = titlebar();
+    render(<TaskDetail {...detailProps()} titlebarSlot={slot} />);
+    const row = () => slot.firstElementChild as HTMLElement;
+
+    // Where the page already is on opening: shown as it is, never animated.
+    act(() => report!([{ isIntersecting: true }]));
+    expect(row().hasAttribute('data-visible')).toBe(false);
+    expect(row().getAttribute('aria-hidden')).toBe('true');
+
+    act(() => report!([{ isIntersecting: false }]));
+    expect(row().hasAttribute('data-visible')).toBe(true);
+    expect(row().hasAttribute('data-instant')).toBe(false);
+    // The head keeps the page's heading; the top bar's copy is not a second one.
+    expect(slot.contains(pageHeading())).toBe(false);
+    expect(within(slot).getByRole('button', { name: 'Task options for Test task' })).toBeDefined();
+
+    act(() => report!([{ isIntersecting: true }]));
+    expect(row().hasAttribute('data-visible')).toBe(false);
+    slot.remove();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('Task sections keyboard navigation', () => {
+  it('keeps focus on the selected tab when arrowing into and out of the Agent tab', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    render(<TaskDetail {...detailProps()} />);
+
+    const overview = screen.getByRole('tab', { name: 'Overview' });
+    overview.focus();
+    // The Agent tab renders the task header inside its conversation, which
+    // remounts the tablist; focus must not fall to the page.
+    fireEvent.keyDown(overview, { key: 'ArrowRight' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Agent', selected: true })));
+
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Review', selected: true })));
   });
 });

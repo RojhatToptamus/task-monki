@@ -15,9 +15,9 @@ describe('CompletedChangeSummaryCard', () => {
       />
     );
 
-    expect(html).toContain('Captured Git changes · 4 files');
+    expect(html).toContain('Captured Git changes in 4 files');
     expect(html).toContain('+278');
-    expect(html).toContain('-12');
+    expect(html).toContain('−12');
     expect(html).toContain('src/core/app/TaskManagerService.progress.integration.test.ts');
     expect(html).toContain('src/dev/seedData.integration.test.ts');
     expect(html).toContain('src/renderer/model/overviewRunActivity.test.ts');
@@ -35,7 +35,7 @@ describe('CompletedChangeSummaryCard', () => {
       <CompletedChangeSummaryCard
         summary={{
           fileCount: 1,
-          title: 'Captured Git changes · 1 file',
+          title: 'Captured Git changes in 1 file',
           additions: 2,
           deletions: 1,
           previewFiles: [
@@ -54,7 +54,7 @@ describe('CompletedChangeSummaryCard', () => {
       />
     );
 
-    expect(html).toContain('Captured Git changes · 1 file');
+    expect(html).toContain('Captured Git changes in 1 file');
     expect(html).not.toContain('Show 0 more files');
   });
 
@@ -91,9 +91,9 @@ describe('CompletedChangeSummaryCard', () => {
       />
     );
 
-    expect(html).toContain('Incomplete captured diff · 4 observed files');
+    expect(html).toContain('Incomplete captured diff, 4 files observed');
     expect(html).toContain('Other files or changes may be missing.');
-    expect(html).toContain('Historical capture — the worktree changed later.');
+    expect(html).toContain('Earlier snapshot. The worktree has changed since.');
     expect(html).not.toMatch(/out of scope|violation|owned by/i);
   });
 });
@@ -101,7 +101,7 @@ describe('CompletedChangeSummaryCard', () => {
 function summaryFixture(): CompletedChangeSummary {
   return {
     fileCount: 4,
-    title: 'Captured Git changes · 4 files',
+    title: 'Captured Git changes in 4 files',
     additions: 278,
     deletions: 12,
     previewFiles: [

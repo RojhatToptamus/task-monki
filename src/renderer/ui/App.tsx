@@ -4,14 +4,15 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent
+  useState
 } from 'react';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  EMPTY_REVIEW_DRAFT,
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
   type CreateTaskRequest,
+  type DecideReviewFindingRequest,
   type ImportTaskRequest,
   type CreateBoardRequest,
   type Board,
@@ -26,6 +27,7 @@ import {
   type DesignDetailSnapshot,
   type DesignDraftRecord,
   type DesignListItem,
+  type BoardTaskSummary,
   type ExternalToolStatusReport,
   type InteractionRequestRecord,
   type Repository,
@@ -35,6 +37,9 @@ import {
   type RefinePromptRequest,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
+  type SideQuestionModelChoice,
+  type ReviewRequestRecord,
+  type TaskReviewDraft,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorktreePreparationInspection,
@@ -47,13 +52,12 @@ import type {
 } from '../../shared/designCanvas';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 import { taskManagerApi } from '../api/taskManagerClient';
-import { partitionPreviewAgentRecords, type AgentConversationRecords } from '../model/previewAgentRecords';
+import { partitionAgentRecords, type AgentConversationRecords } from '../model/agentRecords';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   selectActiveRun,
   selectCurrentWorktree,
   selectLatestGitSnapshot,
-  selectLatestGitHubRepository,
   selectLatestBranchPublication,
   selectLatestPullRequest,
   selectLatestCiRollup,
@@ -81,12 +85,6 @@ import {
   type DesignCanvasExternalLinkRequest
 } from '../model/designs';
 import {
-  dragNewTaskCanvas,
-  NEW_TASK_CANVAS_PAN_DURATION_MS,
-  newTaskCanvasPanPosition,
-  shouldInterruptNewTaskCanvasPanForWheel
-} from '../model/newTaskPanel';
-import {
   buildRepositoryOptions,
   resolveRepositorySetupState,
   resolveSelectedRepositoryId
@@ -94,31 +92,27 @@ import {
 import { appendUniqueNotification } from '../model/notifications';
 import { selectConfiguredRuntimeForOperation } from '../model/runtimeReadiness';
 import {
-  focusedPanelWidth,
   focusedWorkspaceHistoryCollapsed,
   focusedWorkspaceUsesCompactHistory,
-  persistFocusedPanelWidth,
   persistFocusedWorkspaceHistoryCollapsed
 } from '../model/workspaceLayout';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { MainColumn } from './MainColumn';
 import {
   applyThemeToRoot,
-  resolveTheme,
   resolveThemePreset,
   type ThemePreference,
   type ThemePreset
 } from './theme';
-import { computeNavCounts, type NavView } from '../model/taskView';
+import { computeNavCounts, isTasksView, type NavView, type TasksView } from '../model/taskView';
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
 import { useExternalCheckoutObservation } from './useExternalCheckoutObservation';
-import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
+import { useTaskDraftStore } from './useTaskDraftStore';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DesignsWorkspace } from './DesignsWorkspace';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { PreviewsPage, type PreviewsPageState } from './PreviewsPage';
-import { PanelResizeHandle } from './PanelResizeHandle';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 import { SoftwareUpdateNotice } from './SoftwareUpdateNotice';
 import {
@@ -133,22 +127,20 @@ import {
   type NotificationTone
 } from './AppOverlays';
 import {
-  ActiveIcon,
   ArrowLeftIcon,
   ArrowRightIcon,
   BoardIcon,
   DesignIcon,
   DiscourseIcon,
-  DoneIcon,
   InboxIcon,
-  NavItem,
-  PanelIcon,
   PlusIcon,
   PreviewIcon,
-  ReviewIcon,
-  SavedViewsFolderIcon,
+  RailItem,
   SettingsIcon
 } from './AppNavigation';
+import { Tooltip, TooltipProvider } from './Tooltip';
+import { NotifyProvider } from './NotifyContext';
+import { appendToDraft } from '../model/sideQuestions';
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
 const SELECTED_ACTIVITY_REFRESH_DELAY_MS = 1_000;
@@ -170,10 +162,6 @@ const emptyBoardSnapshot: BoardSnapshot = {
   tasks: [],
   interactionRequests: []
 };
-
-function prefersDarkScheme(): boolean {
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
-}
 
 function retainTaskEntries<T>(
   current: Record<string, T>,
@@ -203,6 +191,23 @@ function isPreviewRecipeGenerationSnapshot(
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
+
+/** What a finished review says in a notice; a stopped review was the person's own doing. */
+function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
+  const title = task.title.length > 60 ? `${task.title.slice(0, 59).trimEnd()}…` : task.title;
+  switch (task.projection.agentReview.effectiveStatus) {
+    case 'PASSED': return { message: `Review passed for ${title}`, tone: 'success' };
+    case 'NEEDS_CHANGES': return { message: `Review of ${title} needs changes`, tone: 'info' };
+    case 'INCONCLUSIVE': return { message: `Review of ${title} was inconclusive`, tone: 'info' };
+    case 'FAILED': return { message: `Review of ${title} failed`, tone: 'error' };
+    default: return undefined;
+  }
+}
+
+// Stable writers, so each draft store keeps one in-flight save per task.
+const saveAgentDraftText = (taskId: string, text: string) => taskManagerApi.saveTaskAgentDraft({ taskId, text });
+const saveReviewDraft = (taskId: string, draft: TaskReviewDraft) => taskManagerApi.saveTaskReviewDraft({ taskId, draft });
+
 type AppView = NavView | 'discourse' | 'designs' | 'previews';
 
 function resolveWindowChromePlatform() {
@@ -211,6 +216,47 @@ function resolveWindowChromePlatform() {
 
 export function App() {
   const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
+  // Keyboard modality is a property of the whole document: menus and popovers
+  // portal outside the shell, and the first Tab after launch targets <body>.
+  // Focus that moves because of a key is keyboard traversal — Tab, arrows in a
+  // tab list, list or menu, Escape back to a trigger — while typing that moves
+  // no focus leaves the modality alone.
+  useEffect(() => {
+    let keyed = false;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      keyed = true;
+      if (event.key === 'Tab') setInputModality('keyboard');
+    };
+    const onFocusIn = () => {
+      if (keyed) setInputModality('keyboard');
+    };
+    const onPointerDown = () => {
+      keyed = false;
+      setInputModality('pointer');
+    };
+    // In a menu or list the highlight follows the pointer once it moves there.
+    const onPointerMove = (event: PointerEvent) => {
+      if (!event.movementX && !event.movementY) return;
+      if ((event.target as Element | null)?.closest?.('[role="menu"], [role="listbox"]')) {
+        keyed = false;
+        setInputModality('pointer');
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('focusin', onFocusIn, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('pointermove', onPointerMove, true);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      document.removeEventListener('focusin', onFocusIn, true);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('pointermove', onPointerMove, true);
+    };
+  }, []);
+  useEffect(() => {
+    document.documentElement.dataset.inputModality = inputModality;
+  }, [inputModality]);
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);
   const [taskDetail, setTaskDetail] = useState<TaskDetailSnapshot>();
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
@@ -235,49 +281,18 @@ export function App() {
   const [designDetail, setDesignDetail] = useState<DesignDetailSnapshot>();
   const [designDraft, setDesignDraft] = useState<DesignDraftRecord | null>(null);
   const [designsLoading, setDesignsLoading] = useState(false);
+  // Where the open task's page puts its title row while its head is not on screen.
+  const [taskTitlebarSlot, setTaskTitlebarSlot] = useState<HTMLDivElement | null>(null);
   const [designsError, setDesignsError] = useState<string | undefined>();
   const [designExternalLinkRequest, setDesignExternalLinkRequest] =
     useState<DesignCanvasExternalLinkRequest>();
   const [selectedBoardId, setSelectedBoardId] = useState<string | undefined>();
   const [boardEditor, setBoardEditor] = useState<Board | 'new' | undefined>();
-  const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const pendingAppActions = useRef(0);
-  const [agentDrafts, setAgentDrafts] = useState<Record<string, string>>({});
-  const [agentDraftErrors, setAgentDraftErrors] = useState<Record<string, string | undefined>>({});
-  const agentDraftWrites = useRef(new Map<string, { text: string; work?: Promise<void>; error?: string }>());
-  const saveAgentDraft = (taskId: string, text: string) => {
-    setAgentDrafts((current) => {
-      const entries = Object.entries(current).filter(([id]) => id !== taskId).slice(-39);
-      return { ...Object.fromEntries(entries), [taskId]: text };
-    });
-    const entry = agentDraftWrites.current.get(taskId) ?? { text };
-    entry.text = text;
-    entry.error = undefined;
-    agentDraftWrites.current.set(taskId, entry);
-    if (!entry.work) {
-      entry.work = (async () => {
-        let saved: string;
-        do {
-          saved = entry.text;
-          await taskManagerApi.saveTaskAgentDraft({ taskId, text: saved });
-        } while (saved !== entry.text);
-        setAgentDraftErrors((current) => ({ ...current, [taskId]: undefined }));
-      })().catch((caught: unknown) => {
-        entry.error = `Draft could not be saved: ${String(caught)}`;
-        setAgentDraftErrors((current) => ({ ...current, [taskId]: entry.error }));
-        throw caught;
-      }).finally(() => {
-        entry.work = undefined;
-        for (const [id, previous] of agentDraftWrites.current) {
-          if (agentDraftWrites.current.size <= 40) break;
-          if (id !== taskId && !previous.work && !previous.error) agentDraftWrites.current.delete(id);
-        }
-      });
-      void entry.work.catch(() => undefined);
-    }
-  };
+  const agentDrafts = useTaskDraftStore(saveAgentDraftText);
+  const reviewDrafts = useTaskDraftStore(saveReviewDraft);
 
   const withAppAction = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     pendingAppActions.current += 1;
@@ -286,7 +301,6 @@ export function App() {
   }, []);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
-  const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
   const [newTaskTextDraft, setNewTaskTextDraft] = useState<NewTaskTextDraft>({
     title: '',
     prompt: ''
@@ -307,7 +321,6 @@ export function App() {
   }>();
   const [worktreePreparationActionTaskId, setWorktreePreparationActionTaskId] =
     useState<string>();
-  const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
   );
@@ -315,13 +328,9 @@ export function App() {
     unavailableSoftwareUpdateState
   );
   const [previewThemePreset, setPreviewThemePreset] = useState<ThemePreset | null>(null);
-  const [appSidebarWidth, setAppSidebarWidth] = useState(() =>
-    focusedPanelWidth('app-navigation', 176, 176, 240)
-  );
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [runtimeCatalog, setRuntimeCatalog] = useState<AgentRuntimeCatalog>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
   const focusedHistoryCompactRef = useRef(
@@ -330,13 +339,7 @@ export function App() {
   const taskDetailHeadingRef = useRef<HTMLHeadingElement>(null);
   const taskNavigationReturnFocusRef = useRef<HTMLElement | null>(null);
   const taskNavigationReturnIdRef = useRef<string | undefined>(undefined);
-  const canvasViewportRef = useRef<HTMLDivElement>(null);
-  const canvasContentRef = useRef<HTMLDivElement>(null);
-  const canvasPanFrameRef = useRef<number | undefined>(undefined);
-  const canvasResizeFrameRef = useRef<number | undefined>(undefined);
-  const canvasDragRef = useRef<
-    { pointerId: number; startX: number; startScrollLeft: number } | undefined
-  >(undefined);
+  const lastTasksViewRef = useRef<{ view: TasksView; boardId?: string }>({ view: 'board' });
   const deleteCandidateGenerationRef = useRef(0);
   const worktreePreparationSubmissionRef = useRef(false);
   const worktreePreparationGenerationRef = useRef(0);
@@ -366,169 +369,28 @@ export function App() {
   >({});
   const windowChromePlatform = resolveWindowChromePlatform();
 
-  const cancelCanvasPan = useCallback(() => {
-    if (canvasPanFrameRef.current !== undefined) {
-      window.cancelAnimationFrame(canvasPanFrameRef.current);
-      canvasPanFrameRef.current = undefined;
-    }
-  }, []);
-
-  const panCanvasTo = useCallback(
-    (requestedTarget: number, onComplete?: () => void) => {
-      const viewport = canvasViewportRef.current;
-      if (!viewport) {
-        onComplete?.();
-        return;
-      }
-      cancelCanvasPan();
-      const target = Math.min(
-        Math.max(0, viewport.scrollWidth - viewport.clientWidth),
-        Math.max(0, requestedTarget)
-      );
-      const start = viewport.scrollLeft;
-      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-      if (reduceMotion || Math.abs(target - start) < 0.5) {
-        viewport.scrollLeft = target;
-        onComplete?.();
-        return;
-      }
-      const startedAt = window.performance.now();
-      const step = (now: number) => {
-        const elapsed = now - startedAt;
-        viewport.scrollLeft = newTaskCanvasPanPosition(start, target, elapsed);
-        if (elapsed < NEW_TASK_CANVAS_PAN_DURATION_MS) {
-          canvasPanFrameRef.current = window.requestAnimationFrame(step);
-          return;
-        }
-        viewport.scrollLeft = target;
-        canvasPanFrameRef.current = undefined;
-        onComplete?.();
-      };
-      canvasPanFrameRef.current = window.requestAnimationFrame(step);
-    },
-    [cancelCanvasPan]
-  );
-
-  const revealNewTaskPanel = useCallback(() => {
-    const viewport = canvasViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-    panCanvasTo(viewport.scrollWidth - viewport.clientWidth);
-  }, [panCanvasTo]);
-
+  // New Task is a modal over the app; opening it again while open is a no-op.
   const openNewTask = useCallback(() => {
-    if (isNewTaskClosing) {
-      return;
-    }
-    if (isNewTaskOpen) {
-      revealNewTaskPanel();
-      return;
-    }
     setIsNewTaskOpen(true);
-  }, [isNewTaskClosing, isNewTaskOpen, revealNewTaskPanel]);
+  }, []);
 
   const closeNewTask = useCallback(() => {
-    if (isNewTaskClosing) {
-      return;
-    }
-    setIsNewTaskClosing(true);
-    panCanvasTo(0, () => {
-      setIsNewTaskOpen(false);
-      setIsNewTaskClosing(false);
-    });
-  }, [isNewTaskClosing, panCanvasTo]);
-
-  const keepNewTaskPanelInView = useCallback(() => {
-    if (isNewTaskClosing) {
-      return;
-    }
-    cancelCanvasPan();
-    if (canvasResizeFrameRef.current !== undefined) {
-      window.cancelAnimationFrame(canvasResizeFrameRef.current);
-    }
-    canvasResizeFrameRef.current = window.requestAnimationFrame(() => {
-      const viewport = canvasViewportRef.current;
-      if (viewport) {
-        viewport.scrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-      }
-      canvasResizeFrameRef.current = undefined;
-    });
-  }, [cancelCanvasPan, isNewTaskClosing]);
-
-  useEffect(() => {
-    if (!isNewTaskOpen) {
-      return;
-    }
-    const frame = window.requestAnimationFrame(revealNewTaskPanel);
-    return () => window.cancelAnimationFrame(frame);
-  }, [isNewTaskOpen, revealNewTaskPanel]);
-
-  useEffect(
-    () => () => {
-      cancelCanvasPan();
-      if (canvasResizeFrameRef.current !== undefined) {
-        window.cancelAnimationFrame(canvasResizeFrameRef.current);
-      }
-    },
-    [cancelCanvasPan]
-  );
-
-  const startCanvasDrag = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (
-        isNewTaskClosing ||
-        event.pointerType !== 'mouse' ||
-        event.button !== 0 ||
-        !(event.target instanceof HTMLElement) ||
-        !event.target.matches('.tm-body, .tm-canvas, .tm-canvas__workspace, .tm-canvas__content')
-      ) {
-        return;
-      }
-      cancelCanvasPan();
-      canvasDragRef.current = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startScrollLeft: event.currentTarget.scrollLeft
-      };
-      setIsCanvasDragging(true);
-      event.currentTarget.setPointerCapture(event.pointerId);
-    },
-    [cancelCanvasPan, isNewTaskClosing]
-  );
-
-  const moveCanvasDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = canvasDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    if (Math.abs(event.clientX - drag.startX) > 3) {
-      event.preventDefault();
-    }
-    event.currentTarget.scrollLeft = dragNewTaskCanvas(
-      drag.startScrollLeft,
-      drag.startX,
-      event.clientX,
-      event.currentTarget.scrollWidth - event.currentTarget.clientWidth
-    );
-  }, []);
-
-  const stopCanvasDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = canvasDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    canvasDragRef.current = undefined;
-    setIsCanvasDragging(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
+    setIsNewTaskOpen(false);
   }, []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setNotifications((current) => appendUniqueNotification(current, { id, tone, message }));
+    // A copy already fading out does not swallow the same notice raised again.
+    setNotifications((current) => appendUniqueNotification(
+      current.filter((notification) => !notification.leaving || notification.tone !== tone || notification.message !== message),
+      { id, tone, message }
+    ));
     window.setTimeout(() => {
-      setNotifications((current) => current.filter((notification) => notification.id !== id));
+      // The toast fades out over --motion-fast before it leaves the stack.
+      setNotifications((current) => current.map((notification) =>
+        notification.id === id ? { ...notification, leaving: true } : notification));
+      window.setTimeout(() => {
+        setNotifications((current) => current.filter((notification) => notification.id !== id));
+      }, 120);
     }, 4200);
   }, []);
 
@@ -570,15 +432,13 @@ export function App() {
   }
   const taskDataCoordinator = taskDataCoordinatorRef.current;
   const updateAppSettings = useCallback(
-    async (patch: UpdateAppSettingsRequest, successMessage = 'Settings updated.') => {
+    // A setting applies on change and shows its own effect; only a failure is announced.
+    async (patch: UpdateAppSettingsRequest) => {
       try {
         const nextSettings = await taskManagerApi.updateAppSettings(patch);
         setAppSettings(nextSettings);
         if (patch.externalExecutables || patch.codexExternalTools) {
           setExternalToolStatus(await taskManagerApi.getExternalToolStatus());
-        }
-        if (successMessage) {
-          notify(successMessage, 'success');
         }
         return nextSettings;
       } catch (caught) {
@@ -586,11 +446,11 @@ export function App() {
         return undefined;
       }
     },
-    [notify, reportActionError]
+    [reportActionError]
   );
   const updateTheme = useCallback(
     (nextTheme: ThemePreference) => {
-      void updateAppSettings({ theme: nextTheme }, 'Theme updated.');
+      void updateAppSettings({ theme: nextTheme });
     },
     [updateAppSettings]
   );
@@ -637,14 +497,6 @@ export function App() {
     window.addEventListener('resize', handleFocusedHistoryResize);
     return () => window.removeEventListener('resize', handleFocusedHistoryResize);
   }, []);
-  const toggleSidebar = useCallback(() => {
-    void updateAppSettings({ sidebarCollapsed: !appSettings.sidebarCollapsed }, '');
-  }, [appSettings.sidebarCollapsed, updateAppSettings]);
-
-  useLayoutEffect(() => {
-    canvasContentRef.current?.style.setProperty('--app-sidebar-width', `${appSidebarWidth}px`);
-  }, [appSidebarWidth]);
-
   const refresh = useCallback(async () => {
     await Promise.all([
       taskDataCoordinator.refreshBoard(),
@@ -865,7 +717,6 @@ export function App() {
             : {})
         });
         applyDesignActionDetail(detail, true);
-        notify('Design created.', 'success');
         void refreshDesignList();
       } catch (caught) {
         const message =
@@ -914,10 +765,6 @@ export function App() {
           pendingDesignTurnRef.current = undefined;
         }
         applyDesignActionDetail(detail, false);
-        const accepted = detail.conversation.find(
-          (entry) => entry.turn.clientMessageId === pending.clientMessageId
-        );
-        notify(accepted?.turn.runId ? 'Design update started.' : 'Message queued.', 'success');
         void refreshDesignList();
       } catch (caught) {
         if (!creationRequiresUnchangedRetry(caught) && pendingDesignTurnRef.current === pending) {
@@ -939,7 +786,6 @@ export function App() {
           attachmentDraftId
         });
         applyDesignActionDetail(detail, false);
-        notify('References added.', 'success');
         void refreshDesignList();
         return detail.references
           .filter((reference) => reference.sourceDraftId === attachmentDraftId)
@@ -1068,7 +914,6 @@ export function App() {
           interactionRequestId: interaction.id,
           decision
         });
-        notify('Provider request answered.', 'success');
         await loadDesign(interaction.taskId, { showLoading: false });
         void refreshDesignList();
       } catch (caught) {
@@ -1184,7 +1029,6 @@ export function App() {
       try {
         const detail = await taskManagerApi.renameDesign({ designId, title });
         applyDesignActionDetail(detail, false);
-        notify('Design renamed.', 'success');
         void refreshDesignList();
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : 'Could not rename the Design.';
@@ -1367,16 +1211,6 @@ export function App() {
     },
     [refreshExternalToolStatus]
   );
-
-  useEffect(() => {
-    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
-    if (!media) {
-      return;
-    }
-    const onChange = (event: MediaQueryListEvent) => setPrefersDark(event.matches);
-    media.addEventListener('change', onChange);
-    return () => media.removeEventListener('change', onChange);
-  }, []);
 
   useEffect(() => {
     if (windowChromePlatform !== 'macos') {
@@ -1622,8 +1456,6 @@ export function App() {
   useLayoutEffect(() => {
     applyThemeToRoot(document.documentElement, activeThemePreset, theme);
   }, [activeThemePreset, theme]);
-  const isSidebarCollapsed = appSettings.sidebarCollapsed;
-  const panelToggleLabel = `${isSidebarCollapsed ? 'Expand' : 'Collapse'} navigation sidebar`;
   const selectedRepositoryId = appSettings.selectedRepositoryId ?? '';
 
   const repositoryOptions = useMemo(
@@ -1665,12 +1497,22 @@ export function App() {
 
   useEffect(() => {
     if (activeRepositoryId && activeRepositoryId !== selectedRepositoryId) {
-      void updateAppSettings(
-        { selectedRepositoryId: activeRepositoryId },
-        ''
-      );
+      void updateAppSettings({ selectedRepositoryId: activeRepositoryId });
     }
   }, [activeRepositoryId, selectedRepositoryId, updateAppSettings]);
+
+  // A review that finishes says so wherever the person is; the Inbox keeps what it asks of them.
+  const reviewStatusesRef = useRef<Map<string, string> | undefined>(undefined);
+  useEffect(() => {
+    const previous = reviewStatusesRef.current;
+    reviewStatusesRef.current = new Map(snapshot.tasks.map((task) => [task.id, task.projection.agentReview.status]));
+    if (!previous) return;
+    for (const task of snapshot.tasks) {
+      if (previous.get(task.id) !== 'RUNNING') continue;
+      const notice = reviewFinishedNotice(task);
+      if (notice) notify(notice.message, notice.tone);
+    }
+  }, [snapshot.tasks, notify]);
 
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
   const selectedTask =
@@ -1700,7 +1542,7 @@ export function App() {
   const selectedRecords = useMemo(
     () =>
       selectedTask && taskDetail
-        ? partitionPreviewAgentRecords({
+        ? partitionAgentRecords({
             runs: selectTaskRuns(taskDetail, selectedTask.id),
             items: taskDetail.agentItems,
             instructions: taskDetail.taskInstructions,
@@ -1746,9 +1588,6 @@ export function App() {
   const selectedGitSnapshot = selectedTask && taskDetail
     ? selectLatestGitSnapshot(taskDetail, selectedTask)
     : undefined;
-  const selectedGitHubRepository = selectedTask && taskDetail
-    ? selectLatestGitHubRepository(taskDetail, selectedTask)
-    : undefined;
   const selectedBranchPublication = selectedTask && taskDetail
     ? selectLatestBranchPublication(taskDetail, selectedTask)
     : undefined;
@@ -1790,6 +1629,23 @@ export function App() {
     () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
     [enabledRuntimeIds, runtimeModels]
   );
+  // Ask starts on its own default from Settings, else the implementation default.
+  const sideQuestionDefault = useMemo((): SideQuestionModelChoice => appSettings.sideQuestionRuntimeId
+    ? {
+        runtimeId: appSettings.sideQuestionRuntimeId,
+        model: appSettings.sideQuestionModel,
+        modelProvider: appSettings.sideQuestionModelProvider,
+        reasoningEffort: appSettings.sideQuestionReasoningEffort
+      }
+    : {
+        runtimeId: appSettings.defaultRuntimeId,
+        model: appSettings.defaultModel,
+        modelProvider: appSettings.defaultModelProvider,
+        reasoningEffort: appSettings.defaultReasoningEffort
+      }, [
+    appSettings.sideQuestionRuntimeId, appSettings.sideQuestionModel, appSettings.sideQuestionModelProvider, appSettings.sideQuestionReasoningEffort,
+    appSettings.defaultRuntimeId, appSettings.defaultModel, appSettings.defaultModelProvider, appSettings.defaultReasoningEffort
+  ]);
   const designRuntimeCatalog = useMemo(
     () =>
       runtimeCatalog
@@ -1866,30 +1722,33 @@ export function App() {
       enabledRuntimeModels
     ]
   );
-  const reviewExecutionSettings = useMemo(
-    () =>
-      resolveModelExecutionSettings(
-        enabledRuntimeModels,
-        appSettings.reviewModel ?? appSettings.defaultModel,
-        appSettings.reviewReasoningEffort,
-        reviewRuntime?.preflight.runtime.id ??
-          appSettings.reviewRuntimeId ??
-          selectedTask?.runtimeId ??
-          appSettings.defaultRuntimeId,
-        appSettings.reviewModelProvider
-      ),
-    [
-      appSettings.defaultModel,
-      appSettings.defaultRuntimeId,
-      appSettings.reviewModel,
-      appSettings.reviewModelProvider,
-      appSettings.reviewReasoningEffort,
-      appSettings.reviewRuntimeId,
-      reviewRuntime?.preflight.runtime.id,
-      selectedTask?.runtimeId,
-      enabledRuntimeModels
-    ]
-  );
+  // The review runs on the model chosen in Settings › Review, else on the task's own
+  // model when it reviews on the task's runtime.
+  const reviewExecutionSettings = useMemo(() => {
+    const runtimeId = reviewRuntime?.preflight.runtime.id ??
+      appSettings.reviewRuntimeId ??
+      selectedTask?.runtimeId ??
+      appSettings.defaultRuntimeId;
+    const taskModel = !appSettings.reviewModel && selectedTask?.runtimeId === runtimeId ? selectedTask.agentSettings : undefined;
+    return resolveModelExecutionSettings(
+      enabledRuntimeModels,
+      appSettings.reviewModel ?? taskModel?.model ?? appSettings.defaultModel,
+      appSettings.reviewReasoningEffort ?? taskModel?.reasoningEffort,
+      runtimeId,
+      appSettings.reviewModelProvider ?? taskModel?.modelProvider
+    );
+  }, [
+    appSettings.defaultModel,
+    appSettings.defaultRuntimeId,
+    appSettings.reviewModel,
+    appSettings.reviewModelProvider,
+    appSettings.reviewReasoningEffort,
+    appSettings.reviewRuntimeId,
+    reviewRuntime?.preflight.runtime.id,
+    selectedTask?.runtimeId,
+    selectedTask?.agentSettings,
+    enabledRuntimeModels
+  ]);
 
   const openTaskDetail = useCallback(
     (taskId: string, trigger?: HTMLElement) => {
@@ -1923,12 +1782,19 @@ export function App() {
     setWorktreePreparation(undefined);
   }, [taskDataCoordinator]);
 
+  // New task opens on the repository used last (DESIGN.md: repositories live in Settings).
+  const rememberRepository = (repositoryId: string) => {
+    if (repositoryId && repositoryId !== activeRepositoryId) {
+      void updateAppSettings({ selectedRepositoryId: repositoryId });
+    }
+  };
+
   const createTask = async (input: CreateTaskRequest) => {
     try {
       const created = await taskManagerApi.createTask(input);
+      rememberRepository(input.repositoryId);
       taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
       setNewTaskTextDraft({ title: '', prompt: '' });
-      notify('Task created.', 'success');
       await taskDataCoordinator.refreshBoard();
       await openTaskDetail(created.id);
     } catch (caught) {
@@ -1940,6 +1806,7 @@ export function App() {
   const importTask = async (input: ImportTaskRequest) => {
     try {
       const imported = await taskManagerApi.importTask(input);
+      rememberRepository(input.repositoryId);
       taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
       setNewTaskTextDraft({ title: '', prompt: '' });
       await taskDataCoordinator.refreshBoard();
@@ -1992,7 +1859,6 @@ export function App() {
     setError(undefined);
     try {
       await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings }));
-      notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');
@@ -2328,7 +2194,6 @@ export function App() {
     setError(undefined);
     try {
       await withAppAction(() => taskManagerApi.cancelRun({ runId }));
-      notify('Run cancellation requested.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to cancel run.');
@@ -2343,7 +2208,6 @@ export function App() {
         throw new Error('Run not found.');
       }
       await withAppAction(() => taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction, clientMessageId }));
-      notify('Instruction sent.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to steer run.');
@@ -2351,7 +2215,7 @@ export function App() {
     }
   };
 
-  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments) => {
+  const continueRun = async (runId: string, instruction?: string, clientMessageId?: string, files?: import('../../shared/contracts').InstructionAttachments, reviewRequest?: ReviewRequestRecord) => {
     setError(undefined);
     try {
       const run = selectedRuns.find((candidate) => candidate.id === runId);
@@ -2361,7 +2225,7 @@ export function App() {
       const recoveryContinuation =
         run.status !== 'COMPLETED' ||
         Boolean(selectedTask && getImplementationRetryReason(selectedTask));
-      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files }));
+      await withAppAction(() => taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction, clientMessageId, ...files, ...(reviewRequest ? { reviewRequest } : {}) }));
       notify(
         recoveryContinuation ? 'Continuing unfinished work.' : 'Follow-up run started.',
         'success'
@@ -2417,6 +2281,18 @@ export function App() {
     }
   };
 
+  // Dismissing or restoring a finding records a decision on the current review.
+  const decideReviewFinding = async (input: DecideReviewFindingRequest) => {
+    if (!selectedTask) return;
+    try {
+      await taskManagerApi.decideReviewFinding(input);
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, input.kind === 'DISMISS' ? 'Could not dismiss the finding.' : 'Could not restore the finding.');
+      throw caught;
+    }
+  };
+
   const startReview = async (runId?: string) => {
     setError(undefined);
     try {
@@ -2424,13 +2300,13 @@ export function App() {
       if ((!run && runId) || !selectedTask) {
         throw new Error('Run not found.');
       }
-      notify(REVIEW_STARTED_NOTICE, 'info');
       await withAppAction(() => taskManagerApi.startReview({
         taskId: run?.taskId ?? selectedTask.id,
         runId,
-        target: selectedWorktree?.ownership === 'EXTERNAL' ? undefined : { type: 'UNCOMMITTED_CHANGES' },
         settings: reviewExecutionSettings
       }));
+      // Confirm only what happened: a start that fails reports its error instead.
+      notify(REVIEW_STARTED_NOTICE, 'info');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start review.');
@@ -2479,36 +2355,27 @@ export function App() {
       interactionRequestId: interaction.id,
       decision
     });
-    notify('Provider request answered.', 'success');
     await refresh();
   };
 
-  const selectRepository = useCallback(
+  const revealLabel =
+    windowChromePlatform === 'macos' ? 'Reveal in Finder'
+      : windowChromePlatform === 'windows' ? 'Reveal in File Explorer'
+        : 'Reveal in file manager';
+
+  const revealRepository = useCallback(
     async (repositoryId: string) => {
-      if (!repositoryId || repositoryId === activeRepositoryId) {
-        return;
+      try {
+        const result = await taskManagerApi.executeOpenTargetAction({
+          target: { type: 'repository', repositoryId },
+          action: 'reveal'
+        });
+        if (!result.ok) notify(result.message ?? 'Could not reveal the repository.', 'error');
+      } catch (caught) {
+        reportActionError(caught, 'Could not reveal the repository.');
       }
-      const nextSettings = await updateAppSettings(
-        { selectedRepositoryId: repositoryId },
-        ''
-      );
-      if (!nextSettings) {
-        return;
-      }
-      setSelectedTaskId(undefined);
-      setLastTaskId(undefined);
-      closeTaskDetail();
-      setError(undefined);
-      const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
-      notify(`New tasks will use ${repository?.name ?? 'this repository'}.`, 'success');
     },
-    [
-      activeRepositoryId,
-      closeTaskDetail,
-      notify,
-      snapshot.repositories,
-      updateAppSettings
-    ]
+    [notify, reportActionError]
   );
 
   const addRepository = useCallback(async () => {
@@ -2520,10 +2387,7 @@ export function App() {
         return false;
       }
       const repository = await taskManagerApi.addRepository(selectedPath);
-      const nextSettings = await updateAppSettings(
-        { selectedRepositoryId: repository.id },
-        ''
-      );
+      const nextSettings = await updateAppSettings({ selectedRepositoryId: repository.id });
       if (!nextSettings) {
         return false;
       }
@@ -2620,7 +2484,6 @@ export function App() {
         setSelectedBoardId(board.id);
         setView('board');
         closeTaskDetail();
-        notify(`${board.name} saved.`, 'success');
       } catch (caught) {
         reportActionError(caught, 'Could not save board.');
         throw caught;
@@ -2636,7 +2499,6 @@ export function App() {
         setBoardEditor(undefined);
         setSelectedBoardId(undefined);
         await refresh();
-        notify('Saved view deleted.', 'success');
       } catch (caught) {
         reportActionError(caught, 'Could not delete board.');
         throw caught;
@@ -2724,6 +2586,7 @@ export function App() {
   };
 
   const showView = (next: AppView) => {
+    if (isTasksView(next)) lastTasksViewRef.current = { view: next };
     setView(next);
     if (next !== 'settings') setPreviewThemePreset(null);
     setSelectedBoardId(undefined);
@@ -2737,9 +2600,20 @@ export function App() {
   };
 
   const showBoard = (boardId: string) => {
+    lastTasksViewRef.current = { view: 'board', boardId };
     setSelectedBoardId(boardId);
     setView('board');
     closeTaskDetail();
+  };
+
+  // The rail's Tasks item returns to the view the user last chose there.
+  const showTasks = () => {
+    const last = lastTasksViewRef.current;
+    if (last.boardId && snapshot.boards.some((board) => board.id === last.boardId)) {
+      showBoard(last.boardId);
+    } else {
+      showView(last.view);
+    }
   };
 
   const canGoBack = isDetailOpen;
@@ -2759,7 +2633,6 @@ export function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [selectedTask?.id, showDetail]);
 
-  const resolvedTheme = resolveTheme(theme, prefersDark);
   const appOwnedModalOpen = Boolean(
     deleteCandidate ||
       repositoryDisconnect ||
@@ -2776,42 +2649,28 @@ export function App() {
     isActionPending: () => pendingAppActions.current > 0,
     observe: (taskId) => taskManagerApi.refreshEvidence({ taskId }),
     refresh,
-    onError: (caught) => reportActionError(caught, 'Could not refresh the external checkout.')
+    onError: (caught) => {
+      // Observing a checkout that is already known to be missing only checks
+      // whether it came back; the task page states that it is missing.
+      if (selectedWorktree && selectedWorktree.status !== 'PRESENT') return;
+      reportActionError(caught, 'Could not refresh the external checkout.');
+    }
   });
 
   return (
+    <TooltipProvider>
+    <NotifyProvider value={notify}>
     <div
       ref={appRootRef}
       className="tm-app app-shell"
       tabIndex={-1}
       data-input-modality={inputModality}
       data-window-platform={windowChromePlatform}
-      onKeyDownCapture={(event) => {
-        if (event.key === 'Tab') setInputModality('keyboard');
-      }}
-      onPointerDownCapture={() => setInputModality('pointer')}
     >
       <div
-        ref={canvasViewportRef}
-        className={`tm-body ${isCanvasDragging ? 'tm-body--dragging' : ''}`}
-        inert={appOwnedModalOpen ? true : undefined}
-        aria-hidden={appOwnedModalOpen ? true : undefined}
-        onWheel={(event) => {
-          if (
-            !isNewTaskClosing &&
-            shouldInterruptNewTaskCanvasPanForWheel(
-              event.deltaX,
-              event.deltaY,
-              event.shiftKey
-            )
-          ) {
-            cancelCanvasPan();
-          }
-        }}
-        onPointerDown={startCanvasDrag}
-        onPointerMove={moveCanvasDrag}
-        onPointerUp={stopCanvasDrag}
-        onPointerCancel={stopCanvasDrag}
+        className="tm-body"
+        inert={appOwnedModalOpen || isNewTaskOpen ? true : undefined}
+        aria-hidden={appOwnedModalOpen || isNewTaskOpen ? true : undefined}
       >
         <div className="tm-canvas">
           <div className="tm-canvas__workspace">
@@ -2824,241 +2683,88 @@ export function App() {
               {windowChromePlatform === 'macos' ? (
                 <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
               ) : null}
-              <button
-                type="button"
-                className="tm-iconbtn"
-                onClick={toggleSidebar}
-                aria-label={panelToggleLabel}
-                title={panelToggleLabel}
-              >
-                <PanelIcon />
-              </button>
               <div className="tm-titlebar__nav">
-                <button
-                  type="button"
-                  className="tm-iconbtn"
-                  onClick={goBack}
-                  disabled={!canGoBack}
-                  aria-label="Back"
-                  title="Back"
-                >
-                  <ArrowLeftIcon />
-                </button>
-                <button
-                  type="button"
-                  className="tm-iconbtn"
-                  onClick={goForward}
-                  disabled={!canGoForward}
-                  aria-label="Forward"
-                  title="Forward"
-                >
-                  <ArrowRightIcon />
-                </button>
+                <Tooltip label="Back">
+                  <button type="button" className="tm-iconbtn" onClick={goBack} disabled={!canGoBack} aria-label="Back">
+                    <ArrowLeftIcon />
+                  </button>
+                </Tooltip>
+                <Tooltip label="Forward">
+                  <button type="button" className="tm-iconbtn" onClick={goForward} disabled={!canGoForward} aria-label="Forward">
+                    <ArrowRightIcon />
+                  </button>
+                </Tooltip>
               </div>
+              {/* The task page renders its title row here (TaskDetail). */}
+              {showDetail ? <div ref={setTaskTitlebarSlot} className="tm-titlebar__slot" /> : null}
               <div className="tm-titlebar__spacer" />
               <button
                 ref={newTaskButtonRef}
                 type="button"
-                className="tm-newtask"
+                className="primary-button button--sm tm-newtask"
                 onClick={openNewTask}
                 disabled={!canCreateTask}
-                title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
+                title={canCreateTask ? undefined : 'Finish setup before creating tasks'}
               >
                 <PlusIcon />
                 <span>New task</span>
               </button>
             </header>
 
-            <div ref={canvasContentRef} className="tm-canvas__content">
-            <aside
-              id="app-navigation-sidebar"
-              className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}
+            <div className="tm-canvas__content">
+            <nav
+              id="app-navigation"
+              aria-label="Primary"
+              className="tm-rail"
               inert={isTaskDetailModalOpen ? true : undefined}
               aria-hidden={isTaskDetailModalOpen ? true : undefined}
             >
-          <div className="tm-nav__brand">
-            <img
-              className="tm-nav__brand-mark"
-              src={
-                resolvedTheme === 'dark'
-                  ? './assets/brand/monkey_icon_cream.svg'
-                  : './assets/brand/monkey_icon_charcoal.svg'
-              }
-              alt=""
-              aria-hidden="true"
-            />
-            <span className="tm-nav__brand-name">Task Monki</span>
-          </div>
-          <div className="tm-nav__divider" />
-          <div className="tm-nav__group">
-            <div className="tm-nav__section">
-              <NavItem
+              <RailItem
                 label="Inbox"
                 icon={<InboxIcon />}
                 count={navCounts.inbox}
-                urgent={navCounts.inbox > 0}
-                overlapCount
                 active={!showDetail && view === 'inbox'}
-                collapsed={isSidebarCollapsed}
                 onClick={() => showView('inbox')}
               />
-              <NavItem
-                label="All tasks"
+              <RailItem
+                label="Tasks"
                 icon={<BoardIcon />}
-                active={!showDetail && view === 'board' && !selectedBoardId}
-                collapsed={isSidebarCollapsed}
-                onClick={() => showView('board')}
+                active={showDetail || isTasksView(view)}
+                onClick={showTasks}
               />
-              <NavItem
+              <RailItem
                 label="Designs"
                 icon={<DesignIcon />}
                 active={!showDetail && view === 'designs'}
-                collapsed={isSidebarCollapsed}
                 onClick={() => showView('designs')}
               />
-              <NavItem
+              <RailItem
                 label="Previews"
                 icon={<PreviewIcon />}
                 active={!showDetail && view === 'previews'}
-                collapsed={isSidebarCollapsed}
                 onClick={() => showView('previews')}
               />
-              <NavItem
+              <RailItem
                 label="Discourse"
                 icon={<DiscourseIcon />}
                 count={discourseAttentionCount}
                 countNoun="conversation"
-                pillCount
                 active={!showDetail && view === 'discourse'}
-                collapsed={isSidebarCollapsed}
                 onClick={() => showView('discourse')}
               />
-            </div>
-            <div className="tm-nav__divider" />
-            <div className="tm-nav__section">
-              <div className="tm-nav__saved-head">
-                <button
-                  type="button"
-                  className="tm-nav__saved-toggle"
-                  aria-expanded={areSavedViewsExpanded}
-                  aria-controls="tm-saved-view-list"
-                  onClick={() => setAreSavedViewsExpanded((expanded) => !expanded)}
-                >
-                  <SavedViewsFolderIcon open={areSavedViewsExpanded} />
-                  <span className="tm-nav__saved-title">Saved views</span>
-                </button>
-                <button
-                  type="button"
-                  className="tm-nav__saved-add"
-                  aria-label="New saved view"
-                  title="New saved view"
-                  data-tip="New saved view"
-                  onClick={() => setBoardEditor('new')}
-                >
-                  <PlusIcon />
-                </button>
-              </div>
-              <div
-                id="tm-saved-view-list"
-                className="tm-nav__saved-list"
-                hidden={!areSavedViewsExpanded}
-              >
-                {snapshot.boards.map((board) => (
-                  <NavItem
-                    key={board.id}
-                    label={board.name}
-                    icon={
-                      <span
-                        className="tm-nav__saved-color tm-board-color"
-                        data-board-color={board.color.toLowerCase()}
-                        aria-hidden="true"
-                      />
-                    }
-                    count={selectBoardTasks(snapshot.tasks, board).length}
-                    active={!showDetail && view === 'board' && selectedBoardId === board.id}
-                    collapsed={isSidebarCollapsed}
-                    onClick={() => showBoard(board.id)}
-                  />
-                ))}
-              </div>
-            </div>
-            <div className="tm-nav__divider" />
-            <div className="tm-nav__section">
-              <NavItem
-                label="Active runs"
-                icon={<ActiveIcon />}
-                count={navCounts.active}
-                active={!showDetail && view === 'active'}
-                collapsed={isSidebarCollapsed}
-                onClick={() => showView('active')}
+              <div className="tm-rail__spacer" />
+              <SoftwareUpdateNotice
+                state={softwareUpdateState}
+                onDownload={() => void downloadSoftwareUpdate()}
+                onInstall={() => void installSoftwareUpdate()}
               />
-              <NavItem
-                label="Review queue"
-                icon={<ReviewIcon />}
-                count={navCounts.review}
-                urgent={navCounts.review > 0}
-                pillCount
-                active={!showDetail && view === 'review'}
-                collapsed={isSidebarCollapsed}
-                onClick={() => showView('review')}
-              />
-              <NavItem
-                label="Done & Archive"
-                icon={<DoneIcon />}
-                count={navCounts.done}
-                active={!showDetail && view === 'done'}
-                collapsed={isSidebarCollapsed}
-                onClick={() => showView('done')}
-              />
-            </div>
-            <div className="tm-nav__divider" />
-            <div className="tm-nav__section">
-              <NavItem
+              <RailItem
                 label="Settings"
                 icon={<SettingsIcon />}
                 active={!showDetail && view === 'settings'}
-                collapsed={isSidebarCollapsed}
                 onClick={() => showView('settings')}
               />
-            </div>
-          </div>
-          <div className="tm-nav__spacer" />
-          <SoftwareUpdateNotice
-            state={softwareUpdateState}
-            collapsed={isSidebarCollapsed}
-            onDownload={() => void downloadSoftwareUpdate()}
-            onInstall={() => void installSoftwareUpdate()}
-          />
-          <div className="tm-nav__divider" />
-
-          <RepositorySwitcher
-            activeRepositoryId={activeRepositoryId}
-            options={repositoryOptions}
-            collapsed={isSidebarCollapsed}
-            adding={isAddingRepository}
-            onSelect={selectRepository}
-            onAddRepository={addRepository}
-            onRefreshRepository={refreshRepository}
-            onReconnectRepository={reconnectRepository}
-            onDisconnectRepository={requestRepositoryDisconnect}
-          />
-        </aside>
-
-        {!isSidebarCollapsed ? (
-          <PanelResizeHandle
-            className="tm-nav__resize"
-            label="Resize navigation sidebar"
-            value={appSidebarWidth}
-            min={176}
-            max={240}
-            defaultValue={176}
-            controls="app-navigation-sidebar"
-            onChange={(width) => {
-              setAppSidebarWidth(width);
-              persistFocusedPanelWidth('app-navigation', width);
-            }}
-          />
-        ) : null}
+            </nav>
 
         {showDetail && selectedTask && taskDetail ? (
           <TaskDetail
@@ -3076,15 +2782,14 @@ export function App() {
               }
             }}
             onReadAttachment={(attachmentId) => taskManagerApi.readTaskAttachment({ attachmentId })}
-            onNotify={notify}
             onPrepareTaskAgent={async (text) => {
               if (taskDetail.runs.length) {
-                const draft = agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? '';
-                saveAgentDraft(selectedTask.id, draft ? `${draft}\n\n${text}` : text);
-                await agentDraftWrites.current.get(selectedTask.id)?.work;
+                const draft = agentDrafts.values[selectedTask.id] ?? selectedTask.agentDraft ?? '';
+                agentDrafts.save(selectedTask.id, appendToDraft(draft, text));
+                await agentDrafts.flush(selectedTask.id);
               } else {
                 const prompt = selectedTask.promptDraft ?? selectedTask.prompt;
-                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: `${prompt}\n\n${text}`, draftOnly: true });
+                await taskManagerApi.saveTaskPrompt({ taskId: selectedTask.id, prompt: appendToDraft(prompt, text), draftOnly: true });
                 await refresh();
               }
             }}
@@ -3093,14 +2798,13 @@ export function App() {
               if (!draftOnly) await refresh();
             }}
             agentInstructions={selectedRecords?.task.instructions ?? []}
-            agentDraft={agentDrafts[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
-            agentDraftError={agentDraftErrors[selectedTask.id]}
-            onAgentDraftChange={(text) => saveAgentDraft(selectedTask.id, text)}
-            onFlushAgentDraft={async () => {
-              const pending = agentDraftWrites.current.get(selectedTask.id);
-              await pending?.work;
-              if (pending?.error) throw new Error(pending.error);
-            }}
+            agentDraft={agentDrafts.values[selectedTask.id] ?? selectedTask.agentDraft ?? ''}
+            agentDraftError={agentDrafts.errors[selectedTask.id]}
+            onAgentDraftChange={(text) => agentDrafts.save(selectedTask.id, text)}
+            onFlushAgentDraft={() => agentDrafts.flush(selectedTask.id)}
+            reviewDraft={reviewDrafts.values[selectedTask.id] ?? selectedTask.reviewDraft ?? EMPTY_REVIEW_DRAFT}
+            reviewDraftError={reviewDrafts.errors[selectedTask.id]}
+            onReviewDraftChange={(draft) => reviewDrafts.save(selectedTask.id, draft)}
             onQueueInstruction={async (runId, instruction, id, files) => {
               await withAppAction(() => taskManagerApi.queueTaskInstruction({ taskId: selectedTask.id, runId, instruction, id, ...files }));
               await refresh();
@@ -3115,6 +2819,7 @@ export function App() {
             }}
             initialTab={view === 'previews' ? previewDetailTab : undefined}
             headingRef={taskDetailHeadingRef}
+            titlebarSlot={taskTitlebarSlot}
             error={error}
             task={selectedTask}
             repository={taskDetail.repository}
@@ -3122,7 +2827,6 @@ export function App() {
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
             gitSnapshots={selectedGitSnapshots}
-            githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
             ciRollup={selectedCiRollup}
@@ -3154,7 +2858,21 @@ export function App() {
               ? previewAgentConversation(selectedTask.id, selectedRecords.preview, respondToInteraction)
               : undefined}
             previewProposals={selectedTask ? previewProposalActions(selectedTask.id) : undefined}
-            showMascot={appSettings.showMascot}
+            ask={selectedTask && selectedRecords ? {
+              records: selectedRecords.side,
+              defaultModel: sideQuestionDefault,
+              ask: async (input) => {
+                await withAppAction(() => taskManagerApi.askSideQuestion({ taskId: selectedTask.id, ...input }));
+              },
+              stop: async (runId) => {
+                await withAppAction(() => taskManagerApi.stopSideQuestion({ taskId: selectedTask.id, runId }));
+              },
+              // Bound to this task, so a thread ended after leaving it still reaches its snapshot.
+              end: async (threadId) => {
+                await taskManagerApi.endSideThread({ taskId: selectedTask.id, threadId });
+              },
+              readArtifact
+            } : undefined}
             worktreePreparationPending={worktreePreparationActionTaskId === selectedTask?.id}
             onPrepareWorktree={prepareWorktree}
             onRestoreWorktree={restoreWorktree}
@@ -3162,12 +2880,14 @@ export function App() {
             onCancel={cancelRun}
             onSteer={steerRun}
             onContinue={continueRun}
+            onSendReviewRequest={(runId, instruction, request) => continueRun(runId, instruction, undefined, undefined, request)}
             onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
             onReconnectWorktree={reconnectWorktree}
             onUpdateWorktreeComparison={updateWorktreeComparison}
             onRefreshEvidence={refreshEvidence}
             onRetry={retryRun}
             onReview={startReview}
+            onDecideReviewFinding={decideReviewFinding}
             onSyncAgentGoal={syncAgentGoal}
             onUpdateAgentNativeSession={updateAgentNativeSession}
             onRespondToInteraction={respondToInteraction}
@@ -3194,7 +2914,7 @@ export function App() {
                 </span>
               </div>
             </div>
-            {error ? <div className="tm-error">{error}</div> : null}
+            {error ? <div className="tm-error tm-error--page">{error}</div> : null}
           </main>
         ) : view === 'previews' ? (
           <PreviewsPage
@@ -3235,7 +2955,6 @@ export function App() {
               ? previewAgentConversation(designDetail.design.id, designDetail.previewAgent ?? EMPTY_PREVIEW_AGENT_RECORDS, respondToDesignInteraction)
               : undefined}
             previewProposals={selectedDesignId ? previewProposalActions(selectedDesignId) : undefined}
-            onNotify={notify}
             draft={designDraft}
             models={designRuntimeCatalog?.models ?? []}
             runtimes={designRuntimeCatalog?.runtimes ?? []}
@@ -3292,7 +3011,7 @@ export function App() {
         ) : view === 'discourse' ? (
           <DiscourseWorkspace
             defaults={appSettings.discourseDefaults}
-            onDefaultsChange={async (discourseDefaults) => { await updateAppSettings({ discourseDefaults }, ''); }}
+            onDefaultsChange={async (discourseDefaults) => { await updateAppSettings({ discourseDefaults }); }}
             historyCollapsed={discourseHistoryCollapsed}
             onHistoryCollapsedChange={(collapsed) => {
               setDiscourseHistoryCollapsed(collapsed);
@@ -3305,6 +3024,10 @@ export function App() {
           <MainColumn
             view={view}
             board={selectedBoard}
+            boards={snapshot.boards}
+            onShowTasksView={showView}
+            onShowBoard={showBoard}
+            onNewBoard={() => setBoardEditor('new')}
             tasks={visibleTasks}
             repositories={snapshot.repositories}
             interactionRequests={snapshot.interactionRequests}
@@ -3336,6 +3059,12 @@ export function App() {
             repositorySetupState={repositorySetupState}
             addingRepository={isAddingRepository}
             onAddRepository={addRepository}
+            repositoryOptions={repositoryOptions}
+            revealLabel={revealLabel}
+            onRefreshRepository={refreshRepository}
+            onReconnectRepository={reconnectRepository}
+            onDisconnectRepository={requestRepositoryDisconnect}
+            onRevealRepository={revealRepository}
             onFinishSetup={finishFirstLaunchSetup}
             onGoToDesigns={() => showView('designs')}
             onSelect={selectTask}
@@ -3348,37 +3077,37 @@ export function App() {
             </div>
           </div>
 
-          {isNewTaskOpen ? (
-            <NewTaskPanel
-              agentProfiles={appSettings.agentProfiles}
-              repositoryId={activeRepositoryId}
-              repositories={snapshot.repositories}
-              models={enabledRuntimeModels}
-              runtimes={enabledRuntimes}
-              defaultAgentSettings={defaultTaskSettings}
-              disabled={!canCreateTask}
-              refineDisabledReason={refineDisabledReason}
-              onCreate={createTask}
-              onImport={importTask}
-              onPreviewImport={taskManagerApi.previewImport}
-              onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
-              onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
-              onRefinePrompt={refinePrompt}
-              onCancelPromptRefinement={cancelPromptRefinement}
-              onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
-              onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
-              onReadClipboardImage={taskManagerApi.readClipboardImage}
-              onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
-              initialTextDraft={newTaskTextDraft}
-              onTextDraftChange={setNewTaskTextDraft}
-              returnFocusRef={newTaskButtonRef}
-              fallbackReturnFocusRef={appRootRef}
-              onResize={keepNewTaskPanelInView}
-              onClose={closeNewTask}
-            />
-          ) : null}
         </div>
       </div>
+
+      {isNewTaskOpen ? (
+        <NewTaskPanel
+          agentProfiles={appSettings.agentProfiles}
+          repositoryId={activeRepositoryId}
+          repositories={snapshot.repositories}
+          models={enabledRuntimeModels}
+          runtimes={enabledRuntimes}
+          defaultAgentSettings={defaultTaskSettings}
+          disabled={!canCreateTask}
+          refineDisabledReason={refineDisabledReason}
+          onCreate={createTask}
+          onImport={importTask}
+          onPreviewImport={taskManagerApi.previewImport}
+          onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
+          onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
+          onRefinePrompt={refinePrompt}
+          onCancelPromptRefinement={cancelPromptRefinement}
+          onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
+          onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
+          onReadClipboardImage={taskManagerApi.readClipboardImage}
+          onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+          initialTextDraft={newTaskTextDraft}
+          onTextDraftChange={setNewTaskTextDraft}
+          returnFocusRef={newTaskButtonRef}
+          fallbackReturnFocusRef={appRootRef}
+          onClose={closeNewTask}
+        />
+      ) : null}
 
       {deleteCandidate ? (
         <DeleteTaskModal
@@ -3476,5 +3205,7 @@ export function App() {
 
       <GlobalNotifier notifications={notifications} />
     </div>
+    </NotifyProvider>
+    </TooltipProvider>
   );
 }

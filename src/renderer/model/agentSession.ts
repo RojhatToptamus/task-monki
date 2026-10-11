@@ -1,13 +1,15 @@
-import type { AgentItemRecord, AgentPlanRevisionRecord, RunRecord, TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
+import { parseReviewResponse, type AgentItemRecord, type AgentPlanRevisionRecord, type AgentReviewGateProjection, type ReviewRequestRecord, type ReviewResponseAnswer, type RunRecord, type TaskInstruction, type InteractionRequestRecord } from '../../shared/contracts';
 import { buildRunActivityProjection } from './runActivity';
 import { buildOverviewRunActivityRows, type OverviewActivityRow } from './overviewRunActivity';
+import { pluralize } from './formatting';
 
 export type SessionStep =
   | { key: string; at: string; kind: 'tool'; row: OverviewActivityRow }
   | { key: string; at: string; kind: 'reasoning'; text: string; seconds?: number; active: boolean };
 
 export type SessionEntry =
-  | { key: string; at: string; kind: 'message'; author: 'You' | 'Agent'; text: string; status?: string }
+  /** An agent message replying to a review request carries its answers, taken out of its text. */
+  | { key: string; at: string; kind: 'message'; author: 'You' | 'Agent'; text: string; status?: string; answers?: ReviewResponseAnswer[] }
   | { key: string; at: string; kind: 'steps'; steps: SessionStep[] }
   | { key: string; at: string; kind: 'interaction'; interaction: InteractionRequestRecord }
   | { key: string; at: string; kind: 'plan'; plan: AgentPlanRevisionRecord };
@@ -15,7 +17,8 @@ export type SessionEntry =
 export type SessionTurnState = 'active' | 'completed' | 'stopped' | 'failed' | 'interrupted';
 
 export type SessionTurnOpener =
-  | { kind: 'prompt'; key: string; text: string; at: string }
+  /** A follow-up sent from the Review tab carries its request item by item. */
+  | { kind: 'prompt'; key: string; text: string; at: string; reviewRequest?: ReviewRequestRecord }
   | { kind: 'marker'; key: string; label: string; at: string };
 
 export interface SessionTurn {
@@ -45,23 +48,64 @@ export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructio
   const runInstructions = instructions.filter((item) => item.runId === run.id);
   const authored = runInstructions.find((item) => item.mode !== 'STEER');
   const opener: SessionTurnOpener | undefined = authored
-    ? { kind: 'prompt', key: authored.id, text: authored.text, at: run.startedAt }
+    ? { kind: 'prompt', key: authored.id, text: authored.text, at: run.startedAt, ...(authored.reviewRequest ? { reviewRequest: authored.reviewRequest } : {}) }
     : options.prompt !== undefined ? { kind: 'prompt', key: `${run.id}:prompt`, text: options.prompt, at: run.startedAt }
     : run.mode === 'RETRY' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Retried', at: run.startedAt }
     : run.mode === 'FOLLOW_UP' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Continued', at: run.startedAt }
     : undefined;
   // A review is a detached gate; its findings belong to the review surface.
-  const entries = run.mode === 'REVIEW' ? []
+  const steps = run.mode === 'REVIEW' ? []
     : sessionEntries(run, items, runInstructions.filter((item) => item.mode === 'STEER'), options.cwd, options.plans, options.interactions);
+  const entries = authored?.reviewRequest ? withReviewAnswers(steps, authored.reviewRequest) : steps;
   const state = turnState(run);
   const end = run.endedAt ?? (state === 'active' ? undefined : run.lastEventAt);
-  const durationMs = end ? Date.parse(end) - Date.parse(run.startedAt) : undefined;
   const answer = state === 'completed'
     ? [...entries].reverse().find((entry) => entry.kind === 'message' && entry.author === 'Agent')
     : undefined;
   return { key: run.id, run, opener, entries, state,
-    durationMs: durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined,
+    durationMs: end ? workedMs(run.startedAt, Date.parse(end), options.interactions?.filter((item) => item.runId === run.id)) : undefined,
     answer: answer?.kind === 'message' ? answer.text : undefined };
+}
+
+/** When a run waited on the person: a question or an approval, from its request until it was answered or closed. */
+export type PersonWait = Pick<InteractionRequestRecord, 'requestedAt' | 'respondedAt' | 'resolvedAt'>;
+
+/**
+ * How long a run worked from its start to `end`: its time less every wait on
+ * the person, so a question left open for an hour does not read as an hour of
+ * work. Waits that overlap count once; a wait still open runs to `end`.
+ */
+export function workedMs(startedAt: string, end: number, waits: readonly PersonWait[] = []): number | undefined {
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+  const spans = waits
+    .map((wait) => {
+      const closed = Date.parse(wait.respondedAt ?? wait.resolvedAt ?? '');
+      return [Math.max(start, Date.parse(wait.requestedAt)), Math.min(end, Number.isFinite(closed) ? closed : end)] as const;
+    })
+    .filter(([from, to]) => Number.isFinite(from) && to > from)
+    .sort((left, right) => left[0] - right[0]);
+  let waited = 0;
+  let reached = start;
+  for (const [from, to] of spans) {
+    const counted = Math.max(from, reached);
+    if (to > counted) {
+      waited += to - counted;
+      reached = to;
+    }
+  }
+  return Math.max(0, end - start - waited);
+}
+
+/** The agent's answers to a review request leave its prose and travel with the message as data. */
+function withReviewAnswers(entries: SessionEntry[], request: ReviewRequestRecord): SessionEntry[] {
+  return entries.flatMap((entry) => {
+    if (entry.kind !== 'message' || entry.author !== 'Agent') return [entry];
+    const { prose, answers } = parseReviewResponse(entry.text, request);
+    if (prose === entry.text) return [entry];
+    if (!prose && answers.length === 0) return [];
+    return [{ ...entry, text: prose, ...(answers.length > 0 ? { answers } : {}) }];
+  });
 }
 
 export function sessionEntries(run: RunRecord, items: AgentItemRecord[], steers: TaskInstruction[], cwd?: string, plans: AgentPlanRevisionRecord[] = [], interactions: InteractionRequestRecord[] = []): SessionEntry[] {
@@ -180,15 +224,15 @@ export function stepsSummary(steps: SessionStep[]): string {
   const phrases = [...counts].filter(([kind]) => kind !== 'reasoning' || counts.size === 1).map(([kind, value]) => {
     const count = size(value);
     switch (kind) {
-      case 'read': return `read ${count} ${plural(count, 'file')}`;
+      case 'read': return `read ${pluralize(count, 'file')}`;
       case 'search': return count === 1 ? 'searched the code' : `searched ${count} times`;
       case 'list': return count === 1 ? 'listed files' : `listed ${count} directories`;
-      case 'file': return `edited ${count} ${plural(count, 'file')}`;
-      case 'command': return `ran ${count} ${plural(count, 'command')}`;
+      case 'file': return `edited ${pluralize(count, 'file')}`;
+      case 'command': return `ran ${pluralize(count, 'command')}`;
       case 'permission': return count === 1 ? 'requested approval' : `requested ${count} approvals`;
-      case 'question': return `asked ${count} ${plural(count, 'question')}`;
+      case 'question': return `asked ${pluralize(count, 'question')}`;
       case 'reasoning': return reasoningLabel(steps.reduce((total, step) => total + (step.kind === 'reasoning' ? step.seconds ?? 0 : 0), 0) || undefined, false).toLowerCase();
-      default: return `used ${count} ${plural(count, 'tool')}`;
+      default: return `used ${pluralize(count, 'tool')}`;
     }
   });
   const text = phrases.join(', ');
@@ -201,25 +245,77 @@ export function reasoningLabel(seconds: number | undefined, active: boolean): st
   return seconds < 1 ? 'Thought briefly' : `Thought for ${formatElapsed(seconds * 1000)}`;
 }
 
-/** One line of the latest agent answer for Overview — never user or generated prompt text. */
+/** The agent's latest words as one plain line for the Overview; never user or generated prompt text. */
 export function conversationPreview(turn: SessionTurn, limit = 140): string | undefined {
   const latest = turn.state === 'active'
     ? [...turn.entries].reverse().find((entry) => entry.kind === 'message' && entry.author === 'Agent')
     : undefined;
   const text = latest?.kind === 'message' ? latest.text : turn.answer;
-  const compact = text?.replace(/\s+/gu, ' ').trim();
+  const compact = text ? plainProse(text).replace(/\n/gu, ' ') : undefined;
   if (!compact) return undefined;
   return compact.length <= limit ? compact : `${compact.slice(0, limit - 1).trimEnd()}…`;
 }
 
-export function turnOutcomeLabel(turn: Pick<SessionTurn, 'state' | 'durationMs'>): string {
-  const elapsed = turn.durationMs === undefined ? undefined : formatElapsed(turn.durationMs);
+/** A finished turn's answer as plain lines: what the agent reported, without markdown markers. */
+export function conversationAnswer(turn: SessionTurn): string | undefined {
+  if (turn.state === 'active' || !turn.answer) return undefined;
+  return plainProse(turn.answer) || undefined;
+}
+
+function plainProse(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/gu, '')
+    .split('\n')
+    .map((line) => line
+      .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/u, '')
+      .replace(/`([^`]*)`/gu, '$1')
+      .replace(/(\*\*|__)(.+?)\1/gu, '$2')
+      .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
+      .replace(/\s+/gu, ' ')
+      .trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+export function turnOutcomeLabel(turn: Pick<SessionTurn, 'state' | 'durationMs'>): string | undefined {
+  // Under a second says nothing about the work; the outcome alone does, and a
+  // finished answer needs no word at all.
+  const elapsed = turn.durationMs === undefined || turn.durationMs < 1000 ? undefined : formatElapsed(turn.durationMs);
   switch (turn.state) {
-    case 'completed': return elapsed ? `Worked for ${elapsed}` : 'Completed';
+    case 'completed': return elapsed ? `Worked for ${elapsed}` : undefined;
     case 'stopped': return elapsed ? `Stopped after ${elapsed}` : 'Stopped';
     case 'failed': return elapsed ? `Failed after ${elapsed}` : 'Failed';
     case 'interrupted': return elapsed ? `Interrupted after ${elapsed}` : 'Interrupted';
     default: return 'Working';
+  }
+}
+
+/**
+ * How an agent review turn ended, as the conversation states it. The latest
+ * review names its verdict; an earlier one only how its run ended, because
+ * its verdict is no longer recorded. A live review has no word here: the
+ * working line beneath already says it.
+ */
+export function reviewTurnOutcome(
+  turn: Pick<SessionTurn, 'state'> & { run: Pick<RunRecord, 'id'> },
+  review: Pick<AgentReviewGateProjection, 'runId' | 'status' | 'result'> | undefined
+): string | undefined {
+  if (turn.state === 'active') return undefined;
+  const latest = review?.runId === turn.run.id;
+  // The latest review's verdict, or its status when it recorded none (a review with no structured result).
+  switch (latest ? review.result?.verdict ?? review.status : undefined) {
+    case 'PASSED': return 'Passed';
+    case 'NEEDS_CHANGES': return 'Needs changes';
+    case 'INCONCLUSIVE': return 'Inconclusive';
+    case 'FAILED': return 'Failed';
+  }
+  switch (turn.state) {
+    case 'stopped': return 'Stopped';
+    case 'failed': return 'Failed';
+    case 'interrupted': return 'Interrupted';
+    // A later review replaced this one; its verdict is no longer recorded, so it says that much.
+    case 'completed': return review?.runId && !latest ? 'Earlier review' : undefined;
+    default: return undefined;
   }
 }
 
@@ -252,8 +348,4 @@ function reasoningSeconds(item: AgentItemRecord): number | undefined {
   const start = Date.parse(item.providerStartedAt ?? item.createdAt);
   const end = Date.parse(item.providerCompletedAt ?? (item.status === 'COMPLETED' ? item.updatedAt : ''));
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? Math.round((end - start) / 1000) : undefined;
-}
-
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
 }

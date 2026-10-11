@@ -1,7 +1,9 @@
 import type {
   DomainEvent,
   AgentReviewFinding,
+  AgentReviewResolvedFinding,
   AgentReviewResult,
+  ReviewFindingDecision,
   Finding,
   HealthStatus,
   RunRecord,
@@ -11,10 +13,12 @@ import type {
   PullRequestSnapshotRecord
 } from '../../shared/contracts';
 import {
+  REVIEW_FINDING_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
   isDetachedRunMode,
-  isImplementationRunMode
+  isImplementationRunMode,
+  reviewGateStatusFromResult
 } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
@@ -131,8 +135,9 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     ) {
       return next;
     }
-    // A Preview conversation is telemetry beside the task: it never changes the task's run projection.
-    if (isPreviewRunEvent(event, currentRun)) {
+    // A Preview conversation or a question in Ask is telemetry beside
+    // the task: it never changes the task's workflow, run projection, or review gate.
+    if (isConversationRunEvent(event, currentRun)) {
       return next;
     }
 
@@ -351,17 +356,23 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
   }
 }
 
-function isPreviewRunEvent(event: DomainEvent, run?: RunRecord): boolean {
-  return run?.mode === 'PREVIEW' || getString(event.payload, 'mode') === 'PREVIEW';
+const CONVERSATION_RUN_MODES: ReadonlySet<string> = new Set(['PREVIEW', 'SIDE_QUESTION']);
+
+function isConversationRunEvent(event: DomainEvent, run?: RunRecord): boolean {
+  const eventMode = getString(event.payload, 'mode');
+  return (
+    (run !== undefined && CONVERSATION_RUN_MODES.has(run.mode)) ||
+    (eventMode !== undefined && CONVERSATION_RUN_MODES.has(eventMode))
+  );
 }
 
-/** Reviews and Preview agent turns run beside the task; their events never move its workflow phase. */
+/** Reviews, questions in Ask, and Preview agent turns run beside the task; their events never move its workflow phase. */
 function isDetachedRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
   const eventMode = getString(event.payload, 'mode');
   return (
     (run !== undefined && isDetachedRunMode(run.mode)) ||
     eventMode === 'REVIEW' ||
-    eventMode === 'PREVIEW' ||
+    (eventMode !== undefined && CONVERSATION_RUN_MODES.has(eventMode)) ||
     Boolean(event.runId && task.projection.agentReview?.runId === event.runId)
   );
 }
@@ -514,6 +525,12 @@ export function reduceProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'REVIEW_REQUEST_ANSWERED':
+      return {
+        ...base,
+        agentReview: reduceAgentReview(base.agentReview, event, run),
+        updatedAt: event.receivedAt
+      };
     case 'DELIVERY_COMMIT_CREATED':
       return {
         ...base,
@@ -793,6 +810,13 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'AGENT_REVIEW_FINDING_DECIDED':
+      return {
+        ...base,
+        agentReview: reduceAgentReview(base.agentReview, event, run),
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'AGENT_REVIEW_POLICY_VIOLATION':
       return {
         ...base,
@@ -904,6 +928,8 @@ function reduceReviewProjection(
         updatedAt: event.receivedAt
       };
     }
+    case 'REVIEW_SNAPSHOT_RECORDED':
+      return { ...base, agentReview: reduceAgentReview(base.agentReview, event, run), updatedAt: event.receivedAt };
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         ...base,
@@ -980,14 +1006,26 @@ function reduceAgentReview(
           reviewedHeadSha: getString(event.payload, 'reviewedHeadSha'),
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
           summary: 'An agent is reviewing the current diff.',
+          findingDecisions: [],
           updatedAt: event.receivedAt
         };
+      }
+      // An implementation turn (a follow-up or retry) continues the reviewed work,
+      // so the review stays current until the diff differs from the reviewed one,
+      // which the next Git snapshot decides. Any other turn leaves the review with
+      // no implementation run to belong to, so it becomes earlier context.
+      const startedMode = (run?.mode ?? eventMode) as RunRecord['mode'] | undefined;
+      if (startedMode && isImplementationRunMode(startedMode)) {
+        // The person replied to the agent, so its answer no longer waits on them.
+        if (!base.requestAnswer) return base;
+        const { requestAnswer: _answered, ...rest } = base;
+        return rest;
       }
       if (base.status !== 'NOT_RUN' && base.status !== 'RUNNING') {
         return {
           ...base,
           status: 'STALE',
-          summary: 'Implementation changed after this agent review.',
+          summary: 'Newer work started after this agent review.',
           updatedAt: event.receivedAt
         };
       }
@@ -1063,6 +1101,15 @@ function reduceAgentReview(
         updatedAt: event.receivedAt
       };
     case 'GIT_SNAPSHOT_CAPTURED':
+      // A diff back to exactly what was reviewed makes the review current again.
+      if (base.status === 'STALE' && base.result && reviewedStateRecorded(base) && !snapshotDiffersFromReview(base, event.payload)) {
+        return {
+          ...base,
+          status: reviewGateStatusFromResult(base.result) ?? 'INCONCLUSIVE',
+          summary: base.result.summary,
+          updatedAt: event.receivedAt
+        };
+      }
       if (!isTerminalReviewGate(base) || !snapshotDiffersFromReview(base, event.payload)) {
         return base;
       }
@@ -1072,6 +1119,35 @@ function reduceAgentReview(
         summary: 'The current diff changed after this agent review.',
         updatedAt: event.receivedAt
       };
+    case 'AGENT_REVIEW_FINDING_DECIDED': {
+      // Decisions belong to exactly one review; a decision for another review changes nothing.
+      const decision = getReviewFindingDecision(event.payload);
+      const decisions = base.findingDecisions ?? [];
+      if (
+        !decision ||
+        !base.runId ||
+        decision.reviewRunId !== base.runId ||
+        decisions.length >= REVIEW_FINDING_DECISION_LIMIT ||
+        decisions.some((candidate) => candidate.id === decision.id)
+      ) {
+        return base;
+      }
+      return { ...base, findingDecisions: [...decisions, decision] };
+    }
+    // The exact code the review read was kept.
+    case 'REVIEW_SNAPSHOT_RECORDED': {
+      const tree = getString(event.payload, 'tree');
+      if (!tree || !base.runId || base.runId !== event.runId) return base;
+      return { ...base, reviewedTreeSha: tree };
+    }
+    // The agent's reply to the request after this review settled.
+    case 'REVIEW_REQUEST_ANSWERED': {
+      const needsDecision = getNumber(event.payload, 'needsDecision');
+      if (base.runId !== getString(event.payload, 'reviewRunId') || needsDecision === undefined) return base;
+      return { ...base, requestAnswer: { awaitingDecision: needsDecision > 0 }, updatedAt: event.receivedAt };
+    }
+    // Committing the reviewed changes moves the reviewed state to the new commit;
+    // the clean tree's fingerprint keeps edits made after it counting.
     case 'DELIVERY_COMMIT_CREATED': {
       const headSha = getString(event.payload, 'headSha');
       if (!isTerminalReviewGate(base) || !headSha) {
@@ -1080,7 +1156,7 @@ function reduceAgentReview(
       return {
         ...base,
         reviewedHeadSha: headSha,
-        reviewedDirtyFingerprint: undefined,
+        reviewedDirtyFingerprint: getString(event.payload, 'dirtyFingerprint'),
         updatedAt: event.receivedAt
       };
     }
@@ -1132,6 +1208,10 @@ function isTerminalReviewGate(
   );
 }
 
+function reviewedStateRecorded(review: NonNullable<StatusProjection['agentReview']>): boolean {
+  return Boolean(review.reviewedHeadSha || review.reviewedDirtyFingerprint);
+}
+
 function snapshotDiffersFromReview(
   review: NonNullable<StatusProjection['agentReview']>,
   payload: unknown
@@ -1164,27 +1244,16 @@ function reviewGateStatusFromPayload(
   return undefined;
 }
 
-function reviewGateStatusFromResult(
-  result: AgentReviewResult | undefined
-): Extract<
-  NonNullable<StatusProjection['agentReview']>['status'],
-  'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
-> | undefined {
-  if (!result) {
-    return undefined;
-  }
-  if (
-    result.verdict === 'NEEDS_CHANGES' ||
-    result.findings.some(
-      (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-    )
-  ) {
-    return 'NEEDS_CHANGES';
-  }
-  if (result.verdict === 'PASSED') {
-    return 'PASSED';
-  }
-  return 'INCONCLUSIVE';
+function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).decision;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const decision = value as ReviewFindingDecision;
+  return typeof decision.id === 'string' &&
+    typeof decision.reviewRunId === 'string' &&
+    typeof decision.findingId === 'string'
+    ? structuredClone(decision)
+    : undefined;
 }
 
 function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {
@@ -1209,11 +1278,15 @@ function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {
   const findings = findingsValue
     .map(getAgentReviewFinding)
     .filter((finding): finding is AgentReviewFinding => Boolean(finding));
+  const resolvedFindings = (Array.isArray(record.resolvedFindings) ? record.resolvedFindings : [])
+    .map(getResolvedFinding)
+    .filter((finding): finding is AgentReviewResolvedFinding => Boolean(finding));
   return {
     schemaVersion: 'agent-review/v1',
     verdict,
     summary,
-    findings
+    findings,
+    ...(resolvedFindings.length > 0 ? { resolvedFindings } : {})
   };
 }
 
@@ -1242,8 +1315,18 @@ function getAgentReviewFinding(value: unknown): AgentReviewFinding | undefined {
     path: getString(record, 'path'),
     line: getNumber(record, 'line'),
     endLine: getNumber(record, 'endLine'),
-    recommendation: getString(record, 'recommendation')
+    recommendation: getString(record, 'recommendation'),
+    ...(getString(record, 'previousFindingId') ? { previousFindingId: getString(record, 'previousFindingId') } : {})
   };
+}
+
+function getResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const previousFindingId = getString(value, 'previousFindingId');
+  const title = getString(value, 'title');
+  if (!previousFindingId || !title) return undefined;
+  const note = getString(value, 'note');
+  return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {

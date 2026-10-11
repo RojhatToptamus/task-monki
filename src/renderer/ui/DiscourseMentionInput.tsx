@@ -8,6 +8,7 @@ import {
   type KeyboardEvent
 } from 'react';
 import { X } from 'lucide-react';
+import { FactLine } from './FactLine';
 import {
   canRedoDiscourseMentionSelection,
   canUndoDiscourseMentionSelection,
@@ -346,7 +347,7 @@ export function DiscourseMentionInput({
                   onClick={() => choose(candidate)}
                 >
                   <strong>{candidate.label}</strong>
-                  <span>{candidate.description}</span>
+                  <span><FactLine facts={candidate.description} /></span>
                   {!candidate.available ? <span>Unavailable</span> : null}
                 </button>
               ))}
@@ -401,7 +402,7 @@ function MentionTokenGroup({
               }}
             >
               {token.labelSnapshot}
-              <X aria-hidden="true" absoluteStrokeWidth size={12} strokeWidth={1.5} />
+              <X aria-hidden="true" size={13} />
             </button>
           </li>
         ))}

@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Socket } from 'node:net';
 import type { AgentRuntimeStore } from '../AgentRuntimeStore';
 import {
+  CLIENT_TOOL_ENV_PREFIX,
   clientToolContent,
   safeClientToolFailure,
   type ClientToolContent,
@@ -15,9 +16,9 @@ import {
 import { clientToolSet } from './ClientToolSets';
 
 const REQUEST_LIMIT_BYTES = 64 * 1024;
-const SESSION_CREDENTIAL_ENV = 'TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL';
-const ENDPOINT_ENV = 'TASK_MONKI_CLIENT_TOOL_ENDPOINT';
-const GRANT_FILE_ENV = 'TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE';
+const SESSION_CREDENTIAL_ENV = `${CLIENT_TOOL_ENV_PREFIX}SESSION_CREDENTIAL`;
+const ENDPOINT_ENV = `${CLIENT_TOOL_ENV_PREFIX}ENDPOINT`;
+const GRANT_FILE_ENV = `${CLIENT_TOOL_ENV_PREFIX}CREDENTIAL_FILE`;
 const TURN_CREDENTIAL_HEADER = 'x-task-monki-client-tool-grant';
 const ENDPOINT_PATH = '/client-tool';
 const ACTIVE_RUN_STATUSES = ['STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'];

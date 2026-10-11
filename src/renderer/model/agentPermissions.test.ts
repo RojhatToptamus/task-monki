@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { browserDevSettingsViolations } from '../../core/agent/BrowserDevAgentBoundary';
 import {
-  formatAgentNetworkAccess,
   formatAgentPermissionMode,
+  isAgentNetworkAccessEnabled,
   inferAgentPermissionMode,
   matchingExecutionPolicyPreset,
   settingsForExecutionPolicyPreset
@@ -113,14 +113,14 @@ describe('agent permission settings', () => {
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       })
-    ).toBe('Approve for me');
+    ).toBe('Auto review');
     expect(
-      formatAgentNetworkAccess({
+      isAgentNetworkAccessEnabled({
         sandbox: 'DANGER_FULL_ACCESS',
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       })
-    ).toBe('Enabled');
+    ).toBe(true);
     expect(
       formatAgentPermissionMode({
         runtimeId: 'opencode',

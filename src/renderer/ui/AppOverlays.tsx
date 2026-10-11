@@ -1,5 +1,5 @@
+import { FolderGit2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { Trash2 } from 'lucide-react';
 import {
   BOARD_COLORS,
   type Board,
@@ -29,6 +29,8 @@ export interface AppNotification {
   id: string;
   tone: NotificationTone;
   message: string;
+  /** Fading out ahead of removal. */
+  leaving?: boolean;
 }
 
 const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }> = [
@@ -251,6 +253,7 @@ export function GlobalNotifier({ notifications }: { notifications: AppNotificati
         <div
           className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
           key={notification.id}
+          data-leaving={notification.leaving ? '' : undefined}
         >
           <StatusGlyph
             kind={
@@ -340,7 +343,7 @@ export function DesignExternalLinkModal({
         </div>
         <p>Only open destinations that you trust.</p>
         {error ? (
-          <p className="tm-design-external__error" role="alert">
+          <p className="tm-error tm-modal__error" role="alert">
             {error}
           </p>
         ) : null}
@@ -427,7 +430,7 @@ export function PrepareWorktreeModal({
       >
         <header className="tm-prepare-worktree__header">
           <h3 id="prepare-worktree-title">Prepare worktree</h3>
-          <p>{taskTitle} · {inspection.repositoryName}</p>
+          <WorktreeDialogContext taskTitle={taskTitle} repositoryName={inspection.repositoryName} />
         </header>
 
         <label className="field tm-prepare-worktree__base">
@@ -479,6 +482,19 @@ export function PrepareWorktreeModal({
   );
 }
 
+/** Which task and repository a worktree dialog acts on: the title, then the repository marked by its icon, as in the task's header. */
+function WorktreeDialogContext({ taskTitle, repositoryName }: { taskTitle: string; repositoryName: string }) {
+  return (
+    <p className="tm-prepare-worktree__context">
+      <span>{taskTitle}</span>
+      <span className="tm-prepare-worktree__repo">
+        <FolderGit2 size={13} aria-hidden="true" />
+        {repositoryName}
+      </span>
+    </p>
+  );
+}
+
 export function RecoverWorktreeModal({
   inspection,
   taskTitle,
@@ -523,8 +539,10 @@ export function RecoverWorktreeModal({
           if (!busy) onConfirm();
         }}
       >
-        <h3 id="recover-worktree-title">{title}</h3>
-        <p>{taskTitle} · {inspection.repositoryName}</p>
+        <header className="tm-prepare-worktree__header">
+          <h3 id="recover-worktree-title">{title}</h3>
+          <WorktreeDialogContext taskTitle={taskTitle} repositoryName={inspection.repositoryName} />
+        </header>
 
         <div className="tm-prepare-worktree__commit">
           <span>Commit</span>
@@ -712,18 +730,11 @@ export function DeleteTaskModal({
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
       <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
-        <div className="tm-delete-modal__head">
-          <span className="tm-delete-modal__mark" aria-hidden="true">
-            <TrashIcon />
-          </span>
-          <div>
-            <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
-            <p>
-              Removes this task, its Task Monki records, and managed attachments. Provider
-              history and external protocol-journal traces may remain.
-            </p>
-          </div>
-        </div>
+        <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
+        <p>
+          Removes this task, its Task Monki records, and managed attachments. Provider
+          history and external protocol-journal traces may remain.
+        </p>
 
         <ImpactList
           ariaLabel="Task deletion impact"
@@ -835,8 +846,4 @@ function describeWorktreeRemoval(
     status: 'available',
     detail: `${worktree.worktreePath} will be removed from disk.`
   };
-}
-
-function TrashIcon() {
-  return <Trash2 aria-hidden="true" absoluteStrokeWidth size={16} strokeWidth={1.5} />;
 }

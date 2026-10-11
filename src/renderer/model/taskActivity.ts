@@ -10,12 +10,14 @@ import type {
   Task,
   WorktreeStatus
 } from '../../shared/contracts';
+import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
+import { pluralize, shortSha } from './formatting';
 
 export type TaskActivityActor =
   | 'User'
   | 'Task Monki'
   | 'Agent'
-  | 'Review'
+  | 'Reviewer'
   | 'Git'
   | 'GitHub';
 
@@ -83,6 +85,8 @@ interface TaskActivityCandidate extends TaskActivityItem {
 }
 
 interface TaskActivityBuildState {
+  /** Whether each Git snapshot seen so far had uncommitted changes, so a review names what it read. */
+  uncommittedBySnapshotId: Map<string, boolean>;
   lastGitSnapshotSignature?: string;
   lastGitStatus?: GitStatus;
   lastBranchPublicationSignature?: string;
@@ -128,10 +132,6 @@ export function buildOverviewTaskActivityViewModel(
   input: OverviewTaskActivityInput
 ): TaskActivityViewModel {
   return projectOverviewTaskActivity(buildTaskActivityLedger(input), { limit: input.limit });
-}
-
-export function buildDebugTaskActivityViewModel(input: TaskActivityInput): TaskActivityViewModel {
-  return projectDebugTaskActivity(buildTaskActivityLedger(input));
 }
 
 export function projectOverviewTaskActivity(
@@ -195,7 +195,7 @@ function buildTaskActivityItems(
       .filter((event) => event.type === 'IMPLEMENTATION_OUTCOME_BLOCKED' && event.runId)
       .map((event) => event.runId as string)
   );
-  const state: TaskActivityBuildState = {};
+  const state: TaskActivityBuildState = { uncommittedBySnapshotId: new Map() };
   const items: BuiltTaskActivityItem[] = [];
   let order = 0;
 
@@ -262,17 +262,14 @@ function itemForEvent(
         'risk',
         'Task Monki',
         'Worktree preparation failed',
-        evidence(
-          'Fix the worktree before running or reviewing this task.',
-          evidenceRows(stringField(payload, 'error'))
-        ),
+        fact(stringField(payload, 'error')),
         'error'
       );
     case 'AGENT_RUN_STARTED':
       if (event.runId && terminalRunIds.has(event.runId)) {
         return undefined;
       }
-      return runStartedItem(event, mode, payload, recoveryContinuation);
+      return runStartedItem(event, mode, payload, recoveryContinuation, state);
     case 'AGENT_RUN_COMPLETED':
       return runCompletedItem(event, run?.mode ?? mode, payload, recoveryContinuation);
     case 'AGENT_RUN_FAILED':
@@ -285,10 +282,7 @@ function itemForEvent(
         'risk',
         'Task Monki',
         'Implementation needs another pass',
-        evidence(
-          'Retry the implementation or continue unfinished work before this task can advance.',
-          evidenceRows(stringField(payload, 'reason'))
-        ),
+        fact(stringField(payload, 'reason')),
         'action'
       );
     case 'CANCEL_REQUESTED':
@@ -303,15 +297,29 @@ function itemForEvent(
         undefined,
         'action'
       );
-    case 'AGENT_INTERACTION_REQUESTED':
+    case 'AGENT_INTERACTION_REQUESTED': {
+      // Same split as the projection: questions need input, everything else a decision.
+      const question = stringField(payload, 'type') === 'USER_INPUT';
       return item(
         event,
         'run',
         'Agent',
-        'Needs input',
-        evidence('Respond before the run can continue.', evidenceRows(interactionDetail(payload))),
+        question ? 'Needs input' : 'Needs approval',
+        undefined,
         'action'
       );
+    }
+    case 'REVIEW_REQUEST_ANSWERED': {
+      const waiting = typeof payload.needsDecision === 'number' ? payload.needsDecision : 0;
+      return item(
+        event,
+        'review',
+        'Agent',
+        waiting > 0 ? 'Agent asked for your decision' : 'Agent answered your request',
+        fact(waiting > 0 ? `${pluralize(waiting, 'item')} wait on you` : undefined),
+        waiting > 0 ? 'action' : 'info'
+      );
+    }
     case 'GIT_SNAPSHOT_CAPTURED':
       return gitSnapshotItem(event, payload, state);
     case 'DELIVERY_COMMIT_CREATED':
@@ -354,7 +362,7 @@ function itemForEvent(
         'risk',
         'Task Monki',
         'Review changed Git state',
-        evidence('Review output cannot be accepted as detached review evidence.'),
+        fact('Its result was not accepted.'),
         'error'
       );
     case 'AGENT_RUNTIME_LOST':
@@ -363,7 +371,7 @@ function itemForEvent(
         'risk',
         'Task Monki',
         'Agent runtime lost',
-        evidence('Resolve recovery before continuing this task.', evidenceRows(stringField(payload, 'reason'))),
+        fact(stringField(payload, 'reason')),
         'error'
       );
     case 'AGENT_RUNTIME_RECONCILED':
@@ -377,16 +385,17 @@ function runStartedItem(
   event: DomainEvent,
   mode: AgentRunMode | undefined,
   payload: Record<string, unknown>,
-  recoveryContinuation: boolean
+  recoveryContinuation: boolean,
+  state: TaskActivityBuildState
 ): TaskActivityCandidate {
   switch (mode) {
     case 'REVIEW':
       return item(
         event,
         'review',
-        'Review',
+        'Reviewer',
         'Review started',
-        reviewStartedEvidence(payload),
+        reviewStartedEvidence(payload, state),
         'info'
       );
     case 'FOLLOW_UP':
@@ -426,8 +435,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Review',
-          'Passed',
+          'Reviewer',
+          'Review passed',
           undefined,
           'success'
         );
@@ -435,8 +444,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Review',
-          'Requested changes',
+          'Reviewer',
+          'Review requested changes',
           undefined,
           'action'
         );
@@ -444,8 +453,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Review',
-          'Inconclusive',
+          'Reviewer',
+          'Review inconclusive',
           undefined,
           'action'
         );
@@ -453,8 +462,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Review',
-          'Completed',
+          'Reviewer',
+          'Review completed',
           undefined,
           'success'
         );
@@ -504,14 +513,9 @@ function runFailedItem(
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
-    mode === 'REVIEW' ? 'Review' : 'Agent',
+    mode === 'REVIEW' ? 'Reviewer' : 'Agent',
     title,
-    evidence(
-      mode === 'REVIEW'
-        ? 'Run review again after the failure is resolved.'
-        : 'Retry the implementation or continue unfinished work before this task can advance.',
-      evidenceRows(error)
-    ),
+    fact(error),
     'error'
   );
 }
@@ -535,9 +539,9 @@ function runInterruptedItem(
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
-    mode === 'REVIEW' ? 'Review' : 'Agent',
+    mode === 'REVIEW' ? 'Reviewer' : 'Agent',
     title,
-    evidence('Run stopped before it completed.', evidenceRows(stringField(payload, 'terminalReason'))),
+    fact(stringField(payload, 'terminalReason')),
     'action'
   );
 }
@@ -562,6 +566,14 @@ function gitSnapshotItem(
   payload: Record<string, unknown>,
   state: TaskActivityBuildState
 ): TaskActivityCandidate | undefined {
+  const snapshotId = stringField(payload, 'id');
+  if (snapshotId) {
+    state.uncommittedBySnapshotId.set(snapshotId, hasUncommittedChanges({
+      stagedCount: numberField(payload, 'stagedCount') ?? 0,
+      unstagedCount: numberField(payload, 'unstagedCount') ?? 0,
+      untrackedCount: numberField(payload, 'untrackedCount') ?? 0
+    }));
+  }
   const signature = gitSnapshotSignature(payload);
   const status = stringField(payload, 'status') as GitStatus | undefined;
   if (signature === state.lastGitSnapshotSignature) {
@@ -589,10 +601,7 @@ function gitSnapshotItem(
         'git',
         'Git',
         'Git conflicts detected',
-        evidence(
-          'Resolve conflicts before review or delivery can proceed.',
-          gitCountEvidenceRows(payload)
-        ),
+        rowFacts(gitCountEvidenceRows(payload)),
         'error'
       );
     case 'DIVERGED':
@@ -601,7 +610,7 @@ function gitSnapshotItem(
         'git',
         'Git',
         'Branch diverged',
-        evidence('Reconcile the local branch before delivery can proceed.', branchDivergenceRows(payload)),
+        rowFacts(branchDivergenceRows(payload)),
         'error'
       );
     case 'UNAVAILABLE':
@@ -610,7 +619,7 @@ function gitSnapshotItem(
         'git',
         'Git',
         'Git evidence unavailable',
-        evidence('Refresh local Git evidence before using workflow or delivery decisions.'),
+        undefined,
         'error'
       );
     default:
@@ -662,7 +671,7 @@ function branchPublishFailedItem(
     'delivery',
     'GitHub',
     'Branch push failed',
-    evidence('PR delivery cannot update until the branch push succeeds.', evidenceRows(stringField(payload, 'error'))),
+    fact(stringField(payload, 'error')),
     'error'
   );
 }
@@ -719,7 +728,7 @@ function pullRequestItem(
       'delivery',
       'GitHub',
       'PR closed without merge',
-      evidence('Delivery is not complete because the PR closed without merge.', prEvidenceRows(payload)),
+      rowFacts(prEvidenceRows(payload)),
       'error',
       { replaceKey: terminalPrReplaceKey(payload, status) }
     );
@@ -832,10 +841,7 @@ function githubReviewItem(
         'delivery',
         'GitHub',
         'GitHub requested changes',
-        evidence(
-          'Blocks PR approval until the requested changes are addressed.',
-          prEvidenceRows(payload)
-        ),
+        rowFacts(prEvidenceRows(payload)),
         'error'
       );
     case 'APPROVED':
@@ -854,7 +860,7 @@ function githubReviewItem(
         'delivery',
         'Task Monki',
         'GitHub review evidence is stale',
-        evidence('Refresh GitHub review evidence before using approval as current.', prEvidenceRows(payload)),
+        rowFacts(prEvidenceRows(payload)),
         'action'
       );
     default:
@@ -891,7 +897,7 @@ function mergeItem(
         'delivery',
         'GitHub',
         'PR closed without merge',
-        evidence('Delivery is not complete because the PR closed without merge.', prEvidenceRows(payload)),
+        rowFacts(prEvidenceRows(payload)),
         'error',
         { replaceKey: terminalPrReplaceKey(payload, status) }
       );
@@ -901,7 +907,7 @@ function mergeItem(
         'delivery',
         'GitHub',
         'Merge blocked',
-        evidence('Merge cannot complete until GitHub requirements are satisfied.', prEvidenceRows(payload)),
+        rowFacts(prEvidenceRows(payload)),
         'error'
       );
     case 'QUEUED':
@@ -938,7 +944,7 @@ function githubFailureItem(
     'delivery',
     'GitHub',
     'Could not update GitHub evidence',
-    evidence('PR Status may be stale until GitHub evidence updates.', evidenceRows(stringField(payload, 'error'))),
+    fact(stringField(payload, 'error')),
     'error'
   );
 }
@@ -959,7 +965,7 @@ function transitionCompletedItem(
         'workflow',
         'User',
         'Task marked blocked',
-        evidence('Task owner marked this task blocked.', evidenceRows(stringField(payload, 'reason'))),
+        fact(stringField(payload, 'reason')),
         'error'
       );
     case 'CANCELED':
@@ -968,7 +974,7 @@ function transitionCompletedItem(
         'workflow',
         'User',
         'Task canceled',
-        evidence('Task owner canceled this task.', evidenceRows(stringField(payload, 'reason'))),
+        fact(stringField(payload, 'reason')),
         'action'
       );
     case 'ARCHIVED':
@@ -999,7 +1005,7 @@ function runtimeReconciledItem(
       'risk',
       'Task Monki',
       'Run needs recovery',
-      evidence('Resolve recovery before continuing this task.', evidenceRows(stringField(payload, 'status'))),
+      undefined,
       'error'
     );
   }
@@ -1037,10 +1043,7 @@ function worktreeVerificationItem(
       'risk',
       'Task Monki',
       'Worktree needs attention',
-      evidence(
-        'Fix the worktree before running or reviewing this task.',
-        evidenceRows(stringField(payload, 'error') ?? stringField(payload, 'worktreePath') ?? status)
-      ),
+      fact(stringField(payload, 'error') ?? stringField(payload, 'worktreePath')),
       'error'
     );
   }
@@ -1086,11 +1089,27 @@ function evidence(
   };
 }
 
-function evidenceRows(
-  value: string | undefined,
-  label = 'Reason'
-): TaskActivityEvidenceRow[] | undefined {
-  return value ? [{ label, value }] : undefined;
+/**
+ * The one concrete fact under a row: a reason, an error, a commit. What to do
+ * about it is the Now panel's job, so History never carries advice.
+ */
+function fact(value: string | undefined): TaskActivityEvidence | undefined {
+  const text = value?.trim();
+  return text ? { summary: text } : undefined;
+}
+
+/**
+ * Evidence rows read as one line. A link is the only thing kept expandable, so
+ * the disclosure never repeats its own summary.
+ */
+function rowFacts(rows: TaskActivityEvidenceRow[] | undefined): TaskActivityEvidence | undefined {
+  if (!rows?.length) return undefined;
+  const line = (subset: TaskActivityEvidenceRow[]) =>
+    subset.map((row) => (row.value ? `${row.label} ${row.value}` : row.label)).join(', ');
+  const links = rows.filter((row) => row.href);
+  const facts = rows.filter((row) => !row.href);
+  if (links.length === 0) return { summary: line(facts) };
+  return evidence(facts.length ? line(facts) : line(links), links);
 }
 
 function appendOrReplaceHistoryItem(
@@ -1135,11 +1154,6 @@ function runCategory(mode: AgentRunMode | undefined): TaskActivityCategory {
   return mode === 'REVIEW' ? 'review' : 'run';
 }
 
-function interactionDetail(payload: Record<string, unknown>): string | undefined {
-  const type = stringField(payload, 'type');
-  return type ? humanizeEnum(type) : undefined;
-}
-
 function gitSnapshotSignature(payload: Record<string, unknown>): string {
   const dirtyFingerprint = stringField(payload, 'dirtyFingerprint');
   if (dirtyFingerprint) {
@@ -1159,10 +1173,13 @@ function gitSnapshotSignature(payload: Record<string, unknown>): string {
   ].join(':');
 }
 
-function reviewStartedEvidence(payload: Record<string, unknown>): TaskActivityEvidence | undefined {
+/** The commit the review reads, and the uncommitted changes when the snapshot it started from had any. */
+function reviewStartedEvidence(payload: Record<string, unknown>, state: TaskActivityBuildState): TaskActivityEvidence | undefined {
   const head = shortSha(stringField(payload, 'reviewedHeadSha'));
+  const snapshotId = stringField(payload, 'beforeGitSnapshotId');
+  const uncommitted = snapshotId ? state.uncommittedBySnapshotId.get(snapshotId) === true : false;
   return head
-    ? evidence('Review is tied to stored Git evidence.', [{ label: 'Reviewed head', value: head }])
+    ? fact(`Reviewed ${reviewedCodeText({ head, uncommitted })}`)
     : undefined;
 }
 
@@ -1170,17 +1187,11 @@ function commitEvidence(payload: Record<string, unknown>): TaskActivityEvidence 
   const head = shortSha(stringField(payload, 'headSha'));
   const ahead = numberField(payload, 'aheadCount');
   const committed = numberField(payload, 'committedDiffFileCount');
-  const rows: TaskActivityEvidenceRow[] = [];
-  if (head) {
-    rows.push({ label: 'HEAD', value: head });
-  }
-  if (ahead && ahead > 0) {
-    rows.push({ label: 'Remote status', value: `${pluralize(ahead, 'commit')} ahead` });
-  }
-  if (committed && committed > 0) {
-    rows.push({ label: 'Changed files', value: pluralize(committed, 'file') });
-  }
-  return rows.length ? evidence('Local Git evidence is ready for delivery.', rows) : undefined;
+  return fact([
+    head ? `Commit ${head}` : undefined,
+    committed && committed > 0 ? `${pluralize(committed, 'file')} changed` : undefined,
+    ahead && ahead > 0 ? `${pluralize(ahead, 'commit')} ahead` : undefined
+  ].filter(Boolean).join(', '));
 }
 
 function gitCountEvidenceRows(payload: Record<string, unknown>): TaskActivityEvidenceRow[] | undefined {
@@ -1328,20 +1339,8 @@ function checkDetails(payload: Record<string, unknown>): Array<Record<string, un
   return Array.isArray(value) ? value.map(objectPayload) : [];
 }
 
-function transitionBlockedEvidence(payload: Record<string, unknown>): TaskActivityEvidence {
-  const phase = phaseLabel(payload);
-  const summary =
-    phase === 'Done'
-      ? 'Blocks marking the task done.'
-      : phase
-        ? `Blocks moving to ${phase}.`
-        : 'Blocks the requested workflow transition.';
-  return evidence(summary, evidenceRows(stringField(payload, 'reason')));
-}
-
-function phaseLabel(payload: Record<string, unknown>): string | undefined {
-  const phase = stringField(payload, 'toPhase');
-  return phase ? humanizeEnum(phase) : undefined;
+function transitionBlockedEvidence(payload: Record<string, unknown>): TaskActivityEvidence | undefined {
+  return fact(stringField(payload, 'reason'));
 }
 
 function terminalPrReplaceKey(payload: Record<string, unknown>, status: PullRequestStatus | MergeStatus): string {
@@ -1392,21 +1391,4 @@ function numberField(payload: Record<string, unknown>, key: string): number | un
 function booleanField(payload: Record<string, unknown>, key: string): boolean | undefined {
   const value = payload[key];
   return typeof value === 'boolean' ? value : undefined;
-}
-
-function shortSha(value: string | undefined): string | undefined {
-  return value ? value.slice(0, 7) : undefined;
-}
-
-function pluralize(count: number, label: string): string {
-  return `${count} ${label}${count === 1 ? '' : 's'}`;
-}
-
-function humanizeEnum(value: string): string {
-  return value
-    .toLowerCase()
-    .split('_')
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActionButtonTitle } from './ActionButtonTitle';
 import type { Tone } from '../model/viewTypes';
-import { StatusGlyph, statusKindForTone } from './StatusBadge';
+import { StatusGlyph, statusGlyphFor } from './StatusBadge';
 
 /**
  * Shared header for long-running agent operations: one semantic status mark,
@@ -16,8 +16,7 @@ export function RunHeader({
   onStop,
   stopDisabled,
   stopTitle,
-  trailingLabel,
-  pulse
+  trailingLabel
 }: {
   running: boolean;
   tone: Tone;
@@ -28,18 +27,12 @@ export function RunHeader({
   stopDisabled?: boolean;
   stopTitle?: string;
   trailingLabel?: string;
-  /** Animate the working mark. Defaults to `running`; pass false to hold it still. */
-  pulse?: boolean;
 }) {
   const elapsed = useElapsed(startedAt, running);
-  const animate = pulse ?? running;
   return (
     <div className="tm-runheader">
-      <StatusGlyph
-        kind={statusKindForTone(tone, running)}
-        animate={animate}
-      />
-      <h3 className="tm-runheader__name">{operationName}</h3>
+      <StatusGlyph kind={statusGlyphFor(tone, running) ?? 'idle'} />
+      <h3 className={`tm-runheader__name${running ? ' tm-shimmer' : ''}`}>{operationName}</h3>
       {scope ? <span className="tm-runheader__scope">{scope}</span> : null}
       <span className="tm-runheader__spacer" />
       {running && elapsed !== undefined ? (
@@ -54,7 +47,7 @@ export function RunHeader({
         <ActionButtonTitle disabled={stopDisabled} title={stopTitle}>
           <button
             type="button"
-            className="outline-button outline-button--danger tm-runheader__stop"
+            className="danger-button button--sm tm-runheader__stop"
             disabled={stopDisabled}
             onClick={onStop}
           >

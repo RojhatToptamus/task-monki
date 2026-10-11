@@ -1,33 +1,31 @@
 import type {
-  AgentReviewFinding,
   AgentReviewGateProjection,
   ClientTextExcerpt,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
-import type { ReactNode } from 'react';
+import { effectiveReviewFindings, type EffectiveReviewFinding } from '../../shared/agentReviewFindings';
 import type { ReviewActivityViewModel } from '../model/reviewActivity';
-import { FINDING_LEVELS, findingLevel, shortFindingRef } from '../model/findings';
-import { FindingRow } from './Findings';
+import { FINDING_LEVELS } from '../model/findings';
+import { formatTaskActivityTimestamp } from './TaskActivityPanel';
 import { RunHeader } from './RunHeader';
-import { StatusGlyph, type StatusGlyphKind } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
-import {
-  describeGitSnapshot,
-  describeReviewedDiff
-} from './gitSnapshotCopy';
+import { reviewedCode, reviewedCodeText, type ReviewedCode } from '../model/reviewedCode';
 import type { Tone } from '../model/viewTypes';
+import { ReportedQuote } from './ReportedQuote';
 
 export type ReviewActionPauseReason =
   | 'review-starting'
   | 'review-running'
   | 'implementation-running'
+  | 'question-running'
   | 'delivery-running';
 
 export function ReviewPanel({
   reviewGate,
   reviewRun,
   gitSnapshot,
+  reviewedSnapshot,
   reviewActivity,
   actionBusy,
   reviewPending,
@@ -36,15 +34,16 @@ export function ReviewPanel({
   reviewOutputLoading = false,
   reviewOutputError,
   onLoadReviewOutput = () => undefined,
-  onReviewAgain,
-  reviewAgainDisabled = false,
-  reviewAgainTitle,
-  action,
-  onStopReview
+  onStopReview,
+  showVerdict = true,
+  reviewerName = 'Reviewer',
+  onOpenReview
 }: {
   reviewGate: AgentReviewGateProjection;
   reviewRun?: RunRecord;
   gitSnapshot?: GitSnapshotRecord;
+  /** The Git snapshot the review read, so the card says whether uncommitted changes came with its commit. */
+  reviewedSnapshot?: GitSnapshotRecord;
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
@@ -53,20 +52,24 @@ export function ReviewPanel({
   reviewOutputLoading?: boolean;
   reviewOutputError?: string;
   onLoadReviewOutput?(): void;
-  onReviewAgain?(): void;
-  reviewAgainDisabled?: boolean;
-  reviewAgainTitle?: string;
-  action?: ReactNode;
   onStopReview(reviewRunId: string): void;
+  /** False when the Now panel already states this verdict as the task's step. */
+  showVerdict?: boolean;
+  /** The reviewing runtime's name, so its summary is never read as Task Monki's verdict. */
+  reviewerName?: string;
+  /** Opens the Review tab, where the findings sit on the code. */
+  onOpenReview?(): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
-  const ui = reviewGateUi(effectiveStatus, reviewGate);
+  const ui = reviewGateUi(effectiveStatus);
   const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
-  const currentDiff = describeGitSnapshot(gitSnapshot);
-  const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
+  // What the review read, recorded when it started; one not yet run, or just requested, reads the worktree as it is now.
+  const code = reviewPending || effectiveStatus === 'NOT_RUN'
+    ? reviewedCode(undefined, gitSnapshot)
+    : reviewedCode(reviewGate.reviewedHeadSha, reviewedSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
   const body = reviewBody(reviewGate, reviewRun);
-  const findings = reviewGate.result?.findings ?? [];
+  const findings = effectiveReviewFindings(reviewGate.result, reviewGate.findingDecisions ?? []);
   const hasRawReviewOutput = Boolean(reviewRun?.finalMessage || loadedReviewOutput);
   const stopReviewDisabledTitle = (): string | undefined => {
     if (actionBusy) {
@@ -91,7 +94,7 @@ export function ReviewPanel({
             running
             tone="info"
             operationName="Agent review"
-            scope={reviewedDiff}
+            scope={code ? reviewedCodeText(code) : undefined}
             startedAt={reviewRun?.startedAt}
             onStop={() => reviewRun && onStopReview(reviewRun.id)}
             stopDisabled={!canStopReview || actionBusy || !reviewRun}
@@ -100,40 +103,26 @@ export function ReviewPanel({
         </div>
       ) : (
         <div className="tm-reviewcard__head">
-          {ui.mark !== 'idle' ? (
-            <StatusGlyph className="tm-reviewcard__glyph" kind={ui.mark} />
-          ) : null}
           <div>
             <h3 className="tm-panel__title tm-panel__title--flush">
               Agent review
             </h3>
           </div>
           <span className="tm-reviewcard__spacer" />
-          <span className="tm-reviewcard__status">{ui.label}</span>
-        </div>
-      )}
-
-      {effectiveStatus === 'STALE' ? (
-        <div className="tm-reviewcard__stale">
-          <span>Diff changed since this review.</span>
-          {onReviewAgain ? (
-            <button
-              type="button"
-              disabled={reviewAgainDisabled}
-              title={reviewAgainTitle}
-              onClick={onReviewAgain}
-            >
-              Re-review
-            </button>
+          {showVerdict ? (
+            <span className={`tm-reviewcard__status tm-reviewcard__status--${ui.tone}`}>{ui.label}</span>
+          ) : null}
+          {onOpenReview && findings.length > 0 ? (
+            <button type="button" className="tm-osection__link" onClick={onOpenReview}>Open review</button>
           ) : null}
         </div>
-      ) : null}
+      )}
 
       <div className="tm-reviewcard__body">
         {reviewIsRunning ? (
           <div className="tm-reviewcard__runningstate">
             <div className="tm-reviewcard__activity" aria-live="polite">
-              <span className="tm-reviewcard__activity-k">Current activity</span>
+              <span className="tm-reviewcard__activity-k">Reviewer reported</span>
               <div className="tm-reviewcard__activity-row">
                 <span className="tm-reviewcard__activity-text">
                   {reviewActivity?.label ?? 'Preparing review context.'}
@@ -143,24 +132,25 @@ export function ReviewPanel({
           </div>
         ) : (
           <div className="tm-reviewcard__summary">
-            {body ? <p>{body}</p> : null}
+            {body?.source === 'reviewer' ? (
+              <ReportedQuote source={reviewerName}>{body.text}</ReportedQuote>
+            ) : body ? (
+              <p>{body.text}</p>
+            ) : null}
             {effectiveStatus === 'NOT_RUN' ? (
-              <div className="tm-reviewcard__meta">
-                <span>Will review</span>
-                <strong>{currentDiff}</strong>
-              </div>
+              code ? <p className="tm-reviewcard__meta">Will review <ReviewedCodeLabel code={code} /></p> : null
             ) : (
-              <div className="tm-reviewcard__meta">
-                <span>Last reviewed</span>
-                <strong>{formatReviewTime(reviewGate.updatedAt)}</strong>
-                <span>Reviewed diff</span>
-                <strong>{reviewedDiff}</strong>
-              </div>
+              <p className="tm-reviewcard__meta">
+                Reviewed {code ? <><ReviewedCodeLabel code={code} />, </> : null}
+                {/* When the review ran; the gate's own time moves when it goes out of date or back. */}
+                {formatReviewTime(reviewRun?.endedAt ?? reviewGate.updatedAt)}
+              </p>
             )}
-            {effectiveStatus === 'STALE' ? null : action}
-            <ReviewFindingsList
-              findings={findings}
-              rawOutput={hasRawReviewOutput ? (
+            {findings.length > 0 ? (
+              <p className="tm-reviewcard__findings">
+                <SeverityDistribution findings={findings} earlier={effectiveStatus === 'STALE'} />
+              </p>
+            ) : hasRawReviewOutput ? (
                 <RawReviewOutput
                   textExcerpt={textExcerpt}
                   loadedReviewOutput={loadedReviewOutput}
@@ -169,8 +159,7 @@ export function ReviewPanel({
                   error={reviewOutputError}
                   onLoad={onLoadReviewOutput}
                 />
-              ) : undefined}
-            />
+            ) : null}
           </div>
         )}
       </div>
@@ -232,170 +221,104 @@ function RawReviewOutput({
   );
 }
 
-function ReviewFindingsList({
-  findings,
-  rawOutput
-}: {
-  findings: AgentReviewFinding[];
-  rawOutput?: ReactNode;
-}) {
-  if (findings.length === 0) {
-    return rawOutput ?? null;
-  }
-  const sortedFindings = [...findings].sort(
-    (a, b) => findingLevel(a.severity).rank - findingLevel(b.severity).rank
-  );
-  return (
-    <details className="tm-reviewfindings">
-      <summary>
-        <span className="tm-disclosure__label">
-          <DisclosureChevron />
-          Findings
-        </span>
-        <SeverityDistribution findings={findings} hasRawOutput={Boolean(rawOutput)} />
-      </summary>
-      <div className="tm-reviewfindings__list">
-        {sortedFindings.map((finding) => {
-          const level = findingLevel(finding.severity);
-          return (
-            <FindingRow
-              key={finding.id}
-              tone={level.tone}
-              severityLabel={level.label}
-              title={finding.title}
-              reference={shortFindingRef(finding)}
-              detail={
-                <>
-                  <p>{finding.explanation}</p>
-                  {finding.recommendation ? <p>{finding.recommendation}</p> : null}
-                </>
-              }
-            />
-          );
-        })}
-      </div>
-      {rawOutput}
-    </details>
-  );
+/** The commit in mono, then the uncommitted changes in words when they came with it. */
+function ReviewedCodeLabel({ code }: { code: ReviewedCode }) {
+  if (!code.head) return <>uncommitted changes</>;
+  return <><code>{code.head}</code>{code.uncommitted ? ' and uncommitted changes' : null}</>;
 }
 
-function SeverityDistribution({
-  findings,
-  hasRawOutput
-}: {
-  findings: AgentReviewFinding[];
-  hasRawOutput: boolean;
-}) {
+/**
+ * The open findings by severity ("1 major, 2 minor"), then how many were
+ * dismissed. Earlier findings carry no tone.
+ */
+function SeverityDistribution({ findings, earlier }: { findings: EffectiveReviewFinding[]; earlier: boolean }) {
+  const open = findings.filter((finding) => finding.state === 'OPEN');
+  const closed = findings.length - open.length;
   const counts = FINDING_LEVELS.map((level) => ({
     ...level,
-    count: findings.filter((finding) => finding.severity === level.severity).length
+    count: open.filter((finding) => finding.severity === level.severity).length
   })).filter((level) => level.count > 0);
-  if (counts.length === 0) {
-    return null;
-  }
   return (
-    <span className="tm-reviewfindings__distribution">
-      <span className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
-        {counts.map((level) => (
-          <span
-            key={level.severity}
-            className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}`}
-          >
-            <strong>{level.count}</strong>
-            {level.label}
-          </span>
-        ))}
-        {hasRawOutput ? <span className="tm-reviewfindings__rawref">· raw output</span> : null}
-      </span>
+    <span className="tm-reviewcard__counts" data-earlier={earlier || undefined}>
+      {earlier ? 'Earlier: ' : null}
+      {counts.length === 0 ? 'No open findings' : counts.map((level, index) => (
+        <span key={level.severity} data-severity={level.severity}>
+          {index > 0 ? ', ' : null}{level.count} {level.label.toLowerCase()}
+        </span>
+      ))}
+      {closed > 0 ? <span className="tm-reviewcard__closed">{closed} closed</span> : null}
     </span>
   );
 }
 
+/** The same absolute time the History beside it uses. */
 function formatReviewTime(value: string | undefined): string {
-  if (!value) {
-    return 'unknown';
-  }
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return 'unknown';
-  }
-  const elapsedMs = Date.now() - timestamp;
-  if (elapsedMs >= 0 && elapsedMs < 60_000) {
-    return 'just now';
-  }
-  if (elapsedMs >= 0 && elapsedMs < 60 * 60_000) {
-    const minutes = Math.max(1, Math.round(elapsedMs / 60_000));
-    return `${minutes}m ago`;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(new Date(timestamp));
+  return value ? formatTaskActivityTimestamp(value).label : 'at an unknown time';
 }
 
 function reviewGateUi(
-  status: AgentReviewGateProjection['status'],
-  reviewGate: AgentReviewGateProjection
+  status: AgentReviewGateProjection['status']
 ): {
   label: string;
   tone: Tone;
-  mark: StatusGlyphKind;
 } {
   switch (status) {
     case 'RUNNING':
-      return { label: 'Reviewing', tone: 'info', mark: 'working' };
+      return { label: 'Reviewing', tone: 'info' };
     case 'PASSED':
-      return { label: 'Passed', tone: 'success', mark: 'idle' };
+      return { label: 'Passed', tone: 'success' };
     case 'NEEDS_CHANGES':
-      return { label: 'Needs changes', tone: 'action', mark: 'waiting' };
+      return { label: 'Needs changes', tone: 'action' };
     case 'INCONCLUSIVE':
-      return { label: 'Inconclusive', tone: 'action', mark: 'waiting' };
+      return { label: 'Inconclusive', tone: 'action' };
     case 'FAILED':
-      return { label: 'Failed', tone: 'error', mark: 'blocked' };
+      return { label: 'Failed', tone: 'error' };
     case 'CANCELED':
-      return { label: 'Stopped', tone: 'action', mark: 'idle' };
-    case 'STALE': {
-      switch (reviewGate.result?.verdict) {
-        case 'PASSED': return { label: 'Passed', tone: 'success', mark: 'idle' };
-        case 'NEEDS_CHANGES': return { label: 'Needs changes', tone: 'error', mark: 'idle' };
-        case 'INCONCLUSIVE': return { label: 'Inconclusive', tone: 'action', mark: 'idle' };
-        default: return { label: 'Needs re-review', tone: 'action', mark: 'idle' };
-      }
-    }
+      return { label: 'Stopped', tone: 'action' };
+    // A stale review has one state word; its old verdict is context in the body.
+    case 'STALE':
+      return { label: 'Needs re-review', tone: 'neutral' };
     case 'NOT_RUN':
-      return { label: 'Not run', tone: 'neutral', mark: 'idle' };
+      return { label: 'Not run', tone: 'neutral' };
   }
 }
 
+/** What the review said: the reviewer's own words when it gave them, else Task Monki's account. */
 function reviewBody(
   reviewGate: AgentReviewGateProjection,
   reviewRun?: RunRecord
-): string | undefined {
-  if (reviewRun?.terminalReason) {
-    return reviewRun.terminalReason;
-  }
+): { text: string; source: 'reviewer' | 'task-monki' } | undefined {
+  const own = (text: string | undefined) => (text ? { text, source: 'task-monki' as const } : undefined);
   if (reviewGate.status === 'STALE') {
-    return 'Reviewed diff no longer matches the worktree.';
+    const verdict = reviewGate.result?.verdict;
+    const earlier =
+      verdict === 'PASSED' ? 'passed'
+        : verdict === 'NEEDS_CHANGES' ? 'asked for changes'
+          : verdict === 'INCONCLUSIVE' ? 'was inconclusive'
+            : undefined;
+    return own(earlier
+      ? `The diff changed after this review, which ${earlier} on the earlier version.`
+      : 'The diff changed after this review.');
+  }
+  if (reviewRun?.terminalReason) {
+    return own(reviewRun.terminalReason);
   }
   if (reviewGate.summary) {
-    return reviewGate.summary;
+    return { text: reviewGate.summary, source: 'reviewer' };
   }
   switch (reviewGate.status) {
     case 'NOT_RUN':
+    case 'NEEDS_CHANGES':
       return undefined;
     case 'PASSED':
-      return 'The agent reviewer reported no blocking issues for the reviewed diff.';
-    case 'NEEDS_CHANGES':
-      return 'Send the findings back to the agent, then re-review.';
+      return own('No blocking issues in the reviewed diff.');
     case 'INCONCLUSIVE':
-      return 'The review finished without a clear pass or fail verdict. Read the output, then request changes or mark done explicitly.';
+      return own('The review finished without a clear verdict.');
     case 'FAILED':
-      return 'The review did not complete. Re-run it or inspect Debug.';
+      return own('The review did not complete.');
     case 'CANCELED':
-      return 'The partial review result was discarded.';
+      return own('The partial review result was discarded.');
     case 'RUNNING':
-      return 'Reviewing the current diff.';
+      return own('Reviewing the current diff.');
   }
 }

@@ -4,20 +4,18 @@ import { taskManagerApi } from '../api/taskManagerClient';
 import { ApplicationPreviewPanel } from './preview/ApplicationPreviewPanel';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { DisclosureChevron } from './DisclosureChevron';
-import type { NotificationTone } from './AppOverlays';
 
 /**
  * Repository selection belongs to creation; application setup belongs to Preview. The Design's
  * own Preview conversation drafts `preview.yaml` on its workspace, as on a task.
  */
-export function DesignRepositorySetup({ project, agent, proposals, onUpdate, onOpenLocation, onModalOpenChange, onNotify }: {
+export function DesignRepositorySetup({ project, agent, proposals, onUpdate, onOpenLocation, onModalOpenChange }: {
   project: DesignDetailSnapshot;
   agent?: PreviewAgentConversation;
   proposals?: PreviewProposalActions;
   onUpdate(detail: DesignDetailSnapshot): void;
   onOpenLocation(): Promise<void>;
   onModalOpenChange(open: boolean): void;
-  onNotify?(message: string, tone?: NotificationTone): void;
 }) {
   const root = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState(false);
@@ -51,7 +49,7 @@ export function DesignRepositorySetup({ project, agent, proposals, onUpdate, onO
         {setup?.workspaceChanged ? <button className="outline-button" disabled={busy || active} onClick={() => void run(() => taskManagerApi.startDesign({ designId: project.task.id, acceptWorkspaceSnapshotId: setup.workspaceSnapshotId }))}>Continue with these changes</button> : null}
       </div>
     </div> : null}
-    {project.currentWorktree?.status === 'PRESENT' ? <ApplicationPreviewPanel taskId={project.task.id} projectName={project.repository.name} worktree={project.currentWorktree} onModalOpenChange={onModalOpenChange} onNotify={onNotify}
+    {project.currentWorktree?.status === 'PRESENT' ? <ApplicationPreviewPanel taskId={project.task.id} projectName={project.repository.name} worktree={project.currentWorktree} onModalOpenChange={onModalOpenChange}
       agent={agent && { ...agent, disabledReason: agent.disabledReason ?? (active ? 'Wait for the Design turn to finish.' : undefined) }}
       proposals={proposals && { ...proposals, accept: async (taskId, draftId, yaml) => {
         const result = await proposals.accept(taskId, draftId, yaml);

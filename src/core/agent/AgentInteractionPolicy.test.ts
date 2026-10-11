@@ -64,6 +64,22 @@ describe('Agent interaction policy', () => {
       expect(read(path.join(directory, 'backend', 'package.json'))).toContain('GRANT_TURN');
       // A file directly in the home directory is as broad as approving home itself.
       expect(read(path.join(directory, '.npmrc'))).toEqual(['DECLINE']);
+      // Credential and configuration stores are never offered, as a folder or through a file.
+      for (const [folder, file] of [['.ssh', 'id_ed25519'], ['.codex', 'auth.json'], ['.aws', 'credentials'], ['Library/Keychains', 'login.keychain-db']]) {
+        await fs.mkdir(path.join(directory, folder), { recursive: true });
+        await fs.writeFile(path.join(directory, folder, file), 'private');
+        expect(read(path.join(directory, folder))).toEqual(['DECLINE']);
+        expect(read(path.join(directory, folder, file))).toEqual(['DECLINE']);
+      }
+      if (process.platform !== 'win32') expect(read('/etc')).toEqual(['DECLINE']);
+      // A request naming many paths is refused rather than resolved on the main thread.
+      const many = Array.from({ length: 33 }, () => path.join(directory, 'backend'));
+      expect(buildInteractionPolicy({
+        type: 'PERMISSION_APPROVAL',
+        request: { startedAtMs: 1, cwd: session.worktreePath, permissions: { fileSystem: { read: many } } },
+        session,
+        run
+      }).allowedActions).toEqual(['DECLINE']);
     } finally {
       home.mockRestore();
       await fs.rm(directory, { recursive: true, force: true });

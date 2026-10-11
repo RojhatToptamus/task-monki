@@ -67,6 +67,7 @@ import type {
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
   BOARD_COLORS,
+  REVIEW_FINDING_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   ARTIFACT_KINDS,
   CODEX_RUNTIME_ID,
@@ -77,8 +78,14 @@ import {
   isDetachedRunMode,
   isDetachedSessionRole,
   isImplementationRunMode,
+  effectiveReviewGateStatus,
+  isEmptyReviewDraft,
   isTaskCreationToken,
-  verifiedChecksMatchMergeHead
+  openReviewFindings,
+  reviewDraftProblem,
+  verifiedChecksMatchMergeHead,
+  type ReviewFindingDecision,
+  type TaskReviewDraft
 } from '../../shared/contracts';
 import {
   enforcePosixMode,
@@ -95,7 +102,10 @@ import {
   type VerifiedTaskAttachment
 } from './TaskAttachmentStorage';
 import { AttachmentStoreError } from './AttachmentErrors';
-import { validateCurrentStoreRecords } from './currentStoreValidation';
+import {
+  validateCurrentStoreRecords,
+  validateTaskInstructionConversation
+} from './currentStoreValidation';
 import {
   AppDatabase
 } from './sqlite/AppDatabase';
@@ -1879,11 +1889,6 @@ export class SqliteTaskStore {
     );
   }
 
-  async getIteration(iterationId: string): Promise<TaskIteration | undefined> {
-    await this.init();
-    return clone(this.state.iterations.find((iteration) => iteration.id === iterationId));
-  }
-
   async getWorktree(worktreeId: string): Promise<WorktreeRecord | undefined> {
     await this.init();
     return clone(this.state.worktrees.find((worktree) => worktree.id === worktreeId));
@@ -2479,6 +2484,24 @@ export class SqliteTaskStore {
     });
   }
 
+  /** Saves the person's unsent review with the task; an empty draft clears it. */
+  async saveTaskReviewDraft(taskId: string, draft: TaskReviewDraft): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const problem = reviewDraftProblem(draft);
+      if (problem) throw new Error(problem);
+      const task = this.state.tasks.find((record) => record.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      const saved = isEmptyReviewDraft(draft) ? undefined : clone(draft);
+      this.state = { ...this.state, tasks: this.state.tasks.map((record) => {
+        if (record.id !== taskId) return record;
+        const { reviewDraft: _previous, ...rest } = record;
+        return saved ? { ...rest, reviewDraft: saved } : rest;
+      }) };
+      await this.persistSnapshot();
+    });
+  }
+
   async updateTaskInstructions<T>(taskId: string, update: (records: TaskInstruction[], addedIds: string[]) => T,
     clearDraft?: string, attachmentDraftId?: string): Promise<T> {
     return this.serializeMutation(async () => {
@@ -2490,6 +2513,9 @@ export class SqliteTaskStore {
         const result = update(records, addedIds);
         if (task.kind === 'DESIGN' && records.some((record) => record.role !== 'PREVIEW')) {
           throw new Error('A Design holds only Preview agent messages.');
+        }
+        for (const record of records) {
+          validateTaskInstructionConversation(record as unknown as Record<string, unknown>);
         }
         const availableIds = new Set(this.state.attachments.filter((file) => file.taskId === taskId).map((file) => file.id));
         for (const record of records) {
@@ -4162,6 +4188,43 @@ export class SqliteTaskStore {
     });
   }
 
+  /**
+   * Records a decision on the current review's findings. `decide` runs inside the
+   * serialized mutation against the current task, so its checks and the recorded
+   * event cannot interleave with another change to the review. It throws to refuse.
+   */
+  async recordReviewFindingDecision(
+    taskId: string,
+    decide: (task: Task) => ReviewFindingDecision
+  ): Promise<ReviewFindingDecision> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      const decision = decide(clone(task));
+      const review = task.projection.agentReview;
+      const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
+      if (!review || !reviewRun) throw new Error('This review is no longer current.');
+      if ((review.findingDecisions ?? []).length >= REVIEW_FINDING_DECISION_LIMIT) {
+        throw new Error('This review has reached its decision limit. Run the review again.');
+      }
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'AGENT_REVIEW_FINDING_DECIDED',
+          taskId: task.id,
+          iterationId: reviewRun.iterationId,
+          worktreeId: reviewRun.worktreeId,
+          source: 'ui',
+          payload: { decision }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(decision);
+    });
+  }
+
   async createIterationAndWorktree(input: {
     task: Task;
     branchName: string;
@@ -5587,6 +5650,12 @@ function assertAgentReviewOwnership(
       invalidPersistedRelationship('task agent review artifact ownership');
     }
   }
+
+  for (const decision of review.findingDecisions ?? []) {
+    if (!reviewRun || decision.reviewRunId !== reviewRun.id) {
+      invalidPersistedRelationship('task agent review decision ownership');
+    }
+  }
 }
 
 function indexUniqueRecords<T extends { id: string }>(
@@ -5747,6 +5816,7 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       (run.runtimeId !== task.runtimeId &&
         !(
           (run.mode === 'REVIEW' && session.role === 'REVIEW') ||
+          (run.mode === 'SIDE_QUESTION' && session.role === 'SIDE') ||
           (run.mode === 'PREVIEW' && session.role === 'PREVIEW') ||
           (run.mode === 'SUBAGENT' &&
             session.role === 'SUBAGENT' &&
@@ -5904,7 +5974,7 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
   }
 }
 
-/** Reviews and Preview conversations may run on another runtime than the task; their subagents inherit that. */
+/** Reviews, questions in Ask and Preview conversations may run on another runtime than the task; their subagents inherit that. */
 function belongsToDetachedLineage(
   session: AgentSessionRecord,
   sessions: ReadonlyMap<string, AgentSessionRecord>,
@@ -7319,7 +7389,7 @@ function isCanonicalIsoTimestamp(value: string): boolean {
 function projectBoardTask(task: Task): BoardTaskSummary {
   const review = task.projection.agentReview;
   const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
-  for (const finding of review?.result?.findings ?? []) {
+  for (const finding of openReviewFindings(review?.result, review?.findingDecisions ?? [])) {
     findingCounts[finding.severity] = (findingCounts[finding.severity] ?? 0) + 1;
   }
   return {
@@ -7348,7 +7418,9 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         status: review?.status ?? 'NOT_RUN',
         runId: review?.runId,
         hasResult: Boolean(review?.result),
-        findingCounts
+        findingCounts,
+        effectiveStatus: effectiveReviewGateStatus(review),
+        ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
       }
     }
   };

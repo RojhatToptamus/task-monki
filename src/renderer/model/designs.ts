@@ -56,7 +56,7 @@ export interface DesignWorkspaceLayoutView {
 export type DesignCanvasPresentation =
   | { kind: 'DESKTOP_ONLY'; title: string; detail: string }
   | { kind: 'HIDDEN'; title: string; detail: string }
-  | { kind: 'PLACEHOLDER'; title: string; detail: string; restart: boolean }
+  | { kind: 'PLACEHOLDER'; title: string; detail: string; restart: boolean; failed?: boolean }
   | { kind: 'NATIVE'; target: DesignCanvasTarget; progress: boolean };
 
 export interface DesignCanvasExternalLinkRequest {
@@ -203,10 +203,11 @@ export function designCanvasPresentation(input: {
   if (displayStatus === 'NEEDS_ATTENTION') {
     return {
       kind: 'PLACEHOLDER',
-      title: 'No ready preview',
+      title: 'No preview yet',
       detail: canvas.detail ?? input.project.turns.at(-1)?.failureReason ??
         'Send a follow-up message to try the update again.',
-      restart: input.project.actions.canRestart
+      restart: input.project.actions.canRestart,
+      failed: true
     };
   }
   return {

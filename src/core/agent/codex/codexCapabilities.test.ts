@@ -2,10 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { codexCapabilities } from './codexCapabilities';
 
 describe('codexCapabilities', () => {
-  it('declares the restricted execution policy without approval exceptions', () => {
+  it('defaults to auto review and keeps the restricted policy without approval exceptions', () => {
     const policy = codexCapabilities().executionPolicy;
 
-    expect(policy.defaultPresetId).toBe('restricted');
+    expect(policy.defaultPresetId).toBe('approve-for-me');
+    expect(policy.presets.find((preset) => preset.id === 'approve-for-me')).toMatchObject({
+      label: 'Auto review',
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review'
+    });
     expect(policy.presets.find((preset) => preset.id === 'restricted')).toMatchObject({
       id: 'restricted',
       label: 'Restricted',

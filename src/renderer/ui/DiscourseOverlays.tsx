@@ -6,6 +6,9 @@ import {
   DiscourseTaskIcon
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { DisclosureChevron } from './DisclosureChevron';
+import { FactLine } from './FactLine';
+import { Tooltip } from './Tooltip';
 
 export function InspectorSidebar({ children, returnFocus, onClose }: {
   children: ReactNode;
@@ -21,10 +24,11 @@ export function InspectorSidebar({ children, returnFocus, onClose }: {
       aria-labelledby="discourse-inspector-title">
       <div className="tm-discourse-inspector__head">
         <h2 id="discourse-inspector-title">Conversation settings</h2>
-        <button type="button" className="tm-iconbtn" aria-label="Close conversation settings"
-          title="Close conversation settings" onClick={closeAndReturnFocus}>
-          <DiscourseCloseIcon />
-        </button>
+        <Tooltip label="Close conversation settings">
+          <button type="button" className="tm-iconbtn" aria-label="Close conversation settings" onClick={closeAndReturnFocus}>
+            <DiscourseCloseIcon />
+          </button>
+        </Tooltip>
       </div>
       {children}
     </aside>
@@ -71,10 +75,12 @@ export function ContextPreview({
     >
       <header className="tm-discourse-preview__head">
         <h2 id="discourse-preview-title">Message context</h2>
-        <button type="button" className="tm-iconbtn" aria-label="Close context preview" title="Close context preview"
-          onClick={() => { returnFocusOnCloseRef.current = true; onClose(); }}>
-          <DiscourseCloseIcon />
-        </button>
+        <Tooltip label="Close context preview">
+          <button type="button" className="tm-iconbtn" aria-label="Close context preview"
+            onClick={() => { returnFocusOnCloseRef.current = true; onClose(); }}>
+            <DiscourseCloseIcon />
+          </button>
+        </Tooltip>
       </header>
       <p className="tm-discourse-preview__summary">{preview.references.length
         ? 'Your message, recent conversation, and these sources:'
@@ -88,10 +94,10 @@ export function ContextPreview({
             reference.accessMode === 'FILESYSTEM_READ'
               ? reference.readScope === 'TASK_WORKTREE' ? 'Read-only worktree' : 'Read-only repository'
               : accessModeLabel(reference.accessMode)
-          ].filter(Boolean).join(' · ')} />)}
+          ].filter((fact): fact is string => Boolean(fact))} />)}
       </ul> : null}
       {preview.exclusions.length > 0 ? <details className="tm-discourse-preview__exclusions">
-        <summary>Context limits</summary>
+        <summary><span className="tm-disclosure__label"><DisclosureChevron />Context limits</span></summary>
         <ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
       </details> : null}
     </aside>
@@ -101,14 +107,15 @@ export function ContextPreview({
 export function ContextReference({ kind, label, description, children }: {
   kind: 'TASK' | 'REPOSITORY';
   label: string;
-  description: string;
+  /** Short facts about the source, shown one per span. */
+  description: readonly string[];
   children?: ReactNode;
 }) {
   return <li>
     <span className={`tm-discourse-context-kind tm-discourse-context-kind--${kind.toLowerCase()}`} aria-hidden="true">
       {kind === 'TASK' ? <DiscourseTaskIcon /> : <DiscourseRepositoryIcon />}
     </span>
-    <span><strong title={label}>{label}</strong><small>{description}</small></span>
+    <span><strong title={label}>{label}</strong><small><FactLine facts={description} /></small></span>
     {children}
   </li>;
 }

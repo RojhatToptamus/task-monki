@@ -219,12 +219,13 @@ describe('mounted Design workspace', () => {
     );
 
     expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Design: Codex · Luna/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toBeTruthy();
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: '  Build a calm project portfolio.  ' }
     });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Agent profile:/ }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: profile.name }));
     const create = screen.getByRole('button', { name: 'Create Design' });
     fireEvent.click(create);
     fireEvent.click(create);
@@ -337,7 +338,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Design: Codex · Luna/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Model: Luna via Codex/ }));
     const unavailableOption = screen.getByRole('option', {
       name: `Unsupported via Codex, unavailable. ${reason}`
     });
@@ -391,7 +392,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Design: Codex · Luna/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toBeTruthy();
     const create = screen.getByRole('button', { name: 'Create Design' });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
@@ -506,7 +507,6 @@ describe('mounted Design workspace', () => {
     fireEvent.drop(composer, { dataTransfer: { types: ['Files'], files: [file] } });
 
     expect(screen.getByText('dropped.txt')).toBeTruthy();
-    expect(screen.getByText(/1 file/)).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: 'Build from the dropped direction.' }
     });
@@ -586,7 +586,7 @@ describe('mounted Design workspace', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Connection lost.');
 
     expect(screen.getByRole('textbox', { name: 'Brief' })).toHaveProperty('disabled', true);
-    expect(screen.getByRole('button', { name: /Design: Codex · Luna/ })).toHaveProperty(
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toHaveProperty(
       'disabled',
       true
     );
@@ -1592,7 +1592,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByText('Copied from Original portfolio · Ready state 3')).toBeTruthy();
+    expect(screen.getByText('Copied from Original portfolio, Ready state 3')).toBeTruthy();
     expect(screen.getByText('Continue from this version')).toBeTruthy();
   });
 
@@ -2063,7 +2063,7 @@ describe('mounted Design workspace', () => {
       generationId: 'candidate-1',
       routeId: 'route-1'
     }));
-    expect(screen.getByText('checking v2')).toBeTruthy();
+    expect(screen.getByText('Checking v2')).toBeTruthy();
     expect(screen.getByText('v2').getAttribute('aria-current')).toBe('true');
     expect(
       (screen.getByRole('button', { name: 'Open preview in browser' }) as HTMLButtonElement)

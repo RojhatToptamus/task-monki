@@ -234,6 +234,47 @@ describe('OpenCodeHttpClient', () => {
     expect(rows.join('\n')).not.toContain(encoded);
   });
 
+  it('keeps a client tool\'s plain-text output, such as preview logs, while omitting encoded bytes in it', async () => {
+    const encoded = Buffer.alloc(3000, 7).toString('base64');
+    const logs = 'web exited with code 4\nError: Missing local setup for web';
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(JSON.stringify([{
+          info: { id: 'msg_1', sessionID: 'ses_1', role: 'assistant' },
+          parts: [{
+            id: 'prt_mcp',
+            sessionID: 'ses_1',
+            messageID: 'msg_1',
+            type: 'tool',
+            tool: 'task_monki_preview_inspect_preview',
+            state: {
+              status: 'completed',
+              // OpenCode joins an MCP result's text parts into plain text.
+              output: `${logs}\n\ndata:image/png;base64,${encoded}\n\n${encoded}`
+            }
+          }]
+        }]), { status: 200 })
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+
+    const result = await client.get<unknown[]>('/session/ses_1/message');
+
+    const delivered = JSON.stringify(result.data);
+    expect(delivered).toContain(JSON.stringify(logs).slice(1, -1));
+    expect(delivered).toContain('[Task Monki provider bytes omitted]');
+    expect(delivered).not.toContain(encoded);
+    expect(rows.join('\n')).not.toContain(encoded);
+  });
+
   it('redacts request-scoped MCP credentials from registration journals', async () => {
     const credential = 'temporary-design-session-credential';
     const endpoint = 'http://127.0.0.1:43123/design-tool';

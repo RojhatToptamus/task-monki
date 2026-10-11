@@ -2,7 +2,10 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode,
 import { ArrowUp, X } from 'lucide-react';
 import { Conversation, useConversationScroll } from './Conversation';
 import { useDialogFocusBoundary } from './dialogFocus';
-import { StatusGlyph } from './StatusBadge';
+import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
+import { useSideSheetExpansion } from './TaskSidePanel';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
+import { AgentMark } from './UiIcons';
 
 export interface ConversationPanelComposer {
   placeholder: string;
@@ -24,14 +27,17 @@ export interface ConversationPanelComposer {
 }
 
 /**
- * A conversation beside a working surface: a 44px head, the shared conversation log, and the
+ * A conversation beside a working surface: a 48px head, the shared conversation log, and the
  * shared composer. As an overlay it takes focus and Escape closes it from anywhere; docked
  * beside the surface it is part of the page, so it takes focus only when asked and Escape
- * closes it only from inside. Focus returns to whatever opened it, or to `returnFocusRef`.
- * The caller owns the thread and what sending means.
+ * closes it only from inside. In a side sheet its head can expand it over the page, and
+ * Escape collapses it before it closes. Focus returns to whatever opened it, or to
+ * `returnFocusRef`. The caller owns the thread and what sending means.
  */
-export function ConversationPanel({ title, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, children }: {
+export function ConversationPanel({ title, meta, tools, label, onClose, composer, returnFocusRef, docked = false, autoFocus = false, focusToken, children }: {
   title: string;
+  /** Who answers here, such as the runtime's name, beside the title. */
+  meta?: string;
   /** Controls below the input, such as the model selector. */
   tools?: ReactNode;
   label: string;
@@ -43,6 +49,8 @@ export function ConversationPanel({ title, tools, label, onClose, composer, retu
   docked?: boolean;
   /** Docked only: move focus to the composer when the panel mounts, because the person opened it. */
   autoFocus?: boolean;
+  /** Changes when the caller hands the panel a question from elsewhere; the composer takes focus. */
+  focusToken?: number;
   children: ReactNode;
 }) {
   const fieldId = useId();
@@ -53,14 +61,31 @@ export function ConversationPanel({ title, tools, label, onClose, composer, retu
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const scroller = useConversationScroll();
-  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, fallbackReturnFocusRef: returnFocusRef, trapFocus: false, busy: false, onClose, active: !docked });
+  // In a side sheet the panel can take the page's place; Escape gives it back before it closes anything.
+  const sheet = useSideSheetExpansion();
+  const closeOrCollapse = () => (sheet.expanded ? sheet.setExpanded(false, false) : onClose());
+  useDialogFocusBoundary({ dialogRef: root, initialFocusRef: field, fallbackReturnFocusRef: returnFocusRef, trapFocus: false, busy: false, onClose: closeOrCollapse, active: !docked });
   // Mount-only: a docked panel restored from the person's layout must not steal focus.
   const focusOnMount = useRef(docked && autoFocus);
   useEffect(() => {
     if (focusOnMount.current) field.current?.focus({ preventScroll: true });
   }, []);
-  const closeFromInside = (event: KeyboardEvent<HTMLElement>) => {
-    if (!docked || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+  useEffect(() => {
+    if (focusToken) field.current?.focus({ preventScroll: true });
+  }, [focusToken]);
+  const onPanelKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (sheet.available && isExpandShortcut(event)) {
+      event.preventDefault();
+      sheet.setExpanded(!sheet.expanded, false);
+      return;
+    }
+    if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    if (sheet.expanded) {
+      event.preventDefault();
+      sheet.setExpanded(false, false);
+      return;
+    }
+    if (!docked) return;
     event.preventDefault();
     onClose();
     returnFocusRef?.current?.focus({ preventScroll: true });
@@ -88,12 +113,21 @@ export function ConversationPanel({ title, tools, label, onClose, composer, retu
   };
   const sendLabel = composer.sendLabel ?? 'Send';
   return (
-    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={closeFromInside}>
+    <aside ref={root} className="tm-side-conversation" aria-label={label} tabIndex={-1} onKeyDown={onPanelKeyDown}>
       <header className="tm-side-conversation__head">
+        <AgentMark className="tm-side-conversation__mark" />
         <strong>{title}</strong>
-        <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} title="Close · Esc" onClick={onClose}>
-          <X size={16} strokeWidth={1.5} aria-hidden="true" />
-        </button>
+        {meta ? <span className="tm-side-conversation__meta">{meta}</span> : null}
+        <span className="tm-side-conversation__actions">
+          {sheet.available ? (
+            <ExpandToggle expanded={sheet.expanded} subject={title} onToggle={(animate) => sheet.setExpanded(!sheet.expanded, animate)} />
+          ) : null}
+          <Tooltip label="Close" shortcut="Esc">
+            <button type="button" className="tm-iconbtn" aria-label={`Close ${title}`} onClick={onClose}>
+              <X size={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
+        </span>
       </header>
       <Conversation instance={scroller} label={label} className="tm-side-conversation__log">
         <div className="tm-side-conversation__thread">{children}</div>
@@ -123,16 +157,19 @@ export function ConversationPanel({ title, tools, label, onClose, composer, retu
         />
         <div className="tm-composer__toolbar">
           {tools ? <div className="tm-side-conversation__tools">{tools}</div> : null}
-          {error || composer.hint ? <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span> : null}
+          {/* Always rendered: it takes the free width, so the actions sit at the right. */}
+          <span id={hintId} className="tm-composer__hint" title={error ?? composer.hint}>{error ?? composer.hint}</span>
           {composer.secondary ? (
             <button type="button" className="outline-button tm-composer__secondary" disabled={composer.secondary.disabled || sending} title={composer.secondary.title}
               onClick={() => void composer.secondary!.onClick().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>
               {composer.secondary.label}
             </button>
           ) : null}
-          <button type="submit" className="primary-button tm-composer-action" disabled={!canSend} aria-label={sendLabel} title={`${sendLabel} · ⌘/Ctrl Enter`}>
-            {sending ? <StatusGlyph kind="working" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
-          </button>
+          <Tooltip label={sendLabel} shortcut={SUBMIT_SHORTCUT} side="top">
+            <button type="submit" className="primary-button tm-composer-action" disabled={!canSend} aria-label={sendLabel}>
+              <ArrowUp size={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
         </div>
         {error ? <p className="tm-visually-hidden" role="alert">{error}</p> : null}
       </form>

@@ -20,7 +20,7 @@ it('names runs by outcome and cause, newest first, without attempt ids', () => {
   const rows = previewRunRows(status, false, now);
   expect(rows.map((row) => [row.time, row.outcome, row.cause])).toEqual([
     [runTime('2026-10-09T14:31:00', now), 'Update failed', 'migrate exited with code 1'],
-    [runTime('2026-10-09T14:01:00', now), 'Current run · ready in 21 s · serving', undefined],
+    [runTime('2026-10-09T14:01:00', now), 'Serving, ready in 21 s', undefined],
     [runTime('2026-10-09T13:58:00', now), 'Failed', 'web could not start'],
     [`Yesterday ${runTime('2026-10-08T22:19:00', new Date('2026-10-08T23:00:00'))}`, 'Stopped', undefined]
   ]);

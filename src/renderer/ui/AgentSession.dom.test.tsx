@@ -255,7 +255,7 @@ describe('Agent session interactions', () => {
     })} />);
     const queue = screen.getByRole('button', { name: 'Queue' });
     expect(queue).toHaveProperty('disabled', true);
-    expect(screen.getByText('Answer the agent request before sending an instruction.')).toBeTruthy();
+    expect(screen.getByText('Answer the request first.')).toBeTruthy();
     expect(screen.queryByText('Live Codex is disabled for deterministic seed data.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Stop' })).toHaveProperty('disabled', false);
   });
@@ -342,10 +342,12 @@ describe('Agent session interactions', () => {
       steps: [{ step: 'Inspect the files', status: 'IN_PROGRESS' as const }], rawMessage: makeRawMessage(), observedAt: run.startedAt };
     const input = props({ plans: [plan] });
     const view = render(<AgentSession {...input} />);
-    expect(screen.getByRole('listitem', { name: 'In progress: Inspect the files' })).toBeTruthy();
+    // The step's state is read with it: a mark for sight, the word for assistive technology.
+    const step = () => screen.getByText('Inspect the files').closest('li');
+    expect(step()?.textContent).toBe('Inspect the files, In progress');
     const completed = { ...run, status: 'COMPLETED' as const };
     view.rerender(<AgentSession {...input} run={completed} runs={[completed]} />);
-    expect(screen.getByRole('listitem', { name: 'Unfinished: Inspect the files' })).toBeTruthy();
+    expect(step()?.textContent).toBe('Inspect the filesUnfinished');
     expect(plan.steps[0].status).toBe('IN_PROGRESS');
   });
 

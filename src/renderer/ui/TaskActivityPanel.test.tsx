@@ -1,6 +1,7 @@
 import { createRef } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import type { TaskActivityViewModel } from '../model/taskActivity';
 import { TaskActivityPanel, formatTaskActivityTimestamp } from './TaskActivityPanel';
 
 describe('Activity Timeline timestamp formatting', () => {
@@ -8,58 +9,64 @@ describe('Activity Timeline timestamp formatting', () => {
     const timestamp = formatTaskActivityTimestamp('2026-07-02T10:05:00.000Z');
 
     expect(timestamp.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(timestamp.time).toMatch(/^\d{2}:\d{2}$/);
+    // The clock follows the system format, as conversation times do.
+    expect(timestamp.time).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date('2026-07-02T10:05:00.000Z')));
     expect(timestamp.full).toBe(`${timestamp.date} ${timestamp.time}`);
     expect(`${timestamp.date} ${timestamp.time}`).not.toMatch(/now|^\d+m$/i);
+    // The compact label stays absolute: a day and a clock time, never "now" or "5m ago".
+    expect(timestamp.label).toContain(timestamp.time);
+    expect(timestamp.label).not.toMatch(/now|ago/i);
   });
 
   it('does not describe invalid timestamps as recent activity', () => {
     expect(formatTaskActivityTimestamp('not-a-date')).toEqual({
       date: 'Unknown',
+      day: 'Unknown date',
       time: '',
-      full: 'Unknown time'
+      full: 'Unknown time',
+      label: 'Unknown time'
     });
   });
 
-  it('keeps actionable evidence collapsed and avoids badge-style status duplication', () => {
-    const html = renderToStaticMarkup(
-      <TaskActivityPanel
-        variant="overview"
-        view={{
-          hiddenCount: 0,
-          totalCount: 1,
-          items: [
-            {
-              id: 'item-1',
-              at: '2026-07-02T10:05:00.000Z',
-              actor: 'GitHub',
-              title: 'Checks failed',
-              tone: 'error',
-              category: 'delivery',
-              evidence: {
-                summary: '1 failed check blocks PR readiness.',
-                rows: [
-                  {
-                    label: 'CI / lint-and-test',
-                    value: 'Blocks PR readiness',
-                    href: 'https://github.com/example/repo/actions/runs/1'
-                  }
-                ]
+  it('keeps evidence in the full ledger, collapsed, and out of the Overview History', () => {
+    const view: TaskActivityViewModel = {
+      hiddenCount: 0,
+      totalCount: 1,
+      items: [
+        {
+          id: 'item-1',
+          at: '2026-07-02T10:05:00.000Z',
+          actor: 'GitHub',
+          title: 'Checks failed',
+          tone: 'error',
+          category: 'delivery',
+          evidence: {
+            summary: '1 failed check blocks PR readiness.',
+            rows: [
+              {
+                label: 'CI / lint-and-test',
+                value: 'Blocks PR readiness',
+                href: 'https://github.com/example/repo/actions/runs/1'
               }
-            }
-          ]
-        }}
-      />
-    );
+            ]
+          }
+        }
+      ]
+    };
+    const ledger = renderToStaticMarkup(<TaskActivityPanel variant="debug" view={view} />);
+    expect(ledger).toContain('<details');
+    expect(ledger).toContain('<span>1 failed check blocks PR readiness.</span>');
+    expect(ledger).toContain('CI / lint-and-test');
+    expect(ledger).not.toContain('<summary>Details</summary>');
 
-    expect(html).toContain('<details');
-    expect(html).toContain('<span>1 failed check blocks PR readiness.</span>');
-    expect(html).toContain('CI / lint-and-test');
-    expect(html).toContain('Blocks PR readiness');
-    expect(html).not.toContain('<summary>Details</summary>');
+    // The Overview says what happened, who and when; its Now panel owns the evidence.
+    const overview = renderToStaticMarkup(<TaskActivityPanel variant="overview" view={view} />);
+    expect(overview).toContain('Checks failed');
+    expect(overview).not.toContain('<details');
+    expect(overview).not.toContain('blocks PR readiness');
   });
 
-  it('shows only the latest Overview item and accounts for bounded and hidden history', () => {
+  it('shows the latest Overview history in order with a way to the full ledger', () => {
     const html = renderToStaticMarkup(
       <TaskActivityPanel
         variant="overview"
@@ -79,8 +86,8 @@ describe('Activity Timeline timestamp formatting', () => {
             {
               id: 'latest',
               at: '2026-07-02T10:05:00.000Z',
-              actor: 'Review',
-              title: 'Completed',
+              actor: 'Reviewer',
+              title: 'Review completed',
               tone: 'action',
               category: 'review'
             }
@@ -89,11 +96,14 @@ describe('Activity Timeline timestamp formatting', () => {
       />
     );
 
-    expect(html).toContain('<span>Activity</span>');
-    expect(html).toContain('Completed');
-    expect(html).not.toContain('Worktree ready');
-    expect(html).toContain('4 events · latest Completed');
-    expect(html).toContain('View full activity');
+    expect(html).toContain('>History</h3>');
+    // Every bounded entry is visible, oldest first; nothing hides behind a disclosure.
+    expect(html.indexOf('Worktree ready')).toBeLessThan(html.indexOf('Review completed'));
+    // Entries on the same day share one date line.
+    const day = formatTaskActivityTimestamp('2026-07-02T10:05:00.000Z').day;
+    expect(html.split(`>${day}</h4>`)).toHaveLength(2);
+    expect(html).not.toContain('<details');
+    expect(html).toContain('Full history');
   });
 
   it('omits the Overview activity surface when there are no items', () => {
@@ -157,7 +167,8 @@ describe('Activity Timeline timestamp formatting', () => {
     expect(html).toContain('<h3>Task activity</h3>');
     expect(html).toContain('CI / lint-and-test');
     expect(html).toContain('Blocks PR readiness');
-    expect(html).toContain('Full event audit · 2 events');
+    expect(html).toContain('<span>Full event audit</span>');
+    expect(html).toContain('>2 events</span>');
     expect(html).toContain('Task created');
     expect(html).toContain('Checks synced');
   });

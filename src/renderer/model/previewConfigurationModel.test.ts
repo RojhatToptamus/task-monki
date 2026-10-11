@@ -141,7 +141,7 @@ describe('reading the configuration', () => {
       source: 'live-directories-and-dependencies', cleanup: 'owned-apps-and-containers-data-retained'
     } as unknown as PreviewDescription;
     const entries = describedEntries(description);
-    expect(entries.map((entry) => entry.id)).toEqual(['web', 'web · readiness', 'migrate']);
+    expect(entries.map((entry) => entry.id)).toEqual(['web', 'web readiness', 'migrate']);
     expect(entries[0]!.environment).toEqual([
       { key: 'NODE_ENV', kind: 'text', value: '' },
       { key: 'TOKEN', kind: 'secret', value: 'fixture/token' }

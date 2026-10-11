@@ -1527,6 +1527,30 @@ CREATE INDEX preview_generations_task_state_idx ON preview_generations(task_id, 
 CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_key, routing_state, updated_at DESC, id);
 `
 
+  },
+  {
+    version: 11,
+    name: 'review-finding-decisions',
+    // Task payloads carry review finding decisions. The version prevents older
+    // clients from opening them.
+    sql: 'SELECT 1;'
+  },
+  {
+    version: 12,
+    name: 'side-questions',
+    // Task payloads carry side questions and runtime payloads carry their
+    // SIDE sessions, snapshot read roots and runs. The version prevents older
+    // clients from opening them.
+    sql: 'SELECT 1;'
+  },
+  {
+    version: 13,
+    name: 'drop-shell-layout-settings',
+    // The shell no longer has a collapsible sidebar or a mascot.
+    sql: `UPDATE app_settings
+      SET settings_json = json_set(json_remove(settings_json, '$.sidebarCollapsed', '$.showMascot'), '$.schemaVersion', 15),
+          record_revision = record_revision + 1
+      WHERE json_extract(settings_json, '$.schemaVersion') = 14;`
   }
 ] as const;
 

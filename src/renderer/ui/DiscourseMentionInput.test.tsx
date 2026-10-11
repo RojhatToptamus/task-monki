@@ -12,7 +12,7 @@ describe('DiscourseMentionInput accessibility prototype', () => {
             kind: 'AGENT',
             id: 'builtin.verifier',
             label: 'Verifier',
-            description: 'Checks claims against evidence',
+            description: ['Checks claims against evidence'],
             searchAliases: ['reviewer'],
             available: true
           },
@@ -20,7 +20,7 @@ describe('DiscourseMentionInput accessibility prototype', () => {
             kind: 'TASK',
             id: 'task-1',
             label: 'Fix login',
-            description: 'Ready · repo-a',
+            description: ['Ready', 'repo-a'],
             searchAliases: ['task-1'],
             available: true
           },
@@ -28,7 +28,7 @@ describe('DiscourseMentionInput accessibility prototype', () => {
             kind: 'REPOSITORY',
             id: 'repository-1',
             label: 'repo-a',
-            description: '2 tasks',
+            description: ['2 tasks'],
             searchAliases: ['repos/repo-a'],
             available: false
           }
@@ -59,12 +59,12 @@ describe('DiscourseMentionInput accessibility prototype', () => {
         initialText="@shared"
         candidates={[
           {
-            kind: 'TASK', id: 'shared', label: 'Shared task', description: 'Task',
+            kind: 'TASK', id: 'shared', label: 'Shared task', description: ['Task'],
             searchAliases: [], available: true
           },
           {
             kind: 'REPOSITORY', id: 'shared', label: 'Shared repository',
-            description: 'Repository', searchAliases: [], available: true
+            description: ['Repository'], searchAliases: [], available: true
           }
         ]}
       />

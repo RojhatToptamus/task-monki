@@ -6,6 +6,7 @@ interface DesignMenuItem {
   disabled?: boolean;
   disabledReason?: string;
   danger?: boolean;
+  separated?: boolean;
   action(): void;
 }
 
@@ -43,7 +44,7 @@ export function DesignProjectMenu({
         { label: 'Duplicate current', disabled: !canDuplicate, action: onDuplicate },
         { label: 'Rename…', action: onRename },
         { label: 'Archive', disabled: !canArchive, action: onArchive },
-        { label: 'Delete…', disabled: !canDelete, danger: true, action: onDelete }
+        { label: 'Delete…', disabled: !canDelete, danger: true, separated: true, action: onDelete }
       ]}
     />
   );
@@ -90,7 +91,8 @@ function DesignMenu({ label, items, compact = false, onOpenChange }: {
   onOpenChange?(open: boolean): void;
 }) {
   return <ActionMenu className={compact ? 'tm-design-ready-menu' : 'tm-design-project-menu'} label={label}
+    tooltip={compact ? 'Version options' : 'Design options'}
     onOpenChange={onOpenChange}
-    trigger={<MoreHorizontal aria-hidden="true" size={16} strokeWidth={1.5} />}
+    trigger={<MoreHorizontal aria-hidden="true" size={16} />}
     items={items.map(({ action, ...item }) => ({ ...item, onSelect: action }))} />;
 }

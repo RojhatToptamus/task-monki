@@ -16,6 +16,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   Board,
   BoardSnapshot,
@@ -54,6 +55,12 @@ import type {
   SendPreviewAgentMessageRequest,
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
+  DecideReviewFindingRequest,
+  ReviewFindingDecision,
+  AskSideQuestionRequest,
+  SideQuestionModelChoice,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   PrepareWorktreeRequest,
   InspectWorktreePreparationRequest,
   PrepareWorktreeResult,
@@ -104,6 +111,8 @@ import type {
   TestExternalToolRequest,
   ExternalToolProbeResult,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
+  WorktreeFileRead,
   InteractionRequestRecord,
   OpenTargetInspection,
   OpenTargetRef,
@@ -129,6 +138,7 @@ import {
   ATTACHMENT_MAX_TOTAL_BYTES,
   DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  effectiveReviewFindings,
   getImplementationRetryReason,
   isImplementationRunMode,
   normalizePullRequestTitle,
@@ -172,7 +182,8 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
-import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot } from '../git/GitSnapshotService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
+import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
 import {
   buildContinuationPrompt,
@@ -209,6 +220,11 @@ import {
   PreviewAgentCoordinator,
   resolvePreviewAgentExecution
 } from '../preview/agent/PreviewAgentCoordinator';
+import { AgentReviewCoordinator } from '../review/AgentReviewCoordinator';
+import { SideQuestionCoordinator } from '../sideQuestion/SideQuestionCoordinator';
+import { ReadOnlySnapshotService } from '../git/ReadOnlySnapshotService';
+import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
+import { assertReviewRequestRecord, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -223,6 +239,8 @@ import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseService } from '../discourse/DiscourseService';
 import {
   assertBrowserDevRuntimeIsolation,
+  browserDevExecutionPolicy,
+  executionPresetSettings,
   hasBrowserDevRuntimeIsolation
 } from '../agent/BrowserDevAgentBoundary';
 import {
@@ -256,6 +274,7 @@ import {
 } from '../design/AgentBrowserRuntime';
 import { ClientToolBridge } from '../agent/clientTools/ClientToolBridge';
 import { resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
+import { runReplyText } from '../agent/runReply';
 import {
   INSPECT_DESIGN_TOOL_DEFINITION,
   safeDesignClientToolFailure
@@ -302,6 +321,10 @@ export class TaskManagerService {
   private readonly designBrowser?: DesignBrowserOwner;
   private readonly clientToolBridge: ClientToolBridge;
   private readonly previewAgent: PreviewAgentCoordinator;
+  private readonly reviews: AgentReviewCoordinator;
+  private readonly snapshots: ReadOnlySnapshotService;
+  private readonly reviewSnapshots: ReviewSnapshotStore;
+  private readonly sideQuestions: SideQuestionCoordinator;
   private readonly designDrafts?: DesignDraftStore;
   private readonly github: GitHubService;
   private readonly appSettingsStore: AppSettingsStorage;
@@ -334,6 +357,8 @@ export class TaskManagerService {
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
+      /** Where the code each review read is kept; under the profile in the app. */
+      reviewSnapshotRoot?: string;
       gitPath?: string;
       ghPath?: string;
       codexPath?: string;
@@ -461,14 +486,15 @@ export class TaskManagerService {
         await this.assertRuntimeAllowedInCurrentSurface(adapter);
       }
     });
+    this.reviews = new AgentReviewCoordinator({ store, events });
+    const clientToolScratchRoot = options.clientToolCredentialRoot ??
+      path.join(store.getStorageRoot(), 'client-tool-credentials');
     this.clientToolBridge = new ClientToolBridge({
       executablePath: options.clientToolMcpExecutablePath ?? process.execPath,
       serverPath:
         options.clientToolMcpServerPath ??
         resolveClientToolMcpServerPath({ isPackaged: false, resourcesPath: '', appPath: process.cwd() }),
-      scratchRoot:
-        options.clientToolCredentialRoot ??
-        path.join(store.getStorageRoot(), 'client-tool-credentials'),
+      scratchRoot: clientToolScratchRoot,
       runtimeStore: this.agentRuntimeStore,
       handlers: [
         {
@@ -508,7 +534,8 @@ export class TaskManagerService {
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
         providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
-        allowCandidateDesignModels: this.allowCandidateDesignModels
+        allowCandidateDesignModels: this.allowCandidateDesignModels,
+        ownsReadOnlySnapshot: (candidate) => this.snapshots.owns(candidate)
       }
     );
     this.promptRefiner = new PromptRefinementService((request) =>
@@ -533,6 +560,32 @@ export class TaskManagerService {
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
+    // Snapshots sit beside the managed worktrees. Hosts can share a worktree root, so each
+    // profile sweeps only its own snapshot directory.
+    this.snapshots = new ReadOnlySnapshotService({
+      root: path.join(this.worktrees.getRootDir(), 'snapshots', store.getStoreIdentity().slice(0, 16))
+    });
+    this.reviewSnapshots = new ReviewSnapshotStore(
+      options.reviewSnapshotRoot ?? path.join(this.worktrees.getRootDir(), 'review-snapshots', store.getStoreIdentity().slice(0, 16))
+    );
+    this.sideQuestions = new SideQuestionCoordinator({
+      store,
+      agents: {
+        startSideQuestion: (input) => this.agents.startSideQuestion(input),
+        interruptRun: (runId) => this.withRuntimeOperation(() => this.agents.interruptRun(runId))
+      },
+      snapshots: this.snapshots,
+      readArtifact: (artifactId) => this.readArtifact({ artifactId }),
+      events,
+      questionSettings: (detail, choice) => this.sideQuestionSettings(detail, choice),
+      assertRuntimeEnabled: (runtimeId) => this.assertRuntimeEnabled(runtimeId),
+      withTaskLock: (taskId, action) =>
+        this.withQueuedTaskAction(taskId, 'Side question', () =>
+          this.withRuntimeOperation(async () => {
+            await this.assertAgentRuntimeAvailable();
+            return action();
+          }))
+    });
     if (designOwners) {
       this.designWorktrees = new WorktreeService(designOwners.worktreeRoot);
       this.designSource = new DesignSourceService({
@@ -571,6 +624,7 @@ export class TaskManagerService {
     this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         this.trackPostRunEvidence(event.runId);
+        void this.sideQuestions.handleRunTerminal(event.runId).catch(() => undefined);
         void this.designUpdates?.handleRunTerminal(event.runId).catch(() => undefined);
         void this.dispatchPreviewAgentQueue(event.runId);
         this.scheduleDeferredCodexRuntimeRestart(event.runId);
@@ -668,6 +722,10 @@ export class TaskManagerService {
       [this.appSettings.defaultRuntimeId],
       new Set(this.appSettings.disabledRuntimeIds)
     );
+    this.assertInitializing();
+    // Snapshots are process-owned. Read-only turn recovery above has verified the ones
+    // it needed; none survives into this process.
+    await this.sweepSnapshotsOnStartup().catch(() => undefined);
     this.assertInitializing();
     await this.discourseHost?.initialize();
     this.assertInitializing();
@@ -1135,6 +1193,11 @@ export class TaskManagerService {
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
     return this.openTargets.execute(input, this.openTargetContext());
+  }
+
+  /** A text file in a task's worktree, read only, for the unchanged lines around a captured change. */
+  async readWorktreeFile(input: ReadWorktreeFileRequest): Promise<WorktreeFileRead> {
+    return this.openTargets.readWorktreeFile(input, this.openTargetContext());
   }
 
   private openTargetContext() {
@@ -1656,7 +1719,8 @@ export class TaskManagerService {
       const settings = await prepareTaskCreationSettings(
         adapter,
         requestedInput.agentSettings ?? { runtimeId },
-        []
+        [],
+        this.browserDevAgentBoundary
       );
       return this.store.createTask({
         ...requestedInput,
@@ -1677,7 +1741,8 @@ export class TaskManagerService {
       const settings = await prepareTaskCreationSettings(
         adapter,
         requestedInput.agentSettings ?? { runtimeId },
-        draft.attachments
+        draft.attachments,
+        this.browserDevAgentBoundary
       );
       return this.store.createTask({
         ...requestedInput,
@@ -2794,6 +2859,10 @@ export class TaskManagerService {
     return this.withControlAction(() => this.store.saveTaskAgentDraft(input.taskId, input.text, input.attachmentDraftId));
   }
 
+  async saveTaskReviewDraft(input: SaveTaskReviewDraftRequest): Promise<void> {
+    return this.withControlAction(() => this.store.saveTaskReviewDraft(input.taskId, input.draft));
+  }
+
   async queueTaskInstruction(input: QueueTaskInstructionRequest): Promise<TaskInstruction> {
     return this.withTaskAction(input.taskId, 'Queue instruction', async () => {
       const existing = await this.existingInstruction(input.id, input.taskId, input.instruction, 'QUEUE', input);
@@ -2840,6 +2909,8 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(async () => {
       const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
       if (!record) throw new Error('Instruction not found.');
+      // A Preview message goes to the read-only Preview agent, never to the task's agent.
+      if (record.role === 'PREVIEW') throw new Error('Send this message from the Preview agent.');
       if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
       const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
       assertContinuable(run);
@@ -2855,6 +2926,9 @@ export class TaskManagerService {
   }
 
   private async isPendingInstruction(record: TaskInstruction): Promise<boolean> {
+    // Questions in Ask are answered by their own runs; they never become instructions
+    // for the task's agent.
+    if (record.role === 'SIDE') return false;
     return ['QUEUED', 'HELD'].includes(record.status) ||
       (record.status === 'FAILED' && record.mode !== 'STEER' && record.runId !== undefined && !await this.store.getRun(record.runId));
   }
@@ -2872,7 +2946,8 @@ export class TaskManagerService {
     }
     if (attachments.length === 0) return;
     await prepareTaskCreationSettings(this.runtimeRegistry.require(task.runtimeId),
-      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments);
+      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments,
+      this.browserDevAgentBoundary);
   }
 
   private instructionText(text: string): string {
@@ -2905,7 +2980,8 @@ export class TaskManagerService {
   }
 
   private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
-    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings): Promise<TaskInstruction> {
+    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
+    reviewRequest?: ReviewRequestRecord): Promise<TaskInstruction> {
     const trimmed = this.instructionText(text);
     if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
@@ -2921,6 +2997,7 @@ export class TaskManagerService {
         order: Math.max(0, ...records.map((item) => item.order)) + 1,
         attachmentDraftId: files?.attachmentDraftId, attachmentIds: [...(files?.attachmentIds ?? []), ...addedIds],
         text: trimmed, mode, status, createdAt: now, updatedAt: now,
+        ...(reviewRequest ? { reviewRequest } : {}),
         ...(status === 'SENDING' ? { runId: mode === 'STEER' ? run.id : randomUUID() } : {})
       };
       records.push(record);
@@ -3020,10 +3097,7 @@ export class TaskManagerService {
     if (!waiting) return;
     try {
       await this.withRuntimeOperation(async () => {
-        while (this.taskActionLocks.has(run.taskId)) {
-          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
-        }
-        await this.withTaskAction(run.taskId, 'Queued instruction', async () => {
+        await this.withQueuedTaskAction(run.taskId, 'Queued instruction', async () => {
           await this.ensurePostRunEvidence(runId);
           const detail = await this.store.getTaskDetail(run.taskId);
           const next = detail.taskInstructions.filter((item) => item.status === 'QUEUED' && item.sourceRunId === runId).sort((a, b) => a.order - b.order)[0];
@@ -3034,7 +3108,8 @@ export class TaskManagerService {
               next.sessionId !== current.sessionId || next.iterationId !== detail.task.currentIterationId ||
               next.worktreeId !== detail.task.currentWorktreeId || detail.task.currentRunId !== runId ||
               getImplementationRetryReason(detail.task) || !['IN_PROGRESS', 'REVIEW'].includes(detail.task.workflowPhase) ||
-              detail.runs.some((item) => ACTIVE_AGENT_RUN_STATUSES.has(item.status)) ||
+              detail.runs.some((item) =>
+                ACTIVE_AGENT_RUN_STATUSES.has(item.status) && runHoldsTaskWorktree(item, detail.taskInstructions)) ||
               detail.interactionRequests.some((item) => ['PENDING', 'RESPONDING'].includes(item.status))) {
             await this.holdTaskQueue(run.taskId, 'The run needs attention. Send each instruction when you are ready.');
             return;
@@ -3100,6 +3175,22 @@ export class TaskManagerService {
       }
       await this.setInstructionReceipt(record, 'SUBMITTED');
     }));
+  }
+
+  /**
+   * The person's latest request after a review, and the agent's answer to each item
+   * as its finished reply states them. A reply still running, or without the block,
+   * answers nothing.
+   */
+  private async reviewRound(taskId: string, reviewRunId: string): Promise<{ record: ReviewRequestRecord; answers: ReviewResponseAnswer[] } | undefined> {
+    const detail = await this.store.getTaskDetail(taskId);
+    const instruction = detail.taskInstructions
+      .filter((item) => item.reviewRequest?.reviewRunId === reviewRunId && item.runId)
+      .sort((left, right) => right.order - left.order)[0];
+    if (!instruction?.reviewRequest) return undefined;
+    const run = detail.runs.find((candidate) => candidate.id === instruction.runId);
+    const reply = run?.status === 'COMPLETED' ? await runReplyText(run, (id) => this.agentRuntimeStore.readArtifact(id)) : '';
+    return { record: instruction.reviewRequest, answers: reply ? parseReviewResponse(reply, instruction.reviewRequest).answers : [] };
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
@@ -3220,6 +3311,10 @@ export class TaskManagerService {
     start: (reservedRunId?: string) => Promise<RunRecord>): Promise<RunRecord> {
     const id = input.clientMessageId ?? randomUUID();
     if ((input.attachmentDraftId || input.attachmentIds?.length) && !input.instruction?.trim()) throw new Error('Write a message to send with these files.');
+    if (input.reviewRequest !== undefined) {
+      if (mode !== 'FOLLOW_UP' || !input.instruction?.trim()) throw new Error('A review request is sent as a follow-up message.');
+      assertReviewRequestRecord(input.reviewRequest);
+    }
     const existing = input.instruction?.trim()
       ? await this.existingInstruction(id, input.taskId, input.instruction, mode, input)
       : undefined;
@@ -3238,7 +3333,7 @@ export class TaskManagerService {
       const current = records.find((item) => item.id === existing.id)!;
       Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
       return current;
-    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings);
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings, input.reviewRequest);
     return this.deliverInstruction(record, () => start(record.runId));
   }
 
@@ -3265,7 +3360,8 @@ export class TaskManagerService {
     const resolvedAlternativeSettings = await prepareTaskCreationSettings(
       adapter,
       alternativeSettings,
-      sourceAttachments
+      sourceAttachments,
+      this.browserDevAgentBoundary
     );
     const alternativePrompt = buildForkAlternativeTaskPrompt({
       userContext: await readTaskUserContext(this.store, sourceTask.id, { throughRunId: input.sourceRun.id }),
@@ -3561,22 +3657,138 @@ export class TaskManagerService {
                   configuredReviewSettings
                 ]
               });
+        // The exact code the review reads is kept, so later rounds can show what changed since it.
+        const reviewedTree = await this.captureReviewedTree(worktree.worktreePath, gitSnapshot);
         await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
-        return this.agents.startReview({
+        const previousReview = task.projection.agentReview;
+        const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
+        const review = await this.agents.startReview({
           task,
           iteration,
           worktree,
           sourceRun: run,
-          target: input.target ?? (worktree.ownership === 'EXTERNAL' ? {
+          previousReview: previousReview?.result
+            ? {
+                verdict: previousReview.result.verdict,
+                // The reviewer's own summary; the gate's may only say the review went out of date.
+                summary: previousReview.result.summary || previousReview.summary,
+                findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? []),
+                ...(previousRequest ? { request: previousRequest } : {})
+              }
+            : undefined,
+          // Every change since the task's base: a commit made during the task stays in the review.
+          target: input.target ?? {
             type: 'CUSTOM',
             instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
-          } : { type: 'UNCOMMITTED_CHANGES' }),
+          },
           settings,
           generationKey: gitSnapshot.dirtyFingerprint,
           beforeGitSnapshotId: gitSnapshot.id
         });
+        if (reviewedTree) await this.recordReviewedTree(task, review, worktree, reviewedTree);
+        return review;
       })
     );
+  }
+
+  /**
+   * The worktree's content as the review will read it. A capture that does not
+   * match the Git snapshot the review starts from is dropped: a review is only
+   * ever linked to code it read.
+   */
+  private async captureReviewedTree(worktreePath: string, gitSnapshot: GitSnapshotRecord): Promise<string | undefined> {
+    try {
+      const tree = await this.reviewSnapshots.capture(worktreePath);
+      return (await inspectGitWorkingTreeFingerprint(worktreePath)) === gitSnapshot.dirtyFingerprint ? tree : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async recordReviewedTree(task: Task, review: RunRecord, worktree: WorktreeRecord, tree: string): Promise<void> {
+    try {
+      await this.reviewSnapshots.pin(worktree.worktreePath, task.id, review.id, tree);
+    } catch {
+      return;
+    }
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'REVIEW_SNAPSHOT_RECORDED',
+        taskId: task.id,
+        iterationId: review.iterationId,
+        runId: review.id,
+        worktreeId: review.worktreeId,
+        source: 'git',
+        payload: { reviewRunId: review.id, tree }
+      })
+    );
+  }
+
+  /** What changed from the code a review of this task read to the worktree now. */
+  async readReviewChanges(input: ReadReviewChangesRequest): Promise<ReviewChangesResult> {
+    const task = await this.requireNormalTask(input.taskId, 'Review changes');
+    const review = typeof input.reviewRunId === 'string' ? await this.store.getRun(input.reviewRunId) : undefined;
+    if (!review || review.taskId !== task.id || review.mode !== 'REVIEW') throw new Error('This review is not part of the task.');
+    const worktree = await this.store.getWorktree(review.worktreeId);
+    if (!worktree || worktree.status !== 'PRESENT') return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    const gate = task.projection.agentReview;
+    return this.reviewSnapshots.changesSince(
+      worktree.worktreePath, task.id, review.id, gate?.runId === review.id ? gate.reviewedTreeSha : undefined
+    );
+  }
+
+  decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision> {
+    return this.withTaskAction(input.taskId, 'Review finding decision', async () => {
+      await this.requireNormalTask(input.taskId, 'Review finding decision');
+      return this.reviews.decide(input);
+    });
+  }
+
+  askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction> {
+    this.assertAgentProviderAvailable();
+    // A control action, not a task action: preparing a snapshot must not hold the task
+    // lock, so the implementation agent stays controllable meanwhile.
+    return this.withControlAction(async () => {
+      await this.requireNormalTask(input.taskId, 'Side question');
+      return this.sideQuestions.ask(input);
+    });
+  }
+
+  stopSideQuestion(input: StopSideQuestionRequest): Promise<void> {
+    return this.withControlAction(() => this.sideQuestions.stop(input));
+  }
+
+  endSideThread(input: EndSideThreadRequest): Promise<void> {
+    return this.withControlAction(() => this.sideQuestions.endThread(input));
+  }
+
+  /**
+   * A side question goes to the task's own runtime and model: the task settings with
+   * the latest implementation run's selection, made read-only with approval policy never.
+   */
+  private sideQuestionSettings(detail: TaskDetailSnapshot, choice?: SideQuestionModelChoice): AgentExecutionSettings {
+    // A chosen model answers on its own terms: nothing of the task's model carries over.
+    if (choice) return mergeRunSettings({ readOnly: true, settings: [choice] });
+    const latestImplementation = detail.runs
+      .filter((run) => isImplementationRunMode(run.mode) && run.runtimeId === detail.task.runtimeId)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .at(-1);
+    return mergeRunSettings({
+      readOnly: true,
+      settings: [
+        detail.task.agentSettings,
+        latestImplementation?.requestedSettings,
+        { runtimeId: detail.task.runtimeId }
+      ]
+    });
+  }
+
+  /** Startup also clears registrations an earlier process left in available repositories. */
+  private async sweepSnapshotsOnStartup(): Promise<void> {
+    const { repositories } = await this.store.snapshot();
+    await this.snapshots.sweep(repositories
+      .filter((repository) => repository.kind === 'USER_REGISTERED' && repository.status === 'AVAILABLE')
+      .map((repository) => repository.path));
   }
 
   async syncAgentGoal(input: SyncAgentGoalRequest) {
@@ -3647,6 +3859,7 @@ export class TaskManagerService {
       await settleOwnedWork(this.discourseHost?.beginShutdown()),
       await settleOwnedWork(this.designUpdates?.beginShutdown()),
       await settleOwnedWork(this.agents.shutdown()),
+      await settleOwnedWork(this.snapshots.sweep()),
       await settleOwnedWork(this.clientToolBridge.shutdown()),
       await settleOwnedWork(this.drainPostRunEvidence()),
       await settleOwnedWork(this.previewEnabled ? this.designPreviews.shutdown() : undefined),
@@ -3750,7 +3963,8 @@ export class TaskManagerService {
     this.applications.chooseFile(await this.applicationWorktree(input.taskId), input.keep, input.files));
 
   startRetainedApplicationPreview: ApplicationPreviewApi['startRetainedApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
-    this.applications.startRetained(await this.applicationWorktree(input.taskId)));
+    this.applications.startRetained(await this.applicationWorktree(input.taskId),
+      (attemptId) => this.assertEditableApplicationAttempt(input.taskId, attemptId)));
 
   inspectApplicationPreviewSetup: ApplicationPreviewApi['inspectApplicationPreviewSetup'] = async input =>
     this.applications.inspectSetup(await this.applicationWorktree(input.taskId));
@@ -3870,29 +4084,32 @@ export class TaskManagerService {
     );
   }
 
-  /** Sends the next queued Preview message once its turn has ended; the coordinator holds the queue on any problem. */
+  /**
+   * Sends the next queued Preview message once its turn has ended. A turn that changed the
+   * worktree, or could not be checked, fails and holds the queue with the reason, as does
+   * any error here: no message waits behind a finished turn.
+   */
   private async dispatchPreviewAgentQueue(runId: string): Promise<void> {
     const run = await this.store.getRun(runId).catch(() => undefined);
     if (!run || run.mode !== 'PREVIEW') return;
     try {
       await this.withRuntimeOperation(async () => {
-        while (this.taskActionLocks.has(run.taskId)) {
-          await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
-        }
-        await this.withTaskAction(run.taskId, 'Preview agent completion', async () => {
-          await this.agents.verifyPreviewRepositoryBoundary(runId);
-          const verified = await this.agentRuntimeStore.getRun(runId);
-          if (verified?.repositoryIntegrity?.status !== 'UNCHANGED') {
+        await this.withQueuedTaskAction(run.taskId, 'Preview agent completion', async () => {
+          const integrityFailure = await this.agents.verifyPreviewRepositoryBoundary(runId);
+          if (integrityFailure) {
             this.previewRecipeGenerator.discard(run.taskId);
             this.events.emit({ type: 'preview.recipe-generation.updated', taskId: run.taskId,
               payload: this.previewRecipeGenerator.get(run.taskId), at: new Date().toISOString() });
+            await this.previewAgent.hold(run.taskId, `${integrityFailure} Send each message when you are ready.`);
+          } else {
+            await this.previewAgent.dispatch(runId);
           }
-          await this.previewAgent.dispatch(runId);
           this.events.emit({ type: 'run.state.updated', taskId: run.taskId, runId, payload: {}, at: new Date().toISOString() });
         });
       });
-    } catch {
-      // The queue is held with the reason; the person sends the next message when ready.
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.previewAgent.hold(run.taskId, `${reason} Send each message when you are ready.`).catch(() => undefined);
     }
   }
 
@@ -4161,6 +4378,8 @@ export class TaskManagerService {
     }
     await git(worktree.worktreePath, ['commit', '-m', `Task: ${task.title}`], 120_000);
     const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    // The committed tree is what was reviewed; edits after the commit change this fingerprint.
+    const dirtyFingerprint = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
     await this.store.appendEvent(
       createDomainEvent({
         type: 'DELIVERY_COMMIT_CREATED',
@@ -4168,7 +4387,7 @@ export class TaskManagerService {
         iterationId: worktree.iterationId,
         worktreeId: worktree.id,
         source: 'git',
-        payload: { headSha, branchName: worktree.branchName }
+        payload: { headSha, dirtyFingerprint, branchName: worktree.branchName }
       })
     );
     return this.refreshEvidenceInternal({ taskId: task.id });
@@ -4380,6 +4599,13 @@ export class TaskManagerService {
       }
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
+      if (
+        input.toPhase === 'ARCHIVED' &&
+        snapshot.runs.some((run) =>
+          run.taskId === task.id && run.mode === 'SIDE_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))
+      ) {
+        throw new Error('Wait for the answer in Ask, or stop it, before archiving this task.');
+      }
       const latestGit = snapshot.gitSnapshots
         .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
         .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
@@ -4419,7 +4645,12 @@ export class TaskManagerService {
       }
 
       await this.holdTaskQueue(task.id, 'The task moved to another phase. Review the remaining instructions.');
-      return this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
+      const transitioned = await this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
+      if (input.toPhase === 'ARCHIVED') {
+        // Startup and shutdown sweeps retry a removal that fails here.
+        await this.sideQuestions.removeTask(task.id).catch(() => undefined);
+      }
+      return transitioned;
     });
   }
 
@@ -4455,6 +4686,13 @@ export class TaskManagerService {
         }
         this.previewRecipeGenerator.clearTask(task.id);
         await this.agents.releaseTask(task.id);
+        // Startup and shutdown sweeps retry a removal that fails here.
+        await this.sideQuestions.removeTask(task.id).catch(() => undefined);
+        // The code its reviews read goes with the task.
+        for (const repositoryId of new Set(snapshot.worktrees.filter((worktree) => worktree.taskId === task.id).map((worktree) => worktree.repositoryId))) {
+          const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
+          if (repository) await this.reviewSnapshots.removeTask(repository.path, task.id).catch(() => undefined);
+        }
 
         let removedWorktree = false;
         if (input.removeWorktree) {
@@ -4618,7 +4856,33 @@ export class TaskManagerService {
     );
     if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
       await this.reconcileImplementationOutcome(run, snapshot);
+      await this.recordReviewRequestAnswer(run);
     }
+  }
+
+  /** A finished reply to a review request: how many items the agent answered, and how many wait on the person. */
+  private async recordReviewRequestAnswer(run: RunRecord): Promise<void> {
+    const detail = await this.store.getTaskDetail(run.taskId);
+    const request = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest)?.reviewRequest;
+    if (!request?.reviewRunId) return;
+    const completed = detail.runs.find((candidate) => candidate.id === run.id) ?? run;
+    const reply = await runReplyText(completed, (id) => this.agentRuntimeStore.readArtifact(id));
+    const { answers } = parseReviewResponse(reply, request);
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'REVIEW_REQUEST_ANSWERED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: {
+          reviewRunId: request.reviewRunId,
+          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length
+        }
+      })
+    );
   }
 
   private async reconcileImplementationOutcome(
@@ -5307,6 +5571,18 @@ export class TaskManagerService {
     }
   }
 
+  /** A task action that waits for the task's current action instead of refusing. */
+  private async withQueuedTaskAction<T>(
+    taskId: string,
+    label: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    while (this.taskActionLocks.has(taskId)) {
+      await this.taskActionLocks.get(taskId)!.work.catch(() => undefined);
+    }
+    return this.withTaskAction(taskId, label, action);
+  }
+
   private withRuntimeOperation<T>(action: () => Promise<T>): Promise<T> {
     this.assertAcceptingWork();
     return this.runtimeOperations.runOperation(action);
@@ -5383,17 +5659,22 @@ export class TaskManagerService {
     action: string,
     options: { exceptRunId?: string } = {}
   ): void {
+    // A side question that reads a snapshot leaves the live worktree to other work.
     const activeRun = snapshot.runs.find(
       (run) =>
         run.taskId === taskId &&
         run.id !== options.exceptRunId &&
-        ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+        ACTIVE_AGENT_RUN_STATUSES.has(run.status) &&
+        runHoldsTaskWorktree(run, snapshot.taskInstructions)
     );
     if (!activeRun) {
       return;
     }
     if (activeRun.mode === 'REVIEW') {
       throw new Error(`Wait for the agent review to finish before ${action}.`);
+    }
+    if (activeRun.mode === 'SIDE_QUESTION') {
+      throw new Error(`Wait for the answer in Ask, or stop it, before ${action}.`);
     }
     throw new Error(`Stop or let the active agent run finish before ${action}.`);
   }
@@ -5409,12 +5690,15 @@ async function prepareTaskCreationSettings(
   attachments: readonly Pick<
     AgentAttachmentSelection,
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
-  >[]
+  >[],
+  browserDevBoundary: boolean
 ): Promise<AgentExecutionSettings> {
   const { capabilities, settings } = await prepareAgentExecutionSettings(
     adapter,
     requestedSettings,
-    attachments
+    attachments,
+    'DEFAULT',
+    browserDevBoundary
   );
   if (attachments.length === 0) {
     // Task capture is local and must remain available while a runtime is
@@ -5494,7 +5778,9 @@ async function prepareAgentExecutionSettings(
     AgentAttachmentSelection,
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
   >[],
-  presetKind: 'DEFAULT' | 'AUTONOMOUS_WRITE' = 'DEFAULT'
+  presetKind: 'DEFAULT' | 'AUTONOMOUS_WRITE' = 'DEFAULT',
+  /** The browser development server defaults to a preset it permits, as its catalog shows. */
+  browserDevBoundary = false
 ): Promise<{
   capabilities: Awaited<ReturnType<AgentRuntimeAdapter['capabilities']>>;
   settings: AgentExecutionSettings;
@@ -5506,7 +5792,9 @@ async function prepareAgentExecutionSettings(
     throw new Error('Agent runtime and execution settings runtime must match.');
   }
   const capabilities = await adapter.capabilities();
-  const policy = capabilities.executionPolicy;
+  const policy = browserDevBoundary
+    ? browserDevExecutionPolicy(capabilities.executionPolicy)
+    : capabilities.executionPolicy;
   const preset =
     presetKind === 'AUTONOMOUS_WRITE'
       ? policy.presets.find(
@@ -5535,12 +5823,7 @@ async function prepareAgentExecutionSettings(
   const explicitSettings = Object.fromEntries(
     Object.entries(requestedSettings).filter(([, value]) => value !== undefined)
   ) as AgentExecutionSettings;
-  const presetSettings: AgentExecutionSettings = {
-    sandbox: preset.sandbox,
-    approvalPolicy: preset.approvalPolicy,
-    approvalsReviewer: preset.approvalsReviewer,
-    networkAccess: preset.networkAccess === 'REQUIRED'
-  };
+  const presetSettings = executionPresetSettings(preset);
   if (presetKind === 'AUTONOMOUS_WRITE') {
     const networkPolicy = designNetworkAccessPolicy(capabilities);
     const requestedNetwork = requestedSettings.networkAccess;

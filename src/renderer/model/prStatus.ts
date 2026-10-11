@@ -1,6 +1,5 @@
 import type {
   BranchPublicationRecord,
-  BoardTaskSummary,
   CiRollupRecord,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
@@ -37,7 +36,8 @@ export type PrStatusKind =
 export type PrStatusActionPauseReason =
   | 'review-starting'
   | 'review-running'
-  | 'implementation-running';
+  | 'implementation-running'
+  | 'question-running';
 
 export interface PrStatusViewModel {
   kind: PrStatusKind;
@@ -170,6 +170,8 @@ function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): strin
       return 'Delivery actions pause while review runs.';
     case 'implementation-running':
       return 'Delivery actions pause while the agent runs.';
+    case 'question-running':
+      return 'Delivery actions pause while a question is answered.';
     default:
       return undefined;
   }
@@ -302,7 +304,7 @@ export function buildPrStatusViewModel(input: {
       ...baseStatus(pullRequest),
       ...passingChecks,
       ...reviewStatus,
-      evidenceLine: passingChecks.evidenceLine ?? (ciRollup ? undefined : 'Checks not observed')
+      evidenceLine: passingChecks.evidenceLine ?? checksAbsenceLine(ciRollup)
     };
   }
 
@@ -326,7 +328,7 @@ export function buildPrStatusViewModel(input: {
     kind: pullRequest.isDraft ? 'DRAFT' : 'OPEN',
     headline: pullRequest.isDraft ? 'Draft PR' : 'Open PR',
     tone: pullRequest.isDraft ? 'info' : 'neutral',
-    evidenceLine: passingChecks.evidenceLine ?? (ciRollup ? undefined : 'Checks not observed')
+    evidenceLine: passingChecks.evidenceLine ?? checksAbsenceLine(ciRollup)
   };
 
   function baseStatus(pr: PullRequestSnapshotRecord): PrStatusViewModel {
@@ -376,8 +378,12 @@ function formatPrIdentityLine(pr: PullRequestSnapshotRecord): string {
   return title ? `${number} ${title}` : number;
 }
 
+/** Facts read as one sentence, not as a string of separator-joined labels. */
 function formatEvidenceLine(...parts: Array<string | undefined>): string | undefined {
-  const line = parts.filter(Boolean).join(' · ');
+  const line = parts
+    .filter((part): part is string => Boolean(part))
+    .map((part, index) => (index === 0 ? part : part.charAt(0).toLocaleLowerCase() + part.slice(1)))
+    .join(', ');
   return line || undefined;
 }
 
@@ -549,40 +555,6 @@ function createDraftPrAvailability(
   };
 }
 
-export interface BoardDeliveryParts {
-  /** Mono value part — a PR reference like "PR #82", or "No PR". */
-  ref: string;
-  /** Sans status words like "checks failing", when there is delivery state. */
-  status?: string;
-}
-
-/**
- * The board card's delivery line split into a mono value (the PR reference) and
- * a sans status phrase, so status words never render in mono (audit §06/§07:
- * mono is reserved for values — ids, branches, counts).
- */
-type BoardDeliveryTask = Task | BoardTaskSummary;
-
-export function buildBoardDeliveryParts(task: BoardDeliveryTask): BoardDeliveryParts {
-  const number = task.projection.githubPullRequestNumber;
-  const ref =
-    task.projection.githubPullRequest === 'UNLINKED' ||
-    task.projection.githubPullRequest === 'NOT_CREATED'
-      ? 'No PR'
-      : number
-        ? `PR #${number}`
-        : 'PR';
-  if (ref === 'No PR') {
-    return { ref };
-  }
-  return { ref, status: boardDeliveryStatus(task) };
-}
-
-export function buildBoardDeliveryLine(task: BoardDeliveryTask): string {
-  const { ref, status } = buildBoardDeliveryParts(task);
-  return status ? `${ref} | ${status}` : ref;
-}
-
 export function buildFailingChecksInvestigationPrompt(view: PrStatusViewModel): string {
   const failingChecks = view.checkGroups
     .find((group) => group.status === 'failed')
@@ -732,18 +704,35 @@ function checksToStatus(
       return { kind: 'CHECKS_PENDING', headline: 'Checks pending', tone: 'action' };
     case 'CANCELED':
       return { kind: 'CHECKS_CANCELED', headline: 'Checks canceled', tone: 'action' };
+    // Only checks that ran and were all skipped make a headline
+    // (PR_STATUS_CARD_FLOW, NO_REQUIRED_CHECKS). A pull request with no checks
+    // at all — a repository without CI — leaves the headline to GitHub review
+    // and draft state; checksAbsenceLine says what is missing instead.
     case 'NO_CHECKS':
       return ciRollup.totalCount > 0
         ? { kind: 'NO_REQUIRED_CHECKS', headline: 'Checks skipped', tone: 'action' }
-        : { kind: 'NO_REQUIRED_CHECKS', headline: 'No checks reported', tone: 'action' };
+        : undefined;
     case 'EXPECTED_NOT_REPORTED':
       return { kind: 'CHECKS_PENDING', headline: 'Expected checks not reported', tone: 'action' };
-    case 'NOT_APPLICABLE':
-      return { kind: 'NO_REQUIRED_CHECKS', headline: 'Checks not applicable', tone: 'neutral' };
     case 'STALE':
       return { kind: 'STALE', headline: 'Checks stale', tone: 'action' };
+    default:
+      return undefined;
+  }
+}
+
+/** What the evidence line says when no check verdict leads the headline. */
+function checksAbsenceLine(ciRollup?: CiRollupRecord): string | undefined {
+  switch (ciRollup?.status) {
+    case undefined:
+      return 'Checks not observed';
+    case 'NO_CHECKS':
+      return ciRollup.totalCount > 0 ? undefined : 'No checks reported';
+    // Checks that do not apply have nothing to report.
+    case 'NOT_APPLICABLE':
+      return undefined;
     case 'UNKNOWN':
-      return { kind: 'UNKNOWN', headline: 'Checks unknown', tone: 'neutral' };
+      return 'Checks unknown';
     default:
       return undefined;
   }
@@ -831,7 +820,7 @@ function formatCheckSummary(ciRollup?: CiRollupRecord): string | undefined {
   if (parts.length === 0) {
     return 'No checks reported';
   }
-  return parts.join(' · ');
+  return parts.join(', ');
 }
 
 function formatReviewLine(reviewRollup?: ReviewRollupRecord): string | undefined {
@@ -902,41 +891,4 @@ function checkGroupLabel(status: GitHubCheckDetailRecord['status'], count: numbe
 
 function countPart(count: number | undefined, label: string): string | undefined {
   return count && count > 0 ? `${count} ${label}` : undefined;
-}
-
-function boardDeliveryStatus(task: BoardDeliveryTask): string | undefined {
-  if (task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED') {
-    return 'merged';
-  }
-  if (
-    task.projection.merge === 'CLOSED_UNMERGED' ||
-    task.projection.githubPullRequest === 'CLOSED_UNMERGED'
-  ) {
-    return 'closed';
-  }
-  if (task.projection.ciChecks === 'FAILING' || task.projection.ciChecks === 'BLOCKED') {
-    return 'checks failing';
-  }
-  if (task.projection.ciChecks === 'PENDING') {
-    return 'checks pending';
-  }
-  if (task.projection.ciChecks === 'CANCELED') {
-    return 'checks canceled';
-  }
-  if (task.projection.reviews === 'CHANGES_REQUESTED') {
-    return 'changes requested';
-  }
-  if (task.projection.reviews === 'REQUESTED' || task.projection.reviews === 'PENDING') {
-    return 'review waiting';
-  }
-  if (task.projection.ciChecks === 'PASSING' && task.projection.merge === 'MERGEABLE') {
-    return 'checks passing · mergeable';
-  }
-  if (task.projection.githubPullRequest === 'OPEN_DRAFT') {
-    return 'draft';
-  }
-  if (task.projection.githubPullRequest === 'OPEN_READY') {
-    return 'open';
-  }
-  return undefined;
 }

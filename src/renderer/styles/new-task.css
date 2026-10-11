@@ -1,99 +1,84 @@
 /* ----------------------------------------------------------------------- */
-/* New-task slide-over                                                     */
+/* New task: a focused modal over the app                                  */
 /* ----------------------------------------------------------------------- */
 
-.slideover {
+.newtask-modal__panel {
   position: relative;
-  z-index: var(--layer-overlay);
-  width: min(var(--slideover-width, 560px), 100vw);
-  height: 100%;
-  flex: 0 0 auto;
-  min-width: 0;
-}
-
-.slideover--resizing {
-  user-select: none;
-}
-
-.slideover__panel {
-  position: relative;
+  z-index: var(--layer-sticky);
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: 100%;
-  border-left: 1px solid var(--edge);
-  background: var(--surface);
-  box-shadow: var(--shadow-pop);
+  width: min(640px, 100%);
+  max-height: calc(100vh - max(48px, 10vh) - 48px);
   overflow: hidden;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-modal);
   font-size: var(--t-body);
+  animation: tm-dialog-in var(--motion-modal) var(--ease-out);
 }
 
-.slideover--closing .slideover__panel {
+.newtask-modal--closing .newtask-modal__panel {
   pointer-events: none;
 }
 
-.slideover__resize {
-  position: absolute;
-  inset: 0 auto 0 -2px;
-}
-
-.slideover__header {
+/* The panel head (DESIGN.md 9.1): 48 tall. */
+.newtask-modal__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  height: 44px;
+  gap: 12px;
+  height: var(--h-head);
   flex: 0 0 auto;
-  padding: 0 10px 0 12px;
+  padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--hair);
 }
 
-.slideover__heading {
+/* Expand and Close sit together at the head's end, 2px apart like every pair of icon buttons. */
+.newtask-modal__head-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Expanded, a writing size for a long description: the reading column's width
+   and the height the modal may take, so its head stays where it was and it ends
+   48px above the window's edge. The description takes every line the form leaves. */
+.newtask-modal__panel--expanded {
+  width: min(880px, 100%);
+  height: calc(100vh - max(48px, 10vh) - 48px);
+}
+
+/* The description grows into the room; on a short window it keeps its own
+   height and the body scrolls, so its toolbar never leaves the field. */
+.newtask-modal__panel--expanded :is(.newtask-section, .field--prompt, .field--prompt > .tm-composer) {
+  flex: 1 1 auto;
+}
+
+.newtask-modal__panel--expanded .field--prompt > .tm-composer {
   display: flex;
   flex-direction: column;
-  gap: 4px;
 }
 
-.slideover__heading strong {
-  font-size: 15px;
-  font-weight: 600;
+.newtask-modal__panel--expanded .field.field--prompt textarea {
+  flex: 1 1 auto;
 }
 
-.slideover__heading span {
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.45;
+.newtask-modal__heading strong {
+  font-size: var(--t-heading);
+  font-weight: var(--w-medium);
 }
 
-.slideover__close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--h-icon);
-  height: var(--h-icon);
-  flex: 0 0 auto;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-
-.slideover__close:hover {
-  color: var(--text);
-  background: var(--hover);
-}
-
-.slideover__body {
+.newtask-modal__body {
   container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 16px;
   flex: 1;
   min-height: 0;
-  padding: 16px;
+  padding: 16px 16px 20px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
 }
 
 .newtask-section {
@@ -114,7 +99,7 @@
   padding: 0;
   color: var(--text);
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: var(--w-medium);
 }
 
 .tm-repository-select {
@@ -122,45 +107,32 @@
   min-width: 0;
 }
 
+/* A single-line field (DESIGN.md 10): 32 tall, 12px inset, the value in body
+   type. Focus is the shared text-entry rule in foundation.css. */
 .tm-repository-select__trigger {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  box-shadow: inset 0 0 0 1px var(--field-edge);
+  grid-template-columns: minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   min-height: var(--h-control);
-  padding: 0 10px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .tm-repository-select__trigger:not(:disabled):hover,
 .tm-repository-select__trigger[aria-expanded='true'] {
-  background: var(--field-hover);
-}
-
-.tm-repository-select__trigger:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-repository-select__trigger:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+  background-color: var(--field-hover);
 }
 
 .tm-repository-select__trigger:disabled {
-  cursor: default;
-  background: var(--field-disabled);
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
@@ -179,6 +151,8 @@
   flex: 0 1 auto;
   min-width: 0;
   font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-body);
 }
 
 .tm-repository-select__trigger .tm-repository-picker__path {
@@ -189,72 +163,75 @@
 
 .tm-repository-select__chevron {
   color: var(--muted);
-  transition: transform 120ms ease;
+  transition: transform var(--motion-fast) var(--ease-out);
 }
 
-.tm-repository-select__chevron--open {
-  transform: rotate(180deg);
-}
-
+/* The ActionMenu geometry (DESIGN.md 10): 4px pad, rows with 6px corners. */
 .tm-repository-select__popover {
   position: absolute;
   inset: calc(100% + 6px) 0 auto;
   z-index: var(--layer-menu);
   display: grid;
   gap: 4px;
-  padding: 5px;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
+  padding: 4px;
+  border: 0;
+  border-radius: var(--r);
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
+  /* It grows from the trigger above it, as a menu does (DESIGN.md 12). */
+  transform-origin: top center;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
+/* 4px inside the popover's 10px corner, so the field steps in to 6px. */
 .tm-repository-select__popover .tm-repository-picker__search {
-  height: 32px;
-  border-color: transparent;
-  border-radius: 6px;
+  height: var(--h-control);
+  border-radius: var(--r-xs);
 }
 
 .tm-repository-select__list {
   display: grid;
-  gap: 1px;
   max-height: min(240px, calc(100vh - 260px));
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
 
+/* A menu row: the name in body type over its path, so it takes two lines. */
 .tm-repository-select__option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  min-height: 44px;
+  min-height: var(--h-toolbar);
   padding: 6px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: transparent;
-  color: var(--text-soft);
+  color: var(--text);
   text-align: left;
 }
 
+.tm-repository-select__option strong {
+  font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-body);
+}
+
 .tm-repository-select__option:hover {
-  background: var(--hover);
-  color: var(--text);
+  background-color: var(--hover);
 }
 
 .tm-repository-select__option--selected {
-  background: var(--sel);
-  color: var(--text);
+  background-color: var(--sel);
 }
 
+/* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
+   inward, so the scrolling list never cuts it. */
 .app-shell[data-input-modality='keyboard'] .tm-repository-select__option:focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-repository-select__option:disabled {
-  cursor: default;
+  background-color: var(--sel);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .tm-repository-select__check {
@@ -274,7 +251,7 @@
 
 .tm-repository-picker__search {
   width: 100%;
-  height: 36px;
+  height: var(--h-control);
 }
 
 .tm-repository-picker__list {
@@ -283,19 +260,19 @@
   overflow-y: auto;
   scrollbar-gutter: stable;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
 }
 
+/* A two-line row (DESIGN.md 9.1): 48 tall, the mark 12px from its words. */
 .tm-repository-picker__option {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 50px;
-  padding: 7px 10px;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
   color: var(--text-soft);
-  cursor: pointer;
 }
 
 .tm-repository-picker__option + .tm-repository-picker__option {
@@ -303,24 +280,17 @@
 }
 
 .tm-repository-picker__option:hover {
-  background: var(--hover);
+  background-color: var(--hover);
 }
 
+/* The list scrolls, so the focused row's halo is drawn inside it. */
 .app-shell[data-input-modality='keyboard'] .tm-repository-picker__option:focus-within {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .tm-repository-picker__option:has(input:disabled) {
-  cursor: default;
   color: var(--text-disabled);
-}
-
-.tm-repository-picker__option input {
-  width: 15px;
-  height: 15px;
-  margin: 0;
-  accent-color: var(--accent);
 }
 
 .tm-repository-picker__identity {
@@ -332,8 +302,8 @@
 .tm-repository-picker__identity strong {
   overflow: hidden;
   color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -341,7 +311,7 @@
 .tm-repository-picker__path {
   overflow: hidden;
   color: var(--muted);
-  font: 10.5px/1.35 var(--font-mono);
+  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -350,7 +320,7 @@
   display: inline-flex;
   align-items: center;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--t-meta);
 }
 
 .tm-repository-picker__availability--missing,
@@ -361,7 +331,7 @@
 .tm-repository-picker__empty {
   padding: 14px 10px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .field {
@@ -375,19 +345,14 @@
   gap: 14px;
 }
 
-.field-grid--two {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .field > span,
 .field__header > label,
 .field__label {
   font-size: var(--t-label);
-  font-weight: 600;
+  font-weight: var(--w-medium);
 }
 
-.field__label,
-.network-toggle__title {
+.field__label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -397,7 +362,7 @@
 .field small {
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.4;
+  line-height: var(--lh-ui);
 }
 
 .field__header {
@@ -407,25 +372,25 @@
   gap: 8px;
 }
 
+/* A 24px hit target that keeps the label row's height: the negative block
+   margin gives back what the target adds. */
 .field__refine {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  min-height: var(--h-compact);
+  margin-block: -4px;
   border: 0;
   background: transparent;
   color: var(--accent-ink);
   padding: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
 }
 
 .field__refine:not(:disabled):hover {
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-.field__refine:disabled {
-  cursor: default;
 }
 
 .field__header-actions {
@@ -439,8 +404,8 @@
   background: transparent;
   padding: 0;
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
 }
 
 .field__restore:not(:disabled):hover {
@@ -452,7 +417,7 @@
 .field__prompt-shell {
   display: flex;
   flex-direction: column;
-  transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
 
 /* Focus lives in the shared text-entry rule in foundation.css, so it also
@@ -465,7 +430,17 @@
 
 /* Refining in progress: the surface says it is busy and the text stays
    readable, instead of the user reading through a 45% veil. */
-.field__prompt-shell--running {
+/* In a form the composer is one more field, filled and focused like the inputs
+   beside it. */
+.field--prompt .tm-composer {
+  background: var(--field);
+}
+
+.field--prompt .tm-composer:has(textarea:focus) {
+  background: var(--field-focus);
+}
+
+.field--prompt .tm-composer.field__prompt-shell--running {
   background: var(--field-disabled);
 }
 
@@ -479,7 +454,7 @@
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  resize: vertical;
+  resize: none;
 }
 
 .field.field--prompt textarea:focus {
@@ -494,80 +469,9 @@
   display: none;
 }
 
-.tm-profile-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-left: auto;
-  color: var(--muted);
-  font-size: var(--t-meta);
-}
-
-.tm-composer__toolbar .tm-profile-picker select {
-  width: auto;
-  max-width: 180px;
-  min-width: 0;
-  height: var(--h-toolbar);
-  min-height: 0;
-  padding: 0 6px;
-  border: 0;
-  border-radius: var(--r-sm);
-  box-shadow: none;
-  background: transparent;
-  color: var(--text-soft);
-  font: inherit;
-  cursor: pointer;
-  text-overflow: ellipsis;
-}
-
-.tm-composer__toolbar .tm-profile-picker select:not(:disabled):hover {
-  background: var(--hover);
-}
-
-.tm-composer__toolbar .tm-profile-picker select:disabled {
-  color: var(--text-disabled);
-  cursor: default;
-}
-
-.task-attachment-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 600;
-}
-
-.task-attachment-add:not(:disabled):hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.app-shell[data-input-modality='keyboard'] .task-attachment-add:focus,
-.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus,
-.app-shell[data-input-modality='keyboard'] .newtask-settings > summary:focus {
+.app-shell[data-input-modality='keyboard'] .task-attachment__remove:focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.task-attachment-add:disabled {
-  cursor: default;
-}
-
-.task-attachment-hint {
-  min-width: 0;
-  margin-left: auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted);
-  font-size: 11px;
-  white-space: nowrap;
+  box-shadow: var(--focus-halo);
 }
 
 .task-attachments {
@@ -593,11 +497,12 @@
   min-height: 48px;
   padding: 6px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
+/* 6px inside the chip's 8px corner: the nested radius floors at 4px. */
 .task-attachment__preview {
   display: inline-flex;
   align-items: center;
@@ -607,7 +512,7 @@
   flex: 0 0 auto;
   overflow: hidden;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-2xs);
   background: var(--card);
   color: var(--muted);
 }
@@ -633,7 +538,7 @@
   user-select: text;
   color: var(--text-soft);
   font-size: var(--t-help);
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -641,41 +546,46 @@
 .task-attachment__meta {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.25;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* What happened to the file, then its size, each its own fact. */
+.task-attachment__label {
+  margin-right: 8px;
 }
 
 .task-attachment--error .task-attachment__meta {
   color: var(--blocked-ink);
 }
 
+/* An icon button: 28 square with 8px corners, as `tm-iconbtn`. */
 .task-attachment__remove {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
+  width: var(--h-icon);
+  height: var(--h-icon);
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
 }
 
 .task-attachment__remove:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
 .task-attachment__remove:disabled {
-  cursor: default;
   color: var(--text-disabled);
 }
 
-
+/* 8px inside the composer's 12px corner, so its own corner is 4px. */
 .task-attachment-drop {
   position: absolute;
   inset: 8px;
@@ -685,35 +595,36 @@
   justify-content: center;
   gap: 8px;
   border: 1px dashed var(--edge);
-  border-radius: 8px;
+  border-radius: var(--r-2xs);
   background: var(--surface);
   color: var(--text-soft);
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
   pointer-events: none;
 }
 
 .task-attachment-message {
   display: flex;
   align-items: flex-start;
-  gap: 7px;
+  gap: 6px;
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
 }
 
 .task-attachment-message--error {
   color: var(--blocked-ink);
 }
 
-/* The refined text shown as a proposal with Accept / Revert. */
+/* The refined text shown as a proposal with Accept / Revert: a recessed group
+   on the panel plane. It is prose, so not a code well and not mono. */
 .field__proposal {
-  margin-top: 10px;
+  margin-top: 12px;
   border: 0;
-  border-radius: 10px;
-  background: var(--well);
-  padding: 12px 13px;
+  border-radius: var(--r-md);
+  background: var(--panel);
+  padding: 12px;
 }
 
 .field__proposal-head {
@@ -725,19 +636,20 @@
 }
 
 .field__proposal-title {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
   color: var(--text);
 }
 
 .field__proposal-body {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font: 12.5px/1.5 var(--font-mono);
+  font: var(--t-body)/var(--lh-prose) var(--font-ui);
   color: var(--text-soft);
+  text-wrap: pretty;
 }
 
 .field__proposal-actions {
@@ -753,13 +665,13 @@
   width: 100%;
   border: 0;
   border-radius: var(--r-sm);
-  background: var(--field);
+  background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   padding: 0 12px;
-  font: 400 var(--t-body)/1.4 var(--font-ui);
+  font: var(--w-regular) var(--t-body)/var(--lh-body) var(--font-ui);
   outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .field > input {
@@ -785,148 +697,30 @@
   padding-left: 36px;
 }
 
-/* Keep placeholders visually distinct from entered content. */
-.field input::placeholder,
-.field textarea::placeholder {
-  color: var(--placeholder);
-  opacity: 1;
-}
-
-.field > input:not(:disabled):hover,
-.field > select:not(:disabled):hover {
-  background: var(--field-hover);
+/* A focused field keeps its focus fill under the pointer. */
+.field > input:not(:disabled):not(:focus):hover,
+.field > select:not(:disabled):not(:focus):hover {
+  background-color: var(--field-hover);
 }
 
 .field > input:disabled,
 .field textarea:disabled,
 .field select:disabled {
-  cursor: not-allowed;
-  background: var(--field-disabled);
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
 .field select {
   height: var(--h-control);
-  cursor: pointer;
 }
 
+/* Focus is the shared text-entry rule in foundation.css. */
 .field textarea {
   min-height: clamp(180px, 26vh, 300px);
-  padding: 11px 13px;
-  line-height: 1.55;
+  padding: 12px;
+  line-height: var(--lh-prose);
   overflow: auto;
   resize: vertical;
-}
-
-.field:not(.field--prompt) > input:focus,
-.field:not(.field--prompt) textarea:focus,
-.field:not(.field--prompt) select:focus {
-  background: var(--field-focus);
-  outline: 0;
-  box-shadow: inset 0 0 0 1px var(--field-edge-focus);
-}
-
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) > input:focus,
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) textarea:focus,
-.app-shell[data-input-modality='keyboard'] .field:not(.field--prompt) select:focus {
-  background: var(--field-focus);
-  outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
-}
-
-.newtask-settings {
-  border-top: 1px solid var(--hair);
-  border-bottom: 1px solid var(--hair);
-}
-
-.newtask-settings > summary {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 46px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.newtask-settings > summary::-webkit-details-marker {
-  display: none;
-}
-
-.newtask-settings > summary:hover .newtask-settings__title {
-  color: var(--text);
-}
-
-.newtask-settings__title {
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.newtask-settings__title small {
-  display: block;
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: var(--t-help);
-  font-weight: 400;
-}
-
-.newtask-settings__summary {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: var(--t-meta);
-  font-family: var(--font-mono);
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.newtask-settings > summary svg {
-  color: var(--muted);
-  transition: transform 140ms ease;
-}
-
-.newtask-settings[open] > summary .tm-disclosure__chevron {
-  transform: rotate(90deg);
-}
-
-.newtask-settings__content {
-  display: grid;
-  gap: 14px;
-  padding: 4px 0 16px;
-}
-
-.network-toggle {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  padding: 14px 2px 0;
-  border: 0;
-  border-top: 1px solid var(--hair);
-  border-radius: 0;
-  background: transparent;
-}
-
-.network-toggle__copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.network-toggle__title {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.network-toggle__state {
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
 }
 
 .network-toggle__switch {
@@ -936,32 +730,33 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: transparent;
-  cursor: pointer;
 }
 
+/* The knob is something moving on screen (DESIGN.md 12): 200ms on the
+   in-out curve, and the track's fill changes with it. */
 .network-toggle__switch::before {
   position: absolute;
   inset: 5px 4px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--control-edge);
   content: '';
-  transition: background 160ms ease;
+  transition: background-color var(--motion-move) var(--ease-in-out);
 }
 
+/* Drawn after the track, so it sits above it without a z-index. */
 .network-toggle__switch span {
   position: absolute;
-  z-index: 1;
   top: 7px;
   left: 6px;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--overlay);
   box-shadow: var(--shadow-card);
-  transition: left 160ms cubic-bezier(0.22, 1, 0.36, 1), background 160ms ease;
+  transition: transform var(--motion-move) var(--ease-in-out), background-color var(--motion-move) var(--ease-in-out);
 }
 
 .network-toggle__switch span::after {
@@ -978,8 +773,8 @@
 }
 
 .network-toggle__switch--on span {
-  left: 18px;
-  background: var(--on-primary);
+  transform: translateX(12px);
+  background: var(--control-knob-on);
 }
 
 .network-toggle__switch:disabled::before {
@@ -987,83 +782,11 @@
   box-shadow: inset 0 0 0 1px var(--control-edge);
 }
 
-.network-toggle__switch:disabled {
-  cursor: default;
-}
-
 .network-toggle__switch:disabled span {
   background: var(--overlay);
 }
 
-.info-tip {
-  position: relative;
-  z-index: var(--layer-sticky);
-  display: inline-flex;
-}
-
-.info-tip__button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  border: 1px solid var(--muted);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--muted);
-  cursor: help;
-}
-
-.app-shell[data-input-modality='keyboard'] .info-tip__button:focus,
-.info-tip:hover .info-tip__button {
-  border-color: var(--text-soft);
-  background: var(--text-soft);
-  color: var(--surface);
-  outline: none;
-}
-
-.info-tip__bubble {
-  position: absolute;
-  top: calc(100% + 9px);
-  left: -2px;
-  z-index: var(--layer-tooltip);
-  width: 236px;
-  padding: 9px 11px;
-  border: 1px solid var(--edge);
-  border-radius: 9px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-  color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 1.5;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(3px);
-  transition: opacity 120ms ease, transform 120ms ease;
-  visibility: hidden;
-}
-
-.info-tip__bubble::before {
-  content: '';
-  position: absolute;
-  top: -4px;
-  left: 11px;
-  width: 8px;
-  height: 8px;
-  background: var(--overlay);
-  transform: rotate(45deg);
-}
-
-.info-tip:hover .info-tip__bubble,
-.info-tip:focus-within .info-tip__bubble {
-  opacity: 1;
-  transform: none;
-  visibility: visible;
-}
-
-.slideover__footer {
+.newtask-modal__footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1073,17 +796,36 @@
   border-top: 1px solid var(--hair);
 }
 
-.slideover__footer-actions {
+.newtask-modal__footer-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-left: auto;
+}
+
+/* The shortcut that submits from anywhere in the form. */
+.newtask-modal__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+/* A key (DESIGN.md A.4): 4px corners, the field fill, the label ink. */
+.newtask-modal__hint kbd {
+  padding: 2px 6px;
+  border-radius: var(--r-2xs);
+  background: var(--field);
+  color: var(--faint);
+  font: inherit;
+  line-height: var(--lh-meta);
 }
 
 /* Import uses the same field, selection and focus tokens as the task form. */
 .import-work__picker {
   overflow: hidden;
-  border-radius: var(--r);
+  border-radius: var(--r-sm);
   background: var(--field);
 }
 
@@ -1093,7 +835,7 @@
   gap: 8px;
   height: var(--h-control);
   padding: 0 8px 0 12px;
-  border-radius: var(--r) var(--r) 0 0;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
   color: var(--muted);
 }
 
@@ -1121,7 +863,7 @@
 }
 
 .app-shell[data-input-modality='keyboard'] .import-work__picker:focus-within {
-  outline: 3px solid var(--focus-ring);
+  box-shadow: var(--focus-halo);
 }
 
 .import-work__list {
@@ -1131,12 +873,13 @@
   border-top: 1px solid var(--hair);
 }
 
+/* A content-list row (DESIGN.md 9.1): 36 tall, led by the shared radio mark. */
 .import-work__checkout {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px 10px;
-  min-height: 38px;
+  min-height: 36px;
   width: 100%;
   padding: 8px 12px;
   border: 0;
@@ -1147,22 +890,42 @@
   text-align: left;
 }
 
-.import-work__checkout:not(:disabled):hover { background: var(--field-hover); }
-.import-work__checkout[aria-checked='true'] { background: var(--sel); color: var(--text); }
-.import-work__checkout:disabled { background: var(--field-disabled); color: var(--text-disabled); }
-.import-work__checkout:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-
-.import-work__radio {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px var(--control-edge);
+.import-work__checkout:not(:disabled):hover { background-color: var(--field-hover); }
+.import-work__checkout[aria-selected='true'] { background-color: var(--sel); color: var(--text); }
+.import-work__checkout:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
+/* The list scrolls, so the active option's halo is drawn inside the row. */
+.app-shell[data-input-modality='keyboard'] .import-work__checkout:focus {
+  outline: 0;
+  box-shadow: var(--focus-halo-inset);
 }
 
-.import-work__checkout[aria-checked='true'] .import-work__radio {
-  border: 4px solid var(--accent);
-  background: var(--surface);
+/* The shared radio mark (base-components.css, .interaction-choice__mark): a
+   16px field circle on the control edge, accent with a 6px dot when chosen. */
+.import-work__radio {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-pill);
+  background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--control-edge);
+}
+
+.import-work__checkout[aria-selected='true'] .import-work__radio {
+  background: var(--accent);
   box-shadow: none;
+}
+
+.import-work__checkout[aria-selected='true'] .import-work__radio::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--on-primary);
+}
+
+.import-work__checkout:disabled .import-work__radio {
+  background: var(--field-disabled);
 }
 
 .import-work__identity { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -1174,24 +937,15 @@
 .import-work__empty { margin: 0; padding: 12px; font-size: var(--t-help); color: var(--muted); }
 .import-work__comparison { display: flex; }
 .import-work__comparison .segmented__btn { flex: 1; }
-.slideover .ghost-button {
-  height: var(--h-control);
-  padding: 0 10px;
-  border-radius: var(--r-sm);
-  color: var(--text-soft);
-  font-size: var(--t-help);
-  white-space: nowrap;
-}
-.slideover .ghost-button:not(:disabled):hover { background: var(--hover); color: var(--text); }
 .import-work__commit { font-family: var(--font-mono); }
 .import-work__preview { border-radius: var(--r-sm); background: var(--well); font-size: var(--t-help); }
 .import-work__preview-summary { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; color: var(--text-soft); }
 .import-work__preview-summary > svg { flex: 0 0 auto; margin-top: 2px; color: var(--muted); }
 .import-work__preview-summary > div { flex: 1; min-width: 0; }
-.import-work__preview-summary p { margin: 0 0 3px; overflow-wrap: anywhere; }
+.import-work__preview-summary p { margin: 0 0 2px; overflow-wrap: anywhere; }
 .import-work__preview-summary code { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-meta); }
 .import-work__preview-summary [role='alert'] { color: var(--blocked-ink); }
-.import-work__preview-summary button { flex: 0 0 auto; height: var(--h-compact); padding: 0 8px; font-size: var(--t-help); }
+.import-work__preview-summary button { flex: 0 0 auto; }
 .import-work__changes { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; padding: 10px 12px; border-top: 1px solid var(--hair); }
 .import-work__change { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 10px; }
 .import-work__change > * { overflow-wrap: anywhere; }
@@ -1200,13 +954,14 @@
 .import-work__diffstat span:first-child { color: var(--verified-ink); }
 .import-work__diffstat span:last-child { color: var(--blocked-ink); }
 .import-work__changes p { margin: 0; color: var(--muted); }
-.import-work__existing { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--r); background: var(--well); }
+/* Not code, so not a well: a recessed group on the panel plane. */
+.import-work__existing { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--r-md); background: var(--panel); }
 .import-work__existing-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing strong { font-size: var(--t-heading); }
 .import-work__existing code { overflow-wrap: anywhere; font-size: var(--t-meta); color: var(--muted); }
-.import-work__meta { color: var(--muted); font-size: var(--t-help); }
+.import-work__meta { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-.import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
+.import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 
 @container (max-width: 420px) {
   .import-work__identity { flex-direction: column; gap: 2px; align-items: stretch; }
@@ -1217,95 +972,39 @@
     min-height: clamp(148px, 22vh, 180px);
   }
 
-  .field-grid--two {
-    grid-template-columns: 1fr;
-  }
-
-  .slideover__footer {
+  .newtask-modal__footer {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .slideover__footer-actions {
+  .newtask-modal__footer-actions {
     justify-content: flex-end;
   }
 
 }
 
-/* ----------------------------------------------------------------------- */
-/* Misc                                                                    */
-/* ----------------------------------------------------------------------- */
-
-.empty-state {
-  padding: 16px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--well);
-  color: var(--muted);
-}
-
-.empty-state h2 {
-  margin: 0 0 6px;
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.empty-state p {
-  margin: 0;
-  font-size: 12.5px;
-}
-
 .muted {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--t-help);
 }
 
 .form-error {
   margin: 0;
   color: var(--blocked-ink);
-  font-size: 12px;
+  font-size: var(--t-help);
 }
 
 .form-warning {
   margin: 0;
   color: var(--waiting-ink);
-  font-size: 12px;
-}
-
-.error-banner {
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--error-bg);
-  color: var(--blocked-ink);
-  font-size: 12.5px;
-}
-
-/* Responsive: collapse top-bar actions + grid below 1280px */
-
-@media (max-width: 1279px) {
-  .detail__header {
-    flex-wrap: wrap;
-  }
-
-  .detail__actions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .detail__grid {
-    grid-template-columns: 1fr;
-  }
+  font-size: var(--t-help);
 }
 .task-attachment__open {
   padding: 0;
   border: 0;
   background: none;
-  line-height: 1.5;
+  line-height: var(--lh-ui);
   text-align: start;
-  cursor: pointer;
 }
 
 .task-attachment__open:hover { text-decoration: underline; }
@@ -1316,3 +1015,7 @@
 .task-attachment-preview__content { max-height: 65vh; overflow: auto; }
 .task-attachment-preview__image { display: block; max-width: 100%; max-height: 65vh; margin: auto; object-fit: contain; }
 .task-attachment-preview__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--t-help); }
+
+/* Imported work has no description, so its model and access chips get a row. */
+.newtask-run { gap: 8px; }
+.newtask-run__label { margin-right: 4px; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); }

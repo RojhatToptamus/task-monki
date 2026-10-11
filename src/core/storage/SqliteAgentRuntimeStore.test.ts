@@ -128,6 +128,33 @@ describe('SqliteAgentRuntimeStore', () => {
     );
   });
 
+  it('accepts a side question snapshot only inside its own task folder of the snapshot layout', async () => {
+    const fixture = await storeFixture();
+    const root = await fs.realpath(fixture.root);
+    const worktree = path.join(root, 'worktree');
+    await fs.mkdir(worktree);
+    const snapshotSession = (id: string, snapshot: string) => {
+      const context: AgentExecutionContext = {
+        ...executionContext(id),
+        primaryCwd: snapshot,
+        readRoots: [{ canonicalPath: snapshot, kind: 'WORKTREE_SNAPSHOT', entityId: 'worktree-1' }]
+      };
+      const input = sessionInput(id, { kind: 'TASK', taskId: 'task-1' }, id, context);
+      input.role = 'SIDE';
+      input.taskContext!.worktreePath = worktree;
+      return input;
+    };
+
+    for (const unrelated of [path.join(root, 'elsewhere'), path.join(root, 'snapshots', 'profile', 'task-2', 'thread-1')]) {
+      await expect(fixture.store.createSession(snapshotSession(`snapshot-${path.basename(path.dirname(unrelated))}`, unrelated)))
+        .rejects.toThrow('Task agent runtime session context is invalid.');
+    }
+    const own = snapshotSession('snapshot-own', path.join(root, 'snapshots', 'profile', 'task-1', 'thread-1'));
+    const stored = await fixture.store.createSession(own);
+    // The snapshot is gone once its thread ends; the record still loads.
+    await expect(fixture.openStore().getSession(stored.id)).resolves.toEqual(stored);
+  });
+
   it.each([
     { access: 'READ_ONLY', target: 'different', description: 'different read-only directories' },
     { access: 'READ_ONLY', target: 'missing', description: 'different missing read-only paths' },

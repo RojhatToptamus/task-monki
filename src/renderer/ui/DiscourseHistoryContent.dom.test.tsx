@@ -20,9 +20,9 @@ describe('Team comparison and direct responses', () => {
     expect(screen.getByText('Comparison details').closest('details')?.open).toBe(false);
     fireEvent.click(screen.getByText('Comparison details'));
     fireEvent.click(screen.getByText('Which support window applies?'));
-    expect(screen.getByText('Low confidence · C’s assessment')).toBeTruthy();
+    expect(screen.getByText('C’s assessment: low confidence')).toBeTruthy();
     expect(screen.getByText('Evidence cited by C')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'A · 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'A, message 2' }));
     expect(onNavigate).toHaveBeenCalledWith('answer-a');
   });
 

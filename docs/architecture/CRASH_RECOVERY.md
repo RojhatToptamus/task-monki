@@ -46,6 +46,11 @@ external state in this order:
    interactions.
 5. Normal post-run and workflow evidence repair continues through the existing
    service paths.
+6. Side question snapshots left by an earlier process are removed: write
+   permission is restored, the worktree registration is removed, and Git prunes
+   only when a registration survives. Shutdown runs the same sweep. A side
+   question that read the live worktree and is left `RECOVERY_REQUIRED` keeps
+   holding other agent work until the person stops it.
 
 Failures are isolated to the affected task or runtime. One unavailable
 repository, remote, provider, or GitHub account does not permit Task Monki to
@@ -103,8 +108,12 @@ no-resend rules. A prompt, approval, answer, interrupt, review request, or other
 ambiguous mutation is never replayed automatically.
 
 Terminal reconciliation preserves the recorded run completion time. The time
-of event receipt does not replace that historical value. Repeated startup uses
-the same completion identity and does not publish the review result again.
+of event receipt does not replace that historical value, and later updates to a
+settled run, such as its post-run Git snapshot, keep it. Startup identifies a
+review or side question outcome by its run: when the Task
+store already records that outcome, under whichever operation recorded it,
+startup only settles the runtime record and does not publish the result or
+capture post-run evidence again.
 
 Graceful runtime shutdown first removes adapter event producers. It then drains
 events that Task Monki already accepted before it stops the adapters. Store

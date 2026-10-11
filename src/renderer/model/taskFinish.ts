@@ -4,12 +4,13 @@ import type {
   Task,
   VerifiedChecksEvidence
 } from '../../shared/contracts';
+import { effectiveReviewGateStatus } from '../../shared/agentReviewFindings';
 import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
-import { humanizeEnum } from './formatting';
+import { humanizeEnum, pluralize } from './formatting';
 import type { Tone } from './viewTypes';
 
 export interface FinishEvidenceWarning {
@@ -24,7 +25,8 @@ export interface FinishEvidenceState {
 
 export interface FinishRequirement {
   label: string;
-  detail: string;
+  /** The requirement as a plain fact, e.g. "Committed, not pushed". */
+  fact: string;
   tone: Tone;
   unresolved: boolean;
 }
@@ -49,7 +51,7 @@ export function taskReviewGate(
 
 export function getFinishEvidenceState(
   task: Task,
-  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = effectiveReviewGateStatus(taskReviewGate(task)),
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -72,7 +74,7 @@ export function getFinishEvidenceState(
 
 export function finishRequirementsForTask(
   task: Task,
-  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = effectiveReviewGateStatus(taskReviewGate(task)),
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -102,7 +104,7 @@ export function markDoneModalCopy(
     body: markDoneModalBody(withIssues, hasPullRequest),
     fallbackWarningTitle: 'Evidence is not fully passing.',
     fallbackWarningDetail: 'You are explicitly marking the current local result done.',
-    confirmLabel: busy ? 'Marking done...' : withIssues ? 'Mark done anyway' : 'Mark done'
+    confirmLabel: busy ? 'Marking done…' : withIssues ? 'Mark done anyway' : 'Mark done'
   };
 }
 
@@ -165,7 +167,7 @@ function gitFinishWarning(
         title: 'Working tree is dirty.',
         detail:
           dirtyFileCount && dirtyFileCount > 0
-            ? `${dirtyFileCount} uncommitted file${dirtyFileCount === 1 ? '' : 's'} remain. Commit or open a PR to share the work.`
+            ? `${pluralize(dirtyFileCount, 'uncommitted file')} remain. Commit or open a PR to share the work.`
             : 'Uncommitted changes remain. Commit or open a PR to share the work.'
       };
     case 'NOT_INSPECTED':
@@ -220,21 +222,21 @@ function verificationFinishBlocker(
 function reviewRequirement(status: AgentReviewGateStatus): FinishRequirement {
   switch (status) {
     case 'PASSED':
-      return { label: 'Review', detail: 'passed', tone: 'success', unresolved: false };
+      return { label: 'Review', fact: 'Agent review passed', tone: 'success', unresolved: false };
     case 'NEEDS_CHANGES':
-      return { label: 'Review', detail: 'needs changes', tone: 'error', unresolved: true };
+      return { label: 'Review', fact: 'Agent review requested changes', tone: 'error', unresolved: true };
     case 'RUNNING':
-      return { label: 'Review', detail: 'running', tone: 'info', unresolved: true };
+      return { label: 'Review', fact: 'Agent review running', tone: 'info', unresolved: true };
     case 'STALE':
-      return { label: 'Review', detail: 'stale', tone: 'action', unresolved: true };
+      return { label: 'Review', fact: 'Agent review out of date', tone: 'action', unresolved: true };
     case 'INCONCLUSIVE':
-      return { label: 'Review', detail: 'inconclusive', tone: 'action', unresolved: true };
+      return { label: 'Review', fact: 'Agent review inconclusive', tone: 'action', unresolved: true };
     case 'FAILED':
-      return { label: 'Review', detail: 'failed', tone: 'error', unresolved: true };
+      return { label: 'Review', fact: 'Agent review failed', tone: 'error', unresolved: true };
     case 'CANCELED':
-      return { label: 'Review', detail: 'stopped', tone: 'action', unresolved: true };
+      return { label: 'Review', fact: 'Agent review stopped', tone: 'action', unresolved: true };
     case 'NOT_RUN':
-      return { label: 'Review', detail: 'not run', tone: 'action', unresolved: true };
+      return { label: 'Review', fact: 'No agent review', tone: 'action', unresolved: true };
   }
 }
 
@@ -244,15 +246,17 @@ function treeRequirement(
 ): FinishRequirement {
   switch (status) {
     case 'CLEAN':
-      return { label: 'Tree', detail: 'clean', tone: 'success', unresolved: false };
+      return { label: 'Tree', fact: 'No uncommitted changes', tone: 'success', unresolved: false };
     case 'PUSHED':
-      return { label: 'Tree', detail: 'pushed', tone: 'success', unresolved: false };
+      return { label: 'Tree', fact: 'Pushed', tone: 'success', unresolved: false };
     case 'COMMITTED_UNPUSHED':
-      return { label: 'Tree', detail: 'committed', tone: 'info', unresolved: false };
+      return { label: 'Tree', fact: 'Committed, not pushed', tone: 'info', unresolved: false };
     case 'DIRTY':
       return {
         label: 'Tree',
-        detail: dirtyFileCount && dirtyFileCount > 0 ? `${dirtyFileCount} dirty` : 'dirty',
+        fact: dirtyFileCount && dirtyFileCount > 0
+          ? `${dirtyFileCount} uncommitted ${dirtyFileCount === 1 ? 'file' : 'files'}`
+          : 'Uncommitted changes',
         tone: 'action',
         unresolved: true
       };
@@ -261,7 +265,7 @@ function treeRequirement(
     case 'UNAVAILABLE':
       return {
         label: 'Tree',
-        detail: humanizeEnum(status).toLowerCase(),
+        fact: status === 'CONFLICTED' ? 'Git conflicts' : status === 'DIVERGED' ? 'Branch diverged' : 'Git unavailable',
         tone: 'error',
         unresolved: true
       };
@@ -269,7 +273,7 @@ function treeRequirement(
     case 'UNKNOWN':
       return {
         label: 'Tree',
-        detail: humanizeEnum(status).toLowerCase(),
+        fact: status === 'NOT_INSPECTED' ? 'Git not checked yet' : 'Git state unknown',
         tone: 'action',
         unresolved: true
       };
@@ -279,23 +283,23 @@ function treeRequirement(
 function mergeRequirement(status: MergeStatus): FinishRequirement {
   switch (status) {
     case 'MERGED':
-      return { label: 'Merge', detail: 'merged', tone: 'success', unresolved: false };
+      return { label: 'Merge', fact: 'Merged', tone: 'success', unresolved: false };
     case 'MERGEABLE':
-      return { label: 'Merge', detail: 'ready, not merged', tone: 'action', unresolved: true };
+      return { label: 'Merge', fact: 'Ready to merge', tone: 'action', unresolved: true };
     case 'COMPUTING':
-      return { label: 'Merge', detail: 'checking', tone: 'info', unresolved: true };
+      return { label: 'Merge', fact: 'Checking mergeability', tone: 'info', unresolved: true };
     case 'QUEUED':
-      return { label: 'Merge', detail: 'queued', tone: 'info', unresolved: true };
+      return { label: 'Merge', fact: 'In the merge queue', tone: 'info', unresolved: true };
     case 'BLOCKED':
-      return { label: 'Merge', detail: 'blocked', tone: 'error', unresolved: true };
+      return { label: 'Merge', fact: 'Merge blocked', tone: 'error', unresolved: true };
     case 'CLOSED_UNMERGED':
-      return { label: 'Merge', detail: 'closed unmerged', tone: 'error', unresolved: true };
+      return { label: 'Merge', fact: 'PR closed without merge', tone: 'error', unresolved: true };
     case 'NOT_APPLICABLE':
     case 'NOT_MERGED':
     case 'UNKNOWN':
       return {
         label: 'Merge',
-        detail: humanizeEnum(status).toLowerCase(),
+        fact: 'Not merged',
         tone: 'action',
         unresolved: true
       };
@@ -307,25 +311,25 @@ function checksRequirement(
   evidence?: VerifiedChecksEvidence
 ): FinishRequirement {
   if (verifiedChecksMatchMergeHead({ ...evidence, ciStatus: status })) {
-    return { label: 'Checks', detail: 'passing', tone: 'success', unresolved: false };
+    return { label: 'Checks', fact: 'Checks passed', tone: 'success', unresolved: false };
   }
   if (status === 'PASSING') {
-    return { label: 'Checks', detail: 'not current', tone: 'action', unresolved: true };
+    return { label: 'Checks', fact: 'Checks passed on an older head', tone: 'action', unresolved: true };
   }
   if (status === 'FAILING' || status === 'BLOCKED') {
     return {
       label: 'Checks',
-      detail: humanizeEnum(status).toLowerCase(),
+      fact: status === 'FAILING' ? 'Checks failed' : 'Checks blocked',
       tone: 'error',
       unresolved: true
     };
   }
   if (status === 'PENDING') {
-    return { label: 'Checks', detail: 'pending', tone: 'info', unresolved: true };
+    return { label: 'Checks', fact: 'Checks running', tone: 'info', unresolved: true };
   }
   return {
     label: 'Checks',
-    detail: humanizeEnum(status).toLowerCase(),
+    fact: 'Checks not verified',
     tone: 'action',
     unresolved: true
   };

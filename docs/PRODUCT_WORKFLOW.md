@@ -22,9 +22,10 @@ Each repository has a stable Task Monki ID. Tasks and worktrees reference that
 ID; the checkout path is a mutable repository attribute. Moving or reconnecting
 a checkout updates the repository record without changing task identity.
 
-The sidebar repository selector sets the default for new tasks and provides
-repository lifecycle controls. It does not filter global workflow views,
-counts, or task detail. Adding a repository opens the local folder picker,
+Repositories are managed in Settings → Repositories: a table of every
+connected checkout with its status and task count, and a row menu to reconnect,
+check again, reveal it in the file manager, or disconnect. Nothing there
+filters workflow views, counts, or task detail. Adding a repository opens the local folder picker,
 validates the selected Git checkout, and stores a new repository record.
 Refresh can mark a checkout missing or invalid. Disconnect preserves every
 task and evidence record, while repository-dependent actions stay unavailable
@@ -43,7 +44,8 @@ on-demand runtime is startable but is not labeled Ready until its runtime-owned
 live check succeeds. Authentication, account incompatibility, and protocol
 failure remain distinct states with explicit next actions.
 
-New tasks default to the selected sidebar repository. The composer selects a
+New tasks default to the repository used for the last created or imported
+task (`selectedRepositoryId` in app settings). The composer selects a
 repository by ID and never accepts a repository path as task identity.
 Capturing a text-only task is a local operation and remains available when the
 selected agent runtime is unavailable; live model resolution is deferred until
@@ -51,9 +53,10 @@ Start. Attachment-backed creation still requires a runtime/model with an
 enabled delivery path for each selected content type. Task Monki validates the
 model input types before it adopts the draft.
 
-The New Task composer is a parallel workspace panel rather than a modal
-decision. Closing it preserves title and description text for the current app
-session, while unsubmitted attachment batches are still discarded. A
+The New Task composer is a focused modal over the app. Escape, its close button
+or a click outside closes it; closing preserves title and description text for
+the current app session, while unsubmitted attachment batches are still
+discarded. A
 successful Create clears the preserved text draft. The Profile dropdown inside
 the task and Design composers selects reusable instructions at creation. Existing
 tasks and Designs keep their saved instructions when the library changes.
@@ -207,7 +210,7 @@ cleanup, and privacy semantics.
 
 Task records remain bound to exactly one repository ID. Runs, worktrees, Git
 evidence, GitHub delivery, and provider sessions resolve through task and
-iteration records rather than the current sidebar default or a saved view.
+iteration records rather than the new-task default or a saved view.
 Switching the default repository never closes or mutates an open task.
 
 ## UI priority
@@ -256,14 +259,14 @@ before saving the task.
 
 The selected comparison includes committed, staged, unstaged, and untracked work.
 `HEAD` at import time gives a dirty-only starting comparison. Ordinary refresh
-keeps that resolved base. Change comparison in Evidence, beside the diff, to
-rebuild evidence and make the previous review stale. Older evidence keeps its
+keeps that resolved base. Change comparison, in the Review tab's scope menu,
+rebuilds evidence and makes the previous review stale. Older evidence keeps its
 original comparison.
 
 Run agent review starts detached review directly before the first coding run.
 Task Monki checks Git and runtime readiness before entering Review.
 Start implementation requires an explicit instruction and warns that coding
-changes the original imported checkout. Address findings and
+changes the original imported checkout. Request changes and
 Investigate checks supply that instruction through the same first-run path.
 Later unsuccessful runs still require retry or continuation before review.
 Retry retains the original instruction from the runtime prompt artifact; it does
@@ -305,8 +308,8 @@ rather than adding a second Preview lifecycle here.
 
 ## Activity Timeline
 
-The Overview may show `Activity Timeline` below PR Status. It is a curated task
-history, not a log viewer.
+The Overview shows the latest entries of this timeline as `History`, beside
+the work. It is a curated task history, not a log viewer.
 
 Activity Timeline should answer what changed, who or what caused it, whether
 anything is blocked or stale, and what the next useful action is likely to be.
@@ -319,11 +322,15 @@ order with stable absolute timestamps. It must not render relative labels such
 as "now" for stored events, because reopening a task should not imply the event
 just happened.
 
-Tone is expressed by the row's single status dot. Timeline text stays neutral;
-do not add colored chips, tinted row backgrounds, colored borders, or repeated
-status labels. Supporting details should be collapsed behind an in-row
-disclosure only when they name concrete evidence and the decision it affects,
-such as the exact failed GitHub check that blocks PR readiness.
+A row states what happened, then who recorded it and when. Rows carry no tone
+marks: no dots, colored chips, tinted row backgrounds, colored borders, or
+repeated status labels. In the full ledger a row's supporting detail is the
+concrete evidence itself, such as the reason a run failed, the commit, or the
+exact failed GitHub check that blocks PR readiness. It is never advice about
+what to do next, which belongs to the Overview's Now panel. Detail stays
+collapsed only to keep a link reachable. The Overview's History shows each row
+without its evidence: the Now panel and PR Status already state the current
+evidence, and repeating it in the log reads as two facts.
 
 Main-history items should be consequence-bearing: terminal implementation or
 review outcomes, current active runs, Git state changes, delivery commits,
@@ -410,6 +417,23 @@ Rules:
 The detailed source of truth is
 `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
 
+## Side questions
+
+A side question asks the task's agent something without interrupting it. It
+opens from Side question on the Agent tab.
+
+- It runs on the task's runtime and model in a fresh read-only session and is
+  never added to the main conversation, the task's run, its review, or its
+  attention state.
+- While the implementation agent works, the question reads a read-only snapshot
+  of the worktree taken when it is asked; otherwise it reads the worktree under
+  the normal read-only check.
+- One question is answered at a time; Stop ends the one in progress.
+- Use in follow-up puts an answer, under the question it answers, in the main
+  composer. Nothing else carries over.
+- Closing the panel or leaving the task ends the thread and removes its
+  snapshot. Its runs stay in Debug.
+
 ## Action rules
 
 Ready:
@@ -484,7 +508,12 @@ Review:
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
-- Keep Create draft PR and Push update in PR Status, not duplicated in Finish.
+- Create draft PR appears exactly once. While no PR exists it sits with the
+  finishing actions when finishing holds the Now panel, and in PR Status
+  otherwise; once a PR exists, PR Status owns it and Push update.
+- When the agent review asks for action (needs changes, inconclusive, failed,
+  stopped, or stale), finishing holds the Now panel even while a PR is open,
+  matching the board card's word for the task.
 - Treat Mark done anyway as an explicit owner override when review or Git
   evidence is missing, stale, failed, dirty, unavailable, canceled,
   inconclusive, or unresolved.
@@ -614,7 +643,10 @@ one draft PR for the Task Monki-owned branch, then records PR identity, check
 details, GitHub review rollup, merge state, and whether the PR head is fresh
 against the local worktree.
 
-Create draft PR and Push update are shown only here. Create draft PR opens a
+Push update is shown only here, and so is Create draft PR once a PR exists.
+Before then, Create draft PR sits with the finishing actions when finishing
+holds the Overview's Now panel, and in PR Status otherwise, under the same
+publish guard. Either way it appears exactly once, and it opens a
 small confirmation dialog where the user can edit the default PR title before
 creation. The title is request metadata for a new PR only; if Task Monki finds
 an existing open PR for the task branch, it reuses the observed PR instead of

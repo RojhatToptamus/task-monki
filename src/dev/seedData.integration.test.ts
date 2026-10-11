@@ -31,10 +31,8 @@ import {
   type DevSeedManifest
 } from './seedData';
 import { DEV_SEED_SCENARIOS } from './seedScenarios';
-import {
-  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
-  deterministicDevSeedProviderDisabledReason
-} from './devSeedEnvironment';
+import { DEV_SEED_AGENTS_DISABLED_REASON } from '../shared/devSeed';
+import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -94,7 +92,7 @@ describe('Task Monki development seed data', () => {
         TASK_MANAGER_DEV_SEED_MODE: '1'
       });
       expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
-        DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+        DEV_SEED_AGENTS_DISABLED_REASON
       );
       expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
@@ -263,7 +261,22 @@ describe('Task Monki development seed data', () => {
       snapshot.interactionRequests.find(
         (request) => request.taskId === approvalTask.id && request.status === 'PENDING'
       )
-    ).toMatchObject({ type: 'COMMAND_APPROVAL' });
+    ).toMatchObject({
+      type: 'COMMAND_APPROVAL',
+      allowedActions: expect.arrayContaining(['ACCEPT', 'DECLINE']),
+      policyWarnings: []
+    });
+    // Seeded requests pass through production policy: a warned command cannot be accepted.
+    const warnedApprovalTask = taskForScenario(manifest, snapshot, 'agent-awaiting-approval-warning');
+    expect(
+      snapshot.interactionRequests.find(
+        (request) => request.taskId === warnedApprovalTask.id && request.status === 'PENDING'
+      )
+    ).toMatchObject({
+      type: 'COMMAND_APPROVAL',
+      allowedActions: ['DECLINE', 'CANCEL'],
+      policyWarnings: ['The command working directory is outside the task worktree.']
+    });
     expect(
       snapshot.events.some(
         (event) => event.taskId === approvalTask.id && event.type === 'AGENT_INTERACTION_REQUESTED'
@@ -320,7 +333,7 @@ describe('Task Monki development seed data', () => {
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
-      label: 'Searching review · src/renderer.'
+      label: 'Searching review in src/renderer.'
     });
 
     const runningTask = taskForScenario(manifest, snapshot, 'agent-running');
@@ -453,7 +466,7 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
-  it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
+  it('preserves every seeded scenario during provider-inert initialization', async () => {
     const persistence = await openSeedPersistence(manifest.profileRoot);
     const store = persistence.tasks;
     const runtimeStore = persistence.agentRuntime;
@@ -537,12 +550,13 @@ describe('Task Monki development seed data', () => {
         worktrees: manifest.counts.worktrees,
         events: manifest.counts.events
       });
+      // Seeded runs use the runtime's default access, auto review.
       for (const run of after.runs) {
         expect(run.requestedSettings).toMatchObject({
           sandbox: 'WORKSPACE_WRITE',
           networkAccess: false,
-          approvalPolicy: 'never',
-          approvalsReviewer: 'user'
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'auto_review'
         });
       }
 

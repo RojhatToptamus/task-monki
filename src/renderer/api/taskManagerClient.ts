@@ -1,6 +1,13 @@
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
+  DecideReviewFindingRequest,
+  ReadReviewChangesRequest,
+  ReviewChangesResult,
+  ReviewFindingDecision,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   AppUpdateEvent,
   Board,
   BoardSnapshot,
@@ -35,6 +42,8 @@ import type {
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
+  WorktreeFileRead,
   ImportDesignReferenceAssetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
@@ -80,6 +89,7 @@ import type {
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   SteerRunRequest,
   TestExternalToolRequest,
@@ -235,6 +245,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
+    readWorktreeFile: (input: ReadWorktreeFileRequest) =>
+      post<WorktreeFileRead>(baseUrl, '/api/worktree/read-file', input),
   getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
     discoverAgentRuntimeModels: (runtimeId) =>
       post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),
@@ -471,6 +483,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     sendTaskInstruction: (input: SendTaskInstructionRequest) => post<RunRecord>(baseUrl, '/api/task-instructions/send', input),
     saveTaskPrompt: (input: SaveTaskPromptRequest) => post<void>(baseUrl, '/api/tasks/prompt', input),
     saveTaskAgentDraft: (input: SaveTaskAgentDraftRequest) => post<void>(baseUrl, '/api/task-instructions/draft', input),
+    saveTaskReviewDraft: (input: SaveTaskReviewDraftRequest) => post<void>(baseUrl, '/api/task-review/draft', input),
     steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
     continueRun: (input: ContinueRunRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/continue', input),
@@ -478,6 +491,16 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/retry', input),
     startReview: (input: StartReviewRequest) =>
       post<RunRecord>(baseUrl, '/api/runs/review', input),
+    decideReviewFinding: (input: DecideReviewFindingRequest) =>
+      post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    readReviewChanges: (input: ReadReviewChangesRequest) =>
+      post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
+    askSideQuestion: (input: AskSideQuestionRequest) =>
+      post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
+    stopSideQuestion: (input: StopSideQuestionRequest) =>
+      post<void>(baseUrl, '/api/side-question/stop', input),
+    endSideThread: (input: EndSideThreadRequest) =>
+      post<void>(baseUrl, '/api/side-question/end-thread', input),
     syncAgentGoal: (input: SyncAgentGoalRequest) =>
       post(baseUrl, '/api/agent/goal/sync', input),
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),

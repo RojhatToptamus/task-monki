@@ -1,12 +1,9 @@
-import type { RunRecord, Task, WorkflowPhase, WorktreeRecord } from '../../shared/contracts';
+import type { RunRecord, Task, WorktreeRecord } from '../../shared/contracts';
 import {
   isCompletedCurrentImplementationRun,
   isImplementationRetryRequired
 } from './nextAction';
-
-export function isReviewPhase(phase: WorkflowPhase): boolean {
-  return phase === 'REVIEW' || phase === 'IN_REVIEW';
-}
+import { isClosedPhase, isReviewPhase } from './taskPhase';
 
 export function canReviewExistingWork(task: Task, worktree?: WorktreeRecord): boolean {
   return worktree?.ownership === 'EXTERNAL' && !task.currentRunId &&
@@ -21,8 +18,7 @@ export function shouldShowMoveToReviewHeaderAction(
   return (
     isCompletedCurrentImplementationRun(task, run) &&
     !isImplementationRetryRequired(task, run) &&
-    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(
-      task.workflowPhase
-    )
+    !isReviewPhase(task.workflowPhase) &&
+    !isClosedPhase(task.workflowPhase)
   );
 }

@@ -1,19 +1,19 @@
 import type { CustomAgentProfile } from '../../shared/agentProfiles';
 import { AgentProfileSelect } from './AgentProfileSelect';
+import { AccessMenu } from './AccessMenu';
 import {
   useCallback,
   useEffect,
-  useId,
-  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
   type RefObject
 } from 'react';
-import { Check, ChevronDown, Sparkles, X } from 'lucide-react';
+import { X } from 'lucide-react';
+import { AgentMark } from './UiIcons';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import type {
   AgentExecutionSettings,
-  AgentExecutionPolicyPreset,
   AgentModel,
   AgentRuntimeState,
   CreateTaskRequest,
@@ -32,43 +32,37 @@ import {
   type StageTaskAttachmentBatchRequest
 } from '../../shared/attachments';
 import {
+  presetNetworkAccess,
   settingsForExecutionPolicyPreset
 } from '../model/agentPermissions';
-import {
-  formatAttachmentBytes
-} from '../model/taskAttachmentDraft';
 import {
   creationRequiresUnchangedRetry,
   getOrCreateTaskCreationToken,
 } from '../model/taskAttachmentComposer';
 import {
-  formatReasoningEffort,
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
-import {
-  clampNewTaskPanelWidth,
-  DEFAULT_NEW_TASK_PANEL_WIDTH,
-  getNewTaskPanelWidthBounds,
-  MAX_NEW_TASK_PANEL_WIDTH
-} from '../model/newTaskPanel';
 import {
   buildRepositoryOptions,
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { changeWithMotion, type ExpandMotion } from './expandMotion';
+import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
+import { readNewTaskExpanded, writeNewTaskExpanded } from '../model/newTaskLayout';
 import {
   AgentModelSelector,
   type ModelDiscoveryStatus
 } from './AgentModelSelector';
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
-import { PanelResizeHandle } from './PanelResizeHandle';
-import { StatusGlyph } from './StatusBadge';
-import { DisclosureChevron } from './DisclosureChevron';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
+
+/** The modal grows to its writing size and back on the drawer curve, its head held at its corner. */
+const PANEL_MOTION: ExpandMotion = { duration: '--motion-slow', easing: '--ease-drawer', scale: true };
 
 export interface NewTaskTextDraft {
   agentProfileId?: string;
@@ -113,112 +107,7 @@ interface NewTaskPanelProps {
   onTextDraftChange?(draft: NewTaskTextDraft): void;
   returnFocusRef?: RefObject<HTMLElement | null>;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-  onResize?(): void;
   onClose(): void;
-}
-
-export function ExecutionPolicySelect({
-  presets,
-  selectedPreset,
-  unmatchedSummary,
-  disabled,
-  onChange
-}: {
-  presets: readonly AgentExecutionPolicyPreset[];
-  selectedPreset?: AgentExecutionPolicyPreset;
-  unmatchedSummary?: { label: string; detail: string };
-  disabled: boolean;
-  onChange(presetId: string): void;
-}) {
-  const [open, setOpen] = useState(false);
-  const popupId = useId();
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    if (disabled) {
-      setOpen(false);
-      return undefined;
-    }
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', closeOnOutsidePointer);
-    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
-  }, [disabled, open]);
-
-  const close = () => setOpen(false);
-
-  return (
-    <div
-      className={`tm-access-select ${open ? 'is-open' : ''}`}
-      ref={rootRef}
-      onBlur={(event) => {
-        const nextTarget = event.relatedTarget;
-        if (open && !(nextTarget instanceof Node && event.currentTarget.contains(nextTarget))) {
-          close();
-        }
-      }}
-      onKeyDown={(event) => {
-        if (open && event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation();
-          close();
-          triggerRef.current?.focus();
-        }
-      }}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        className="tm-access-select__trigger"
-        aria-label={`Execution policy: ${selectedPreset?.label ?? unmatchedSummary?.label ?? 'Unavailable'}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? popupId : undefined}
-        disabled={disabled || presets.length === 0}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className="tm-access-select__summary">
-          <strong>{selectedPreset?.label ?? unmatchedSummary?.label ?? 'No execution policy'}</strong>
-          <small>{selectedPreset?.detail ?? unmatchedSummary?.detail ?? 'The selected agent does not expose an execution policy.'}</small>
-        </span>
-        <SelectChevronIcon open={open} />
-      </button>
-
-      {open ? (
-        <div className="tm-access-select__menu" id={popupId} role="menu" aria-label="Execution policy">
-          {presets.map((preset) => {
-            const selected = preset.id === selectedPreset?.id;
-            return (
-              <button
-                type="button"
-                role="menuitemradio"
-                className={`tm-access-select__option ${selected ? 'is-selected' : ''}`}
-                aria-checked={selected}
-                disabled={disabled}
-                key={preset.id}
-                onClick={() => {
-                  onChange(preset.id);
-                  close();
-                  triggerRef.current?.focus();
-                }}
-              >
-                <span>
-                  <strong>{preset.label}</strong>
-                  <small>{preset.detail}</small>
-                </span>
-                <span className="tm-access-select__check" aria-hidden="true">
-                  {selected ? <SelectCheckIcon /> : null}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 export function NewTaskPanel({
@@ -246,7 +135,6 @@ export function NewTaskPanel({
   onTextDraftChange,
   returnFocusRef,
   fallbackReturnFocusRef,
-  onResize,
   onClose
 }: NewTaskPanelProps) {
   const [agentProfileId, setAgentProfileId] = useState(initialTextDraft?.agentProfileId);
@@ -296,18 +184,9 @@ export function NewTaskPanel({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
-  const slideoverRef = useRef<HTMLDivElement>(null);
-  const [panelWidth, setPanelWidth] = useState(() =>
-    clampNewTaskPanelWidth(
-      DEFAULT_NEW_TASK_PANEL_WIDTH,
-      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
-    )
-  );
-  const [panelWidthBounds, setPanelWidthBounds] = useState(() =>
-    getNewTaskPanelWidthBounds(
-      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
-    )
-  );
+  // A writing size for a long description; imported work has none, so it keeps the usual size.
+  const [expandedPreference, setExpandedPreference] = useState(readNewTaskExpanded);
+  const expanded = expandedPreference && !importing;
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
@@ -401,8 +280,6 @@ export function NewTaskPanel({
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
   const effectiveReasoningEffort =
     resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
-  const networkDisabledByPreset = permissionPreset?.networkAccess === 'DISABLED';
-  const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
   const availableRepositories = repositories.filter(
     (repository) => repository.status === 'AVAILABLE'
   );
@@ -489,7 +366,6 @@ export function NewTaskPanel({
   });
   const {
     activeItems: activeAttachmentItems,
-    byteCount: attachmentByteCount,
     busy: attachmentsBusy,
     hasErrors: attachmentsHaveErrors,
     isReadingClipboardImage,
@@ -503,9 +379,7 @@ export function NewTaskPanel({
     drop: dropAttachments,
     close: closeAttachments
   } = attachments;
-  const effectiveNetworkAccess =
-    networkRequiredByPreset ||
-    (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess);
+  const effectiveNetworkAccess = presetNetworkAccess(permissionPreset, networkAccess);
   const selectedModelRejectsImages = Boolean(attachmentModelError);
   const selectedRuntimeRejectsAttachments =
     activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;
@@ -514,23 +388,6 @@ export function NewTaskPanel({
       !selectedRuntime.preflight.readiness.canStart &&
       activeAttachmentItems.length === 0
   );
-
-  useEffect(() => {
-    const resizePanelForViewport = () => {
-      const nextBounds = getNewTaskPanelWidthBounds(window.innerWidth);
-      setPanelWidthBounds(nextBounds);
-      setPanelWidth((current) =>
-        Math.min(nextBounds.max, Math.max(nextBounds.min, current))
-      );
-      onResize?.();
-    };
-    window.addEventListener('resize', resizePanelForViewport);
-    return () => window.removeEventListener('resize', resizePanelForViewport);
-  }, [onResize]);
-
-  useLayoutEffect(() => {
-    slideoverRef.current?.style.setProperty('--slideover-width', `${panelWidth}px`);
-  }, [panelWidth]);
 
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
@@ -551,24 +408,22 @@ export function NewTaskPanel({
     onClose();
   }, [closeAttachments, onCancelPromptRefinement, onClose, panelClosedRef]);
 
+  const changeExpanded = (next: boolean, animate: boolean) => changeWithMotion(animate ? panelRef.current : undefined, () => {
+    setExpandedPreference(next);
+    writeNewTaskExpanded(next);
+  }, PANEL_MOTION);
+
+  // Creating a task is a short, focused form: a modal keeps focus inside it.
+  // Escape gives back the writing size before it closes the modal.
   useDialogFocusBoundary({
     dialogRef: panelRef,
     initialFocusRef: titleInputRef,
     fallbackReturnFocusRef,
     busy: isSubmitting,
-    trapFocus: false,
-    onClose: closePanel,
+    onClose: expanded ? () => changeExpanded(false, false) : closePanel,
     returnFocus: returnFocusRef?.current,
     shouldReturnFocus: () => returnFocusAfterCloseRef.current
   });
-
-  const resizePanel = useCallback(
-    (nextWidth: number) => {
-      setPanelWidth(Math.min(panelWidthBounds.max, Math.max(panelWidthBounds.min, nextWidth)));
-      onResize?.();
-    },
-    [onResize, panelWidthBounds.max, panelWidthBounds.min]
-  );
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -795,19 +650,57 @@ export function NewTaskPanel({
     attachmentsHaveErrors ||
     selectedRuntimeRejectsAttachments ||
     selectedModelRejectsImages;
+  // The model and access chips: in the description's toolbar for new work, in
+  // their own row for imported work, which has no description.
+  const runChips = <>
+    <AgentModelSelector
+      label="Model"
+      presentation="compact"
+      runtimeId={runtimeId}
+      modelId={modelId}
+      reasoningEffort={effectiveReasoningEffort}
+      models={models}
+      runtimes={runtimes}
+      disabled={composerLocked}
+      onDiscoverModels={onDiscoverAgentRuntimeModels}
+      onDiscoveryStatusChange={setModelDiscoveryStatus}
+      onSelectionChange={(nextRuntimeId, nextModelId) => {
+        const nextModel = models.find((candidate) => candidate.runtimeId === nextRuntimeId && candidate.id === nextModelId);
+        setRuntimeId(nextRuntimeId);
+        setModelId(nextModel?.id ?? '');
+        setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+      }}
+      onReasoningEffortChange={setReasoningEffort}
+    />
+    {permissionPresets.length ? <AccessMenu
+      presets={permissionPresets}
+      selected={permissionPreset}
+      networkOn={effectiveNetworkAccess}
+      disabled={composerLocked}
+      onPresetChange={(preset) => setPermissionPresetId(preset.id)}
+      onNetworkChange={setNetworkAccess}
+    /> : null}
+  </>;
   return (
-    <div
-      ref={slideoverRef}
-      className={`slideover ${isClosing ? 'slideover--closing' : ''}`}
-      onDragEnter={enterAttachmentDrag}
-      onDragOver={continueAttachmentDrag}
-      onDragLeave={leaveAttachmentDrag}
-      onDrop={dropAttachments}
-    >
+    <div className={`tm-modal tm-modal--top newtask-modal${isClosing ? ' newtask-modal--closing' : ''}`} role="presentation">
+      <button
+        type="button"
+        className="tm-modal__scrim"
+        aria-label="Close new task"
+        tabIndex={-1}
+        disabled={isSubmitting}
+        onClick={closePanel}
+      />
       <form
         id="new-task-panel-content"
         ref={panelRef}
-        className="slideover__panel"
+        className={`newtask-modal__panel${expanded ? ' newtask-modal__panel--expanded' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        onDragEnter={enterAttachmentDrag}
+        onDragOver={continueAttachmentDrag}
+        onDragLeave={leaveAttachmentDrag}
+        onDrop={dropAttachments}
         onSubmit={submit}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && importing && checkoutQuery) {
@@ -815,6 +708,11 @@ export function NewTaskPanel({
             event.stopPropagation();
             setCheckoutQuery('');
             event.currentTarget.querySelector<HTMLInputElement>('input[aria-label="Filter checkouts"]')?.focus();
+            return;
+          }
+          if (!importing && isExpandShortcut(event)) {
+            event.preventDefault();
+            changeExpanded(!expanded, false);
             return;
           }
           if (
@@ -832,18 +730,7 @@ export function NewTaskPanel({
         aria-label="New task"
         tabIndex={-1}
       >
-        <PanelResizeHandle
-          className="slideover__resize"
-          label="Resize new task panel"
-          value={panelWidth}
-          min={panelWidthBounds.min}
-          max={panelWidthBounds.max}
-          defaultValue={DEFAULT_NEW_TASK_PANEL_WIDTH}
-          direction={-1}
-          controls="new-task-panel-content"
-          onChange={resizePanel}
-        />
-        <header className="slideover__header">
+        <header className="newtask-modal__header">
           {onImport ? (
             <div className="segmented" role="group" aria-label="Task source" onKeyDown={(event) => {
               if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
@@ -864,21 +751,20 @@ export function NewTaskPanel({
                 </button>
               ))}
             </div>
-          ) : <div className="slideover__heading">
+          ) : <div className="newtask-modal__heading">
             <strong>New task</strong>
           </div>}
-          <button
-            type="button"
-            className="slideover__close"
-            aria-label="Close"
-            disabled={isSubmitting}
-            onClick={closePanel}
-          >
-            <CloseIcon />
-          </button>
+          <div className="newtask-modal__head-actions">
+            {!importing ? <ExpandToggle expanded={expanded} onToggle={(animate) => changeExpanded(!expanded, animate)} /> : null}
+            <Tooltip label="Close" shortcut="Esc">
+              <button type="button" className="tm-iconbtn" aria-label="Close" disabled={isSubmitting} onClick={closePanel}>
+                <X aria-hidden="true" size={16} />
+              </button>
+            </Tooltip>
+          </div>
         </header>
 
-        <div className="slideover__body">
+        <div className="newtask-modal__body">
           <section className="newtask-section" aria-label="Task essentials">
             {!(importing && selectedCheckout?.existingTaskId) ? <fieldset className="field tm-newtask-repository">
               <legend>Repository</legend>
@@ -961,8 +847,8 @@ export function NewTaskPanel({
                     title={refineDisabledReason}
                     onClick={() => void refine()}
                   >
-                    {isRefining ? <StatusGlyph kind="working" /> : <SparkleIcon />}
-                    <span className="field__refine-label">
+                    <AgentMark size={13} />
+                    <span className={`field__refine-label${isRefining ? ' tm-shimmer' : ''}`}>
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
                   </button>
@@ -970,6 +856,7 @@ export function NewTaskPanel({
               </span>
               <AttachmentComposerShell
                 attachments={attachments}
+                toolbarStart={runChips}
                 attachmentLabel="Task attachments"
                 toolbarAction={
                   <AgentProfileSelect
@@ -985,30 +872,12 @@ export function NewTaskPanel({
                 className={isRefining ? 'field__prompt-shell--running' : ''}
                 bindDropTarget={false}
                 removeDisabled={composerLocked}
-                addButtonTitle={
-                  effectiveAttachmentsEnabled
-                    ? `Stored locally and shared read-only with ${
-                        selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
-                      } for this task.`
-                      : !runtimeSupportsAttachments
-                        ? `${
-                            selectedRuntime?.preflight.runtime.displayName ??
-                            'The selected agent runtime'
-                          } does not support task attachments.`
-                        : 'Attachments require file-read isolation between tasks.'
-                }
                 hint={
                   !effectiveAttachmentsEnabled
                     ? runtimeSupportsAttachments
-                      ? 'Unavailable in this build'
-                      : 'Unavailable for this runtime'
-                    : isReadingClipboardImage
-                      ? 'Reading clipboard image…'
-                      : activeAttachmentItems.length > 0
-                        ? `${activeAttachmentItems.length} ${
-                            activeAttachmentItems.length === 1 ? 'file' : 'files'
-                          } · ${formatAttachmentBytes(attachmentByteCount)}`
-                        : 'Paste or drop files'
+                      ? 'Files are unavailable in this build'
+                      : 'Files are unavailable for this runtime'
+                    : isReadingClipboardImage ? 'Reading clipboard image…' : undefined
                 }
               >
                 <textarea
@@ -1057,86 +926,12 @@ export function NewTaskPanel({
             </> : null}
           </section>
 
-          {!(importing && selectedCheckout?.existingTaskId) ? <details className="newtask-settings">
-            <summary>
-              <span className="newtask-settings__title">Run configuration{importing ? <small>Applies when you start an agent</small> : null}</span>
-              <span className="newtask-settings__summary">
-                {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
-                {selectedModel ? ` · ${selectedModel.displayName}` : ''}
-                {effectiveReasoningEffort
-                  ? ` · ${formatReasoningEffort(effectiveReasoningEffort)}`
-                  : ''}
-              </span>
-              <DisclosureChevron />
-            </summary>
-
-            <div className="newtask-settings__content">
-              <AgentModelSelector
-                label="Run configuration"
-                runtimeId={runtimeId}
-                modelId={modelId}
-                reasoningEffort={effectiveReasoningEffort}
-                models={models}
-                runtimes={runtimes}
-                disabled={composerLocked}
-                onDiscoverModels={onDiscoverAgentRuntimeModels}
-                onDiscoveryStatusChange={setModelDiscoveryStatus}
-                onSelectionChange={(nextRuntimeId, nextModelId) => {
-                  const nextModel = models.find(
-                    (candidate) =>
-                      candidate.runtimeId === nextRuntimeId && candidate.id === nextModelId
-                  );
-                  setRuntimeId(nextRuntimeId);
-                  setModelId(nextModel?.id ?? '');
-                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-                }}
-                onReasoningEffortChange={setReasoningEffort}
-                access={
-                  <div className="tm-agent-console__row">
-                    <span className="tm-agent-console__label">Access</span>
-                    <div className="tm-agent-console__access">
-                      <ExecutionPolicySelect
-                        presets={permissionPresets}
-                        selectedPreset={permissionPreset}
-                        disabled={composerLocked}
-                        onChange={setPermissionPresetId}
-                      />
-                    </div>
-                  </div>
-                }
-              />
-
-              <div className="network-toggle">
-                <div className="network-toggle__copy">
-                  <span className="network-toggle__title" id="task-network-access-label">
-                    Network access
-                  </span>
-                  <span className="network-toggle__state">
-                    {networkDisabledByPreset
-                      ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
-                      : networkRequiredByPreset
-                        ? 'Required by this execution policy.'
-                        : effectiveNetworkAccess
-                          ? 'Enabled - commands may use the network during this task.'
-                          : 'Disabled - network use stays outside the task boundary.'}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`network-toggle__switch ${
-                    effectiveNetworkAccess ? 'network-toggle__switch--on' : ''
-                  }`}
-                  role="switch"
-                  aria-labelledby="task-network-access-label"
-                  aria-checked={effectiveNetworkAccess}
-                  disabled={composerLocked || networkDisabledByPreset || networkRequiredByPreset}
-                  onClick={() => setNetworkAccess((current) => !current)}
-                >
-                  <span />
-                </button>
-              </div>
+          {importing && !selectedCheckout?.existingTaskId ? (
+            <div className="tm-chip-row newtask-run">
+              <span className="newtask-run__label">Agent</span>
+              {runChips}
             </div>
-          </details> : null}
+          ) : null}
 
           {error ? (
             <p className="form-error" role="alert">
@@ -1146,33 +941,28 @@ export function NewTaskPanel({
           {currentRefinementWarning ? (
             <p className="form-warning">{currentRefinementWarning}</p>
           ) : null}
+          {/* Creating still works; only starting waits for the runtime, so this is a warning. */}
           {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
-            <p className="form-error">
+            <p className="form-warning">
               {selectedRuntimeReadiness.detail}
-              {selectedRuntimeReadiness.nextAction
-                ? ` ${selectedRuntimeReadiness.nextAction}.`
-                : ''}{' '}
-              You can create the task now and start it after the runtime is available.
+              {selectedRuntimeReadiness.nextAction ? ` ${selectedRuntimeReadiness.nextAction}.` : ''}
             </p>
           ) : null}
           {!importing && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
             <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
           ) : null}
-          {!importing && selectedRuntimeReadiness.warnings.map((warning) => (
-            <p className="form-warning" key={`${warning.code}:${warning.message}`}>
-              {warning.message}
-            </p>
-          ))}
         </div>
 
-        <footer className="slideover__footer">
+        <footer className="newtask-modal__footer">
           {importing ? <p className="import-work__footer-note" role="status">
-            {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'In progress · No files move. No agent starts.')}
-          </p> : null}
-          <div className="slideover__footer-actions">
+            {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'Imports as In progress. No files move and no agent starts.')}
+          </p> : (
+            <span className="newtask-modal__hint" aria-hidden="true"><kbd>{SUBMIT_SHORTCUT}</kbd> to create</span>
+          )}
+          <div className="newtask-modal__footer-actions">
             <button
               type="button"
-              className={importing ? 'ghost-button' : 'outline-button'}
+              className="outline-button"
               disabled={isSubmitting}
               onClick={closePanel}
             >
@@ -1219,30 +1009,6 @@ function createPromptRefinementRequestId(): string {
     return globalThis.crypto.randomUUID();
   }
   return `prompt-refine-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function SelectChevronIcon({ open }: { open: boolean }) {
-  return (
-    <ChevronDown
-      absoluteStrokeWidth
-      className={`tm-access-select__chevron ${open ? 'tm-access-select__chevron--open' : ''}`}
-      aria-hidden="true"
-      size={12}
-      strokeWidth={1.5}
-    />
-  );
-}
-
-function SelectCheckIcon() {
-  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
-}
-
-function SparkleIcon() {
-  return <Sparkles aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
-}
-
-function CloseIcon() {
-  return <X aria-hidden="true" absoluteStrokeWidth size={15} strokeWidth={1.5} />;
 }
 
 function RefinementProposal({

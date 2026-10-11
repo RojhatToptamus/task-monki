@@ -20,6 +20,7 @@ import { MessageMarkdown } from './MessageMarkdown';
 import { DiscourseHistoryContent } from './DiscourseHistoryContent';
 import { MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageHeader } from './MessageHeader';
+import { Tooltip } from './Tooltip';
 import { messageModelName } from '../model/messageIdentity';
 import type { AgentModel } from '../../shared/contracts';
 import { StoredAttachmentChip } from './AttachmentChip';
@@ -90,29 +91,27 @@ export function DiscourseMessage({
   };
   const actions = message.status !== 'TOMBSTONE' ? (
           <footer>
-            <button
+            <Tooltip label="Reply"><button
               type="button"
               className="tm-discourse-message-action"
               aria-label="Reply"
-              title="Reply"
               onClick={onReply}
             >
               <DiscourseReplyIcon />
-            </button>
-            <button
+            </button></Tooltip>
+            <Tooltip label={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}><button
               type="button"
               className="tm-discourse-message-action"
               aria-label={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
-              title={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
               onClick={() => void copyMessage()}
             >
               {copyState === 'copied' ? <DiscourseCheckIcon /> : <DiscourseCopyIcon />}
-            </button>
+            </button></Tooltip>
             <span className="tm-visually-hidden" role="status" aria-live="polite">
               {copyState === 'copied' ? 'Message copied' : copyState === 'failed' ? 'Message could not be copied' : ''}
             </span>
             {!user && message.author.kind === 'AGENT' && message.status === 'VISIBLE' ? (
-              <button type="button" className="tm-discourse-message-action" aria-label={`Ask ${peerName} to review`} title={`Ask ${peerName} to review`} onClick={onAskOthers}><Users size={16} strokeWidth={1.5} aria-hidden="true" /></button>
+              <Tooltip label={`Ask ${peerName} to review`}><button type="button" className="tm-discourse-message-action" aria-label={`Ask ${peerName} to review`} onClick={onAskOthers}><Users size={16} aria-hidden="true" /></button></Tooltip>
             ) : null}
             <ActionMenu
               className="tm-discourse-message-menu"
@@ -133,7 +132,7 @@ export function DiscourseMessage({
                   ? [{ label: 'Correct message', onSelect: onCorrect }]
                   : []),
                 ...(user
-                  ? [{ label: 'Delete message', danger: true, onSelect: onDelete }]
+                  ? [{ label: 'Delete message', danger: true, separated: true, onSelect: onDelete }]
                   : [])
               ]}
             />

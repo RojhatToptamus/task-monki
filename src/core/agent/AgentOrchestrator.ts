@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { lstat, realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
 import type {
   AgentExecutionSettings,
@@ -9,6 +11,7 @@ import type {
   AgentReviewTarget,
   AgentRunMode,
   AgentSessionRecord,
+  DomainEvent,
   InteractionRequestRecord,
   RespondToInteractionRequest,
   RunRecord,
@@ -16,6 +19,7 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import { reviewGateStatusFromResult } from '../../shared/contracts';
 import type {
   AgentAttachmentSelection,
   TaskAttachmentRecord
@@ -24,7 +28,10 @@ import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
-import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
+import {
+  buildAgentReviewPrompt,
+  type PreviousReviewContext
+} from '../../shared/promptTemplates';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
@@ -48,6 +55,8 @@ import {
   assertBrowserDevRuntimeIsolation,
   assertBrowserDevSettingsSafe,
   BROWSER_DEV_BOUNDARY_MESSAGE,
+  BROWSER_DEV_PREVIEW_AGENT_MESSAGE,
+  browserDevCapabilities,
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
 import { agentServersOwnedByPreviousApplication } from './AgentRuntimeRecovery';
@@ -68,13 +77,17 @@ import {
   createAgentSessionAccessEpoch
 } from './AgentRuntimeOwnership';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
-import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from '../review/AgentReviewContract';
+import { parseAgentReviewResult } from '../review/AgentReviewContract';
 import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
+/** The single item that carries a side question's answer. */
+const SIDE_ANSWER_ITEM_ID = 'task-monki:side-answer';
+const SIDE_ANSWER_FLUSH_MS = 300;
+// Keeps the item inside the runtime store's telemetry payload limit; the final
+// artifact keeps the complete answer.
+const SIDE_ANSWER_ITEM_MAX_CHARS = 60_000;
+const SIDE_ANSWER_ITEM_MAX_BYTES = 200 * 1024;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -98,7 +111,7 @@ function isReadOnlyRuntimePurpose(
   purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
 ): boolean {
   return (
-    purpose === 'TASK_REVIEW' ||
+    isTaskReadOnlyTurnPurpose(purpose) ||
     purpose === 'TASK_PREVIEW' ||
     purpose === 'PROMPT_REFINEMENT' ||
     purpose === 'PREVIEW_RECIPE_GENERATION' ||
@@ -106,11 +119,52 @@ function isReadOnlyRuntimePurpose(
   );
 }
 
+/** A review and a question in Ask share the Task read-only turn projection on the shared runtime-turn lane. */
+function isTaskReadOnlyTurnPurpose(
+  purpose: import('../../shared/agentRuntime').AgentRuntimePurpose
+): boolean {
+  return (
+    purpose === 'TASK_REVIEW' ||
+    purpose === 'TASK_SIDE_QUESTION'
+  );
+}
+
+/**
+ * The latest outcome the Task store recorded for each run, from the events the
+ * shared read-only lane publishes: a terminal event, or AGENT_RUNTIME_LOST when the
+ * run requires recovery. A later loss reopens a terminal run for a new outcome.
+ */
+function recordedTaskRunOutcomes(
+  events: readonly DomainEvent[]
+): Map<string, 'TERMINAL' | 'RECOVERY_REQUIRED'> {
+  const outcomes = new Map<string, 'TERMINAL' | 'RECOVERY_REQUIRED'>();
+  for (const event of events) {
+    if (!event.runId) continue;
+    if (
+      event.type === 'AGENT_RUN_COMPLETED' ||
+      event.type === 'AGENT_RUN_FAILED' ||
+      event.type === 'AGENT_RUN_INTERRUPTED'
+    ) {
+      outcomes.set(event.runId, 'TERMINAL');
+    } else if (event.type === 'AGENT_RUNTIME_LOST') {
+      outcomes.set(event.runId, 'RECOVERY_REQUIRED');
+    }
+  }
+  return outcomes;
+}
+
+/** Read roots whose working tree a read-only turn must leave unchanged. */
+function repositoryReadRoots(
+  context: import('../../shared/agentRuntime').AgentExecutionContext
+): import('../../shared/agentRuntime').AgentAttestedReadRoot[] {
+  return context.readRoots.filter((root) =>
+    root.kind === 'WORKTREE' || root.kind === 'WORKTREE_SNAPSHOT' || root.kind === 'REPOSITORY');
+}
+
 async function inspectReadOnlyRepositoryState(
   context: import('../../shared/agentRuntime').AgentExecutionContext
 ): Promise<string | undefined> {
-  const roots = context.readRoots
-    .filter((root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY')
+  const roots = repositoryReadRoots(context)
     .map((root) => root.canonicalPath)
     .sort();
   if (roots.length === 0) return undefined;
@@ -245,6 +299,22 @@ export interface StartOrchestratedReview {
   settings: AgentExecutionSettings;
   generationKey?: string;
   beforeGitSnapshotId?: string;
+  /** The earlier review's findings and decisions, so the new review does not re-raise settled ones without reason. */
+  previousReview?: PreviousReviewContext;
+}
+
+export interface StartOrchestratedSideQuestion {
+  /** Reserved by the caller's message receipt before admission, with the fresh session it creates. */
+  runId: string;
+  sessionId: string;
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  /** The task's runtime, model and settings; the turn runs read-only with approval policy never. */
+  settings: AgentExecutionSettings;
+  prompt: string;
+  /** A read-only snapshot of the worktree to read instead of the live checkout. */
+  snapshotPath?: string;
 }
 
 export class AgentOrchestrator implements AgentRuntimeCoordinator {
@@ -258,6 +328,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   >();
   private readonly disposeRuntimeTurnListeners: Array<() => void> = [];
   private runtimeTurnEventQueue: Promise<void> = Promise.resolve();
+  /** Side questions this process started and has not settled; only their answers stream into items. */
+  private readonly sideAnswerRuns = new Set<string>();
+  private readonly sideAnswerStreams = new Map<
+    string,
+    { text: string; flushedText: string; timer?: NodeJS.Timeout }
+  >();
 
   constructor(
     private readonly store: SqliteTaskStore,
@@ -268,6 +344,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
       allowCandidateDesignModels?: boolean;
+      /** Whether a path is one of this profile's read-only snapshots; side questions read only those. */
+      ownsReadOnlySnapshot?: (candidate: string) => boolean;
     } = {}
   ) {
     this.runtimes =
@@ -311,6 +389,26 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       );
     }
     return adapter.buildExecutionContext(input);
+  }
+
+  /**
+   * The execution context every read-only lane (agent review and Ask) runs in: the task checkout, or a read-only snapshot of it, as the only read
+   * root. Runtimes receive the checkout with its parent folders resolved; the session's
+   * Task context keeps the worktree path the task records, which the store requires.
+   */
+  private async buildReadOnlyCheckoutContext(
+    runtimeId: string,
+    input: Omit<BuildAgentRuntimeExecutionContextInput, 'primaryCwd' | 'readRoots'> & {
+      checkout: { path: string; kind: 'WORKTREE' | 'WORKTREE_SNAPSHOT'; worktreeId: string };
+    }
+  ) {
+    const { checkout, ...context } = input;
+    const checkoutPath = await canonicalCheckoutPath(checkout.path);
+    return this.buildExecutionContext(runtimeId, {
+      ...context,
+      primaryCwd: checkoutPath,
+      readRoots: [{ canonicalPath: checkoutPath, kind: checkout.kind, entityId: checkout.worktreeId }]
+    });
   }
 
   async prepareTurn(
@@ -1073,9 +1171,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
     const session = await this.runtimeStore.getSession(run.sessionId);
     if (!session) return event;
-    const repositoryRoots = session.executionContext.readRoots.filter(
-      (root) => root.kind === 'WORKTREE' || root.kind === 'REPOSITORY'
-    );
+    const repositoryRoots = repositoryReadRoots(session.executionContext);
     const boundaryAt =
       event.type === 'TERMINAL' ? event.completedAt : event.observedAt;
     if (repositoryRoots.length === 0) {
@@ -1153,18 +1249,28 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   private async projectTaskReadOnlyRuntimeEvent(
     event: AgentRuntimeTurnEvent
   ): Promise<void> {
-    if (event.type === 'DELTA') return;
+    if (event.type === 'DELTA') {
+      await this.bufferSideAnswer(event);
+      return;
+    }
     const runtimeRun = await this.runtimeStore.getRun(event.runId);
     if (
       !runtimeRun ||
       runtimeRun.owner.kind !== 'TASK' ||
-      runtimeRun.purpose !== 'TASK_REVIEW'
+      !isTaskReadOnlyTurnPurpose(runtimeRun.purpose)
     ) {
       return;
     }
+    const side = runtimeRun.purpose === 'TASK_SIDE_QUESTION';
     const run = await this.taskRuntime.getRun(runtimeRun.id);
     if (!run) return;
+    const streamedAnswer = side ? this.takeSideAnswerStream(run.id) : '';
     if (event.type === 'RECOVERY_REQUIRED') {
+      // The run is lost; a later terminal event settles the answer from its output artifact.
+      if (side) this.sideAnswerRuns.delete(run.id);
+      if (streamedAnswer.trim()) {
+        await this.upsertSideAnswerItem(run, streamedAnswer, 'IN_PROGRESS');
+      }
       await this.taskRuntime.applyTaskRuntimeEvent(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
@@ -1192,10 +1298,16 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
 
     const output = await this.runtimeStore.readArtifact(runtimeRun.outputArtifactId);
+    if (side) {
+      this.sideAnswerRuns.delete(run.id);
+      await this.settleSideAnswer(run, output, event.status, streamedAnswer);
+    }
     const finalArtifact = await this.taskRuntime.writeFinalArtifact(
       run.taskId,
       run.id,
-      output.trim() || event.error || 'The review returned no final response.',
+      output.trim() ||
+        event.error ||
+        (side ? 'The agent returned no answer.' : 'The review returned no final response.'),
       `shared-review-final:${run.id}`
     );
     await this.taskRuntime.applyTaskRuntimeEvent(
@@ -1215,15 +1327,23 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       }),
       `shared-review-final-link:${run.id}`
     );
-    const reviewResult =
-      event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
-    const reviewStatus = agentReviewStatusFromResult(reviewResult);
     const type =
       event.status === 'completed'
         ? 'AGENT_RUN_COMPLETED'
         : event.status === 'interrupted'
           ? 'AGENT_RUN_INTERRUPTED'
           : 'AGENT_RUN_FAILED';
+    let outcome: Record<string, unknown>;
+    if (side) {
+      outcome = { mode: 'SIDE_QUESTION' };
+    } else {
+      const reviewResult =
+        event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
+      outcome = {
+        agentReviewStatus: reviewGateStatusFromResult(reviewResult),
+        agentReviewResult: reviewResult
+      };
+    }
     await this.taskRuntime.applyTaskRuntimeEvent(
       createDomainEvent({
         type,
@@ -1239,8 +1359,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           error: event.error,
           terminalReason: event.error,
           finalArtifactId: finalArtifact.id,
-          agentReviewStatus: reviewStatus,
-          agentReviewResult: reviewResult
+          ...outcome
         },
         occurredAt: event.completedAt
       }),
@@ -1259,6 +1378,113 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       worktreeId: run.worktreeId,
       payload: { status: event.status, finalArtifactId: finalArtifact.id },
       at: event.completedAt
+    });
+  }
+
+  /**
+   * The shared read-only lane streams text, not provider items. A side question's
+   * answer is projected as one AGENT_MESSAGE item, updated at most every
+   * SIDE_ANSWER_FLUSH_MS while it streams and settled with the run.
+   */
+  private async bufferSideAnswer(
+    event: Extract<AgentRuntimeTurnEvent, { type: 'DELTA' }>
+  ): Promise<void> {
+    // Other read-only workflows stream through their own listeners; skip them without a lookup.
+    if (!this.sideAnswerRuns.has(event.runId)) return;
+    let stream = this.sideAnswerStreams.get(event.runId);
+    if (!stream) {
+      stream = { text: '', flushedText: '' };
+      this.sideAnswerStreams.set(event.runId, stream);
+    }
+    if (stream.text.length < SIDE_ANSWER_ITEM_MAX_CHARS) {
+      stream.text = `${stream.text}${event.text}`.slice(0, SIDE_ANSWER_ITEM_MAX_CHARS);
+    }
+    if (stream.timer) return;
+    const runId = event.runId;
+    stream.timer = setTimeout(() => {
+      const current = this.sideAnswerStreams.get(runId);
+      if (current) current.timer = undefined;
+      // Flushes stay ordered with the run's other runtime events.
+      const flush = this.runtimeTurnEventQueue.then(() => this.flushSideAnswer(runId));
+      this.runtimeTurnEventQueue = flush.catch(() => undefined);
+    }, SIDE_ANSWER_FLUSH_MS);
+    stream.timer.unref?.();
+  }
+
+  private async flushSideAnswer(runId: string): Promise<void> {
+    const stream = this.sideAnswerStreams.get(runId);
+    if (!stream || !stream.text.trim() || stream.text === stream.flushedText) return;
+    const run = await this.taskRuntime.getRun(runId);
+    if (!run || isTerminalRuntimeRun(run.status)) return;
+    await this.upsertSideAnswerItem(run, stream.text, 'IN_PROGRESS');
+    stream.flushedText = stream.text;
+  }
+
+  /** Ends the answer's stream and returns everything it received. */
+  private takeSideAnswerStream(runId: string): string {
+    const stream = this.sideAnswerStreams.get(runId);
+    if (!stream) return '';
+    if (stream.timer) clearTimeout(stream.timer);
+    this.sideAnswerStreams.delete(runId);
+    return stream.text;
+  }
+
+  /** Settles the answer item with the run: its final text, or what streamed before it ended. */
+  private async settleSideAnswer(
+    run: RunRecord,
+    output: string,
+    status: Extract<AgentRuntimeTurnEvent, { type: 'TERMINAL' }>['status'],
+    streamedText: string
+  ): Promise<void> {
+    const items = await this.taskRuntime.getAgentItemsForRun(run.id);
+    const recorded = items.find((item) => item.providerItemId === SIDE_ANSWER_ITEM_ID);
+    // A replayed terminal event finds the answer it already settled.
+    if (recorded && recorded.status !== 'IN_PROGRESS') return;
+    const recordedText = (recorded?.payload as { text?: unknown } | undefined)?.text;
+    const text = output.trim() || streamedText.trim() ||
+      (typeof recordedText === 'string' ? recordedText.trim() : '');
+    if (!text) return;
+    await this.upsertSideAnswerItem(
+      run,
+      text,
+      status === 'completed' ? 'COMPLETED' : status === 'interrupted' ? 'INTERRUPTED' : 'FAILED'
+    );
+  }
+
+  private async upsertSideAnswerItem(
+    run: RunRecord,
+    value: string,
+    status: 'IN_PROGRESS' | 'COMPLETED' | 'INTERRUPTED' | 'FAILED'
+  ): Promise<void> {
+    let text = value.length > SIDE_ANSWER_ITEM_MAX_CHARS
+      ? `${value.slice(0, SIDE_ANSWER_ITEM_MAX_CHARS - 1)}…`
+      : value;
+    while (Buffer.byteLength(JSON.stringify(text), 'utf8') > SIDE_ANSWER_ITEM_MAX_BYTES) {
+      text = `${text.slice(0, Math.floor(text.length * 0.8))}…`;
+    }
+    const at = new Date().toISOString();
+    await this.taskRuntime.upsertAgentItem(
+      {
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        sessionId: run.sessionId,
+        providerItemId: SIDE_ANSWER_ITEM_ID,
+        type: 'AGENT_MESSAGE',
+        status,
+        payload: { text },
+        ...(status === 'IN_PROGRESS' ? {} : { providerCompletedAt: at })
+      },
+      `side-answer:${run.id}:${status}:${createHash('sha256').update(text).digest('hex')}`
+    );
+    this.events.emit({
+      type: 'run.activity',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: { itemType: 'agentMessage', itemId: SIDE_ANSWER_ITEM_ID, status },
+      at
     });
   }
 
@@ -1476,16 +1702,25 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         })
         .filter((operationId): operationId is string => operationId !== undefined)
     );
+    const recordedOutcomes = recordedTaskRunOutcomes(taskSnapshot.events);
     for (const run of snapshot.runs) {
       const terminal = isTerminalRuntimeRun(run.status);
       const observedAt = run.endedAt ?? run.lastEventAt ?? run.createdAt;
       const taskProjectionOperationId = terminal
         ? `shared-review-terminal:${run.id}:${observedAt}`
         : `shared-review-recovery:${run.id}:${observedAt}`;
+      // The outcome is identified by its run: another writer (a start failure, the
+      // browser-development boundary) may have recorded it under a different
+      // operation or completion time than this record now carries.
+      const taskOutcomeRecorded =
+        run.owner.kind === 'TASK' &&
+        isTaskReadOnlyTurnPurpose(run.purpose) &&
+        (recordedOutcomes.get(run.id) === (terminal ? 'TERMINAL' : 'RECOVERY_REQUIRED') ||
+          publishedTaskRuntimeOperations.has(taskProjectionOperationId));
       const taskProjectionNeedsReconciliation =
         run.owner.kind === 'TASK' &&
-        run.purpose === 'TASK_REVIEW' &&
-        !publishedTaskRuntimeOperations.has(taskProjectionOperationId);
+        isTaskReadOnlyTurnPurpose(run.purpose) &&
+        !taskOutcomeRecorded;
       const transientTurnNeedsCleanup =
         terminal &&
         (run.owner.kind === 'PROMPT_REFINEMENT' ||
@@ -1539,7 +1774,11 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         run.repositoryIntegrity?.status === 'PENDING' ||
         taskProjectionNeedsReconciliation;
       if (needsEventProcessing) {
-        if (!run.providerTurnId && event.type === 'TERMINAL') {
+        if (taskOutcomeRecorded) {
+          // Only the runtime record is unsettled; projecting again would append a
+          // second outcome and capture post-run evidence for it again.
+          await this.verifyReadOnlyRuntimeBoundary(event);
+        } else if (!run.providerTurnId && event.type === 'TERMINAL') {
           const verified = await this.verifyReadOnlyRuntimeBoundary(event);
           await this.projectTaskReadOnlyRuntimeEvent(verified);
         } else {
@@ -1552,8 +1791,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           run.owner.kind === 'PREVIEW_RECIPE_GENERATION'
         ) {
           await this.finishRuntimeTurn(run.id);
-        } else if (run.owner.kind === 'TASK' && run.purpose === 'TASK_REVIEW') {
-          if (!needsEventProcessing && terminalQueueNeedsSettlement) {
+        } else if (run.owner.kind === 'TASK' && isTaskReadOnlyTurnPurpose(run.purpose)) {
+          // The projection settles and releases the turn it projects; a turn whose
+          // outcome was already recorded is settled and released here instead.
+          if (
+            !taskProjectionNeedsReconciliation &&
+            (needsEventProcessing || terminalQueueNeedsSettlement)
+          ) {
             await this.finishRuntimeTurn(run.id);
           }
         } else {
@@ -1611,6 +1855,24 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
 
   async getRuntimeCatalog(
     disabledRuntimeIds: ReadonlySet<AgentRuntimeId> = new Set()
+  ): Promise<AgentRuntimeCatalog> {
+    const catalog = await this.readRuntimeCatalog(disabledRuntimeIds);
+    if (this.options.allowNetworkAccess !== false) return catalog;
+    // Task creation applies the same browser-safe default (TaskManagerService).
+    return {
+      ...catalog,
+      runtimes: catalog.runtimes.map((runtime) => ({
+        ...runtime,
+        preflight: {
+          ...runtime.preflight,
+          capabilities: browserDevCapabilities(runtime.preflight.capabilities)
+        }
+      }))
+    };
+  }
+
+  private async readRuntimeCatalog(
+    disabledRuntimeIds: ReadonlySet<AgentRuntimeId>
   ): Promise<AgentRuntimeCatalog> {
     if (this.options.providerStartupDisabledReason) {
       const refreshedAt = new Date().toISOString();
@@ -1944,18 +2206,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       userContext: await readTaskUserContext(this.store, input.task.id),
       task: input.task,
       worktree: input.worktree,
-      target: input.target
+      target: input.target,
+      previousReview: input.previousReview
     });
-    const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
+    const executionContext = await this.buildReadOnlyCheckoutContext(reviewRuntimeId, {
       sessionId: reviewSessionId,
-      primaryCwd: input.worktree.worktreePath,
-      readRoots: [
-        {
-          canonicalPath: input.worktree.worktreePath,
-          kind: 'WORKTREE',
-          entityId: input.worktree.id
-        }
-      ],
+      checkout: { path: input.worktree.worktreePath, kind: 'WORKTREE', worktreeId: input.worktree.id },
       modelSettings: settings,
       clientOperationId: reviewSessionOperationId,
       attachments: preflightAttachments
@@ -1995,23 +2251,124 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       taskReviewTarget: input.target,
       attachmentSelection: toAgentAttachmentSelection(preflightAttachments)
     });
-    const reviewSession = await this.taskRuntime.getAgentSession(prepared.session.id);
-    const reviewRun = await this.taskRuntime.getRun(prepared.run.id);
-    if (!reviewSession || !reviewRun) {
-      throw new Error('Prepared review did not project into its Task owner.');
-    }
-    await this.store.recordAgentSessionCreated(reviewSession);
-    await this.store.recordAgentRunStarted(reviewRun);
-    try {
-      const attachments = toAgentTurnAttachments(
+    return this.startPreparedTaskReadOnlyTurn(prepared, {
+      startOperationId: `review-start:${prepared.run.id}`,
+      unconfirmedReason: 'Task Monki could not confirm whether the review started.',
+      attachments: async () => toAgentTurnAttachments(
         await this.store.prepareRunAttachments(prepared.run.id, input.task.id)
-      );
+      )
+    });
+  }
+
+  /**
+   * Starts one side question on the shared read-only lane: a fresh SIDE session on the
+   * task's own runtime and model, reading either the live worktree or a read-only
+   * snapshot of it, so the repository comparison applies to the checkout it reads.
+   */
+  startSideQuestion(input: StartOrchestratedSideQuestion): Promise<RunRecord> {
+    const operation = this.startQueue.then(() => this.startSideQuestionSerially(input));
+    this.startQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
+  private async startSideQuestionSerially(
+    input: StartOrchestratedSideQuestion
+  ): Promise<RunRecord> {
+    this.assertProviderStartupAvailable();
+    if (input.task.kind !== 'NORMAL' || input.worktree.taskId !== input.task.id) {
+      throw new Error('A side question requires its task worktree.');
+    }
+    if (input.snapshotPath !== undefined && !this.options.ownsReadOnlySnapshot?.(input.snapshotPath)) {
+      throw new Error('A side question can read only a Task Monki read-only snapshot of its worktree.');
+    }
+    // The question runs on the runtime its request names, the task's by default.
+    const runtimeId = input.settings.runtimeId ?? input.task.runtimeId;
+    const adapter = this.runtimes.require(runtimeId);
+    const support = projectAgentExecutionSupport(await adapter.capabilities(), 'SIDE_QUESTION');
+    if (!support.supported) throw new Error(support.reason);
+    const settings = await this.validateSettings(adapter, { ...input.settings, runtimeId });
+    await this.assertCapacity();
+    const sessionId = input.sessionId;
+    if (await this.runtimeStore.getSession(sessionId)) {
+      throw new Error('Each side question needs a new session.');
+    }
+    const executionContext = await this.buildReadOnlyCheckoutContext(runtimeId, {
+      sessionId,
+      checkout: input.snapshotPath
+        ? { path: input.snapshotPath, kind: 'WORKTREE_SNAPSHOT', worktreeId: input.worktree.id }
+        : { path: input.worktree.worktreePath, kind: 'WORKTREE', worktreeId: input.worktree.id },
+      modelSettings: settings,
+      clientOperationId: `side-question-session:${input.task.id}:${sessionId}`,
+      attachments: []
+    });
+    const prepared = await this.prepareTurn({
+      sessionId,
+      runId: input.runId,
+      owner: { kind: 'TASK', taskId: input.task.id },
+      scope: {
+        kind: 'TASK',
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id
+      },
+      runtimeId,
+      model: settings.model ?? runtimeId,
+      purpose: 'TASK_SIDE_QUESTION',
+      generationKey: input.runId,
+      executionContext,
+      prompt: input.prompt,
+      priority: 'TASK_FOREGROUND',
+      clientOperationId: `side-question-run:${input.task.id}:${input.runId}`,
+      createdAt: new Date().toISOString(),
+      role: 'SIDE',
+      taskContext: {
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath
+      },
+      taskDetails: { eventCount: 0 },
+      attachmentSelection: []
+    });
+    this.sideAnswerRuns.add(prepared.run.id);
+    try {
+      return await this.startPreparedTaskReadOnlyTurn(prepared, {
+        startOperationId: `side-question-start:${prepared.run.id}`,
+        unconfirmedReason: 'Task Monki could not confirm whether the question started.',
+        attachments: async () => []
+      });
+    } catch (error) {
+      this.sideAnswerRuns.delete(prepared.run.id);
+      this.takeSideAnswerStream(prepared.run.id);
+      throw error;
+    }
+  }
+
+  /** Publishes a prepared read-only Task turn to its Task owner, then delivers it. */
+  private async startPreparedTaskReadOnlyTurn(
+    prepared: PreparedAgentRuntimeTurn,
+    options: {
+      startOperationId: string;
+      unconfirmedReason: string;
+      attachments: () => Promise<AgentTurnAttachment[]>;
+    }
+  ): Promise<RunRecord> {
+    const session = await this.taskRuntime.getAgentSession(prepared.session.id);
+    const run = await this.taskRuntime.getRun(prepared.run.id);
+    if (!session || !run) {
+      throw new Error('The prepared read-only turn did not project into its Task owner.');
+    }
+    await this.store.recordAgentSessionCreated(session);
+    await this.store.recordAgentRunStarted(run);
+    try {
       await this.startPreparedTurnNow(
         prepared.queueEntry.id,
-        `review-start:${prepared.run.id}`,
-        attachments
+        options.startOperationId,
+        await options.attachments()
       );
-      return (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+      return (await this.taskRuntime.getRun(prepared.run.id)) ?? run;
     } catch (error) {
       await this.runtimeTurnEventQueue;
       const canonical = await this.runtimeStore.getRun(prepared.run.id);
@@ -2022,14 +2379,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
           ...(canonical.providerTurnId
             ? { providerTurnId: canonical.providerTurnId }
             : {}),
-          reason:
-            canonical.terminalReason ??
-            'Task Monki could not confirm whether the review started.',
+          reason: canonical.terminalReason ?? options.unconfirmedReason,
           observedAt: canonical.lastEventAt ?? new Date().toISOString()
         });
         throw error;
       }
-      const projected = (await this.taskRuntime.getRun(prepared.run.id)) ?? reviewRun;
+      const projected = (await this.taskRuntime.getRun(prepared.run.id)) ?? run;
       await this.recordStartFailure(projected, error);
       if (canonical && isTerminalRuntimeRun(canonical.status)) {
         await this.finishRuntimeTurn(canonical.id);
@@ -2091,10 +2446,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       return;
     }
     const canonical = await this.runtimeStore.getRun(run.id);
-    if (canonical?.purpose === 'TASK_REVIEW') {
+    if (canonical && isTaskReadOnlyTurnPurpose(canonical.purpose)) {
       const interrupted = await this.interruptTurn(
         run.id,
-        'The review was canceled.',
+        canonical.purpose === 'TASK_SIDE_QUESTION' ? 'The question was stopped.' : 'The review was canceled.',
         `cancel-shared-review:${run.id}`
       );
       if (interrupted.status === 'RECOVERY_REQUIRED') {
@@ -2304,6 +2659,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   async shutdown(): Promise<void> {
     for (const dispose of this.disposeRuntimeTurnListeners.splice(0)) dispose();
     this.runtimeTurnListeners.clear();
+    this.sideAnswerRuns.clear();
+    for (const runId of [...this.sideAnswerStreams.keys()]) this.takeSideAnswerStream(runId);
     await this.runtimeTurnEventQueue;
     await this.runtimes.shutdownAll();
   }
@@ -2320,15 +2677,27 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
   }
 
-  /** Ordinary task adapters publish terminal events; verify Preview before its queue advances. */
-  async verifyPreviewRepositoryBoundary(runId: string): Promise<void> {
+  /**
+   * Ordinary task adapters publish terminal events; verify Preview before its queue advances.
+   * Returns why the worktree is not verified unchanged, after failing the run, or nothing when
+   * it is unchanged.
+   */
+  async verifyPreviewRepositoryBoundary(runId: string): Promise<string | undefined> {
     const run = await this.runtimeStore.getRun(runId);
-    if (!run || run.purpose !== 'TASK_PREVIEW' || !isTerminalRuntimeRun(run.status)) return;
+    if (!run || run.purpose !== 'TASK_PREVIEW' || !isTerminalRuntimeRun(run.status)) return undefined;
+    const completedAt = run.endedAt ?? run.lastEventAt ?? run.createdAt;
     await this.verifyReadOnlyRuntimeBoundary({
       type: 'TERMINAL', runId, providerTurnId: run.providerTurnId ?? run.id,
       status: run.status === 'COMPLETED' ? 'completed' : run.status === 'INTERRUPTED' ? 'interrupted' : 'failed',
-      completedAt: run.endedAt ?? run.lastEventAt ?? run.createdAt
+      completedAt
     });
+    const verified = await this.runtimeStore.getRun(runId);
+    if (!verified || verified.repositoryIntegrity?.status === 'UNCHANGED') return undefined;
+    const reason = verified.repositoryIntegrity?.detail ??
+      'Task Monki could not verify the repository boundary for this read-only turn.';
+    // An earlier check can have recorded the violation without failing the run.
+    if (verified.status !== 'FAILED') await this.failRuntimeRunAfterIntegrityViolation(verified, reason, completedAt);
+    return reason;
   }
 
   private async startProviderTurn(
@@ -2578,10 +2947,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     mode?: AgentRunMode
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
-      assertBrowserDevRuntimeIsolation(
-        adapter.descriptor,
-        await adapter.capabilities()
-      );
+      const capabilities = await adapter.capabilities();
+      assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
+      // Names the reason instead of the approval policy the person cannot change.
+      if (mode === 'PREVIEW') throw new Error(BROWSER_DEV_PREVIEW_AGENT_MESSAGE);
     }
     const resolved = await adapter.resolveExecution({ settings, attachments });
     const resolvedSettings = resolved.settings;
@@ -2999,4 +3368,21 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       at: new Date().toISOString()
     });
   }
+}
+
+/**
+ * A checkout path with its parent folders resolved. Worktrees can sit under a symlinked
+ * folder (on macOS the temporary folder /var links to /private/var) and runtimes accept
+ * only canonical directories. The checkout folder itself is kept as named, so a checkout
+ * that is itself a symlink still reaches the runtime's own canonical-directory check.
+ */
+async function canonicalCheckoutPath(checkout: string): Promise<string> {
+  const resolved = path.resolve(checkout);
+  const missing = () => new Error(`The task checkout is missing: ${resolved}`);
+  const parent = await realpath(path.dirname(resolved)).catch(() => {
+    throw missing();
+  });
+  const canonical = path.join(parent, path.basename(resolved));
+  if (!(await lstat(canonical).catch(() => undefined))) throw missing();
+  return canonical;
 }

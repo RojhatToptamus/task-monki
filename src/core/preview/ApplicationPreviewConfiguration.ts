@@ -164,14 +164,14 @@ export function reconcileRetainedConfiguration(
         continue;
       if (entry !== undefined && !isDeepStrictEqual(saved[key], entry)) {
         document.setIn([...prefix, key], entry);
-        changes.push(`${id} · ${key}`);
+        changes.push(`${key} in ${id}`);
       }
     }
     const bindings = 'bindings' in node ? node.bindings : undefined;
     for (const [key, binding] of Object.entries(bindings ?? {})) {
       if (!isDeepStrictEqual(saved.env?.[key], binding)) {
         document.setIn([...prefix, 'env', key], binding);
-        changes.push(`${id} · ${key}`);
+        changes.push(`${key} in ${id}`);
       }
     }
     const keys =
@@ -182,7 +182,7 @@ export function reconcileRetainedConfiguration(
           : undefined;
     for (const key of keys ?? [])
       if (!(key in (bindings ?? {})) && !(key in (saved.env ?? {})))
-        concealedKeys.push(`${id} · ${key}`);
+        concealedKeys.push(`${key} in ${id}`);
   }
   return changes.length || concealedKeys.length
     ? { text: document.toString(), changes, concealedKeys }

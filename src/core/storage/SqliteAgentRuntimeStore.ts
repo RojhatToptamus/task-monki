@@ -4054,8 +4054,32 @@ function taskSessionCwdMatches(session: AgentRuntimeSessionRecord): boolean {
   const { primaryCwd, repositoryAccess } = session.executionContext;
   if (worktreePath === primaryCwd) return true;
   if (!worktreePath || repositoryAccess !== 'READ_ONLY') return false;
+  if (readsTaskWorktreeSnapshot(session)) return true;
   const canonicalWorktree = canonicalPath(worktreePath);
   return canonicalWorktree !== undefined && canonicalWorktree === canonicalPath(primaryCwd);
+}
+
+/**
+ * A side question can read a disposable read-only snapshot of its task worktree instead of
+ * the live checkout. Its only read root names that snapshot and the task worktree it copies;
+ * provider subagents inherit that context. The comparison is lexical: the snapshot is
+ * removed when its thread ends. Snapshots are laid out as `<snapshot root>/<taskId>/<threadId>`
+ * (ReadOnlySnapshotService), so the root must sit in a folder named for the session's task.
+ * The snapshot root itself is runtime configuration and the profile can move, so admission
+ * checks it (AgentOrchestrator) and loading does not.
+ */
+function readsTaskWorktreeSnapshot(session: AgentRuntimeSessionRecord): boolean {
+  const roots = session.executionContext.readRoots;
+  const snapshot = roots[0] ? path.resolve(roots[0].canonicalPath) : undefined;
+  return (
+    roots.length === 1 &&
+    roots[0]!.kind === 'WORKTREE_SNAPSHOT' &&
+    roots[0]!.entityId === session.taskContext?.worktreeId &&
+    session.owner.kind === 'TASK' &&
+    snapshot !== undefined &&
+    path.basename(path.dirname(snapshot)) === session.owner.taskId &&
+    snapshot === path.resolve(session.executionContext.primaryCwd)
+  );
 }
 
 function validateState(state: AgentRuntimeStoreState): void {
@@ -4999,7 +5023,9 @@ function runtimeRunUpdate(
       existing.delivery === 'ACKNOWLEDGED' || existing.delivery === 'TERMINAL'
       ? 'TERMINAL'
       : 'NOT_DELIVERED';
-    result.endedAt = update.endedAt ?? occurredAt;
+    // A later update to a settled run, such as its post-run Git snapshot, keeps
+    // the recorded completion time; only the transition into terminal sets it.
+    result.endedAt = update.endedAt ?? existing.endedAt ?? occurredAt;
     if (existing.interruptDelivery) result.interruptDelivery = 'TERMINAL';
   }
   return result;
@@ -5012,6 +5038,7 @@ function taskPurposeFromMode(mode: AgentRunMode): AgentRuntimeRunRecord['purpose
     case 'FOLLOW_UP': return 'TASK_FOLLOW_UP';
     case 'RETRY': return 'TASK_RETRY';
     case 'REVIEW': return 'TASK_REVIEW';
+    case 'SIDE_QUESTION': return 'TASK_SIDE_QUESTION';
     case 'DESIGN': return 'TASK_DESIGN';
     case 'PREVIEW': return 'TASK_PREVIEW';
     case 'COMPACTION': return 'TASK_COMPACTION';
@@ -5028,6 +5055,7 @@ function taskModeFromPurpose(
     case 'TASK_FOLLOW_UP': return 'FOLLOW_UP';
     case 'TASK_RETRY': return 'RETRY';
     case 'TASK_REVIEW': return 'REVIEW';
+    case 'TASK_SIDE_QUESTION': return 'SIDE_QUESTION';
     case 'TASK_DESIGN': return 'DESIGN';
     case 'TASK_PREVIEW': return 'PREVIEW';
     case 'TASK_COMPACTION': return 'COMPACTION';

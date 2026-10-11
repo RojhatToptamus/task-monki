@@ -8,8 +8,9 @@ import { previewFolderUsage, type PreviewWorktreeAvailability } from '../../mode
 import type { PreviewConfigurationChange } from '../../model/previewConfigurationChanges';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { DecisionBlock } from '../DecisionBlock';
-import { basename, CopyPath, DisclosureSummary, expected, GroupLabel, message, parentPath, PreviewRunReview, Row, shortenPath, usePreviewNotify } from './previewPresentation';
+import { basename, CopyPath, DisclosureSummary, expected, GroupLabel, message, parentPath, PreviewRunReview, Row, shortenPath } from './previewPresentation';
 import { PreviewSecretDialog } from './PreviewSecretDialog';
+import { useNotify } from '../NotifyContext';
 
 /** The worktree is gone, broken or not yet created: the block carries the consent the restore needs. The primary is in the status row. */
 export function PreviewWorktreeBlock({ worktree, availability }: { worktree?: WorktreeRecord; availability: Exclude<PreviewWorktreeAvailability, { state: 'available' }> }) {
@@ -32,7 +33,7 @@ export function PreviewWorktreeBlock({ worktree, availability }: { worktree?: Wo
     <DecisionBlock
       kind={kind}
       tone={availability.pending ? 'info' : 'error'}
-      meta={worktree ? `${commit ?? ''}${commit ? ' · ' : ''}${worktree.branchName}` : undefined}
+      meta={worktree ? `${worktree.branchName}${commit ? ` at ${commit}` : ''}` : undefined}
       title={title}
       summary={summary}
       details={
@@ -62,7 +63,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   onSecretReferences(references: string[] | undefined): void;
   refresh(): void;
 }) {
-  const notify = usePreviewNotify();
+  const notify = useNotify();
   const [chosenFolders, setChosenFolders] = useState<Record<string, string>>({});
   const [allSecrets, setAllSecrets] = useState(false);
   // "Add all values" decides the form once: saving one value makes it available on the next poll,
@@ -95,7 +96,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   const missingTools = prerequisites.filter((item) => item.status === 'missing');
   const unverified = prerequisites.filter((item) => item.status !== 'missing');
   const recipients = (secret: (typeof requirements.secrets)[number]) =>
-    secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`).join(', ');
+    secret.bindings.map((binding) => `${binding.key} in ${binding.service ?? 'the application'}`).join(', ');
   const openSecret = secretReferences?.length === 1 ? secretReferences[0] : undefined;
   const inlineSecret = secretReferences && (secretReferences.length === 0
     ? storageNeeded
@@ -110,7 +111,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
       inline
       sequence={sequence}
       references={secretReferences}
-      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`)]))}
+      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.key} in ${binding.service ?? 'the application'}`)]))}
       labels={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, [...new Set(secret.bindings.map((binding) => binding.key))].join(', ')]))}
       onClose={() => {
         onSecretReferences(undefined);
@@ -139,7 +140,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                   key={key}
                   name={<code>{basename(directory)}</code>}
                   title={directory}
-                  detail={<span className="tm-preview-path" title={directory}>{missing ? 'Not found · ' : ''}{shortenPath(parentPath(directory))}</span>}
+                  detail={<span className="tm-preview-path" title={directory}>{missing ? 'Not found in ' : ''}{shortenPath(parentPath(directory))}</span>}
                   end={
                     missing ? (
                       <button
@@ -199,7 +200,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                 className="tm-preview-row--line"
                 name="Secret storage"
                 expansion={secretReferences?.length === 0 ? secretForm : undefined}
-                detail={<span title={storageFor.length ? `Needed for ${storageFor.join(', ')}` : undefined}>{storage?.state === 'new' ? 'Not set up on this Mac' : 'Locked'}{storageNeeds ? ` · needed for ${storageNeeds}` : ''}</span>}
+                detail={<span title={storageFor.length ? `Needed for ${storageFor.join(', ')}` : undefined}>{storage?.state === 'new' ? 'Not set up on this Mac' : 'Locked'}{storageNeeds ? `, needed for ${storageNeeds}` : ''}</span>}
                 end={
                   <button className="outline-button tm-preview-row-button" onClick={() => onSecretReferences([])}>
                     {storage?.state === 'new' ? 'Set up storage' : 'Unlock storage'}
@@ -244,7 +245,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
       ) : null}
       {unverified.length ? (
         <details className="tm-preview-disclosure">
-          <DisclosureSummary>Other checks · {unverified.length}</DisclosureSummary>
+          <DisclosureSummary>{unverified.length} other {unverified.length === 1 ? 'check' : 'checks'}</DisclosureSummary>
           <div className="tm-preview-rows">
             {unverified.map((item, i) => <Row key={i} name={item.service ?? item.requirement} detail={item.message} end="Checked at start" />)}
           </div>
@@ -331,7 +332,7 @@ export function PreviewDiagnosisBlock({ diagnosis, meta, primary, secondary, mor
         <>
           <button className="outline-button" disabled={primary.disabled} title={primary.disabledReason} onClick={primary.onSelect}>{primary.label}</button>
           {secondary ? <button className="ghost-button" disabled={secondary.disabled} title={secondary.disabledReason} onClick={secondary.onSelect}>{secondary.label}</button> : null}
-          <ActionMenu label="More recovery actions" trigger={<>More<ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" /></>} items={more} />
+          <ActionMenu label="More recovery actions" trigger={<>More<ChevronDown size={13} aria-hidden="true" /></>} items={more} />
         </>
       }
       details={
@@ -346,7 +347,7 @@ export function PreviewDiagnosisBlock({ diagnosis, meta, primary, secondary, mor
       {diagnosis.excerpt ? (
         <div className="tm-preview-excerpt">
           <div className="tm-preview-excerpt__bar">
-            <span>{diagnosis.service ?? 'Application'} · last output</span>
+            <span>{diagnosis.service ? `Last output from ${diagnosis.service}` : 'Last output'}</span>
             <button className="ghost-button" onClick={onOpenLogs}>Open in Logs</button>
           </div>
           <pre>{diagnosis.excerpt}</pre>

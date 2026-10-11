@@ -13,6 +13,7 @@ import {
 } from '../model/designs';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { StatusGlyph } from './StatusBadge';
+import { Tooltip } from './Tooltip';
 import {
   UiDesktopIcon,
   UiExternalLinkIcon,
@@ -44,6 +45,8 @@ export interface DesignCanvasProps {
   occluded?: boolean;
   setup?: ReactNode;
   setupRequired?: boolean;
+  /** The conversation beside the canvas already states why an update failed. */
+  conversationVisible?: boolean;
   onShowCanvas?(request: DesignCanvasShowRequest): void | Promise<void>;
   onHideCanvas?(request: DesignCanvasHideRequest): void;
   onRefresh(request: DesignCanvasRefreshRequest): Promise<void>;
@@ -67,6 +70,7 @@ export function DesignCanvas({
   occluded = false,
   setup,
   setupRequired = false,
+  conversationVisible = false,
   onShowCanvas,
   onHideCanvas,
   onRefresh,
@@ -103,6 +107,15 @@ export function DesignCanvas({
   const sourceFile =
     project.projectFiles.find((file) => file.path.endsWith('/index.html') || file.path === 'index.html') ??
     project.projectFiles[0];
+  const footerSource = displayedTarget ? (
+    <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
+      {displayedTarget.routeId}{displayedTarget.entryPath}
+    </span>
+  ) : sourceFile && !viewingEarlierRevision ? (
+    <span className="tm-design-canvas__source" title={`${sourceFile.path}, ${formatAttachmentBytes(sourceFile.byteCount)}`}>
+      {sourceFile.path}
+    </span>
+  ) : null;
   const canvasStatus = canvasStatusView(
     project,
     activeOrdinal,
@@ -241,7 +254,7 @@ export function DesignCanvas({
   ) : (
     <div className="tm-design-canvas__placeholder" aria-live="polite">
       <strong>{presentation.title}</strong>
-      <span>{presentation.detail}</span>
+      {presentation.kind === 'PLACEHOLDER' && presentation.failed && conversationVisible ? null : <span>{presentation.detail}</span>}
       {presentation.kind === 'PLACEHOLDER' && presentation.restart ? (
         <button
           type="button"
@@ -273,7 +286,7 @@ export function DesignCanvas({
       <header className="tm-design-canvas__toolbar">
         {setupVisible ? <strong className="tm-design-canvas__setup-title">Preview setup</strong> : <nav className="tm-design-canvas__versions" aria-label="Design versions">
           {project.revisions.length === 0 ? (
-            <span aria-current="true">v1</span>
+            presentation.kind === 'NATIVE' ? <span aria-current="true">v1</span> : null
           ) : project.revisions.map((revision) => {
             const selected =
               !previewInProgress && revision.id === selectedRevision?.id;
@@ -314,7 +327,7 @@ export function DesignCanvas({
         <div className="tm-design-canvas__tools">
           {setup ? <button
             type="button"
-            className="outline-button"
+            className="outline-button button--sm"
             aria-expanded={setupVisible}
             aria-controls="design-preview-setup"
             onClick={() => setSetupOpen(!setupVisible)}
@@ -322,13 +335,12 @@ export function DesignCanvas({
             {setupVisible ? 'Back to preview' : 'Preview setup'}
           </button> : null}
           {!setupVisible ? <>
-          <div className="tm-design-canvas__devices" role="group" aria-label="Canvas device">
+          <div className="segmented tm-design-canvas__devices" role="group" aria-label="Canvas device">
             {DEVICE_OPTIONS.map((option) => (
-              <button
+              <Tooltip key={option.id} label={option.label}><button
                 type="button"
-                key={option.id}
+                className="segmented__btn"
                 aria-label={option.label}
-                title={option.label}
                 aria-pressed={device === option.id}
                 onClick={() => setDevice(option.id)}
               >
@@ -337,25 +349,23 @@ export function DesignCanvas({
                   : option.id === 'tablet'
                     ? <UiTabletIcon />
                     : <UiPhoneIcon />}
-              </button>
+              </button></Tooltip>
             ))}
           </div>
           <span className="tm-design-canvas__device-size">{selectedDevice.size}</span>
-          <button
+          <Tooltip label="Reload preview"><button
             type="button"
-            className="tm-design-canvas__tool"
+            className="tm-iconbtn tm-design-canvas__tool"
             aria-label="Reload preview"
-            title="Reload preview"
             disabled={!generationId || operation !== undefined}
             onClick={() => void refreshPreview()}
           >
-            <UiRefreshIcon busy={operation === 'refresh'} />
-          </button>
-          <button
+            <UiRefreshIcon />
+          </button></Tooltip>
+          <Tooltip label="Open preview in browser"><button
             type="button"
-            className="tm-design-canvas__tool"
+            className="tm-iconbtn tm-design-canvas__tool"
             aria-label="Open preview in browser"
-            title="Open preview in browser"
             disabled={
               !generationId ||
               !routeId ||
@@ -370,7 +380,7 @@ export function DesignCanvas({
             )}
           >
             <UiExternalLinkIcon />
-          </button>
+          </button></Tooltip>
           </> : null}
         </div>
       </header>
@@ -381,7 +391,7 @@ export function DesignCanvas({
           <div>
             <button
               type="button"
-              className="outline-button"
+              className="outline-button button--sm"
               disabled={operation !== undefined}
               onClick={() => void runOperation(
                 'select',
@@ -393,7 +403,7 @@ export function DesignCanvas({
             </button>
             {project.actions.canRestore ? <button
               type="button"
-              className="primary-button"
+              className="primary-button button--sm"
               aria-label={`Restore version ${selectedRevision.ordinal} as a new version`}
               disabled={operation !== undefined}
               onClick={() => void runOperation(
@@ -414,26 +424,15 @@ export function DesignCanvas({
         </div>
       </div>}
 
-      <footer className="tm-design-canvas__footer">
-        <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
+      {canvasStatus || footerSource || selectedRevision ? <footer className="tm-design-canvas__footer">
+        {canvasStatus ? <span className="tm-design-canvas__state" data-tone={canvasStatus.tone}>
           <StatusGlyph kind={canvasStatus.tone} />
           {canvasStatus.label}
-        </span>
-        {displayedTarget ? <span className="tm-design-canvas__source" title={`${displayedTarget.routeId}${displayedTarget.entryPath}`}>
-          {displayedTarget.routeId}{displayedTarget.entryPath}
-        </span> : sourceFile && !viewingEarlierRevision ? (
-          <>
-            <span aria-hidden="true">·</span>
-            <span className="tm-design-canvas__source" title={sourceFile.path}>
-              {sourceFile.path} · {formatAttachmentBytes(sourceFile.byteCount)}
-            </span>
-          </>
-        ) : null}
+        </span> : null}
+        {footerSource}
         <span className="tm-design-canvas__footer-spacer" />
-        <time dateTime={selectedRevision?.createdAt ?? project.design.updatedAt}>
-          {formatDesignUpdatedAt(selectedRevision?.createdAt ?? project.design.updatedAt)}
-        </time>
-      </footer>
+        {selectedRevision ? <time dateTime={selectedRevision.createdAt}>{formatDesignUpdatedAt(selectedRevision.createdAt)}</time> : null}
+      </footer> : null}
       {error ? <p className="tm-design-canvas__error" role="alert">{error}</p> : null}
     </section>
   );
@@ -443,29 +442,28 @@ function canvasStatusView(
   project: DesignProjectDetail,
   ordinal: number,
   viewedOrdinal?: number
-): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' | 'blocked' } {
+): { label: string; tone: 'idle' | 'working' | 'waiting' | 'verified' } | undefined {
   if (viewedOrdinal !== undefined) {
     return { label: `v${viewedOrdinal} preview`, tone: 'idle' };
   }
   if (project.canvas.state === 'PREVIEWING') {
     const candidateOrdinal = project.revisions.length === 0 ? 1 : ordinal + 1;
-    return { label: `checking v${candidateOrdinal}`, tone: 'working' };
+    return { label: `Checking v${candidateOrdinal}`, tone: 'working' };
   }
   const status = designProjectStatus(project);
   if (status === 'STARTING' || status === 'RUNNING') {
-    return { label: `building v${ordinal}`, tone: 'working' };
+    return { label: `Building v${ordinal}`, tone: 'working' };
   }
   if (status === 'UPDATING') {
-    return { label: `rebuilding v${ordinal + 1}`, tone: 'working' };
+    return { label: `Rebuilding v${ordinal + 1}`, tone: 'working' };
   }
   if (status === 'READY') {
     return { label: `v${ordinal} ready`, tone: 'verified' };
   }
   if (status === 'NEEDS_INPUT') {
-    return { label: 'waiting for input', tone: 'waiting' };
+    return { label: 'Waiting for input', tone: 'waiting' };
   }
-  if (status === 'NEEDS_ATTENTION') {
-    return { label: 'preview needs attention', tone: 'blocked' };
-  }
+  // The Design's own status already says it needs attention.
+  if (status === 'NEEDS_ATTENTION') return undefined;
   return { label: `v${ordinal} archived`, tone: 'idle' };
 }

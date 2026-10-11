@@ -31,8 +31,8 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
-import { ArrowUp, CornerDownRight, RotateCcw, Square } from 'lucide-react';
-import { StatusGlyph } from './StatusBadge';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
+import { ArrowUp, RotateCcw, Square } from 'lucide-react';
 
 export interface DesignConversationProps {
   project: DesignProjectDetail;
@@ -331,7 +331,7 @@ export function DesignConversation({
           <p className="tm-design-conversation__origin">
             Copied from {project.origin.designTitle ?? 'an earlier Design'}
             {project.origin.revisionOrdinal
-              ? ` · Ready state ${project.origin.revisionOrdinal}`
+              ? `, Ready state ${project.origin.revisionOrdinal}`
               : ''}
           </p>
         ) : null}
@@ -441,15 +441,14 @@ export function DesignConversation({
           attachmentLabel="Files for this Design message"
           className="tm-design-composer__shell"
           removeDisabled={submitting || submissionOutcomeUnknown}
-          addButtonTitle="Add read-only references to this Design message."
-          addButtonLabel="Reference"
+          addButtonLabel="Attach"
           onAddButtonClick={onOpenReferences}
           toolbarAction={
             <>
               {project.actions.canStop && project.actions.stopTurnId ? (
                 <button
                   type="button"
-                  className="ghost-button tm-composer-action"
+                  className="outline-button tm-composer-action"
                   aria-label={stopping ? 'Stopping' : 'Stop'} title="Stop response"
                   disabled={stopping}
                   onClick={() => {
@@ -462,15 +461,17 @@ export function DesignConversation({
                       .finally(() => setStopping(false));
                   }}
                 >
-                  {stopping ? <StatusGlyph kind="working" /> : <Square size={14} strokeWidth={1.5} aria-hidden="true" />}
+                  <Square size={13} aria-hidden="true" />
                 </button>
               ) : null}
-              {!questionPending ? <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
-                aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
-                title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
-                {submitting ? <StatusGlyph kind="working" /> : submissionOutcomeUnknown ? <RotateCcw size={16} strokeWidth={1.5} aria-hidden="true" />
-                  : activeWork ? <CornerDownRight size={16} strokeWidth={1.5} aria-hidden="true" /> : <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />}
-              </button> : null}
+              {!questionPending ? <Tooltip label={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response' : 'Send'}
+                shortcut={submissionOutcomeUnknown ? undefined : SUBMIT_SHORTCUT} side="top">
+                <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
+                  aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}>
+                  {submissionOutcomeUnknown ? <RotateCcw size={16} aria-hidden="true" />
+                    : <ArrowUp size={16} aria-hidden="true" />}
+                </button>
+              </Tooltip> : null}
             </>
           }
           hint={<span id="design-refinement-help">{
@@ -481,8 +482,8 @@ export function DesignConversation({
                 : attachments.activeItems.length > 0
                   ? `${attachments.activeItems.length} ${
                       attachments.activeItems.length === 1 ? 'new file' : 'new files'
-                    } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : '⌘ Enter')
+                    }, ${formatAttachmentBytes(attachments.byteCount)}`
+                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : SUBMIT_SHORTCUT)
           }</span>}
         >
           <MessageQueue items={pending.map((entry) => ({ id: entry.turn.id, text: entry.userMessage,
@@ -505,7 +506,7 @@ export function DesignConversation({
             rows={3}
             readOnly={questionPending}
             aria-disabled={questionPending || undefined}
-            placeholder={questionPending ? questionPrompt : activeWork ? 'Queue a message for after this response' : 'Describe the next change…'}
+            placeholder={questionPending ? questionPrompt : activeWork ? 'Queue a message for after this response' : 'Describe the next change'}
             disabled={
               !canRefine ||
               submitting ||
@@ -593,12 +594,9 @@ function DesignTurnMessages({
 
       {entry.userInputInteractions?.filter((interaction) => !['PENDING', 'RESPONDING'].includes(interaction.status))
         .map((interaction) => <UserInputSummary key={interaction.id} interaction={interaction} />)}
-      <Message from="agent" label="Design agent" className={`tm-design-message--${view.status.toLowerCase()}`}>
+      <Message from="agent" label="Design agent">
         {entry.assistantMessage ? (
           <MessageContent><MessageMarkdown text={entry.assistantMessage} /></MessageContent>
-        ) : null}
-        {view.detail ? (
-          <p className="tm-design-message__detail">{view.detail}</p>
         ) : null}
         <MessageMeta className="tm-design-message__ready-actions">
           <span className="tm-design-message__turn-status" data-tone={view.tone}>
@@ -615,6 +613,9 @@ function DesignTurnMessages({
             />
           ) : null}
         </MessageMeta>
+        {view.detail ? (
+          <p className="tm-design-message__detail">{view.detail}</p>
+        ) : null}
       </Message>
     </article>
   );

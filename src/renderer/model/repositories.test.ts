@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Repository, Task } from '../../shared/contracts';
 import {
+  abbreviateHomePath,
   buildRepositoryOptions,
   filterRepositoryOptions,
   resolveRepositorySetupState,
@@ -152,3 +153,12 @@ function taskFixture(id: string, repositoryId: string): Task {
     }
   };
 }
+
+describe('abbreviateHomePath', () => {
+  it('writes only a leading home folder as ~ on each platform', () => {
+    expect(abbreviateHomePath('/Users/ada/code/acme-api')).toBe('~/code/acme-api');
+    expect(abbreviateHomePath('/home/ada/code/acme-api')).toBe('~/code/acme-api');
+    expect(abbreviateHomePath('C:\\Users\\ada\\code\\acme-api')).toBe('~\\code\\acme-api');
+    expect(abbreviateHomePath('/opt/Users/ada/acme-api')).toBe('/opt/Users/ada/acme-api');
+  });
+});

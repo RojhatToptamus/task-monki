@@ -5,7 +5,7 @@ import type {
   AgentItemRecord, AgentPlanRevisionRecord, InteractionRequestRecord, RunRecord, TaskAttachmentRecord, TaskInstruction
 } from '../../shared/contracts';
 import type { AttachmentContent } from '../../shared/attachments';
-import { formatElapsed, isActiveRunStatus, planMarker, sessionTurn, turnOutcomeLabel, type SessionTurn } from '../model/agentSession';
+import { formatElapsed, isActiveRunStatus, planMarker, sessionTurn, turnOutcomeLabel, workedMs, type PersonWait, type SessionTurn } from '../model/agentSession';
 import type { RunFailureBannerViewModel } from '../model/taskView';
 import { ActionMenu } from './ActionMenu';
 import { ActivitySteps } from './ActivitySteps';
@@ -13,7 +13,9 @@ import { StoredAttachmentChip } from './AttachmentChip';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
 import { MessageMarkdown } from './MessageMarkdown';
 import { PlanCard } from './Plan';
+import { ReviewAnswers, ReviewRequestCard } from './ReviewRound';
 import { UserInputSummary } from './UserInputSummary';
+import { ReportedQuote } from './ReportedQuote';
 
 /**
  * Projects each run into a turn. Task detail arrives as a fresh snapshot on
@@ -80,10 +82,12 @@ function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]
 type ReadAttachment = (id: string) => Promise<AttachmentContent>;
 
 /** One run as the person sees it: the opener, the agent's messages and steps, then the outcome. */
-export function Turn({ turn, clip = 0, failure, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment }: {
+export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtifact, onShowDebug, attachments = [], onReadAttachment }: {
   turn: SessionTurn;
   clip?: number;
   failure?: RunFailureBannerViewModel;
+  /** Who recorded the run's own reason, so it is quoted under that name. */
+  sourceName?: string;
   capture?: ReactNode;
   onReadArtifact?: (id: string) => Promise<string>;
   onShowDebug?(): void;
@@ -94,27 +98,34 @@ export function Turn({ turn, clip = 0, failure, capture, onReadArtifact, onShowD
   const live = turn.state === 'active';
   return <div className="tm-turn">
     {turn.opener && !clip ? turn.opener.kind === 'prompt'
-      ? <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
+      ? turn.opener.reviewRequest
+        ? <ReviewRequestCard request={turn.opener.reviewRequest} time={turn.opener.at} />
+        : <UserMessage text={turn.opener.text} time={turn.opener.at} attachments={attachments} onReadAttachment={onReadAttachment} />
       : <Message from="user" className="tm-message--action">
         <span className="tm-message__action">{turn.opener.label === 'Retried'
-          ? <RotateCcw size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />
-          : <Play size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />}{turn.opener.label}</span>
+          ? <RotateCcw size={13} aria-hidden="true" />
+          : <Play size={13} aria-hidden="true" />}{turn.opener.label}</span>
         <MessageMeta><MessageTime value={turn.opener.at} /></MessageMeta>
       </Message> : null}
     {entries.map((entry, index) => {
       if (entry.kind === 'message') return entry.author === 'You'
         ? <UserMessage key={entry.key} text={entry.text} time={entry.at} status={entry.status} />
-        : <Message key={entry.key} from="agent" label="Agent response"><MessageContent><MessageMarkdown text={entry.text} /></MessageContent></Message>;
+        : <Message key={entry.key} from="agent" label="Agent response"><MessageContent>
+          {entry.text ? <MessageMarkdown text={entry.text} /> : null}
+          {entry.answers && turn.opener?.kind === 'prompt' && turn.opener.reviewRequest
+            ? <ReviewAnswers request={turn.opener.reviewRequest} answers={entry.answers} /> : null}
+        </MessageContent></Message>;
       if (entry.kind === 'interaction') return <UserInputSummary key={entry.key} interaction={entry.interaction} />;
       if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
     })}
     {failure ? <div className="tm-turn__notice" data-status={failure.status}>
-      <CircleAlert size={16} strokeWidth={1.5} absoluteStrokeWidth aria-hidden="true" />
-      <div><strong>{failure.title}</strong><p>{failure.detail}</p></div>
+      <CircleAlert size={16} aria-hidden="true" />
+      <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
+        {failure.reportedReason ? <ReportedQuote className="tm-turn__reported" source={sourceName ?? 'Agent'}>{failure.reportedReason}</ReportedQuote> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}
-    {live ? null : <TurnFooter turn={turn} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
+    {live ? null : <TurnFooter turn={turn} noticeShown={Boolean(failure)} onReadArtifact={onReadArtifact} onShowDebug={onShowDebug} />}
   </div>;
 }
 
@@ -132,11 +143,16 @@ export function UserMessage({ text, time, status, attachments, onReadAttachment 
   </Message>;
 }
 
-function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
-  turn: SessionTurn; onReadArtifact?: (id: string) => Promise<string>; onShowDebug?(): void;
+function TurnFooter({ turn, noticeShown, onReadArtifact, onShowDebug }: {
+  turn: SessionTurn;
+  /** The notice above already names how the run ended; only a duration adds to it. */
+  noticeShown: boolean;
+  onReadArtifact?: (id: string) => Promise<string>;
+  onShowDebug?(): void;
 }) {
   const [prompt, setPrompt] = useState<{ open: boolean; text?: string; error?: string }>({ open: false });
   const end = turn.run.endedAt ?? turn.run.lastEventAt;
+  const outcome = noticeShown && (turn.durationMs ?? 0) < 1000 ? undefined : turnOutcomeLabel(turn);
   const promptArtifactId = turn.run.promptArtifactId;
   const showPrompt = () => {
     if (prompt.open) { setPrompt((current) => ({ ...current, open: false })); return; }
@@ -152,10 +168,10 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
   ];
   return <>
     <div className="tm-turn__footer">
-      <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{turnOutcomeLabel(turn)}</span>
-      {end ? <><span aria-hidden="true">·</span><MessageTime value={end} /></> : null}
-      {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={14} className="tm-iconbtn tm-turn__action" /> : null}
-      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" trigger={<MoreHorizontal size={16} strokeWidth={1.5} aria-hidden="true" />} items={details} /> : null}
+      {outcome ? <span className="tm-turn__outcome" data-state={turn.state} title={turn.state === 'completed' ? undefined : turn.run.terminalReason}>{outcome}</span> : null}
+      {end ? <MessageTime value={end} /> : null}
+      {turn.answer ? <CopyIconButton value={turn.answer} label="Copy response" size={13} className="tm-iconbtn tm-turn__action" /> : null}
+      {details.length ? <ActionMenu className="tm-turn-menu" label="Response details" tooltip="Response details" trigger={<MoreHorizontal size={13} aria-hidden="true" />} items={details} /> : null}
     </div>
     {prompt.open ? <section className="tm-turn__prompt" aria-label="Sent prompt">
       {prompt.error ? <p role="alert">{prompt.error}</p> : prompt.text === undefined ? <p>Loading prompt…</p> : <pre>{prompt.text}</pre>}
@@ -163,12 +179,47 @@ function TurnFooter({ turn, onReadArtifact, onShowDebug }: {
   </>;
 }
 
-export function Elapsed({ since }: { since: string }) {
-  const start = Date.parse(since);
+/**
+ * Messages no run carries yet: still sending, delivery uncertain, or refused
+ * before a run was admitted. A panel shows them after its turns.
+ */
+export function unattachedInstructions(instructions: readonly TaskInstruction[], runs: readonly { id: string }[]): TaskInstruction[] {
+  return instructions.filter((item) =>
+    !runs.some((run) => run.id === item.runId) && (item.status === 'SENDING' || item.status === 'UNCERTAIN' || (item.status === 'FAILED' && !item.runId))
+  );
+}
+
+/** Those messages, each with its delivery state. */
+export function UnattachedMessages({ instructions }: { instructions: readonly TaskInstruction[] }) {
+  return <>
+    {instructions.map((item) => (
+      <UserMessage
+        key={item.id}
+        text={item.text}
+        time={item.createdAt}
+        status={item.status === 'FAILED' ? item.detail ?? 'Not sent' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Sending…'}
+      />
+    ))}
+  </>;
+}
+
+/** The one live line while an agent works: what it is doing, and for how long. */
+export function WorkingLine({ label, since }: { label: string; since: string }) {
+  return (
+    <div className="tm-side-conversation__working">
+      <span role="status" className="tm-shimmer">{label}</span>
+      <Elapsed since={since} />
+    </div>
+  );
+}
+
+/** How long the work has run; time spent waiting on the person (`waits`) does not count. */
+export function Elapsed({ since, waits }: { since: string; waits?: readonly PersonWait[] }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  return Number.isFinite(start) ? <span className="tm-agent-session__elapsed" aria-hidden="true">{formatElapsed(now - start)}</span> : null;
+  const worked = workedMs(since, now, waits);
+  return worked !== undefined ? <span className="tm-agent-session__elapsed" aria-hidden="true">{formatElapsed(worked)}</span> : null;
 }

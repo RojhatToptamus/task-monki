@@ -39,7 +39,7 @@ export function DiscourseAgentSettings({
           return (
             <div className="tm-discourse-agent-config__agent" key={selection.agentProfileId}>
               <div className="tm-discourse-agent-config__identity">
-                <small>{index === 0 ? 'Main agent' : 'Peer · on request'}</small>
+                <small>{index === 0 ? 'Main agent' : 'Peer, on request'}</small>
               </div>
               <AgentModelSelector
                 presentation="compact"

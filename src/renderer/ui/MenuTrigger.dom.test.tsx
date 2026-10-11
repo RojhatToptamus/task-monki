@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { DesignProjectMenu, DesignReadyMenu } from './DesignActionsMenu';
 import { ActionMenu } from './ActionMenu';
 import { DiscourseModeMenu } from './DiscourseModeMenu';
-import { RepositorySwitcher } from './RepositorySwitcher';
 
 describe('Menu trigger dismissal', () => {
   it.each([
@@ -13,10 +12,7 @@ describe('Menu trigger dismissal', () => {
       onRestore={vi.fn()} onDuplicate={vi.fn()} />],
     ['Conversation actions', () => <ActionMenu className="tm-action-menu" label="Conversation actions"
       trigger="Options" items={[{ label: 'Archive', onSelect: vi.fn() }]} />],
-    ['Conversation mode', () => <DiscourseModeMenu value="CHAT" disabled={false} onChange={vi.fn()} />],
-    ['Repository selection', () => <RepositorySwitcher activeRepositoryId="" options={[]} collapsed={false} adding={false}
-      onSelect={vi.fn()} onAddRepository={vi.fn()} onRefreshRepository={vi.fn()}
-      onReconnectRepository={vi.fn()} onDisconnectRepository={vi.fn()} />]
+    ['Conversation mode', () => <DiscourseModeMenu value="CHAT" disabled={false} onChange={vi.fn()} />]
   ] as const)('%s closes when its trigger is clicked from the focused menu', async (_name, content) => {
     render(content());
     const trigger = screen.getByRole('button');

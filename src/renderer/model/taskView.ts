@@ -1,9 +1,11 @@
+import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
   BoardTaskSummary,
   DomainEvent,
   Repository,
+  RunRecord,
   Task,
   WorkflowPhase
 } from '../../shared/contracts';
@@ -12,42 +14,50 @@ import {
   getImplementationRetryReason
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
-import { formatShortId } from './selectors';
-import { buildBoardDeliveryParts } from './prStatus';
-import { describeTaskAttention, isAttentionTask, isInFlightTask } from './taskAttention';
+import {
+  describeAttentionStatus,
+  describeTaskAttention,
+  isAttentionTask,
+  isInFlightTask
+} from './taskAttention';
 import { humanizeEnum } from './formatting';
+import { hasPullRequest, isClosedPhase, isMerged, isReviewPhase } from './taskPhase';
 import type { Tone } from './viewTypes';
 
-/**
- * Tone palette shared by the standard status pill. Each maps to a semantic
- * `--<tone>` CSS variable and the `.status-pill--<tone>` class.
- */
-export interface CardEvidenceItem {
-  /** Mono value part (e.g. a PR reference), rendered before the label. */
-  value?: string;
-  /** Sans status words describing the delivery state. */
-  label: string;
-  tone?: Tone;
+/** A task's pull request as a board card shows it: GitHub's number and state. */
+export interface TaskCardPullRequest {
+  /** Undefined while the pull request is linked but not yet numbered. */
+  number?: number;
+  state: 'draft' | 'open' | 'merged' | 'closed';
+  /** Delivery progress the card's status word does not already say, e.g. "checks pending". */
+  note?: string;
 }
 
 export interface TaskCardVM {
   id: string;
   title: string;
   meta?: string;
-  /** Lineage cue for a forked task, e.g. "fork of #task-rev"; undefined otherwise. */
+  /** Lineage cue for a forked task, e.g. "Fork of Add rate limiting"; undefined otherwise. */
   lineage?: string;
   repositoryId: string;
   stateLabel: string;
   stateTone: Tone;
+  /** An agent run or the agent review is working; the only state that moves. */
+  stateInFlight: boolean;
   showState: boolean;
   archived: boolean;
-  evidence: CardEvidenceItem[];
+  pullRequest?: TaskCardPullRequest;
+  /** Review findings by severity, e.g. "1 blocker, 2 major"; the Review queue's triage signal. */
+  findings?: string;
 }
 
 export interface RunFailureBannerViewModel {
   status: 'FAILED' | 'LOST' | 'RECOVERY_REQUIRED' | 'NEEDS_RETRY';
   title: string;
-  detail: string;
+  /** A fact that changes the decision; the recovery actions already say what to do. */
+  detail?: string;
+  /** What the run itself recorded, shown as reported context, never as Task Monki's verdict. */
+  reportedReason?: string;
 }
 
 export interface TaskCompletionEvidenceViewModel {
@@ -77,53 +87,107 @@ export function describeTaskCompletionEvidence(
   if (markedDone) {
     return {
       label: 'Marked done',
-      detail: 'Accepted in Task Monki. This records acceptance, not independent verification.'
+      detail: 'Accepted in Task Monki, not independently verified.'
     };
   }
   if (
     completionPolicyRequiresMerge(task.completionPolicy) &&
-    (task.projection.merge === 'MERGED' || task.projection.githubPullRequest === 'MERGED')
+    isMerged(task.projection)
   ) {
     return {
       label: 'Auto-completed',
-      detail: 'Completed from the task merge policy. Human acceptance was not recorded.'
+      detail: 'Completed by the merge policy; no one marked it done.'
     };
   }
   return {
     label: 'Completion unknown',
-    detail: 'Task Monki cannot establish how this task reached Done.'
+    detail: 'Task Monki cannot tell how this task reached Done.'
   };
 }
 
+export interface TaskClosureViewModel {
+  label: string;
+  detail?: string;
+  /** When the task reached its closed phase, if recorded. */
+  at?: string;
+}
+
+/** How and when a closed task ended: Done, Canceled or Archived. */
+export function describeTaskClosure(
+  task: Pick<Task, 'id' | 'workflowPhase' | 'completionPolicy' | 'projection'>,
+  events: readonly DomainEvent[]
+): TaskClosureViewModel | undefined {
+  if (!isClosedPhase(task.workflowPhase)) {
+    return undefined;
+  }
+  const closing = events
+    .filter((event) =>
+      event.taskId === task.id &&
+      event.type === 'TRANSITION_COMPLETED' &&
+      (event.payload as Record<string, unknown> | null)?.toPhase === task.workflowPhase
+    )
+    .reduce<DomainEvent | undefined>(
+      (latest, event) => !latest || event.receivedAt > latest.receivedAt ? event : latest,
+      undefined
+    );
+  const at = closing?.receivedAt;
+  if (task.workflowPhase === 'DONE') {
+    const evidence = describeTaskCompletionEvidence(task, events);
+    return { label: evidence?.label ?? 'Done', detail: evidence?.detail, ...(at ? { at } : {}) };
+  }
+  const reason = (closing?.payload as Record<string, unknown> | null)?.reason;
+  return {
+    label: humanizeEnum(task.workflowPhase),
+    ...(typeof reason === 'string' && reason.trim() ? { detail: asSentence(reason) } : {}),
+    ...(at ? { at } : {})
+  };
+}
+
+/**
+ * Explains an unsuccessful implementation outcome. Task Monki's own explanation
+ * leads; the current run's recorded terminal reason — a provider or transport
+ * message — is kept as reported context. The task projection summary is never
+ * used here: it describes the latest task event, which can be unrelated (for
+ * example a later worktree verification).
+ */
 export function describeRunFailureBanner(
-  task: Task
+  task: Task,
+  currentRun?: Pick<RunRecord, 'id' | 'terminalReason'>
 ): RunFailureBannerViewModel | undefined {
   if (isImplementationOutcomeBlocked(task)) {
     return {
       status: 'NEEDS_RETRY',
-      title: 'Implementation needs another pass',
-      detail:
-        getImplementationRetryReason(task) ??
-        'Retry the implementation or continue unfinished work before review.'
+      title: 'Needs retry',
+      ...(getImplementationRetryReason(task) ? { detail: getImplementationRetryReason(task) } : {})
     };
   }
+  const recordedReason =
+    currentRun && currentRun.id === task.currentRunId
+      ? currentRun.terminalReason?.trim() || undefined
+      : undefined;
   switch (task.projection.agentRun) {
     case 'FAILED':
       return {
         status: 'FAILED',
-        title: 'The agent run failed',
-        detail: `${task.projection.summary} Retry the implementation or continue unfinished work from the current state.`
+        title: 'Run failed',
+        ...(recordedReason ? { reportedReason: asSentence(recordedReason) } : {})
       };
     case 'LOST':
     case 'RECOVERY_REQUIRED':
       return {
         status: task.projection.agentRun,
-        title: 'Task Monki cannot prove the final provider state',
-        detail: task.projection.summary
+        title: task.projection.agentRun === 'LOST' ? 'Runtime lost' : 'Recovery required',
+        detail: 'Task Monki could not confirm how the run ended and will not resubmit it on its own.',
+        ...(recordedReason ? { reportedReason: asSentence(recordedReason) } : {})
       };
     default:
       return undefined;
   }
+}
+
+function asSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 export interface TaskCardOptions {
@@ -139,9 +203,9 @@ export interface TaskCardOptions {
    * the Review queue where that count is the signal engineers scan for.
    */
   showReviewCount?: boolean;
-  /** Use the lifecycle vocabulary that scans cleanly in the Active runs view. */
-  statusContext?: 'active';
   repositoryName?: string;
+  /** Titles of other tasks, so a fork names the task it came from. */
+  taskTitles?: ReadonlyMap<string, string>;
 }
 
 export interface TaskCardRepositoryIdentity {
@@ -151,8 +215,14 @@ export interface TaskCardRepositoryIdentity {
 
 export type TaskCardSource = Task | BoardTaskSummary;
 
-/** Human label + tone for a task's most salient run/phase state. */
-export function describeTaskState(task: TaskCardSource): { label: string; tone: Tone } {
+/**
+ * The one status word for a task. The board card, the task header and Active
+ * runs all show it, so one state never has two names. Ordered by the UI
+ * priority in PRODUCT_WORKFLOW: a decision the user owes, then recovery, then
+ * work in flight, then verified local and delivery evidence, then the agent
+ * review gate, then the phase.
+ */
+export function describeTaskStatus(task: TaskCardSource): { label: string; tone: Tone } {
   if (task.workflowPhase === 'DONE') {
     return { label: 'Done', tone: 'success' };
   }
@@ -160,134 +230,136 @@ export function describeTaskState(task: TaskCardSource): { label: string; tone: 
     return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
   }
 
+  // A decision the user owes, a broken checkout and recovery come first, in the
+  // order the attention model gives them; an interrupted run is recovery too.
   const attention = describeTaskAttention(task);
   if (
     attention &&
-    (reviewAttentionShouldWin(task.projection.agentRun) ||
+    (USER_OR_RECOVERY_RUNS.has(task.projection.agentRun) ||
+      CHECKOUT_PROBLEMS.has(task.projection.worktree) ||
       isImplementationOutcomeBlocked(task))
   ) {
-    return {
-      label: ['Needs approval', 'Needs input'].includes(attention.label)
-        ? 'Needs you'
-        : attention.label,
-      tone: attention.tone === 'error' ? 'error' : 'action'
-    };
+    return describeAttentionStatus(attention);
+  }
+  if (task.projection.agentRun === 'INTERRUPTED') {
+    return { label: 'Interrupted', tone: 'action' };
   }
 
   const review = taskCardReview(task);
-  if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
-    switch (review.status) {
-      case 'RUNNING':
-        return { label: 'Reviewing...', tone: 'info' };
-      case 'PASSED':
-        return { label: 'Review passed', tone: 'success' };
-      case 'NEEDS_CHANGES':
-        return { label: 'Needs changes', tone: 'error' };
-      case 'INCONCLUSIVE':
-        return { label: 'Inconclusive', tone: 'action' };
-      case 'FAILED':
-        return { label: 'Review failed', tone: 'error' };
-      case 'CANCELED':
-        return { label: 'Review stopped', tone: 'action' };
-      case 'STALE':
-        return { label: 'Needs re-review', tone: 'action' };
-      case 'NOT_RUN':
-        return { label: 'Ready for review', tone: 'action' };
-    }
+  if (review.status === 'RUNNING') {
+    return { label: 'Reviewing', tone: 'info' };
   }
-
-  if (attention) {
-    return {
-      label: attention.label,
-      tone: attention.tone === 'error' ? 'error' : 'action'
-    };
-  }
-
   if (isFixingReviewFeedback(task)) {
     return { label: 'Fixing review feedback', tone: 'info' };
   }
-
   const run = task.projection.agentRun;
-  if (run === 'RUNNING' || run === 'STARTING' || run === 'QUEUED') {
+  if (run === 'QUEUED' || run === 'STARTING' || run === 'RUNNING' || run === 'INTERRUPTING') {
     return { label: humanizeEnum(run), tone: 'info' };
+  }
+
+  if (attention) {
+    return describeAttentionStatus(attention);
+  }
+  if (isReviewPhase(task.workflowPhase)) {
+    const status = cardReviewStatus(task);
+    return describeDeliveryProgress(task, status) ?? describeReviewGateStatus(task, status);
   }
   if (run === 'COMPLETED') {
     return { label: 'Completed', tone: 'success' };
   }
-  if (run === 'INTERRUPTED' || run === 'INTERRUPTING') {
-    return { label: humanizeEnum(run), tone: 'action' };
-  }
+  return task.workflowPhase === 'IN_PROGRESS'
+    ? { label: 'In progress', tone: 'info' }
+    : { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
+}
 
-  switch (task.workflowPhase) {
-    case 'IN_PROGRESS':
-      return { label: 'In progress', tone: 'info' };
-    default:
-      return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
+const CHECKOUT_PROBLEMS = new Set<Task['projection']['worktree']>(['MISSING', 'PRUNABLE', 'ERROR']);
+
+const USER_OR_RECOVERY_RUNS = new Set<Task['projection']['agentRun']>([
+  'AWAITING_APPROVAL',
+  'AWAITING_USER_INPUT',
+  'FAILED',
+  'RECOVERY_REQUIRED',
+  'LOST'
+]);
+
+
+
+/**
+ * A pull request's own progress, when it asks something of the user or ends
+ * the review: a merged PR awaiting completion, or an open PR whose branch
+ * diverged, has unpushed changes, or carries stale checks. An agent review
+ * verdict that needs action still leads.
+ */
+function describeDeliveryProgress(
+  task: TaskCardSource,
+  status: AgentReviewGateStatus
+): { label: string; tone: Tone } | undefined {
+  const projection = task.projection;
+  if (isMerged(projection)) {
+    return { label: 'Merged', tone: 'neutral' };
+  }
+  const open = projection.githubPullRequest === 'OPEN_DRAFT' || projection.githubPullRequest === 'OPEN_READY';
+  if (!open || (status !== 'NOT_RUN' && status !== 'PASSED')) {
+    return undefined;
+  }
+  if (projection.git === 'DIVERGED') {
+    return { label: 'Branch diverged', tone: 'error' };
+  }
+  if (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED') {
+    return { label: 'Changes not pushed', tone: 'action' };
+  }
+  if (projection.ciChecks === 'STALE') {
+    return { label: 'Checks stale', tone: 'action' };
+  }
+  return undefined;
+}
+
+/**
+ * The agent review is a detached gate. Once a pull request carries delivery,
+ * an absent or passed agent review is not the task's state; the phase is.
+ */
+function describeReviewGateStatus(
+  task: TaskCardSource,
+  status: AgentReviewGateStatus
+): { label: string; tone: Tone } {
+  const delivering = task.workflowPhase === 'IN_REVIEW' || hasPullRequest(task.projection);
+  switch (status) {
+    case 'PASSED':
+      return delivering
+        ? { label: 'In review', tone: 'neutral' }
+        : { label: 'Review passed', tone: 'success' };
+    case 'NEEDS_CHANGES':
+      // The user owes the next step, so it carries the waiting tone, not the failure one.
+      return { label: 'Needs changes', tone: 'action' };
+    case 'INCONCLUSIVE':
+      return { label: 'Inconclusive', tone: 'action' };
+    case 'FAILED':
+      return { label: 'Review failed', tone: 'error' };
+    case 'CANCELED':
+      return { label: 'Review stopped', tone: 'action' };
+    case 'STALE':
+      return { label: 'Needs re-review', tone: 'action' };
+    case 'RUNNING':
+      return { label: 'Reviewing', tone: 'info' };
+    case 'NOT_RUN':
+      return delivering
+        ? { label: 'In review', tone: 'neutral' }
+        : { label: 'Ready for review', tone: 'action' };
   }
 }
 
-/** Header state should describe task/workflow context, not review verdict detail. */
-export function describeTaskHeaderState(task: Task): { label: string; tone: Tone } {
-  if (task.workflowPhase === 'DONE') {
-    return { label: 'Done', tone: 'success' };
-  }
-  if (task.workflowPhase === 'CANCELED' || task.workflowPhase === 'ARCHIVED') {
-    return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
-  }
-
-  const attention = describeTaskAttention(task);
-  if (
-    attention &&
-    (reviewAttentionShouldWin(task.projection.agentRun) ||
-      isImplementationOutcomeBlocked(task))
-  ) {
-    return {
-      label: attention.label,
-      tone: attention.tone === 'error' ? 'error' : 'action'
-    };
-  }
-
-  const run = task.projection.agentRun;
-  if (run === 'QUEUED' || run === 'STARTING' || run === 'RUNNING') {
-    return {
-      label: task.projection.agentReview?.status === 'RUNNING' ? 'Reviewing' : 'Implementing',
-      tone: 'info'
-    };
-  }
-  if (run === 'INTERRUPTING' || run === 'INTERRUPTED') {
-    return { label: humanizeEnum(run), tone: 'action' };
-  }
-  if (run === 'FAILED' || run === 'RECOVERY_REQUIRED' || run === 'LOST') {
-    return { label: attention?.label ?? humanizeEnum(run), tone: 'error' };
-  }
-
-  if (task.projection.agentReview?.status === 'STALE') {
-    return { label: 'Re-verify', tone: 'action' };
-  }
-
-  if (task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW') {
-    return { label: 'Reviewing', tone: 'neutral' };
-  }
-  if (task.workflowPhase === 'IN_PROGRESS') {
-    if (run === 'IDLE') return { label: 'In progress', tone: 'neutral' };
-    return { label: 'Implementing', tone: 'info' };
-  }
-
-  return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
-}
-
-export function canRequestReviewChanges(
-  review: NonNullable<Task['projection']['agentReview']>,
-  effectiveStatus = review.status,
-  hasReviewOutput = Boolean(review.result)
-): boolean {
-  if (effectiveStatus === 'NEEDS_CHANGES' || effectiveStatus === 'INCONCLUSIVE') {
-    return true;
-  }
-  return (
-    effectiveStatus === 'FAILED' &&
-    hasReviewOutput
-  );
+/**
+ * Whether the review gives the implementation agent something to act on. A
+ * review that asks for changes does, including one whose notes are only prose.
+ * An inconclusive or failed review does only through open findings: its prose
+ * explains why the review could not finish ("Git metadata is inaccessible"),
+ * which is not work for the agent, so the next step is to run it again.
+ */
+export function canRequestReviewChanges(review: NonNullable<Task['projection']['agentReview']>): boolean {
+  const effectiveStatus = effectiveReviewGateStatus(review);
+  if (effectiveStatus === 'NEEDS_CHANGES') return true;
+  return (effectiveStatus === 'INCONCLUSIVE' || effectiveStatus === 'FAILED') &&
+    openReviewFindings(review.result, review.findingDecisions ?? []).length > 0;
 }
 
 const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
@@ -296,36 +368,86 @@ const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
   'RUNNING'
 ]);
 
+/** The agent review gate's own word for the task, as the board card would say it. */
+export function describeReviewGateWord(task: TaskCardSource): { label: string; tone: Tone } {
+  return describeReviewGateStatus(task, cardReviewStatus(task));
+}
+
+const IN_FLIGHT_RUNS = new Set<Task['projection']['agentRun']>([
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'INTERRUPTING'
+]);
+
+/** An agent run or the agent review is actually working, not merely open. */
+export function isTaskWorkInFlight(task: TaskCardSource): boolean {
+  return IN_FLIGHT_RUNS.has(task.projection.agentRun) || taskCardReview(task).status === 'RUNNING';
+}
+
 function isFixingReviewFeedback(task: TaskCardSource): boolean {
   const review = taskCardReview(task);
   return (
     task.workflowPhase === 'IN_PROGRESS' &&
     REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
-    review.status === 'STALE' &&
+    // A turn after a finished review; the review goes stale only once the diff changes.
+    review.status !== 'NOT_RUN' &&
+    review.status !== 'RUNNING' &&
     Boolean(review.runId || reviewHasResult(review))
   );
 }
 
-function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
-  return [
-    'AWAITING_APPROVAL',
-    'AWAITING_USER_INPUT',
-    'FAILED',
-    'RECOVERY_REQUIRED',
-    'LOST'
-  ].includes(agentRun);
+/**
+ * The pull request a card names. Its state is the icon; words appear only for
+ * delivery progress the card's status word does not already state, so "Checks
+ * failed" never sits beside "checks failing". No pull request, no footer.
+ */
+export function cardPullRequestForTask(
+  task: TaskCardSource,
+  stateLabel = describeTaskStatus(task).label
+): TaskCardPullRequest | undefined {
+  const projection = task.projection;
+  if (!hasPullRequest(projection)) {
+    return undefined;
+  }
+  const state = cardPullRequestState(projection);
+  if (!state) {
+    return undefined;
+  }
+  const note = state === 'draft' || state === 'open' ? cardPullRequestNote(projection) : undefined;
+  return {
+    number: projection.githubPullRequestNumber,
+    state,
+    ...(note && !CARD_NOTE_STATED_BY[note]?.includes(stateLabel) ? { note } : {})
+  };
 }
 
-export function evidenceLineForTask(task: TaskCardSource): CardEvidenceItem[] {
-  const { ref, status } = buildBoardDeliveryParts(task);
-  // "No PR" is the absence of delivery state, not information — reserve the
-  // footer for cards that actually carry a PR/check/merge signal (DESIGN.md §6).
-  if (ref === 'No PR' || !status) {
-    return [];
-  }
-  // Mono for the PR reference (a value); sans for the status words.
-  return [{ value: ref, label: status, tone: deliveryLineTone(task) }];
+function cardPullRequestState(
+  projection: TaskCardSource['projection']
+): TaskCardPullRequest['state'] | undefined {
+  if (isMerged(projection)) return 'merged';
+  if (projection.merge === 'CLOSED_UNMERGED' || projection.githubPullRequest === 'CLOSED_UNMERGED') return 'closed';
+  if (projection.githubPullRequest === 'OPEN_DRAFT') return 'draft';
+  if (projection.githubPullRequest === 'OPEN_READY') return 'open';
+  return undefined;
 }
+
+function cardPullRequestNote(projection: TaskCardSource['projection']): string | undefined {
+  if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') return 'checks failing';
+  if (projection.ciChecks === 'PENDING') return 'checks pending';
+  if (projection.ciChecks === 'CANCELED') return 'checks canceled';
+  if (projection.reviews === 'CHANGES_REQUESTED') return 'changes requested';
+  if (projection.reviews === 'REQUESTED' || projection.reviews === 'PENDING') return 'review waiting';
+  // Scalars alone never claim ready to merge; that needs evidence for the current head.
+  if (projection.ciChecks === 'PASSING' && projection.merge === 'MERGEABLE') return 'checks passing, mergeable';
+  return undefined;
+}
+
+/** Status words that already carry a delivery note, so the card says it once. */
+const CARD_NOTE_STATED_BY: Record<string, string[]> = {
+  'checks failing': ['Checks failed'],
+  'changes requested': ['GitHub changes requested']
+};
 
 const FINDING_SEVERITY_LABELS: Array<{
   severity: AgentReviewFinding['severity'];
@@ -339,7 +461,7 @@ const FINDING_SEVERITY_LABELS: Array<{
 
 /**
  * The triage signal an engineer scans a review queue for: a compact count of
- * findings by severity, e.g. "1 blocker · 2 major" (audit §03 Review queue).
+ * findings by severity, e.g. "1 blocker, 2 major".
  * Returns undefined when there is no recorded review result with findings.
  */
 export function reviewFindingCountLabel(task: TaskCardSource): string | undefined {
@@ -351,47 +473,7 @@ export function reviewFindingCountLabel(task: TaskCardSource): string | undefine
     const count = counts[severity] ?? 0;
     return count > 0 ? `${count} ${singular}` : undefined;
   }).filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(' · ') : undefined;
-}
-
-/** The most salient severity tone across a task's review findings. */
-export function reviewFindingTone(task: TaskCardSource): Tone {
-  const counts = reviewFindingCounts(task);
-  if (counts.BLOCKER) {
-    return 'error';
-  }
-  if (counts.MAJOR) {
-    return 'action';
-  }
-  return 'info';
-}
-
-function deliveryLineTone(task: TaskCardSource): Tone {
-  if (
-    task.projection.githubPullRequest === 'CLOSED_UNMERGED' ||
-    task.projection.ciChecks === 'FAILING' ||
-    task.projection.ciChecks === 'BLOCKED' ||
-    task.projection.reviews === 'CHANGES_REQUESTED'
-  ) {
-    return 'error';
-  }
-  if (
-    task.projection.ciChecks === 'PENDING' ||
-    task.projection.ciChecks === 'CANCELED' ||
-    task.projection.ciChecks === 'STALE' ||
-    task.projection.reviews === 'REQUESTED' ||
-    task.projection.reviews === 'PENDING'
-  ) {
-    return 'action';
-  }
-  if (
-    task.projection.githubPullRequest === 'MERGED' ||
-    task.projection.merge === 'MERGED' ||
-    (task.projection.ciChecks === 'PASSING' && task.projection.merge === 'MERGEABLE')
-  ) {
-    return 'success';
-  }
-  return 'neutral';
+  return parts.length > 0 ? parts.join(', ') : undefined;
 }
 
 export function buildTaskCardVM(
@@ -399,52 +481,31 @@ export function buildTaskCardVM(
   options: TaskCardOptions = {}
 ): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
-  const state = options.statusContext === 'active'
-    ? describeActiveTaskState(task)
-    : describeTaskState(task);
-  const evidence = evidenceLineForTask(task);
-  if (showReviewCount) {
-    const findingLabel = reviewFindingCountLabel(task);
-    if (findingLabel) {
-      // Lead with the triage signal engineers scan the review queue for.
-      evidence.unshift({ label: findingLabel, tone: reviewFindingTone(task) });
-    }
-  }
+  const state = describeTaskStatus(task);
   return {
     id: task.id,
     title: task.title,
     meta: showRepo ? options.repositoryName : undefined,
     lineage: task.forkedFromTaskId
-      ? `fork of #${formatShortId(task.forkedFromTaskId)}`
+      ? options.taskTitles?.has(task.forkedFromTaskId) ? `Fork of ${options.taskTitles.get(task.forkedFromTaskId)}` : 'Fork'
       : undefined,
     repositoryId: task.repositoryId,
     stateLabel: state.label,
     stateTone: state.tone,
+    stateInFlight: isTaskWorkInFlight(task),
     showState: !stateRestatesColumn(state.label, columnKey),
     archived: task.workflowPhase === 'ARCHIVED',
-    evidence
+    pullRequest: cardPullRequestForTask(task, state.label),
+    findings: showReviewCount ? reviewFindingCountLabel(task) : undefined
   };
 }
 
-function describeActiveTaskState(task: TaskCardSource): { label: string; tone: Tone } {
-  if (task.projection.agentRun === 'AWAITING_APPROVAL' || task.projection.agentRun === 'AWAITING_USER_INPUT') {
-    return { label: 'Needs you', tone: 'action' };
-  }
-  if (task.projection.agentReview?.status === 'RUNNING') {
-    return { label: 'Reviewing', tone: 'info' };
-  }
-  if (['QUEUED', 'STARTING', 'RUNNING', 'INTERRUPTING'].includes(task.projection.agentRun)) {
-    return { label: 'Implementing', tone: 'info' };
-  }
-  return describeTaskState(task);
-}
-
 /**
- * True when a card's state pill merely repeats the column it sits in — e.g.
- * "Ready" inside Backlog / Ready or "Done" inside Done. Pills are kept where
- * they refine the column (e.g. "Needs changes" within Review).
+ * True when a card's status word merely repeats the column it sits in, e.g.
+ * "Ready" inside Backlog / Ready or "Done" inside Done. The word stays where it
+ * refines the column ("Needs changes" within Review).
  */
-function stateRestatesColumn(stateLabel: string, columnKey: string | undefined): boolean {
+export function stateRestatesColumn(stateLabel: string, columnKey: string | undefined): boolean {
   if (columnKey === 'ready') {
     return stateLabel === 'Ready' || stateLabel === 'Backlog';
   }
@@ -453,6 +514,9 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
   }
   if (columnKey === 'progress') {
     return stateLabel === 'In progress';
+  }
+  if (columnKey === 'review') {
+    return stateLabel === 'In review';
   }
   return false;
 }
@@ -497,9 +561,12 @@ export function shouldShowInboxRepository(
 }
 
 export type NavView = 'inbox' | 'board' | 'active' | 'review' | 'done' | 'settings';
+/** The Tasks page's built-in views: the board and three filtered lists. Saved views are boards. */
+export type TasksView = 'board' | 'active' | 'review' | 'done';
 
-const REVIEW_PHASES: WorkflowPhase[] = ['REVIEW', 'IN_REVIEW'];
-const DONE_PHASES: WorkflowPhase[] = ['DONE', 'CANCELED', 'ARCHIVED'];
+export function isTasksView(view: string): view is TasksView {
+  return view === 'board' || view === 'active' || view === 'review' || view === 'done';
+}
 
 export interface NavCounts {
   inbox: number;
@@ -513,7 +580,7 @@ export function computeNavCounts(tasks: TaskCardSource[]): NavCounts {
     inbox: tasks.filter(isAttentionTask).length,
     active: tasks.filter(isInFlightTask).length,
     review: tasks.filter(isReviewQueueTask).length,
-    done: tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)).length
+    done: tasks.filter((task) => isClosedPhase(task.workflowPhase)).length
   };
 }
 
@@ -530,7 +597,7 @@ export function tasksForView(
     case 'review':
       return sorted(tasks.filter(isReviewQueueTask));
     case 'done':
-      return sorted(tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)));
+      return sorted(tasks.filter((task) => isClosedPhase(task.workflowPhase)));
     default:
       return sorted(tasks);
   }
@@ -567,15 +634,25 @@ export function columnTasks(
 }
 
 function isReviewQueueTask(task: TaskCardSource): boolean {
-  return REVIEW_PHASES.includes(task.workflowPhase) || taskCardReview(task).status === 'RUNNING';
+  return isReviewPhase(task.workflowPhase) || taskCardReview(task).status === 'RUNNING';
 }
 
 function taskCardReview(task: TaskCardSource) {
   return task.projection.agentReview ?? {
     status: 'NOT_RUN' as const,
+    effectiveStatus: 'NOT_RUN' as const,
     hasResult: false,
     findingCounts: {}
   };
+}
+
+/**
+ * The review status a task's word reflects: the gate rule once every finding
+ * decision applies. The board's summary carries it; a full projection is asked directly.
+ */
+function cardReviewStatus(task: TaskCardSource): AgentReviewGateStatus {
+  const review = taskCardReview(task);
+  return 'findingCounts' in review ? review.effectiveStatus : effectiveReviewGateStatus(review);
 }
 
 function reviewHasResult(review: ReturnType<typeof taskCardReview>): boolean {
@@ -588,7 +665,7 @@ function reviewFindingCounts(
   const review = taskCardReview(task);
   if ('findingCounts' in review) return review.findingCounts;
   const counts: Partial<Record<AgentReviewFinding['severity'], number>> = {};
-  for (const finding of review.result?.findings ?? []) {
+  for (const finding of openReviewFindings(review.result, review.findingDecisions ?? [])) {
     counts[finding.severity] = (counts[finding.severity] ?? 0) + 1;
   }
   return counts;

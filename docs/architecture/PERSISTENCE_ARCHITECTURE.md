@@ -23,6 +23,7 @@ profile.
 | Attachment and artifact bytes | SQLite owns identity, reachability, size, digest, and media metadata. `ManagedFileStore` owns byte publication and verification. | Immutable files below `storage/files` |
 | Application previews and secrets | Previewhost owns runtime records, retained data, and encrypted secret storage. | Profile-local `preview-runtime` directory, outside Task Monki's SQLite backup |
 | Managed Design source | The managed Git repository owns commits, trees, and refs. SQLite owns Task Monki's repository and Design records. | Git repositories below `storage/design-repositories` |
+| Code each review read | A private bare Git repository per source repository owns the trees and the refs that keep them. The review gate records each tree's id. | Profile-local `review-snapshots` directory, outside Task Monki's SQLite backup |
 | Redacted provider protocol diagnostics | The runtime server record owns retention. The journal owns bounded byte segments. | NDJSON below `storage/protocol-journals` |
 | User repositories, ordinary task worktrees, Git remotes, GitHub, provider processes, and Preview runtime objects | Their external systems | Task Monki observes and reconciles them. It does not copy them into application persistence. |
 
@@ -83,6 +84,7 @@ For a profile root, current application-owned paths are:
     design-worktrees/
   backups/
     backup-<timestamp>-<id>/
+  review-snapshots/
 ```
 
 `design-worktrees` are derived data.
@@ -92,6 +94,9 @@ external repository or uncommitted worktree edits. The desktop host keeps ordina
 worktrees outside this persistence root. Preview runtime data and Discourse
 execution workspaces are also outside this root. SQLite stores their durable
 identities and outcomes where required.
+
+`review-snapshots` is derived data: backups leave it out, and a review whose
+tree is missing compares the changed files instead of the exact code.
 
 During restore, the staging or live root can contain
 `.task-monki-restore-intent.json`. This temporary marker remains until restore
@@ -195,6 +200,24 @@ the unused gateway-port preference and advances settings to schema 14 while
 preserving other preferences. It retains Design source history and refuses to
 discard unresolved process ownership. The pre-upgrade backup preserves the
 previous records.
+
+SQLite migration 13 removes the `sidebarCollapsed` and `showMascot`
+preferences and advances settings to schema 15.
+
+SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
+version fences with no table change. Task store schema 29 adds review finding
+decisions (`AgentReviewGateProjection.findingDecisions`): a dismissal with its
+reason and optional note, or a restore. Schema 30 adds the `SIDE` message role with `threadId`, `snapshotTakenAt`,
+`snapshotOmittedFileCount` and an optional Ask `subject` (a finding or lines),
+the `SIDE_QUESTION` run mode, the `SIDE` session role, and the
+`WORKTREE_SNAPSHOT` read-root kind. It also carries review rounds: a follow-up
+message's `reviewRequest`, the `REVIEW_REQUEST_ANSWERED` event and the review
+gate's `requestAnswer`, the `REVIEW_SNAPSHOT_RECORDED` event and the gate's
+`reviewedTreeSha` (the tree lives in `<profile>/review-snapshots`, a private
+bare repository per source repository, never in the user's repository), a
+review result's `resolvedFindings` and findings'
+`previousFindingId`, and the `DEFERRED` dismissal reason. A side question's snapshot is not durable state;
+it is owned by `ReadOnlySnapshotService` and swept at startup.
 
 `WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
 external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;

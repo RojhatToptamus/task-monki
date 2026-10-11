@@ -223,12 +223,12 @@ describe('discourse renderer model', () => {
       labelSnapshot: 'task-monki'
     }]);
     expect(candidates).toMatchObject([
-      { kind: 'AGENT', id: 'builtin.lead', description: 'Lead · gpt-test' },
-      { kind: 'TASK', id: 'task-1', description: '#task-1 · task-monki · in progress' },
+      { kind: 'AGENT', id: 'builtin.lead', description: ['Lead', 'gpt-test'] },
+      { kind: 'TASK', id: 'task-1', description: ['#task-1', 'task-monki', 'in progress'] },
       {
         kind: 'REPOSITORY',
         id: 'repository-1',
-        description: '…/src/task-monki · 1 task · read-only files',
+        description: ['…/src/task-monki', '1 task', 'read-only files'],
         recentOrdinal: 1
       }
     ]);

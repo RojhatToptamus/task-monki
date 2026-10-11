@@ -20,7 +20,7 @@ import type { AgentRuntimeRegistry } from '../../agent/AgentRuntimeRegistry';
 import type { ClientToolHandler } from '../../agent/clientTools/ClientToolBridge';
 import { projectAgentExecutionSupport } from '../../../shared/agentExecutionSupport';
 import { mergeRunSettings } from '../../app/AgentRunSettingsPolicy';
-import { ACTIVE_AGENT_RUN_STATUSES } from '../../app/TaskTransitionPolicy';
+import { ACTIVE_AGENT_RUN_STATUSES, isActiveWorktreeWriter } from '../../app/TaskTransitionPolicy';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import type { SqliteTaskStore } from '../../storage/SqliteTaskStore';
 import type { ApplicationPreviewService } from '../ApplicationPreviewService';
@@ -57,6 +57,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const HELD_AFTER_STOP = 'Stopped. Send each message when you are ready.';
 const HELD_AFTER_FAILURE = 'The message could not start. Review the remaining messages.';
 const HELD_AFTER_ATTENTION = 'The agent needs attention. Send each message when you are ready.';
+const WAIT_FOR_WORKTREE_WRITER =
+  'Wait for the task agent to finish working in the worktree, or stop it. The Preview agent checks that the worktree is unchanged by its turn.';
+const HELD_FOR_WORKTREE_WRITER = 'The task agent is working in the worktree. Send each message when it finishes.';
 
 /**
  * The task's Preview conversation: a detached PREVIEW session per runtime and model on the task
@@ -79,6 +82,7 @@ export class PreviewAgentCoordinator {
       throw new Error('This message ID has already been used for different content.');
     }
     if (existing && !this.isPending(existing, detail)) return existing;
+    if (activeWorktreeWriter(detail)) throw new Error(WAIT_FOR_WORKTREE_WRITER);
     const active = activePreviewRun(detail);
     if (active) return this.enqueue(input.id, text, existing, active);
     const execution = await this.resolveExecution(context, input.settings);
@@ -120,10 +124,16 @@ export class PreviewAgentCoordinator {
       await this.hold(run.taskId, run.status === 'INTERRUPTED' ? HELD_AFTER_STOP : HELD_AFTER_ATTENTION);
       return;
     }
+    if (activeWorktreeWriter(detail)) {
+      await this.hold(run.taskId, HELD_FOR_WORKTREE_WRITER);
+      return;
+    }
     let context: PreviewAgentContext;
     try {
       context = await this.options.requireContext(run.taskId);
       if (context.iteration.id !== run.iterationId || context.worktree.id !== run.worktreeId) throw new Error('The task worktree changed.');
+      // The runtime may have been disabled, or left the surface's boundary, since the turn began.
+      await this.options.assertRuntimeUsable(this.options.runtimes.require(run.runtimeId));
     } catch (error) {
       await this.hold(run.taskId, `${messageOf(error)} Send each message when you are ready.`);
       return;
@@ -277,7 +287,8 @@ export class PreviewAgentCoordinator {
     });
   }
 
-  private async hold(taskId: string, detail: string): Promise<void> {
+  /** Holds every queued Preview message with the reason; the person sends each again. */
+  async hold(taskId: string, detail: string): Promise<void> {
     const pending = (await this.options.store.getTaskDetail(taskId)).taskInstructions.some((item) => item.role === 'PREVIEW' && item.status === 'QUEUED');
     if (!pending) return;
     await this.update(taskId, (records) => {
@@ -297,6 +308,14 @@ export class PreviewAgentCoordinator {
 /** The run the conversation is working on, if any. */
 export function activePreviewRun(detail: Pick<TaskDetailSnapshot, 'runs'>): RunRecord | undefined {
   return detail.runs.find((run) => run.mode === 'PREVIEW' && ACTIVE_AGENT_RUN_STATUSES.has(run.status));
+}
+
+/**
+ * An active run that can change the live worktree. A Preview turn fails when the worktree
+ * changes under it, so none starts beside one.
+ */
+function activeWorktreeWriter(detail: Pick<TaskDetailSnapshot, 'runs'>): RunRecord | undefined {
+  return detail.runs.find(isActiveWorktreeWriter);
 }
 
 /** The conversation for this runtime and model on the current worktree, if one exists. */

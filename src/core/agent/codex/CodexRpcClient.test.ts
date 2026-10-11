@@ -377,6 +377,45 @@ describe('CodexRpcClient', () => {
     client.close();
   });
 
+  it('knows which server requests still wait for their first response', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-open-requests-'));
+    const store = await openRuntimeStore(dir);
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = new CodexRpcClient(input, output, store, server.id, 1_000);
+    const received = (method: 'serverRequest' | 'notification') =>
+      new Promise<void>((resolve) => client.events.once(method, () => resolve()));
+    const request = (id: number) => output.write(`${JSON.stringify({
+      method: 'item/commandExecution/requestApproval',
+      id,
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: `item-${id}`, startedAtMs: Date.now() }
+    })}\n`);
+
+    let arrived = received('serverRequest');
+    request(7);
+    await arrived;
+    expect(client.awaitsResponse(7)).toBe(true);
+    // Once answered, an error path must not answer it again.
+    await client.respond(7, { decision: 'decline' });
+    expect(client.awaitsResponse(7)).toBe(false);
+
+    arrived = received('serverRequest');
+    request(8);
+    await arrived;
+    const resolved = received('notification');
+    output.write(`${JSON.stringify({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 8 } })}\n`);
+    await resolved;
+    expect(client.awaitsResponse(8)).toBe(false);
+    client.close();
+  });
+
   it('persists a server-request response reference before writing it to stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-response-'));
     const store = await openRuntimeStore(dir);

@@ -44,7 +44,7 @@ export function DiscourseComposer({ draftId, blocked, model, validateModel, onPe
   });
   const error = loadError ?? files.draftError ?? files.modelError ?? files.overflowError;
   return <AttachmentComposerShell attachments={files} className="tm-discourse-composer"
-    attachmentLabel="Message files" addButtonTitle="Attach files" hint="" toolbarStart={mode} toolbarAction={actions(files)}>
+    attachmentLabel="Message files" hint="" toolbarStart={mode} toolbarAction={actions(files)}>
     {children(files)}
     {error ? <p className="tm-error" role="alert">{error}</p> : null}
   </AttachmentComposerShell>;

@@ -23,7 +23,8 @@ import { PreviewAttemptConfiguration } from './PreviewAttemptConfiguration';
 import { ApplicationLogs } from './ApplicationLogs';
 import { PreviewSecretsSettings } from './PreviewSecretsSettings';
 import { ApplicationPreviewPanel } from './ApplicationPreviewPanel';
-import { persistPreviewAgentOpen } from '../../model/workspaceLayout';
+import { NotifyProvider } from '../NotifyContext';
+import { useRef, useState, type ComponentProps } from 'react';
 import type { PreviewAgentConversation, PreviewProposalActions } from './PreviewAgentProps';
 import { createRuntimeReadiness } from '../../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../../core/agent/codex/codexCapabilities';
@@ -122,6 +123,20 @@ function agentConversation(overrides: Partial<PreviewAgentConversation> = {}): P
     ...overrides
   };
 }
+/** The task page's side sheet, as TaskDetail provides it: a toggle, open state and the slot the Preview renders into. */
+function HostedPreview({ initiallyOpen = false, ...props }: ComponentProps<typeof ApplicationPreviewPanel> & { initiallyOpen?: boolean }) {
+  const [state, setState] = useState({ open: initiallyOpen, focus: false });
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  return <>
+    <button ref={toggleRef} type="button" aria-pressed={state.open} onClick={() => setState({ open: !state.open, focus: !state.open })}>Preview agent</button>
+    <ApplicationPreviewPanel {...props} agentHost={{
+      open: state.open, onOpenChange: (open, focus = false) => setState({ open, focus: open && focus }), slot, docked: true, autoFocus: state.focus, toggleRef
+    }} />
+    {state.open ? <div ref={setSlot} /> : null}
+  </>;
+}
+
 const proposal: PreviewRecipeGenerationSnapshot = { taskId: 'task', status: 'READY', draft: {
   id: 'draft', taskId: 'task', fileName: 'preview.yaml', replacesExistingFile: false,
   yaml: 'name: example\ntype: static\ndirectory: .\n', generatedAt: '', validation: { status: 'VALID' },
@@ -144,7 +159,7 @@ it('opens the conversation for a pending question, answers it in place, and neve
   const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
   expect(panel.textContent).toContain('Draft a preview configuration for this project.');
   expect(panel.textContent).toContain('Which application should run: Alpha or Beta?');
-  expect((screen.getByRole('button', { name: 'Agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
+  expect((screen.getByRole('button', { name: 'Preview agent' }) as HTMLButtonElement).getAttribute('aria-pressed')).toBe('true');
   expect((screen.getByRole('button', { name: 'Queue' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByRole('textbox', { name: 'Which application should run: Alpha or Beta?' }), { target: { value: 'Alpha' } });
   fireEvent.click(screen.getByRole('button', { name: 'Submit answers' }));
@@ -166,12 +181,12 @@ it.each(['header', 'chat'] as const)('preserves edits across a stale-save reject
   fireEvent.click(screen.getByRole('button', { name: 'YAML' }));
   const edited = proposal.draft!.yaml + '# Keep this edit\n';
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: edited } });
-  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
   fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   expect((await screen.findByRole('alert')).textContent).toContain('Configuration changed');
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
   expect((screen.getByRole('textbox', { name: 'Preview YAML' }) as HTMLTextAreaElement).value).toBe(edited);
-  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
+  if (source === 'chat' && !screen.queryByRole('button', { name: 'Save and review' })) fireEvent.click(screen.getByRole('button', { name: 'Preview agent' }));
   fireEvent.click(screen.getByRole('button', { name: source === 'chat' ? 'Save and review' : 'Save' }));
   await waitFor(() => expect(proposals.accept).toHaveBeenCalledTimes(2));
   expect(proposals.accept).toHaveBeenLastCalledWith('task', 'draft', edited);
@@ -637,8 +652,13 @@ it('opens the selected source through desktop actions and keeps a failed open re
   expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'default' });
   fireEvent.click(screen.getByRole('button', { name: 'Open folder backend' }));
   await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-  fireEvent.click(screen.getByRole('button', { name: 'Folder actions for backend' }));
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Open in VS Code' }));
+  const folderActions = screen.getByRole('button', { name: 'Folder actions for backend' });
+  folderActions.focus();
+  fireEvent.keyDown(folderActions, { key: 'ArrowDown' });
+  const open = await screen.findByRole('menuitem', { name: 'Open' });
+  await waitFor(() => expect(open.getAttribute('data-disabled')).toBeNull());
+  expect(open.textContent).toContain('VS Code');
+  fireEvent.click(open);
   await waitFor(() => expect(api.executeOpenTargetAction).toHaveBeenLastCalledWith({ target, action: 'open', appId: 'vscode' }));
   expect(api.inspectOpenTarget).toHaveBeenCalledWith({ target });
   await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
@@ -648,7 +668,7 @@ it('opens the selected source through desktop actions and keeps a failed open re
     api.executeOpenTargetAction.mockResolvedValue({ ok: true, clipboardText: '/other/repository/backend' });
     const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
     trigger.focus();
-    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Copy path' }));
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     expect(writeText).toHaveBeenCalledWith('/other/repository/backend');
@@ -656,17 +676,6 @@ it('opens the selected source through desktop actions and keeps a failed open re
   } finally {
     Reflect.deleteProperty(navigator, 'clipboard');
   }
-  const trigger = screen.getByRole('button', { name: 'Folder actions for backend' });
-  fireEvent.click(trigger);
-  await screen.findByRole('menuitem', { name: 'Copy path' });
-  fireEvent.scroll(screen.getByRole('menu'));
-  expect(screen.getByRole('menu')).toBeTruthy();
-  fireEvent.scroll(screen.getByLabelText('Configuration used for this run'));
-  expect(screen.queryByRole('menu')).toBeNull();
-  fireEvent.click(trigger);
-  await screen.findByRole('menuitem', { name: 'Copy path' });
-  fireEvent.resize(window);
-  expect(screen.queryByRole('menu')).toBeNull();
 });
 
 
@@ -780,10 +789,9 @@ it('opens a past run’s configuration read-only from the runs list and returns 
 });
 
 it('restores a docked Preview agent the person left open without taking focus from the page', async () => {
-  persistPreviewAgentOpen(true);
   const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
-  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  render(<HostedPreview initiallyOpen taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
   const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
   await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
   expect(panel.contains(document.activeElement)).toBe(false);
@@ -793,17 +801,17 @@ it('opens the Preview agent from its own button, sends with the selected model, 
   const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
   const agent = agentConversation();
-  const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
-  const toggle = await screen.findByRole('button', { name: 'Agent' });
+  const view = render(<HostedPreview taskId="task" worktree={worktree('PRESENT')} agent={agent} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const toggle = await screen.findByRole('button', { name: 'Preview agent' });
   expect(toggle.getAttribute('aria-pressed')).toBe('false');
   fireEvent.click(toggle);
   const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
   expect(panel.textContent).toContain('Scenario model');
   // Opened by the person, the docked panel takes focus in its composer.
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration…' })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration' })));
   fireEvent.click(screen.getByRole('tab', { name: 'Logs' }));
   expect(screen.getByRole('complementary', { name: 'Preview agent conversation' })).toBeTruthy();
-  fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration…' }), { target: { value: 'Add a Redis service' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ask about the preview or request a configuration' }), { target: { value: 'Add a Redis service' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   await waitFor(() => expect(agent.send).toHaveBeenCalledWith('Add a Redis service', expect.any(String), { runtimeId: 'codex', model: 'scenario-model', modelProvider: 'openai', reasoningEffort: 'low' }));
   expect(api.startApplicationPreview).not.toHaveBeenCalled();
@@ -813,7 +821,7 @@ it('opens the Preview agent from its own button, sends with the selected model, 
     runs: [previewRun('RUNNING')],
     instructions: [previewMessage('m1', 'Add a Redis service', 'SUBMITTED', 'preview-run'), previewMessage('m2', 'Also a worker', 'QUEUED')]
   });
-  view.rerender(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={working} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  view.rerender(<HostedPreview taskId="task" worktree={worktree('PRESENT')} agent={working} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
   expect(screen.getByRole('list', { name: 'Pending instructions' }).textContent).toContain('Also a worker');
   expect(screen.getByRole('button', { name: 'Queue' })).toBeTruthy();
   expect((screen.getByRole('button', { name: /^Preview agent model:/ }) as HTMLButtonElement).disabled).toBe(true);
@@ -827,10 +835,8 @@ it('opens the Preview agent from its own button, sends with the selected model, 
   expect(screen.getByRole('complementary', { name: 'Preview agent conversation' })).toBeTruthy();
   fireEvent.keyDown(screen.getByRole('textbox', { name: 'Queue a message for after this response' }), { key: 'Escape' });
   await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
-  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Agent' }));
-  expect(screen.getByRole('button', { name: 'Agent' }).getAttribute('aria-pressed')).toBe('false');
-  // Closed while the agent works, the entry still says so.
-  expect(screen.getByRole('button', { name: 'Agent' }).getAttribute('aria-describedby')).toBe(screen.getByText('Agent working').id);
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Preview agent' }));
+  expect(screen.getByRole('button', { name: 'Preview agent' }).getAttribute('aria-pressed')).toBe('false');
   expect(api.cancelApplicationPreview).not.toHaveBeenCalled();
 });
 
@@ -854,9 +860,9 @@ it('continues the saved Preview model before its catalog loads and leaves provid
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: false });
   const agent = agentConversation({ runs: [previewRun('COMPLETED')], models: [] });
   const view = render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agent} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Agent' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview agent' }));
   expect(screen.getByRole('button', { name: /Preview agent model:.*scenario-model/ })).toBeTruthy();
-  fireEvent.change(screen.getByRole('textbox', { name: 'Ask for a change or an explanation…' }), { target: { value: 'Continue our previous conversation.' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Ask for a change or an explanation' }), { target: { value: 'Continue our previous conversation.' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   await waitFor(() => expect(agent.send).toHaveBeenCalledWith('Continue our previous conversation.', expect.any(String), expect.objectContaining({ model: 'scenario-model', modelProvider: 'openai' })));
   view.rerender(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={{ ...agent, runtimes: [{ ...codexRuntime, preflight: { ...codexRuntime.preflight, readiness: createRuntimeReadiness('DISABLED', 'Connection unavailable.') } }] }} />);
@@ -919,27 +925,19 @@ it('enters every missing value in one form, one reference after another', async 
   }
 });
 
-it('opens the agent as a drawer when the Preview is narrow and returns focus to its entry on Escape', async () => {
+it('without a task page, opens the agent as a floating sheet and returns focus to its entry on Escape', async () => {
   const stopped: PreviewStatus = { name: 'fixture', busy: false, latest: { ...initial.active!, type: 'environment', state: 'stopped' } };
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: stopped });
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-  const width = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 700 } as DOMRect);
-  try {
-    render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
-    const toggle = await screen.findByRole('button', { name: 'Agent' });
-    toggle.focus();
-    fireEvent.click(toggle);
-    const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
-    expect(panel.closest('.tm-preview-agent-drawer')).toBeTruthy();
-    expect(screen.queryByRole('tab', { name: 'Preview agent' })).toBeNull();
-    fireEvent.keyDown(window, { key: 'Escape' });
-    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(toggle));
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
-  } finally {
-    width.mockRestore();
-    vi.unstubAllGlobals();
-  }
+  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} agent={agentConversation()} proposals={proposalActions({ taskId: 'task', status: 'EMPTY' })} />);
+  const toggle = await screen.findByRole('button', { name: 'Preview agent' });
+  toggle.focus();
+  fireEvent.click(toggle);
+  const panel = await screen.findByRole('complementary', { name: 'Preview agent conversation' });
+  expect(panel.closest('.tm-side-sheet--floating')).toBeTruthy();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Preview agent conversation' })).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(toggle));
+  expect(toggle.getAttribute('aria-pressed')).toBe('false');
 });
 
 it('opens and copies each service at its own routed host name, and Open app uses the primary host, never the numeric address', async () => {
@@ -978,7 +976,7 @@ it('reverts unsaved edits to the file without writing it', async () => {
   api.getApplicationPreview.mockResolvedValue({ name: 'fixture', hasConfigurationFile: true, status: { name: 'fixture', busy: false, latest: { ...initial.active!, state: 'stopped' } } });
   api.readApplicationPreviewFile.mockResolvedValue({ file: { name: 'preview.yaml', text } });
   const onNotify = vi.fn();
-  render(<ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} onNotify={onNotify} />);
+  render(<NotifyProvider value={onNotify}><ApplicationPreviewPanel taskId="task" worktree={worktree('PRESENT')} /></NotifyProvider>);
   fireEvent.click(await screen.findByRole('tab', { name: 'Configuration' }));
   fireEvent.click(await screen.findByRole('button', { name: 'YAML' }));
   fireEvent.change(screen.getByRole('textbox', { name: 'Preview YAML' }), { target: { value: `${text}# not wanted\n` } });

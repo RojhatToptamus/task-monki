@@ -46,8 +46,8 @@ import {
   type DesignCanvasRefreshRequest,
   type DesignCanvasShowRequest
 } from './DesignCanvas';
-import type { NotificationTone } from './AppOverlays';
 import { DesignRepositorySetup } from './DesignRepositorySetup';
+import { Tooltip } from './Tooltip';
 import type { PreviewAgentConversation, PreviewProposalActions } from './preview/PreviewAgentProps';
 import { DesignConversation } from './DesignConversation';
 import { DesignFilesDrawer } from './DesignFilesDrawer';
@@ -60,7 +60,6 @@ import {
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
-import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { useTaskAttachments } from './useTaskAttachments';
 import { DesignProjectMenu } from './DesignActionsMenu';
@@ -109,7 +108,6 @@ export interface DesignsWorkspaceProps {
   previewAgent?: PreviewAgentConversation;
   previewProposals?: PreviewProposalActions;
   /** Confirms completed Preview actions, such as a saved preview.yaml. */
-  onNotify?(message: string, tone?: NotificationTone): void;
   draft?: DesignDraftRecord | null;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
@@ -179,7 +177,6 @@ export function DesignsWorkspace({
   project,
   previewAgent,
   previewProposals,
-  onNotify,
   draft = null,
   models,
   runtimes,
@@ -396,15 +393,12 @@ export function DesignsWorkspace({
         role={historyModalOpen ? 'dialog' : undefined}
         tabIndex={historyModalOpen ? -1 : undefined}
       >
-        <header className="tm-designs-rail__head">
-          <div>
-            <h2>Designs</h2>
-            <p>Build and refine working previews.</p>
-          </div>
-          <div className="tm-designs-rail__head-actions">
+        <header className="tm-listrail__head">
+          <h2>Designs</h2>
+          <div className="tm-listrail__head-actions">
             <button
               type="button"
-              className="tm-designs-rail__new"
+              className="tm-listrail__new"
               onClick={() => {
                 setCreatingBlank(true);
                 if (historyModalOpen) onHistoryCollapsedChange?.(true);
@@ -414,20 +408,19 @@ export function DesignsWorkspace({
               <span>New</span>
             </button>
             {historyModalOpen ? (
-              <button
+              <Tooltip label="Close Design history"><button
                 type="button"
                 className="tm-iconbtn tm-designs-rail__close"
                 aria-label="Close Design history"
-                title="Close Design history"
                 onClick={() => onHistoryCollapsedChange?.(true)}
               >
                 <PanelIcon />
-              </button>
+              </button></Tooltip>
             ) : null}
           </div>
         </header>
 
-        <label className="tm-designs-rail__search">
+        <label className="tm-listrail__search">
           <UiSearchIcon />
           <span className="tm-visually-hidden">Search Designs</span>
           <input
@@ -438,10 +431,11 @@ export function DesignsWorkspace({
             onChange={(event) => setHistoryQuery(event.target.value)}
           />
         </label>
-        <div className="tm-designs-rail__filter" role="group" aria-label="Design status">
+        <div className="segmented segmented--fill tm-listrail__filter" role="group" aria-label="Design status">
           {(['active', 'all', 'archived'] as const).map((filter) => (
             <button
               type="button"
+              className="segmented__btn"
               key={filter}
               aria-pressed={historyFilter === filter}
               onClick={() => setHistoryFilter(filter)}
@@ -451,9 +445,9 @@ export function DesignsWorkspace({
           ))}
         </div>
 
-        <nav className="tm-designs-rail__list" aria-label="Recent Designs">
+        <nav className="tm-listrail__list" aria-label="Recent Designs">
           {visibleDesigns.length === 0 ? (
-            <p className="tm-designs-rail__empty">
+            <p className="tm-listrail__empty">
               {designs.length === 0 ? 'No Designs yet' : 'No Designs match this view'}
             </p>
           ) : (
@@ -465,7 +459,7 @@ export function DesignsWorkspace({
               return (
                 <button
                   type="button"
-                  className={`tm-designs-rail__item ${selected ? 'tm-designs-rail__item--active' : ''}`}
+                  className={`tm-listrail__item ${selected ? 'tm-listrail__item--active' : ''}`}
                   aria-current={selected ? 'page' : undefined}
                   key={design.id}
                   onClick={() => {
@@ -474,8 +468,8 @@ export function DesignsWorkspace({
                     if (historyModalOpen) onHistoryCollapsedChange?.(true);
                   }}
                 >
-                  <span className="tm-designs-rail__item-title">{design.title}</span>
-                  <span className="tm-designs-rail__item-meta">
+                  <span className="tm-listrail__item-title">{design.title}</span>
+                  <span className="tm-listrail__item-meta">
                     <span data-tone={status.tone}>{status.label}</span>
                     <time dateTime={design.updatedAt}>
                       {formatDesignUpdatedAt(design.updatedAt)}
@@ -539,7 +533,6 @@ export function DesignsWorkspace({
             </header>
             <div className="tm-designs-loading__body">
               <div className="tm-workspace-loading">
-                <StatusGlyph kind="working" />
                 <span>Loading Design</span>
               </div>
             </div>
@@ -669,10 +662,11 @@ export function DesignsWorkspace({
                     key={project.design.id}
                     project={project}
                     setup={project.repository.kind === 'USER_REGISTERED' && project.task.workflowPhase !== 'ARCHIVED' && onUpdateProject ? (
-                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject} agent={previewAgent} proposals={previewProposals} onNotify={onNotify}
+                      <DesignRepositorySetup project={project} onUpdate={onUpdateProject} agent={previewAgent} proposals={previewProposals}
                         onOpenLocation={() => project.currentWorktree ? onOpenDesignLocation(project.design.id, project.currentWorktree.id) : Promise.resolve()}
                         onModalOpenChange={setPreviewSetupModalOpen} />
                     ) : undefined}
+                    conversationVisible={renderedLayout === 'split'}
                     setupRequired={Boolean(project.repositorySetup?.blocker) || (project.revisions.length === 0 && project.turns.some((turn) => !turn.runId && !turn.outcome))}
                     desktopAvailable={desktopCanvasAvailable}
                     occluded={projectMenuOpen || canvasOccluded || historyModalOpen || deleteOpen || renameOpen || previewSetupModalOpen || attachmentPreviewOpen}
@@ -789,6 +783,7 @@ function DesignHeader({
 }) {
   const status = designStatusView(designProjectStatus(project));
   const revision = project.revisions.at(-1)?.ordinal;
+  const activeReferenceCount = project.references.filter((reference) => reference.state === 'ACTIVE').length;
   return (
     <header className="tm-designs-header">
       <div className="tm-designs-header__leading">
@@ -801,36 +796,36 @@ function DesignHeader({
           <p>
             <span className="tm-design-status" data-tone={status.tone}>
               <StatusGlyph kind={status.tone} />
-              {status.label}{revision ? ` · revision ${revision}` : ''}
+              {status.label}
             </span>
+            {revision ? <span>Revision {revision}</span> : null}
           </p>
         </div>
       </div>
       <div className="tm-designs-header__actions">
-        <div className="tm-design-layout" role="group" aria-label="Design layout">
+        <div className="segmented tm-design-layout" role="group" aria-label="Design layout">
           {availableLayouts.map((option) => (
-            <button
+            <Tooltip key={option} label={layoutLabel(option)}><button
               type="button"
-              key={option}
+              className="segmented__btn"
               aria-pressed={layout === option}
               aria-label={layoutLabel(option)}
-              title={layoutLabel(option)}
               onClick={() => onLayoutChange(option)}
             >
               <UiLayoutIcon layout={option} />
-            </button>
+            </button></Tooltip>
           ))}
         </div>
         <button
           type="button"
-          className="tm-designs-header__files"
+          className="outline-button button--sm tm-designs-header__files"
           aria-expanded={filesOpen}
           aria-controls="design-files-drawer"
           onClick={onToggleFiles}
         >
           <UiFolderIcon />
           References
-          <span>{project.references.filter((reference) => reference.state === 'ACTIVE').length}</span>
+          {activeReferenceCount ? <span>{activeReferenceCount}</span> : null}
         </button>
         <DesignProjectMenu
           title={project.design.title}
@@ -1060,46 +1055,42 @@ function NewDesignForm({
             <h1>New Design</h1>
           </div>
           {canCancel ? (
-            <button
+            <Tooltip label="Close new Design"><button
               type="button"
               className="tm-iconbtn"
               aria-label="Close new Design"
-              title="Close new Design"
               disabled={submitting}
               onClick={onCancel}
             >
               <UiCloseIcon />
-            </button>
+            </button></Tooltip>
           ) : null}
         </header>
 
         <div className="tm-design-create__body">
           <div className="tm-design-create__content">
-            <div className="field">
-              <span>Source</span>
-              <div className="segmented" role="group" aria-label="Design source" onKeyDown={(event) => {
-                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-                event.preventDefault();
-                const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
-                next?.focus();
-                next?.click();
-              }}>
-                {(['BLANK', 'EXISTING_REPOSITORY'] as const).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    className="segmented__btn"
-                    aria-pressed={sourceKind === kind}
-                    disabled={composerLocked}
-                    onClick={() => setSourceKind(kind)}
-                  >
-                    {kind === 'BLANK' ? 'Blank' : 'Existing repository'}
-                  </button>
-                ))}
-              </div>
+            <div className="segmented tm-design-create__source" role="group" aria-label="Design source" onKeyDown={(event) => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+              event.preventDefault();
+              const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
+              next?.focus();
+              next?.click();
+            }}>
+              {(['BLANK', 'EXISTING_REPOSITORY'] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  className="segmented__btn"
+                  aria-pressed={sourceKind === kind}
+                  disabled={composerLocked}
+                  onClick={() => setSourceKind(kind)}
+                >
+                  {kind === 'BLANK' ? 'Blank' : 'Existing repository'}
+                </button>
+              ))}
             </div>
             {sourceKind === 'EXISTING_REPOSITORY' ? (
-              <>
+              <div className="tm-design-create__repository">
                 <div className="field">
                   <span>Repository</span>
                   <RepositorySelect
@@ -1115,137 +1106,122 @@ function NewDesignForm({
                   <select id="design-base" aria-describedby="design-base-help" value={baseKey} disabled={composerLocked || inspecting || !inspection} onChange={(event) => setBaseKey(event.target.value)}>
                     {inspecting ? <option value="">Loading branches…</option> : null}
                     {!inspection && !inspecting ? <option value="">Select a repository first</option> : null}
-                    {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} · {item.sha.slice(0, 8)}</option>)}
+                    {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} at {item.sha.slice(0, 8)}</option>)}
                   </select>
-                  <small id="design-base-help">Creates a separate worktree. Uncommitted changes are not included.</small>
+                  <small id="design-base-help">Uncommitted changes are not included.</small>
                 </div>
-              </>
+              </div>
             ) : null}
 
-            <div className="field field--prompt">
-              <label className="field__label" htmlFor="new-design-brief">Brief</label>
-              <AttachmentComposerShell
-                attachments={attachments}
-                className="tm-design-create__composer"
-                attachmentLabel="Design references"
-                toolbarAction={
-                  <AgentProfileSelect
-                    profiles={agentProfiles}
-                    value={agentProfileId}
-                    disabled={composerLocked}
-                    onChange={setAgentProfileId}
-                  />
-                }
-                removeDisabled={composerLocked}
-                addButtonTitle={
-                  attachmentsEnabled
-                    ? 'Stored locally and shared read-only with the Design agent.'
-                    : 'The selected agent runtime does not support references.'
-                }
-                hint={
-                  !attachmentsEnabled
-                    ? 'Unavailable for this runtime'
-                    : attachments.isReadingClipboardImage
-                      ? 'Reading clipboard image…'
-                      : attachments.activeItems.length > 0
-                        ? `${attachments.activeItems.length} ${
-                            attachments.activeItems.length === 1 ? 'file' : 'files'
-                          } · ${formatAttachmentBytes(attachments.byteCount)}`
-                        : 'Paste or drop files'
-                }
-              >
-                <textarea
-                  id="new-design-brief"
-                  value={brief}
-                  rows={7}
-                  placeholder="Describe what you want to design or change…"
+            {/* The brief, the agent and the step are one composer, as on the
+                Agent tab before its first run. */}
+            <AttachmentComposerShell
+              attachments={attachments}
+              className="tm-design-create__composer"
+              attachmentLabel="Design references"
+              removeDisabled={composerLocked}
+              toolbarStart={<>
+                <AgentModelSelector
+                  label="Model"
+                  runtimeId={selectedRuntimeId}
+                  modelId={selectedModelId}
+                  reasoningEffort={selectedReasoningEffort}
+                  models={models}
+                  runtimes={runtimes}
                   disabled={composerLocked}
-                  onChange={(event) => setBrief(event.target.value)}
-                  onPaste={attachments.paste}
+                  presentation="compact"
+                  showSelectionError={false}
+                  selectionUnavailable={
+                    !selectedRuntimeId ||
+                    !selectedModelId ||
+                    Boolean(selectedRuntimeUnavailableReason)
+                  }
+                  runtimeUnavailableReason={(runtime) =>
+                    designRuntimeUnavailableReason(runtime, models)
+                  }
+                  modelUnavailableReason={(model, runtime) =>
+                    designModelUnavailableReason(runtime, model)
+                  }
+                  onDiscoverModels={onDiscoverAgentRuntimeModels}
+                  onSelectionChange={(nextRuntimeId, nextModelId) => {
+                    setRuntimeId(nextRuntimeId);
+                    setModelId(nextModelId);
+                    const nextModel = selectableModels.find(
+                      (model) =>
+                        model.runtimeId === nextRuntimeId && model.id === nextModelId
+                    );
+                    setReasoningEffort(
+                      nextModel?.designSupport?.defaultReasoningEffort ??
+                        nextModel?.defaultReasoningEffort ??
+                        ''
+                    );
+                  }}
+                  onReasoningEffortChange={setReasoningEffort}
                 />
-              </AttachmentComposerShell>
-            </div>
+                <AgentProfileSelect
+                  profiles={agentProfiles}
+                  value={agentProfileId}
+                  disabled={composerLocked}
+                  onChange={setAgentProfileId}
+                />
+              </>}
+              hint={
+                selectedRuntimeUnavailableReason ??
+                (!selectedRuntimeId || !selectedModelId ? 'No ready agent supports Design Mode.' : undefined) ??
+                (attachments.isReadingClipboardImage ? 'Reading clipboard image…' : undefined) ??
+                (!attachmentsEnabled ? 'Files are unavailable for this runtime' : undefined)
+              }
+              toolbarAction={
+                <button
+                  type="submit"
+                  className="primary-button button--sm"
+                  disabled={
+                    submitting ||
+                    brief.trim().length === 0 ||
+                    (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
+                    !selectedRuntimeId ||
+                    !selectedModelId ||
+                    Boolean(selectedRuntimeUnavailableReason) ||
+                    attachments.busy ||
+                    attachments.hasErrors ||
+                    Boolean(attachments.modelError)
+                  }
+                >
+                  {submitting
+                    ? 'Creating…'
+                    : creationOutcomeUnknown
+                      ? 'Retry creation'
+                      : 'Create Design'}
+                </button>
+              }
+            >
+              <label className="tm-visually-hidden" htmlFor="new-design-brief">Brief</label>
+              <textarea
+                id="new-design-brief"
+                className="tm-composer__input"
+                value={brief}
+                rows={8}
+                placeholder="Describe what you want to design or change"
+                disabled={composerLocked}
+                onChange={(event) => setBrief(event.target.value)}
+                onPaste={attachments.paste}
+                onKeyDown={(event) => {
+                  if (!event.nativeEvent.isComposing && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+              />
+            </AttachmentComposerShell>
 
             {attachments.overflowError || attachments.modelError ? (
               <p className="task-attachment-message task-attachment-message--error" role="alert">
                 {attachments.overflowError ?? attachments.modelError}
               </p>
             ) : null}
-
-            <div className="tm-design-create__runtime" aria-label="Design agent settings">
-              <AgentModelSelector
-                label="Design"
-                runtimeId={selectedRuntimeId}
-                modelId={selectedModelId}
-                reasoningEffort={selectedReasoningEffort}
-                models={models}
-                runtimes={runtimes}
-                disabled={composerLocked}
-                presentation="compact"
-                selectionUnavailable={
-                  !selectedRuntimeId ||
-                  !selectedModelId ||
-                  Boolean(selectedRuntimeUnavailableReason)
-                }
-                selectionUnavailableMessage={
-                  selectedRuntimeUnavailableReason ??
-                  'No ready agent supports Design Mode.'
-                }
-                runtimeUnavailableReason={(runtime) =>
-                  designRuntimeUnavailableReason(runtime, models)
-                }
-                modelUnavailableReason={(model, runtime) =>
-                  designModelUnavailableReason(runtime, model)
-                }
-                onDiscoverModels={onDiscoverAgentRuntimeModels}
-                onSelectionChange={(nextRuntimeId, nextModelId) => {
-                  setRuntimeId(nextRuntimeId);
-                  setModelId(nextModelId);
-                  const nextModel = selectableModels.find(
-                    (model) =>
-                      model.runtimeId === nextRuntimeId && model.id === nextModelId
-                  );
-                  setReasoningEffort(
-                    nextModel?.designSupport?.defaultReasoningEffort ??
-                      nextModel?.defaultReasoningEffort ??
-                      ''
-                  );
-                }}
-                onReasoningEffortChange={setReasoningEffort}
-              />
-            </div>
-
             {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
           </div>
         </div>
-        <footer className="tm-design-create__actions">
-          {canCancel ? (
-            <button type="button" className="outline-button" disabled={submitting} onClick={onCancel}>
-              {creationOutcomeUnknown ? 'Close' : 'Cancel'}
-            </button>
-          ) : null}
-          <button
-            type="submit"
-            className="primary-button"
-            disabled={
-              submitting ||
-              brief.trim().length === 0 ||
-              (sourceKind === 'EXISTING_REPOSITORY' && (!base || inspecting)) ||
-              !selectedRuntimeId ||
-              !selectedModelId ||
-              Boolean(selectedRuntimeUnavailableReason) ||
-              attachments.busy ||
-              attachments.hasErrors ||
-              Boolean(attachments.modelError)
-            }
-          >
-            {submitting
-              ? 'Creating…'
-              : creationOutcomeUnknown
-                ? 'Retry creation'
-                : 'Create Design'}
-          </button>
-        </footer>
       </form>
     </div>
   );
@@ -1312,7 +1288,7 @@ function RenameDesignDialog({
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
-        {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={saving} onClick={onCancel}>
             Cancel
@@ -1387,7 +1363,7 @@ function DeleteDesignDialog({
           <p>The repository and Design branch are kept. The workspace stays at <code>{retainedWorkspace}</code>.</p>
           <label><input type="checkbox" checked={removeWorktree} disabled={deleting} onChange={(event) => setRemoveWorktree(event.target.checked)} /> Also remove the workspace if it has no unsaved, untracked, or ignored files.</label>
         </> : <p>Task Monki removes the Design. It removes the managed workspace when that action is safe.</p>}
-        {error ? <p className="tm-design-delete__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button
             ref={cancelRef}
@@ -1448,17 +1424,18 @@ function DesignHistoryToggle({
 }) {
   const label = collapsed ? 'Show Design history' : 'Hide Design history';
   return (
-    <button
-      type="button"
-      className="tm-iconbtn tm-mode-history-toggle"
-      aria-label={label}
-      aria-expanded={!collapsed}
-      aria-controls="design-history-panel"
-      title={label}
-      onClick={() => onChange?.(!collapsed)}
-    >
-      <PanelIcon />
-    </button>
+    <Tooltip label={label}>
+      <button
+        type="button"
+        className="tm-iconbtn tm-mode-history-toggle"
+        aria-label={label}
+        aria-expanded={!collapsed}
+        aria-controls="design-history-panel"
+        onClick={() => onChange?.(!collapsed)}
+      >
+        <PanelIcon />
+      </button>
+    </Tooltip>
   );
 }
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import type { WorktreeRecord } from '../../shared/contracts';
-import { buildDiffFileTree, parseGitDiffEvidenceForScope } from '../../renderer/model/diffEvidence';
+import { parseGitDiffEvidenceForScope } from '../../renderer/model/diffEvidence';
 import { buildDiffEvidence, inspectGitSnapshot, parseGitStatusPorcelain } from './GitSnapshotService';
 
 const execFileAsync = promisify(execFile);
@@ -136,19 +136,6 @@ describe('inspectGitSnapshot', () => {
       })
     ]);
     expect(parsedFiles.every((file) => file.blocks[0]?.source === 'unstaged')).toBe(true);
-
-    const tree = buildDiffFileTree(parsedFiles);
-    expect(tree).toMatchObject({
-      fileCount: 2,
-      additions: 2,
-      deletions: 0
-    });
-    expect(tree.children.map((node) => node.name)).toEqual(['alpha', 'beta']);
-    expect(tree.children[0]).toMatchObject({
-      type: 'directory',
-      name: 'alpha',
-      fileCount: 1
-    });
   });
 
   it('does not report empty directories because Git has no file entry to diff', async () => {

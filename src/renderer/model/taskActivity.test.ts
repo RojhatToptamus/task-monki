@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createInitialProjection,
-  type AgentRunMode,
   type DomainEvent,
   type RunRecord,
   type Task
@@ -60,6 +59,18 @@ describe('task activity model', () => {
     expect(overview.items.map((item) => item.title)).toEqual(['Checks failed']);
     expect(debug.items.map((item) => item.title)).toEqual(['Task created', 'Checks failed']);
     expect(debug.items[1].evidence).toEqual(overview.items[0].evidence);
+  });
+
+  it('names a pending approval as an approval and a question as input', () => {
+    const ledger = buildTaskActivityLedger({
+      task: taskFixture(),
+      events: [
+        event('AGENT_INTERACTION_REQUESTED', { type: 'COMMAND_APPROVAL' }),
+        event('AGENT_INTERACTION_REQUESTED', { type: 'USER_INPUT' })
+      ]
+    });
+
+    expect(ledger.map((item) => item.title)).toEqual(['Needs approval', 'Needs input']);
   });
 
   it('keeps GitHub verdict changes and drops no-op refresh captures', () => {
@@ -187,15 +198,9 @@ describe('task activity model', () => {
       'Implementation completed',
       'Implementation needs another pass'
     ]);
-    expect(view.items[1].evidence).toMatchObject({
-      summary:
-        'Retry the implementation or continue unfinished work before this task can advance.',
-      rows: [
-        {
-          label: 'Reason',
-          value: expect.stringMatching(/declined.*no Git change/i)
-        }
-      ]
+    // History states the observed reason; what to do about it is the Now panel's job.
+    expect(view.items[1].evidence).toEqual({
+      summary: expect.stringMatching(/declined.*no Git change/i)
     });
   });
 
@@ -316,10 +321,28 @@ describe('task activity model', () => {
     });
 
     expect(view.items.map((item) => `${item.actor}: ${item.title}`)).toEqual([
-      'Review: Requested changes',
+      'Reviewer: Review requested changes',
       'GitHub: GitHub requested changes'
     ]);
     expect(view.items[0].evidence).toBeUndefined();
+  });
+
+  it('names the uncommitted changes a running review reads with its commit', () => {
+    const snapshot = (id: string, untrackedCount: number) => event('GIT_SNAPSHOT_CAPTURED', {
+      id, headSha: 'f390644aa', dirtyFingerprint: `fp-${id}`, status: untrackedCount ? 'DIRTY' : 'CLEAN',
+      stagedCount: 0, unstagedCount: 0, untrackedCount
+    });
+    const started = (snapshotId: string, runId: string) => event('AGENT_RUN_STARTED',
+      { mode: 'REVIEW', beforeGitSnapshotId: snapshotId, reviewedHeadSha: 'f390644aa' }, { runId });
+    const ledger = buildTaskActivityLedger({
+      task: taskFixture(),
+      events: [snapshot('dirty', 2), started('dirty', 'review-1'), snapshot('clean', 0), started('clean', 'review-2')]
+    });
+
+    expect(ledger.filter((item) => item.title === 'Review started').map((item) => item.evidence?.summary)).toEqual([
+      'Reviewed f390644 and uncommitted changes',
+      'Reviewed f390644'
+    ]);
   });
 
   it('surfaces stale local review as current Task Monki state', () => {
@@ -358,8 +381,8 @@ describe('task activity model', () => {
     });
 
     expect(view.items[0]).toMatchObject({
-      actor: 'Review',
-      title: 'Passed'
+      actor: 'Reviewer',
+      title: 'Review passed'
     });
     expect(view.items[0].evidence).toBeUndefined();
     expect(view.items[1]).toMatchObject({
@@ -462,9 +485,8 @@ describe('task activity model', () => {
       'Branch push failed',
       'PR merged'
     ]);
-    expect(view.items.find((item) => item.title === 'Transition blocked')?.evidence).toMatchObject({
-      summary: 'Blocks marking the task done.',
-      rows: [{ label: 'Reason', value: 'Merge evidence is missing.' }]
+    expect(view.items.find((item) => item.title === 'Transition blocked')?.evidence).toEqual({
+      summary: 'Merge evidence is missing.'
     });
   });
 

@@ -18,12 +18,13 @@ describe('mounted NewTaskPanel prompt refinement', () => {
     const onCreate = vi.fn(() => new Promise<void>(() => undefined));
     const onTextDraftChange = vi.fn();
     renderPanel({ agentProfiles: [profile], onCreate, onTextDraftChange });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Agent profile' }), { target: { value: profile.id } });
+    fireEvent.keyDown(screen.getByRole('button', { name: /^Agent profile:/ }), { key: 'ArrowDown' });
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: profile.name }));
     expect(onTextDraftChange).toHaveBeenLastCalledWith({ title: 'Sync badge', prompt: 'add a sync badge', agentProfileId: profile.id });
     fireEvent.click(screen.getByRole('button', { name: 'Create task in project' }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ agentProfileId: profile.id }));
-    expect((screen.getByRole('combobox', { name: 'Agent profile' }) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /^Agent profile:/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('sends the full refinement input and invalidates a proposal when that input changes', async () => {
@@ -141,14 +142,14 @@ describe('mounted existing-work import', () => {
       onListExistingWorktrees: async () => [{ worktreePath: '/tmp/project', branchName: 'feature' }]
     });
     fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
-    await screen.findByRole('radio', { name: 'feature · /tmp/project', checked: true });
+    await screen.findByRole('option', { name: 'feature at /tmp/project', selected: true });
     fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'feature · /tmp/project', checked: true }));
+    fireEvent.click(screen.getByRole('option', { name: 'feature at /tmp/project', selected: true }));
     fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: true }));
     expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    fireEvent.submit(screen.getByRole('dialog', { name: 'New task' }));
     await waitFor(() => expect(onImport).toHaveBeenCalledOnce());
     expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
       repositoryId: 'repository-1', worktreePath: '/tmp/project', branchName: 'feature', baseRef: 'HEAD',
@@ -170,10 +171,25 @@ describe('mounted existing-work import', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
     await screen.findByRole('button', { name: 'Open existing task' });
     await act(async () => resolveOld([{ worktreePath: '/tmp/old', branchName: 'wrong' }]));
-    expect(screen.queryByRole('radio', { name: 'wrong · /tmp/old' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'wrong at /tmp/old' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open existing task' }));
     await waitFor(() => expect(onOpenExistingTask).toHaveBeenCalledWith('archived-task'));
     expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it('lets the keyboard browse checkouts without selecting each one', async () => {
+    renderPanel({ onImport: vi.fn(), onListExistingWorktrees: async () => [
+      { worktreePath: '/tmp/one', branchName: 'feat/add-search' },
+      { worktreePath: '/tmp/two', branchName: 'fix/slow-list', existingTaskId: 'task-existing' }
+    ] });
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    const first = await screen.findByRole('option', { name: 'feat/add-search at /tmp/one' });
+    first.focus();
+    // Selecting a tracked checkout replaces the list, so arrows must only move focus.
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
+    const second = screen.getByRole('option', { name: 'fix/slow-list at /tmp/two', selected: false });
+    expect(document.activeElement).toBe(second);
+    expect(screen.queryByText('This checkout already has a task')).toBeNull();
   });
 
   it('keeps the selected checkout visible, clears the filter before closing, and preserves both text drafts', async () => {
@@ -183,13 +199,13 @@ describe('mounted existing-work import', () => {
       { worktreePath: '/tmp/two', branchName: 'fix/slow-list' }
     ] });
     fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
-    fireEvent.click(await screen.findByRole('radio', { name: 'feat/add-search · /tmp/one' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'feat/add-search at /tmp/one' }));
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('add search');
     fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), { target: { value: 'Keep my title' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Filter checkouts' }), { target: { value: 'slow' } });
-    expect(screen.getByRole('radio', { name: 'feat/add-search · /tmp/one', checked: true })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'feat/add-search at /tmp/one', selected: true })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Filter checkouts' }), { key: 'Enter' });
-    expect(screen.getByRole('radio', { name: 'fix/slow-list · /tmp/two', checked: true })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'fix/slow-list at /tmp/two', selected: true })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Title' }), { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     expect((screen.getByRole('textbox', { name: 'Filter checkouts' }) as HTMLInputElement).value).toBe('');
@@ -197,7 +213,7 @@ describe('mounted existing-work import', () => {
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Sync badge');
     expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
     fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
-    await screen.findByRole('radio', { name: 'fix/slow-list · /tmp/two', checked: true });
+    await screen.findByRole('option', { name: 'fix/slow-list at /tmp/two', selected: true });
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Keep my title');
     expect(screen.queryByRole('textbox', { name: 'Description' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Use branch' }));
@@ -224,12 +240,43 @@ describe('mounted existing-work import', () => {
     expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox', { name: 'Branch or commit' }), { target: { value: 'invalid' } });
     await screen.findByRole('alert');
-    fireEvent.submit(screen.getByRole('form', { name: 'New task' }));
+    fireEvent.submit(screen.getByRole('dialog', { name: 'New task' }));
     expect(onImport).not.toHaveBeenCalled();
   });
 });
 
 const emptyPreview: ImportPreview = { baseRef: 'refs/heads/main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), commitCount: 0, fileCount: 0, commits: [], files: [] };
+
+describe('mounted New task writing size', () => {
+  it('grows for a long description, gives the size back on Escape before closing, and opens at the size it was left', async () => {
+    window.localStorage.clear();
+    const onClose = vi.fn();
+    const { unmount } = renderPanel({ onClose, onImport: async () => undefined });
+
+    const expand = screen.getByRole('button', { name: 'Expand' });
+    expand.focus();
+    fireEvent.click(expand);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Collapse' }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Expand' })).toBeTruthy();
+
+    // The chord works while writing; imported work has no description, so no writing size.
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Description' }), { key: 'F', metaKey: true, shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    expect(screen.queryByRole('button', { name: 'Collapse' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'New work', pressed: false }));
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+
+    unmount();
+    renderPanel({ onClose });
+    expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+});
 
 function renderPanel(overrides: Partial<React.ComponentProps<typeof NewTaskPanel>> = {}) {
   const model: AgentModel = {

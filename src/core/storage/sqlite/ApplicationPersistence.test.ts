@@ -245,7 +245,8 @@ describe('ApplicationPersistence', () => {
     await fs.chmod(paths.databasePath, 0o600);
     let persistence = await open(profileRoot);
     try {
-      expect(await persistence.settings.get()).toEqual({ ...settings, schemaVersion: 14, theme: 'light', showMascot: false, agentProfiles: [] });
+      // Migration 13 drops the retired shell preferences the fixture still carries.
+      expect(await persistence.settings.get()).toEqual({ ...settings, schemaVersion: 15, theme: 'light', agentProfiles: [] });
       const backups = await fs.readdir(paths.backupsRoot);
       expect(backups).toHaveLength(1);
       const backup = await persistence.backups.verifyBackup(backups[0]!);
@@ -403,13 +404,13 @@ describe('ApplicationPersistence', () => {
           remotes: [],
           checkedAt: new Date(0).toISOString()
         });
-        await persistence.settings.update({ showMascot: false });
+        await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
         throw new Error('roll back both owners');
       })
     ).rejects.toThrow('roll back both owners');
 
     await expect(persistence.tasks.snapshot()).resolves.toMatchObject({ repositories: [] });
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: true });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: true });
 
     await persistence.database.write(async () => {
       await persistence.tasks.addRepository({
@@ -421,13 +422,13 @@ describe('ApplicationPersistence', () => {
         remotes: [],
         checkedAt: new Date(0).toISOString()
       });
-      await persistence.settings.update({ showMascot: false });
+      await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
     });
 
     await expect(persistence.tasks.snapshot()).resolves.toMatchObject({
       repositories: [expect.objectContaining({ path: repositoryPath })]
     });
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
   });
 
   it('orders Task serialization before runtime event transactions', async () => {
@@ -471,7 +472,7 @@ describe('ApplicationPersistence', () => {
     const taskMutation = persistence.tasks.serializePersistenceMutation(async () => {
       signalTaskMutation();
       await taskGate;
-      await persistence.settings.update({ showMascot: false });
+      await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
     });
     await taskMutationEntered;
 
@@ -496,7 +497,7 @@ describe('ApplicationPersistence', () => {
     await expect(persistence.taskRuntime.getRun(run.id)).resolves.toMatchObject({
       status: 'RUNNING'
     });
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
   });
 
   it('keeps Task projections read-only in SQLite', async () => {
@@ -570,7 +571,7 @@ describe('ApplicationPersistence', () => {
       path.join(os.tmpdir(), 'task-monki-close-active-backup-')
     );
     const persistence = await open(profileRoot);
-    await persistence.settings.update({ showMascot: false });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
 
     const originalBackup = persistence.database.backup.bind(persistence.database);
     let signalBackupStarted!: () => void;
@@ -613,7 +614,7 @@ describe('ApplicationPersistence', () => {
     opened.delete(persistence);
 
     const nextOwner = await open(profileRoot);
-    await expect(nextOwner.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(nextOwner.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
   });
 
   it('creates a verified backup and restores it under the offline profile lease', async () => {
@@ -621,9 +622,9 @@ describe('ApplicationPersistence', () => {
       path.join(os.tmpdir(), 'task-monki-application-restore-')
     );
     let persistence = await open(profileRoot);
-    await persistence.settings.update({ showMascot: false });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
     const backup = await persistence.backups.createBackup();
-    await persistence.settings.update({ showMascot: true });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: true });
     await close(persistence);
 
     const recovery = new ApplicationPersistenceRecovery(profileRoot, 'test-1.0.0');
@@ -634,7 +635,7 @@ describe('ApplicationPersistence', () => {
     });
 
     persistence = await open(profileRoot);
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
     expect(persistence.database.checkIntegrity('full')).toMatchObject({ mode: 'full' });
   });
 
@@ -643,9 +644,9 @@ describe('ApplicationPersistence', () => {
       path.join(os.tmpdir(), 'task-monki-interrupted-application-restore-')
     );
     let persistence = await open(profileRoot);
-    await persistence.settings.update({ showMascot: false });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
     const backup = await persistence.backups.createBackup();
-    await persistence.settings.update({ showMascot: true });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: true });
     const paths = persistence.paths;
     await close(persistence);
 
@@ -681,7 +682,7 @@ describe('ApplicationPersistence', () => {
       previousStoragePath: expect.any(String)
     });
     persistence = await open(profileRoot);
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
   });
 
   it('restores journals and managed Design Git history but not ephemeral worktrees', async () => {
@@ -769,7 +770,7 @@ describe('ApplicationPersistence', () => {
       path.join(os.tmpdir(), 'task-monki-corrupt-application-recovery-')
     );
     let persistence = await open(profileRoot);
-    await persistence.settings.update({ showMascot: false });
+    await persistence.settings.update({ autoInstallUpdatesOnQuit: false });
     const backup = await persistence.backups.createBackup();
     const databasePath = persistence.paths.databasePath;
     await close(persistence);
@@ -796,7 +797,7 @@ describe('ApplicationPersistence', () => {
       previousStoragePath: undefined
     });
     persistence = await open(profileRoot);
-    await expect(persistence.settings.get()).resolves.toMatchObject({ showMascot: false });
+    await expect(persistence.settings.get()).resolves.toMatchObject({ autoInstallUpdatesOnQuit: false });
     expect(persistence.database.checkIntegrity('full')).toMatchObject({ mode: 'full' });
   });
 

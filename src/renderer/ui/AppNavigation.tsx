@@ -1,76 +1,61 @@
 import {
-  Activity,
-  Archive,
   ArrowLeft,
   ArrowRight,
   Columns3,
-  Folder,
-  FolderOpen,
   Inbox,
   MessagesSquare,
   Monitor,
+  Palette,
   PanelLeft,
-  PanelsTopLeft,
   Plus,
-  Settings2,
-  SquareCheckBig
+  Settings2
 } from 'lucide-react';
 import { useId, type ReactNode } from 'react';
+import { Tooltip } from './Tooltip';
 import { UiLucideIcon } from './UiIcons';
 
-export function NavItem({
+/**
+ * One destination on the icon rail. The rail never expands, so the name lives
+ * in the accessible label and in a tooltip. Something waiting on the user is a
+ * dot at the icon's corner; how many is in the tooltip and on the page itself.
+ */
+export function RailItem({
   label,
   icon,
-  count,
+  count = 0,
   countNoun = 'task',
-  urgent,
-  pillCount = false,
-  overlapCount = false,
   active,
-  collapsed,
   onClick
 }: {
   label: string;
   icon: ReactNode;
+  /** Items waiting on the user. */
   count?: number;
   countNoun?: string;
-  urgent?: boolean;
-  pillCount?: boolean;
-  overlapCount?: boolean;
   active: boolean;
-  collapsed?: boolean;
   onClick(): void;
 }) {
   const descriptionId = useId();
-  const countDescription =
-    count != null && count > 0
-      ? `${count} ${countNoun}${count === 1 ? '' : 's'}`
-      : undefined;
+  const waiting = count > 0 ? `${count} ${countNoun}${count === 1 ? '' : 's'} waiting` : undefined;
   return (
-    <button
-      type="button"
-      className={`tm-nav__item ${active ? 'tm-nav__item--active' : ''} ${overlapCount ? 'tm-nav__item--overlap-count' : ''}`}
-      onClick={onClick}
-      data-tip={collapsed ? label : undefined}
-      aria-label={label}
-      aria-describedby={countDescription ? descriptionId : undefined}
-    >
-      {icon}
-      <span className="tm-nav__label">{label}</span>
-      {count != null && count > 0 ? (
-        <span
-          className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''} ${pillCount ? 'tm-nav__count--pill' : ''}`}
-          aria-hidden="true"
-        >
-          {count}
-        </span>
-      ) : null}
-      {countDescription ? (
-        <span id={descriptionId} className="tm-visually-hidden">
-          {countDescription}
-        </span>
-      ) : null}
-    </button>
+    <Tooltip label={waiting ? `${label}, ${count > 99 ? '99+' : count} waiting` : label} side="right">
+      <button
+        type="button"
+        className={`tm-rail__item${active ? ' tm-rail__item--active' : ''}`}
+        onClick={onClick}
+        aria-label={label}
+        aria-current={active ? 'page' : undefined}
+        aria-describedby={waiting ? descriptionId : undefined}
+      >
+        {icon}
+        {waiting ? (
+          <>
+            <span className="tm-rail__dot" aria-hidden="true" />
+            <span id={descriptionId} className="tm-visually-hidden">{waiting}</span>
+          </>
+        ) : null}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -87,7 +72,7 @@ export function ArrowRightIcon() {
 }
 
 export function PlusIcon() {
-  return <UiLucideIcon component={Plus} size={14} />;
+  return <UiLucideIcon component={Plus} size={13} />;
 }
 
 export function InboxIcon() {
@@ -99,7 +84,7 @@ export function BoardIcon() {
 }
 
 export function DesignIcon() {
-  return <UiLucideIcon component={PanelsTopLeft} />;
+  return <UiLucideIcon component={Palette} />;
 }
 
 export function PreviewIcon() {
@@ -108,22 +93,6 @@ export function PreviewIcon() {
 
 export function DiscourseIcon() {
   return <UiLucideIcon component={MessagesSquare} />;
-}
-
-export function SavedViewsFolderIcon({ open }: { open: boolean }) {
-  return <UiLucideIcon component={open ? FolderOpen : Folder} />;
-}
-
-export function ActiveIcon() {
-  return <UiLucideIcon component={Activity} />;
-}
-
-export function ReviewIcon() {
-  return <UiLucideIcon component={SquareCheckBig} />;
-}
-
-export function DoneIcon() {
-  return <UiLucideIcon component={Archive} />;
 }
 
 export function SettingsIcon() {

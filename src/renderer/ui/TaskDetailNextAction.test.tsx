@@ -8,7 +8,7 @@ import {
 } from './TaskDetail';
 
 const moveToReview: NextActionModel = {
-  sentence: 'Implementation finished. Move it to review to run the quality gate.',
+  title: 'Completed',
   primary: { id: 'move-to-review', label: 'Move to review' },
   secondaries: []
 };
@@ -53,7 +53,7 @@ describe('TaskWorkPanels', () => {
     );
 
     expect(html).toContain('aria-labelledby="task-work-panels-title"');
-    expect(html).toContain('Progress, review, and agent controls');
+    expect(html).toContain('Current work');
     expect(html).toContain('Agent progress');
     expect(html).toContain('Review');
     expect(html).toContain('<h3>Agent</h3>');

@@ -4,6 +4,7 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
+import { pluralize } from './formatting';
 
 export type RunActivityCategory =
   | 'read'
@@ -62,7 +63,6 @@ export interface RunActivitySection {
 export interface RunActivityProjection {
   rows: RunActivityRow[];
   sections: RunActivitySection[];
-  outputSummary?: string;
 }
 
 interface ActivityCandidate extends RunActivityLeaf {
@@ -99,8 +99,7 @@ export function buildRunActivityProjection(input: {
 
   return {
     rows: groupedRows,
-    sections: buildRunActivitySections(groupedRows),
-    outputSummary: commandOutputSummary(runItems)
+    sections: buildRunActivitySections(groupedRows)
   };
 }
 
@@ -599,10 +598,10 @@ function contextGroupCopy(
   count: number
 ): Pick<RunActivityRow, 'label' | 'detail'> {
   if (category === 'read') {
-    return { label: 'Read', detail: `${count} ${plural(count, 'file')}` };
+    return { label: 'Read', detail: pluralize(count, 'file') };
   }
   if (category === 'search') {
-    return { label: 'Searched', detail: `${count} ${plural(count, 'time')}` };
+    return { label: 'Searched', detail: pluralize(count, 'time') };
   }
   return {
     label: 'Listed',
@@ -706,7 +705,7 @@ function searchActivityDetail(
   const compactQuery = query ? compactValue(query, 56) : undefined;
   const compactPath = shortPath(path, cwd);
   if (compactQuery && compactPath) {
-    return `${compactQuery} · ${compactPath}`;
+    return `${compactQuery} in ${compactPath}`;
   }
   return compactQuery ?? compactPath ?? 'project';
 }
@@ -784,21 +783,9 @@ function commandActivityMetric(
   return durationMetric(numberValue(payload.durationMs));
 }
 
-function commandOutputSummary(items: AgentItemRecord[]): string | undefined {
-  const lineCount = items
-    .filter((item) => item.type === 'COMMAND_EXECUTION')
-    .reduce((total, item) => {
-      const output = stringValue(objectPayload(item.payload).aggregatedOutput);
-      return total + outputLineCount(output);
-    }, 0);
-  return lineCount > 0
-    ? `show output · ${lineCount} ${plural(lineCount, 'line')}`
-    : undefined;
-}
-
 function lineCountMetric(output: string | undefined): string | undefined {
   const lineCount = outputLineCount(output);
-  return lineCount > 0 ? `${lineCount} ${plural(lineCount, 'line')}` : undefined;
+  return lineCount > 0 ? pluralize(lineCount, 'line') : undefined;
 }
 
 function outputLineCount(output: string | undefined): number {
@@ -1119,10 +1106,6 @@ function compactAbsolutePath(value: string): string {
     return `//${segments.slice(0, 2).join('/')}/…/${segments.slice(-3).join('/')}`;
   }
   return `/…/${segments.slice(-3).join('/')}`;
-}
-
-function plural(count: number, word: string): string {
-  return count === 1 ? word : `${word}s`;
 }
 
 function unique(values: string[]): string[] {

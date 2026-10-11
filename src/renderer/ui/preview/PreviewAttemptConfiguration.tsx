@@ -47,7 +47,7 @@ export function PreviewAttemptConfiguration({ taskId, attempt, status, projectDi
       <div className="tm-preview-configuration__toolbar">
         <span className="tm-preview-configuration__file">
           <strong>Run configuration</strong>
-          {run ? ` · ${run.time} · ${run.outcome.toLowerCase()}` : ''} · read-only
+          <span>{run ? `${run.time}, ${run.outcome.toLowerCase()}, read-only` : 'read-only'}</span>
         </span>
         <div className="tm-preview-configuration__views">
           <button type="button" className="ghost-button" onClick={onBack}>Back to preview.yaml</button>

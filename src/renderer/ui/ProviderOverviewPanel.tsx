@@ -104,7 +104,7 @@ export function ProviderOverviewPanel({
         <h4>Runtime</h4>
         <dl className="provider-kv">
           <dt>Status</dt>
-          <dd>
+          <dd className="provider-kv__text">
             <span>
               {humanizeEnum(
                 server?.status ??
@@ -115,16 +115,19 @@ export function ProviderOverviewPanel({
             </span>
           </dd>
           <dt>Integration</dt>
-          <dd>
+          <dd className="provider-kv__text">
             <span>{runtime?.displayName ?? server?.runtimeId ?? task.runtimeId}</span>
-            <small>
-              {runtime
-                ? `${humanizeEnum(runtime.kind)} · ${humanizeEnum(runtime.transport)}`
-                : '—'}
-            </small>
+            {runtime ? (
+              <small className="provider-meta">
+                <span>{humanizeEnum(runtime.kind)}</span>
+                <span>{humanizeEnum(runtime.transport)}</span>
+              </small>
+            ) : (
+              <small>—</small>
+            )}
           </dd>
           <dt>Account</dt>
-          <dd>
+          <dd className="provider-kv__text">
             <span>{runtimeState?.preflight.accountLabel ?? '—'}</span>
           </dd>
           <dt>Version</dt>
@@ -155,7 +158,7 @@ export function ProviderOverviewPanel({
           {runtimeResolution ? (
             <>
               <dt>Runtime probes</dt>
-              <dd>
+              <dd className="provider-kv__text">
                 <span>{runtimeResolution.probes.length}</span>
                 <small>{rejectedRuntimeProbes.length} rejected</small>
               </dd>
@@ -173,11 +176,11 @@ export function ProviderOverviewPanel({
                 <dt>Code</dt>
                 <dd>{diagnostic.code}</dd>
                 <dt>Stage</dt>
-                <dd>{humanizeEnum(diagnostic.stage)}</dd>
+                <dd className="provider-kv__text">{humanizeEnum(diagnostic.stage)}</dd>
                 <dt>Severity</dt>
-                <dd>{humanizeEnum(diagnostic.severity)}</dd>
+                <dd className="provider-kv__text">{humanizeEnum(diagnostic.severity)}</dd>
                 <dt>Message</dt>
-                <dd className="provider-item-kv__prose">
+                <dd className="provider-kv__text">
                   {diagnostic.message}
                   {diagnostic.detail ? <small>{diagnostic.detail}</small> : null}
                 </dd>
@@ -195,7 +198,7 @@ export function ProviderOverviewPanel({
                 <small>{runtimeResolution.selectedVersion ?? 'version unknown'}</small>
               </dd>
               <dt>Source</dt>
-              <dd>{humanizeEnum(runtimeResolution.selectedSource)}</dd>
+              <dd className="provider-kv__text">{humanizeEnum(runtimeResolution.selectedSource)}</dd>
               <dt>Launch</dt>
               <dd>{formatArgv(runtimeResolution.selectedLaunchArgv)}</dd>
               <dt>Required capabilities</dt>
@@ -212,7 +215,7 @@ export function ProviderOverviewPanel({
                   <small>{probe.version ?? 'version unknown'}</small>
                 </dd>
                 <dt>Status</dt>
-                <dd>
+                <dd className="provider-kv__text">
                   {probe.compatible ? 'Compatible' : 'Rejected'}
                   <small>{humanizeEnum(probe.source)}</small>
                 </dd>
@@ -224,7 +227,7 @@ export function ProviderOverviewPanel({
                 <dt>Missing</dt>
                 <dd>{formatList(probe.missingCapabilities)}</dd>
                 <dt>Detail</dt>
-                <dd>{probe.detail}</dd>
+                <dd className="provider-kv__text">{probe.detail}</dd>
               </dl>
             ))}
           </details>
@@ -238,7 +241,7 @@ export function ProviderOverviewPanel({
             {session ? (
               <button
                 type="button"
-                className="outline-button provider-small-button"
+                className="outline-button button--sm"
                 disabled={syncing || !session.materialized}
                 onClick={() => void sync()}
               >
@@ -248,18 +251,18 @@ export function ProviderOverviewPanel({
           </div>
           <dl className="provider-kv">
             <dt>Sync state</dt>
-            <dd>
+            <dd className="provider-kv__text">
               <span>{goal ? humanizeEnum(goal.syncState) : '—'}</span>
               <small>{goal?.source ? humanizeEnum(goal.source) : '—'}</small>
             </dd>
             <dt>Expected goal</dt>
             <dd>
-              <span className="provider-kv__prose">{task.prompt}</span>
+              <span className="provider-kv__text">{task.prompt}</span>
               <small>Authoritative task goal</small>
             </dd>
             <dt>Provider goal</dt>
             <dd>
-              <span className="provider-kv__prose">{goal?.providerObjective ?? '—'}</span>
+              <span className="provider-kv__text">{goal?.providerObjective ?? '—'}</span>
               <small>
                 {goal?.providerObjective === task.prompt
                   ? 'Matches the Task Monki goal'
@@ -267,7 +270,7 @@ export function ProviderOverviewPanel({
               </small>
             </dd>
             <dt>Provider status</dt>
-            <dd>
+            <dd className="provider-kv__text">
               <span>{goal?.providerStatus ?? '—'}</span>
             </dd>
           </dl>

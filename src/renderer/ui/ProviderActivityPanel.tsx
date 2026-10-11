@@ -161,13 +161,11 @@ function ProviderRunView({
           <span className="tm-disclosure__label">
             <DisclosureChevron />
             <span className="provider-turn__copy">
-              <strong>
-                {childLabel ? `${childLabel} · ` : ''}
-                {humanizeEnum(run.mode)} turn
-              </strong>
-              <small>
-                {new Date(run.startedAt).toLocaleString()} ·{' '}
-                {run.providerTurnId ?? '—'}
+              <strong>{humanizeEnum(run.mode)} turn</strong>
+              <small className="provider-meta">
+                {childLabel ? <span>{childLabel}</span> : null}
+                <span>{new Date(run.startedAt).toLocaleString()}</span>
+                <span className="provider-meta__id">{run.providerTurnId ?? '—'}</span>
               </small>
             </span>
           </span>
@@ -181,9 +179,14 @@ function ProviderRunView({
               <strong>
                 Child thread {session.providerSessionId ?? session.id}
               </strong>
-              <span>
-                {session.providerRole ?? 'role unreported'} · parent{' '}
-                {session.providerParentSessionId ?? session.parentSessionId ?? 'unresolved'}
+              <span className="provider-meta">
+                <span>{session.providerRole ?? 'role unreported'}</span>
+                <span>
+                  parent{' '}
+                  <span className="provider-meta__id">
+                    {session.providerParentSessionId ?? session.parentSessionId ?? 'unresolved'}
+                  </span>
+                </span>
               </span>
             </div>
           ) : null}
@@ -212,9 +215,9 @@ function ProviderRunView({
                   <DisclosureChevron />
                   <span className="provider-raw-protocol__copy">
                     <strong>Raw protocol</strong>
-                    <small>
-                      {runItems.length} {runItems.length === 1 ? 'item' : 'items'} ·{' '}
-                      {providerEvents.length} {providerEvents.length === 1 ? 'event' : 'events'}
+                    <small className="provider-meta">
+                      <span>{runItems.length} {runItems.length === 1 ? 'item' : 'items'}</span>
+                      <span>{providerEvents.length} {providerEvents.length === 1 ? 'event' : 'events'}</span>
                     </small>
                   </span>
                 </span>
@@ -267,9 +270,9 @@ function AttachmentSubmissionDetails({
           <DisclosureChevron />
           <span className="provider-raw-protocol__copy">
             <strong>Attachment submissions</strong>
-            <small>
-              {submissions.length} {submissions.length === 1 ? 'file' : 'files'} · recorded after
-              provider start
+            <small className="provider-meta">
+              <span>{submissions.length} {submissions.length === 1 ? 'file' : 'files'}</span>
+              <span>recorded after provider start</span>
             </small>
           </span>
         </span>
@@ -288,14 +291,17 @@ function AttachmentSubmissionDetails({
                 </strong>
                 <span>{humanizeEnum(submission.transport)}</span>
               </header>
-              <p>
-                {submission.mediaType} · {submission.byteCount.toLocaleString()} bytes ·{' '}
-                <code>sha256:{submission.sha256.slice(0, 12)}…</code>
+              <p className="provider-meta">
+                <span>{submission.mediaType}</span>
+                <span>{submission.byteCount.toLocaleString()} bytes</span>
+                <code className="provider-meta__id">sha256:{submission.sha256.slice(0, 12)}…</code>
               </p>
               <footer>
-                {humanizeEnum(submission.correlation.kind)}{' '}
-                {submission.correlation.id} · submitted{' '}
-                {new Date(submission.submittedAt).toLocaleString()}
+                <span>
+                  {humanizeEnum(submission.correlation.kind)}{' '}
+                  <span className="provider-meta__id">{submission.correlation.id}</span>
+                </span>
+                <span>submitted {new Date(submission.submittedAt).toLocaleString()}</span>
               </footer>
             </article>
           ))}
@@ -330,12 +336,20 @@ function ProviderActivitySections({ sections }: { sections: RunActivitySection[]
 }
 
 function ProviderActivityRowView({ row }: { row: RunActivityRow }) {
-  const detail = [row.detail, row.metric].filter(Boolean).join(' · ');
   return (
     <article className={`provider-activity-row provider-activity-row--${row.category}`}>
       <div className="provider-activity-row__main">
         <span className="provider-activity-row__label">{row.label}</span>
-        <span className="provider-activity-row__detail">{detail || 'No detail reported'}</span>
+        <span className="provider-activity-row__detail provider-meta">
+          {row.detail || row.metric ? (
+            <>
+              {row.detail ? <span>{row.detail}</span> : null}
+              {row.metric ? <span>{row.metric}</span> : null}
+            </>
+          ) : (
+            'No detail reported'
+          )}
+        </span>
         <span className={`provider-activity-row__status provider-activity-row__status--${row.status}`}>
           {humanizeEnum(row.status)}
         </span>
@@ -375,9 +389,11 @@ function ProviderLifecycleEvent({ event }: { event: DomainEvent }) {
       {eventType === 'error' ? (
         <StructuredData value={payload.error ?? {}} />
       ) : eventType === 'model/rerouted' ? (
-        <p>
-          {stringValue(payload.fromModel) ?? 'unknown'} →{' '}
-          {stringValue(payload.model) ?? 'unknown'} · {String(payload.reason ?? '')}
+        <p className="provider-meta">
+          <span>
+            {stringValue(payload.fromModel) ?? 'unknown'} → {stringValue(payload.model) ?? 'unknown'}
+          </span>
+          {payload.reason ? <span>{String(payload.reason)}</span> : null}
         </p>
       ) : eventType === 'turn/diff/updated' ? (
         <p>
@@ -433,8 +449,9 @@ function ProviderItem({ item }: { item: AgentItemRecord }) {
     <article className={`provider-item provider-item--${item.type.toLowerCase()}`}>
       <header>
         <strong>{itemTitle(item.type, payload)}</strong>
-        <span>
-          {humanizeEnum(item.status)} · {humanizeEnum(item.type)}
+        <span className="provider-meta">
+          <span>{humanizeEnum(item.status)}</span>
+          <span>{humanizeEnum(item.type)}</span>
         </span>
       </header>
       <ItemBody type={item.type} payload={payload} />
@@ -481,7 +498,7 @@ function ItemBody({
         <dt>Working directory</dt>
         <dd>{stringValue(payload.cwd) || 'unknown'}</dd>
         <dt>Exit / duration</dt>
-        <dd>
+        <dd className="provider-kv__text">
           {formatNullable(payload.exitCode)} / {formatDuration(payload.durationMs)}
         </dd>
         {Array.isArray(payload.commandActions) && payload.commandActions.length > 0 ? (
@@ -517,7 +534,8 @@ function ItemBody({
               <summary>
                 <span className="tm-disclosure__label">
                   <DisclosureChevron />
-                  {stringValue(value.kind) || 'change'} · {stringValue(value.path) || 'unknown'}
+                  <span>{stringValue(value.kind) || 'change'}</span>
+                  <span className="provider-meta__id">{stringValue(value.path) || 'unknown'}</span>
                 </span>
               </summary>
               <pre>{stringValue(value.diff) || 'No provider diff.'}</pre>
@@ -555,7 +573,7 @@ function ItemBody({
     return (
       <dl className="provider-item-kv">
         <dt>Query</dt>
-        <dd>{stringValue(payload.query) || 'unknown'}</dd>
+        <dd className="provider-kv__text">{stringValue(payload.query) || 'unknown'}</dd>
         {payload.action ? (
           <>
             <dt>Action</dt>
@@ -582,15 +600,15 @@ function ItemBody({
       return (
         <dl className="provider-item-kv">
           <dt>Collaboration tool</dt>
-          <dd>{humanizeEnum(stringValue(payload.tool) ?? 'unknown')}</dd>
+          <dd className="provider-kv__text">{humanizeEnum(stringValue(payload.tool) ?? 'unknown')}</dd>
           <dt>Sender thread</dt>
           <dd>{stringValue(payload.senderThreadId) ?? 'unknown'}</dd>
           <dt>Receiver threads</dt>
           <dd>{receivers.length > 0 ? receivers.join(', ') : 'none reported'}</dd>
           <dt>Delegated prompt</dt>
-          <dd>{stringValue(payload.prompt) ?? 'not supplied'}</dd>
+          <dd className="provider-kv__text">{stringValue(payload.prompt) ?? 'not supplied'}</dd>
           <dt>Requested model / effort</dt>
-          <dd>
+          <dd className="provider-kv__text">
             {stringValue(payload.model) ?? 'inherited or unknown'} /{' '}
             {stringValue(payload.reasoningEffort) ?? 'inherited or unknown'}
           </dd>
@@ -604,7 +622,7 @@ function ItemBody({
     return (
       <dl className="provider-item-kv">
         <dt>Activity</dt>
-        <dd>{humanizeEnum(stringValue(payload.kind) ?? 'unknown')}</dd>
+        <dd className="provider-kv__text">{humanizeEnum(stringValue(payload.kind) ?? 'unknown')}</dd>
         <dt>Child thread</dt>
         <dd>{stringValue(payload.agentThreadId) ?? 'unknown'}</dd>
         <dt>Agent path</dt>

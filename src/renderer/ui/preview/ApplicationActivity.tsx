@@ -43,7 +43,7 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
         <section aria-label="Preview services">
           <GroupLabel>
             Services
-            <span className="tm-preview-group__meta"> · {serving ? 'serving' : attempt === status?.candidate ? 'starting' : 'last run'} <time dateTime={attempt.startedAt}>{clock(attempt.startedAt)}</time></span>
+            <span className="tm-preview-group__meta">{serving ? 'serving' : attempt === status?.candidate ? 'starting' : 'last run'} <time dateTime={attempt.startedAt}>{clock(attempt.startedAt)}</time></span>
           </GroupLabel>
           <div className="tm-application-preview__table-wrap">
             <table className="tm-application-preview__table tm-application-preview__services">
@@ -99,7 +99,7 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
           <GroupLabel>Retained data</GroupLabel>
           <div className="tm-preview-rows">
             {unlisted.map((resource) => (
-              <Row key={resource.name} name={resource.name} detail={`${serviceTypeLabel(resource.type)} · data kept across Stop`} />
+              <Row key={resource.name} name={resource.name} detail={`${serviceTypeLabel(resource.type)}, data kept across Stop`} />
             ))}
           </div>
         </section>
@@ -112,7 +112,7 @@ export function ApplicationActivity({ status, restoredRun, onLogs, onAsRun, onCo
               <span className="tm-preview-run__when">{run.time}</span>
               <span className="tm-preview-run__outcome">
                 {run.outcome}
-                {run.cause ? <span className="tm-preview-run__cause"> · {run.cause}</span> : null}
+                {run.cause ? <span className="tm-preview-run__cause">{run.cause}</span> : null}
               </span>
               <span className="tm-preview-run__end">
                 {run.logsAvailable ? (

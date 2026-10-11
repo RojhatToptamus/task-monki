@@ -32,15 +32,15 @@ export function previewRunRows(status: PreviewStatus | undefined, restoredRun: b
       outcome: restored
         ? 'Stopped when Task Monki quit'
         : serving
-          ? `Current run · ${readyIn(attempt)}serving`
+          ? `Serving${readyIn(attempt)}`
           : attempt.state === 'failed'
             ? update ? 'Update failed' : 'Failed'
             : attempt.state === 'starting'
-              ? 'This run · starting'
+              ? 'Starting'
               : attempt.state === 'canceled'
                 ? 'Canceled'
                 : attempt.state === 'cleanup-incomplete'
-                  ? 'Stopped · cleanup incomplete'
+                  ? 'Stopped, cleanup incomplete'
                   : 'Stopped',
       cause: restored ? 'logs expired' : failureCause(attempt),
       logsAvailable: !restored
@@ -51,7 +51,7 @@ export function previewRunRows(status: PreviewStatus | undefined, restoredRun: b
 function readyIn(attempt: AttemptSummary): string {
   if (!attempt.readyAt) return '';
   const seconds = Math.round((Date.parse(attempt.readyAt) - Date.parse(attempt.startedAt)) / 1000);
-  return Number.isFinite(seconds) && seconds >= 0 ? `ready in ${seconds} s · ` : '';
+  return Number.isFinite(seconds) && seconds >= 0 ? `, ready in ${seconds} s` : '';
 }
 
 /** The failing service and the fact the runtime reported for it. */
@@ -134,7 +134,7 @@ export function shortAddress(url: string): string {
 export function runTime(iso: string, now = new Date()): string {
   const date = new Date(iso);
   if (!Number.isFinite(date.getTime())) return '';
-  const clock = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const clock = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
   if (sameDay(date, now)) return clock;
   const yesterday = new Date(now);

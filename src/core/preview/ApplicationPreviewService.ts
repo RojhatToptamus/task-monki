@@ -70,6 +70,12 @@ export class ApplicationPreviewService {
     Map<string, { path: string; canonical: string }>
   >();
   private readonly approvals = new Map<string, Approval>();
+  /**
+   * The last failure diagnosis per preview. A failed attempt's logs and configuration are
+   * fixed, so it is computed again only when the attempt or what is serving changes, not on
+   * every read.
+   */
+  private readonly diagnoses = new Map<string, { key: string; diagnosis: Awaited<ReturnType<typeof diagnosePreviewFailure>> }>();
   constructor(
     private readonly options: {
       root: string;
@@ -263,13 +269,9 @@ export class ApplicationPreviewService {
     const latest = status?.candidate ?? status?.latest;
     const diagnosis =
       latest?.state === 'failed'
-        ? await diagnosePreviewFailure(
-            this.owner(),
-            name,
-            status!,
-            requirements?.description
-          )
+        ? await this.diagnose(name, status!, requirements?.description)
         : undefined;
+    if (!diagnosis) this.diagnoses.delete(name);
     return {
       name,
       status,
@@ -462,14 +464,29 @@ export class ApplicationPreviewService {
     return affected;
   }
 
-  async startRetained(worktree: WorktreeRecord) {
+  private async diagnose(name: string, status: PreviewStatus, description?: PreviewDescription) {
+    const key = [status.latest?.id, status.latest?.state, status.active?.id, status.url].join('\0');
+    const cached = this.diagnoses.get(name);
+    if (cached?.key === key) return cached.diagnosis;
+    const diagnosis = await diagnosePreviewFailure(this.owner(), name, status, description);
+    this.diagnoses.set(name, { key, diagnosis });
+    return diagnosis;
+  }
+
+  /**
+   * Starts the latest run's configuration again. `assertStartable` refuses an attempt the
+   * caller does not own, such as a saved Design capture under the same runtime name.
+   */
+  async startRetained(worktree: WorktreeRecord, assertStartable: (attemptId: string) => Promise<void>) {
     if (await readPreviewRecipeFile(worktree.worktreePath))
       throw new Error('preview.yaml exists. Start from the current file.');
     await this.allowWorktree(worktree);
     const current = await this.read(worktree);
-    if (!current.status?.latest)
+    const latest = current.status?.latest;
+    if (!latest)
       throw new Error('There is no previous configuration to start.');
-    await this.owner().startAgain(current.name, current.status.latest.id);
+    await assertStartable(latest.id);
+    await this.owner().startAgain(current.name, latest.id);
     return this.read(worktree);
   }
 

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -14,7 +15,9 @@ import type {
   OpenTargetDetectedApp,
   OpenTargetInspection,
   OpenTargetRef,
+  ReadWorktreeFileRequest,
   Repository,
+  WorktreeFileRead,
   WorktreeRecord
 } from '../../shared/contracts';
 
@@ -32,13 +35,11 @@ interface OpenAppDefinition {
 
 interface KnownOpenAppLocation {
   executable: string;
-  iconPath?: string;
 }
 
 interface DetectedOpenApp {
   definition: OpenAppDefinition;
   executable: string;
-  iconPath?: string;
 }
 
 interface OpenTargetContext {
@@ -73,11 +74,13 @@ export interface OpenTargetHost {
   launchExecutable(executable: string, argv: string[], cwd?: string): Promise<void>;
   openDefault(filePath: string): Promise<void>;
   reveal(filePath: string): Promise<void>;
-  getFileIconDataUrl?(filePath: string): Promise<string | undefined>;
 }
 
+/** How long a detection of installed editors is reused; installing one shows up after this. */
+const APP_DETECTION_TTL_MS = 60_000;
+
 export class OpenTargetService {
-  private readonly appIconDataUrls = new Map<string, Promise<string | undefined>>();
+  private detection?: { at: number; apps: Promise<OpenTargetDetectedApp[]> };
   private readonly pathApi: typeof path.posix | typeof path.win32;
 
   constructor(private readonly host: OpenTargetHost = createNodeOpenTargetHost()) {
@@ -140,6 +143,55 @@ export class OpenTargetService {
         message: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+
+  /**
+   * Reads a regular text file inside a task's recorded worktree, for showing the
+   * unchanged lines around a captured change. The path must stay inside the
+   * worktree lexically and after symlinks, and a path through any symlink is not
+   * a file here: Git records a symlink's target, not the file it points to. The
+   * file is opened without following a final symlink, checked to be the file the
+   * path resolved to, and read up to a size cap; anything else is refused.
+   */
+  async readWorktreeFile(
+    input: ReadWorktreeFileRequest,
+    context: OpenTargetContext
+  ): Promise<WorktreeFileRead> {
+    if (typeof input?.taskId !== 'string' || !input.taskId || typeof input.worktreeId !== 'string' || typeof input.relativePath !== 'string') {
+      throw new Error('A task, its worktree and a relative file path are required.');
+    }
+    const target = await this.resolveWorktreeFileTarget(
+      { type: 'worktreeFile', taskId: input.taskId, worktreeId: input.worktreeId, relativePath: input.relativePath },
+      context
+    );
+    if (!target.exists) return { status: 'MISSING' };
+    if (target.kind !== 'file' || !target.rootPath) return { status: 'NOT_FILE' };
+    const [realTarget, realRoot] = await Promise.all([
+      this.host.realpath(target.path),
+      this.host.realpath(target.rootPath)
+    ]);
+    const lexical = this.pathApi.join(realRoot, this.pathApi.relative(target.rootPath, target.path));
+    if (comparablePath(realTarget, this.host.platform) !== comparablePath(lexical, this.host.platform)) {
+      return { status: 'NOT_FILE' };
+    }
+    if ((target.statSize ?? 0) > MAX_COPY_FILE_BYTES) return { status: 'TOO_LARGE' };
+    let buffer: Buffer;
+    try {
+      buffer = await this.host.readFile(target.path, target.rootPath, MAX_COPY_FILE_BYTES);
+    } catch (error) {
+      // It grew past the cap between the size check and the read.
+      if (error instanceof Error && /too large/i.test(error.message)) return { status: 'TOO_LARGE' };
+      throw error;
+    }
+    if (buffer.byteLength > MAX_COPY_FILE_BYTES) return { status: 'TOO_LARGE' };
+    if (buffer.includes(0)) return { status: 'BINARY' };
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
+    } catch {
+      return { status: 'BINARY' };
+    }
+    return { status: 'TEXT', text, blobSha1: gitBlobSha1(buffer) };
   }
 
   private async resolveTarget(
@@ -242,18 +294,26 @@ export class OpenTargetService {
     this.assertPathWithinRoot(realTarget, realRoot);
   }
 
-  private async detectApps(): Promise<OpenTargetDetectedApp[]> {
-    const detected = await Promise.all(
-      APP_DEFINITIONS.map(async (definition) => {
-        const app = await this.detectApp(definition);
-        if (!app) {
-          return undefined;
-        }
-        return await this.toDetectedApp(app);
-      })
-    );
+  /**
+   * The installed editors, reused for a minute: every menu opening inspects the target, and
+   * probing each editor's command and install locations each time made the menu slow.
+   */
+  private detectApps(): Promise<OpenTargetDetectedApp[]> {
+    const now = Date.now();
+    if (!this.detection || now - this.detection.at > APP_DETECTION_TTL_MS) {
+      const apps = this.probeApps();
+      this.detection = { at: now, apps };
+      apps.catch(() => { this.detection = undefined; });
+    }
+    return this.detection.apps;
+  }
+
+  private async probeApps(): Promise<OpenTargetDetectedApp[]> {
+    const detected = await Promise.all(APP_DEFINITIONS.map((definition) => this.detectApp(definition)));
     return [
-      ...detected.filter((app): app is OpenTargetDetectedApp => Boolean(app)),
+      ...detected
+        .filter((app): app is DetectedOpenApp => Boolean(app))
+        .map((app) => ({ id: app.definition.id, label: app.definition.label })),
       {
         id: DEFAULT_APP_ID,
         label: 'Default app'
@@ -268,69 +328,21 @@ export class OpenTargetService {
       this.host
     );
     if (pathCandidate) {
-      return {
-        definition,
-        executable: pathCandidate,
-        iconPath: await this.resolveAppIconPath(definition, pathCandidate)
-      };
+      return { definition, executable: pathCandidate };
     }
 
     for (const location of knownLocations) {
       if (await this.host.access(location.executable, true)) {
-        return {
-          definition,
-          executable: location.executable,
-          iconPath: location.iconPath
-        };
+        return { definition, executable: location.executable };
       }
     }
     return undefined;
-  }
-
-  private async toDetectedApp(app: DetectedOpenApp): Promise<OpenTargetDetectedApp> {
-    const iconDataUrl = app.iconPath ? await this.appIconDataUrl(app.iconPath) : undefined;
-    return {
-      id: app.definition.id,
-      label: app.definition.label,
-      icon: iconDataUrl ? { kind: 'image', dataUrl: iconDataUrl } : undefined
-    };
-  }
-
-  private appIconDataUrl(appPath: string): Promise<string | undefined> {
-    let promise = this.appIconDataUrls.get(appPath);
-    if (!promise) {
-      promise = this.host.getFileIconDataUrl?.(appPath).catch(() => undefined)
-        ?? Promise.resolve(undefined);
-      this.appIconDataUrls.set(appPath, promise);
-    }
-    return promise;
   }
 
   private knownLocations(definition: OpenAppDefinition): KnownOpenAppLocation[] {
     return definition
       .knownLocations(this.host.platform, this.host.env)
-      .map((location) => ({
-        executable: expandHome(location.executable, this.pathApi),
-        iconPath: location.iconPath ? expandHome(location.iconPath, this.pathApi) : undefined
-      }));
-  }
-
-  private async resolveAppIconPath(
-    definition: OpenAppDefinition,
-    executable: string
-  ): Promise<string | undefined> {
-    const realExecutable = await this.host.realpath(executable).catch(() => executable);
-    const bundlePath = appBundlePathFromExecutable(realExecutable);
-    if (bundlePath && (await this.host.access(bundlePath))) {
-      return bundlePath;
-    }
-
-    for (const location of this.knownLocations(definition)) {
-      if (location.iconPath && (await this.host.access(location.iconPath))) {
-        return location.iconPath;
-      }
-    }
-    return undefined;
+      .map((location) => ({ executable: expandHome(location.executable, this.pathApi) }));
   }
 
   private async canCopyFileContents(target: ResolvedOpenTarget): Promise<TextFileReadiness> {
@@ -596,12 +608,6 @@ export function createNodeOpenTargetHost(): OpenTargetHost {
     },
     async reveal(filePath) {
       await launchPlatformReveal(process.platform, filePath);
-    },
-    async getFileIconDataUrl(filePath) {
-      if (process.platform !== 'darwin' || path.extname(filePath) !== '.app') {
-        return undefined;
-      }
-      return await macAppIconDataUrl(filePath);
     }
   };
 }
@@ -675,6 +681,11 @@ async function readFileFromVerifiedDescriptor(
   }
 }
 
+/** Git's object id for a blob with these bytes: the SHA-1 of "blob <size>\0" followed by the bytes. */
+function gitBlobSha1(bytes: Buffer): string {
+  return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
+}
+
 function assertContainedPath(candidate: string, root: string): void {
   const relative = path.relative(root, candidate);
   if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return;
@@ -740,8 +751,7 @@ const APP_DEFINITIONS: OpenAppDefinition[] = [
       platform === 'darwin'
         ? [
             {
-              executable: '/usr/bin/xed',
-              iconPath: '/Applications/Xcode.app'
+              executable: '/usr/bin/xed'
             }
           ]
         : [],
@@ -782,81 +792,6 @@ function candidateExecutableNames(commandName: string, host: OpenTargetHost): st
   return [commandName, ...extensions.map((extension) => `${commandName}${extension}`)];
 }
 
-function appBundlePathFromExecutable(executable: string): string | undefined {
-  const match = executable.match(/^(.*?\.app)(?:[/\\]|$)/);
-  return match?.[1];
-}
-
-async function macAppIconDataUrl(appPath: string): Promise<string | undefined> {
-  const iconPath = await macAppIconPath(appPath);
-  if (!iconPath) {
-    return undefined;
-  }
-
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-icon-'));
-  const outputPath = path.join(tempDir, 'icon.png');
-  try {
-    await execFileAsync('/usr/bin/sips', [
-      '-s',
-      'format',
-      'png',
-      '-z',
-      '32',
-      '32',
-      iconPath,
-      '--out',
-      outputPath
-    ], { timeout: 5000 });
-    const png = await fs.readFile(outputPath);
-    return `data:image/png;base64,${png.toString('base64')}`;
-  } catch {
-    return undefined;
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function macAppIconPath(appPath: string): Promise<string | undefined> {
-  const resourcesPath = path.join(appPath, 'Contents', 'Resources');
-  const iconName = await readMacBundleIconName(appPath);
-  const candidates = new Set<string>();
-  if (iconName) {
-    candidates.add(iconName);
-    if (!path.extname(iconName)) {
-      candidates.add(`${iconName}.icns`);
-    }
-  }
-
-  let resourceNames: string[] = [];
-  try {
-    resourceNames = await fs.readdir(resourcesPath);
-  } catch {
-    return undefined;
-  }
-
-  for (const candidate of candidates) {
-    if (resourceNames.includes(candidate)) {
-      return path.join(resourcesPath, candidate);
-    }
-  }
-
-  const fallback = resourceNames.find((name) => path.extname(name).toLowerCase() === '.icns');
-  return fallback ? path.join(resourcesPath, fallback) : undefined;
-}
-
-async function readMacBundleIconName(appPath: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await execFileAsync('/usr/libexec/PlistBuddy', [
-      '-c',
-      'Print:CFBundleIconFile',
-      path.join(appPath, 'Contents', 'Info.plist')
-    ], { timeout: 3000 });
-    return stdout.trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function knownEditorLocations(
   appId: Exclude<OpenTargetAppId, 'default' | 'xcode'>,
   platform: NodeJS.Platform,
@@ -878,7 +813,6 @@ function knownEditorLocations(
     return applications.map((base) => {
       const appPath = hostPath.join(base, appName);
       return {
-        iconPath: appPath,
         executable: hostPath.join(appPath, macExecutableFor(appId))
       };
     });
@@ -924,8 +858,7 @@ function windowsEditorLocations(
         const appRoot = winPath.join(localAppData, 'Programs', 'Microsoft VS Code');
         return [
           {
-            executable: winPath.join(appRoot, 'bin', 'code.cmd'),
-            iconPath: winPath.join(appRoot, 'Code.exe')
+            executable: winPath.join(appRoot, 'bin', 'code.cmd')
           }
         ];
       }
@@ -938,8 +871,7 @@ function windowsEditorLocations(
         );
         return [
           {
-            executable: winPath.join(appRoot, 'bin', 'code-insiders.cmd'),
-            iconPath: winPath.join(appRoot, 'Code - Insiders.exe')
+            executable: winPath.join(appRoot, 'bin', 'code-insiders.cmd')
           }
         ];
       }
@@ -948,16 +880,14 @@ function windowsEditorLocations(
         const appRoot = winPath.join(localAppData, 'Programs', 'Cursor');
         return [
           {
-            executable: winPath.join(appRoot, 'resources', 'app', 'bin', 'cursor.cmd'),
-            iconPath: winPath.join(appRoot, 'Cursor.exe')
+            executable: winPath.join(appRoot, 'resources', 'app', 'bin', 'cursor.cmd')
           }
         ];
       }
     case 'windsurf':
       return [
         {
-          executable: winPath.join(userProfile, '.codeium', 'windsurf', 'bin', 'windsurf.cmd'),
-          iconPath: winPath.join(userProfile, '.codeium', 'windsurf', 'Windsurf.exe')
+          executable: winPath.join(userProfile, '.codeium', 'windsurf', 'bin', 'windsurf.cmd')
         }
       ];
     case 'sublime':
@@ -965,8 +895,7 @@ function windowsEditorLocations(
         const appRoot = winPath.join(programFiles, 'Sublime Text');
         return [
           {
-            executable: winPath.join(appRoot, 'subl.exe'),
-            iconPath: winPath.join(appRoot, 'sublime_text.exe')
+            executable: winPath.join(appRoot, 'subl.exe')
           }
         ];
       }
@@ -977,13 +906,6 @@ function windowsEditorLocations(
         },
         {
           executable: winPath.join(
-            programFiles,
-            'JetBrains',
-            'IntelliJ IDEA',
-            'bin',
-            'idea64.exe'
-          ),
-          iconPath: winPath.join(
             programFiles,
             'JetBrains',
             'IntelliJ IDEA',

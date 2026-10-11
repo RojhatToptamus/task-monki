@@ -226,8 +226,6 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: record.theme,
     themePreset: record.themePreset,
-    sidebarCollapsed: record.sidebarCollapsed,
-    showMascot: record.showMascot,
     autoInstallUpdatesOnQuit: record.autoInstallUpdatesOnQuit,
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
     disabledRuntimeIds: [...record.disabledRuntimeIds],
@@ -248,6 +246,10 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     reviewRuntimeId: record.reviewRuntimeId,
     reviewModelProvider: record.reviewModelProvider,
     reviewReasoningEffort: record.reviewReasoningEffort,
+    sideQuestionModel: record.sideQuestionModel,
+    sideQuestionRuntimeId: record.sideQuestionRuntimeId,
+    sideQuestionModelProvider: record.sideQuestionModelProvider,
+    sideQuestionReasoningEffort: record.sideQuestionReasoningEffort,
     codexExternalTools: { ...record.codexExternalTools },
     externalExecutables: { ...record.externalExecutables },
     runtimeExecutablePaths: { ...record.runtimeExecutablePaths },
@@ -269,12 +271,6 @@ export function mergeAppSettings(
   }
   if (input.themePreset !== undefined) {
     patch.themePreset = normalizeThemePreset(input.themePreset);
-  }
-  if (input.sidebarCollapsed !== undefined) {
-    patch.sidebarCollapsed = requireBoolean(input.sidebarCollapsed, 'sidebarCollapsed');
-  }
-  if (input.showMascot !== undefined) {
-    patch.showMascot = requireBoolean(input.showMascot, 'showMascot');
   }
   if (input.autoInstallUpdatesOnQuit !== undefined) {
     patch.autoInstallUpdatesOnQuit = requireBoolean(
@@ -340,6 +336,9 @@ export function mergeAppSettings(
   }
   if ('reviewReasoningEffort' in input) {
     patch.reviewReasoningEffort = normalizeOptionalString(input.reviewReasoningEffort);
+  }
+  for (const key of ['sideQuestionModel', 'sideQuestionRuntimeId', 'sideQuestionModelProvider', 'sideQuestionReasoningEffort'] as const) {
+    if (key in input) patch[key] = normalizeOptionalString(input[key]);
   }
   if (input.codexExternalTools !== undefined) {
     if (!isRecord(input.codexExternalTools)) {
@@ -493,8 +492,6 @@ function isCurrentAppSettingsRecord(
     'discourseDefaults',
     'theme',
     'themePreset',
-    'sidebarCollapsed',
-    'showMascot',
     'autoInstallUpdatesOnQuit',
     'firstLaunchSetupCompleted',
     'disabledRuntimeIds',
@@ -512,6 +509,10 @@ function isCurrentAppSettingsRecord(
     'reviewRuntimeId',
     'reviewModelProvider',
     'reviewReasoningEffort',
+    'sideQuestionModel',
+    'sideQuestionRuntimeId',
+    'sideQuestionModelProvider',
+    'sideQuestionReasoningEffort',
     'codexExternalTools',
     'externalExecutables',
     'runtimeExecutablePaths',
@@ -530,7 +531,11 @@ function isCurrentAppSettingsRecord(
     record.reviewModel,
     record.reviewRuntimeId,
     record.reviewModelProvider,
-    record.reviewReasoningEffort
+    record.reviewReasoningEffort,
+    record.sideQuestionModel,
+    record.sideQuestionRuntimeId,
+    record.sideQuestionModelProvider,
+    record.sideQuestionReasoningEffort
   ];
   const tools = record.codexExternalTools;
   const executables = record.externalExecutables;
@@ -539,8 +544,6 @@ function isCurrentAppSettingsRecord(
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     (record.theme === 'light' || record.theme === 'dark' || record.theme === 'device') &&
     isTaskManagerThemePreset(record.themePreset) &&
-    typeof record.sidebarCollapsed === 'boolean' &&
-    typeof record.showMascot === 'boolean' &&
     typeof record.autoInstallUpdatesOnQuit === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&
     Array.isArray(record.agentProfiles) &&

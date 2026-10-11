@@ -12,6 +12,7 @@ import type {
   InteractionRequestRecord
 } from '../../shared/contracts';
 import { availableProviderCommandOptions } from '../model/agentPermissions';
+import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { StructuredData } from './display';
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
@@ -143,6 +144,7 @@ function InteractionBody({
         <CommandRequest
           interaction={interaction}
           disabled={disabled}
+          worktreePath={sourceSession?.worktreePath}
           onRespond={respond}
         />
       ) : interaction.type === 'FILE_CHANGE_APPROVAL' ? (
@@ -215,7 +217,7 @@ function InteractionWaiting({ requestedAt, count }: { requestedAt: string; count
   return (
     <span className="interaction-card__waiting">
       Waiting {formatElapsed(now - Date.parse(requestedAt))}
-      {count > 1 ? ` · ${count} pending` : ''}
+      {count > 1 ? <span className="interaction-card__pending">{count} pending</span> : null}
     </span>
   );
 }
@@ -223,10 +225,11 @@ function InteractionWaiting({ requestedAt, count }: { requestedAt: string; count
 function CommandRequest({
   interaction,
   disabled,
+  worktreePath,
   onRespond
-}: InteractionSectionProps) {
+}: InteractionSectionProps & { worktreePath?: string }) {
   const request = interaction.request as AgentCommandApprovalRequest;
-  const displayCommand = unwrapShellCommand(request.command);
+  const displayCommand = displayApprovalCommand(request.command);
   const providerOptions = availableProviderCommandOptions(interaction, request);
   const providerNativeRequest = request.providerOptions !== undefined;
   const canRememberCommand =
@@ -263,9 +266,12 @@ function CommandRequest({
 
   return (
     <>
-      {providerNativeRequest ? (
-        <ProviderCommandContext request={request} displayCommand={displayCommand} />
-      ) : null}
+      <CommandContext
+        request={request}
+        displayCommand={displayCommand}
+        worktreePath={worktreePath}
+        providerNative={providerNativeRequest}
+      />
       {displayCommand ? (
         <pre className="interaction-command">
           <code>{displayCommand}</code>
@@ -293,19 +299,6 @@ function CommandRequest({
         <div className="interaction-actions interaction-actions--command">
           {providerNativeRequest ? (
             <>
-              {providerOptions.map((option) => (
-                <ActionButton
-                  key={option.id}
-                  label={option.label}
-                  variant={
-                    option.action === 'ACCEPT' && !option.providerRemembersChoice
-                      ? 'primary'
-                      : 'secondary'
-                  }
-                  disabled={disabled}
-                  onClick={() => onRespond(option.decision)}
-                />
-              ))}
               {hasAction(interaction, 'CANCEL') ? (
                 <ActionButton
                   label="Cancel request"
@@ -319,6 +312,19 @@ function CommandRequest({
                   }
                 />
               ) : null}
+              {providerOptionsInOrder(providerOptions).map((option) => (
+                <ActionButton
+                  key={option.id}
+                  label={option.label}
+                  variant={
+                    option.action === 'ACCEPT' && !option.providerRemembersChoice
+                      ? 'primary'
+                      : 'secondary'
+                  }
+                  disabled={disabled}
+                  onClick={() => onRespond(option.decision)}
+                />
+              ))}
             </>
           ) : (
             <>
@@ -330,18 +336,6 @@ function CommandRequest({
                 showCancel={false}
                 onRespond={onRespond}
               />
-              {hasAction(interaction, 'ACCEPT') ? (
-                <ActionButton
-                  label="Allow once"
-                  disabled={disabled}
-                  onClick={() =>
-                    onRespond({
-                      interactionType: 'COMMAND_APPROVAL',
-                      action: 'ACCEPT'
-                    })
-                  }
-                />
-              ) : null}
               {canAllowForSession || canRememberCommand ? (
                 <ActionButton
                   label={
@@ -354,6 +348,18 @@ function CommandRequest({
                   onClick={submitPersistentChoice}
                 />
               ) : null}
+              {hasAction(interaction, 'ACCEPT') ? (
+                <ActionButton
+                  label="Allow once"
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'ACCEPT'
+                    })
+                  }
+                />
+              ) : null}
             </>
           )}
         </div>
@@ -362,19 +368,31 @@ function CommandRequest({
   );
 }
 
-function ProviderCommandContext({
+/**
+ * Everything besides the command that the decision approves. A provider-native
+ * request also states its reason; any request shows the network host, extra
+ * paths, and a working directory outside the task worktree, because those widen
+ * what "Allow" grants. A directory inside the worktree was already checked by
+ * policy and stays out of the way.
+ */
+function CommandContext({
   request,
-  displayCommand
+  displayCommand,
+  worktreePath,
+  providerNative
 }: {
   request: AgentCommandApprovalRequest;
   displayCommand?: string;
+  worktreePath?: string;
+  providerNative: boolean;
 }) {
   const network = formatProviderNetworkContext(request.networkApprovalContext);
-  const reason = providerReason(request.reason, displayCommand);
+  const reason = providerNative ? providerReason(request.reason, displayCommand) : undefined;
+  const cwd = request.cwd && (providerNative || !isWithinWorktree(request.cwd, worktreePath)) ? request.cwd : undefined;
   const hasDetails =
     Boolean(reason) ||
     Boolean(request.paths?.length) ||
-    Boolean(request.cwd) ||
+    Boolean(cwd) ||
     Boolean(network);
 
   if (!hasDetails) {
@@ -395,10 +413,10 @@ function ProviderCommandContext({
           <dd><pre>{request.paths.join('\n')}</pre></dd>
         </>
       ) : null}
-      {request.cwd ? (
+      {cwd ? (
         <>
           <dt>Working directory</dt>
-          <dd><code>{request.cwd}</code></dd>
+          <dd><code>{cwd}</code></dd>
         </>
       ) : null}
       {network ? (
@@ -459,18 +477,12 @@ function FileChangeRequest({
         ) : null}
       </dl>
       <div className="interaction-actions">
-        {hasAction(interaction, 'ACCEPT') ? (
-          <ActionButton
-            label="Apply once"
-            disabled={disabled}
-            onClick={() =>
-              onRespond({
-                interactionType: 'FILE_CHANGE_APPROVAL',
-                action: 'ACCEPT'
-              })
-            }
-          />
-        ) : null}
+        <RejectButtons
+          interaction={interaction}
+          interactionType="FILE_CHANGE_APPROVAL"
+          disabled={disabled}
+          onRespond={onRespond}
+        />
         {hasAction(interaction, 'ACCEPT_FOR_SESSION') ? (
           <ActionButton
             label="Allow root for session"
@@ -484,12 +496,18 @@ function FileChangeRequest({
             }
           />
         ) : null}
-        <RejectButtons
-          interaction={interaction}
-          interactionType="FILE_CHANGE_APPROVAL"
-          disabled={disabled}
-          onRespond={onRespond}
-        />
+        {hasAction(interaction, 'ACCEPT') ? (
+          <ActionButton
+            label="Apply once"
+            disabled={disabled}
+            onClick={() =>
+              onRespond({
+                interactionType: 'FILE_CHANGE_APPROVAL',
+                action: 'ACCEPT'
+              })
+            }
+          />
+        ) : null}
       </div>
     </>
   );
@@ -537,18 +555,20 @@ function PermissionRequest({
         ) : null}
       </dl>
       <div className="interaction-actions">
-        {hasAction(interaction, 'GRANT_TURN') ? (
-          <ActionButton
-            label="Grant for turn"
+        {hasAction(interaction, 'DECLINE') ? (
+          <button
+            type="button"
+            className="outline-button"
             disabled={disabled}
             onClick={() =>
-              onRespond({
+              void onRespond({
                 interactionType: 'PERMISSION_APPROVAL',
-                action: 'GRANT_TURN',
-                permissions: request.permissions
+                action: 'DECLINE'
               })
             }
-          />
+          >
+            Decline
+          </button>
         ) : null}
         {hasAction(interaction, 'GRANT_SESSION') ? (
           <ActionButton
@@ -564,20 +584,18 @@ function PermissionRequest({
             }
           />
         ) : null}
-        {hasAction(interaction, 'DECLINE') ? (
-          <button
-            type="button"
-            className="outline-button"
+        {hasAction(interaction, 'GRANT_TURN') ? (
+          <ActionButton
+            label="Grant for turn"
             disabled={disabled}
             onClick={() =>
-              void onRespond({
+              onRespond({
                 interactionType: 'PERMISSION_APPROVAL',
-                action: 'DECLINE'
+                action: 'GRANT_TURN',
+                permissions: request.permissions
               })
             }
-          >
-            Decline
-          </button>
+          />
         ) : null}
       </div>
     </>
@@ -629,6 +647,12 @@ function McpRequest({
         />
       ) : null}
       <div className="interaction-actions">
+        <RejectButtons
+          interaction={interaction}
+          interactionType="MCP_ELICITATION"
+          disabled={disabled}
+          onRespond={onRespond}
+        />
         {hasAction(interaction, 'ACCEPT') ? (
           <ActionButton
             label="Accept"
@@ -642,12 +666,6 @@ function McpRequest({
             }
           />
         ) : null}
-        <RejectButtons
-          interaction={interaction}
-          interactionType="MCP_ELICITATION"
-          disabled={disabled}
-          onRespond={onRespond}
-        />
       </div>
     </>
   );
@@ -696,6 +714,11 @@ function UserInputRequest({
       </div>
       {hasAction(interaction, 'ANSWER') ? (
         <div className="interaction-actions">
+          {request.questions.length > 1 && !canSubmit ? (
+            <span className="interaction-actions__hint">
+              {request.questions.length - unanswered.length} of {request.questions.length} answered
+            </span>
+          ) : null}
           {canDelegate ? (
             <ActionButton
               label={unanswered.length < request.questions.length ? 'Decide the rest' : 'Decide for me'}
@@ -799,11 +822,11 @@ function UserInputQuestion({
               checked={choice.selected.includes(option.label)}
               onChange={(event) => chooseOption(option.label, event.target.checked)}
             />
-            <span>
+            <ChoiceMark kind={inputType} />
+            <span className="interaction-choice__text">
               <strong>{option.label}</strong>
               {option.description ? <small>{option.description}</small> : null}
             </span>
-            <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
           </label>
         ))}
         {question.isOther ? (
@@ -817,13 +840,13 @@ function UserInputQuestion({
                 checked={choice.customSelected}
                 onChange={(event) => chooseCustom(event.target.checked)}
               />
-              <span><strong>Other…</strong></span>
-              <Check className="interaction-choice__check" size={16} strokeWidth={1.5} aria-hidden="true" />
+              <ChoiceMark kind={inputType} />
+              <span className="interaction-choice__text"><strong>Other</strong></span>
             </label>
             {choice.customSelected ? <textarea
               className="interaction-question__input"
               rows={1}
-              placeholder="Your answer…"
+              placeholder="Your answer"
               aria-label={`${question.header} other answer`}
               disabled={disabled}
               value={choice.custom}
@@ -984,6 +1007,12 @@ interface UserInputChoiceValue {
   custom: string;
 }
 
+/** Declining first and the one-time accept, the primary action, last. */
+function providerOptionsInOrder<T extends { action: string; providerRemembersChoice: boolean }>(options: readonly T[]): T[] {
+  const rank = (option: T) => option.action !== 'ACCEPT' ? 0 : option.providerRemembersChoice ? 1 : 2;
+  return [...options].sort((left, right) => rank(left) - rank(right));
+}
+
 function RejectButtons({
   interaction,
   interactionType,
@@ -1032,7 +1061,7 @@ function RejectButtons({
       {showCancel && hasAction(interaction, 'CANCEL') ? (
         <button
           type="button"
-          className="outline-button outline-button--danger interaction-actions__stop"
+          className="danger-button interaction-actions__stop"
           disabled={disabled}
           onClick={() =>
             void onRespond({
@@ -1079,7 +1108,7 @@ function formatProviderNetworkContext(
   context: AgentCommandApprovalRequest['networkApprovalContext']
 ): string | undefined {
   if (context?.protocol && context.host) {
-    return `${context.protocol} · ${context.host}`;
+    return `${context.protocol}://${context.host}`;
   }
   return context?.protocol ?? context?.host;
 }
@@ -1100,7 +1129,7 @@ function InteractionTechnicalDetails({
       <summary><DisclosureChevron />Request details</summary>
       <dl className="interaction-details interaction-details--technical">
         <dt>Source</dt>
-        <dd>{formatSessionSource(sourceSession, interaction.sessionId)}</dd>
+        <dd><SessionSource session={sourceSession} fallbackId={interaction.sessionId} /></dd>
         <dt>Request ID</dt>
         <dd><code>{String(interaction.providerRequestId)}</code></dd>
         {commandRequest?.command ? (
@@ -1129,12 +1158,13 @@ function InteractionTechnicalDetails({
   );
 }
 
-function unwrapShellCommand(command: string | undefined): string | undefined {
-  if (!command) {
-    return undefined;
-  }
-  const match = command.match(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/);
-  return match?.[2] ?? command;
+/** The visible radio or checkbox for a choice row; the native input stays for semantics. */
+function ChoiceMark({ kind }: { kind: 'radio' | 'checkbox' }) {
+  return (
+    <span className="interaction-choice__mark" data-kind={kind} aria-hidden="true">
+      {kind === 'checkbox' ? <Check size={13} /> : null}
+    </span>
+  );
 }
 
 function buildMcpContent(
@@ -1215,18 +1245,16 @@ function formatElapsed(milliseconds: number): string {
   return `${minutes}m ${seconds % 60}s`;
 }
 
-function formatSessionSource(
-  session: AgentSessionRecord | undefined,
-  fallbackId: string
-): string {
+/** Which session asked: its name, then its id in mono. */
+function SessionSource({ session, fallbackId }: { session: AgentSessionRecord | undefined; fallbackId: string }) {
   if (!session) {
-    return `Unknown local session ${fallbackId.slice(0, 8)}`;
+    return <>Unknown local session <code>{fallbackId.slice(0, 8)}</code></>;
   }
   const label =
     session.providerNickname ??
     session.providerRole ??
     (session.role === 'SUBAGENT' ? 'Subagent' : 'Primary agent');
-  return `${label} · ${session.providerSessionId ?? session.id}`;
+  return <>{label} <code>{session.providerSessionId ?? session.id}</code></>;
 }
 
 function isObject(

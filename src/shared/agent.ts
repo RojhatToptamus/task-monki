@@ -92,6 +92,11 @@ export type AgentRunMode =
   | 'FOLLOW_UP'
   | 'RETRY'
   | 'REVIEW'
+  /**
+   * A person's side question to the task's implementation agent, answered read-only in a
+   * fresh session on the task's runtime and model. It never joins the main conversation.
+   */
+  | 'SIDE_QUESTION'
   | 'DESIGN'
   | 'PREVIEW'
   | 'COMPACTION'
@@ -102,12 +107,12 @@ export type AgentInstructionProfile = 'DESIGN' | 'PREVIEW';
 
 /** Modes that run beside the task's work and never bind or advance its workflow. */
 export function isDetachedRunMode(mode: AgentRunMode): boolean {
-  return mode === 'REVIEW' || mode === 'PREVIEW';
+  return mode === 'REVIEW' || mode === 'SIDE_QUESTION' || mode === 'PREVIEW';
 }
 
 /** Sessions that may use a runtime other than the task's own, because they never carry its implementation work. */
 export function isDetachedSessionRole(role: AgentSessionRole): boolean {
-  return role === 'REVIEW' || role === 'PREVIEW';
+  return role === 'REVIEW' || role === 'PREVIEW' || role === 'SIDE';
 }
 
 /** Modes whose successful completion produces implementation work for review. */
@@ -137,7 +142,8 @@ export type AgentServerStatus =
   | 'FAILED'
   | 'LOST';
 
-export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'PREVIEW' | 'SUBAGENT';
+/** SIDE is one read-only side question on the task's runtime; it never carries the task's work. */
+export type AgentSessionRole = 'PRIMARY' | 'ALTERNATIVE' | 'REVIEW' | 'PREVIEW' | 'SIDE' | 'SUBAGENT';
 export type AgentSessionRelationshipState =
   | 'ROOT'
   | 'RESOLVED'
@@ -240,14 +246,12 @@ export function isTaskManagerThemePreset(value: unknown): value is TaskManagerTh
   return TASK_MANAGER_THEME_PRESETS.includes(value as TaskManagerThemePreset);
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 14 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 15 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
   theme: TaskManagerThemePreference;
   themePreset: TaskManagerThemePreset;
-  sidebarCollapsed: boolean;
-  showMascot: boolean;
   autoInstallUpdatesOnQuit: boolean;
   firstLaunchSetupCompleted: boolean;
   disabledRuntimeIds: AgentRuntimeId[];
@@ -268,6 +272,11 @@ export interface TaskManagerAppSettings {
   reviewRuntimeId?: AgentRuntimeId;
   reviewModelProvider?: AgentModelProviderId;
   reviewReasoningEffort?: string;
+  /** The side questions' default model and effort; unset follows the implementation default. */
+  sideQuestionModel?: string;
+  sideQuestionRuntimeId?: AgentRuntimeId;
+  sideQuestionModelProvider?: AgentModelProviderId;
+  sideQuestionReasoningEffort?: string;
   codexExternalTools: CodexExternalToolSettings;
   externalExecutables: ExternalExecutablePathSettings;
   runtimeExecutablePaths: Record<AgentRuntimeId, string | null>;
@@ -291,8 +300,6 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   theme: 'dark',
   themePreset: 'graphite',
-  sidebarCollapsed: false,
-  showMascot: true,
   autoInstallUpdatesOnQuit: true,
   firstLaunchSetupCompleted: false,
   disabledRuntimeIds: [],

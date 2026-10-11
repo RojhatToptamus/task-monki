@@ -1,180 +1,47 @@
-import { CircleCheck, CircleChevronRight, CircleX, LoaderCircle } from 'lucide-react';
-import { formatStatusValue } from './display';
+import { CircleCheck, CircleChevronRight, CircleX } from 'lucide-react';
+import type { Tone } from '../model/viewTypes';
 
-interface StatusBadgeProps {
-  label: string;
-  value: string;
-  tone?: 'neutral' | 'info' | 'action' | 'success' | 'warning' | 'error';
-  muted?: boolean;
-}
-
-const RUNNING_VALUES = new Set([
-  'RUNNING',
-  'STARTING',
-  'QUEUED',
-  'CREATING',
-  'IN_PROGRESS',
-  'PUSHING',
-  'COMPUTING',
-  'INTERRUPTING'
-]);
-
-export function StatusChip({ label, value, tone = 'neutral', muted = false }: StatusBadgeProps) {
-  const resolvedTone = tone === 'neutral' ? toneForValue(value) : tone;
-  const classes = [
-    'status-pill',
-    'status-pill--with-value',
-    `status-pill--${resolvedTone}`,
-    isRunningValue(value) ? 'status-pill--running' : '',
-    muted ? 'status-pill--muted' : ''
-  ].filter(Boolean);
+/** A badge: the state word on a tint of its tone. Nothing in it moves (DESIGN.md 6.6). */
+export function Chip({ tone, label }: { tone: Tone; label: string }) {
   return (
-    <span className={classes.join(' ')}>
+    <span className={`status-pill status-pill--${tone}`}>
       <span className="status-pill__label">{label}</span>
-      <strong className="status-pill__value">{formatStatusValue(value)}</strong>
     </span>
   );
 }
 
-export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
-
-export function Chip({
-  tone,
-  label,
-  compact = false,
-  showDot = true
-}: {
-  tone: StatusPillTone;
-  label: string;
-  compact?: boolean;
-  showDot?: boolean;
-}) {
-  const classes = [
-    'status-pill',
-    `status-pill--${tone}`,
-    !showDot ? 'status-pill--word-only' : '',
-    compact ? 'status-pill--compact' : ''
-  ].filter(Boolean);
-
-  return (
-    <span className={classes.join(' ')}>
-      {showDot ? <StatusGlyph kind={statusKindForTone(tone, false)} /> : null}
-      <span className="status-pill__label">{label}</span>
-    </span>
-  );
+/**
+ * The glyph beside a status word. A state that needs the user or has failed
+ * takes its mark, and it outranks work in flight: a task that needs an approval
+ * never shows the working circle. Anything else is a word alone.
+ */
+export function statusGlyphFor(tone: Tone, inFlight: boolean): StatusGlyphKind | undefined {
+  if (tone === 'action') return 'waiting';
+  if (tone === 'error') return 'blocked';
+  return inFlight ? 'working' : undefined;
 }
 
 export type StatusGlyphKind = 'working' | 'waiting' | 'blocked' | 'verified' | 'idle';
 
 export function StatusGlyph({
   kind,
-  className = '',
-  animate = kind === 'working'
+  className = ''
 }: {
   kind: StatusGlyphKind;
   className?: string;
-  animate?: boolean;
 }) {
   if (kind === 'idle') return null;
-  const classes = [
-    'tm-status-glyph',
-    `tm-status-glyph--${kind}`,
-    !animate ? 'tm-status-glyph--static' : '',
-    className
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const Component = kind === 'working'
-    ? LoaderCircle
-    : kind === 'waiting'
-      ? CircleChevronRight
-      : kind === 'blocked'
-        ? CircleX
-        : CircleCheck;
-  return (
-    <Component
-      absoluteStrokeWidth
-      aria-hidden="true"
-      className={classes}
-      size={14}
-      strokeWidth={1.5}
-    />
-  );
-}
-
-export function statusKindForTone(
-  tone: StatusPillTone | 'warning',
-  running: boolean
-): StatusGlyphKind {
-  if (running) return 'working';
-  if (tone === 'action' || tone === 'warning') return 'waiting';
-  if (tone === 'error') return 'blocked';
-  if (tone === 'success') return 'verified';
-  return 'idle';
-}
-
-export function statusKindForAvailabilityTone(tone: string): StatusGlyphKind {
-  if (tone === 'ok' || tone === 'success' || tone === 'ready') return 'verified';
-  if (tone === 'error' || tone === 'blocked') return 'blocked';
-  if (tone === 'warning' || tone === 'action' || tone === 'pending') return 'waiting';
-  if (tone === 'working' || tone === 'info') return 'working';
-  return 'idle';
-}
-
-function toneForValue(value: string): NonNullable<StatusBadgeProps['tone']> {
-  if (
-    ['COMPLETED', 'PASSED', 'PRESENT', 'VALID', 'HEALTHY', 'CLEAN', 'PUSHED', 'READY', 'OPEN_READY', 'MERGED', 'PASSING', 'APPROVED', 'SATISFIED'].includes(value)
-  ) {
-    return 'success';
+  const classes = ['lucide', 'tm-status-glyph', `tm-status-glyph--${kind}`, className].filter(Boolean).join(' ');
+  if (kind === 'working') {
+    // Work in flight is a half-filled circle that holds still; motion belongs
+    // to the one line of live text on a surface (DESIGN.md 6.6).
+    return (
+      <svg className={classes} viewBox="0 0 24 24" width={13} height={13} aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" />
+        <path d="M12 6a6 6 0 0 1 0 12z" fill="currentColor" />
+      </svg>
+    );
   }
-  if (
-    [
-      'FAILED',
-      'ERROR',
-      'INVALID',
-      'CONFLICTED',
-      'DIVERGED',
-      'UNAVAILABLE',
-      'MISSING',
-      'BLOCKED',
-      'AUTH_REQUIRED',
-      'GH_MISSING',
-      'MISSING_REMOTE',
-      'CLOSED_UNMERGED',
-      'FAILING',
-      'RECOVERY_REQUIRED',
-      'LOST'
-    ].includes(value)
-  ) {
-    return 'error';
-  }
-  if (
-    [
-      'WARNING',
-      'STALE',
-      'DIRTY',
-      'COMMITTED_UNPUSHED',
-      'LOCKED',
-      'PRUNABLE',
-      'OPEN_DRAFT',
-      'PENDING',
-      'REQUESTED',
-      'CHANGES_REQUESTED',
-      'AMBIGUOUS',
-      'AWAITING_APPROVAL',
-      'AWAITING_USER_INPUT',
-      'RESPONDING',
-      'INTERRUPTED'
-    ].includes(value)
-  ) {
-    return 'warning';
-  }
-  if (isRunningValue(value)) {
-    return 'info';
-  }
-  return 'neutral';
-}
-
-function isRunningValue(value: string): boolean {
-  return RUNNING_VALUES.has(value);
+  const Component = kind === 'waiting' ? CircleChevronRight : kind === 'blocked' ? CircleX : CircleCheck;
+  return <Component aria-hidden="true" className={classes} size={13} />;
 }

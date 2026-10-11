@@ -110,7 +110,7 @@ export function RepositorySelect({
             </span>
           ) : null}
         </span>
-        <UiChevronDownIcon open={open} size={14} className="tm-repository-select__chevron" />
+        <UiChevronDownIcon open={open} size={13} className="tm-repository-select__chevron" />
       </button>
 
       {open ? (
@@ -256,12 +256,12 @@ function RepositorySearch({
       {query ? (
         <button
           type="button"
-          className="tm-filefilter__clear"
+          className="tm-iconbtn"
           aria-label="Clear repository search"
           disabled={disabled}
           onClick={() => onQueryChange('')}
         >
-          <X aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />
+          <X aria-hidden="true" size={13} />
         </button>
       ) : null}
     </div>
@@ -273,9 +273,9 @@ function formatRepositoryStatus(status: RepositoryOption['status']): string {
 }
 
 function SearchIcon() {
-  return <Search aria-hidden="true" absoluteStrokeWidth className="tm-filefilter__search-icon" size={14} strokeWidth={1.5} />;
+  return <Search aria-hidden="true" className="tm-filefilter__search-icon" size={13} />;
 }
 
 function CheckIcon() {
-  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
+  return <Check aria-hidden="true" size={13} />;
 }

@@ -66,18 +66,23 @@ export function matchingExecutionPolicyPreset(
   );
 }
 
+/** Network access under a preset: a required preset turns it on, a disabled one off, and an optional one follows the request. */
+export function presetNetworkAccess(
+  preset: Pick<AgentExecutionPolicyPreset, 'networkAccess'> | undefined,
+  requested: boolean | undefined
+): boolean {
+  if (preset?.networkAccess === 'REQUIRED') return true;
+  if (preset?.networkAccess === 'DISABLED') return false;
+  return requested === true;
+}
+
 export function settingsForExecutionPolicyPreset(
   preset: AgentExecutionPolicyPreset,
   options: { networkAccess?: boolean } = {}
 ): AgentPermissionSettings {
   return {
     sandbox: preset.sandbox,
-    networkAccess:
-      preset.networkAccess === 'REQUIRED'
-        ? true
-        : preset.networkAccess === 'DISABLED'
-          ? false
-          : options.networkAccess === true,
+    networkAccess: presetNetworkAccess(preset, options.networkAccess),
     approvalPolicy: preset.approvalPolicy,
     approvalsReviewer: preset.approvalsReviewer
   };
@@ -145,7 +150,7 @@ export function formatAgentPermissionMode(
     case 'AUTO_ACCEPT_EDITS':
       return 'Auto-accept edits';
     case 'APPROVE_FOR_ME':
-      return 'Approve for me';
+      return 'Auto review';
     case 'FULL_ACCESS':
       return 'Full access';
     case 'CUSTOM':
@@ -157,8 +162,4 @@ export function isAgentNetworkAccessEnabled(
   settings: AgentExecutionSettings
 ): boolean {
   return settings.sandbox === 'DANGER_FULL_ACCESS' || settings.networkAccess === true;
-}
-
-export function formatAgentNetworkAccess(settings: AgentExecutionSettings): string {
-  return isAgentNetworkAccessEnabled(settings) ? 'Enabled' : 'Disabled';
 }

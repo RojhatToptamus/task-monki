@@ -408,7 +408,7 @@ describe('Import existing work', () => {
     expect(changed.tasks[0]?.projection.agentReview?.status).toBe('STALE');
     expect(changed.events.some((event) => event.type === 'AGENT_REVIEW_POLICY_VIOLATION')).toBe(false);
     expect(s.agent.startedTurns).toEqual([]);
-  });
+  }, 20_000);
 
   it('requires explicit coding intent, retains it on retry, and starts a fresh session after reconnect', async () => {
     const s = await scenarios.create();

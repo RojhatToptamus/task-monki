@@ -1,24 +1,67 @@
 :root {
-  /* Type — the seven roles in DESIGN.md 3.2. A component never sets a size
+  /* Type — the seven roles in DESIGN.md 8.2. A component never sets a size
      that is not one of these. */
-  --t-title: 24px;
+  --t-title: 22px;
   --t-heading: 15px;
   --t-label: 13px;
   --t-body: 13px;
   --t-help: 12px;
   --t-meta: 11.5px;
-  --t-group: 9.5px;
+  --t-group: 12px;
+
+  /* Weights — the interface uses two: 500 for titles and emphasis, 400 for everything else. */
+  --w-title: 500;
+  --w-medium: 500;
+  --w-regular: 400;
+
+  /* Line boxes in whole pixels: a single-line control, a row or code never lands
+     on a fraction. Long reading text alone uses the --lh-prose factor. */
+  --lh-meta: 16px;
+  --lh-ui: 18px;
+  --lh-body: 20px;
+  --lh-title: 28px;
+  --lh-prose: 1.55;
+
+  /* The page gutter: every page's title, tabs and content start here. */
+  --tm-gutter: 32px;
+
+  /* Icons draw one line weight at every size (DESIGN.md 8.3). */
+  --icon-stroke: 1.25px;
 
   /* Control heights — decision surface, toolbar, compact, icon button. */
-  --h-control: 34px;
-  --h-toolbar: 30px;
-  --h-compact: 26px;
+  --h-control: 32px;
+  --h-toolbar: 28px;
+  --h-compact: 24px;
   --h-icon: 28px;
 
-  /* Geometry, motion and layers. */
+  /* Rows, bars and heads (DESIGN.md §3): a dense row (rail, index, menu), a
+     content row or file head, a two-line or table row, a toolbar under a head,
+     and a head. */
+  --h-row-dense: 28px;
+  --h-row: 36px;
+  --h-row-tall: 48px;
+  --h-bar: 40px;
+  --h-head: 48px;
+
+  /* Keyboard focus adds a halo to whatever rim a control has; it never replaces
+     it. Inside a scrolling or clipped list the halo is drawn inward. */
+  --focus-halo: 0 0 0 3px var(--focus-ring);
+  --focus-halo-inset: inset 0 0 0 2px var(--focus-ring);
+
+  /* Motion (DESIGN.md 12). Durations by job; easing curves are the only three
+     the app uses. Entering surfaces ease out; nothing eases in. */
   --motion-fast: 120ms;
   --motion-standard: 180ms;
-  --motion-slow: 240ms;
+  --motion-modal: 220ms;
+  --motion-slow: 280ms;
+  /* Something moving on screen (a toggle's knob) eases both ways over this. */
+  --motion-move: 200ms;
+  --motion-toast: 240ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Layers. */
   --layer-base: 0;
   --layer-sticky: 10;
   --layer-handle: 20;
@@ -35,6 +78,12 @@
   -webkit-font-smoothing: antialiased;
 }
 
+@media (max-width: 1279px) {
+  :root {
+    --tm-gutter: 24px;
+  }
+}
+
 :root[data-mode='light'] {
   color-scheme: light;
 }
@@ -47,14 +96,33 @@
   box-sizing: border-box;
 }
 
+/* Headings and emphasis take the medium weight unless a component sets one;
+   the browser's bold is outside the two weights the interface uses. */
+.app-shell :where(h1, h2, h3, h4, h5, h6, strong, b, th) {
+  font-weight: var(--w-medium);
+}
+
+/* A component's own display never overrides hidden, so a closed collapsible
+   keeps none of its padding. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
   height: 100%;
 }
 
+/* Body text is 13px; a component that sets no size reads at it, portals included. */
 body {
   background: var(--ground);
+  font-size: var(--t-body);
+}
+
+/* Code-like text is always the app's mono, never the browser's generic one. */
+:where(code, kbd, samp, pre) {
+  font-family: var(--font-mono);
 }
 
 #root {
@@ -81,14 +149,25 @@ body {
   max-width: 100%;
   padding: 9px 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--overlay);
   color: var(--text);
-  box-shadow: var(--shadow-pop);
-  font-size: 12px;
-  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
   line-height: 1.35;
   pointer-events: auto;
+  animation: tm-toast-in var(--motion-toast) var(--ease-out);
+}
+
+/* A toast leaves faster than it arrived, before it is removed. */
+.tm-notifier__item[data-leaving] {
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
 }
 
 .tm-notifier__item strong {
@@ -100,32 +179,66 @@ body {
   height: 9px;
 }
 
+/* A scroll thumb shows only while the pointer is over its scroller, as on the
+   system's overlay scrollbars; at rest a long page carries no extra line. */
 ::-webkit-scrollbar-thumb {
-  background: var(--edge);
-  border-radius: 9px;
+  background-color: transparent;
+  border-radius: var(--r-sm);
   border: 2px solid transparent;
   background-clip: content-box;
-  opacity: 0.4;
 }
 
-::-webkit-scrollbar-track {
+:hover::-webkit-scrollbar-thumb {
+  background-color: var(--edge);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-@keyframes tm-fade {
+@keyframes tm-menu-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
+    transform: scale(0.96);
   }
 }
 
-@keyframes tm-spin {
+@keyframes tm-menu-out {
   to {
-    transform: rotate(360deg);
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes tm-dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes tm-scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes tm-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Live text: a soft highlight crosses the words once every 2.4s. */
+@keyframes tm-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: -100% 0;
   }
 }
 
@@ -135,41 +248,102 @@ textarea {
   font: inherit;
 }
 
+/* No browser padding: a fixed-size button centers its glyph exactly, and a
+   button with words sets its own. */
 button {
-  cursor: pointer;
+  padding: 0;
   border: 0;
   background: none;
   color: inherit;
 }
 
+/* A desktop app keeps the arrow on everything it can click: a disclosure's
+   words would otherwise take the text caret, a link the pointing hand. */
+summary,
+:any-link {
+  cursor: default;
+}
+
+/* State feedback eases (DESIGN.md 12): fills and ink settle over --motion-fast,
+   and a press scale returns the same way. A component that names its own
+   transition replaces this one. Menu items and listbox options stay instant,
+   because their highlight follows the pointer and the arrow keys. */
+.app-shell :where(button:not([role='option']), [role='button'], [role='tab'], summary, a) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+
+/* Text surfaces change fill and rim on hover and focus, including a pointer
+   click into a composer, so both ease rather than snap. */
+.app-shell :where(
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select,
+  .tm-composer,
+  .tm-listrail__search,
+  .tm-filefilter__search,
+  .tm-agent-console__search,
+  .import-work__search,
+  .tm-theme-picker__trigger
+) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
 .app-shell :where(button, [role='button'], input, textarea, select):disabled,
 .app-shell :where(button, [role='button'])[aria-disabled='true'] {
-  cursor: not-allowed;
+  cursor: default;
   color: var(--text-disabled);
 }
 
-/* Filled families keep their identity while disabled: the fill drops to the
-   disabled plane instead of the whole control fading out. */
-.app-shell :where(.primary-button, .sidebar__new-task):disabled {
-  background: var(--primary-disabled);
-  color: var(--text-disabled);
-}
-
-.app-shell :where(.outline-button, .danger-button, .segmented__btn, .overflow__trigger):disabled {
+.app-shell :where(.outline-button, .danger-button, .segmented__btn):disabled {
   background: var(--field-disabled);
   color: var(--text-disabled);
 }
 
-/* The token overlay preserves each control family's rest fill and geometry.
-   Ink-filled controls (the primary family) cannot take an ink overlay, so they
-   press with their own derived fill. */
-:where(button, [role='button']):not(:disabled):active {
-  background-image: linear-gradient(var(--press), var(--press));
+/* A disabled primary keeps its place but not its fill (DESIGN.md A.4), so it
+   matches the disabled half of a split send control beside it. */
+.app-shell :where(.primary-button):disabled {
+  background: var(--primary-disabled);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--text-disabled);
 }
 
-:where(.primary-button, .sidebar__new-task):not(:disabled):active {
-  background-image: none;
-  background-color: var(--primary-press);
+/* Press darkens a fill that is already there (DESIGN.md A.4, A.5): --press over
+   the control's rest or hover fill, which is why those hover rules set
+   background-color and never the shorthand. Only controls that own a fill take
+   it. Ink-filled controls (the primary family) press with their own derived
+   fill (base-components.css). A tab, a segment, a text link, a disclosure row,
+   a switch and a scrim have no fill to darken, and a menu trigger answers with
+   its open state, so none of them ever shows a grey box. */
+:where(
+  .outline-button,
+  .danger-button,
+  .ghost-button,
+  .tm-iconbtn,
+  .tm-detail__assistant,
+  .tm-listrail__new,
+  .tm-prstatus__refresh,
+  .task-attachment__remove,
+  .tm-discourse-message-action,
+  .tm-conversation__latest,
+  .tm-preview-follow,
+  .tm-discourse-new-responses,
+  .tm-rail__item,
+  .tm-settings__nav-item,
+  .tm-listrail__item,
+  .tm-review__index-file,
+  .tm-review__index-finding,
+  .tm-card__hit,
+  .tm-inbox-row__hit,
+  .tm-previews__identity,
+  .tm-preview-entry--toggle
+):not(:disabled):active {
+  background-image: linear-gradient(var(--press), var(--press));
 }
 
 .tm-visually-hidden {
@@ -183,6 +357,13 @@ button {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+/* One placeholder ink everywhere: --placeholder is solved to the prose floor
+   (DESIGN §2.5); the browser default measures 3.75:1 on field fills. */
+::placeholder {
+  color: var(--placeholder);
+  opacity: 1;
 }
 
 .app-shell[data-input-modality='pointer'] :where(
@@ -200,19 +381,17 @@ button {
    is the most reported dark-theme complaint in the product. */
 .app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea:not(.tm-composer textarea), select):focus,
 .app-shell :where(
-  .tm-composer:has(textarea:focus),
-  .tm-discourse-search,
+  .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
 ):focus-within,
 .app-shell :where(
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
-  .tm-access-select__trigger,
   .tm-repository-select__trigger
 ):focus {
   outline: 0;
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
 
@@ -222,20 +401,18 @@ button {
   select,
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
-  .tm-access-select__trigger,
   .tm-repository-select__trigger
 ):focus,
 .app-shell[data-input-modality='keyboard'] :where(
-  .tm-composer:has(textarea:focus),
-  .tm-discourse-search,
+  .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
 ):focus-within {
   outline: 0;
-  background: var(--field-focus);
+  background-color: var(--field-focus);
   box-shadow:
     inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+    var(--focus-halo);
 }
 
 .app-shell[data-input-modality='keyboard'] :where(
@@ -246,7 +423,20 @@ button {
   [role='separator']
 ):focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo);
+}
+
+/* Controls that rest on a rim keep it under the halo. */
+.app-shell[data-input-modality='keyboard'] :where(.outline-button, .tm-slot-more__trigger):focus {
+  box-shadow: inset 0 0 0 1px var(--field-edge), var(--focus-halo);
+}
+
+.app-shell[data-input-modality='keyboard'] .segmented__btn[aria-pressed='true']:focus {
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--focus-halo);
+}
+
+.app-shell[data-input-modality='keyboard'] .tm-send-menu__trigger.tm-action-menu__trigger:focus {
+  box-shadow: inset 1px 0 0 var(--primary-hover), var(--focus-halo);
 }
 
 @media (forced-colors: active) {
@@ -272,9 +462,14 @@ button {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
     animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
   }
+
+  /* The shimmer's still fallback lives beside .tm-shimmer in
+     base-components.css, which loads after this file. */
 }
 
 @media (prefers-contrast: more) {

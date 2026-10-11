@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 describe('ACP attachment delivery', () => {
-  it('removes Design MCP credentials and managed paths from protocol journals', () => {
+  it('removes client-tool MCP credentials and managed paths from protocol journals', () => {
     const safe = journalSafeAcpMessage({
       jsonrpc: '2.0',
       id: 1,
@@ -36,17 +36,17 @@ describe('ACP attachment delivery', () => {
       params: {
         cwd: '/worktree',
         mcpServers: [{
-          name: 'task-monki-design-tools',
+          name: 'task-monki-preview-tools',
           command: '/packaged/Task Monki',
-          args: ['/packaged/design-tool-mcp-server.mjs'],
+          args: ['/packaged/client-tool-mcp-server.mjs'],
           env: [
             {
-              name: 'TASK_MONKI_DESIGN_TOOL_SESSION_CREDENTIAL',
+              name: 'TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL',
               value: 'session-secret'
             },
             {
-              name: 'TASK_MONKI_DESIGN_TOOL_CREDENTIAL_FILE',
-              value: '/managed/design-tool-credentials/grant/turn-grant'
+              name: 'TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE',
+              value: '/managed/client-tool-credentials/grant/turn-grant'
             }
           ]
         }]
@@ -54,8 +54,8 @@ describe('ACP attachment delivery', () => {
     });
 
     expect(JSON.stringify(safe)).not.toContain('session-secret');
-    expect(JSON.stringify(safe)).not.toContain('/managed/design-tool-credentials');
-    expect(JSON.stringify(safe)).toContain('[REDACTED TASK MONKI DESIGN TOOL VALUE]');
+    expect(JSON.stringify(safe)).not.toContain('/managed/client-tool-credentials');
+    expect(JSON.stringify(safe)).toContain('[REDACTED TASK MONKI CLIENT TOOL VALUE]');
   });
 
   it('maps verified Grok text to an opaque embedded resource without a path', async () => {

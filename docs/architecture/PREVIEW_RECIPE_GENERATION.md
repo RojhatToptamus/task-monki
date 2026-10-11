@@ -41,6 +41,12 @@ id). A message sent during a turn waits in the queue (`QUEUE`, `QUEUED`) behind
 the active run and is sent when that run completes in the same session. Stop
 interrupts the run and holds the queue; a held or failed message is sent again
 by its id. Task Monki restarts hold queued messages like the task queue does.
+Messages are refused while a run that can write the worktree is active (the
+task's agent or a Design turn), because the turn's repository comparison would
+fail; a queued message is held instead of starting beside one. A runtime that
+was disabled or left the surface's boundary holds the queue at the next send.
+In the browser development server the Preview agent is unavailable: its folder
+requests need an escalatable approval policy that server refuses.
 Removing or editing a queued message uses the shared instruction editing.
 
 Each turn's prompt is the person's message followed by one line of preview
@@ -51,7 +57,8 @@ prompt. Turns use each provider's read-only policy, with command and
 file-change approvals rejected. A read outside the worktree that the provider
 asks about becomes an explicit read-only permission request for the exact folder
 or file; a file qualifies only when its folder would. Home directories, their
-ancestors, writes and network access cannot be granted. Codex asks through its
+ancestors, hidden folders (such as `~/.ssh` or `~/.codex`), application data
+under home, system folders, writes and network access cannot be granted. Codex asks through its
 permission tool, OpenCode through its external-directory permission, and an ACP
 agent through a read permission request, which Task Monki answers with
 the agent's one-time choice. These inspection grants belong to the provider

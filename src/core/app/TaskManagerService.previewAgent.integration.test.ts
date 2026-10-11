@@ -230,15 +230,48 @@ describe('TaskManagerService Preview agent', () => {
       .rejects.toThrow('did not resolve the selected Preview model');
   });
 
-  it('keeps Preview messages queued when the main task agent is stopped', async () => {
-    const { scenario, task } = await previewScenario('preview-agent-independent-queue');
+  it('refuses a Preview turn beside work that can change the worktree, and never hands a Preview message to the task agent', async () => {
+    const { scenario, task } = await previewScenario('preview-agent-worktree-writer');
     const primary = await scenario.service.startRun({ taskId: task.id });
+    // The turn's repository comparison would fail as the task agent edits files.
+    await expect(scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Inspect the configuration.' }))
+      .rejects.toThrow('Wait for the task agent to finish working in the worktree');
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.filter((item) => item.role === 'PREVIEW')).toEqual([]);
+    await scenario.completeRun(primary.id);
+
     const preview = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Inspect the configuration.' });
     const queued = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Explain the requirements.' });
-    await scenario.service.cancelRun({ runId: primary.id });
-    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === queued.id)?.status).toBe('QUEUED');
-    await scenario.completeRun(preview.runId!);
-    await scenario.waitForSnapshot((snapshot) => snapshot.taskInstructions.some((item) => item.id === queued.id && item.status === 'SUBMITTED'));
+    await scenario.service.stopPreviewAgent({ taskId: task.id });
+    await scenario.waitForSnapshot((snapshot) => snapshot.runs.some((run) => run.id === preview.runId && run.status === 'INTERRUPTED'));
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === queued.id)?.status).toBe('HELD');
+    // A held Preview message is sent from the Preview agent only.
+    await expect(scenario.service.sendTaskInstruction({ taskId: task.id, id: queued.id, runId: primary.id }))
+      .rejects.toThrow('Send this message from the Preview agent');
+    expect(scenario.agent.startedTurns.filter((turn) => turn.prompt.includes('Explain the requirements.'))).toEqual([]);
+  });
+
+  it('holds the queue with the reason when the next turn cannot be sent', async () => {
+    const { scenario, task } = await previewScenario('preview-agent-dispatch-failure');
+    const first = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'First' });
+    const second = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Second' });
+    const third = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Third' });
+    // Disabled in Settings while the first turn runs: the queued turns must not use it.
+    const internals = scenario.service as unknown as { appSettings: Record<string, unknown>; agents: { verifyPreviewRepositoryBoundary(runId: string): Promise<unknown> } };
+    internals.appSettings = { ...internals.appSettings, disabledRuntimeIds: [scenario.agent.descriptor.id] };
+    await scenario.completeRun(first.runId!);
+    await scenario.waitForSnapshot((snapshot) => snapshot.taskInstructions.some((item) => item.id === second.id && item.status === 'HELD'));
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === second.id)?.detail).toMatch(/disabled/i);
+    expect(scenario.agent.startedTurns).toHaveLength(1);
+
+    // An error while checking the finished turn holds the queue too, instead of leaving it waiting.
+    internals.appSettings = { ...internals.appSettings, disabledRuntimeIds: [] };
+    const resent = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: second.id, text: 'Second' });
+    await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: third.id, text: 'Third' });
+    internals.agents.verifyPreviewRepositoryBoundary = async () => { throw new Error('The run record changed.'); };
+    await scenario.completeRun(resent.runId!);
+    await scenario.waitForSnapshot((snapshot) => snapshot.taskInstructions.some((item) => item.id === third.id && item.status === 'HELD'));
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === third.id)?.detail)
+      .toBe('The run record changed. Send each message when you are ready.');
   });
 
   it('accepts a Preview conversation on another runtime than the task and keeps the task readable', async () => {
@@ -263,6 +296,18 @@ describe('TaskManagerService Preview agent', () => {
     expect((await scenario.store.getTaskDetail(task.id)).taskInstructions).toEqual([]);
   });
 
+  it('refuses the Preview agent in browser development with the reason instead of an approval policy the person cannot change', async () => {
+    const scenario = await scenarioRegistry.create({ name: 'preview-agent-browser-boundary', previewEnabled: true, allowAgentNetworkAccess: false });
+    const task = await scenario.createTask({ title: 'Preview agent in browser development' });
+    await prepareTestWorktree(scenario.service, task.id);
+    const id = randomUUID();
+    await expect(scenario.service.sendPreviewAgentMessage({ taskId: task.id, id, text: 'Hello' }))
+      .rejects.toThrow('Use the Electron app for the Preview agent');
+    expect(scenario.agent.startedTurns).toHaveLength(0);
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === id))
+      .toMatchObject({ status: 'FAILED', detail: expect.stringContaining('asks before reading folders') });
+  });
+
   it('rejects proposals and holds the queue when files change during Preview analysis, preserving the changes', async () => {
     const { scenario, task, worktree } = await previewScenario('preview-agent-changed-files');
     const first = await scenario.service.sendPreviewAgentMessage({ taskId: task.id, id: randomUUID(), text: 'Inspect only.' });
@@ -274,6 +319,8 @@ describe('TaskManagerService Preview agent', () => {
     })).rejects.toThrow(/changed during/i);
     await scenario.completeRun(first.runId!);
     await scenario.waitForSnapshot((snapshot) => snapshot.taskInstructions.some((item) => item.id === queued.id && item.status === 'HELD'));
+    expect((await scenario.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.id === queued.id)?.detail)
+      .toContain('Repository state changed during the read-only turn.');
     expect((await scenario.store.getRun(first.runId!))?.status).toBe('FAILED');
     expect(scenario.agent.startedTurns).toHaveLength(1);
     expect(await fs.readFile(path.join(worktree.worktreePath, 'server.mjs'), 'utf8')).toBe('// unexpected change\n');

@@ -4,13 +4,14 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode
+  type KeyboardEvent as ReactKeyboardEvent
 } from 'react';
-import { Check, ChevronDown, RefreshCw, Search, X } from 'lucide-react';
+import { Brain, Check, ChevronDown, Gauge, RefreshCw, Search, X } from 'lucide-react';
 import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import { formatReasoningEffort } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
+import { ActionMenu } from './ActionMenu';
+import { Tooltip } from './Tooltip';
 
 export type ModelDiscoveryStatus = 'idle' | 'loading' | 'failed';
 
@@ -22,14 +23,12 @@ interface AgentModelSelectorProps {
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
-  compact?: boolean;
   presentation?: 'full' | 'compact';
   fallbackSummary?: string;
   selectionUnavailable?: boolean;
   showSelectionError?: boolean;
   selectionUnavailableMessage?: string;
   showRuntimeLabel?: boolean;
-  access?: ReactNode;
   runtimeUnavailableReason?(runtime: AgentRuntimeState): string | undefined;
   modelUnavailableReason?(
     model: AgentModel,
@@ -84,14 +83,12 @@ export function AgentModelSelector({
   models,
   runtimes,
   disabled = false,
-  compact = false,
-  presentation,
+  presentation = 'full',
   fallbackSummary,
   selectionUnavailable = false,
   showSelectionError = true,
   selectionUnavailableMessage = 'Choose an available provider and model.',
   showRuntimeLabel = true,
-  access,
   runtimeUnavailableReason,
   modelUnavailableReason,
   onDiscoverModels,
@@ -99,7 +96,6 @@ export function AgentModelSelector({
   onSelectionChange,
   onReasoningEffortChange
 }: AgentModelSelectorProps) {
-  const effectivePresentation = presentation ?? (compact ? 'compact' : 'full');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeOptionId, setActiveOptionId] = useState<string>();
@@ -386,15 +382,16 @@ export function AgentModelSelector({
     selectedModel?.displayName ??
     fallbackSummary ??
     (selectedRuntime ? 'Provider default' : 'No agent available');
+  // The model, then the agent it runs on, as the menu's options name them.
   const triggerDetails = selectedRuntime
-    ? `${selectedRuntime.preflight.runtime.displayName} · ${triggerSummary}`
+    ? `${triggerSummary} via ${selectedRuntime.preflight.runtime.displayName}`
     : runtimeId
-      ? `${runtimeId} · ${triggerSummary}`
+      ? `${triggerSummary} via ${runtimeId}`
       : triggerSummary;
 
   return (
     <div
-      className={`tm-agent-console tm-agent-console--${effectivePresentation}`}
+      className={`tm-agent-console tm-agent-console--${presentation}`}
       ref={rootRef}
     >
       <div
@@ -411,41 +408,40 @@ export function AgentModelSelector({
         {showRuntimeLabel ? (
           <span className="tm-agent-console__label">Model</span>
         ) : null}
-        <button
-          ref={triggerRef}
-          type="button"
-          className={`tm-agent-console__trigger ${
-            (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
-            selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
-            selectedRuntimeUnavailableReason ||
-            selectionUnavailable
-              ? 'tm-agent-console__trigger--error'
-              : ''
-          }`}
-          aria-label={`${label}: ${triggerDetails}`}
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          aria-controls={listboxId}
-          aria-busy={
-            discovery?.runtimeId === runtimeId && discovery.status === 'loading'
-          }
-          aria-invalid={selectionUnavailable || undefined}
-          aria-describedby={
-            selectionUnavailable && showSelectionError
-              ? selectionErrorId
-              : undefined
-          }
-          title={selectedRuntimeUnavailableReason ?? triggerDetails}
-          disabled={disabled || runtimes.length === 0}
-          onClick={() => (open ? closeMenu(false) : openMenu())}
-        >
-          <span className="tm-agent-console__summary">{triggerSummary}</span>
-          {discovery?.runtimeId === runtimeId && discovery.status === 'loading' ? (
-            <SpinnerIcon />
-          ) : (
-            <ChevronIcon open={open} />
-          )}
-        </button>
+        <Tooltip label={selectedRuntimeUnavailableReason ?? triggerDetails}>
+          <button
+            ref={triggerRef}
+            type="button"
+            className={`tm-agent-console__trigger ${
+              (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
+              selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
+              selectedRuntimeUnavailableReason ||
+              selectionUnavailable
+                ? 'tm-agent-console__trigger--error'
+                : ''
+            }`}
+            aria-label={`${label}: ${triggerDetails}`}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            aria-busy={
+              discovery?.runtimeId === runtimeId && discovery.status === 'loading'
+            }
+            aria-invalid={selectionUnavailable || undefined}
+            aria-describedby={
+              selectionUnavailable && showSelectionError
+                ? selectionErrorId
+                : undefined
+            }
+            disabled={disabled || runtimes.length === 0}
+            onClick={() => (open ? closeMenu(false) : openMenu())}
+          >
+            {/* A composer chip leads with its mark, like Access and Profile; a narrow composer shows the mark alone. */}
+            <Brain className="tm-agent-console__chip-icon" size={13} aria-hidden="true" />
+            <span className="tm-agent-console__summary">{triggerSummary}</span>
+            <ChevronDown className="tm-agent-console__chevron" aria-hidden="true" size={13} />
+          </button>
+        </Tooltip>
 
         <div
           id={popupId}
@@ -463,7 +459,7 @@ export function AgentModelSelector({
           }
         >
           <div className="tm-agent-console__search">
-            <Search aria-hidden="true" size={14} strokeWidth={1.5} />
+            <Search aria-hidden="true" size={13} />
             <input
               ref={searchRef}
               type="text"
@@ -490,7 +486,7 @@ export function AgentModelSelector({
                   searchRef.current?.focus();
                 }}
               >
-                <X aria-hidden="true" size={12} strokeWidth={1.6} />
+                <X aria-hidden="true" size={13} />
               </button>
             ) : null}
           </div>
@@ -568,16 +564,13 @@ export function AgentModelSelector({
                       onClick={() => void choose(option)}
                     >
                       <span className="tm-agent-console__option-name">
-                        {discoveryLoading ? (
-                          <SpinnerIcon />
-                        ) : option.kind === 'discovery' ? (
+                        {option.kind === 'discovery' ? (
                           <RefreshCw
                             aria-hidden="true"
                             size={13}
-                            strokeWidth={1.5}
                           />
                         ) : null}
-                        {optionLabel}
+                        <span>{optionLabel}</span>
                       </span>
                       <span className="tm-agent-console__option-meta">
                         {option.meta}
@@ -623,8 +616,9 @@ export function AgentModelSelector({
       {onReasoningEffortChange && efforts.length > 0 ? (
         <div className="tm-agent-console__row">
           <span className="tm-agent-console__label">Reasoning</span>
+          {/* The one segmented control (DESIGN.md 10), filling the row. */}
           <div
-            className="tm-agent-console__reasoning"
+            className="segmented segmented--fill tm-agent-console__reasoning"
             role="group"
             aria-label={`${label} reasoning`}
             data-many-options={reasoningChoiceCount > 4 || undefined}
@@ -633,7 +627,7 @@ export function AgentModelSelector({
               {includesProviderDefaultReasoning ? (
                 <button
                   type="button"
-                  className={reasoningEffort === '' ? 'is-selected' : ''}
+                  className={`segmented__btn${reasoningEffort === '' ? ' is-selected' : ''}`}
                   aria-pressed={reasoningEffort === ''}
                   aria-label="Default reasoning"
                   disabled={disabled}
@@ -646,7 +640,7 @@ export function AgentModelSelector({
               {efforts.map((effort) => (
                 <button
                   type="button"
-                  className={effort === reasoningEffort ? 'is-selected' : ''}
+                  className={`segmented__btn${effort === reasoningEffort ? ' is-selected' : ''}`}
                   aria-pressed={effort === reasoningEffort}
                   aria-label={`${formatReasoningEffort(effort)} reasoning`}
                   disabled={disabled}
@@ -661,27 +655,35 @@ export function AgentModelSelector({
                 </button>
               ))}
             </div>
-            <select
-              className="tm-agent-console__reasoning-select"
-              aria-label={`${label} reasoning effort`}
-              value={reasoningEffort}
+            {/* Where the choices do not fit as a row, they are a menu. */}
+            <ActionMenu
+              className="tm-agent-console__reasoning-menu"
+              label={`${label} reasoning effort: ${reasoningEffort ? formatReasoningEffort(reasoningEffort) : 'Default'}`}
+              tooltip="Reasoning effort"
+              selection="single"
+              side="top"
+              align="start"
               disabled={disabled}
-              onChange={(event) => onReasoningEffortChange(event.target.value)}
-            >
-              {includesProviderDefaultReasoning ? (
-                <option value="">Default</option>
-              ) : null}
-              {efforts.map((effort) => (
-                <option value={effort} key={effort}>
-                  {formatReasoningEffort(effort)}
-                </option>
-              ))}
-            </select>
+              trigger={<>
+                <Gauge className="tm-agent-console__chip-icon" size={13} aria-hidden="true" />
+                <span className="tm-agent-console__chip-label">{reasoningEffort ? formatReasoningEffort(reasoningEffort) : 'Default'}</span>
+                <ChevronDown className="tm-agent-console__chip-chevron" size={13} aria-hidden="true" />
+              </>}
+              items={[
+                ...(includesProviderDefaultReasoning
+                  ? [{ id: 'provider-default', label: 'Default', pressed: reasoningEffort === '', onSelect: () => onReasoningEffortChange('') }]
+                  : []),
+                ...efforts.map((effort) => ({
+                  id: effort,
+                  label: formatReasoningEffort(effort),
+                  pressed: effort === reasoningEffort,
+                  onSelect: () => onReasoningEffortChange(effort)
+                }))
+              ]}
+            />
           </div>
         </div>
       ) : null}
-
-      {access}
     </div>
   );
 }
@@ -904,10 +906,13 @@ export function AgentModelSetting({
   modelUnavailableReason,
   onDiscoverModels,
   onSelectionChange,
-  onReasoningEffortChange
+  onReasoningEffortChange,
+  reset
 }: {
   label: string;
   hint?: string;
+  /** Returns the setting to what it follows when nothing is chosen, such as each task's model. */
+  reset?: { label: string; onReset(): void };
   runtimeId: string;
   modelId: string;
   fallbackSummary?: string;
@@ -930,6 +935,7 @@ export function AgentModelSetting({
       <div className="tm-model-default__title">
         <strong>{label}</strong>
         {hint ? <span>{hint}</span> : null}
+        {reset ? <button type="button" className="ghost-button button--sm tm-model-default__reset" onClick={reset.onReset}>{reset.label}</button> : null}
       </div>
       <AgentModelSelector
         label={label}
@@ -959,22 +965,7 @@ function modelCatalogNeedsActivation(runtime: AgentRuntimeState): boolean {
   );
 }
 
-function ChevronIcon({ open }: { open: boolean }) {
-  return (
-    <ChevronDown
-      absoluteStrokeWidth
-      className={`tm-agent-console__chevron ${open ? 'is-open' : ''}`}
-      aria-hidden="true"
-      size={12}
-      strokeWidth={1.5}
-    />
-  );
-}
 
 function CheckIcon() {
-  return <Check aria-hidden="true" absoluteStrokeWidth size={13} strokeWidth={1.5} />;
-}
-
-function SpinnerIcon() {
-  return <span className="tm-agent-console__spinner" aria-hidden="true" />;
+  return <Check aria-hidden="true" size={13} />;
 }

@@ -44,6 +44,21 @@ export function formatStatusValue(value: string): string {
   return value;
 }
 
+/** "file" or "files", for a count. */
+export function plural(count: number, word: string): string {
+  return count === 1 ? word : `${word}s`;
+}
+
+/** "1 file" or "3 files". */
+export function pluralize(count: number, word: string): string {
+  return `${count} ${plural(count, word)}`;
+}
+
+/** A commit hash shortened the way Git shows it. */
+export function shortSha(sha: string | undefined): string | undefined {
+  return sha ? sha.slice(0, 7) : undefined;
+}
+
 export function looksLikeInternalEnum(value: string): boolean {
   return value.includes('_') || /^[A-Z]+$/.test(value);
 }

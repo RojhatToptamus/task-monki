@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import {
-  buildDiffFileTree,
-  filterDiffFiles,
-  groupDiffFiles,
-  inspectGitDiffEvidence,
-  parseGitDiffEvidence,
-  parseGitDiffEvidenceForScope
-} from './diffEvidence';
+import { inspectGitDiffEvidence, parseGitDiffEvidenceForScope } from './diffEvidence';
+
+const parseAll = (text: string) => parseGitDiffEvidenceForScope(text, 'all');
 
 describe('diff evidence parser', () => {
   it('parses Git evidence sections into files with line stats', () => {
-    const files = parseGitDiffEvidence(`# Git diff evidence
+    const files = parseAll(`# Git diff evidence
 
 ## Diff stat
  src/App.tsx | 2 +-
@@ -115,97 +110,84 @@ diff --git "a/src/quoted name.ts" "b/src/quoted name.ts"
     expect(inspected.completeness).toBe('INCOMPLETE');
   });
 
-  it('groups files by directory with root files first', () => {
-    const groups = groupDiffFiles(
-      parseGitDiffEvidence(`diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/ui/Task.tsx b/src/ui/Task.tsx
---- a/src/ui/Task.tsx
-+++ b/src/ui/Task.tsx
-@@ -1 +1 @@
--old
-+new
-`)
-    );
+  it('keeps trailing patch text out of a file once its hunk counts are used up', () => {
+    // Git ends every patch with a newline and evidence sections are separated by
+    // blank lines; neither may become a context row with invented line numbers.
+    const files = parseAll([
+      '## Committed diff',
+      'diff --git a/scenarios/review-passed.txt b/scenarios/review-passed.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/scenarios/review-passed.txt',
+      '@@ -0,0 +1 @@',
+      '+Committed seed change.',
+      '',
+      '',
+      '## Unstaged diff',
+      'diff --git a/a.txt b/a.txt',
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,2 +1,2 @@',
+      ' ',
+      '-old',
+      '+new',
+      ''
+    ].join('\n'));
 
-    expect(groups.map((group) => group.directory)).toEqual(['Root', 'src/ui']);
-    expect(groups[1].files[0].path).toBe('src/ui/Task.tsx');
-  });
-
-  it('builds a changed-file tree with aggregate counts', () => {
-    const files = parseGitDiffEvidence(`diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/core/workflow/reducer.ts b/src/core/workflow/reducer.ts
---- a/src/core/workflow/reducer.ts
-+++ b/src/core/workflow/reducer.ts
-@@ -1 +1,2 @@
- const current = true;
-+const next = true;
-diff --git a/src/renderer/ui/TaskDetail.tsx b/src/renderer/ui/TaskDetail.tsx
---- a/src/renderer/ui/TaskDetail.tsx
-+++ b/src/renderer/ui/TaskDetail.tsx
-@@ -1 +1 @@
--old
-+new
-`);
-
-    const tree = buildDiffFileTree(files);
-
-    expect(tree.fileCount).toBe(3);
-    expect(tree.additions).toBe(3);
-    expect(tree.deletions).toBe(2);
-    expect(tree.children.map((node) => node.name)).toEqual(['src', 'README.md']);
-
-    const src = tree.children[0];
-    expect(src).toMatchObject({
-      type: 'directory',
-      name: 'src',
-      fileCount: 2
-    });
-    if (src.type !== 'directory') {
-      throw new Error('expected src directory');
-    }
-    expect(src.children.map((node) => node.name)).toEqual(['core', 'renderer']);
-  });
-
-  it('filters changed files by path and status before tree rendering', () => {
-    const files = parseGitDiffEvidence(`diff --git a/src/App.tsx b/src/App.tsx
---- a/src/App.tsx
-+++ b/src/App.tsx
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/model/newTask.ts b/src/model/newTask.ts
-new file mode 100644
---- /dev/null
-+++ b/src/model/newTask.ts
-@@ -0,0 +1 @@
-+export const task = true;
-diff --git a/docs/old.md b/docs/old.md
-deleted file mode 100644
---- a/docs/old.md
-+++ /dev/null
-@@ -1 +0,0 @@
--removed
-`);
-
-    expect(filterDiffFiles(files, { query: 'model', status: 'all' })).toHaveLength(1);
-    expect(filterDiffFiles(files, { status: 'added' }).map((file) => file.path)).toEqual([
-      'src/model/newTask.ts'
+    const rows = (path: string) => files
+      .find((file) => file.path === path)!
+      .blocks.flatMap((block) => block.lines)
+      .filter((line) => line.kind !== 'meta');
+    expect(rows('scenarios/review-passed.txt')).toEqual([
+      { kind: 'hunk', content: '@@ -0,0 +1 @@' },
+      { kind: 'addition', newLine: 1, content: '+Committed seed change.' }
     ]);
-    expect(filterDiffFiles(files, { query: 'src', status: 'deleted' })).toHaveLength(0);
+    // A real blank context line keeps its single-space prefix and its numbers.
+    expect(rows('a.txt').map((line) => [line.kind, line.oldLine, line.newLine])).toEqual([
+      ['hunk', undefined, undefined],
+      ['context', 1, 1],
+      ['deletion', 2, undefined],
+      ['addition', undefined, 2]
+    ]);
+  });
+
+  it('reads hunk lines by their prefix, not by what their text looks like', () => {
+    const files = parseAll([
+      'diff --git a/db/schema.sql b/db/schema.sql',
+      '--- a/db/schema.sql',
+      '+++ b/db/schema.sql',
+      '@@ -1,2 +1,2 @@',
+      // Removed and added lines whose text starts with "-- " and "++ ".
+      '--- legacy index',
+      ' CREATE TABLE tasks (id TEXT);',
+      '\\ No newline at end of file',
+      '+++ counter',
+      '@@ -10 +10 @@',
+      '-old',
+      '+new',
+      'diff --git a/notes.txt b/notes.txt',
+      '--- a/notes.txt',
+      '+++ b/notes.txt',
+      '@@ -1,5 +1,5 @@',
+      ' kept',
+      '[Task Monki truncated unstaged diff after 4096 retained bytes.]',
+      ''
+    ].join('\n'));
+
+    const schema = files.find((file) => file.path === 'db/schema.sql');
+    expect(files.map((file) => file.path)).toEqual(['db/schema.sql', 'notes.txt']);
+    expect(schema?.oldPath).toBeUndefined();
+    expect(schema?.deletions).toBe(2);
+    expect(schema?.additions).toBe(2);
+    // A truncated hunk stops at the marker; neither it nor the trailing blank gets numbers.
+    const notes = files.find((file) => file.path === 'notes.txt')!
+      .blocks.flatMap((block) => block.lines)
+      .filter((line) => line.kind !== 'meta' && line.kind !== 'hunk');
+    expect(notes).toEqual([{ kind: 'context', oldLine: 1, newLine: 1, content: ' kept' }]);
   });
 
   it('parses synthetic empty added-file diffs without hunks', () => {
-    const files = parseGitDiffEvidence(`# Git diff evidence
+    const files = parseAll(`# Git diff evidence
 
 ## Unstaged diff
 diff --git a/empty.txt b/empty.txt

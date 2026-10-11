@@ -38,7 +38,7 @@ describe('CompletedChangeSummaryPanel', () => {
       await pending.promise;
     });
 
-    expect(screen.getByText('Captured Git changes · 1 file')).toBeDefined();
+    expect(screen.getByText('Captured Git changes in 1 file')).toBeDefined();
     expect(screen.getByText('app.ts')).toBeDefined();
     expect(screen.queryByText('Loading captured Git changes…')).toBeNull();
   });
@@ -50,7 +50,7 @@ describe('CompletedChangeSummaryPanel', () => {
       gitSnapshots={[gitSnapshotFixture(), gitSnapshotFixture({ id: 'newer', capturedAt: '2026-07-07T11:00:00Z', dirtyFingerprint: 'changed' })]}
       onViewDiff={onViewDiff} />);
     fireEvent.click(await screen.findByText('1 file changed'));
-    expect(screen.getByText('Historical capture')).toBeTruthy();
+    expect(screen.getByText('Earlier snapshot')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
     expect(onViewDiff).toHaveBeenCalledWith('git-1');
   });

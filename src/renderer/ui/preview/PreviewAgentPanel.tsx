@@ -1,6 +1,6 @@
 import { useMemo, useState, type RefObject } from 'react';
 import { Pencil } from 'lucide-react';
-import type { PreviewRecipeGenerationDraft, TaskInstruction } from '../../../shared/contracts';
+import type { PreviewRecipeGenerationDraft } from '../../../shared/contracts';
 import { isActiveRunStatus } from '../../model/agentSession';
 import { proposalSummary } from '../../model/previewAgentRequests';
 import { previewAgentUnavailableReason, type PreviewAgentSelection } from '../../model/previewAgentSelection';
@@ -9,8 +9,7 @@ import { AgentModelSelector } from '../AgentModelSelector';
 import { ConversationPanel } from '../ConversationPanel';
 import { InteractionPanel } from '../InteractionPanel';
 import { MessageQueue } from '../MessageQueue';
-import { Elapsed, Turn, UserMessage, useSessionTurns } from '../SessionTurns';
-import { StatusGlyph } from '../StatusBadge';
+import { Turn, UnattachedMessages, unattachedInstructions, useSessionTurns, WorkingLine } from '../SessionTurns';
 import type { PreviewAgentConversation } from './PreviewAgentProps';
 
 /**
@@ -50,9 +49,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       .sort((a, b) => a.order - b.order),
     [agent.instructions, agent.runs]
   );
-  const unattached = agent.instructions.filter((item) =>
-    !agent.runs.some((run) => run.id === item.runId) && (['SENDING', 'UNCERTAIN'].includes(item.status) || (item.status === 'FAILED' && !item.runId))
-  );
+  const unattached = unattachedInstructions(agent.instructions, agent.runs);
   const lastTurn = turns.at(-1);
   const lastLiveEntry = lastTurn?.state === 'active' ? lastTurn.entries.at(-1) : undefined;
   const liveWorkVisible = lastLiveEntry?.kind === 'steps' && lastLiveEntry.steps.some((step) => (step.kind === 'reasoning' ? step.active : step.row.status === 'active'));
@@ -108,7 +105,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
         />
       }
       composer={{
-        placeholder: editing ? 'Edit the queued message' : active ? 'Queue a message for after this response' : turns.length ? 'Ask for a change or an explanation…' : 'Ask about the preview or request a configuration…',
+        placeholder: editing ? 'Edit the queued message' : active ? 'Queue a message for after this response' : turns.length ? 'Ask for a change or an explanation' : 'Ask about the preview or request a configuration',
         hint: disabledReason ?? '',
         sendLabel: editing ? 'Save' : active ? 'Queue' : 'Send',
         disabled: !!disabledReason || (!editing && questionPending),
@@ -140,7 +137,7 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
             />
             {editing ? (
               <div className="tm-agent-session__editing">
-                <Pencil size={13} strokeWidth={1.25} absoluteStrokeWidth aria-hidden="true" />Editing queued message
+                <Pencil size={13} aria-hidden="true" />Editing queued message
                 <button type="button" className="ghost-button" onClick={() => setEditing(undefined)} disabled={busy}>Cancel</button>
               </div>
             ) : null}
@@ -149,22 +146,16 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       }}
     >
       {turns.length === 0 && unattached.length === 0 ? (
-        <p className="tm-preview-agent__intro">
+        <p className="tm-side-conversation__empty">
           Set up your preview, change how it runs, or investigate a failure.
         </p>
       ) : null}
       {turns.map((turn) => (
         <Turn key={turn.key} turn={turn} onReadArtifact={agent.readArtifact} />
       ))}
-      {unattached.map((item) => (
-        <UserMessage key={item.id} text={item.text} time={item.createdAt} status={statusLabel(item)} />
-      ))}
+      <UnattachedMessages instructions={unattached} />
       {active && !questionPending && (active.status === 'INTERRUPTING' || active.status === 'STARTING' || active.status === 'QUEUED' || !liveWorkVisible) ? (
-        <div className="tm-side-conversation__working">
-          <StatusGlyph kind="working" />
-          <span role="status">{workingLabel}</span>
-          <Elapsed since={active.startedAt} />
-        </div>
+        <WorkingLine label={workingLabel} since={active.startedAt} />
       ) : null}
       <InteractionPanel interactions={agent.interactions} sessions={agent.sessions} onRespond={agent.respond} />
       {proposal ? (
@@ -179,8 +170,4 @@ export function PreviewAgentPanel({ agent, selection, onSelectionChange, proposa
       ) : null}
     </ConversationPanel>
   );
-}
-
-function statusLabel(item: TaskInstruction): string {
-  return item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent';
 }

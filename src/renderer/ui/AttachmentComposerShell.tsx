@@ -3,12 +3,12 @@ import { Paperclip } from 'lucide-react';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import type { TaskAttachmentController } from './useTaskAttachments';
 import { AttachmentChip } from './AttachmentChip';
+import { Tooltip } from './Tooltip';
 
 export function AttachmentComposerShell({
   attachments,
   children,
   attachmentLabel,
-  addButtonTitle,
   addButtonLabel = 'Add files',
   onAddButtonClick,
   onPreviewOpenChange,
@@ -23,11 +23,13 @@ export function AttachmentComposerShell({
   attachments: TaskAttachmentController;
   children: ReactNode;
   attachmentLabel: string;
-  addButtonTitle: string;
+  /** The add control's name, in its tooltip and accessible label. */
   addButtonLabel?: string;
   onAddButtonClick?(): void;
   onPreviewOpenChange?(open: boolean): void;
-  hint: ReactNode;
+  /** One line of state beside the action, only when it changes what sending does. */
+  hint?: ReactNode;
+  /** Controls after the add button, such as the model and access chips. */
   toolbarStart?: ReactNode;
   toolbarAction?: ReactNode;
   className?: string;
@@ -62,7 +64,6 @@ export function AttachmentComposerShell({
       ) : null}
       <div className="tm-composer__toolbar">
         {!compact ? <>
-          {toolbarStart}
           <input
             ref={attachments.inputRef}
             className="task-attachment-input"
@@ -74,20 +75,22 @@ export function AttachmentComposerShell({
             aria-hidden="true"
             onChange={attachments.selectFiles}
           />
-          <button
-            type="button"
-            className="task-attachment-add"
-            disabled={attachments.interactionBlocked}
-            title={addButtonTitle}
-            onClick={() => {
-              if (onAddButtonClick) onAddButtonClick();
-              else attachments.inputRef.current?.click();
-            }}
-          >
-            <PaperclipIcon />
-            <span>{addButtonLabel}</span>
-          </button>
-          <span className="task-attachment-hint">{hint}</span>
+          <Tooltip label={addButtonLabel}>
+            <button
+              type="button"
+              className="tm-iconbtn task-attachment-add"
+              aria-label={addButtonLabel}
+              disabled={attachments.interactionBlocked}
+              onClick={() => {
+                if (onAddButtonClick) onAddButtonClick();
+                else attachments.inputRef.current?.click();
+              }}
+            >
+              <PaperclipIcon />
+            </button>
+          </Tooltip>
+          {toolbarStart}
+          <span className="tm-composer__hint" title={typeof hint === 'string' ? hint : undefined}>{hint}</span>
         </> : null}
         {toolbarAction}
       </div>
@@ -102,5 +105,5 @@ export function AttachmentComposerShell({
 }
 
 export function PaperclipIcon() {
-  return <Paperclip aria-hidden="true" absoluteStrokeWidth size={14} strokeWidth={1.5} />;
+  return <Paperclip aria-hidden="true" size={16} />;
 }

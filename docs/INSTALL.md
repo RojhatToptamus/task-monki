@@ -119,10 +119,11 @@ does not rewrite global or repository configuration. The current Grok ACP may
 offer only one-time allow and reject choices for an individual request, in which
 case Task Monki does not invent a remembered or scoped choice.
 
-Codex is different: it enforces and attests its managed sandbox. **Restricted**
-permits only worktree writes with network and exceptions disabled; **Ask for
-approval** and **Approve for me** review eligible sandbox exceptions; **Full
-access** intentionally removes the sandbox.
+Codex is different: it enforces and attests its managed sandbox. **Auto
+review**, the default, lets Codex's automatic reviewer evaluate eligible sandbox
+exceptions; **Ask for approval** sends them to you; **Restricted** permits only
+worktree writes with network and exceptions disabled; **Full access**
+intentionally removes the sandbox.
 
 OpenCode likewise has no attested process sandbox. Its two presets both report
 full process access: Ask for approval gates native mutation and external-
@@ -207,8 +208,8 @@ check again every six hours while the app is open. Task Monki does not download
 an update until you select **Download**.
 
 You can also open **Settings → Updates** and select **Check now**. When a newer
-release exists, the left sidebar shows the update state. Select the notice to
-download the update. Select **Restart to update** when the download completes.
+release exists, an update control appears at the foot of the left rail; its
+tooltip states the update. Select it to download the update. Select **Restart to update** when the download completes.
 
 The **Install on quit** setting is on by default. With this option on, a
 downloaded update installs when Task Monki closes normally. It does not install
@@ -220,7 +221,7 @@ package by design. macOS updates still require the app's valid Developer ID
 signature. Every platform update also uses the digest in its GitHub update
 metadata.
 
-If an update fails, select the sidebar notice or the Settings action to retry.
+If an update fails, select the rail's update control or the Settings action to retry.
 You can always install a newer release manually from GitHub Releases.
 
 The stable package identity preserves the same app data directory during a

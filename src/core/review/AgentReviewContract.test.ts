@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  agentReviewStatusFromResult,
-  parseAgentReviewResult
-} from './AgentReviewContract';
+import { reviewGateStatusFromResult } from '../../shared/contracts';
+import { parseAgentReviewResult } from './AgentReviewContract';
 
 describe('AgentReviewContract', () => {
   it('parses the fenced structured review result', () => {
@@ -32,7 +30,7 @@ Review found one blocker.
     expect(result?.summary).toBe('Keyboard shortcut handling leaks listeners.');
     expect(result?.findings[0]?.severity).toBe('BLOCKER');
     expect(result?.findings[0]?.path).toBe('src/renderer/ui/App.tsx');
-    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(reviewGateStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 
   it('derives needs-changes from blocker or major findings even with a passing verdict', () => {
@@ -49,7 +47,7 @@ Review found one blocker.
     }`);
 
     expect(result?.findings[0]?.id).toBe('major-shortcut-shadows-reload');
-    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(reviewGateStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 
   it('parses native Codex review comments when no JSON result is returned', () => {
@@ -83,6 +81,6 @@ Full review comments:
       line: 96,
       endLine: 99
     });
-    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(reviewGateStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 });

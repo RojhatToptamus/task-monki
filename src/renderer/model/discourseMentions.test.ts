@@ -21,7 +21,7 @@ const agent: DiscourseMentionCandidate = {
   kind: 'AGENT',
   id: 'builtin.verifier',
   label: 'Verifier',
-  description: 'Checks claims against evidence',
+  description: ['Checks claims against evidence'],
   searchAliases: ['fact checker'],
   available: true
 };
@@ -202,10 +202,10 @@ describe('discourse mention composer model', () => {
 
   it('ranks deterministically with repositories ahead of task-heavy context', () => {
     const candidates: DiscourseMentionCandidate[] = [
-      { kind: 'REPOSITORY', id: 'repo-1', label: 'Verifier tools', description: '', searchAliases: ['/repo/verifier'], available: true },
-      { kind: 'TASK', id: 'task-1', label: 'Verify checkout', description: '', searchAliases: ['TM-1'], available: true },
+      { kind: 'REPOSITORY', id: 'repo-1', label: 'Verifier tools', description: [], searchAliases: ['/repo/verifier'], available: true },
+      { kind: 'TASK', id: 'task-1', label: 'Verify checkout', description: [], searchAliases: ['TM-1'], available: true },
       { ...agent, recentOrdinal: 4 },
-      { kind: 'AGENT', id: 'builtin.skeptic', label: 'Skeptic', description: '', searchAliases: ['reviewer'], available: false }
+      { kind: 'AGENT', id: 'builtin.skeptic', label: 'Skeptic', description: [], searchAliases: ['reviewer'], available: false }
     ];
     expect(rankDiscourseMentionCandidates(candidates, 'ver').map((item) => item.id)).toEqual([
       'builtin.verifier',
@@ -223,8 +223,8 @@ describe('discourse mention composer model', () => {
 
   it('retains duplicate display names for explicit ID-based selection', () => {
     const duplicates: DiscourseMentionCandidate[] = [
-      { kind: 'TASK', id: 'task-a', label: 'Fix login', description: 'repo-a', searchAliases: [], available: true },
-      { kind: 'TASK', id: 'task-b', label: 'Fix login', description: 'repo-b', searchAliases: [], available: true }
+      { kind: 'TASK', id: 'task-a', label: 'Fix login', description: ['repo-a'], searchAliases: [], available: true },
+      { kind: 'TASK', id: 'task-b', label: 'Fix login', description: ['repo-b'], searchAliases: [], available: true }
     ];
     expect(rankDiscourseMentionCandidates(duplicates, 'Fix login').map((item) => item.id)).toEqual([
       'task-a',
@@ -237,7 +237,7 @@ describe('discourse mention composer model', () => {
       kind: 'TASK',
       id: `task-${index}`,
       label: `Repository task ${index}`,
-      description: '',
+      description: [],
       searchAliases: ['repository'],
       available: true
     }));
@@ -248,7 +248,7 @@ describe('discourse mention composer model', () => {
         kind: 'REPOSITORY',
         id: 'repository-1',
         label: 'Task Monki repository',
-        description: '',
+        description: [],
         searchAliases: ['repository'],
         available: true
       }

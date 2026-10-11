@@ -12,6 +12,7 @@ import {
   isImplementationRunMode,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import { runMayWriteTaskWorktree } from '../../shared/sideQuestions';
 
 export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'QUEUED',
@@ -22,6 +23,11 @@ export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new S
   'INTERRUPTING',
   'RECOVERY_REQUIRED'
 ]);
+
+/** An active run that may be changing the task's worktree. */
+export function isActiveWorktreeWriter(run: RunRecord): boolean {
+  return ACTIVE_AGENT_RUN_STATUSES.has(run.status) && runMayWriteTaskWorktree(run);
+}
 
 export interface TaskTransitionEvidence {
   hasWorktree: boolean;
@@ -45,11 +51,13 @@ export function taskDeletionBlocker(
   task: Task,
   snapshot: TaskSnapshot
 ): string | undefined {
-  const activeRun = snapshot.runs.find(
+  const activeRuns = snapshot.runs.filter(
     (run) => run.taskId === task.id && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
   );
-  if (activeRun) {
-    return 'Stop or let the active agent run finish before deleting this task.';
+  if (activeRuns.length > 0) {
+    return activeRuns.every((run) => run.mode === 'SIDE_QUESTION')
+      ? 'Wait for the answer in Ask, or stop it, before deleting this task.'
+      : 'Stop or let the active agent run finish before deleting this task.';
   }
 
   const activeInteraction = snapshot.interactionRequests.find(

@@ -135,9 +135,9 @@ function SubagentNode({
             <DisclosureChevron />
             <span className="subagent-node__summary-copy">
               <strong>{displayName}</strong>
-              <small>
-                {node.session.providerRole ?? '—'} ·{' '}
-                {node.session.providerSessionId ?? '—'}
+              <small className="provider-meta">
+                <span>{node.session.providerRole ?? '—'}</span>
+                <span className="provider-meta__id">{node.session.providerSessionId ?? '—'}</span>
               </small>
             </span>
           </span>
@@ -154,9 +154,9 @@ function SubagentNode({
           ) : null}
           <dl className="provider-item-kv">
             <dt>Delegated prompt</dt>
-            <dd>{node.session.delegatedPrompt ?? '—'}</dd>
+            <dd className="provider-kv__text">{node.session.delegatedPrompt ?? '—'}</dd>
             <dt>Requested model / effort</dt>
-            <dd>
+            <dd className="provider-kv__text">
               {node.session.requestedSettings.model ?? '—'} /{' '}
               {node.session.requestedSettings.reasoningEffort ?? '—'}
             </dd>
@@ -233,18 +233,27 @@ function SubagentRunSummary({
       <summary>
         <span className="tm-disclosure__label">
           <DisclosureChevron />
-          {run.providerTurnId ?? shortId(run.id)} · {humanizeEnum(run.status)}
+          <span className="provider-meta__id">{run.providerTurnId ?? shortId(run.id)}</span>
+          <span>{humanizeEnum(run.status)}</span>
         </span>
-        <small>
-          {items.length} items · {interactions.length} requests
+        <small className="provider-meta">
+          <span>{items.length} items</span>
+          <span>{interactions.length} requests</span>
         </small>
       </summary>
       <div>
         {activityRows.length > 0 ? (
           activityRows.map((row) => (
-            <p key={row.key}>
-              <strong>{row.label}:</strong>{' '}
-              {[row.detail, row.metric].filter(Boolean).join(' · ') || row.status}
+            <p key={row.key} className="provider-meta">
+              <strong>{row.label}</strong>
+              {row.detail || row.metric ? (
+                <>
+                  {row.detail ? <span>{row.detail}</span> : null}
+                  {row.metric ? <span>{row.metric}</span> : null}
+                </>
+              ) : (
+                <span>{row.status}</span>
+              )}
             </p>
           ))
         ) : (

@@ -6,15 +6,43 @@ Provider messages, plans, and tool reports remain telemetry.
 
 ## Surfaces
 
-Overview shows one Agent conversation link with the current action state and
-captured local changes. Recovery context lives beside that link. Review, PR delivery, Preview,
-and acceptance keep their existing owners and controls. When implementation needs
-retry and no PR exists, Overview omits the inactive PR card. The Agent summary
-owns the recovery explanation; existing PR evidence remains visible.
+The task header shows the board's four lanes as the task's lifecycle track
+(Ready › In progress › Review › Done) with the repository and branch. The task's
+own stage is emphasized and carries a glyph when it needs the user or has
+failed, spinning only while an agent run or review is working; its status word
+is stated once, by the Overview.
+
+Overview leads with the Now panel: the step the task needs now. Its owner
+follows the UI priority in `docs/PRODUCT_WORKFLOW.md`: a pending agent request,
+a missing or failed checkout (Retry and Continue cannot run without it),
+recovery, work in flight, PR Status while a pull request is unmerged, finishing,
+then setup; a closed task shows how and when it ended. A merged pull request
+hands the panel to finishing. Each owner brings its existing controls — the
+request's decisions, Retry and Continue, Restore or Reconnect, PR Status, the
+next-action model, Prepare or Start — so no control gains a second meaning. Its
+title states the state in the board card's word, or what the agent is doing
+("Codex wants to run a command", "Codex is working", "Codex is reviewing").
+While the agent works or reviews, the panel quotes its latest progress beneath
+that title; a running review also offers Stop review. A run that
+still waits on a request that is no longer open says so rather than reading as
+ordinary waiting.
+
+Below the panel, flat sections follow the lifecycle: the request as written
+(omitted when it only repeats the title), the result of a completed run — what
+the agent reported, attributed to it, above the files Task Monki captured or "No
+file changes" — then the agent review once one exists, and PR Status when a pull
+request exists and does not hold the panel. Before a pull request exists,
+Create draft PR is one of the finishing actions while finishing holds the
+panel, and a PR Status section offers it otherwise. A fixed record column holds
+Details (agent, model, effort, permissions, network, base, branch), Preview when
+a worktree exists, and History: each entry's event, source and time, with its
+evidence in the full ledger.
 
 The Agent tab is a chronological conversation with one history scroller and a
-pinned composer. The task heading and tabs reappear when scrolling upward and hide
-when scrolling downward. Keyboard focus keeps them visible. Header motion uses
+pinned composer. The task heading and tabs hide only when the reader scrolls
+downward and reappear when they scroll upward; arriving on the tab, following
+output, and restoring a position never hide them. Keyboard focus keeps them
+visible. Header motion uses
 the shared duration and reduced-motion rules. The original request is its first
 user message. Authored follow-ups appear when admitted; live instructions appear within the active
 response. User messages use the shared filled message surface; agent prose stays
@@ -56,9 +84,15 @@ web/MCP work, and compaction. Commands and reasoning use compact disclosures;
 file paths are relative to the worktree where available. Command wrappers and
 sub-second durations do not appear in the conversation. Tools retain their start
 position as completion arrives, and grouping does not cross agent prose.
-Native plan updates stay at the first plan's position. A terminal run marks a
-stale active step unfinished, stopped, or failed without changing provider steps.
-No plan data means no synthetic checklist.
+Native plan updates stay at the first plan's position, rendered as a checklist:
+a check for done, a dot for the current step, a ring for what is left. The plan
+never spins; the running command and the working line carry the motion. A
+terminal run marks a stale active step unfinished, stopped, or failed, in words
+on that step only, without changing provider steps. No plan data means no
+synthetic checklist. An agent review entry names the latest review's verdict
+(Passed, Requested changes, Inconclusive); an earlier review says only how its
+run ended, because its verdict is no longer recorded. A failed run's own reason
+is quoted under the runtime's name.
 Tool disclosures show bounded command, output, and error excerpts. Full protocol
 payloads and provider diagnostics stay in Debug. A terminal
 run cannot leave a stale item looking active. This changes its presentation,
@@ -74,8 +108,9 @@ The initial conversation renders about 80 blocks, with an explicit control to
 load another page. Run boundaries stay internal; page boundaries keep an outcome
 with at least its last entry. Output appends without advancing the loaded
 start. Prepending history preserves the reader's offset. Scrolling follows output
-only while the reader is near the bottom; Jump to latest resumes following
-without moving keyboard focus. The last viewed task's loaded start and reading
+only while the reader is near the bottom; Jump to latest resumes following.
+Because the control disappears once the view is at the end, activating it from
+the keyboard hands focus to the history. The last viewed task's loaded start and reading
 position survive tab changes and renderer reloads within the window session.
 
 The response footer's secondary Response details menu opens the sent execution

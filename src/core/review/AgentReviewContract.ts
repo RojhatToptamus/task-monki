@@ -1,11 +1,10 @@
-import type {
-  AgentReviewFinding,
-  AgentReviewFindingSeverity,
-  AgentReviewGateStatus,
-  AgentReviewResult
+import {
+  AGENT_REVIEW_FINDING_SEVERITIES,
+  type AgentReviewFinding,
+  type AgentReviewFindingSeverity,
+  type AgentReviewResolvedFinding,
+  type AgentReviewResult
 } from '../../shared/contracts';
-
-const SEVERITIES: AgentReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'];
 
 export const AGENT_REVIEW_RESULT_SCHEMA_VERSION = 'agent-review/v1' as const;
 
@@ -24,26 +23,6 @@ export function parseAgentReviewResult(text: string | undefined): AgentReviewRes
   }
 }
 
-export function agentReviewStatusFromResult(
-  result: AgentReviewResult | undefined
-): Extract<AgentReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> | undefined {
-  if (!result) {
-    return undefined;
-  }
-  if (
-    result.verdict === 'NEEDS_CHANGES' ||
-    result.findings.some(
-      (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-    )
-  ) {
-    return 'NEEDS_CHANGES';
-  }
-  if (result.verdict === 'PASSED') {
-    return 'PASSED';
-  }
-  return 'INCONCLUSIVE';
-}
-
 export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -57,12 +36,25 @@ export function normalizeReviewResult(value: unknown): AgentReviewResult | undef
     typeof value.summary === 'string' && value.summary.trim()
       ? value.summary.trim()
       : defaultSummary(verdict, findings);
+  const resolvedFindings = (Array.isArray(value.resolvedFindings) ? value.resolvedFindings : [])
+    .map(normalizeResolvedFinding)
+    .filter((finding): finding is AgentReviewResolvedFinding => Boolean(finding));
   return {
     schemaVersion: AGENT_REVIEW_RESULT_SCHEMA_VERSION,
     verdict,
     summary,
-    findings
+    findings,
+    ...(resolvedFindings.length > 0 ? { resolvedFindings } : {})
   };
+}
+
+function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefined {
+  if (!isRecord(value)) return undefined;
+  const previousFindingId = stringValue(value.previousFindingId) ?? stringValue(value.id);
+  const title = stringValue(value.title);
+  if (!previousFindingId || !title) return undefined;
+  const note = stringValue(value.note);
+  return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
 function extractJsonBlock(text: string): string | undefined {
@@ -114,13 +106,14 @@ function normalizeFinding(value: unknown, index: number): AgentReviewFinding | u
     path,
     line,
     endLine: numberValue(value.endLine),
-    recommendation: stringValue(value.recommendation) ?? stringValue(value.fix)
+    recommendation: stringValue(value.recommendation) ?? stringValue(value.fix),
+    ...(stringValue(value.previousFindingId) ? { previousFindingId: stringValue(value.previousFindingId) } : {})
   };
 }
 
 function normalizeSeverity(value: unknown): AgentReviewFindingSeverity | undefined {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
-  return SEVERITIES.includes(normalized as AgentReviewFindingSeverity)
+  return AGENT_REVIEW_FINDING_SEVERITIES.includes(normalized as AgentReviewFindingSeverity)
     ? (normalized as AgentReviewFindingSeverity)
     : undefined;
 }

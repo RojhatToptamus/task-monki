@@ -103,7 +103,11 @@ export type AgentRunScope =
 
 export interface AgentAttestedReadRoot {
   canonicalPath: string;
-  kind: 'WORKTREE' | 'REPOSITORY' | 'EMPTY_MANAGED';
+  /**
+   * WORKTREE_SNAPSHOT is a disposable read-only copy of the worktree `entityId`, taken
+   * so a read-only turn can read the task while its live checkout keeps changing.
+   */
+  kind: 'WORKTREE' | 'WORKTREE_SNAPSHOT' | 'REPOSITORY' | 'EMPTY_MANAGED';
   entityId?: string;
 }
 
@@ -199,6 +203,7 @@ export type AgentRuntimePurpose =
   | 'TASK_FOLLOW_UP'
   | 'TASK_RETRY'
   | 'TASK_REVIEW'
+  | 'TASK_SIDE_QUESTION'
   | 'TASK_DESIGN'
   | 'TASK_PREVIEW'
   | 'TASK_COMPACTION'

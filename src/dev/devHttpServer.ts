@@ -343,6 +343,16 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/worktree/read-file') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.readWorktreeFile((await readJson()) as never)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/open-target/execute') {
         sendJson(
           response,
@@ -983,6 +993,12 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/task-review/draft') {
+        await options.service.saveTaskReviewDraft((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/runs/steer') {
         await options.service.steerRun((await readJson()) as never);
         sendJson(response, requestId, 200, {});
@@ -1016,6 +1032,42 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           200,
           await options.service.startReview((await readJson()) as never)
         );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/review/changes') {
+        sendJson(response, requestId, 200, await options.service.readReviewChanges((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/review/decide-finding') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.decideReviewFinding((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/ask') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.askSideQuestion((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/stop') {
+        await options.service.stopSideQuestion((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/side-question/end-thread') {
+        await options.service.endSideThread((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
         return;
       }
 

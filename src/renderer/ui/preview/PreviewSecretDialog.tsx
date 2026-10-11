@@ -239,7 +239,7 @@ export function PreviewSecretDialog({
       ) : null}
       {sequence && reference ? (
         <p className="tm-preview-secret-form__progress">
-          <code>{reference}</code> · {position + 1} of {references!.length}
+          <code>{reference}</code> <span>{position + 1} of {references!.length}</span>
         </p>
       ) : null}
       {reference && !creating && !referenceKnown ? (

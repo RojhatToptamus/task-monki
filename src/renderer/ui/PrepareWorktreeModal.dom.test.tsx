@@ -21,6 +21,9 @@ describe('Worktree preparation confirmation', () => {
       onConfirm, onSelectBase, onCancel: vi.fn(), fallbackReturnFocusRef: createRef<HTMLElement>()
     };
     const view = render(<PrepareWorktreeModal {...props} />);
+    // The task, then its repository, each its own fact.
+    expect(screen.getByText('Backend changes').tagName).toBe('SPAN');
+    expect(screen.getByText('Backend').closest('.tm-prepare-worktree__repo')?.querySelector('svg')).not.toBeNull();
     const select = screen.getByRole('combobox', { name: 'Base branch' });
     await waitFor(() => expect(document.activeElement).toBe(select));
     fireEvent.change(select, { target: { value: 'refs/heads/feature' } });

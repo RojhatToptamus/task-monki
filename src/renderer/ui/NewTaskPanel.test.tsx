@@ -15,38 +15,10 @@ import {
   reserveClipboardAttachmentRead,
   shouldPreventDefaultAttachmentPaste
 } from '../model/taskAttachmentComposer';
-import {
-  clampNewTaskPanelWidth,
-  dragNewTaskCanvas,
-  getNewTaskPanelWidthBounds,
-  newTaskCanvasPanPosition,
-  shouldInterruptNewTaskCanvasPanForWheel
-} from '../model/newTaskPanel';
 import { AttachmentChip } from './AttachmentChip';
 import { NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
-  it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
-    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 380, max: 720 });
-    expect(clampNewTaskPanelWidth(320, 1440)).toBe(380);
-    expect(clampNewTaskPanelWidth(820, 1440)).toBe(720);
-    expect(getNewTaskPanelWidthBounds(360)).toEqual({ min: 360, max: 360 });
-    expect(clampNewTaskPanelWidth(660, 360)).toBe(360);
-    expect(newTaskCanvasPanPosition(0, 520, 0)).toBe(0);
-    expect(newTaskCanvasPanPosition(0, 520, 180)).toBe(260);
-    expect(newTaskCanvasPanPosition(0, 520, 360)).toBe(520);
-    expect(dragNewTaskCanvas(0, 600, 450, 520)).toBe(150);
-    expect(dragNewTaskCanvas(520, 450, 600, 520)).toBe(370);
-  });
-
-  it('only interrupts an automatic canvas pan for intentional horizontal wheel input', () => {
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 160, false)).toBe(false);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(2, 160, false)).toBe(false);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(80, 12, false)).toBe(true);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 80, true)).toBe(true);
-    expect(shouldInterruptNewTaskCanvasPanForWheel(0.2, 0.1, false)).toBe(false);
-  });
-
   it('reuses one task creation token across response-loss retries', () => {
     const holder: { current: string | undefined } = { current: undefined };
     let generated = 0;
@@ -375,10 +347,7 @@ describe('NewTaskPanel', () => {
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('aria-label="New task"');
-    expect(html).not.toContain('role="dialog"');
-    expect(html).toContain('Execution policy: Restricted');
-    expect(html).toContain('Restricted');
-    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Access: Auto review"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');
@@ -390,28 +359,25 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('aria-keyshortcuts="Meta+Enter Control+Enter"');
     expect(html).not.toContain('aria-pressed=');
-    expect(html).toContain('Network access');
-    expect(html).toContain('Add files');
-    expect(html).toContain(
-      'title="Stored locally and shared read-only with Codex for this task."'
-    );
-    expect(html).toContain('Paste or drop files');
+    expect(html).toContain('aria-label="Add files"');
+    expect(html).not.toContain('Paste or drop files');
     expect(html).not.toContain('After validation, Task Monki stores');
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
-    expect(html).toContain('aria-labelledby="task-network-access-label"');
-    expect(html).toContain('<details');
-    expect(html).toContain('>Model<');
+    // Model and access are chips in the description's toolbar, not a settings section.
+    expect(html).not.toContain('<details');
     expect(html).toContain('aria-label="Search models and providers"');
     expect(html).toContain('aria-label="Models by provider"');
     expect(html).toContain('OpenCode');
     expect(html).toContain('OpenCode-only model');
-    expect(html).toContain('role="separator"');
-    expect(html).toContain('aria-label="Resize new task panel"');
-    expect(html).not.toContain('slideover__scrim');
+    // New Task is a focused modal: a dialog over the app, not a resizable side panel.
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="true"');
+    expect(html).not.toContain('Resize new task panel');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
-    expect(html).toContain('Provider commands run outside a Task Monki sandbox.');
-    expect(html).toContain('The saved runtime change will apply after this turn.');
+    // Runtime notices belong to Settings, not to every task created on that runtime.
+    expect(html).not.toContain('Provider commands run outside a Task Monki sandbox.');
+    expect(html).not.toContain('The saved runtime change will apply after this turn.');
     expect(html).not.toContain('Internal ACP client-tool notice.');
     expect(html).not.toContain('Reasoning effort');
 
@@ -425,7 +391,8 @@ describe('NewTaskPanel', () => {
     expect(preservedDraftHtml).toContain('>Preserved description</textarea>');
 
     const fullAccessHtml = renderPanel({ defaultPresetId: 'full-access' });
-    expect(fullAccessHtml).toContain('Required by this execution policy.');
+    // A preset that requires the network shows it on: the access chip names it.
+    expect(fullAccessHtml).toMatch(/aria-label="Access: [^"]+, network on"/);
 
     const fallbackHtml = renderPanel({
       repositoryId: 'repository-disconnected',
@@ -459,8 +426,7 @@ describe('NewTaskPanel', () => {
     expect(fallbackHtml).not.toContain('Create task in old-project');
 
     const gatedHtml = renderPanel({ attachmentsEnabled: false });
-    expect(gatedHtml).toContain('Unavailable in this build');
-    expect(gatedHtml).toContain('Attachments require file-read isolation between tasks.');
+    expect(gatedHtml).toContain('Files are unavailable in this build');
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskInstruction, InteractionRequestRecord } from '../../shared/contracts';
 import { makeAgentItemRecord, makeRunRecord } from '../../testSupport/rendererRecords';
-import { conversationPreview, earlierHistory, sessionEntries, sessionTurn, stepsSummary, type SessionEntry, type SessionTurn } from './agentSession';
+import { conversationPreview, earlierHistory, reviewTurnOutcome, sessionEntries, sessionTurn, stepsSummary, workedMs, type SessionEntry, type SessionTurn } from './agentSession';
 
 describe('agent session history', () => {
   it('shows normalized agent messages once without exposing generated user-prompt echoes', () => {
@@ -45,6 +45,27 @@ describe('agent session history', () => {
     expect(entries[1]).toMatchObject({ text: 'Vienna has no matching stock yet.' });
     expect(entries[0]).toMatchObject({ interaction: { decision: { answers: { scope: ['Vienna'] } } } });
     expect(sessionEntries(run, [], [], undefined, [], [{ ...question, status: 'RESPONDING' }])).toEqual([]);
+  });
+
+  it('counts only the time a run worked, not the time it waited on the person', () => {
+    const at = (minutes: number) => `2026-07-19T12:${String(minutes).padStart(2, '0')}:00Z`;
+    // 20 minutes in all: a question open 12:02 to 12:10, an approval 12:08 to 12:12 overlapping it, one still open from 12:18.
+    const waits = [
+      { requestedAt: at(2), respondedAt: at(10) },
+      { requestedAt: at(8), resolvedAt: at(12) },
+      { requestedAt: at(18) }
+    ];
+    expect(workedMs(at(0), Date.parse(at(20)), waits)).toBe(8 * 60_000);
+    expect(workedMs(at(0), Date.parse(at(20)))).toBe(20 * 60_000);
+    expect(workedMs('not a time', Date.parse(at(20)))).toBeUndefined();
+
+    const run = makeRunRecord({ id: 'asked', status: 'COMPLETED', startedAt: at(0), endedAt: at(20) });
+    const question = (id: string, requestedAt: string, respondedAt: string, runId = run.id) => ({
+      ...({} as InteractionRequestRecord), id, runId, type: 'USER_INPUT' as const, status: 'RESOLVED' as const, requestedAt, respondedAt
+    });
+    // A question in another run of the task does not shorten this one.
+    expect(sessionTurn(run, [], [], { interactions: [question('q', at(1), at(16)), question('other', at(0), at(20), 'another-run')] }).durationMs)
+      .toBe(5 * 60_000);
   });
 
   it('stops live activity after interruption while retaining the provider record unchanged', () => {
@@ -112,6 +133,26 @@ describe('agent session history', () => {
     // A page boundary that would show only an outcome keeps the turn's last entry with it.
     expect(earlierHistory([turnWith('x', 10), turnWith('y', 77)], { first: 2, clip: 0 })).toEqual({ first: 0, clip: 9 });
   });
+
+  it('names the latest review verdict in the conversation, and never claims one for an earlier review', () => {
+    const verdict = (value: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE') => ({
+      runId: 'review-2', status: 'STALE' as const,
+      result: { schemaVersion: 'agent-review/v1' as const, verdict: value, summary: 'Summary.', findings: [] }
+    });
+    const turn = (id: string, state: SessionTurn['state']) => ({ state, run: { id } });
+
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('PASSED'))).toBe('Passed');
+    // A verdict stays the verdict after follow-up work makes the review stale.
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), verdict('NEEDS_CHANGES'))).toBe('Needs changes');
+    // An earlier review's verdict is no longer recorded: it is named as earlier, or by how it ended.
+    expect(reviewTurnOutcome(turn('review-1', 'completed'), verdict('PASSED'))).toBe('Earlier review');
+    expect(reviewTurnOutcome(turn('review-1', 'failed'), verdict('PASSED'))).toBe('Failed');
+    // A live review is announced by the working line, not twice.
+    expect(reviewTurnOutcome(turn('review-2', 'active'), verdict('PASSED'))).toBeUndefined();
+    // The latest review without a structured result says its status, never "Earlier review".
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), { runId: 'review-2', status: 'INCONCLUSIVE' })).toBe('Inconclusive');
+    expect(reviewTurnOutcome(turn('review-2', 'completed'), { runId: 'review-2', status: 'FAILED' })).toBe('Failed');
+  });
 });
 
 function toolRows(entries: SessionEntry[]) {
@@ -124,6 +165,27 @@ function turnWith(key: string, count: number): SessionTurn {
     key: `${key}-${index}`, at: run.startedAt, kind: 'message' as const, author: 'Agent' as const, text: `${index}`
   })) };
 }
+
+describe('review rounds in the conversation', () => {
+  it('opens with the request and takes the answers out of the reply', () => {
+    const run = makeRunRecord({ id: 'fix', mode: 'FOLLOW_UP', status: 'COMPLETED' });
+    const reviewRequest = {
+      reviewRunId: 'review-1',
+      items: [{ number: 1, kind: 'FINDING' as const, findingId: 'leak', severity: 'MAJOR' as const, title: 'Listener leaks' }]
+    };
+    const sent = instruction({ id: 'request', runId: 'fix', mode: 'FOLLOW_UP', text: 'Address the review.', reviewRequest });
+    const reply = makeAgentItemRecord({ id: 'reply', runId: 'fix', payload: {
+      text: 'Removed the listener.\n```task-monki-review-response\n[{"item": 1, "outcome": "FIXED"}]\n```'
+    } });
+
+    const turn = sessionTurn(run, [reply], [sent]);
+    expect(turn.opener).toMatchObject({ kind: 'prompt', reviewRequest });
+    expect(turn.entries).toEqual([expect.objectContaining({ kind: 'message', text: 'Removed the listener.', answers: [{ item: 1, outcome: 'FIXED' }] })]);
+    expect(turn.answer).toBe('Removed the listener.');
+    // A reply that is not to a request keeps its text as written.
+    expect(sessionTurn(run, [reply], [{ ...sent, reviewRequest: undefined }]).entries[0]).toMatchObject({ text: expect.stringContaining('task-monki-review-response') });
+  });
+});
 
 function instruction(overrides: Partial<TaskInstruction>): TaskInstruction {
   return {

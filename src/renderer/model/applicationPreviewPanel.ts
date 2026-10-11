@@ -106,8 +106,9 @@ export function previewStatusRow(input: PreviewStatusRowInput): PreviewStatusRow
       secondary: [{ action: 'stop', label: 'Stop' }]
     };
   if (!snapshot.hasConfigurationFile) {
-    // The runtime keeps the last run's configuration; it can run again without the file.
-    const retained = !!latest;
+    // The runtime keeps the last run's configuration; it can run again without the file,
+    // unless that run is a saved Design capture, which ordinary controls never restart.
+    const retained = !!latest && !snapshot.designAttempts?.includes(latest.id);
     const draft = { action: 'draft' as const, label: input.agentWorking ? 'Agent working…' : 'Draft with Preview agent' };
     const write = { action: 'write' as const, label: retained || input.agentDisabledReason ? 'Write preview.yaml' : 'Write it myself' };
     const author = input.agentDisabledReason ? write : draft;

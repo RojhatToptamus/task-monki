@@ -30,8 +30,6 @@ describe('AppSettingsStore', () => {
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       theme: 'dark',
       themePreset: 'graphite',
-      sidebarCollapsed: false,
-      showMascot: true,
       autoInstallUpdatesOnQuit: true,
       firstLaunchSetupCompleted: false,
       externalExecutables: {
@@ -98,7 +96,7 @@ describe('AppSettingsStore', () => {
     expect((await store.get()).agentProfiles).toEqual([profile]);
     await Promise.all([
       store.saveAgentProfile({ ...profile, description: 'Inspect producer and consumer.' }),
-      store.update({ showMascot: false })
+      store.update({ autoInstallUpdatesOnQuit: false })
     ]);
     const updated = await store.get();
     await expect(database.write(async () => {
@@ -202,17 +200,6 @@ describe('AppSettingsStore', () => {
       gitExecutablePath: '/usr/bin/git',
       codexExecutablePath: '/opt/bin/codex',
       ghExecutablePath: '/usr/bin/gh'
-    });
-  });
-
-  it('preserves explicit mascot visibility in the current schema', async () => {
-    expect(normalizeAppSettings(currentSettings()).showMascot).toBe(true);
-    expect(normalizeAppSettings(currentSettings({ showMascot: false })).showMascot).toBe(false);
-
-    const store = new MemoryAppSettingsStore({ showMascot: true });
-
-    await expect(store.update({ showMascot: false })).resolves.toMatchObject({
-      showMascot: false
     });
   });
 

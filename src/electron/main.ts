@@ -19,6 +19,8 @@ import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
+import { resolveDevSeedProfile } from './devSeedProfile';
+import { DEV_SEED_AGENTS_DISABLED_REASON } from '../shared/devSeed';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
@@ -44,6 +46,7 @@ import type {
   GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  ReadWorktreeFileRequest,
   ImportDesignReferenceAssetRequest,
   OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
@@ -65,10 +68,16 @@ import type {
   ReconnectRepositoryRequest,
   StartRunRequest,
   StartReviewRequest,
+  DecideReviewFindingRequest,
+  ReadReviewChangesRequest,
+  AskSideQuestionRequest,
+  EndSideThreadRequest,
+  StopSideQuestionRequest,
   QueueTaskInstructionRequest,
   EditTaskInstructionRequest,
   SendTaskInstructionRequest,
   SaveTaskAgentDraftRequest,
+  SaveTaskReviewDraftRequest,
   SaveTaskPromptRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -180,7 +189,18 @@ const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
 
-const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+const devSeedProfile = resolveDevSeedProfile({ isPackaged: app.isPackaged, env: process.env });
+const devSeedProfileRoot = devSeedProfile.profileRoot;
+if (devSeedProfileRoot) {
+  app.setPath('userData', devSeedProfileRoot);
+}
+if (devSeedProfile.error) {
+  // Quits below without opening any profile.
+  console.error(devSeedProfile.error);
+  dialog.showErrorBox('Task Monki development seed', devSeedProfile.error);
+}
+
+const ownsSingleInstanceLock = !devSeedProfile.error && app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
   app.quit();
@@ -454,6 +474,9 @@ function installIpcHandlers(): void {
   });
   handleTrustedIpc('openTarget:execute', async (_, input: ExecuteOpenTargetActionRequest) => {
     return service.executeOpenTargetAction(input);
+  });
+  handleTrustedIpc('worktree:readFile', async (_, input: ReadWorktreeFileRequest) => {
+    return service.readWorktreeFile(input);
   });
 
   handleTrustedIpc('repository:add', async (_, repositoryPath: string) => {
@@ -763,6 +786,7 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('task:savePrompt', async (_, input: SaveTaskPromptRequest) => service.saveTaskPrompt(input));
   handleTrustedIpc('agent:saveTaskAgentDraft', async (_, input: SaveTaskAgentDraftRequest) => service.saveTaskAgentDraft(input));
+  handleTrustedIpc('agent:saveTaskReviewDraft', async (_, input: SaveTaskReviewDraftRequest) => service.saveTaskReviewDraft(input));
 
   handleTrustedIpc('agent:steerRun', async (_, input: SteerRunRequest) => {
     return service.steerRun(input);
@@ -779,6 +803,20 @@ function installIpcHandlers(): void {
   handleTrustedIpc('agent:startReview', async (_, input: StartReviewRequest) => {
     return service.startReview(input);
   });
+
+  handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
+    service.decideReviewFinding(input));
+  handleTrustedIpc('agent:readReviewChanges', async (_, input: ReadReviewChangesRequest) =>
+    service.readReviewChanges(input));
+
+  handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
+    service.askSideQuestion(input));
+
+  handleTrustedIpc('agent:stopSideQuestion', async (_, input: StopSideQuestionRequest) =>
+    service.stopSideQuestion(input));
+
+  handleTrustedIpc('agent:endSideThread', async (_, input: EndSideThreadRequest) =>
+    service.endSideThread(input));
 
   handleTrustedIpc('agent:syncGoal', async (_, input: SyncAgentGoalRequest) => {
     return service.syncAgentGoal(input);
@@ -1127,6 +1165,12 @@ void app.whenReady().then(async () => {
     {
       agentCwd: providerRuntimeCwd,
       appSettingsStore: persistence.settings,
+      ...(devSeedProfileRoot
+        ? {
+            agentProviderStartupDisabledReason: DEV_SEED_AGENTS_DISABLED_REASON,
+            allowAgentNetworkAccess: false
+          }
+        : {}),
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,
       previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
@@ -1140,6 +1184,7 @@ void app.whenReady().then(async () => {
       taskRuntimeAccess: persistence.taskRuntime,
       discourseStore: persistence.discourse,
       discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
+      reviewSnapshotRoot: path.join(userDataDir, 'review-snapshots'),
       clientToolMcpExecutablePath: process.execPath,
       clientToolMcpServerPath: resolveClientToolMcpServerPath({
         isPackaged: app.isPackaged,

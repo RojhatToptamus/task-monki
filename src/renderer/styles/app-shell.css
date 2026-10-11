@@ -18,37 +18,37 @@
 
 /* ---- Title bar ---- */
 
+/* The titlebar and the rail share the ground and read as one L-shaped frame
+   around the content sheet, so nothing separates them. */
 .tm-titlebar {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 52px;
-  padding: 0 16px 0 9px;
+  height: 44px;
+  padding: 0 12px 0 10px;
   padding-right: max(
-    16px,
-    calc(16px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+    12px,
+    calc(12px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
   );
   background: var(--ground);
-  border-bottom: 1px solid var(--edge);
   flex: 0 0 auto;
   -webkit-app-region: drag;
   user-select: none;
 }
 
 .tm-titlebar__traffic-spacer {
-  flex: 0 0 82px;
+  flex: 0 0 72px;
   height: 100%;
   pointer-events: none;
 }
 
-/* Icon button used for collapse toggle + back/next history nav */
 .tm-iconbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
+  width: var(--h-icon);
+  height: var(--h-icon);
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted);
   flex: 0 0 auto;
@@ -65,7 +65,7 @@
 }
 
 .tm-iconbtn:not(:disabled):hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
@@ -77,38 +77,68 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  margin-left: 4px;
 }
 
 .tm-titlebar__spacer {
   flex: 1;
 }
 
-.tm-newtask {
-  display: inline-flex;
+/* A task page's title row: on the working tabs (Agent, Review, Preview) it is
+   the page's title, and on a reading tab it stands in for the head once that
+   has scrolled away. The title gives way before its menu and steps do. */
+.tm-titlebar__slot {
+  display: flex;
+  min-width: 0;
+}
+
+.tm-titlebar__task {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 13px;
-  border-radius: 8px;
-  background: var(--primary);
-  color: var(--on-primary);
-  font-size: 12.5px;
-  font-weight: 600;
-  -webkit-app-region: no-drag;
-  transition: background 120ms ease;
+  gap: 4px;
+  min-width: 0;
+  margin-left: 6px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
 }
 
-.tm-newtask:not(:disabled):hover {
-  background: var(--primary-hover);
+.tm-titlebar__task > :not(.tm-titlebar__title) {
+  flex: 0 0 auto;
 }
 
-.tm-newtask:disabled {
-  background: var(--panel);
-  color: var(--muted);
-  cursor: default;
-  opacity: 0.68;
+/* It rises in as a reading tab's head scrolls away and leaves faster than it
+   came. A tab opening shows it as it is. */
+.tm-titlebar__task[data-visible] {
+  opacity: 1;
+  transform: none;
+  transition-duration: var(--motion-standard);
 }
+.tm-titlebar__task[data-instant] { transition: none; }
+
+.tm-titlebar__title {
+  min-width: 0;
+  max-width: 48vw;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-titlebar__title:focus {
+  outline: none;
+}
+
+/* The request link and a step sit a little apart from the title and its menu. */
+.tm-titlebar__taskmenu + * {
+  margin-left: 4px;
+}
+
+/* New task is the primary family at the toolbar height (`primary-button
+   button--sm`); the titlebar rule above keeps it out of the drag region. */
 
 /* ---- Body row ---- */
 
@@ -116,38 +146,22 @@
   flex: 1;
   min-height: 0;
   display: block;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-}
-
-.tm-body::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-.tm-body--dragging {
-  cursor: grabbing;
-  user-select: none;
+  overflow: hidden;
 }
 
 .tm-canvas {
   display: flex;
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   height: 100%;
 }
 
 .tm-canvas__workspace {
   display: flex;
   flex-direction: column;
-  width: 100vw;
-  min-width: 100vw;
+  width: 100%;
+  min-width: 0;
   height: 100%;
-  flex: 0 0 100vw;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -159,882 +173,125 @@
   overflow: hidden;
 }
 
-/* ---- Slim nav ---- */
+/* Every page is one sheet inset from the window edge (DESIGN.md 11.2): the
+   surface plane, 12px corners, and a hair seam that keeps the corner legible
+   where the fill step is small. */
+.tm-canvas__content > :not(.tm-rail) {
+  flex: 1;
+  min-width: 0;
+  margin: 0 8px 8px 0;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--hair);
+  overflow: hidden;
+}
 
-.tm-nav {
-  flex: 0 0 var(--app-sidebar-width, 176px);
-  width: var(--app-sidebar-width, 176px);
-  min-width: 176px;
-  max-width: 240px;
-  box-sizing: border-box;
+/* An assistant's docked sheet keeps its own width beside the page's sheet. */
+.tm-canvas__content > .tm-side-sheet {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+/* Expanded, the docked sheet covers the page's sheet and its own as one sheet,
+   from the page's left edge (its anchor) to the window margin, above the page's
+   pinned heads while it moves. A stand-in holds its place, so the page under it
+   never reflows and collapsing finds it as it was; once covered, the page
+   leaves the tab order and the accessibility tree. */
+.tm-canvas__content:has(> .tm-side-sheet[data-expanded]) {
+  position: relative;
+}
+
+.tm-canvas__content > .tm-detail {
+  anchor-name: --tm-task-page;
+}
+
+.tm-canvas__content > .tm-side-sheet__room {
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.tm-canvas__content > .tm-side-sheet[data-expanded] {
+  position: absolute;
+  inset: 0;
+  left: anchor(--tm-task-page left);
+  z-index: var(--layer-overlay);
+}
+
+.tm-canvas__content > .tm-side-sheet[data-expand-motion] {
+  z-index: var(--layer-overlay);
+}
+
+.tm-canvas__content:has(> .tm-side-sheet[data-expanded]:not([data-expand-motion])) > .tm-detail {
+  visibility: hidden;
+}
+
+/* ---- Rail ---- */
+
+/* The rail is permanent and icon-only (DESIGN.md 11.2). Names are tooltips; a
+   dot appears only when something waits on the user. */
+.tm-rail {
+  flex: 0 0 56px;
   display: flex;
   flex-direction: column;
-  padding: 8px 6px;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  padding: 2px 0 14px;
   background: var(--ground);
-  border-right: 0;
-  overflow: visible;
 }
 
-.tm-nav__resize {
-  flex: 0 0 5px;
-}
-
-.tm-nav__brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 34px;
-  padding: 0 10px;
-}
-
-.tm-nav__brand-mark {
-  width: 16px;
-  height: 16px;
-  border-radius: 5px;
-  flex: 0 0 auto;
-  object-fit: cover;
-}
-
-.tm-nav__brand-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.tm-nav__group {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.tm-nav__section {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.tm-nav__item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  text-align: left;
-  height: 34px;
-  flex: 0 0 auto;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.tm-nav__item:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-nav__item:focus,
-.app-shell[data-input-modality='keyboard'] .tm-nav__repo:focus,
-.app-shell[data-input-modality='keyboard'] .tm-segtoggle__btn:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-nav__item--active {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.tm-nav__item svg {
-  flex: 0 0 auto;
-}
-
-.tm-nav__saved-color {
-  width: 9px;
-  height: 9px;
-  margin: 0 3.5px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-}
-
-.tm-nav__saved-head {
+.tm-rail__item {
   position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: 34px;
-}
-
-.tm-nav__saved-toggle {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-  width: 100%;
-  min-height: 34px;
-  padding: 7px 38px 7px 10px;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  text-align: left;
-}
-
-.tm-nav__saved-toggle > svg {
-  flex: 0 0 auto;
-}
-
-.tm-nav__saved-toggle:hover,
-.tm-nav__saved-toggle:active {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-nav__saved-toggle:focus,
-.app-shell[data-input-modality='keyboard'] .tm-nav__saved-add:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-nav__saved-title {
-  min-width: 0;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.tm-nav__saved-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-}
-
-.tm-nav__saved-list[hidden] {
-  display: none;
-}
-
-.tm-nav__saved-add {
-  position: absolute;
-  top: 3px;
-  right: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  border-radius: 7px;
-  color: var(--muted);
-  font-size: 16px;
-}
-
-.tm-nav__saved-add:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-nav__label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-nav__count {
-  flex: 0 0 auto;
-  text-align: center;
-  font-size: 10.5px;
-  font-family: var(--font-mono);
-  color: var(--muted);
-}
-
-.tm-nav__count--urgent {
-  color: var(--waiting-ink);
-}
-
-.tm-nav__count--pill {
-  min-width: 19px;
-  padding: 1px 7px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--field);
-}
-
-.tm-nav__count--urgent.tm-nav__count--pill {
-  background: var(--amber-bg);
-  color: var(--waiting-ink);
-}
-
-.tm-nav__divider {
-  height: 1px;
-  background: var(--hair);
-  margin: 12px 6px;
-}
-
-.tm-nav__spacer {
-  flex: 1;
-}
-
-.tm-software-update {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  min-height: 38px;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 9px;
-  color: var(--text);
-  font: 600 12px/1.2 var(--font-ui);
-  text-align: left;
-}
-
-button.tm-software-update:hover {
-  box-shadow: inset 0 0 0 1px var(--hair);
-}
-
-.app-shell[data-input-modality='keyboard'] button.tm-software-update:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-software-update--available,
-.tm-software-update--downloading {
-  background: var(--amber-bg);
-  color: var(--waiting-ink);
-}
-
-.tm-software-update--ready {
-  background: var(--primary);
-  color: var(--on-primary);
-}
-
-.tm-software-update--failed {
-  background: var(--error-bg);
-  color: var(--blocked-ink);
-}
-
-.tm-software-update__icon {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-}
-
-.tm-software-update__body {
   display: grid;
-  min-width: 0;
-  flex: 1;
-  gap: 6px;
-}
-
-.tm-software-update__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-software-update__percent {
+  place-items: center;
+  width: 36px;
+  height: 36px;
   flex: 0 0 auto;
-  color: currentColor;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 500;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
-.tm-software-update__progress {
-  display: block;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--hair);
+.tm-rail__item svg {
+  width: 18px;
+  height: 18px;
 }
 
-.tm-software-update__progress > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--waiting);
+.tm-rail__item:hover {
+  background-color: var(--hover);
+  color: var(--text-soft);
 }
 
-.tm-software-update__dot {
+/* The current destination is a raised fill, clearly apart from a hover. */
+.tm-rail__item--active,
+.tm-rail__item--active:hover {
+  background-color: var(--card);
+  color: var(--text);
+}
+
+.tm-rail__dot {
   position: absolute;
-  top: -4px;
-  right: -5px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
   box-shadow: 0 0 0 2px var(--ground);
 }
 
-.tm-repo-switcher {
-  position: relative;
-  width: 100%;
+.tm-rail__item--active .tm-rail__dot {
+  box-shadow: 0 0 0 2px var(--card);
 }
 
-.tm-nav__repo {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  min-height: 48px;
-  flex: 0 0 auto;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: transparent;
-  border: 0;
-  color: var(--text);
-  cursor: pointer;
+.tm-rail__update[data-tone='failed'] {
+  color: var(--blocked-ink);
 }
 
-.tm-nav__repo:hover,
-.tm-nav__repo[aria-expanded='true'] {
-  background: var(--hover);
-}
-
-.tm-nav__repo-icon {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  color: var(--muted);
-}
-
-/* The repository glyph communicates destination without implying availability. */
-.tm-nav__repo-icon > svg {
-  display: block;
-}
-
-.tm-nav__repo-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
+.tm-rail__spacer {
   flex: 1;
-}
-
-.tm-nav__repo-label {
-  font-size: var(--t-meta);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.tm-nav__repo-name {
-  font-size: var(--t-help);
-  color: var(--text);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tm-nav__repo-chevron {
-  flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
-  margin-left: auto;
-  color: var(--muted);
-  transition: transform var(--motion-fast) ease, color var(--motion-fast) ease;
-}
-
-.tm-nav__repo[aria-expanded='true'] .tm-nav__repo-chevron {
-  color: var(--text-soft);
-}
-
-.tm-nav__repo-chevron--open {
-  transform: rotate(180deg);
-}
-
-.tm-repo-menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 8px);
-  z-index: var(--layer-tooltip);
-  width: min(336px, calc(100vw - 32px));
-  overflow: hidden;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-repo-menu__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 12px;
-  border-bottom: 1px solid var(--hair);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.tm-repo-menu__head strong {
-  color: var(--muted);
-  font: 600 11px/1 var(--font-mono);
-}
-
-.tm-repo-menu__list {
-  display: grid;
-  gap: 3px;
-  max-height: 260px;
-  overflow: auto;
-  padding: 6px;
-}
-
-.tm-repo-menu__item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  width: 100%;
-  padding: 8px 9px;
-  border: 0;
-  border-radius: 9px;
-  color: var(--text-soft);
-  text-align: left;
-}
-
-.tm-repo-menu__item:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-repo-menu__item--active {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.tm-repo-menu__text {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.tm-repo-menu__name {
-  overflow: hidden;
-  color: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-repo-menu__path {
-  overflow: hidden;
-  color: var(--muted);
-  font: 10.5px/1.35 var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-repo-menu__meta {
-  display: flex;
-  align-items: flex-end;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-
-.tm-repo-menu__meta span {
-  color: var(--text-soft);
-  font-size: 9.5px;
-  font-weight: 600;
-}
-
-.tm-repo-menu__meta strong {
-  color: var(--text-soft);
-  font-weight: 600;
-}
-
-.tm-repo-menu__meta em {
-  color: var(--muted);
-  font-size: 9.5px;
-  font-style: normal;
-  text-transform: capitalize;
-}
-
-.tm-repo-menu__meta .tm-repo-menu__availability--available {
-  color: var(--text-soft);
-}
-
-.tm-repo-menu__meta .tm-repo-menu__availability--missing,
-.tm-repo-menu__meta .tm-repo-menu__availability--invalid {
-  color: var(--blocked-ink);
-}
-
-.tm-repo-menu__empty {
-  padding: 16px 12px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.tm-repo-menu__footer {
-  display: grid;
-  gap: 6px;
-  padding: 8px;
-  border-top: 1px solid var(--hair);
-}
-
-.tm-repo-menu__manage {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tm-repo-menu__manage button {
-  min-height: 28px;
-  padding: 0 8px;
-  border-radius: 7px;
-  color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
-.tm-repo-menu__manage button:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-repo-menu__manage .tm-repo-menu__disconnect {
-  color: var(--blocked-ink);
-}
-
-.tm-repo-menu__manage .tm-repo-menu__disconnect:hover {
-  background: var(--error-bg);
-  color: var(--blocked-ink);
-}
-
-.tm-repo-menu__add {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 34px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--field);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.tm-repo-menu__add:not(:disabled):hover {
-  background: var(--field-hover);
-}
-
-.tm-repo-menu__add:disabled {
-  cursor: default;
-  color: var(--text-disabled);
-}
-
-/* ---- Sidebar theme toggle ---- */
-
-/* ---- Collapsed sidebar: the icon column never moves. ---- */
-
-.tm-nav--collapsed {
-  flex-basis: 48px;
-  width: 48px;
-  min-width: 48px;
-  max-width: 48px;
-  padding: 8px 6px;
-  border-right: 1px solid var(--hair);
-}
-
-.tm-nav--collapsed .tm-nav__group {
-  width: 100%;
-  gap: 0;
-}
-
-.tm-nav--collapsed .tm-nav__section {
-  width: 100%;
-  gap: 2px;
-}
-
-.tm-nav--collapsed .tm-nav__item {
-  justify-content: flex-start;
-  width: 36px;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
-  position: relative;
-}
-
-.tm-nav--collapsed .tm-nav__item:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-nav--collapsed .tm-nav__item--active {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.tm-nav--collapsed .tm-nav__label {
-  display: none;
-}
-
-.tm-nav--collapsed .tm-nav__saved-add {
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.tm-nav--collapsed .tm-nav__saved-head {
-  justify-content: flex-start;
-}
-
-.tm-nav--collapsed .tm-nav__saved-toggle {
-  width: 36px;
-  padding: 0 10px;
-  overflow: hidden;
-}
-
-.tm-nav--collapsed .tm-nav__saved-list {
-  gap: 2px;
-}
-
-.tm-nav--collapsed .tm-nav__brand {
-  justify-content: flex-start;
-  padding: 0 10px;
-}
-
-.tm-nav--collapsed .tm-nav__brand-name {
-  display: none;
-}
-
-.tm-nav--collapsed .tm-nav__divider {
-  margin: 12px 6px;
-}
-
-.tm-nav--collapsed .tm-nav__count {
-  display: none;
-}
-
-.tm-nav--collapsed .tm-nav__item--overlap-count .tm-nav__count {
-  display: block;
-  position: absolute;
-  top: 1px;
-  right: 0;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 4px;
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 600;
-  line-height: 15px;
-  border: 1.5px solid var(--panel);
-  background: var(--waiting);
-  color: var(--on-primary);
-}
-
-.tm-nav--collapsed .tm-nav__item--active.tm-nav__item--overlap-count .tm-nav__count {
-  border-color: var(--sel);
-  background: var(--waiting);
-  color: var(--on-primary);
-}
-
-.tm-nav--collapsed .tm-nav__repo {
-  justify-content: flex-start;
-  padding: 0 10px;
-  width: 36px;
-  height: 34px;
-  position: relative;
-}
-
-.tm-nav--collapsed .tm-software-update {
-  justify-content: center;
-  width: 36px;
-  min-height: 34px;
-  padding: 0;
-}
-
-.tm-nav--collapsed .tm-software-update__body,
-.tm-nav--collapsed .tm-software-update__percent {
-  display: none;
-}
-
-.tm-nav--collapsed .tm-repo-switcher {
-  width: 36px;
-}
-
-.tm-nav--collapsed .tm-nav__repo-text {
-  display: none;
-}
-
-/* Collapsed: keep the repository glyph legible without duplicating availability. */
-.tm-nav--collapsed .tm-nav__repo-icon > svg {
-  display: block;
-}
-
-.tm-nav--collapsed .tm-nav__repo-chevron {
-  display: none;
-}
-
-.tm-repo-switcher--collapsed .tm-repo-menu {
-  left: calc(100% + 12px);
-  bottom: 0;
-}
-
-/* clean tooltip on collapsed items (escapes the bar; nav is overflow:visible) */
-.tm-nav--collapsed .tm-nav__item[data-tip]:hover::after,
-.tm-nav--collapsed .tm-nav__item[data-tip]:focus-visible::after,
-.tm-nav--collapsed .tm-nav__saved-add[data-tip]:hover::after,
-.tm-nav--collapsed .tm-nav__saved-add[data-tip]:focus-visible::after,
-.tm-nav--collapsed .tm-nav__repo[data-tip]:hover::after,
-.tm-nav--collapsed .tm-nav__repo[data-tip]:focus-visible::after,
-.tm-nav--collapsed .tm-software-update[data-tip]:hover::after,
-.tm-nav--collapsed .tm-software-update[data-tip]:focus-visible::after {
-  content: attr(data-tip);
-  position: absolute;
-  left: calc(100% + 12px);
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: var(--layer-tooltip);
-  white-space: nowrap;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--overlay);
-  border: 0;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: var(--shadow-pop);
-  pointer-events: none;
-}
-
-@media (max-width: 760px) {
-  .tm-titlebar {
-    gap: 8px;
-    padding: 0 10px;
-    padding-right: max(
-      10px,
-      calc(10px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
-    );
-  }
-
-  .tm-newtask {
-    padding: 0 11px;
-  }
-
-  .tm-nav {
-    flex-basis: 48px;
-    width: 48px;
-    min-width: 48px;
-    max-width: 48px;
-    padding: 8px 6px;
-    border-right: 1px solid var(--hair);
-  }
-
-  .tm-nav__resize {
-    display: none;
-  }
-
-  .tm-nav .tm-nav__group {
-    width: 100%;
-    gap: 0;
-  }
-
-  .tm-nav .tm-nav__section {
-    width: 100%;
-    gap: 2px;
-  }
-
-  .tm-nav .tm-nav__item {
-    position: relative;
-    justify-content: flex-start;
-    width: 36px;
-    height: 34px;
-    padding: 0 10px;
-    border-radius: 8px;
-  }
-
-  .tm-nav .tm-nav__saved-add {
-    visibility: hidden;
-    pointer-events: none;
-  }
-
-  .tm-nav .tm-nav__saved-head {
-    justify-content: flex-start;
-  }
-
-  .tm-nav .tm-nav__saved-toggle {
-    width: 36px;
-    padding: 0 10px;
-    overflow: hidden;
-  }
-
-  .tm-nav .tm-nav__saved-list {
-    gap: 2px;
-  }
-
-  .tm-nav .tm-nav__label,
-  .tm-nav .tm-nav__brand-name,
-  .tm-nav .tm-nav__repo-text {
-    display: none;
-  }
-
-  .tm-nav .tm-nav__brand {
-    justify-content: flex-start;
-    padding: 0 10px;
-  }
-
-  .tm-nav .tm-nav__divider {
-    margin: 12px 6px;
-  }
-
-  .tm-nav .tm-nav__count {
-    display: none;
-  }
-
-  .tm-nav .tm-nav__item--overlap-count .tm-nav__count {
-    display: block;
-    position: absolute;
-    top: 1px;
-    right: 0;
-    min-width: 15px;
-    width: auto;
-    height: 15px;
-    padding: 0 4px;
-    border: 1px solid var(--panel);
-    border-radius: 999px;
-    background: var(--waiting);
-    color: var(--on-primary);
-    font: 600 9.5px/15px var(--font-mono);
-  }
-
-  .tm-nav .tm-nav__repo {
-    justify-content: flex-start;
-    width: 36px;
-    height: 34px;
-    padding: 0 10px;
-    position: relative;
-  }
-
-  .tm-nav .tm-repo-switcher {
-    width: 36px;
-  }
-
-  .tm-nav .tm-nav__repo-chevron {
-    display: none;
-  }
-
-  .tm-nav .tm-repo-menu {
-    left: calc(100% + 12px);
-    bottom: 0;
-  }
 }
 
 /* ---- Main column ---- */
@@ -1050,8 +307,8 @@ button.tm-software-update:hover {
 .tm-main__head {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 16px 24px 12px;
+  gap: 12px;
+  padding: 20px var(--tm-gutter) 12px;
   flex: 0 0 auto;
 }
 
@@ -1061,47 +318,84 @@ button.tm-software-update:hover {
 
 .tm-main__title {
   margin: 0;
-  font-size: 22px;
-  font-weight: 600;
+  font-size: var(--t-title);
+  font-weight: var(--w-title);
+  /* A whole-pixel line box: 22px type on 28px. */
+  line-height: var(--lh-title);
   letter-spacing: -0.02em;
   color: var(--text);
 }
 
 .tm-main__subtitle {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--t-help);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-main__head-action {
-  min-height: 30px;
-  margin-left: auto;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--field);
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.tm-main__head-action:hover {
-  background: var(--field-hover);
-  color: var(--text);
-}
-
-.tm-main__sync {
-  color: var(--muted);
-  font-size: 12px;
   margin-left: auto;
 }
 
+/* The Tasks page's views: words on the bar's baseline, then one control that
+   adds a saved view. */
+.tm-main__tabbar {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 0 var(--tm-gutter);
+  box-shadow: inset 0 -1px 0 var(--hair);
+}
+
+.tm-main__tabbar .tm-tabs {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tm-main__tab-add {
+  width: var(--h-compact);
+  height: var(--h-compact);
+  margin-left: 14px;
+  border-radius: var(--r-xs);
+}
+
+.tm-tab .tm-board-color {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin-right: 6px;
+  border-radius: var(--r-pill);
+}
+
+.tm-main__panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tm-main__panel > .tm-board,
+.tm-main__panel > .tm-grid {
+  padding-top: 16px;
+}
+
+/* The inline notice (DESIGN.md 10), in the blocked tone. Inside a composer, card
+   or dialog it sits in its container's flow; on a page it takes the gutter. */
 .tm-error {
-  margin: 0 24px 8px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--error-bg);
-  color: var(--text-soft);
-  font-size: 12.5px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  background: var(--blocked-bg);
+  color: var(--blocked-ink);
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
+}
+
+.tm-error.tm-error--page {
+  margin: 0 var(--tm-gutter) 8px;
 }
 
 /* ---- Kanban board ---- */
@@ -1110,10 +404,10 @@ button.tm-software-update:hover {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(188px, 1fr));
   align-items: start;
-  gap: 14px;
-  padding: 6px 24px 24px;
+  gap: 12px;
+  padding: 6px var(--tm-gutter) 24px;
   overflow-x: auto;
 }
 
@@ -1128,32 +422,27 @@ button.tm-software-update:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 4px 11px;
+  /* With the card list's 2px, the first card sits 12px below the label. */
+  padding: 6px 4px 10px;
 }
 
 .tm-col__label {
   margin: 0;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
   color: var(--text);
-  letter-spacing: 0.01em;
 }
 
 .tm-col__count {
-  min-width: 20px;
-  text-align: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--field);
   color: var(--muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-col__cards {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 12px;
   overflow-y: auto;
   padding: 2px 2px 16px;
   flex: 1;
@@ -1161,13 +450,14 @@ button.tm-software-update:hover {
   scrollbar-gutter: stable;
 }
 
-/* Four columns remain readable at the full workspace width. Below the point
-   where a lane would fall under the 220px card floor, the same lane groups
-   become one vertically scrolling list; this is derived layout, not view state. */
-@media (max-width: 1179px) {
+/* All four lanes stay side by side down to the app's 1100px minimum window;
+   a wider rail scrolls them horizontally. Only a window narrower than the app
+   minimum (the browser development host) stacks the lanes, at full width. */
+@media (max-width: 1099px) {
   .tm-board {
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 14px;
     overflow-x: hidden;
     overflow-y: auto;
@@ -1190,7 +480,7 @@ button.tm-software-update:hover {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 24px 24px;
+  padding: 6px var(--tm-gutter) 24px;
   scrollbar-gutter: stable;
 }
 
@@ -1201,11 +491,12 @@ button.tm-software-update:hover {
   scrollbar-gutter: stable;
 }
 
+/* Cards in a row share its height, so their footers line up. */
 .tm-grid__inner {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(296px, 1fr));
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
   width: 100%;
 }
 
@@ -1213,11 +504,13 @@ button.tm-software-update:hover {
   text-align: center;
   padding: 60px 16px;
   color: var(--muted);
-  font-size: 13.5px;
+  font-size: var(--t-body);
 }
 
 /* ---- Task card ---- */
 
+/* A task card: the repository and the state badge on top, the title, then
+   one quiet fact and the pull request when they exist (DESIGN.md Appendix B). */
 .tm-card {
   position: relative;
   display: flex;
@@ -1225,15 +518,15 @@ button.tm-software-update:hover {
   width: 100%;
   text-align: left;
   padding: 0;
-  border-radius: 13px;
+  border: 0;
+  border-radius: var(--r-md);
   background: var(--card);
-  border: 1px solid var(--edge-raised);
-  box-shadow: var(--shadow-card);
-  transition: background var(--motion-fast) ease;
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 
 .tm-card:hover {
-  background: var(--card-hover);
+  background-color: var(--card-hover);
 }
 
 .tm-card__body {
@@ -1241,12 +534,12 @@ button.tm-software-update:hover {
   z-index: var(--layer-sticky);
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
   width: 100%;
   min-height: 100%;
-  padding: 11px 12px;
+  padding: 11px 12px 12px;
   border: 0;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   background: transparent;
   color: inherit;
   pointer-events: none;
@@ -1254,141 +547,112 @@ button.tm-software-update:hover {
 }
 
 .app-shell[data-input-modality='keyboard'] .tm-card__hit:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus,
-.app-shell[data-input-modality='keyboard'] .tm-taskmenu__item:focus {
+.app-shell[data-input-modality='keyboard'] .tm-taskmenu__trigger:focus {
   outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  box-shadow: var(--focus-halo);
 }
 
+/* The repository names the card only when the view spans repositories; the
+   badge keeps the top-right corner. */
 .tm-card__top {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
   gap: 8px;
   min-width: 0;
+  min-height: 20px;
 }
 
 .tm-card__top > .status-pill {
   flex: 0 0 auto;
   margin-left: auto;
-  padding: 3px 8px;
-  font-size: 10.5px;
 }
 
-.tm-card__top > .status-pill--info {
-  background: var(--ctx-bg);
-  color: var(--working-ink);
+.tm-card__top > .status-pill:first-child {
+  margin-left: 0;
 }
 
-.tm-card__top > :is(.status-pill--action, .status-pill--warning) {
-  background: var(--amber-bg);
-  color: var(--waiting-ink);
-}
-
-.tm-card__top > .status-pill--success {
-  background: var(--verified-bg);
-  color: var(--verified-ink);
-}
-
-.tm-card__top > .status-pill--error {
-  background: var(--error-bg);
-  color: var(--blocked-ink);
+.tm-card__meta {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tm-card__titlerow {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
-  min-height: 28px;
 }
 
 .tm-card__title {
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.32;
+  padding: 1px 0;
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
   color: var(--text);
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
-.tm-card__meta {
+/* A fork's lineage or the Review queue's finding count: one quiet line. */
+.tm-card__fact {
   display: flex;
-  flex: 1 1 auto;
   align-items: center;
-  min-width: 0;
   gap: 6px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Lineage cue for a forked task — relates the two same-titled cards so the
-   duplication reads as intentional, not a data bug (audit §03 Board). */
-.tm-card__lineage {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-card__lineage svg {
+.tm-card__fact svg {
   flex: 0 0 auto;
 }
 
-.tm-card__evidence {
+.tm-card__fact > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tm-card__foot {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 12px;
-  padding-top: 8px;
-  margin-top: 3px;
-  border-top: 1px solid var(--hair);
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
+  min-width: 0;
+  margin-top: auto;
+  padding-top: 2px;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
 }
 
-.tm-card__evidence-item {
+.tm-card__pr {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Mono for the PR reference (a value); the status words stay sans. */
-.tm-card__evidence-value {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
+.tm-card__pr svg {
+  flex: 0 0 auto;
 }
 
-.tm-card__evidence-item--info {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.tm-card__evidence-item--action {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.tm-card__evidence-item--error {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.tm-card__evidence-item--success {
-  color: var(--muted);
+.tm-card__pr-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tm-card__hit {
@@ -1399,9 +663,8 @@ button.tm-software-update:hover {
   height: 100%;
   padding: 0;
   border: 0;
-  border-radius: 13px;
+  border-radius: var(--r-md);
   background: transparent;
-  cursor: pointer;
 }
 
 .tm-card__body .tm-taskmenu {
@@ -1410,15 +673,16 @@ button.tm-software-update:hover {
 
 .tm-card__actions {
   flex: 0 0 auto;
-  margin-right: -4px;
+  /* The 28px trigger centres on the 20px title line. */
+  margin: -4px -6px -4px 0;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.12s ease, visibility 0.12s ease;
+  transition: opacity var(--motion-fast) var(--ease-out), visibility var(--motion-fast) var(--ease-out);
 }
 
 .tm-card:hover .tm-card__actions,
 .tm-card:focus-within .tm-card__actions,
-.tm-card__actions:has([aria-expanded='true']) {
+.tm-card__actions:has([data-state='open']) {
   opacity: 1;
   visibility: visible;
 }
@@ -1428,180 +692,11 @@ button.tm-software-update:hover {
   display: inline-flex;
 }
 
-.tm-taskmenu__trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
+.tm-taskmenu__trigger.tm-action-menu__trigger {
+  width: var(--h-icon);
+  min-width: var(--h-icon);
   padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  line-height: 0;
-  cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
-}
-
-.tm-taskmenu__trigger:hover,
-.tm-taskmenu__trigger[aria-expanded='true'] {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-taskmenu__menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: var(--layer-menu);
-  display: flex;
-  min-width: 152px;
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
-
-.tm-taskmenu__menu--floating {
-  position: fixed;
-  top: auto;
-  right: auto;
-  min-width: 0;
-}
-
-.tm-taskmenu__menu:not(.tm-taskmenu__menu--floating):has(.tm-pathmenu__item) {
-  min-width: 214px;
-}
-
-.tm-taskmenu__item {
-  width: 100%;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-}
-
-.tm-taskmenu__item:not(:disabled):hover {
-  background: var(--hover);
-}
-
-.tm-taskmenu__item:disabled {
-  color: var(--muted);
-}
-
-.tm-taskmenu__item--danger {
-  color: var(--blocked);
-}
-
-.tm-pathmenu--floating {
-  position: fixed;
-  z-index: var(--layer-menu);
-  display: flex;
-  min-width: 214px;
-  max-width: min(280px, calc(100vw - 18px));
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-pathmenu__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tm-pathmenu__item span:last-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-pathmenu__appicon {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-}
-
-.tm-pathmenu__separator {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--hair);
-}
-
-.tm-pathmenu__submenu {
-  display: grid;
-  gap: 1px;
-}
-
-.tm-pathmenu__submenu-label {
-  padding: 5px 10px 3px;
-  color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.tm-pathmenu__submenu-body {
-  display: grid;
-  gap: 1px;
-  padding-left: 10px;
-}
-
-.tm-pathmenu__message {
-  padding: 8px 10px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.tm-pathmenu__message--error {
-  color: var(--blocked);
-}
-
-.tm-headbtn {
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 9px;
-  background: var(--field);
-  border: 0;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.tm-headbtn:not(:disabled):hover {
-  background: var(--field-hover);
-}
-
-.tm-headbtn--primary {
-  padding: 0 15px;
-  background: var(--primary);
-  border: 0;
-  color: var(--on-primary);
-}
-
-.tm-headbtn--primary:not(:disabled):hover {
-  background: var(--primary-hover);
+  border-radius: var(--r-sm);
 }
 
 /* ---- Inbox ---- */
@@ -1610,175 +705,229 @@ button.tm-software-update:hover {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 24px 28px;
+  padding: 4px var(--tm-gutter) 28px;
 }
 
 .tm-inbox__inner {
-  max-width: 980px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  max-width: 1040px;
 }
 
 .tm-inbox__empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 64px 16px;
+  gap: 10px;
+  padding: 72px 16px;
+  color: var(--muted);
   text-align: center;
 }
 
 .tm-inbox__empty-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: var(--panel);
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--verified-ink);
-  font-size: 18px;
-}
-
-.tm-inbox__empty strong {
-  font-size: 15px;
-  color: var(--text);
+  color: var(--muted);
 }
 
 .tm-inbox__empty span {
-  font-size: 13px;
+  font-size: var(--t-body);
+}
+
+/* One list in the table container (DESIGN.md A.5): a tile for the kind of
+   decision, the task and what it needs, the repository, the age, and, for an
+   approval, its answer in place. */
+.tm-inbox__list {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--r-md);
+}
+
+.tm-inbox__list::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
+  pointer-events: none;
+}
+
+.tm-inbox-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 60px;
+  padding: 10px 12px 10px 16px;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.tm-inbox-row + .tm-inbox-row {
+  box-shadow: inset 0 1px 0 var(--hair);
+}
+
+.tm-inbox-row:first-child {
+  border-radius: var(--r-md) var(--r-md) 0 0;
+}
+
+.tm-inbox-row:last-child {
+  border-radius: 0 0 var(--r-md) var(--r-md);
+}
+
+.tm-inbox-row:only-child {
+  border-radius: var(--r-md);
+}
+
+.tm-inbox-row:hover {
+  background-color: var(--hover);
+}
+
+.tm-inbox-row__hit {
+  position: absolute;
+  inset: 0;
+  z-index: var(--layer-base);
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+}
+
+/* A row inside the scrolling list: the halo is drawn inward so it is never cut. */
+.app-shell[data-input-modality='keyboard'] .tm-inbox-row__hit:focus {
+  outline: 0;
+  box-shadow: var(--focus-halo-inset);
+}
+
+.tm-inbox-row > :not(.tm-inbox-row__hit) {
+  position: relative;
+  z-index: var(--layer-sticky);
+  pointer-events: none;
+}
+
+.tm-attention-tile {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  background: var(--field);
   color: var(--muted);
 }
 
-.tm-decision {
-  /* Neutral surface card — the Inbox context already means "waiting on you", so
-     the tinted amber box + colored border (DESIGN.md §4 ban) is unnecessary;
-     tone lives in the concise status text in the head. */
-  border: 1px solid var(--edge-raised);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-  border-radius: 11px;
-  background: var(--card);
-  box-shadow: var(--shadow-card);
-  padding: 12px 14px;
-}
-
-.tm-decision__body {
-  min-width: 0;
-}
-
-.tm-decision__head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 3px;
-}
-
-.tm-decision__kind {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-soft);
-}
-
-.tm-decision__kind--error {
-  color: var(--blocked-ink);
-}
-
-.tm-decision__kind--action {
+.tm-attention-tile[data-tone='warning'] {
+  background: var(--waiting-bg);
   color: var(--waiting-ink);
 }
 
-.tm-decision__kind--info {
-  color: var(--working-ink);
+.tm-attention-tile[data-tone='error'] {
+  background: var(--blocked-bg);
+  color: var(--blocked-ink);
 }
 
-.tm-decision__repository {
-  overflow: hidden;
-  color: var(--muted);
-  font: 11px/1.3 var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.tm-inbox-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.tm-decision__repository::before {
-  content: '·';
-  margin-right: 7px;
-  color: var(--muted);
-}
-
-.tm-decision__title {
-  overflow: hidden;
+.tm-inbox-row__title {
   margin: 0;
-  color: var(--text);
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-decision__summary {
   overflow: hidden;
-  margin: 3px 0 0;
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.4;
+  color: var(--text);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-body);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tm-decision__actions {
+.tm-inbox-row__why {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
+  white-space: nowrap;
+}
+
+.tm-inbox-row__status {
+  flex: 0 0 auto;
+  font-weight: var(--w-medium);
+}
+
+.tm-inbox-row__status[data-tone='warning'] {
+  color: var(--waiting-ink);
+}
+
+.tm-inbox-row__status[data-tone='error'] {
+  color: var(--blocked-ink);
+}
+
+.tm-inbox-row__detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tm-inbox-row__subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
+  text-overflow: ellipsis;
+}
+
+.tm-inbox-row__more {
+  margin-left: 8px;
+  color: var(--faint);
+}
+
+.tm-inbox-row__repo {
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--t-help);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Fixed columns, so an approval's buttons never push the age out of line. */
+.tm-inbox-row__repo { grid-column: 4; }
+
+.tm-inbox-row__age {
+  grid-column: 5;
+  min-width: 28px;
+  color: var(--muted);
+  font-size: var(--t-help);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-inbox-row > .tm-inbox-row__actions {
+  grid-column: 3;
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
-  justify-content: flex-end;
-  gap: 7px;
-  margin-top: 0;
-}
-
-.tm-decision__approve,
-.tm-decision__deny {
-  height: 32px;
-  padding: 0 14px;
-  font-size: 12.5px;
-}
-
-.tm-decision__open {
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 8px;
-  color: var(--accent-ink);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.tm-decision__open.primary-button {
-  color: var(--on-primary);
+  gap: 6px;
+  pointer-events: auto;
 }
 
 @media (max-width: 720px) {
   .tm-inbox {
-    padding: 6px 14px 24px;
+    padding: 4px 14px 24px;
   }
 
-  .tm-decision {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 9px;
+  .tm-inbox-row {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
   }
 
-  .tm-decision__title,
-  .tm-decision__summary {
-    overflow: visible;
-    text-overflow: clip;
-    white-space: normal;
-  }
-
-  .tm-decision__actions {
-    flex-wrap: wrap;
-    justify-content: flex-start;
+  .tm-inbox-row__repo {
+    display: none;
   }
 }
 
@@ -1788,17 +937,17 @@ button.tm-software-update:hover {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 20px 24px 32px;
+  padding: 12px var(--tm-gutter) 32px;
 }
 
+/* The page's reading column, under its title like every other page. */
 .tm-setup__inner {
   width: min(100%, 880px);
-  margin-inline: auto;
 }
 
 .tm-setup__panel {
   display: grid;
-  gap: 22px;
+  gap: 24px;
 }
 
 .tm-setup-section {
@@ -1807,32 +956,17 @@ button.tm-software-update:hover {
 }
 
 .tm-setup-section__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  margin: 0 0 0 2px;
+  color: var(--muted);
+  font-size: var(--t-group);
+  font-weight: var(--w-medium);
 }
 
-.tm-setup-section__head h2 {
-  margin: 0;
-  color: var(--faint);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.tm-setup-section__head span {
-  height: 1px;
-  flex: 1;
-  background: var(--hair);
-}
-
+/* The settings container: the object edge, no fill of its own. */
 .tm-setup-step,
 .tm-setup__card {
-  background: var(--card);
-  border: 1px solid var(--edge-raised);
-  border-radius: 11px;
-  box-shadow: var(--shadow-panel);
+  border-radius: var(--r-md);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
 }
 
 .tm-setup-step {
@@ -1849,16 +983,16 @@ button.tm-software-update:hover {
 .tm-setup-step h2 {
   margin: 0;
   color: var(--text);
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.35;
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
 }
 
 .tm-setup-step p {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-setup-step__actions {
@@ -1866,16 +1000,6 @@ button.tm-software-update:hover {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  flex: 0 0 auto;
-}
-
-.tm-setup__primary {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.tm-setup__primary svg {
   flex: 0 0 auto;
 }
 
@@ -1890,19 +1014,17 @@ button.tm-software-update:hover {
   gap: 10px;
   padding: 8px 16px;
   border-top: 1px solid var(--hair);
-  color: var(--faint);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  color: var(--muted);
+  font-size: var(--t-group);
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__checked {
   margin-left: auto;
-  color: var(--faint);
-  font: 10.5px/1.3 var(--font-mono);
-  letter-spacing: 0;
-  text-transform: none;
+  color: var(--muted);
+  font-size: var(--t-meta);
+  font-weight: var(--w-regular);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-setup-tools {
@@ -1934,13 +1056,13 @@ button.tm-software-update:hover {
 
 .tm-setup-tools__copy strong {
   color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__copy span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-meta);
 }
 
 .tm-setup-tools__meta {
@@ -1954,17 +1076,22 @@ button.tm-software-update:hover {
 
 .tm-setup-tools__meta strong {
   color: var(--text-soft);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-tools__meta span {
   max-width: 220px;
   overflow: hidden;
   color: var(--muted);
-  font: 10.5px/1.3 var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tm-setup-tools__meta .tm-setup-tools__value {
+  font-family: var(--font-mono);
 }
 
 .tm-setup__model {
@@ -1989,13 +1116,13 @@ button.tm-software-update:hover {
   min-width: 0;
   gap: 2px;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
 }
 
 .tm-setup-finish__status strong {
   color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
 }
 
 .tm-setup-finish__actions {
@@ -2041,63 +1168,110 @@ button.tm-software-update:hover {
 
 /* ---- Settings ---- */
 
+/* One sheet with its own section list (DESIGN.md 11.1): the list on the left, the section in an 880px reading column on the right. */
 .tm-settings {
+  display: flex;
   flex: 1;
   min-height: 0;
+}
+
+.tm-settings__nav {
+  display: flex;
+  flex: 0 0 212px;
+  flex-direction: column;
+  gap: 2px;
+  /* Item text starts on the page gutter: the items carry 8px of their own. */
+  padding: 20px 12px 20px calc(var(--tm-gutter) - 8px);
   overflow-y: auto;
-  padding: 6px 24px 40px;
-  scrollbar-gutter: stable;
+  background: var(--panel);
+}
+
+.tm-settings__title {
+  margin: 4px 8px 12px;
+  color: var(--text);
+  font-size: var(--t-title);
+  font-weight: var(--w-title);
+  line-height: var(--lh-title);
+  letter-spacing: -0.02em;
+}
+
+/* A rail row, as in the Review index: 28 tall with 6px corners. */
+.tm-settings__nav-item {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: var(--h-toolbar);
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  color: var(--text-soft);
+  font-size: var(--t-body);
+  text-align: left;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.tm-settings__nav-item:hover {
+  background-color: var(--hover);
+  color: var(--text);
+}
+
+.tm-settings__nav-item--active,
+.tm-settings__nav-item--active:hover {
+  background-color: var(--sel);
+  color: var(--text);
 }
 
 .tm-settings__inner {
-  width: min(100%, 880px);
-}
-
-.tm-settings__nav.tm-tabs {
-  margin: 0 0 30px;
-  border-bottom: 1px solid var(--hair);
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 24px var(--tm-gutter) 48px;
+  scrollbar-gutter: stable;
 }
 
 .tm-settings__pane {
   display: grid;
-  gap: 22px;
+  gap: 16px;
+  max-width: 880px;
 }
 
 .tm-settings__pane-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 24px;
+  min-height: var(--h-toolbar);
 }
 
 .tm-settings__pane-head h2 {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: var(--t-heading);
+  font-weight: var(--w-medium);
 }
 
 .tm-settings__pane-head p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.45;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
+/* Rows of settings share the list container every table uses: the object
+   edge, 12px corners, no fill of its own, and dividers that run edge to edge
+   (each row carries the 16px inset, below). */
 .tm-settings__list {
   overflow: visible;
-  padding: 0 16px;
-  border: 1px solid var(--edge-raised);
-  border-radius: 11px;
-  background: var(--card);
-  box-shadow: var(--shadow-panel);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
 }
 
 .tm-settings__empty {
-  padding: 18px 2px;
+  padding: 16px 2px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--t-help);
 }
 
 .tm-settings__subsection {
@@ -2112,19 +1286,18 @@ button.tm-software-update:hover {
 .tm-settings__subsection > h3 {
   margin: 0 0 0 2px;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: var(--t-group);
+  font-weight: var(--w-medium);
 }
 
+/* A table row (DESIGN.md 9.1): 48 tall, so a 32px control has 8px above and below. */
 .tm-settings__row {
   display: flex;
-  min-height: 52px;
+  min-height: var(--h-row-tall);
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 10px 2px;
+  padding: 8px 16px;
   border-top: 1px solid var(--hair);
 }
 
@@ -2132,101 +1305,59 @@ button.tm-software-update:hover {
   border-top: 0;
 }
 
-.tm-appearance {
-  padding: 4px 18px;
-}
-
-.tm-update-settings {
-  padding: 4px 18px;
-}
-
-.tm-update-settings__row {
-  min-height: 58px;
-  padding: 15px 0;
-}
-
-.tm-update-settings__label {
+.tm-settings__label {
   display: grid;
+  gap: 2px;
   min-width: 0;
-  gap: 3px;
 }
 
-.tm-update-settings__label > span:last-child {
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.35;
-}
-
+/* A version or a download's progress: a value, so the interface face. */
 .tm-update-settings__value {
   flex: 0 0 auto;
   color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.tm-appearance__row {
-  min-height: 58px;
-  padding: 15px 0;
-}
-
-.tm-appearance__label {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.tm-appearance__label > span:last-child {
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.35;
+  font-size: var(--t-help);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-theme-picker {
   position: relative;
-  z-index: 1;
   flex: 0 0 auto;
 }
 
+/* While open, its menu sits over the rows below it. */
+.tm-theme-picker:has(.tm-theme-picker__menu) {
+  z-index: var(--layer-menu);
+}
+
+/* A single-line field (DESIGN.md 10): 32 tall, 8px corners, 12px inset, the
+   value at the body size. Focus is the shared text-entry rule in foundation.css. */
 .tm-theme-picker__trigger {
   display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) 13px;
+  grid-template-columns: 8px minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   min-width: 186px;
-  height: 34px;
+  height: var(--h-control);
   padding: 0 12px;
-  border-radius: 10px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: var(--t-body);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-body);
   text-align: left;
 }
 
-.tm-theme-picker__trigger:hover {
-  background: var(--field-hover);
-}
-
+.tm-theme-picker__trigger:hover,
 .tm-theme-picker__trigger[aria-expanded='true'] {
-  background: var(--field-hover);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-theme-picker__trigger:focus,
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__trigger:focus,
-.app-shell[data-input-modality='keyboard'] .tm-settings__select:focus,
-.app-shell[data-input-modality='keyboard'] .tm-settings__input:focus {
-  outline: 0;
-  background: var(--field-focus);
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
+  background-color: var(--field-hover);
 }
 
 .tm-theme-picker__dot {
-  width: 9px;
-  height: 9px;
-  border-radius: var(--r-pill, 999px);
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
   background: var(--theme-option-accent);
 }
 
@@ -2234,6 +1365,7 @@ button.tm-software-update:hover {
   color: var(--muted);
 }
 
+/* The ActionMenu geometry (DESIGN.md 10): 4px pad, 28px rows, 6px row corners. */
 .tm-theme-picker__menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -2242,365 +1374,249 @@ button.tm-software-update:hover {
   width: 262px;
   max-height: 328px;
   overflow-y: auto;
-  padding: 6px;
-  border-radius: 12px;
-  background: var(--overlay);
-  border: 1px solid var(--edge);
-  box-shadow: var(--shadow-pop);
+  padding: 4px;
+  border-radius: var(--r);
+  background: var(--card);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   scrollbar-gutter: stable;
+  /* It grows from its trigger, as a menu does (DESIGN.md 12). */
+  transform-origin: top right;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-theme-picker__group + .tm-theme-picker__group {
-  margin-top: 5px;
-  padding-top: 5px;
+  margin-top: 4px;
+  padding-top: 4px;
   border-top: 1px solid var(--hair);
 }
 
 .tm-theme-picker__group-label {
-  padding: 5px 8px 3px;
-  color: var(--faint);
-  font: 600 9px/1 var(--font-mono);
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: var(--t-group);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
 .tm-theme-picker__option {
   display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) 12px;
+  grid-template-columns: 8px minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  height: 30px;
+  height: var(--h-toolbar);
   padding: 0 8px;
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 12px;
+  border-radius: var(--r-xs);
+  color: var(--text);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
   text-align: left;
 }
 
 .tm-theme-picker__option:hover,
 .tm-theme-picker__option[data-previewed='true'] {
-  background: var(--hover);
-  color: var(--text-soft);
+  background-color: var(--hover);
   outline: 0;
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
-  background: var(--hover);
-  color: var(--text-soft);
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .tm-theme-picker__option[aria-selected='true'] {
-  background: var(--sel);
-  color: var(--text);
+  background-color: var(--sel);
 }
 
+/* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
+   inward, so the scrolling menu never cuts it. */
+.app-shell[data-input-modality='keyboard'] .tm-theme-picker__option:focus {
+  background-color: var(--sel);
+  outline: 0;
+  box-shadow: var(--focus-halo-inset);
+}
+
+/* A miniature of the shell in the chosen theme. It uses the live tokens, so it
+   can never disagree with the app around it. */
 .tm-theme-preview {
-  margin: 0;
-  padding: 15px 0 18px;
-  border-top: 1px solid var(--hair);
-}
-
-.tm-theme-preview__label {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 11px;
-}
-
-.tm-theme-preview__label strong {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.tm-theme-preview__label span {
-  color: var(--muted);
-  font-size: 12px;
+  padding: 4px 0 16px;
 }
 
 .tm-theme-preview__window {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  min-height: 236px;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  padding-bottom: 7px;
-  border-radius: 14px;
+  border-radius: var(--r);
   background: var(--ground);
-  box-shadow: var(--shadow-card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised);
+}
+
+.tm-theme-preview__titlebar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 8px;
+}
+
+.tm-theme-preview__new {
+  padding: 2px 6px;
+  border-radius: var(--r-2xs);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+}
+
+.tm-theme-preview__body {
+  display: flex;
+  min-height: 0;
 }
 
 .tm-theme-preview__rail {
   display: flex;
+  flex: 0 0 36px;
   flex-direction: column;
-  gap: 1px;
-  padding: 9px 7px 9px 8px;
-}
-
-.tm-theme-preview__brand-row {
-  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 3px 7px 11px;
+  gap: 4px;
+  padding: 2px 0 8px;
 }
 
-.tm-theme-preview__brand-row strong {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-theme-preview__brand {
+.tm-theme-preview__rail-item {
+  position: relative;
   display: grid;
-  flex: 0 0 auto;
-  width: 19px;
-  height: 19px;
   place-items: center;
-  border-radius: 6px;
-  background: var(--primary);
-  color: var(--on-primary);
-  font: 600 9px/1 var(--font-mono);
-}
-
-.tm-theme-preview__nav-row {
-  display: flex;
-  height: 26px;
-  align-items: center;
-  padding: 0 8px;
-  border-radius: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-xs);
   color: var(--muted);
-  font-size: 11.5px;
-  white-space: nowrap;
 }
 
-.tm-theme-preview__nav-row small {
-  margin-left: auto;
-  color: var(--faint);
-  font: 400 9.5px/1 var(--font-mono);
-}
-
-.tm-theme-preview__nav-row--selected {
+.tm-theme-preview__rail-item--active {
   background: var(--sel);
   color: var(--text);
-  font-weight: 600;
 }
 
-.tm-theme-preview__nav-row--hover {
-  background: var(--hover);
-  color: var(--text-soft);
-}
-
-.tm-theme-preview__rail-divider {
-  height: 1px;
-  margin: 9px 8px;
-  background: var(--hair);
-}
-
-.tm-theme-preview__saved-view {
-  gap: 8px;
-  height: 24px;
-}
-
-.tm-theme-preview__saved-view i {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
+.tm-theme-preview__rail-item i {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
   border-radius: var(--r-pill);
-  background: var(--id-2);
+  background: var(--waiting);
 }
 
-.tm-theme-preview__content {
+.tm-theme-preview__sheet {
   display: flex;
-  min-width: 0;
-  min-height: 236px;
+  flex: 1;
   flex-direction: column;
   gap: 10px;
-  padding: 14px;
-  border-radius: 11px 0 0 11px;
+  min-width: 0;
+  margin: 0 6px 6px 0;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
   background: var(--surface);
+  box-shadow: 0 0 0 1px var(--hair);
 }
 
-.tm-theme-preview__heading {
-  display: grid;
-  gap: 2px;
+.tm-theme-preview__title {
+  color: var(--text);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
 }
 
-.tm-theme-preview__heading strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.tm-theme-preview__heading span,
-.tm-theme-preview__card small {
+.tm-theme-preview__tabs {
+  display: flex;
+  gap: 14px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--hair);
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--t-meta);
+}
+
+.tm-theme-preview__tab--active {
+  color: var(--text);
+}
+
+.tm-theme-preview__cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .tm-theme-preview__card {
-  display: grid;
-  gap: 7px;
-  padding: 11px 12px;
-  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
   background: var(--card);
-  box-shadow: var(--shadow-card);
+  box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
 }
 
-.tm-theme-preview__card > div {
+.tm-theme-preview__card-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-}
-
-.tm-theme-preview__card span,
-.tm-theme-preview__card small {
-  font-family: var(--font-mono);
-}
-
-.tm-theme-preview__card span {
+  gap: 6px;
   color: var(--muted);
-  font-size: 9.5px;
-}
-
-.tm-theme-preview__card em {
-  padding: 3px 7px;
-  border-radius: 7px;
-  background: var(--amber-bg);
-  color: var(--waiting-ink);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 500;
+  font-size: var(--t-meta);
 }
 
 .tm-theme-preview__card strong {
-  color: var(--text);
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.tm-theme-preview__card hr {
-  width: 100%;
-  height: 1px;
-  margin: 0;
-  border: 0;
-  background: var(--hair);
-}
-
-.tm-theme-preview__evidence {
-  justify-content: flex-start;
-  gap: 6px;
-}
-
-.tm-theme-preview__evidence i {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-}
-
-.tm-theme-preview__evidence i:nth-child(1) { background: var(--verified); }
-.tm-theme-preview__evidence i:nth-child(2) { background: var(--blocked); }
-.tm-theme-preview__evidence i:nth-child(3) { background: var(--working); }
-
-.tm-theme-preview__evidence small {
-  margin-left: auto;
-  color: var(--faint);
-  font: 400 10px/1 var(--font-mono);
-}
-
-.tm-theme-preview__composer {
-  display: grid;
-  gap: 20px;
-  margin-top: auto;
-  padding: 10px 11px 9px;
-  border-radius: 12px;
-  background: var(--field);
-}
-
-.tm-theme-preview__composer > span {
   overflow: hidden;
-  color: var(--placeholder);
-  font-size: 12px;
+  color: var(--text);
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tm-theme-preview__composer > div {
+.tm-theme-preview__composer {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.tm-theme-preview__composer small {
-  color: var(--muted);
-  font: 400 10px/1 var(--font-mono);
+  justify-content: space-between;
+  padding: 8px 8px 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--placeholder);
+  font-size: var(--t-meta);
 }
 
 .tm-theme-preview__send {
-  display: grid;
-  height: 25px;
-  margin-left: auto;
-  padding: 0 12px;
-  place-items: center;
-  border-radius: 8px;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-2xs);
   background: var(--primary);
-  color: var(--on-primary);
-  font-size: 11.5px;
-  font-weight: 600;
-}
-
-.tm-appearance__note {
-  max-width: 620px;
-  margin: 12px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .tm-settings__k {
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
 }
 
 .tm-settings__description {
   display: block;
-  margin-top: 3px;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
+/* Single-line fields (DESIGN.md 10): 32 tall, 12px inset, the value in body
+   type like every other field and field-style trigger. */
 .tm-settings__select,
 .tm-settings__input {
-  height: 32px;
+  height: var(--h-control);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
-  font: 600 12px/1 var(--font-ui);
+  font: var(--w-regular) var(--t-body)/var(--lh-body) var(--font-ui);
 }
 
 .tm-settings__select {
   min-width: 0;
   max-width: 100%;
-  appearance: none;
-  -webkit-appearance: none;
-  padding: 0 28px 0 10px;
-  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 15px) calc(50% - 1px),
-    calc(100% - 10px) calc(50% - 1px);
-  background-repeat: no-repeat;
-  background-size: 5px 5px, 5px 5px;
-  cursor: pointer;
+  padding: 0 28px 0 12px;
 }
 
 .tm-settings__select--compact {
@@ -2609,40 +1625,16 @@ button.tm-software-update:hover {
 
 .tm-settings__select:disabled,
 .tm-settings__input:disabled {
-  color: var(--muted);
-  cursor: default;
-  opacity: 0.7;
-}
-
-.tm-settings__input {
-  min-width: 180px;
-  flex: 1 1 260px;
-  padding: 0 10px;
-  font-family: var(--font-mono);
-}
-
-.tm-settings__button {
-  height: 32px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--field);
-  color: var(--text);
-  font: 600 12px/1 var(--font-ui);
-  white-space: nowrap;
-}
-
-.tm-settings__button:disabled {
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
-.tm-settings__button--primary {
-  background: var(--primary);
-  color: var(--on-primary);
-}
-
-.tm-settings__button--primary:hover {
-  background: var(--primary-hover);
+/* An executable path: a string the user copies, so it is set in mono. */
+.tm-settings__input {
+  min-width: 180px;
+  flex: 1 1 260px;
+  padding: 0 12px;
+  font-family: var(--font-mono);
 }
 
 .tm-settings-status,
@@ -2652,10 +1644,10 @@ button.tm-software-update:hover {
 }
 
 .tm-settings-status {
-  gap: 7px;
+  gap: 6px;
   color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-setting {
@@ -2666,13 +1658,14 @@ button.tm-software-update:hover {
   border-top: 0;
 }
 
+/* A two-line row (DESIGN.md 9.1): the agent's name and its status over a switch. */
 .tm-agent-setting__summary {
   display: flex;
-  min-height: 64px;
+  min-height: var(--h-row-tall);
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 11px 0;
+  padding: 8px 0;
 }
 
 .tm-agent-setting__identity {
@@ -2688,17 +1681,17 @@ button.tm-software-update:hover {
 .tm-executable-setting h4 {
   margin: 0;
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
 }
 
 .tm-agent-setting__identity p,
 .tm-executable-setting p {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   text-overflow: ellipsis;
 }
 
@@ -2706,24 +1699,25 @@ button.tm-software-update:hover {
   margin: -4px 0 10px;
 }
 
+/* The disclosure's name, then its current value in the quieter ink: no
+   separator between them (DESIGN.md 5). 16 + 4 + 4 keeps a 24px target. */
 .tm-agent-setting__details > summary {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   padding: 4px 0;
   color: var(--muted);
-  cursor: pointer;
-  font-size: 11.5px;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
   list-style: none;
+}
+
+.tm-agent-setting__details > summary > span:last-child {
+  color: var(--faint);
 }
 
 .tm-agent-setting__details > summary::-webkit-details-marker {
   display: none;
-}
-
-.tm-agent-setting__details > summary span:last-child::before {
-  content: "·";
-  margin-right: 8px;
 }
 
 .tm-agent-setting__details[open] > summary .tm-disclosure__chevron {
@@ -2735,23 +1729,14 @@ button.tm-software-update:hover {
 }
 
 .tm-agent-setting__editor {
-  padding: 10px 0 5px 20px;
-}
-
-.tm-model-defaults {
-  overflow: visible;
-  padding: 0 16px;
-  border: 1px solid var(--edge-raised);
-  border-radius: 11px;
-  background: var(--card);
-  box-shadow: var(--shadow-panel);
+  padding: 10px 0 4px 20px;
 }
 
 .tm-model-default {
   display: grid;
   grid-template-columns: minmax(142px, 0.75fr) minmax(0, 2.25fr);
-  gap: 22px;
-  padding: 14px 0;
+  gap: 24px;
+  padding: 16px 0;
   border-top: 1px solid var(--hair);
 }
 
@@ -2759,23 +1744,31 @@ button.tm-software-update:hover {
   border-top: 0;
 }
 
+/* The title's first line centres on the 32px model field beside it. */
 .tm-model-default__title {
   display: grid;
   align-content: start;
-  gap: 3px;
-  padding-top: 8px;
+  gap: 2px;
+  padding-top: 6px;
 }
 
 .tm-model-default__title strong {
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--t-label);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-body);
 }
 
 .tm-model-default__title span {
   color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
+}
+
+/* The ghost's label lines up with the title above it. */
+.tm-model-default__reset {
+  justify-self: start;
+  margin: 2px 0 0 -8px;
 }
 
 .tm-agent-console {
@@ -2810,42 +1803,47 @@ button.tm-software-update:hover {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* The label's line centres on the 32px control beside it. */
 .tm-agent-console__label {
-  padding-top: 7px;
+  padding-top: 8px;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
 .tm-agent-console__row--agent .tm-agent-console__label {
   padding-top: 0;
 }
 
+/* One height per placement: a single-line field (32) here, the toolbar
+   height (28) when compact. The value is body type, as in every field; focus
+   is the shared text-entry rule in foundation.css. */
 .tm-agent-console__trigger {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
+  grid-template-columns: minmax(0, 1fr) 13px;
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 34px;
+  height: var(--h-control);
   min-width: 0;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text);
   text-align: left;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
 .tm-agent-console__trigger:not(:disabled):hover,
 .tm-agent-console__trigger[aria-expanded='true'] {
-  background: var(--field-hover);
+  background-color: var(--field-hover);
 }
 
 .tm-agent-console__trigger--error {
-  background: var(--field);
+  background-color: var(--field);
   box-shadow: inset 0 0 0 1px var(--blocked);
 }
 
@@ -2854,49 +1852,37 @@ button.tm-software-update:hover {
 }
 
 .app-shell[data-input-modality='keyboard'] .tm-agent-console__trigger--error:focus {
-  box-shadow:
-    inset 0 0 0 1px var(--blocked),
-    0 0 0 3px var(--focus-ring);
+  box-shadow: inset 0 0 0 1px var(--blocked), var(--focus-halo);
 }
 
 .tm-agent-console__trigger--error:not(:disabled):hover,
 .tm-agent-console__trigger--error[aria-expanded='true'] {
-  background: var(--field-hover);
+  background-color: var(--field-hover);
 }
 
 .tm-agent-console__trigger:disabled {
-  cursor: default;
+  background-color: var(--field-disabled);
 }
 
 .tm-agent-console__summary {
   overflow: hidden;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* The chevron stays still while the menu is open, like every ActionMenu chip
+   beside it; the open fill already says the menu is showing. */
 .tm-agent-console__chevron {
   color: var(--muted);
-  transition: transform 120ms ease;
 }
 
-.tm-agent-console__chevron.is-open {
-  transform: rotate(180deg);
-}
-
-.tm-agent-console__spinner {
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid var(--edge);
-  border-top-color: var(--text-soft);
-  border-radius: 50%;
-  animation: tm-spin 700ms linear infinite;
-}
-
+/* The menu takes the ActionMenu geometry (DESIGN.md 10): 6px below its
+   trigger, 4px pad, 28px rows with 6px corners. */
 .tm-agent-console__menu {
   position: absolute;
-  top: 40px;
+  top: 38px;
   left: 84px;
   z-index: var(--layer-menu);
   display: flex;
@@ -2905,20 +1891,30 @@ button.tm-software-update:hover {
   flex-direction: column;
   padding: 0;
   border: 0;
-  border-radius: 12px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
+  border-radius: var(--r);
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   overflow: hidden;
+  /* It grows from its trigger, as an ActionMenu does (DESIGN.md 12); showing
+     it again replays the entrance because [hidden] removes its box. */
+  transform-origin: top left;
+  animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
 .tm-agent-console__menu--top {
   top: auto;
-  bottom: 40px;
+  bottom: 38px;
+  transform-origin: bottom left;
 }
 
 .tm-agent-console__menu--right {
   right: 0;
   left: auto;
+  transform-origin: top right;
+}
+
+.tm-agent-console__menu--top.tm-agent-console__menu--right {
+  transform-origin: bottom right;
 }
 
 .tm-agent-console__row--agent-unlabelled .tm-agent-console__menu {
@@ -2934,16 +1930,18 @@ button.tm-software-update:hover {
   display: none;
 }
 
+/* A single-line field 4px inside the menu, so its corner steps in from the
+   menu's 10px to 6px. Its clear button keeps the same 4px inset. */
 .tm-agent-console__search {
   display: flex;
-  min-height: 34px;
+  height: var(--h-control);
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  margin: 6px 6px 0;
-  padding: 0 8px;
+  margin: 4px 4px 0;
+  padding: 0 4px 0 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-xs);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--faint);
@@ -2952,13 +1950,13 @@ button.tm-software-update:hover {
 .tm-agent-console__search input {
   width: 100%;
   min-width: 0;
-  height: 22px;
+  height: 100%;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--text);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: var(--t-body);
 }
 
 .app-shell .tm-agent-console__search input:focus,
@@ -2968,29 +1966,25 @@ button.tm-software-update:hover {
   box-shadow: none;
 }
 
-.tm-agent-console__search input::placeholder {
-  color: var(--placeholder);
-}
-
 .tm-agent-console__search button {
   display: grid;
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
+  width: var(--h-compact);
+  min-width: var(--h-compact);
+  height: var(--h-compact);
   place-items: center;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   color: var(--muted);
 }
 
 .tm-agent-console__search button:hover {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
 .tm-agent-console__list {
   min-height: 0;
   flex: 1;
-  padding: 6px;
+  padding: 4px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
@@ -2999,33 +1993,32 @@ button.tm-software-update:hover {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
-  padding: 9px 7px 5px;
-  color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  gap: 12px;
+  padding: 8px 8px 4px;
+  color: var(--muted);
+  font-size: var(--t-group);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-meta);
 }
 
+/* "2 unavailable" is a count in words: the interface face, not mono. */
 .tm-agent-console__group-title span:last-child:not(:first-child) {
   overflow: hidden;
-  font: 9px/1 var(--font-mono);
-  letter-spacing: 0;
+  font-size: var(--t-meta);
+  font-weight: var(--w-regular);
   text-overflow: ellipsis;
-  text-transform: none;
   white-space: nowrap;
 }
 
 .tm-agent-console__option {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 14px;
+  grid-template-columns: minmax(0, 1fr) auto 13px;
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 30px;
-  padding: 0 7px;
-  border-radius: 7px;
+  min-height: var(--h-toolbar);
+  padding: 4px 8px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text);
   text-align: left;
@@ -3033,31 +2026,34 @@ button.tm-software-update:hover {
 
 .tm-agent-console__option:not([aria-disabled='true']):hover,
 .tm-agent-console__option.is-active {
-  background: var(--hover);
+  background-color: var(--hover);
   color: var(--text);
 }
 
 .tm-agent-console__option[aria-disabled='true'] {
-  background: transparent;
+  background-color: transparent;
   color: var(--text-disabled);
-  cursor: default;
 }
 
-.tm-agent-console__option[aria-selected='true'] {
-  background: var(--sel);
-}
-
+.tm-agent-console__option[aria-selected='true'],
 .tm-agent-console__option[aria-selected='true'].is-active {
-  background: var(--sel);
+  background-color: var(--sel);
+}
+
+/* The keyboard row, as in ActionMenu: the selected fill and the halo drawn
+   inward, so the scrolling list never cuts it. */
+.app-shell[data-input-modality='keyboard'] .tm-agent-console__option.is-active {
+  background-color: var(--sel);
+  box-shadow: var(--focus-halo-inset);
 }
 
 .tm-agent-console__option-name {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   overflow: hidden;
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3066,17 +2062,19 @@ button.tm-software-update:hover {
   flex: 0 0 auto;
 }
 
+/* "default", "no catalog": words, so the interface face. */
 .tm-agent-console__option-meta {
   color: var(--faint);
-  font: 9px/1 var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
 }
 
 .tm-agent-console__option-detail {
   grid-column: 1 / -1;
   color: inherit;
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.35;
+  font-size: var(--t-meta);
+  font-weight: var(--w-regular);
+  line-height: var(--lh-meta);
 }
 
 .tm-agent-console__check {
@@ -3085,31 +2083,23 @@ button.tm-software-update:hover {
 }
 
 .tm-agent-console__empty {
-  border-radius: 7px;
+  padding: 12px 8px;
   color: var(--muted);
-  font-size: 12px;
-}
-
-.tm-agent-console__empty {
-  padding: 14px 8px 16px;
-  line-height: 1.5;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-agent-console__option--error {
   color: var(--blocked-ink);
 }
 
+/* The effort is the one segmented control (`segmented segmented--fill` in the
+   markup, DESIGN.md 10): a 32px track of 28px segments, the chosen one raised
+   on the card plane with its ring. This rule only adds the container that
+   decides when the choices fold into a menu. */
 .tm-agent-console__reasoning {
-  display: flex;
-  align-items: center;
-  gap: 2px;
   min-width: 0;
-  min-height: 34px;
   container: tm-agent-reasoning / inline-size;
-  padding: 2px;
-  border-radius: 9px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
 }
 
 .tm-agent-console__reasoning-options {
@@ -3120,47 +2110,20 @@ button.tm-software-update:hover {
   gap: 2px;
 }
 
-.tm-agent-console__reasoning::before {
-  display: none;
-}
-
-.tm-agent-console__reasoning button {
+.tm-agent-console__reasoning-options button {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 1;
-  min-width: 0;
-  min-height: 30px;
-  padding: 0 8px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
 }
 
-.tm-agent-console__reasoning button > span {
+.tm-agent-console__reasoning-options button > span {
   display: none;
-}
-
-.tm-agent-console__reasoning button.is-selected {
-  background: var(--card);
-  color: var(--text);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-agent-console__reasoning button:focus {
-  border-radius: 5px;
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-agent-console__reasoning button:disabled {
-  cursor: default;
 }
 
 .tm-agent-console__reasoning small {
   overflow: hidden;
   max-width: 100%;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3177,18 +2140,14 @@ button.tm-software-update:hover {
   display: inline;
 }
 
-.tm-agent-console__reasoning-select {
+/* The effort as a menu, where its choices do not fit as a row. */
+.tm-agent-console__reasoning-menu {
   display: none;
-  width: 100%;
-  min-width: 0;
-  height: 30px;
-  padding: 0 26px 0 8px;
-  border: 0;
-  outline: 0;
-  border-radius: 7px;
-  background: var(--card);
-  color: var(--text);
-  font: 600 11px/1 var(--font-ui);
+}
+
+.tm-agent-console__chip-icon {
+  display: none;
+  flex: 0 0 auto;
 }
 
 @container tm-agent-reasoning (max-width: 280px) {
@@ -3206,11 +2165,12 @@ button.tm-software-update:hover {
   }
 
   .tm-agent-console__reasoning[data-many-options='true']
-    .tm-agent-console__reasoning-select {
-    display: block;
+    .tm-agent-console__reasoning-menu {
+    display: inline-flex;
   }
 }
 
+/* Stacked: the 16px label, 6px, the 32px field, then the menu 6px below it. */
 @container tm-agent-console (max-width: 320px) {
   .tm-agent-console__row {
     grid-template-columns: 1fr;
@@ -3224,14 +2184,14 @@ button.tm-software-update:hover {
 
   .tm-agent-console__row--agent:not(.tm-agent-console__row--agent-unlabelled)
     .tm-agent-console__menu {
-    top: 58px;
+    top: 60px;
     left: 0;
   }
 
   .tm-agent-console__row--agent:not(.tm-agent-console__row--agent-unlabelled)
     .tm-agent-console__menu--top {
     top: auto;
-    bottom: 46px;
+    bottom: 38px;
   }
 
   .tm-agent-console__row--agent:not(.tm-agent-console__row--agent-unlabelled)
@@ -3250,7 +2210,7 @@ button.tm-software-update:hover {
 
 .tm-agent-console--compact .tm-agent-console__row {
   grid-template-columns: minmax(0, 1fr);
-  gap: 5px;
+  gap: 6px;
 }
 
 .tm-agent-console--compact .tm-agent-console__label {
@@ -3258,13 +2218,13 @@ button.tm-software-update:hover {
 }
 
 .tm-agent-console--compact .tm-agent-console__trigger {
-  height: 28px;
+  height: var(--h-toolbar);
   padding-inline: 8px;
-  background: var(--field);
 }
 
 .tm-agent-console--compact .tm-agent-console__summary {
-  font-size: 10.5px;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-agent-console--compact .tm-agent-console__menu {
@@ -3282,176 +2242,14 @@ button.tm-software-update:hover {
   left: auto;
 }
 
-.tm-agent-console--compact .tm-agent-console__reasoning {
-  padding-top: 1px;
-}
-
-.tm-agent-console--compact .tm-agent-console__reasoning small {
-  font-size: 9px;
-}
-
 .tm-agent-console__selection-error {
   color: var(--blocked-ink);
-  font-size: 9px;
-  line-height: 1.3;
-}
-
-.tm-agent-console__access {
-  position: relative;
-  display: grid;
-  min-width: 0;
-}
-
-.tm-access-select {
-  position: relative;
-  min-width: 0;
-}
-
-.tm-access-select__trigger {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 34px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-  color: var(--text);
-  text-align: left;
-}
-
-.tm-access-select__trigger:not(:disabled):hover,
-.tm-access-select.is-open .tm-access-select__trigger {
-  background: var(--field-hover);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-access-select__trigger:focus {
-  outline: 0;
-  box-shadow:
-    inset 0 0 0 1px var(--field-edge-focus),
-    0 0 0 3px var(--focus-ring);
-}
-
-.app-shell[data-input-modality='keyboard'] .tm-access-select__option:focus {
-  outline: 0;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.tm-access-select__summary {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  min-width: 0;
-}
-
-.tm-access-select__summary strong {
-  flex: 0 0 auto;
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.tm-access-select__summary small {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-access-select__chevron {
-  width: 12px;
-  height: 12px;
-  color: var(--muted);
-  stroke: currentColor;
-  transition: transform 120ms ease;
-}
-
-.tm-access-select.is-open .tm-access-select__chevron {
-  transform: rotate(180deg);
-}
-
-.tm-access-select__menu {
-  position: absolute;
-  z-index: var(--layer-menu);
-  bottom: calc(100% + 6px);
-  right: 0;
-  left: 0;
-  display: grid;
-  gap: 1px;
-  padding: 6px;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-}
-
-.tm-access-select__option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 16px;
-  align-items: start;
-  gap: 10px;
-  width: 100%;
-  min-height: 46px;
-  padding: 7px 9px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-soft);
-  text-align: left;
-}
-
-.tm-access-select__option:not(:disabled):hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-access-select__option.is-selected {
-  background: var(--sel);
-  color: var(--text);
-}
-
-.tm-access-select__option:disabled {
-  cursor: default;
-}
-
-.tm-access-select__option > span:first-child {
-  display: grid;
-  gap: 2px;
-}
-
-.tm-access-select__option strong {
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.tm-access-select__option small {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 1.35;
-}
-
-.tm-access-select__check {
-  display: grid;
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  place-items: center;
-}
-
-.tm-access-select__check svg {
-  width: 13px;
-  height: 13px;
-  stroke-width: 1.8;
+  font-size: var(--t-meta);
+  line-height: var(--lh-meta);
 }
 
 .tm-executable-setting {
-  padding: 14px 2px;
+  padding: 16px;
   border-top: 1px solid var(--hair);
 }
 
@@ -3464,20 +2262,32 @@ button.tm-software-update:hover {
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 11px;
+  margin-bottom: 12px;
 }
 
 .tm-executable-editor {
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 
+/* The resolved path, then its version, apart by space; the path gives way first. */
 .tm-executable-editor__meta {
-  overflow: hidden;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
   color: var(--muted);
-  font: 10.5px/1.4 var(--font-mono);
-  text-overflow: ellipsis;
+  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
   white-space: nowrap;
+}
+
+.tm-executable-editor__meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tm-executable-editor__meta > span + span {
+  flex: 0 0 auto;
 }
 
 .tm-executable-editor__controls {
@@ -3495,36 +2305,16 @@ button.tm-software-update:hover {
 .tm-executable-editor__feedback {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--t-meta);
 }
 
-.tm-segtoggle {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 2px;
-  padding: 2px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--field);
-  box-shadow: inset 0 0 0 1px var(--field-edge);
-}
-
-.tm-segtoggle__btn {
-  height: 28px;
-  padding: 0 15px;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.tm-segtoggle__btn--active {
-  background: var(--card);
-  color: var(--text);
-  font-weight: 600;
+/* Every row in a settings list carries the 16px inset itself, so the hair
+   between rows runs to the list's edge, as in a table. Scoped under the shell
+   so it holds over a row's own padding shorthand in a later file. */
+.app-shell .tm-settings__list > * {
+  padding-inline: 16px;
 }
 
 @media (max-width: 760px) {
@@ -3577,18 +2367,10 @@ button.tm-software-update:hover {
     margin-left: auto;
   }
 
-  .tm-segtoggle__btn {
-    padding-inline: 10px;
-  }
-
-  .tm-appearance__row {
+  .tm-appearance .tm-settings__row {
     align-items: stretch;
     flex-direction: column;
     gap: 10px;
-  }
-
-  .tm-update-settings__row {
-    align-items: flex-start;
   }
 
   .tm-theme-picker__trigger,
@@ -3601,38 +2383,6 @@ button.tm-software-update:hover {
     left: 0;
     width: min(100%, 262px);
   }
-
-  .tm-theme-preview__window {
-    grid-template-columns: 76px minmax(0, 1fr);
-  }
-
-  .tm-theme-preview__brand-row strong,
-  .tm-theme-preview__nav-row > span,
-  .tm-theme-preview__nav-row small {
-    display: none;
-  }
-
-  .tm-theme-preview__brand-row,
-  .tm-theme-preview__nav-row {
-    justify-content: center;
-  }
-
-  .tm-theme-preview__saved-view {
-    padding-inline: 0;
-  }
-}
-
-/* ---- Priority pill (kept for parity; omitted in markup when no data) ---- */
-
-.tm-prio {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 5px;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  font-family: var(--font-mono);
 }
 
 /* Reusable profile instructions share the settings and form controls. */
@@ -3642,18 +2392,12 @@ button.tm-software-update:hover {
   min-width: 0;
 }
 
-.tm-profile-editor > p,
-.tm-profile-row__description p {
+.tm-profile-editor > p {
   margin: 0;
   padding: 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.tm-profile-row__description {
-  min-width: 0;
-  overflow-wrap: anywhere;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 .tm-profile-row__actions,
@@ -3672,5 +2416,5 @@ button.tm-software-update:hover {
 .tm-profile-editor__delete p {
   flex-basis: 100%;
   margin: 0;
-  font-size: 12px;
+  font-size: var(--t-help);
 }

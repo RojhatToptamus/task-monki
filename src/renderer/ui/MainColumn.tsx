@@ -1,6 +1,21 @@
 import type { AgentProfilesSettingsActions } from './AgentProfilesSettings';
-import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { CircleCheck, GitFork } from 'lucide-react';
+import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  CircleCheck,
+  CircleQuestionMark,
+  CircleX,
+  FolderX,
+  GitBranch,
+  GitFork,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
+  ListChecks,
+  RotateCcw,
+  ShieldQuestionMark,
+  type LucideIcon
+} from 'lucide-react';
 import type {
   AgentInteractionDecision,
   Board,
@@ -19,9 +34,14 @@ import {
 import { resolveBoardNavigationTarget } from '../model/boardKeyboardNavigation';
 import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
-import type { RepositorySetupState } from '../model/repositories';
-import { describeTaskAttention } from '../model/taskAttention';
+import type { RepositoryOption, RepositorySetupState } from '../model/repositories';
+import type { RepositorySettingsActions } from './RepositorySettings';
+import { describeTaskAttention, type TaskAttentionKind, type TaskAttentionTone } from '../model/taskAttention';
+import { formatShortAge } from '../model/timeAgo';
+import { AccessibleTab } from './AccessibleTabs';
+import { PlusIcon } from './AppNavigation';
 import { Chip } from './StatusBadge';
+import { Tooltip } from './Tooltip';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import {
   SettingsView
@@ -37,14 +57,22 @@ import {
   tasksForView,
   tasksSpanMultipleRepositories,
   shouldShowInboxRepository,
+  isTasksView,
   type NavView,
+  type TasksView,
+  type TaskCardPullRequest,
   type TaskCardSource,
   type TaskCardVM
 } from '../model/taskView';
 
-interface MainColumnProps extends AgentProfilesSettingsActions {
+interface MainColumnProps extends AgentProfilesSettingsActions, RepositorySettingsActions {
+  repositoryOptions: RepositoryOption[];
   view: NavView;
   board?: Board;
+  boards: Board[];
+  onShowTasksView(view: TasksView): void;
+  onShowBoard(boardId: string): void;
+  onNewBoard(): void;
   tasks: TaskCardSource[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
@@ -52,10 +80,7 @@ interface MainColumnProps extends AgentProfilesSettingsActions {
   onSetTheme(theme: ThemePreference): void;
   onPreviewThemePreset(themePreset: ThemePreset | null): void;
   appSettings: TaskManagerAppSettings;
-  onSetAppSettings(
-    settings: UpdateAppSettingsRequest,
-    successMessage?: string
-  ): void | Promise<unknown>;
+  onSetAppSettings(settings: UpdateAppSettingsRequest): void | Promise<unknown>;
   softwareUpdateState: SoftwareUpdateState;
   onCheckForSoftwareUpdates(): Promise<void>;
   onDownloadSoftwareUpdate(): Promise<void>;
@@ -71,8 +96,6 @@ interface MainColumnProps extends AgentProfilesSettingsActions {
   runtimes: AgentRuntimeState[];
   activeRepository?: Repository;
   repositorySetupState: RepositorySetupState;
-  addingRepository: boolean;
-  onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
   onGoToDesigns(): void;
   onSelect(taskId: string, trigger?: HTMLElement): void;
@@ -85,37 +108,18 @@ interface MainColumnProps extends AgentProfilesSettingsActions {
   onEditBoard(board: Board): void;
 }
 
-const VIEW_TITLES: Record<
-  NavView,
-  { title: string; subtitle(tasks: TaskCardSource[]): string }
-> = {
-  inbox: {
-    title: 'Inbox',
-    subtitle: () => 'Decisions and runs waiting on you'
-  },
-  board: {
-    title: 'All tasks',
-    subtitle: (tasks) =>
-      `${tasks.length} task${tasks.length === 1 ? '' : 's'} across the pipeline`
-  },
-  active: {
-    title: 'Active runs',
-    subtitle: (tasks) => `${tasksForView(tasks, 'active').length} tasks currently in flight`
-  },
-  review: {
-    title: 'Review queue',
-    subtitle: (tasks) =>
-      `${tasksForView(tasks, 'review').length} tasks ready to verify and ship`
-  },
-  done: {
-    title: 'Done & Archive',
-    subtitle: (tasks) => `${tasksForView(tasks, 'done').length} completed tasks`
-  },
-  settings: {
-    title: 'Settings',
-    subtitle: () => 'Agents, models, tools, updates, and appearance'
-  }
-};
+function inboxSubtitle(tasks: TaskCardSource[]): string | undefined {
+  const waiting = tasks.filter((task) => describeTaskAttention(task)).length;
+  return waiting > 0 ? `${waiting} waiting on you` : undefined;
+}
+
+/** The Tasks page's built-in views, in tab order. Saved views follow them. */
+const TASKS_VIEWS: Array<{ view: TasksView; label: string }> = [
+  { view: 'board', label: 'All' },
+  { view: 'active', label: 'Running' },
+  { view: 'review', label: 'In review' },
+  { view: 'done', label: 'Done' }
+];
 
 const SETUP_VIEW_TITLES: Record<
   Exclude<RepositorySetupState, 'complete'>,
@@ -138,6 +142,10 @@ const SETUP_VIEW_TITLES: Record<
 export function MainColumn({
   view,
   board,
+  boards,
+  onShowTasksView,
+  onShowBoard,
+  onNewBoard,
   tasks,
   repositories,
   interactionRequests,
@@ -165,6 +173,12 @@ export function MainColumn({
   repositorySetupState,
   addingRepository,
   onAddRepository,
+  repositoryOptions,
+  revealLabel,
+  onRefreshRepository,
+  onReconnectRepository,
+  onDisconnectRepository,
+  onRevealRepository,
   onFinishSetup,
   onGoToDesigns,
   onSelect,
@@ -173,7 +187,8 @@ export function MainColumn({
   onRequestDelete,
   onEditBoard
 }: MainColumnProps) {
-  const head = VIEW_TITLES[view];
+  const tasksPage = isTasksView(view);
+  const taskTitles = new Map(tasks.map((task) => [task.id, task.title]));
   const showRepositorySetup = repositorySetupState !== 'complete' && view !== 'settings';
   const setupHead =
     repositorySetupState === 'complete'
@@ -190,27 +205,23 @@ export function MainColumn({
 
   return (
     <main className="tm-main">
-      <div className="tm-main__head">
-        <div className="tm-main__head-copy">
-          <h1 className="tm-main__title">
-            {showRepositorySetup ? setupHead.title : board?.name ?? head.title}
-          </h1>
-          <span className="tm-main__subtitle">
-            {showRepositorySetup ? setupHead.subtitle : head.subtitle(tasks)}
-          </span>
-        </div>
-        {!showRepositorySetup && board && view === 'board' ? (
-          <button
-            type="button"
-            className="tm-main__head-action"
-            onClick={() => onEditBoard(board)}
-          >
-            Edit view
-          </button>
-        ) : null}
-      </div>
+      {showRepositorySetup ? (
+        <PageHead title={setupHead.title} subtitle={setupHead.subtitle} />
+      ) : tasksPage ? (
+        <TasksHead
+          view={view}
+          board={board}
+          boards={boards}
+          onShowTasksView={onShowTasksView}
+          onShowBoard={onShowBoard}
+          onNewBoard={onNewBoard}
+          onEditBoard={onEditBoard}
+        />
+      ) : view === 'inbox' ? (
+        <PageHead title="Inbox" subtitle={inboxSubtitle(tasks)} />
+      ) : null}
 
-      {error ? <div className="tm-error">{error}</div> : null}
+      {error ? <div className="tm-error tm-error--page">{error}</div> : null}
 
       {showRepositorySetup ? (
         <FirstLaunchSetup
@@ -229,9 +240,12 @@ export function MainColumn({
           onSetAppSettings={onSetAppSettings}
         />
       ) : null}
-      {!showRepositorySetup && view === 'board' ? (
+      {!showRepositorySetup && tasksPage ? (
+        <div className="tm-main__panel" id="tasks-view-panel" role="tabpanel" aria-labelledby={tasksTabId(view, board)}>
+      {view === 'board' ? (
         <BoardKanban
           tasks={tasks}
+          taskTitles={taskTitles}
           repositories={repositories}
           showRepository={shouldShowTaskRepository(board)}
           onSelect={onSelect}
@@ -239,15 +253,18 @@ export function MainColumn({
           onRequestDelete={onRequestDelete}
         />
       ) : null}
-      {!showRepositorySetup && (view === 'active' || view === 'review' || view === 'done') ? (
+      {view === 'active' || view === 'review' || view === 'done' ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
+          taskTitles={taskTitles}
           repositories={repositories}
           view={view}
           onSelect={onSelect}
           onArchive={onArchive}
           onRequestDelete={onRequestDelete}
         />
+      ) : null}
+        </div>
       ) : null}
       {!showRepositorySetup && view === 'inbox' ? (
         <Inbox
@@ -260,6 +277,14 @@ export function MainColumn({
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
         <SettingsView
+          repositories={repositoryOptions}
+          addingRepository={addingRepository}
+          revealLabel={revealLabel}
+          onAddRepository={onAddRepository}
+          onRefreshRepository={onRefreshRepository}
+          onReconnectRepository={onReconnectRepository}
+          onDisconnectRepository={onDisconnectRepository}
+          onRevealRepository={onRevealRepository}
           onSaveAgentProfile={onSaveAgentProfile}
           onDeleteAgentProfile={onDeleteAgentProfile}
           theme={theme}
@@ -284,8 +309,91 @@ export function MainColumn({
     </main>
   );
 }
+function PageHead({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="tm-main__head">
+      <div className="tm-main__head-copy">
+        <h1 className="tm-main__title">{title}</h1>
+        {subtitle ? <span className="tm-main__subtitle">{subtitle}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function tasksTabId(view: TasksView, board?: Board): string {
+  return board ? `tasks-view-board-${board.id}` : `tasks-view-${view}`;
+}
+
+/**
+ * The Tasks page: one title, then the views as tabs. The built-in views come
+ * first; saved views follow with their marker, and the last control adds one.
+ */
+function TasksHead({
+  view,
+  board,
+  boards,
+  onShowTasksView,
+  onShowBoard,
+  onNewBoard,
+  onEditBoard
+}: {
+  view: TasksView;
+  board?: Board;
+  boards: Board[];
+  onShowTasksView(view: TasksView): void;
+  onShowBoard(boardId: string): void;
+  onNewBoard(): void;
+  onEditBoard(board: Board): void;
+}) {
+  return (
+    <>
+      <div className="tm-main__head">
+        <div className="tm-main__head-copy">
+          <h1 className="tm-main__title">Tasks</h1>
+        </div>
+        {board ? (
+          <button type="button" className="ghost-button tm-main__head-action" onClick={() => onEditBoard(board)}>
+            Edit view
+          </button>
+        ) : null}
+      </div>
+      <div className="tm-main__tabbar">
+        <div className="tm-tabs" role="tablist" aria-label="Task views">
+          {TASKS_VIEWS.map((item) => (
+            <AccessibleTab
+              key={item.view}
+              id={tasksTabId(item.view)}
+              panelId="tasks-view-panel"
+              label={item.label}
+              selected={!board && view === item.view}
+              onSelect={() => onShowTasksView(item.view)}
+            />
+          ))}
+          {boards.map((saved) => (
+            <AccessibleTab
+              key={saved.id}
+              id={tasksTabId('board', saved)}
+              panelId="tasks-view-panel"
+              label={saved.name}
+              marker={<span className="tm-board-color" data-board-color={saved.color.toLowerCase()} aria-hidden="true" />}
+              selected={board?.id === saved.id}
+              onSelect={() => onShowBoard(saved.id)}
+            />
+          ))}
+        </div>
+        <Tooltip label="New view">
+          <button type="button" className="tm-iconbtn tm-main__tab-add" aria-label="New view" onClick={onNewBoard}>
+            <PlusIcon />
+          </button>
+        </Tooltip>
+      </div>
+    </>
+  );
+}
+
 function BoardKanban({
   tasks,
+  taskTitles,
   repositories,
   showRepository,
   onSelect,
@@ -293,6 +401,7 @@ function BoardKanban({
   onRequestDelete
 }: {
   tasks: TaskCardSource[];
+  taskTitles: ReadonlyMap<string, string>;
   repositories: Repository[];
   showRepository: boolean;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -356,6 +465,7 @@ function BoardKanban({
                   key={task.id}
                   vm={buildTaskCardVM(task, {
                     columnKey: column.key,
+                    taskTitles,
                     ...selectTaskCardRepositoryIdentity(
                       task.repositoryId,
                       repositoriesById,
@@ -393,6 +503,7 @@ function BoardKanban({
 
 function CardGrid({
   tasks,
+  taskTitles,
   repositories,
   view,
   onSelect,
@@ -400,6 +511,7 @@ function CardGrid({
   onRequestDelete
 }: {
   tasks: TaskCardSource[];
+  taskTitles: ReadonlyMap<string, string>;
   repositories: Repository[];
   view: NavView;
   onSelect(id: string, trigger?: HTMLElement): void;
@@ -422,8 +534,8 @@ function CardGrid({
               key={task.id}
               vm={buildTaskCardVM(task, {
                 showReviewCount,
+                taskTitles,
                 columnKey: view === 'active' ? 'progress' : view,
-                statusContext: view === 'active' ? 'active' : undefined,
                 ...selectTaskCardRepositoryIdentity(
                   task.repositoryId,
                   repositoriesById,
@@ -484,7 +596,10 @@ export function TaskCard({
           <div className="tm-card__top">
             {vm.meta ? <span className="tm-card__meta">{vm.meta}</span> : null}
             {vm.showState ? (
-              <Chip tone={vm.stateTone} label={vm.stateLabel} showDot={false} />
+              <Chip
+                tone={vm.stateInFlight && vm.stateTone === 'neutral' ? 'info' : vm.stateTone}
+                label={vm.stateLabel}
+              />
             ) : null}
           </div>
         ) : null}
@@ -501,30 +616,40 @@ export function TaskCard({
           />
         </div>
         {vm.lineage ? (
-          <div className="tm-card__lineage">
-            <GitFork aria-hidden="true" absoluteStrokeWidth size={12} strokeWidth={1.5} />
+          <div className="tm-card__fact">
+            <GitFork aria-hidden="true" size={13} />
             <span>{vm.lineage}</span>
           </div>
         ) : null}
-        {vm.evidence.length > 0 ? (
-        <div className="tm-card__evidence" aria-label="Task evidence">
-          {vm.evidence.map((item, index) => (
-            <span
-              key={`${item.label}-${index}`}
-              className={`tm-card__evidence-item ${
-                item.tone ? `tm-card__evidence-item--${item.tone}` : ''
-              }`}
-            >
-              {item.value ? (
-                <span className="tm-card__evidence-value">{item.value}</span>
-              ) : null}
-              <span className="tm-card__evidence-label">{item.label}</span>
-            </span>
-          ))}
-        </div>
+        {vm.findings ? <div className="tm-card__fact">{vm.findings}</div> : null}
+        {vm.pullRequest ? (
+          <div className="tm-card__foot">
+            <CardPullRequest pullRequest={vm.pullRequest} />
+          </div>
         ) : null}
       </div>
     </article>
+  );
+}
+
+const PULL_REQUEST_ICONS = {
+  draft: GitPullRequestDraft,
+  open: GitPullRequest,
+  merged: GitMerge,
+  closed: GitPullRequestClosed
+} as const;
+
+/** GitHub's convention: the icon carries the state, the number names the PR. */
+function CardPullRequest({ pullRequest }: { pullRequest: TaskCardPullRequest }) {
+  const Icon = PULL_REQUEST_ICONS[pullRequest.state];
+  const name = pullRequest.number ? `#${pullRequest.number}` : 'Pull request';
+  return (
+    <span className="tm-card__pr">
+      <Icon aria-hidden="true" size={13} />
+      <span className="tm-card__pr-name">{name}</span>
+      <span className="tm-visually-hidden">, {pullRequest.state}</span>
+      {pullRequest.note ? <span className="tm-card__pr-note">{pullRequest.note}</span> : null}
+    </span>
   );
 }
 
@@ -569,30 +694,57 @@ function Inbox({
         {decisions.length === 0 ? (
           <div className="tm-inbox__empty">
             <span className="tm-inbox__empty-mark">
-              <CircleCheck aria-hidden="true" absoluteStrokeWidth size={18} strokeWidth={1.5} />
+              <CircleCheck aria-hidden="true" size={18} />
             </span>
-            <strong>All clear</strong>
-            <span>Nothing needs your decision. The pipeline is running itself.</span>
+            <span>Approvals, questions and failed runs appear here.</span>
           </div>
         ) : (
-          decisions.map((task) => (
-            <InboxDecisionCard
-              key={task.id}
-              task={task}
-              repositoryName={repositoryNames.get(task.repositoryId) ?? 'Missing repository'}
-              showRepository={showRepository}
-              interaction={activeInteractionForTask(interactionRequests, task.id)}
-              onSelect={onSelect}
-              onRespondToInteraction={onRespondToInteraction}
-            />
-          ))
+          <ul className="tm-inbox__list" aria-label="Waiting on you">
+            {decisions.map((task) => (
+              <InboxRow
+                key={task.id}
+                task={task}
+                repositoryName={repositoryNames.get(task.repositoryId) ?? 'Missing repository'}
+                showRepository={showRepository}
+                interaction={activeInteractionForTask(interactionRequests, task.id)}
+                onSelect={onSelect}
+                onRespondToInteraction={onRespondToInteraction}
+              />
+            ))}
+          </ul>
         )}
       </div>
     </div>
   );
 }
 
-export function InboxDecisionCard({
+const ATTENTION_ICONS: Record<TaskAttentionKind, LucideIcon> = {
+  approval: ShieldQuestionMark,
+  question: CircleQuestionMark,
+  retry: RotateCcw,
+  failure: CircleX,
+  checkout: FolderX,
+  git: GitBranch,
+  review: ListChecks,
+  delivery: GitPullRequest,
+  finish: CircleCheck
+};
+
+/** The kind of decision as one glyph on a tint of its tone. */
+function AttentionTile({ kind, tone }: { kind: TaskAttentionKind; tone: TaskAttentionTone }) {
+  const Icon = ATTENTION_ICONS[kind];
+  return (
+    <span className="tm-attention-tile" data-tone={tone} aria-hidden="true">
+      <Icon size={16} />
+    </span>
+  );
+}
+
+/**
+ * One task waiting on the user: what it needs, then the task.
+ * The whole row opens it; a plain command approval is answerable in place.
+ */
+export function InboxRow({
   task,
   repositoryName,
   showRepository,
@@ -611,14 +763,15 @@ export function InboxDecisionCard({
   ): Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const subjectId = useId();
   const attention = describeTaskAttention(task);
-  const attentionTone =
-    attention?.tone === 'error' ? 'error' : attention?.tone === 'info' ? 'info' : 'action';
   // Inline decisions come straight from the interaction's allowed actions, so
   // answering here drives the same handler the detail page uses (no new IPC).
   const inline = interaction ? inboxInteractionDecisions(interaction) : {};
-  const openIsPrimary = !inline.approve;
-
+  if (!attention) {
+    return null;
+  }
+  const age = formatShortAge(task.updatedAt);
   const respond = async (decision: AgentInteractionDecision) => {
     if (!interaction || busy) {
       return;
@@ -627,59 +780,73 @@ export function InboxDecisionCard({
     try {
       await onRespondToInteraction(interaction, decision);
     } catch {
-      // The app shell surfaces the error and keeps the card so the user retries.
+      // The app shell surfaces the error and keeps the row so the user retries.
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <article className="tm-decision">
-      <div className="tm-decision__body">
-        <div className="tm-decision__head">
-          <span className={`tm-decision__kind tm-decision__kind--${attentionTone}`}>
-            {attention?.label}
-          </span>
-          {showRepository ? (
-            <span className="tm-decision__repository">{repositoryName}</span>
+    <li className="tm-inbox-row">
+      <button
+        type="button"
+        className="tm-inbox-row__hit"
+        aria-label={`Open ${task.title}`}
+        data-task-id={task.id}
+        onClick={(event) => onSelect(task.id, event.currentTarget)}
+      />
+      <AttentionTile kind={attention.kind} tone={attention.tone} />
+      <div className="tm-inbox-row__main">
+        <h2 className="tm-inbox-row__title">{task.title}</h2>
+        <p className="tm-inbox-row__why">
+          <span className="tm-inbox-row__status" data-tone={attention.tone}>{attention.label}</span>
+          {inline.subject ? (
+            <code id={subjectId} className="tm-inbox-row__subject">{inline.subject}</code>
+          ) : inline.question ? (
+            <span className="tm-inbox-row__detail">
+              {inline.question.text}
+              {inline.question.more > 0 ? (
+                <span className="tm-inbox-row__more">
+                  {inline.question.more} more question{inline.question.more === 1 ? '' : 's'}
+                </span>
+              ) : null}
+            </span>
+          ) : attention.detail ? (
+            <span className="tm-inbox-row__detail">{attention.detail}</span>
           ) : null}
-        </div>
-        <h2 className="tm-decision__title">{task.title}</h2>
-        <p className="tm-decision__summary" title={attention?.detail ?? task.projection.summary}>
-          {attention?.detail ?? task.projection.summary}
         </p>
       </div>
-      <div className="tm-decision__actions">
-        {inline.approve ? (
-          <button
-            type="button"
-            className="primary-button tm-decision__approve"
-            disabled={busy}
-            onClick={() => void respond(inline.approve!.decision)}
-          >
-            {inline.approve.label}
-          </button>
-        ) : null}
-        {inline.deny ? (
-          <button
-            type="button"
-            className="outline-button tm-decision__deny"
-            disabled={busy}
-            onClick={() => void respond(inline.deny!.decision)}
-          >
-            {inline.deny.label}
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className={openIsPrimary ? 'tm-decision__open primary-button' : 'tm-decision__open'}
-          aria-label={`Open task: ${task.title}`}
-          data-task-id={task.id}
-          onClick={(event) => onSelect(task.id, event.currentTarget)}
-        >
-          Open task
-        </button>
-      </div>
-    </article>
+      {inline.approve || inline.deny ? (
+        <div className="tm-inbox-row__actions">
+          {/* Same order as the Agent tab: refusal first, the default beside it. */}
+          {inline.deny ? (
+            <button
+              type="button"
+              className="outline-button button--sm"
+              disabled={busy}
+              aria-describedby={subjectId}
+              onClick={() => void respond(inline.deny!.decision)}
+            >
+              {inline.deny.label}
+            </button>
+          ) : null}
+          {inline.approve ? (
+            <button
+              type="button"
+              className="primary-button button--sm"
+              disabled={busy}
+              aria-describedby={subjectId}
+              onClick={() => void respond(inline.approve!.decision)}
+            >
+              {inline.approve.label}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {showRepository ? <span className="tm-inbox-row__repo">{repositoryName}</span> : null}
+      {age ? (
+        <time className="tm-inbox-row__age" dateTime={task.updatedAt} title={new Date(task.updatedAt).toLocaleString()}>{age}</time>
+      ) : null}
+    </li>
   );
 }

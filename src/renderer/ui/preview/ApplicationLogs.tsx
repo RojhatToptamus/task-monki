@@ -15,7 +15,7 @@ import {
   ChevronDown,
   ChevronUp,
   Columns2,
-  Ellipsis,
+  MoreHorizontal,
   Pause,
   Play,
   Search
@@ -37,6 +37,7 @@ import { applicationAttempts, previewRunRows, runTime } from '../../model/applic
 import { CopyGlyph, useCopied } from '../CopyIconButton';
 import { ApplicationLogStream } from './ApplicationLogStream';
 import { PanelResizeHandle } from '../PanelResizeHandle';
+import { Tooltip } from '../Tooltip';
 import { message } from './previewPresentation';
 
 const TERMINAL_MARKERS = new Set([
@@ -84,7 +85,7 @@ export function ApplicationLogs(props: {
   const runs = previewRunRows(props.status, false);
   const runLabel = (attemptId: string) => {
     const run = runs.find((item) => item.attempt.id === attemptId);
-    return run ? [run.outcome, run.cause].filter(Boolean).join(' · ') : attemptId;
+    return run ? [run.outcome, run.cause].filter(Boolean).join(', ') : attemptId;
   };
   const id =
     props.selection?.attemptId ??
@@ -204,7 +205,7 @@ function RunLogs({
       const code = /exit(?:ed)?(?: with code)? \(?(\d+)\)?/i.exec(
         attempt.services?.[source]?.error?.message ?? ''
       )?.[1];
-      return code ? `failed · exit ${code}` : 'failed';
+      return code ? `failed with exit ${code}` : 'failed';
     }
     return state === 'skipped'
       ? 'not started'
@@ -345,7 +346,7 @@ function RunLogs({
           source,
           marker: state,
           text: displayName(source),
-          detail: `${exit ? ` · ${failureWord(exit)}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`}`
+          detail: [exit ? failureWord(exit) : '', initial ? '' : `observed ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`].filter(Boolean).join(', ')
         });
       }
       previous[source] = state;
@@ -536,7 +537,7 @@ function RunLogs({
             selection="single"
             align="start"
             side="bottom"
-            trigger={<><span>{attempt.id === status?.active?.id ? 'Current run' : runTime(attempt.startedAt)}</span><ChevronDown size={14} aria-hidden="true" /></>}
+            trigger={<><span>{attempt.id === status?.active?.id ? 'Current run' : runTime(attempt.startedAt)}</span><ChevronDown size={13} aria-hidden="true" /></>}
             items={attempts.map((item) => ({
               id: item.id,
               label: runTime(item.startedAt),
@@ -555,7 +556,7 @@ function RunLogs({
             side="bottom"
             closeOnSelect={false}
             note={atPaneLimit ? 'Side by side shows up to four sources.' : undefined}
-            trigger={<><span>{chosen.length === sources.length ? 'All sources' : chosen.length === 1 ? displayName(chosen[0]!) : `${chosen.length} sources`}</span><ChevronDown size={14} aria-hidden="true" /></>}
+            trigger={<><span>{chosen.length === sources.length ? 'All sources' : chosen.length === 1 ? displayName(chosen[0]!) : `${chosen.length} sources`}</span><ChevronDown size={13} aria-hidden="true" /></>}
             items={[
               {
                 label: 'All sources',
@@ -614,26 +615,24 @@ function RunLogs({
                   ? `${matchIndex < 0 ? 0 : (matchIndex % matches.length) + 1} of ${matches.length}`
                   : 'No matches'}
               </span>
-              <button
+              <Tooltip label="Previous match" shortcut="Shift+Enter"><button
                 type="button"
                 className="ghost-button tm-preview-log-icon"
                 aria-label="Previous log match"
-                title="Previous match (Shift+Enter)"
                 onClick={() => navigateMatch(-1)}
                 disabled={!matches.length}
               >
                 <ChevronUp size={16} aria-hidden="true" />
-              </button>
-              <button
+              </button></Tooltip>
+              <Tooltip label="Next match" shortcut="Enter"><button
                 type="button"
                 className="ghost-button tm-preview-log-icon"
                 aria-label="Next log match"
-                title="Next match (Enter)"
                 onClick={() => navigateMatch(1)}
                 disabled={!matches.length}
               >
                 <ChevronDown size={16} aria-hidden="true" />
-              </button>
+              </button></Tooltip>
               {full ? (
                 <button
                   type="button"
@@ -647,44 +646,42 @@ function RunLogs({
             </span>
           ) : null}
           {full && sources.length > 1 ? (
-            <button
+            <Tooltip label={sideBySideAvailable ? 'Side by side' : SIDE_BY_SIDE_REASON}><button
               type="button"
               className="ghost-button tm-preview-log-icon"
               aria-pressed={side}
               aria-disabled={!sideBySideAvailable || undefined}
               aria-label="Side by side"
-              title={sideBySideAvailable ? 'Side by side' : SIDE_BY_SIDE_REASON}
               onClick={toggleSideBySide}
             >
               <Columns2 size={16} aria-hidden="true" />
-            </button>
+            </button></Tooltip>
           ) : null}
-          <button
+          <Tooltip label={followLabel}><button
             type="button"
             className="ghost-button tm-preview-log-icon"
             aria-label={followLabel}
-            title={followLabel}
             onClick={() => followAll(followKeys, allPaused)}
           >
             {allPaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-          </button>
+          </button></Tooltip>
           {full ? (
-            <button
+            <Tooltip label={copied ? 'Copied' : 'Copy visible logs'}><button
               type="button"
               className="ghost-button tm-preview-log-icon"
               aria-label="Copy visible logs"
-              title={copied ? 'Copied' : 'Copy visible logs'}
               onClick={copyVisible}
             >
               <CopyGlyph copied={copied} />
-            </button>
+            </button></Tooltip>
           ) : null}
           {more.length ? (
             <ActionMenu
               className="tm-preview-log-more"
               label="More log actions"
+              tooltip="More actions"
               side="bottom"
-              trigger={<Ellipsis size={16} aria-hidden="true" />}
+              trigger={<MoreHorizontal size={16} aria-hidden="true" />}
               items={more}
             />
           ) : null}
@@ -734,15 +731,14 @@ function RunLogs({
                     <span className="tm-preview-log-pane__state" data-state={sourceState(source)}>
                       {stateWord(source)}
                     </span>
-                    <button
+                    <Tooltip label={paused.includes(source) ? 'Resume logs' : 'Pause logs'}><button
                       type="button"
                       className="ghost-button tm-preview-log-icon tm-preview-log-icon--compact"
                       aria-label={`${paused.includes(source) ? 'Resume' : 'Pause'} ${displayName(source)} logs`}
-                      title={paused.includes(source) ? 'Resume logs' : 'Pause logs'}
                       onClick={() => follow(source, paused.includes(source))}
                     >
                       {paused.includes(source) ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
-                    </button>
+                    </button></Tooltip>
                   </header>
                 ) : null}
                 <ApplicationLogStream

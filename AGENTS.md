@@ -87,6 +87,9 @@ finishing changes that touch storage, workflow, protocol, or renderer behavior.
   hand-edited store JSON.
 - `scripts/serve-readme-screenshot-data.mjs` is screenshot-only legacy data and
   is not authoritative for workflow testing.
+- Seeded states serve automated checks and states a real run cannot reach in
+  reasonable time. Visual and interaction verification of UI work happens on
+  real data (`DESIGN.md` §15).
 
 ## Development Rules
 
@@ -162,26 +165,31 @@ projection, or provider state inconsistent.
 
 ## UI implementation and verification
 
-`DESIGN.md` owns visual and interaction rules. Before a material UI change,
-inspect the running workflow and its closest shared implementations. Identify the
-primary content, next action, supporting information, and state owner before
-editing.
+`DESIGN.md` owns visual, copy and interaction rules. Follow its §1 procedure for
+every UI change: name the moment, find the shipped pattern, justify each
+element, place and size it by §3 and §4, write the fewest words by §5, define
+every state and its motion. Reuse the shared components listed in its §10 rather
+than building a local variant. Values are tokens (`themes.css`,
+`src/renderer/styles/foundation.css`); a literal is a defect, and
+`npm run check:themes` rejects literal sizes, weights, radii and layers, the
+pointer and not-allowed cursors, generic monospace, middle-dot separators, and
+icon sizes outside the set. Theme tokens change only through
+`tools/build-themes.mjs` (`docs/design/THEMES.md`).
 
-Compare equivalent content and states across affected screens. Fix the owning
-layout or shared component when a defect repeats. Remove superseded code and
-styles. Preserve workflow ownership and provider capability boundaries.
+Before a material UI change, inspect the running workflow and its closest shared
+implementations. Compare equivalent content and states across affected screens.
+Fix the owning layout or shared component when a defect repeats. Remove
+superseded code and styles. Preserve workflow ownership and provider capability
+boundaries.
 
-Verify the final source in the actual desktop app. Exercise a complete affected
-workflow, including relevant pending, failure, retry, and restored states. Check
-both themes and supported narrow and wide windows when layout or styling changes.
-
-Operate the controls. Inspect focus, selection and copying, overlays, scrolling,
-and content movement where affected. Use realistic content lengths and history.
-Recheck affected behavior after corrections.
-
-Passing tests and screenshots do not establish interaction quality. Correct
-observed defects before declaring completion. Report what ran, what was simulated,
-and what remains unverified.
+Pass `DESIGN.md` §15, the quality gate, before calling UI work done. Verify in
+the desktop app built from this branch, with a fresh `--user-data-dir`, on a
+disposable testing repository with real tasks and real agent runs; never against
+the installed app's profile, and never by running agents in this repository.
+Exercise every affected state, both modes, the minimum and a wide window, at
+100% zoom, and measure computed sizes with `tools/design-audit.js`. Passing tests
+and screenshots do not establish interaction quality. Report what ran, what was
+seeded or simulated, and what remains unverified.
 
 ## Implementation Quality And Performance
 

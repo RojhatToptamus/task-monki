@@ -53,10 +53,10 @@ describe('focused workspace layout preferences', () => {
 
   it('persists panel widths and clamps values at the point of use', () => {
     const storage = memoryStorage();
-    persistFocusedPanelWidth('app-navigation', 224, storage);
+    persistFocusedPanelWidth('task-side-panel', 224, storage);
     persistFocusedPanelWidth('design-history', 410, storage);
 
-    expect(focusedPanelWidth('app-navigation', 176, 176, 240, storage)).toBe(224);
+    expect(focusedPanelWidth('task-side-panel', 176, 176, 240, storage)).toBe(224);
     expect(focusedPanelWidth('design-history', 268, 220, 360, storage)).toBe(360);
     expect(focusedPanelWidth('discourse-history', 268, 220, 360, storage)).toBe(268);
   });
