@@ -217,7 +217,7 @@ function InteractionWaiting({ requestedAt, count }: { requestedAt: string; count
   return (
     <span className="interaction-card__waiting">
       Waiting {formatElapsed(now - Date.parse(requestedAt))}
-      {count > 1 ? ` · ${count} pending` : ''}
+      {count > 1 ? <span className="interaction-card__pending">{count} pending</span> : null}
     </span>
   );
 }
@@ -1108,7 +1108,7 @@ function formatProviderNetworkContext(
   context: AgentCommandApprovalRequest['networkApprovalContext']
 ): string | undefined {
   if (context?.protocol && context.host) {
-    return `${context.protocol} · ${context.host}`;
+    return `${context.protocol}://${context.host}`;
   }
   return context?.protocol ?? context?.host;
 }
@@ -1129,7 +1129,7 @@ function InteractionTechnicalDetails({
       <summary><DisclosureChevron />Request details</summary>
       <dl className="interaction-details interaction-details--technical">
         <dt>Source</dt>
-        <dd>{formatSessionSource(sourceSession, interaction.sessionId)}</dd>
+        <dd><SessionSource session={sourceSession} fallbackId={interaction.sessionId} /></dd>
         <dt>Request ID</dt>
         <dd><code>{String(interaction.providerRequestId)}</code></dd>
         {commandRequest?.command ? (
@@ -1245,18 +1245,16 @@ function formatElapsed(milliseconds: number): string {
   return `${minutes}m ${seconds % 60}s`;
 }
 
-function formatSessionSource(
-  session: AgentSessionRecord | undefined,
-  fallbackId: string
-): string {
+/** Which session asked: its name, then its id in mono. */
+function SessionSource({ session, fallbackId }: { session: AgentSessionRecord | undefined; fallbackId: string }) {
   if (!session) {
-    return `Unknown local session ${fallbackId.slice(0, 8)}`;
+    return <>Unknown local session <code>{fallbackId.slice(0, 8)}</code></>;
   }
   const label =
     session.providerNickname ??
     session.providerRole ??
     (session.role === 'SUBAGENT' ? 'Subagent' : 'Primary agent');
-  return `${label} · ${session.providerSessionId ?? session.id}`;
+  return <>{label} <code>{session.providerSessionId ?? session.id}</code></>;
 }
 
 function isObject(

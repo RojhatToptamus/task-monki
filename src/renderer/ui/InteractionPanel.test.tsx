@@ -38,7 +38,7 @@ describe('InteractionPanel', () => {
     expect(html).not.toContain('/bin/zsh -lc');
     expect(html).not.toContain('/tmp/task/react-repo');
     // The host widens what "Allow" grants, so it stays beside the command.
-    expect(html).toContain('https · registry.npmjs.org');
+    expect(html).toContain('https://registry.npmjs.org');
   });
 
   it('shows only deny when policy warnings block command approval', () => {
@@ -120,7 +120,7 @@ describe('InteractionPanel', () => {
     expect(html).toContain('<code>npm test</code>');
     expect(html).toContain('src/core/agent.ts');
     expect(html).toContain('/tmp/task/react-repo');
-    expect(html).toContain('https · registry.npmjs.org');
+    expect(html).toContain('https://registry.npmjs.org');
     expect(html).toContain('Yes, proceed');
     expect(html).toContain('No, tell Grok why');
     expect(html).toContain('Allow edits this session');

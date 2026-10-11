@@ -42,7 +42,7 @@ export function buildCompletedChangeSummary(
 
   return {
     fileCount: files.length,
-    title: `Captured Git changes · ${files.length} ${plural(files.length, 'file')}`,
+    title: `Captured Git changes in ${files.length} ${plural(files.length, 'file')}`,
     additions,
     deletions,
     previewFiles,

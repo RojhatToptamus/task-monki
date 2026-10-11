@@ -189,7 +189,7 @@ export function CompletedChangeSummaryCard({
   }
   const title =
     incomplete && summary
-      ? `Incomplete captured diff · ${summary.fileCount} observed ${plural(summary.fileCount, 'file')}`
+      ? `Incomplete captured diff, ${summary.fileCount} ${plural(summary.fileCount, 'file')} observed`
       : summary?.title ?? 'Captured Git changes';
 
   return (

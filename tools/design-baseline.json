@@ -5,7 +5,6 @@
     "hover-background-shorthand": 17
   },
   "renderer": {
-    "separator-in-copy": 35,
-    "native-title-on-button": 23
+    "native-title-on-button": 21
   }
 }

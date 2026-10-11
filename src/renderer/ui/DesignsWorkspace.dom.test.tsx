@@ -219,7 +219,7 @@ describe('mounted Design workspace', () => {
     );
 
     expect(screen.getByRole('heading', { name: 'New Design' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Model: Codex · Luna/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toBeTruthy();
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Brief' }), {
       target: { value: '  Build a calm project portfolio.  ' }
@@ -338,7 +338,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Model: Codex · Luna/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Model: Luna via Codex/ }));
     const unavailableOption = screen.getByRole('option', {
       name: `Unsupported via Codex, unavailable. ${reason}`
     });
@@ -392,7 +392,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Model: Codex · Luna/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toBeTruthy();
     const create = screen.getByRole('button', { name: 'Create Design' });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
@@ -586,7 +586,7 @@ describe('mounted Design workspace', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Connection lost.');
 
     expect(screen.getByRole('textbox', { name: 'Brief' })).toHaveProperty('disabled', true);
-    expect(screen.getByRole('button', { name: /Model: Codex · Luna/ })).toHaveProperty(
+    expect(screen.getByRole('button', { name: /Model: Luna via Codex/ })).toHaveProperty(
       'disabled',
       true
     );
@@ -1592,7 +1592,7 @@ describe('mounted Design workspace', () => {
       />
     );
 
-    expect(screen.getByText('Copied from Original portfolio · Ready state 3')).toBeTruthy();
+    expect(screen.getByText('Copied from Original portfolio, Ready state 3')).toBeTruthy();
     expect(screen.getByText('Continue from this version')).toBeTruthy();
   });
 

@@ -83,7 +83,7 @@ export function StoredAttachmentChip({
         {onRead ? <AttachmentPreview name={attachment.displayName} read={onRead} onOpenChange={onPreviewOpenChange} /> :
           <span className="task-attachment__name" title={attachment.displayName}>{attachment.displayName}</span>}
         <span className="task-attachment__meta">
-          {label ? `${label} · ` : ''}{formatAttachmentBytes(attachment.byteCount)}
+          {label ? <span className="task-attachment__label">{label}</span> : null}{formatAttachmentBytes(attachment.byteCount)}
         </span>
       </span>
       {onRemove ? <button

@@ -40,7 +40,7 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
     case 'AGENT_GOAL_UPDATED':
       return {
         label: 'Provider goal updated',
-        detail: `${stringField(payload, 'syncState') ?? 'UNKNOWN'} · ${stringField(payload, 'providerStatus') ?? 'status unknown'}`
+        detail: `Sync ${stringField(payload, 'syncState') ?? 'UNKNOWN'}, provider status ${stringField(payload, 'providerStatus') ?? 'unknown'}`
       };
     case 'AGENT_GOAL_CLEARED':
       return {
@@ -70,12 +70,12 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
     case 'AGENT_SUBAGENT_DISCOVERED':
       return {
         label: 'Subagent discovered',
-        detail: `${stringField(payload, 'providerChildSessionId') ?? 'unknown child'} · ${stringField(payload, 'source') ?? 'source unknown'}`
+        detail: `${stringField(payload, 'providerChildSessionId') ?? 'unknown child'}, ${stringField(payload, 'source') ?? 'source unknown'}`
       };
     case 'AGENT_SUBAGENT_UPDATED':
       return {
         label: 'Subagent updated',
-        detail: `${stringField(payload, 'status') ?? 'status unknown'} · ${stringField(payload, 'providerChildSessionId') ?? 'unknown child'}`
+        detail: `${stringField(payload, 'status') ?? 'status unknown'}, ${stringField(payload, 'providerChildSessionId') ?? 'unknown child'}`
       };
     case 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED':
       return {
@@ -122,7 +122,7 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
     case 'AGENT_RUNTIME_RECONCILED':
       return {
         label: 'Agent runtime reconciled',
-        detail: `${stringField(payload, 'status') ?? 'unknown'} · ${stringField(payload, 'recoveryState') ?? 'unknown'}`
+        detail: `Status ${stringField(payload, 'status') ?? 'unknown'}, recovery ${stringField(payload, 'recoveryState') ?? 'unknown'}`
       };
     case 'PROCESS_STARTED':
       return { label: 'Process started', detail: `PID ${numberField(payload, 'pid') ?? 'unknown'}.` };

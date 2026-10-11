@@ -30,7 +30,7 @@ describe('completed change summary model', () => {
 
     expect(summary).toEqual({
       fileCount: 4,
-      title: 'Captured Git changes · 4 files',
+      title: 'Captured Git changes in 4 files',
       additions: 278,
       deletions: 12,
       previewFiles: [

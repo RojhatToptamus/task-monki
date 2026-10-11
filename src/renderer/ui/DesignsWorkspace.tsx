@@ -799,8 +799,9 @@ function DesignHeader({
           <p>
             <span className="tm-design-status" data-tone={status.tone}>
               <StatusGlyph kind={status.tone} />
-              {status.label}{revision ? ` · revision ${revision}` : ''}
+              {status.label}
             </span>
+            {revision ? <span>Revision {revision}</span> : null}
           </p>
         </div>
       </div>
@@ -1108,7 +1109,7 @@ function NewDesignForm({
                   <select id="design-base" aria-describedby="design-base-help" value={baseKey} disabled={composerLocked || inspecting || !inspection} onChange={(event) => setBaseKey(event.target.value)}>
                     {inspecting ? <option value="">Loading branches…</option> : null}
                     {!inspection && !inspecting ? <option value="">Select a repository first</option> : null}
-                    {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} · {item.sha.slice(0, 8)}</option>)}
+                    {inspection?.bases.map((item) => <option key={item.refName ?? 'HEAD'} value={item.refName ?? 'HEAD'}>{item.refName?.replace('refs/heads/', '') ?? 'Detached HEAD'} at {item.sha.slice(0, 8)}</option>)}
                   </select>
                   <small id="design-base-help">Uncommitted changes are not included.</small>
                 </div>

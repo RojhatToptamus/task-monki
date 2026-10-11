@@ -68,7 +68,7 @@ describe('AgentModelSelector', () => {
     );
 
     expect(discover).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Implementation: Cursor Agent · Auto' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Implementation: Auto via Cursor Agent' }));
     const search = screen.getByRole('combobox', {
       name: 'Search models and providers'
     });
@@ -126,7 +126,7 @@ describe('AgentModelSelector', () => {
     );
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Design: Cursor Agent · Provider default' })
+      screen.getByRole('button', { name: 'Design: Provider default via Cursor Agent' })
     );
     const option = screen.getByRole('option', {
       name: `Auto via Cursor Agent, unavailable. ${reason}`
@@ -178,7 +178,7 @@ describe('AgentModelSelector', () => {
     );
 
     const trigger = screen.getByRole('button', {
-      name: 'Implementation: Cursor Agent · Auto'
+      name: 'Implementation: Auto via Cursor Agent'
     });
     fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     const search = screen.getByRole('combobox', {
@@ -229,7 +229,7 @@ describe('AgentModelSelector', () => {
     );
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Implementation: Cursor Agent · Auto' })
+      screen.getByRole('button', { name: 'Implementation: Auto via Cursor Agent' })
     );
     const search = screen.getByRole('combobox', {
       name: 'Search models and providers'
@@ -246,7 +246,7 @@ describe('AgentModelSelector', () => {
     expect(onSelectionChange).toHaveBeenCalledWith(model.runtimeId, nextModel.id);
     await waitFor(() =>
       expect(document.activeElement).toBe(
-        screen.getByRole('button', { name: 'Implementation: Cursor Agent · Auto' })
+        screen.getByRole('button', { name: 'Implementation: Auto via Cursor Agent' })
       )
     );
   });
@@ -266,7 +266,7 @@ describe('AgentModelSelector', () => {
     );
 
     const trigger = screen.getByRole('button', {
-      name: 'Implementation: Cursor Agent · Auto'
+      name: 'Implementation: Auto via Cursor Agent'
     });
     fireEvent.click(trigger);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');

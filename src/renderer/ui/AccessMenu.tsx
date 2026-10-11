@@ -16,7 +16,7 @@ export function AccessMenu({ presets, selected, networkOn, disabled = false, onP
   onNetworkChange(on: boolean): void;
 }) {
   const networkFixed = selected?.networkAccess === 'DISABLED' || selected?.networkAccess === 'REQUIRED';
-  const summary = `${selected?.label ?? 'Custom'}${networkOn ? ' · Network' : ''}`;
+  const summary = `${selected?.label ?? 'Custom'}${networkOn ? ', network on' : ''}`;
   return (
     <ActionMenu
       className="tm-composer-chip"

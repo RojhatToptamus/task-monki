@@ -199,7 +199,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                 className="tm-preview-row--line"
                 name="Secret storage"
                 expansion={secretReferences?.length === 0 ? secretForm : undefined}
-                detail={<span title={storageFor.length ? `Needed for ${storageFor.join(', ')}` : undefined}>{storage?.state === 'new' ? 'Not set up on this Mac' : 'Locked'}{storageNeeds ? ` · needed for ${storageNeeds}` : ''}</span>}
+                detail={<span title={storageFor.length ? `Needed for ${storageFor.join(', ')}` : undefined}>{storage?.state === 'new' ? 'Not set up on this Mac' : 'Locked'}{storageNeeds ? `, needed for ${storageNeeds}` : ''}</span>}
                 end={
                   <button className="outline-button tm-preview-row-button" onClick={() => onSecretReferences([])}>
                     {storage?.state === 'new' ? 'Set up storage' : 'Unlock storage'}
@@ -244,7 +244,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
       ) : null}
       {unverified.length ? (
         <details className="tm-preview-disclosure">
-          <DisclosureSummary>Other checks · {unverified.length}</DisclosureSummary>
+          <DisclosureSummary>{unverified.length} other {unverified.length === 1 ? 'check' : 'checks'}</DisclosureSummary>
           <div className="tm-preview-rows">
             {unverified.map((item, i) => <Row key={i} name={item.service ?? item.requirement} detail={item.message} end="Checked at start" />)}
           </div>
@@ -346,7 +346,7 @@ export function PreviewDiagnosisBlock({ diagnosis, meta, primary, secondary, mor
       {diagnosis.excerpt ? (
         <div className="tm-preview-excerpt">
           <div className="tm-preview-excerpt__bar">
-            <span>{diagnosis.service ?? 'Application'} · last output</span>
+            <span>{diagnosis.service ? `Last output from ${diagnosis.service}` : 'Last output'}</span>
             <button className="ghost-button" onClick={onOpenLogs}>Open in Logs</button>
           </div>
           <pre>{diagnosis.excerpt}</pre>

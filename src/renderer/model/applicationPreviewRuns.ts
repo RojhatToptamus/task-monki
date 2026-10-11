@@ -32,15 +32,15 @@ export function previewRunRows(status: PreviewStatus | undefined, restoredRun: b
       outcome: restored
         ? 'Stopped when Task Monki quit'
         : serving
-          ? `Current run · ${readyIn(attempt)}serving`
+          ? `Serving${readyIn(attempt)}`
           : attempt.state === 'failed'
             ? update ? 'Update failed' : 'Failed'
             : attempt.state === 'starting'
-              ? 'This run · starting'
+              ? 'Starting'
               : attempt.state === 'canceled'
                 ? 'Canceled'
                 : attempt.state === 'cleanup-incomplete'
-                  ? 'Stopped · cleanup incomplete'
+                  ? 'Stopped, cleanup incomplete'
                   : 'Stopped',
       cause: restored ? 'logs expired' : failureCause(attempt),
       logsAvailable: !restored
@@ -51,7 +51,7 @@ export function previewRunRows(status: PreviewStatus | undefined, restoredRun: b
 function readyIn(attempt: AttemptSummary): string {
   if (!attempt.readyAt) return '';
   const seconds = Math.round((Date.parse(attempt.readyAt) - Date.parse(attempt.startedAt)) / 1000);
-  return Number.isFinite(seconds) && seconds >= 0 ? `ready in ${seconds} s · ` : '';
+  return Number.isFinite(seconds) && seconds >= 0 ? `, ready in ${seconds} s` : '';
 }
 
 /** The failing service and the fact the runtime reported for it. */

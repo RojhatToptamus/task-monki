@@ -133,7 +133,6 @@ describe('run activity projection', () => {
         tone: 'success'
       }
     ]);
-    expect(projection.outputSummary).toBe('show output · 2 lines');
     expect(projection.rows[0].detail).not.toContain('/bin/zsh');
     expect(projection.rows[0].detail).not.toContain('/Users/rojhat/project');
     expect(projection.rows[0].detail).not.toContain('secret output');

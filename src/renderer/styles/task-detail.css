@@ -2577,7 +2577,7 @@
 .tm-reviewcard__counts [data-severity='BLOCKER'],
 .tm-reviewcard__counts [data-severity='MAJOR'] { color: var(--blocked-ink); }
 .tm-reviewcard__counts[data-earlier] [data-severity] { color: var(--muted); }
-.tm-reviewcard__closed { color: var(--muted); }
+.tm-reviewcard__closed { margin-left: 8px; color: var(--muted); }
 
 /* The tab's assistant panel toggle, at the right end of the tab bar: Ask on
    Overview, Agent and Review, the Preview agent on Preview. */

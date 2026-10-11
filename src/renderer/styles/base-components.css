@@ -560,6 +560,15 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
   white-space: nowrap;
 }
 
+.interaction-card__pending {
+  margin-left: 8px;
+}
+
+/* FactLine: one fact per span, 8px apart; inline, so a parent's ellipsis still applies. */
+.tm-fact-line > span + span {
+  margin-left: 8px;
+}
+
 .interaction-card--question { padding: 12px; }
 .interaction-card--question .interaction-card__header h3 { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .interaction-card--question .interaction-form { gap: 20px; margin-top: 12px; }

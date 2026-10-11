@@ -7,6 +7,7 @@ import {
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { DisclosureChevron } from './DisclosureChevron';
+import { FactLine } from './FactLine';
 import { Tooltip } from './Tooltip';
 
 export function InspectorSidebar({ children, returnFocus, onClose }: {
@@ -93,7 +94,7 @@ export function ContextPreview({
             reference.accessMode === 'FILESYSTEM_READ'
               ? reference.readScope === 'TASK_WORKTREE' ? 'Read-only worktree' : 'Read-only repository'
               : accessModeLabel(reference.accessMode)
-          ].filter(Boolean).join(' · ')} />)}
+          ].filter((fact): fact is string => Boolean(fact))} />)}
       </ul> : null}
       {preview.exclusions.length > 0 ? <details className="tm-discourse-preview__exclusions">
         <summary><span className="tm-disclosure__label"><DisclosureChevron />Context limits</span></summary>
@@ -106,14 +107,15 @@ export function ContextPreview({
 export function ContextReference({ kind, label, description, children }: {
   kind: 'TASK' | 'REPOSITORY';
   label: string;
-  description: string;
+  /** Short facts about the source, shown one per span. */
+  description: readonly string[];
   children?: ReactNode;
 }) {
   return <li>
     <span className={`tm-discourse-context-kind tm-discourse-context-kind--${kind.toLowerCase()}`} aria-hidden="true">
       {kind === 'TASK' ? <DiscourseTaskIcon /> : <DiscourseRepositoryIcon />}
     </span>
-    <span><strong title={label}>{label}</strong><small>{description}</small></span>
+    <span><strong title={label}>{label}</strong><small><FactLine facts={description} /></small></span>
     {children}
   </li>;
 }

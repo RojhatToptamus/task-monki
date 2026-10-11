@@ -81,7 +81,7 @@ describe('summarizeEvent', () => {
       )
     ).toEqual({
       label: 'Subagent discovered',
-      detail: 'thread-child · COLLAB_RECEIVER'
+      detail: 'thread-child, COLLAB_RECEIVER'
     });
     expect(
       summarizeEvent(

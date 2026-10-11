@@ -19,7 +19,7 @@ import { Elapsed, Turn, UserMessage, useSessionTurns } from './SessionTurns';
 import { StatusGlyph } from './StatusBadge';
 import { ArrowUp, ChevronDown, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react';
 import { AgentMark } from './UiIcons';
-import { SUBMIT_SHORTCUT } from './Tooltip';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 
 export interface AgentSessionProps {
   task: Task;
@@ -308,11 +308,13 @@ export function AgentSession(props: AgentSessionProps) {
               {displayedRun && canStopTaskRun(displayedRun) ? <button type="button" className="outline-button tm-composer__secondary" disabled={busy}
                 title="Stop the current response" onClick={() => void act(() => props.onStop(displayedRun.id))}>Stop</button> : null}
               {mode && !questionPending ? <div className={`tm-composer__send${allowed.length > 1 ? ' tm-composer__send--split' : ''}`}>
-                <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
-                  aria-label={delivery[mode].label}
-                  title={blocked ?? (needsText && !draft.trim() ? 'Write a message first' : `${delivery[mode].description} · ${SUBMIT_SHORTCUT}`)}>
-                  {sendControl(mode, followUp)}
-                </button>
+                {/* A blocked composer says why in its hint; the tooltip names the action and its shortcut. */}
+                <Tooltip label={delivery[mode].description} shortcut={SUBMIT_SHORTCUT} side="top">
+                  <button className={`primary-button tm-composer__primary${sendUsesIcon(mode, followUp) ? ' tm-composer__primary--icon' : ''}`} type="submit" disabled={!canSend}
+                    aria-label={delivery[mode].label}>
+                    {sendControl(mode, followUp)}
+                  </button>
+                </Tooltip>
                 {allowed.length > 1 ? <ActionMenu className="tm-send-menu" label="Instruction delivery" selection="single" disabled={busy || Boolean(blocked)}
                   trigger={<ChevronDown size={13} aria-hidden="true" />}
                   items={allowed.map((item) => ({ label: delivery[item].label, description: delivery[item].description, pressed: mode === item,

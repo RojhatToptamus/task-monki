@@ -1836,7 +1836,7 @@ export function TaskDetail(props: TaskDetailProps) {
             artifacts={props.artifacts}
             worktree={worktree}
             comparison={externalWork && worktree ? {
-              label: `${worktree.baseRef} · ${worktree.baseSha.slice(0, 8)}`,
+              label: `${worktree.baseRef} at ${worktree.baseSha.slice(0, 8)}`,
               onChange: () => setExistingWorkModal('comparison'),
               disabledReason: reviewActionPauseTitle ?? (reviewActionBusy ? taskActionBusyTitle : undefined)
             } : undefined}

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Renderer copy and components follow DESIGN.md §5 (Words) and §10 (Components):
-// no em-dash, emoji or banned word in interface copy, no ellipsis in a
-// placeholder, no spinner, and one agent mark. Separator glyphs in copy and native
-// titles on buttons are ratchets: their count is recorded in
+// no em-dash, emoji, banned word or separator glyph in interface copy, no
+// ellipsis in a placeholder, no spinner, and one agent mark. Copy the model layer
+// builds reaches the same screens, so it keeps the separator rule too. Native
+// titles on buttons are a ratchet: their count is recorded in
 // tools/design-baseline.json and may only go down. Lower the number there when a
 // change removes some; never raise it.
 import { readdirSync, readFileSync } from 'node:fs';
@@ -11,11 +12,14 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const uiDirectory = resolve(here, '../src/renderer/ui');
+const modelDirectory = resolve(here, '../src/renderer/model');
 const baseline = JSON.parse(readFileSync(resolve(here, 'design-baseline.json'), 'utf8'));
 
 // A string literal, template or JSX text that carries the pattern.
 const inCopy = (inner) => new RegExp(`[\`'">][^\`'"<\\n]*${inner}`, 'gu');
+const separatorRule = { pattern: inCopy('\\s[·•]\\s'), message: 'middle dot or bullet joining facts in copy; give each fact its own span or words (DESIGN.md §5)' };
 const rules = [
+  separatorRule,
   { pattern: inCopy('\\w\\s—\\s\\w'), message: 'em-dash in interface copy (DESIGN.md §5)' },
   { pattern: /\p{Extended_Pictographic}/gu, message: 'emoji in interface copy (DESIGN.md §5)' },
   { pattern: />[^<{]*\b(?:Click|Please|successfully|Oops|Simply|Tip:|Note:)\b[^<]*</g, message: 'banned word in interface copy (DESIGN.md §5)' },
@@ -24,7 +28,6 @@ const rules = [
   { pattern: /import[^;]*\bBot\w*\b[^;]*from\s+['"]lucide-react['"]/g, message: 'robot icon; every agent is AgentMark (DESIGN.md §8.3)' }
 ];
 const ratchets = {
-  'separator-in-copy': { pattern: inCopy('\\s[·•]\\s'), message: 'middle dot or bullet joining facts in copy (DESIGN.md §5)' },
   'native-title-on-button': { pattern: /<button\b[^>]*\btitle=/g, message: 'native title on a button; name it with Tooltip and state a disabled reason beside the actions (DESIGN.md §4, §10)' }
 };
 
@@ -32,13 +35,20 @@ const ratchets = {
 const blankComments = (source) => source
   .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '))
   .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, (match, lead) => lead + match.slice(lead.length).replace(/[^\n]/g, ' '));
-const tsxFiles = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
-  entry.isDirectory() ? tsxFiles(resolve(directory, entry.name))
-    : entry.name.endsWith('.tsx') && !entry.name.includes('.test.') ? [resolve(directory, entry.name)] : []);
+const sourceFiles = (directory, extension) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+  entry.isDirectory() ? sourceFiles(resolve(directory, entry.name), extension)
+    : entry.name.endsWith(extension) && !entry.name.includes('.test.') ? [resolve(directory, entry.name)] : []);
 
 const failures = [];
 const ratchetHits = Object.fromEntries(Object.keys(ratchets).map((name) => [name, []]));
-for (const file of tsxFiles(uiDirectory)) {
+for (const file of sourceFiles(modelDirectory, '.ts')) {
+  const source = blankComments(readFileSync(file, 'utf8'));
+  const lineOf = (index) => source.slice(0, index).split('\n').length;
+  for (const match of source.matchAll(separatorRule.pattern)) {
+    failures.push(`model/${file.slice(modelDirectory.length + 1)}:${lineOf(match.index)} ${separatorRule.message}: ${match[0].trim().slice(0, 60)}`);
+  }
+}
+for (const file of sourceFiles(uiDirectory, '.tsx')) {
   const source = blankComments(readFileSync(file, 'utf8'));
   const name = file.slice(uiDirectory.length + 1);
   const lineOf = (index) => source.slice(0, index).split('\n').length;
@@ -66,4 +76,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 if (report.length > 0) console.log(report.join('\n'));
-console.log('Renderer copy has no em-dash, emoji, banned word or ellipsis placeholder, and components use no spinner and one agent mark.');
+console.log('Renderer copy has no em-dash, emoji, banned word, separator glyph or ellipsis placeholder, and components use no spinner and one agent mark.');

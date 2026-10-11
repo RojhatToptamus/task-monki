@@ -62,7 +62,6 @@ export interface RunActivitySection {
 export interface RunActivityProjection {
   rows: RunActivityRow[];
   sections: RunActivitySection[];
-  outputSummary?: string;
 }
 
 interface ActivityCandidate extends RunActivityLeaf {
@@ -99,8 +98,7 @@ export function buildRunActivityProjection(input: {
 
   return {
     rows: groupedRows,
-    sections: buildRunActivitySections(groupedRows),
-    outputSummary: commandOutputSummary(runItems)
+    sections: buildRunActivitySections(groupedRows)
   };
 }
 
@@ -782,18 +780,6 @@ function commandActivityMetric(
     return `exit ${exitCode}`;
   }
   return durationMetric(numberValue(payload.durationMs));
-}
-
-function commandOutputSummary(items: AgentItemRecord[]): string | undefined {
-  const lineCount = items
-    .filter((item) => item.type === 'COMMAND_EXECUTION')
-    .reduce((total, item) => {
-      const output = stringValue(objectPayload(item.payload).aggregatedOutput);
-      return total + outputLineCount(output);
-    }, 0);
-  return lineCount > 0
-    ? `show output · ${lineCount} ${plural(lineCount, 'line')}`
-    : undefined;
 }
 
 function lineCountMetric(output: string | undefined): string | undefined {

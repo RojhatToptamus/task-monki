@@ -38,7 +38,7 @@ describe('CompletedChangeSummaryPanel', () => {
       await pending.promise;
     });
 
-    expect(screen.getByText('Captured Git changes · 1 file')).toBeDefined();
+    expect(screen.getByText('Captured Git changes in 1 file')).toBeDefined();
     expect(screen.getByText('app.ts')).toBeDefined();
     expect(screen.queryByText('Loading captured Git changes…')).toBeNull();
   });

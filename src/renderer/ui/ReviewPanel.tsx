@@ -252,7 +252,7 @@ function SeverityDistribution({ findings, earlier }: { findings: EffectiveReview
           {index > 0 ? ', ' : null}{level.count} {level.label.toLowerCase()}
         </span>
       ))}
-      {closed > 0 ? <span className="tm-reviewcard__closed"> · {closed} closed</span> : null}
+      {closed > 0 ? <span className="tm-reviewcard__closed">{closed} closed</span> : null}
     </span>
   );
 }

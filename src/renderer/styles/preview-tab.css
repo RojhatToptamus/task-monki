@@ -52,7 +52,7 @@
 .tm-application-preview__notice { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-regular); line-height: 1.5; }
 .tm-application-preview__error { margin: 0; color: var(--blocked-ink); font-size: var(--t-help); line-height: 1.5; white-space: normal; }
 .tm-application-preview__state { font-size: var(--t-help); color: var(--muted); white-space: nowrap; }
-.tm-application-preview__state-detail { color: var(--muted); }
+.tm-application-preview__state-detail { margin-left: 8px; color: var(--muted); }
 .tm-application-preview__state:is([data-state='ready'], [data-state='succeeded']) { color: var(--verified-ink); }
 .tm-application-preview__state[data-state='failed'] { color: var(--blocked-ink); }
 .tm-application-preview__state:is([data-state='starting'], [data-state='running'], [data-state='waiting']) { color: var(--accent-ink); }

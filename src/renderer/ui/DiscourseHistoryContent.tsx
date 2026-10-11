@@ -36,12 +36,12 @@ export function DiscourseHistoryContent({ result, sources, comparison, onNavigat
           {point.sourceMessageIds.map((id) => {
             const source = sources.find((message) => message.id === id);
             return <button type="button" className="tm-discourse-message-action" key={id} onClick={() => onNavigate(id)}>
-              {source ? `${messageAuthorLabel(source)} · ${source.ordinal}` : 'View source'}
+              {source ? `${messageAuthorLabel(source)}, message ${source.ordinal}` : 'View source'}
             </button>;
           })}
         </div>
         {point.evidence.length ? <p><strong>Evidence cited by C</strong>{point.evidence.join('; ')}</p> : null}
-        <small>{label(point.confidence)} confidence · C’s assessment</small>
+        <small>C’s assessment: {label(point.confidence).toLowerCase()} confidence</small>
       </details>)}
     </div><MessageMarkdown text={result.reason} /></details>
     {result.actions.length ? <details><summary><span className="tm-disclosure__label"><DisclosureChevron />Next questions</span></summary>

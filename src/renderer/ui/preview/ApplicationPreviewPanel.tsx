@@ -587,7 +587,8 @@ export function ApplicationPreviewPanel({
   const agentPanel = !agentConversation ? null
     : agentHost ? (agentHost.slot ? createPortal(agentConversation, agentHost.slot) : null)
     : <FloatingSidePanel>{agentConversation}</FloatingSidePanel>;
-  const latestMeta = `${serving && latest?.id !== serving.id ? 'update' : 'this run'}${latest?.startedAt ? ` · ${previewRunRows(status, false).find((run) => run.attempt.id === latest.id)?.time ?? ''}` : ''}`;
+  const latestTime = latest?.startedAt ? previewRunRows(status, false).find((run) => run.attempt.id === latest.id)?.time : undefined;
+  const latestMeta = `${serving && latest?.id !== serving.id ? 'update' : 'this run'}${latestTime ? `, ${latestTime}` : ''}`;
   // What holds the preview, decided in Activity only: Configuration and Logs are never pushed down.
   const attentionBlock = availability.state !== 'available' ? (
     <PreviewWorktreeBlock worktree={worktree} availability={availability} />

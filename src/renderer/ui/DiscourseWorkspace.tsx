@@ -2260,7 +2260,7 @@ export function DiscourseWorkspace({
               <ul className="tm-discourse-context-list">
                 {pinned.map((reference) => (
                   <ContextReference key={reference.contextLinkId} kind={reference.entityKind} label={reference.labelSnapshot}
-                    description={`${reference.entityKind === 'TASK' ? 'Task context' : 'Repository context'} · ${availabilityLabel(reference.availability)}`}>
+                    description={[reference.entityKind === 'TASK' ? 'Task context' : 'Repository context', availabilityLabel(reference.availability)]}>
                     <button type="button" aria-label={`Unpin ${reference.labelSnapshot}`} onClick={() => void unpinContext(reference)}>
                       <X aria-hidden="true" size={13} />
                     </button>

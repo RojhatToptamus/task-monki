@@ -130,8 +130,8 @@ export function discourseMentionCandidates(
       id: entry.profile.id,
       label: entry.profile.displayName,
       description: entry.availability === 'AVAILABLE'
-        ? `${roleLabel(entry.profile.roleTemplate)} · ${entry.resolvedSettings?.model ?? 'No model'}`
-        : entry.unavailableReason ?? 'Agent unavailable',
+        ? [roleLabel(entry.profile.roleTemplate), entry.resolvedSettings?.model ?? 'No model']
+        : [entry.unavailableReason ?? 'Agent unavailable'],
       searchAliases: [
         entry.profile.roleTemplate,
         entry.resolvedSettings?.runtimeId ?? '',
@@ -144,7 +144,7 @@ export function discourseMentionCandidates(
       kind: 'TASK',
       id: task.id,
       label: task.title,
-      description: `${shortId(task.id)} · ${task.repositoryName} · ${humanize(task.workflowPhase)}`,
+      description: [shortId(task.id), task.repositoryName, humanize(task.workflowPhase)],
       searchAliases: [task.id, task.repositoryName, task.workflowPhase],
       available: task.availability === 'AVAILABLE',
       recentOrdinal: recentOrder.get(`TASK:${task.id}`)
@@ -153,7 +153,7 @@ export function discourseMentionCandidates(
       kind: 'REPOSITORY',
       id: repository.id,
       label: repository.displayName,
-      description: `${repositoryDisplayPath(repository.displayPath)} · ${repository.taskCount} task${repository.taskCount === 1 ? '' : 's'} · ${accessLabel(repository.accessMode)}`,
+      description: [repositoryDisplayPath(repository.displayPath), `${repository.taskCount} task${repository.taskCount === 1 ? '' : 's'}`, accessLabel(repository.accessMode)],
       searchAliases: [repository.id, repository.displayPath],
       available: repository.availability === 'AVAILABLE',
       recentOrdinal: recentOrder.get(`REPOSITORY:${repository.id}`)

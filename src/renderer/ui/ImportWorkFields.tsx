@@ -129,7 +129,7 @@ export function ImportWorkFields({
         }}>
           {filtered.map((item) => <button key={item.worktreePath} type="button" role="option"
             className="import-work__checkout" aria-selected={selected?.worktreePath === item.worktreePath}
-            aria-label={`${item.branchName ?? 'Detached HEAD'} · ${item.worktreePath}`}
+            aria-label={`${item.branchName ?? 'Detached HEAD'} at ${item.worktreePath}`}
             disabled={locked || Boolean(item.unavailableReason)}
             tabIndex={selected ? selected.worktreePath === item.worktreePath ? 0 : -1 : item.worktreePath === firstAvailablePath ? 0 : -1}
             title={item.unavailableReason ?? item.worktreePath} onClick={() => onSelect(item.worktreePath)}>

@@ -31,6 +31,7 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { creationRequiresUnchangedRetry } from '../model/taskAttachmentComposer';
 import { DesignReadyMenu } from './DesignActionsMenu';
 import { DisclosureChevron } from './DisclosureChevron';
+import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { ArrowUp, RotateCcw, Square } from 'lucide-react';
 
 export interface DesignConversationProps {
@@ -330,7 +331,7 @@ export function DesignConversation({
           <p className="tm-design-conversation__origin">
             Copied from {project.origin.designTitle ?? 'an earlier Design'}
             {project.origin.revisionOrdinal
-              ? ` · Ready state ${project.origin.revisionOrdinal}`
+              ? `, Ready state ${project.origin.revisionOrdinal}`
               : ''}
           </p>
         ) : null}
@@ -463,12 +464,14 @@ export function DesignConversation({
                   <Square size={13} aria-hidden="true" />
                 </button>
               ) : null}
-              {!questionPending ? <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
-                aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}
-                title={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response · ⌘/Ctrl Enter' : 'Send · ⌘/Ctrl Enter'}>
-                {submissionOutcomeUnknown ? <RotateCcw size={16} aria-hidden="true" />
-                  : <ArrowUp size={16} aria-hidden="true" />}
-              </button> : null}
+              {!questionPending ? <Tooltip label={submissionOutcomeUnknown ? 'Retry sending' : activeWork ? 'Queue after response' : 'Send'}
+                shortcut={submissionOutcomeUnknown ? undefined : SUBMIT_SHORTCUT} side="top">
+                <button type="submit" className="primary-button tm-composer-action" disabled={!canSubmit}
+                  aria-label={submitting ? 'Sending…' : submissionOutcomeUnknown ? 'Retry' : activeWork ? 'Queue' : 'Send'}>
+                  {submissionOutcomeUnknown ? <RotateCcw size={16} aria-hidden="true" />
+                    : <ArrowUp size={16} aria-hidden="true" />}
+                </button>
+              </Tooltip> : null}
             </>
           }
           hint={<span id="design-refinement-help">{
@@ -479,8 +482,8 @@ export function DesignConversation({
                 : attachments.activeItems.length > 0
                   ? `${attachments.activeItems.length} ${
                       attachments.activeItems.length === 1 ? 'new file' : 'new files'
-                    } · ${formatAttachmentBytes(attachments.byteCount)}`
-                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : '⌘ Enter')
+                    }, ${formatAttachmentBytes(attachments.byteCount)}`
+                  : disabledReason ?? (draftStatus === 'saving' ? 'Saving draft…' : draftStatus === 'error' ? 'Draft not saved' : SUBMIT_SHORTCUT)
           }</span>}
         >
           <MessageQueue items={pending.map((entry) => ({ id: entry.turn.id, text: entry.userMessage,

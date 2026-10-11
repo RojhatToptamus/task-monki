@@ -392,7 +392,7 @@ describe('NewTaskPanel', () => {
 
     const fullAccessHtml = renderPanel({ defaultPresetId: 'full-access' });
     // A preset that requires the network shows it on: the access chip names it.
-    expect(fullAccessHtml).toMatch(/aria-label="Access: [^"]+ · Network"/);
+    expect(fullAccessHtml).toMatch(/aria-label="Access: [^"]+, network on"/);
 
     const fallbackHtml = renderPanel({
       repositoryId: 'repository-disconnected',

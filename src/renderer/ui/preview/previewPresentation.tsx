@@ -17,6 +17,7 @@ import type {
 import type { OpenTargetRef } from '../../../shared/contracts';
 import { serviceOutcome } from '../../model/applicationPreviewRuns';
 import { DisclosureChevron } from '../DisclosureChevron';
+import { FactLine } from '../FactLine';
 import { Tooltip } from '../Tooltip';
 import { useDialogFocusBoundary } from '../dialogFocus';
 import { SourceFolderActions } from './PreviewSourceFolder';
@@ -143,7 +144,7 @@ export function StateWord({ service }: { service: Pick<ServiceStatus, 'type' | '
   return (
     <span className="tm-application-preview__state" data-state={service.state}>
       {outcome.word}
-      {outcome.detail ? <span className="tm-application-preview__state-detail"> · {outcome.detail}</span> : null}
+      {outcome.detail ? <span className="tm-application-preview__state-detail">{outcome.detail}</span> : null}
     </span>
   );
 }
@@ -298,25 +299,27 @@ export function PreviewRunReview({ description, projectDirectory, outcomes, sour
     <div className="tm-preview-run-review">
       <GroupLabel>{heading}</GroupLabel>
       <div className="tm-preview-rows">
-        {services.map(([id, service]) => (
-          <Row
-            key={id}
-            name={id}
-            detail={'command' in service && service.command ? <code>{commandText(service.command)}</code> : <span>{serviceSummary(service)}</span>}
-            end={outcomes?.[id] ? <StateWord service={outcomes[id]!} /> : undefined}
-          >
-            {[
-              folder(service as { cwd?: string; directory?: string }),
-              'dependsOn' in service && service.dependsOn?.length ? `after ${service.dependsOn.join(', ')}` : undefined,
-              service.type === 'job' ? (service.run === 'once' ? 'once per retained environment' : 'every start') : undefined,
-              readiness(service)
-            ]
-              .filter(Boolean)
-              .join(' · ') || undefined}
-          </Row>
-        ))}
+        {services.map(([id, service]) => {
+          // Where and when it runs, and when it counts as ready, one fact per span.
+          const facts = [
+            folder(service as { cwd?: string; directory?: string }),
+            'dependsOn' in service && service.dependsOn?.length ? `after ${service.dependsOn.join(', ')}` : undefined,
+            service.type === 'job' ? (service.run === 'once' ? 'once per retained environment' : 'every start') : undefined,
+            readiness(service)
+          ].filter((fact): fact is string => Boolean(fact));
+          return (
+            <Row
+              key={id}
+              name={id}
+              detail={'command' in service && service.command ? <code>{commandText(service.command)}</code> : <span>{serviceSummary(service)}</span>}
+              end={outcomes?.[id] ? <StateWord service={outcomes[id]!} /> : undefined}
+            >
+              {facts.length ? <FactLine facts={facts} /> : undefined}
+            </Row>
+          );
+        })}
         {probes.map(({ id, kind, probe }) => (
-          <Row key={`${id}:${kind}`} name={`${id} · ${kind}`} detail={<code>{commandText(probe.command)}</code>}>
+          <Row key={`${id}:${kind}`} name={`${id} ${kind}`} detail={<code>{commandText(probe.command)}</code>}>
             {probe.cwd ? folderName(probe.cwd, projectDirectory) : undefined}
           </Row>
         ))}
@@ -351,13 +354,13 @@ export function PreviewRunReview({ description, projectDirectory, outcomes, sour
 
 function serviceSummary(service: DescribedService | Description['spec']): string {
   if (service.type === 'postgres' || service.type === 'redis')
-    return `${serviceTypeLabel(service.type)} managed by Preview · data kept after Stop`;
+    return `${serviceTypeLabel(service.type)} managed by Preview, data kept after Stop`;
   if (service.type === 'attach' && 'url' in service && service.url)
     return typeof service.url === 'string' ? service.url : 'secret' in service.url ? `Secret ${service.url.secret}` : `Environment ${service.url.fromEnv}`;
   if (service.type === 'external-tcp' && 'host' in service) return `${service.host}:${service.port}`;
-  if (service.type === 'preview' && 'name' in service) return `Preview ${service.name}${service.service ? ` · ${service.service}` : ''}`;
-  if ('image' in service && service.image) return `${serviceTypeLabel(service.type)} · ${service.image}`;
-  if ('files' in service && Array.isArray(service.files)) return `Compose · ${service.files.join(', ')}`;
+  if (service.type === 'preview' && 'name' in service) return `Preview ${service.name}${service.service ? `, service ${service.service}` : ''}`;
+  if ('image' in service && service.image) return `${serviceTypeLabel(service.type)} ${service.image}`;
+  if ('files' in service && Array.isArray(service.files)) return `Compose ${service.files.join(', ')}`;
   return serviceTypeLabel(service.type);
 }
 

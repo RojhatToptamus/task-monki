@@ -388,10 +388,11 @@ export function AgentModelSelector({
     selectedModel?.displayName ??
     fallbackSummary ??
     (selectedRuntime ? 'Provider default' : 'No agent available');
+  // The model, then the agent it runs on, as the menu's options name them.
   const triggerDetails = selectedRuntime
-    ? `${selectedRuntime.preflight.runtime.displayName} · ${triggerSummary}`
+    ? `${triggerSummary} via ${selectedRuntime.preflight.runtime.displayName}`
     : runtimeId
-      ? `${runtimeId} · ${triggerSummary}`
+      ? `${triggerSummary} via ${runtimeId}`
       : triggerSummary;
 
   return (

@@ -285,7 +285,7 @@ export function DesignFilesDrawer({
                       <span>
                         <strong title={attachment.displayName}>{attachment.displayName}</strong>
                         <small>
-                          Removed{reference.projectAssetPath ? ` · ${reference.projectAssetPath}` : ''}
+                          Removed{reference.projectAssetPath ? ` from ${reference.projectAssetPath}` : ''}
                         </small>
                       </span>
                     </li>
@@ -360,7 +360,7 @@ function DesignReferenceRow({
         <span>
           <strong title={attachment.displayName}>{attachment.displayName}</strong>
           <small>
-            {assetPath ?? `${formatAttachmentBytes(attachment.byteCount)} · read-only`}
+            {assetPath ?? `${formatAttachmentBytes(attachment.byteCount)}, read-only`}
           </small>
         </span>
       </label>

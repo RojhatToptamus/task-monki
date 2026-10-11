@@ -559,6 +559,11 @@
   white-space: nowrap;
 }
 
+/* What happened to the file, then its size, each its own fact. */
+.task-attachment__label {
+  margin-right: 8px;
+}
+
 .task-attachment--error .task-attachment__meta {
   color: var(--blocked-ink);
 }

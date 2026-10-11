@@ -14,7 +14,8 @@ export interface DiscourseMentionCandidate {
   kind: DiscourseMentionKind;
   id: string;
   label: string;
-  description: string;
+  /** Short facts about the candidate, shown one per span. */
+  description: string[];
   searchAliases: string[];
   available: boolean;
   recentOrdinal?: number;

@@ -376,7 +376,7 @@ describe('Agent pre-run setup', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     await screen.findByRole('button', { name: 'reference.png' });
     expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', true);
-    fireEvent.click(screen.getByRole('button', { name: 'Model: Codex · Test model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Model: Test model via Codex' }));
     fireEvent.click(screen.getByRole('option', { name: 'Image model via Codex' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare worktree' })).toHaveProperty('disabled', false));
     fireEvent.click(screen.getByRole('button', { name: 'Prepare worktree' }));
