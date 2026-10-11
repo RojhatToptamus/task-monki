@@ -1773,6 +1773,12 @@
   line-height: var(--lh-meta);
 }
 
+/* The ghost's label lines up with the title above it. */
+.tm-model-default__reset {
+  justify-self: start;
+  margin: 2px 0 0 -8px;
+}
+
 .tm-agent-console {
   position: relative;
   display: grid;

@@ -15,8 +15,18 @@ export interface AnchoredFindings {
   general: ReviewFindingView[];
 }
 
-export function lineAnchorKey(fileId: string, blockId: string, lineIndex: number): string {
-  return `${fileId}\u0000${blockId}\u0000${lineIndex}`;
+/**
+ * Where a diff line sits, by its side and number, so a key survives unchanged
+ * lines opening above it; a line without a number falls back to its position.
+ */
+export function lineAnchorKey(fileId: string, blockId: string, line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>, index: number): string {
+  return `${fileId}\u0000${blockId}\u0000${diffLineId(line, index)}`;
+}
+
+/** A line's identity within its block: its side and number, else its position. */
+export function diffLineId(line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>, index: number): string {
+  return line.kind === 'deletion' && line.oldLine !== undefined ? `o${line.oldLine}`
+    : line.newLine !== undefined ? `n${line.newLine}` : `i${index}`;
 }
 
 export function normalizeReviewPath(path: string): string {
@@ -91,7 +101,7 @@ function findRowAnchor(file: DiffFile, side: ReviewComment['side'], line: number
       const number = side === 'OLD' ? (candidate.kind === 'deletion' ? candidate.oldLine : undefined) : candidate.newLine;
       if (number !== undefined && number >= line && number <= last) anchor = index;
     });
-    if (anchor !== undefined) return lineAnchorKey(file.id, block.id, anchor);
+    if (anchor !== undefined) return lineAnchorKey(file.id, block.id, block.lines[anchor]!, anchor);
   }
   return undefined;
 }
@@ -106,8 +116,8 @@ export function buildReviewIndex(files: readonly DiffFile[], anchored: AnchoredF
   return files.map((file) => {
     const findings = [...(anchored.byFile.get(file.id) ?? [])];
     for (const block of file.blocks) {
-      block.lines.forEach((_, index) => {
-        findings.push(...(anchored.byLine.get(lineAnchorKey(file.id, block.id, index)) ?? []));
+      block.lines.forEach((line, index) => {
+        findings.push(...(anchored.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []));
       });
     }
     return { file, findings };

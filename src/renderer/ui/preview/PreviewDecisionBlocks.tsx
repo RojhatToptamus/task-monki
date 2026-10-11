@@ -32,7 +32,7 @@ export function PreviewWorktreeBlock({ worktree, availability }: { worktree?: Wo
     <DecisionBlock
       kind={kind}
       tone={availability.pending ? 'info' : 'error'}
-      meta={worktree ? `${commit ?? ''}${commit ? ' · ' : ''}${worktree.branchName}` : undefined}
+      meta={worktree ? `${worktree.branchName}${commit ? ` at ${commit}` : ''}` : undefined}
       title={title}
       summary={summary}
       details={
@@ -95,7 +95,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
   const missingTools = prerequisites.filter((item) => item.status === 'missing');
   const unverified = prerequisites.filter((item) => item.status !== 'missing');
   const recipients = (secret: (typeof requirements.secrets)[number]) =>
-    secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`).join(', ');
+    secret.bindings.map((binding) => `${binding.key} in ${binding.service ?? 'the application'}`).join(', ');
   const openSecret = secretReferences?.length === 1 ? secretReferences[0] : undefined;
   const inlineSecret = secretReferences && (secretReferences.length === 0
     ? storageNeeded
@@ -110,7 +110,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
       inline
       sequence={sequence}
       references={secretReferences}
-      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.service ?? 'Application'} · ${binding.key}`)]))}
+      recipients={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, secret.bindings.map((binding) => `${binding.key} in ${binding.service ?? 'the application'}`)]))}
       labels={Object.fromEntries(requirements.secrets.map((secret) => [secret.id, [...new Set(secret.bindings.map((binding) => binding.key))].join(', ')]))}
       onClose={() => {
         onSecretReferences(undefined);
@@ -139,7 +139,7 @@ export function PreviewRequirementsBlock({ taskId, requirements, status, busy, r
                   key={key}
                   name={<code>{basename(directory)}</code>}
                   title={directory}
-                  detail={<span className="tm-preview-path" title={directory}>{missing ? 'Not found · ' : ''}{shortenPath(parentPath(directory))}</span>}
+                  detail={<span className="tm-preview-path" title={directory}>{missing ? 'Not found in ' : ''}{shortenPath(parentPath(directory))}</span>}
                   end={
                     missing ? (
                       <button

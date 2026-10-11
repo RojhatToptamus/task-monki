@@ -81,7 +81,7 @@ function applicationDetail(manifest: Manifest, folder: string): string {
   const framework = FRAMEWORKS.find(([name]) => name in dependencies)?.[1] ?? 'Node.js';
   const script = ['dev', 'start', 'serve'].find((name) => manifest.scripts?.[name]);
   const where = folder === '.' ? '' : ` in ${folder}`;
-  return script ? `${framework}${where} · npm run ${script}` : `${framework}${where} · no dev or start script`;
+  return script ? `${framework}${where}, npm run ${script}` : `${framework}${where}, no dev or start script`;
 }
 
 async function dependenciesDetail(manifest: Manifest, root: string, folder: string) {
@@ -93,8 +93,8 @@ async function dependenciesDetail(manifest: Manifest, root: string, folder: stri
   const declared = manifest.packageManager?.match(/^([a-z]+)/)?.[1];
   const manager = declared ?? lockfile?.[1] ?? 'npm';
   return lockfile
-    ? { detail: `${manager} · ${lockfile[0]}`, source: lockfile[0] }
-    : { detail: `${manager} · no lockfile committed`, source: path.posix.join(folder, 'package.json') };
+    ? { detail: `${manager} with ${lockfile[0]}`, source: lockfile[0] }
+    : { detail: `${manager}, no lockfile committed`, source: path.posix.join(folder, 'package.json') };
 }
 
 function envKeys(text: string | undefined): string[] | undefined {

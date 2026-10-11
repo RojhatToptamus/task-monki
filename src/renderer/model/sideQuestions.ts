@@ -51,5 +51,5 @@ export function sideQuestionSnapshotNote(question: Pick<TaskInstruction, 'snapsh
   if (Number.isNaN(taken.getTime())) return undefined;
   const time = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(taken);
   const omitted = question.snapshotOmittedFileCount ?? 0;
-  return `Read a snapshot from ${time}${omitted > 0 ? ` · ${omitted} large untracked file${omitted === 1 ? '' : 's'} left out` : ''}`;
+  return `Read a snapshot from ${time}${omitted > 0 ? `, without ${omitted} large untracked file${omitted === 1 ? '' : 's'}` : ''}`;
 }

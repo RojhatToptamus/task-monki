@@ -4,6 +4,7 @@
 .tm-preview-configuration__toolbar { display: flex; align-items: center; gap: 16px; min-height: var(--h-toolbar); }
 .tm-preview-configuration__file { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-preview-configuration__file strong { color: var(--text); font-weight: var(--w-medium); }
+.tm-preview-configuration__file strong + span { margin-left: 8px; }
 .tm-preview-configuration__views { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .tm-preview-configuration__views .ghost-button[aria-pressed='true'] { background-color: var(--sel); color: var(--text); }
 .tm-preview-configuration__link { padding: 0; color: var(--accent-ink); font-size: inherit; }

@@ -22,7 +22,7 @@ describe('side question follow-up', () => {
 describe('side question snapshot note', () => {
   it('says how fresh a snapshot answer is and what it left out', () => {
     const note = sideQuestionSnapshotNote({ snapshotTakenAt: '2026-10-10T14:02:00.000Z', snapshotOmittedFileCount: 2 });
-    expect(note).toMatch(/^Read a snapshot from .+ · 2 large untracked files left out$/);
+    expect(note).toMatch(/^Read a snapshot from .+, without 2 large untracked files$/);
     expect(sideQuestionSnapshotNote({ snapshotTakenAt: undefined })).toBeUndefined();
   });
 });

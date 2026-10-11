@@ -24,8 +24,8 @@ describe('readPreviewProjectFacts', () => {
     });
     const facts = await readPreviewProjectFacts(root);
     expect(facts).toEqual([
-      { label: 'Application', detail: 'Next.js · npm run dev', source: 'package.json' },
-      { label: 'Dependencies', detail: 'npm · package-lock.json', source: 'package-lock.json' },
+      { label: 'Application', detail: 'Next.js, npm run dev', source: 'package.json' },
+      { label: 'Dependencies', detail: 'npm with package-lock.json', source: 'package-lock.json' },
       { label: 'Environment', detail: 'DATABASE_URL, API_SECRET', source: '.env.example' },
       { label: 'Services', detail: 'db, cache', source: 'docker-compose.yml' }
     ]);
@@ -38,9 +38,9 @@ describe('readPreviewProjectFacts', () => {
       'web/package.json': JSON.stringify({ scripts: { dev: 'vite' }, devDependencies: { vite: '6' } })
     });
     expect(await readPreviewProjectFacts(nested)).toEqual([
-      { label: 'Application', detail: 'Fastify · npm run start', source: 'package.json' },
-      { label: 'Dependencies', detail: 'pnpm · no lockfile committed', source: 'package.json' },
-      { label: 'Application', detail: 'Vite in web · npm run dev', source: 'web/package.json' }
+      { label: 'Application', detail: 'Fastify, npm run start', source: 'package.json' },
+      { label: 'Dependencies', detail: 'pnpm, no lockfile committed', source: 'package.json' },
+      { label: 'Application', detail: 'Vite in web, npm run dev', source: 'web/package.json' }
     ]);
     const python = await project({ 'pyproject.toml': '[project]\nname = "api"\n' });
     expect(await readPreviewProjectFacts(python)).toEqual([{ label: 'Application', detail: 'Python project', source: 'pyproject.toml' }]);

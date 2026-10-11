@@ -345,6 +345,23 @@ describe('SettingsView', () => {
     );
   });
 
+  it('shows no review model until one is chosen, because each review follows its task\'s model', () => {
+    const following = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      defaultRuntimeId: 'codex',
+      defaultModel: codexModel.model
+    });
+    expect(following.selectedReviewModel).toBeUndefined();
+    expect(following.selectedReviewEffort).toBe('');
+
+    const chosen = selectSettingsModels([codexModel], runtimes, {
+      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+      reviewRuntimeId: 'codex',
+      reviewModel: codexModel.model
+    });
+    expect(chosen.selectedReviewModel?.id).toBe(codexModel.id);
+  });
+
   it('starts side questions on the implementation default until a model is chosen for them', () => {
     const following = selectSettingsModels([codexModel], runtimes, {
       ...DEFAULT_TASK_MANAGER_APP_SETTINGS,

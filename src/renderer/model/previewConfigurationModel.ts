@@ -165,7 +165,7 @@ export function describedEntries(description: PreviewDescription): Configuration
       ] as const
     ).flatMap(([kind, probe]) =>
       isRecord(probe) && probe.type === 'command'
-        ? [entryFrom(`${id} · ${kind}`, [], { type: 'probe', command: probe.command, ...(typeof probe.cwd === 'string' ? { cwd: probe.cwd } : {}) }, true)]
+        ? [entryFrom(`${id} ${kind}`, [], { type: 'probe', command: probe.command, ...(typeof probe.cwd === 'string' ? { cwd: probe.cwd } : {}) }, true)]
         : []
     );
     return [entry, ...probes];

@@ -85,7 +85,7 @@ export function ApplicationLogs(props: {
   const runs = previewRunRows(props.status, false);
   const runLabel = (attemptId: string) => {
     const run = runs.find((item) => item.attempt.id === attemptId);
-    return run ? [run.outcome, run.cause].filter(Boolean).join(' · ') : attemptId;
+    return run ? [run.outcome, run.cause].filter(Boolean).join(', ') : attemptId;
   };
   const id =
     props.selection?.attemptId ??
@@ -205,7 +205,7 @@ function RunLogs({
       const code = /exit(?:ed)?(?: with code)? \(?(\d+)\)?/i.exec(
         attempt.services?.[source]?.error?.message ?? ''
       )?.[1];
-      return code ? `failed · exit ${code}` : 'failed';
+      return code ? `failed with exit ${code}` : 'failed';
     }
     return state === 'skipped'
       ? 'not started'
@@ -346,7 +346,7 @@ function RunLogs({
           source,
           marker: state,
           text: displayName(source),
-          detail: `${exit ? ` · ${failureWord(exit)}` : ''}${initial ? '' : ` · observed ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`}`
+          detail: [exit ? failureWord(exit) : '', initial ? '' : `observed ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`].filter(Boolean).join(', ')
         });
       }
       previous[source] = state;

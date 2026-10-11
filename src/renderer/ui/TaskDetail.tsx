@@ -312,6 +312,8 @@ export function TaskDetail(props: TaskDetailProps) {
   // while they move between tabs and cleared when the request is sent.
   // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
   const [requestSheetPending, setRequestSheetPending] = useState(false);
+  // A Review file shown full screen takes the page, tab bar included.
+  const [reviewFullScreen, setReviewFullScreen] = useState(false);
   // Ask: one thread per open panel. Closing the panel or leaving the task ends it,
   // which removes its snapshot; the end call is kept from the task that opened it.
   // The subject is what the next question is about: a finding or lines of the diff.
@@ -1649,7 +1651,7 @@ export function TaskDetail(props: TaskDetailProps) {
     <>
     {titlebarRow}
     <main ref={detailRootRef} className={`tm-detail tm-detail--${tab}`} tabIndex={-1}>
-      {tab !== 'agent' ? <div className="tm-detail__chrome">{readingTab ? taskMasthead : null}{taskNav}</div> : null}
+      {tab !== 'agent' && !(tab === 'review' && reviewFullScreen) ? <div className="tm-detail__chrome">{readingTab ? taskMasthead : null}{taskNav}</div> : null}
 
       <div
         id="task-detail-panel"
@@ -1808,6 +1810,7 @@ export function TaskDetail(props: TaskDetailProps) {
           <ReviewWorkspace
             key={task.id}
             taskId={task.id}
+            onFullScreenChange={setReviewFullScreen}
             review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}

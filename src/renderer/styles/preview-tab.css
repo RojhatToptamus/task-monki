@@ -28,7 +28,9 @@
 .tm-preview-statusrow__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .tm-preview-statusrow__actions :is(.primary-button, .outline-button) { height: var(--h-toolbar); padding: 0 12px; }
 .tm-preview-statusrow__actions .tm-action-menu__trigger { width: var(--h-toolbar); }
-.tm-preview-sections { height: var(--preview-sections); }
+/* The tabs fill the bar, so the selected underline lies on the head's hairline. */
+.tm-preview-sections { height: var(--preview-sections); align-items: stretch; }
+.tm-preview-sections .tm-tab { height: auto; }
 .tm-preview-body { display: grid; align-content: start; gap: 16px; min-width: 0; padding: 16px var(--tm-gutter) 32px; }
 .tm-preview-attention { min-width: 0; border-radius: var(--r-md); outline: 0; }
 .app-shell[data-input-modality='keyboard'] .tm-preview-attention:focus { box-shadow: 0 0 0 3px var(--focus-ring); }
@@ -188,7 +190,7 @@
 
 /* Group labels and rows (DESIGN §3 group label, §5 settings row): no cards inside the block. */
 .tm-preview-group { margin: 4px 0 0; color: var(--muted); font-size: var(--t-group); font-weight: var(--w-medium); }
-.tm-preview-group__meta { font-size: var(--t-meta); font-weight: var(--w-regular); }
+.tm-preview-group__meta { margin-left: 8px; font-size: var(--t-meta); font-weight: var(--w-regular); }
 .tm-preview-group__meta time { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .tm-preview-rows { display: grid; min-width: 0; }
 .tm-preview-row { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto; gap: 2px 14px; align-items: baseline; min-height: 34px; padding: 6px 0; border-top: 1px solid var(--hair); min-width: 0; font-size: var(--t-help); }
@@ -217,7 +219,7 @@
 .tm-preview-run:first-child { border-top: 0; }
 .tm-preview-run__when { color: var(--muted); font: var(--t-meta) var(--font-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tm-preview-run__outcome { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.tm-preview-run__cause { color: var(--muted); }
+.tm-preview-run__cause { margin-left: 8px; color: var(--muted); }
 .tm-preview-run__end { display: flex; align-items: center; gap: 2px; }
 
 /* Configuration tab. */

@@ -913,10 +913,13 @@ export function AgentModelSetting({
   modelUnavailableReason,
   onDiscoverModels,
   onSelectionChange,
-  onReasoningEffortChange
+  onReasoningEffortChange,
+  reset
 }: {
   label: string;
   hint?: string;
+  /** Returns the setting to what it follows when nothing is chosen, such as each task's model. */
+  reset?: { label: string; onReset(): void };
   runtimeId: string;
   modelId: string;
   fallbackSummary?: string;
@@ -939,6 +942,7 @@ export function AgentModelSetting({
       <div className="tm-model-default__title">
         <strong>{label}</strong>
         {hint ? <span>{hint}</span> : null}
+        {reset ? <button type="button" className="ghost-button button--sm tm-model-default__reset" onClick={reset.onReset}>{reset.label}</button> : null}
       </div>
       <AgentModelSelector
         label={label}

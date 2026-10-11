@@ -460,11 +460,17 @@ function ModelSettings({
             });
           }}
         />
+        {/* Until a model is chosen here, each review runs on its task's own model. */}
         <AgentModelSetting
           label="Review"
           runtimeId={selected.reviewRuntimeId}
           modelId={selected.selectedReviewModel?.id ?? ''}
+          fallbackSummary={selected.selectedReviewModel ? undefined : 'Each task\'s model'}
           reasoningEffort={selected.selectedReviewEffort}
+          reset={selected.selectedReviewModel ? {
+            label: 'Use each task\'s model',
+            onReset: () => onSetAppSettings({ reviewRuntimeId: null, reviewModel: null, reviewModelProvider: null, reviewReasoningEffort: null })
+          } : undefined}
           models={enabledModels}
           runtimes={enabledRuntimes}
           runtimeUnavailableReason={(runtime) =>
@@ -630,12 +636,10 @@ export function selectSettingsModels(
         previewRecipeGenerationRuntimeId,
         appSettings.previewRecipeGenerationModelProvider
       );
-  const selectedReviewModel = selectModel(
-    models,
-    appSettings.reviewModel,
-    reviewRuntimeId,
-    appSettings.reviewModelProvider
-  );
+  // Without a chosen model a review follows its task, so no model is shown as chosen.
+  const selectedReviewModel = appSettings.reviewModel
+    ? selectModel(models, appSettings.reviewModel, reviewRuntimeId, appSettings.reviewModelProvider)
+    : undefined;
 
   return {
     defaultRuntimeId,

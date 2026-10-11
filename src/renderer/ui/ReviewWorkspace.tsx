@@ -24,6 +24,7 @@ import {
   buildReviewIndex,
   diffFileSignature,
   filesChangedSinceReview,
+  diffLineId,
   lineAnchorKey,
   normalizeReviewPath,
   type ReviewFindingView
@@ -86,6 +87,8 @@ export interface ReviewWorkspaceProps {
   resolvedFindings?: readonly AgentReviewResolvedFinding[];
   /** Hands the selected lines, and what was typed about them, to Ask instead of the request. */
   onAskAboutLines?(lines: { path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }, text: string): void;
+  /** A file shown full screen takes the whole page; the page hides its own chrome meanwhile. */
+  onFullScreenChange?(fullScreen: boolean): void;
   /** Another surface asked to see the request, such as the Overview's Request changes; cleared once it opens. */
   requestSheetPending?: boolean;
   onRequestSheetOpened?(): void;
@@ -131,7 +134,14 @@ function findingWords(findings: readonly ReviewFindingView[]): string {
 }
 
 /** Rows of one block chosen in the gutter; the anchor is where the drag began. */
-interface LineSelection { fileId: string; blockId: string; start: number; end: number; anchor: number }
+/** Chosen lines by identity (`diffLineId`), so the choice holds while unchanged lines open around it. */
+interface LineSelection { fileId: string; blockId: string; start: string; end: string; anchor: string }
+/** A selection's positions in the block as it is now. */
+function selectionRange(block: DiffBlock, selection: Pick<LineSelection, 'start' | 'end' | 'anchor'>): { start: number; end: number; anchor: number } | undefined {
+  const indexOf = (id: string) => block.lines.findIndex((line, index) => diffLineId(line, index) === id);
+  const [start, end, anchor] = [indexOf(selection.start), indexOf(selection.end), indexOf(selection.anchor)];
+  return start < 0 || end < 0 || anchor < 0 ? undefined : { start: Math.min(start, end), end: Math.max(start, end), anchor };
+}
 interface CommentDraft {
   /** The row (or `file:<id>`) the composer opens under. */
   key: string;
@@ -274,7 +284,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const fileOfFinding = (findingId: string) =>
     ordered.find((entry) => (findingsByFile.get(entry.file.id) ?? []).some((finding) => finding.id === findingId));
   const expand = (fileId: string) => setCollapsedOverride((currentOverride) => ({ ...currentOverride, [fileId]: false }));
-  /** Shows `fileId` alone (opening it if collapsed), or every file again when undefined. */
+  // The page hides its tab bar while a file is full screen, and gets it back when the tab closes.
+  const onFullScreenChange = props.onFullScreenChange;
+  useEffect(() => {
+    onFullScreenChange?.(Boolean(focusedFile));
+  }, [focusedFile, onFullScreenChange]);
+  useEffect(() => () => onFullScreenChange?.(false), [onFullScreenChange]);
+  /** Shows `fileId` full screen (opening it if collapsed), or every file again when undefined. */
   const focusFile = (fileId: string | undefined, animate: boolean) => {
     const leaving = fileId ? undefined : focusedFile;
     if (fileId && !focusedFile) listScroll.current = { fileId, top: diffRef.current?.scrollTop ?? 0 };
@@ -334,7 +350,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const selectionRef = useRef<LineSelection | undefined>(undefined);
   const dragging = useRef(false);
   const applySelection = (next?: LineSelection) => { selectionRef.current = next; setSelection(next); };
-  const openComposer = (file: DiffFile, block: DiffBlock, range: Pick<LineSelection, 'start' | 'end' | 'anchor'>) => {
+  const openComposer = (file: DiffFile, block: DiffBlock, chosen: Pick<LineSelection, 'start' | 'end' | 'anchor'>) => {
+    const range = selectionRange(block, chosen);
+    if (!range) return;
     const anchorLine = block.lines[range.anchor]!;
     const side: ReviewComment['side'] = anchorLine.kind === 'deletion' ? 'OLD' : 'NEW';
     const numbers = block.lines.slice(range.start, range.end + 1)
@@ -343,16 +361,17 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     if (!numbers.length) return;
     const line = Math.min(...numbers);
     const last = Math.max(...numbers);
-    setCommentDraft({ key: lineAnchorKey(file.id, block.id, range.end), path: file.path, side, line, endLine: last > line ? last : undefined, text: '' });
+    setCommentDraft({ key: lineAnchorKey(file.id, block.id, block.lines[range.end]!, range.end), path: file.path, side, line, endLine: last > line ? last : undefined, text: '' });
   };
   const beginSelect = (file: DiffFile, block: DiffBlock, rowIndex: number, event: ReactPointerEvent) => {
     if (!canComment || event.button > 0) return;
     event.preventDefault();
     const current = selectionRef.current;
-    const extend = event.shiftKey && current?.fileId === file.id && current.blockId === block.id;
-    applySelection(extend
-      ? { ...current, start: Math.min(current.start, rowIndex), end: Math.max(current.end, rowIndex) }
-      : { fileId: file.id, blockId: block.id, start: rowIndex, end: rowIndex, anchor: rowIndex });
+    const id = diffLineId(block.lines[rowIndex]!, rowIndex);
+    const range = current?.fileId === file.id && current.blockId === block.id ? selectionRange(block, current) : undefined;
+    applySelection(event.shiftKey && current && range
+      ? { ...current, ...(rowIndex < range.start ? { start: id } : rowIndex > range.end ? { end: id } : {}) }
+      : { fileId: file.id, blockId: block.id, start: id, end: id, anchor: id });
     dragging.current = true;
     const finish = () => {
       window.removeEventListener('pointerup', finish);
@@ -365,7 +384,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const extendSelect = (file: DiffFile, block: DiffBlock, rowIndex: number) => {
     const current = selectionRef.current;
     if (!dragging.current || current?.fileId !== file.id || current.blockId !== block.id) return;
-    applySelection({ ...current, start: Math.min(current.anchor, rowIndex), end: Math.max(current.anchor, rowIndex) });
+    // The drag runs from where it started to the line under the pointer, either way.
+    applySelection({ ...current, start: current.anchor, end: diffLineId(block.lines[rowIndex]!, rowIndex) });
   };
   const closeComposer = () => { setCommentDraft(undefined); applySelection(undefined); };
   const saveComment = () => {
@@ -611,7 +631,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const feedbackCount = (props.findingsSendable ? plan.send.length + plan.suggestions.length : openFindings.length) + draft.comments.length;
 
   return (
-    <section className="tm-review" aria-label="Review" onKeyDown={onKeyDown}>
+    <section className="tm-review" aria-label="Review" data-file-full-screen={focusedFile ? '' : undefined} onKeyDown={onKeyDown}>
       <div className="tm-review__bar">
         <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
           <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => setRail('files')}>
@@ -807,13 +827,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     wholeFile={context.wholeFileItem(file.id, () => { if (collapsed) expand(file.id); })}
                     onError={(message) => notify(message, 'error')}
                   />
-                  {/* The head's Expand and Collapse are the chevron's, so this control says what it shows. */}
+                  {/* The head's Expand and Collapse are the chevron's, so this control names full screen. */}
                   <ExpandToggle
                     compact
                     className="tm-review__mini"
                     expanded={focused}
-                    labels={{ expand: 'Show only this file', collapse: 'Show all files' }}
-                    ariaLabel={focused ? 'Show all files' : `Show only ${file.path}`}
+                    labels={{ expand: 'Full screen', collapse: 'Exit full screen' }}
+                    ariaLabel={focused ? 'Exit full screen' : `Show ${file.path} full screen`}
                     onToggle={(animate) => focusFile(focused ? undefined : file.id, animate)}
                   />
                 </header>
@@ -839,11 +859,11 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                             // Keyed by the hunk it leads into, so it keeps focus while lines open above it.
                             return <ReviewGap key={`gap-${row.reveal ? row.raw : rowIndex}`} row={row} onReveal={(from, to) => context.reveal(block.id, from, to)} />;
                           }
-                          const anchor = lineAnchorKey(file.id, block.id, row.index);
+                          const anchor = lineAnchorKey(file.id, block.id, row.line, row.index);
                           const line = row.line;
                           const number = line.kind === 'deletion' ? line.oldLine : line.newLine;
-                          const selected = selection?.fileId === file.id && selection.blockId === block.id &&
-                            row.index >= selection.start && row.index <= selection.end;
+                          const range = selection?.fileId === file.id && selection.blockId === block.id ? selectionRange(block, selection) : undefined;
+                          const selected = Boolean(range && row.index >= range.start && row.index <= range.end);
                           return (
                             <div key={anchor} className="tm-review-line-group">
                               <div
@@ -862,7 +882,11 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                       className="tm-review-line__comment"
                                       aria-label={`Comment on ${line.kind === 'deletion' ? 'removed ' : ''}line ${number}`}
                                       // A pointer comments through the gutter press; this handles the keyboard.
-                                      onClick={(event) => { if (event.detail === 0) openComposer(file, block, { start: row.index, end: row.index, anchor: row.index }); }}
+                                      onClick={(event) => {
+                                        if (event.detail !== 0) return;
+                                        const id = diffLineId(row.line, row.index);
+                                        openComposer(file, block, { start: id, end: id, anchor: id });
+                                      }}
                                     >
                                       <Plus size={12} aria-hidden="true" />
                                     </button>

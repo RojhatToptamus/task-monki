@@ -45,8 +45,9 @@ describe('anchorReviewFindings', () => {
       finding('no-location')
     ]);
 
-    expect(anchored.byLine.get(lineAnchorKey(rateLimit.id, 'committed', 3))?.map((item) => item.id)).toEqual(['range']);
-    expect(anchored.byLine.get(lineAnchorKey(rateLimit.id, 'unstaged', 1))?.map((item) => item.id)).toEqual(['latest-block']);
+    const key = (blockId: string, index: number) => lineAnchorKey(rateLimit.id, blockId, rateLimit.blocks.find((block) => block.id === blockId)!.lines[index]!, index);
+    expect(anchored.byLine.get(key('committed', 3))?.map((item) => item.id)).toEqual(['range']);
+    expect(anchored.byLine.get(key('unstaged', 1))?.map((item) => item.id)).toEqual(['latest-block']);
     expect(anchored.byFile.get(rateLimit.id)?.map((item) => item.id)).toEqual(['outside-diff']);
     expect(anchored.general.map((item) => item.id)).toEqual(['other-file', 'no-location']);
     expect(buildReviewIndex([rateLimit], anchored)[0]?.findings.map((item) => item.id)).toEqual(['outside-diff', 'range', 'latest-block']);
