@@ -52,6 +52,23 @@ describe('anchorReviewFindings', () => {
     expect(anchored.general.map((item) => item.id)).toEqual(['other-file', 'no-location']);
     expect(buildReviewIndex([rateLimit], anchored)[0]?.findings.map((item) => item.id)).toEqual(['outside-diff', 'range', 'latest-block']);
   });
+
+  it('finds a review\'s lines on the old side of the changes since that review', () => {
+    // Lines added above since the review shift the new side; the old side is the code the review read.
+    const sinceReview = file('src/app.js', [{
+      id: 'changes', label: 'Local diff', source: 'unstaged', lines: [
+        { kind: 'hunk', content: '@@ -10,2 +10,7 @@' },
+        ...[10, 11, 12, 13, 14].map((newLine) => ({ kind: 'addition' as const, newLine, content: '+added' })),
+        { kind: 'context', oldLine: 10, newLine: 15, content: ' kept' },
+        { kind: 'deletion', oldLine: 11, content: '-reviewed' }
+      ]
+    }]);
+    const reviewed = [finding('reviewed', { path: 'src/app.js', line: 10, endLine: 11 })];
+    const key = (index: number) => lineAnchorKey(sinceReview.id, 'changes', sinceReview.blocks[0]!.lines[index]!, index);
+
+    expect(anchorReviewFindings([sinceReview], reviewed, 'REVIEWED').byLine.get(key(7))?.map((item) => item.id)).toEqual(['reviewed']);
+    expect(anchorReviewFindings([sinceReview], reviewed).byLine.get(key(2))?.map((item) => item.id)).toEqual(['reviewed']);
+  });
 });
 
 describe('buildReviewDiffRows', () => {

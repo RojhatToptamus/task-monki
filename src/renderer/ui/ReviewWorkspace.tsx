@@ -205,7 +205,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const loading = diff.loading || (canCompareSinceReview && !chosenScope && (reviewed.loading || changes.loading));
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
-  const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings), [files, visibleFindings]);
+  // Measured from this review's own code, the findings' lines are on the old side.
+  const findingSide = exactChanges && props.changesSince?.reviewRunId === review?.runId ? 'REVIEWED' : 'NEW';
+  const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings, findingSide), [files, visibleFindings, findingSide]);
   const anchoredComments = useMemo(() => anchorReviewComments(files, draft.comments), [files, draft.comments]);
   const findingsByFile = useMemo(() => new Map(buildReviewIndex(files, anchored).map((entry) => [entry.file.id, entry.findings])), [files, anchored]);
   const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);

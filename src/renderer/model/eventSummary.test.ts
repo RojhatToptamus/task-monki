@@ -44,6 +44,9 @@ describe('summarizeEvent', () => {
       detail: 'COMMAND_APPROVAL is waiting for review.'
     });
     expect(
+      summarizeEvent(createEvent('AGENT_INTERACTION_REQUESTED', { type: 'USER_INPUT' }))
+    ).toEqual({ label: 'Agent asked a question', detail: 'Waiting for your answer.' });
+    expect(
       summarizeEvent(
         createEvent('AGENT_INTERACTION_RESOLVED', {
           status: 'DECLINED'

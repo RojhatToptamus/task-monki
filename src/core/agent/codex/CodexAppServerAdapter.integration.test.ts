@@ -4389,6 +4389,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect((await store.getAgentSession(interaction.sessionId))?.status).toBe(
       'AWAITING_APPROVAL'
     );
+    await vi.waitFor(async () =>
+      expect((await store.getTask(task.id))?.projection.agentRun).toBe('AWAITING_APPROVAL')
+    );
 
     await expect(
       orchestrator.respondToInteraction({
@@ -4494,6 +4497,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({
       status: 'AWAITING_USER_INPUT'
     });
+    // The task itself records the wait, so the board and the Inbox ask for input.
+    await vi.waitFor(async () =>
+      expect((await store.getTask(task.id))?.projection.agentRun).toBe('AWAITING_USER_INPUT')
+    );
     const input: RespondToInteractionRequest = {
       taskId: task.id,
       runId: run.id,
@@ -4527,6 +4534,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     } else {
       await waitForRunStatus(store, run.id, 'RUNNING');
       expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({ status: 'ACTIVE' });
+      await vi.waitFor(async () =>
+        expect((await store.getTask(task.id))?.projection.agentRun).toBe('RUNNING')
+      );
     }
     await expect(orchestrator.respondToInteraction(input)).rejects.toThrow(
       'expected PENDING'

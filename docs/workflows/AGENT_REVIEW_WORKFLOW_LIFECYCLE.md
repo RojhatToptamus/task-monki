@@ -59,7 +59,9 @@ The important product rule is:
     starts from is dropped, so a review is only ever linked to code it read.
     `readReviewChanges` diffs that tree against the worktree now: the Review
     tab's Since the review (out of date) and Since the last review (a current
-    re-review) show exactly what changed between rounds.
+    re-review) show exactly what changed between rounds. In Since the review
+    the old side is the reviewed code, so the review's findings anchor to the
+    line numbers it read there.
   - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
     the person's request after this review settles (`runId`, items answered,
     items that need the person's decision); cleared when the next turn starts.

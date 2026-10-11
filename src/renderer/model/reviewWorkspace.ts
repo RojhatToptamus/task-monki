@@ -37,9 +37,16 @@ export function normalizeReviewPath(path: string): string {
  * Anchors each finding to the diff the user is reading. A finding attaches
  * after the last displayed line of its range on the new side, preferring the
  * latest block (unstaged over staged over committed), because that is the code
- * the review read. A line outside the diff falls back to the file's top.
+ * the review read. In a diff from the reviewed code to the worktree now, the
+ * reviewed code is the old side, so `side: 'REVIEWED'` finds the range there,
+ * on unchanged and removed lines alike. A line outside the diff falls back to
+ * the file's top.
  */
-export function anchorReviewFindings(files: readonly DiffFile[], findings: readonly ReviewFindingView[]): AnchoredFindings {
+export function anchorReviewFindings(
+  files: readonly DiffFile[],
+  findings: readonly ReviewFindingView[],
+  side: 'NEW' | 'REVIEWED' = 'NEW'
+): AnchoredFindings {
   const byLine = new Map<string, ReviewFindingView[]>();
   const byFile = new Map<string, ReviewFindingView[]>();
   const general: ReviewFindingView[] = [];
@@ -56,7 +63,7 @@ export function anchorReviewFindings(files: readonly DiffFile[], findings: reado
       general.push(finding);
       continue;
     }
-    const anchor = finding.line ? findRowAnchor(file, 'NEW', finding.line, finding.endLine) : undefined;
+    const anchor = finding.line ? findRowAnchor(file, side, finding.line, finding.endLine) : undefined;
     if (anchor) push(byLine, anchor, finding);
     else push(byFile, file.id, finding);
   }
@@ -90,15 +97,21 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
   return { byLine, byFile };
 }
 
-/** The last displayed row of a line range on one side, preferring the latest block. Hidden unchanged lines are not displayed. */
-function findRowAnchor(file: DiffFile, side: ReviewComment['side'], line: number, endLine?: number): string | undefined {
+/**
+ * The last displayed row of a line range on one side, preferring the latest
+ * block. Hidden unchanged lines are not displayed. A comment's old side is its
+ * removed lines; the reviewed side is every line the old code had.
+ */
+function findRowAnchor(file: DiffFile, side: ReviewComment['side'] | 'REVIEWED', line: number, endLine?: number): string | undefined {
   const last = endLine && endLine >= line ? endLine : line;
   for (let blockIndex = file.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
     const block = file.blocks[blockIndex]!;
     let anchor: number | undefined;
     block.lines.forEach((candidate, index) => {
       if (candidate.expansion === 'hidden') return;
-      const number = side === 'OLD' ? (candidate.kind === 'deletion' ? candidate.oldLine : undefined) : candidate.newLine;
+      const number = side === 'REVIEWED'
+        ? (candidate.kind === 'addition' ? undefined : candidate.oldLine)
+        : side === 'OLD' ? (candidate.kind === 'deletion' ? candidate.oldLine : undefined) : candidate.newLine;
       if (number !== undefined && number >= line && number <= last) anchor = index;
     });
     if (anchor !== undefined) return lineAnchorKey(file.id, block.id, block.lines[anchor]!, anchor);

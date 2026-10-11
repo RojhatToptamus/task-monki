@@ -85,13 +85,15 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
           'Provider child identifiers are missing or contradictory.'
       };
     case 'AGENT_INTERACTION_REQUESTED':
-      return {
-        label: 'Approval requested',
-        detail: `${stringField(payload, 'type') ?? 'Agent interaction'} is waiting for review.`
-      };
+      return stringField(payload, 'type') === 'USER_INPUT'
+        ? { label: 'Agent asked a question', detail: 'Waiting for your answer.' }
+        : {
+            label: 'Approval requested',
+            detail: `${stringField(payload, 'type') ?? 'Agent interaction'} is waiting for review.`
+          };
     case 'AGENT_INTERACTION_RESOLVED':
       return {
-        label: 'Approval resolved',
+        label: stringField(payload, 'type') === 'USER_INPUT' ? 'Question answered' : 'Approval resolved',
         detail: stringField(payload, 'status') ?? 'The provider request was cleared.'
       };
     case 'AGENT_RUN_COMPLETED':

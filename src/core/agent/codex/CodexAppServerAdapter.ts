@@ -3701,6 +3701,27 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       policyWarnings: policy.warnings,
       requestRawMessage: raw
     });
+    const blocked =
+      mapped.type === 'DYNAMIC_TOOL' ||
+      (mapped.type === 'USER_INPUT' && policy.allowedActions.length === 0);
+    if (!blocked) {
+      // The task's own record of the wait, so the board and the Inbox show the
+      // task as needing the user until the request resolves.
+      await this.persistRuntimeEvent(
+        createDomainEvent({
+          type: 'AGENT_INTERACTION_REQUESTED',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: server.id,
+          interactionRequestId: interaction.id,
+          source: 'provider',
+          payload: { type: mapped.type, status: 'PENDING' }
+        })
+      );
+    }
     this.emitInteractionUpdate(interaction);
     this.appEvents.emit({
       type: 'run.activity',
@@ -3711,10 +3732,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       payload: { type: mapped.type, status: 'PENDING' },
       at: new Date().toISOString()
     });
-    if (
-      mapped.type === 'DYNAMIC_TOOL' ||
-      (mapped.type === 'USER_INPUT' && policy.allowedActions.length === 0)
-    ) {
+    if (blocked) {
       await this.resolveBlockedInteraction(interaction);
     }
   }

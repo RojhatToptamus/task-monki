@@ -1569,7 +1569,8 @@ control's icon, state or tooltip already carries.
   Committed, Uncommitted, and the round: Since the review once an out-of-date
   review has changes since it, which it then leads with, or Since the last review
   once a re-review is current; each is exactly what changed from the code that
-  review read, kept when it started; never an empty scope), a View icon (By
+  review read, kept when it started, so an out-of-date review's findings sit on
+  the lines it read, on the old side; never an empty scope), a View icon (By
   importance, By path; expand or collapse every file), and the review action.
   A stale review keeps Run review again as the primary there; a finished,
   current one offers it as an icon beside its time.
