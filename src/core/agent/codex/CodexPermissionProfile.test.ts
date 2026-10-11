@@ -344,6 +344,32 @@ describe('Codex Discourse read-only permission scope', () => {
     });
   });
 
+  it('grants a linked worktree\'s common Git directory read-only, and leaves a checkout\'s own .git alone', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-git-scope-')));
+    const worktree = path.join(root, 'worktree');
+    const commonDir = path.join(root, 'repository', '.git');
+    const ownGit = path.join(worktree, '.git');
+    await Promise.all([fs.mkdir(commonDir, { recursive: true }), fs.mkdir(ownGit, { recursive: true })]);
+    const profile = (gitMetadataRoots?: string[]) => codexReadOnlyScopeProfile({
+      sessionId: 'session-review',
+      scope: { primaryCwd: worktree, readOnlyRoots: [worktree] },
+      ...(gitMetadataRoots ? { gitMetadataRoots } : {})
+    });
+
+    const plain = await profile();
+    // Sessions created before Git metadata roots existed keep their attested hash.
+    expect((await profile([])).scopeHash).toBe(plain.scopeHash);
+    // A main checkout's .git is already readable and is not a second, overlapping root.
+    expect((await profile([ownGit])).scopeHash).toBe(plain.scopeHash);
+
+    const linked = await profile([commonDir]);
+    expect(linked.scopeHash).not.toBe(plain.scopeHash);
+    expect(linked.config).toMatchObject({
+      permissions: { [linked.profileId]: { filesystem: { [worktree]: 'read', [commonDir]: 'read' } } }
+    });
+    await expect(profile([path.join(root, 'missing', '.git')])).rejects.toThrow('Git metadata root');
+  });
+
   it('rejects broad and overlapping roots and requires exact runtime evidence', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-scope-'));
     const primaryPath = path.join(root, 'primary');

@@ -726,6 +726,55 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     expect((await store.getAgentSession(reviewed.sessionId))?.worktreePath).toBe(linkedWorktree);
   });
 
+  it.each([
+    { checkout: 'symlink', description: 'hands a checkout that is itself a symlink to the runtime as named, for its canonical-directory check to refuse' },
+    { checkout: 'missing', description: 'fails clearly when the checkout is missing, before asking the runtime for a context' }
+  ] as const)('$description', async ({ checkout }) => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-checkout-')));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    await initializeRepository(repositoryDir);
+    const checkoutPath = path.join(dir, 'checkout');
+    if (checkout === 'symlink') await fs.symlink(repositoryDir, checkoutPath);
+    const store = await openOrchestratorTaskStore(path.join(dir, 'profile'));
+    const runtime = bindTaskRuntime(store);
+    const adapter = new Phase4Adapter(runtime.task);
+    const orchestrator = new AgentOrchestrator(store, runtime.store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review checkout',
+      prompt: 'Implement the change.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: `codex/review-${checkout}`,
+      worktreePath: checkoutPath,
+      baseSha: 'base'
+    });
+    const implemented = await orchestrator.startTurn({
+      task, iteration, worktree, mode: 'IMPLEMENTATION', prompt: task.prompt, settings: task.agentSettings
+    });
+    await terminal(runtime.task, implemented, 'AGENT_RUN_COMPLETED');
+    const contextBefore = adapter.lastExecutionContextInput;
+    const review = orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: (await store.getRun(implemented.id))!,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+    });
+    if (checkout === 'symlink') {
+      await review;
+      expect(adapter.lastExecutionContextInput?.primaryCwd).toBe(checkoutPath);
+      expect(adapter.lastExecutionContextInput?.readRoots[0]?.canonicalPath).toBe(checkoutPath);
+    } else {
+      await expect(review).rejects.toThrow(`The task checkout is missing: ${checkoutPath}`);
+      expect(adapter.lastExecutionContextInput).toBe(contextBefore);
+    }
+  });
+
   it('recreates a missing provider session and retries the same follow-up run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
     const repositoryDir = path.join(dir, 'repository');

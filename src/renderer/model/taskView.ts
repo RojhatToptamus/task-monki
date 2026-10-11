@@ -1,4 +1,4 @@
-import { reviewAsksForChanges } from '../../shared/agentReviewFindings';
+import { effectiveReviewGateStatus } from '../../shared/agentReviewFindings';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -648,17 +648,13 @@ function taskCardReview(task: TaskCardSource) {
 }
 
 /**
- * The review status a task's word reflects: a review that asked for changes
- * reads as passed once every finding is dismissed or withdrawn. The board's
- * summary carries that answer; a full projection is asked directly.
+ * The review status a task's word reflects: the gate rule applied once every
+ * finding decision applies, so the reviewer's revisions move it both ways. The
+ * board's summary carries that answer; a full projection is asked directly.
  */
 function cardReviewStatus(task: TaskCardSource): AgentReviewGateStatus {
   const review = taskCardReview(task);
-  if (review.status !== 'NEEDS_CHANGES') return review.status;
-  const asks = 'asksForChanges' in review ? review.asksForChanges ?? true
-    : 'findingCounts' in review ? true
-      : reviewAsksForChanges(review);
-  return asks ? review.status : 'PASSED';
+  return 'findingCounts' in review ? review.effectiveStatus ?? review.status : effectiveReviewGateStatus(review);
 }
 
 function reviewHasResult(review: ReturnType<typeof taskCardReview>): boolean {

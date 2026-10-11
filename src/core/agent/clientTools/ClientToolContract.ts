@@ -2,6 +2,8 @@ import type { AgentRunMode, AgentSessionRole } from '../../../shared/agent';
 import type { AgentRuntimePurpose } from '../../../shared/agentRuntime';
 
 export const CLIENT_TOOL_MAX_TEXT_BYTES = 32 * 1024;
+/** Every environment variable the client-tool MCP server receives starts with this; their values are secret. */
+export const CLIENT_TOOL_ENV_PREFIX = 'TASK_MONKI_CLIENT_TOOL_';
 export const CLIENT_TOOL_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /** One app-owned tool as the provider sees it: a name, a description, and a JSON schema for its input. */

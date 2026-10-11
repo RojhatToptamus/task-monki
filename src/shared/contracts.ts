@@ -942,8 +942,11 @@ export interface BoardAgentReviewSummary {
   hasResult: boolean;
   /** Open findings by their current severity, after the person's and reviewer's decisions. */
   findingCounts: Partial<Record<AgentReviewFindingSeverity, number>>;
-  /** `reviewAsksForChanges` of the review; Task Monki always sets it. */
-  asksForChanges?: boolean;
+  /**
+   * `effectiveReviewGateStatus` of the review: the status once every decision applies,
+   * which can differ from `status` both ways. Task Monki always sets it.
+   */
+  effectiveStatus?: AgentReviewGateStatus;
 }
 
 export type BoardStatusProjection = Pick<

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RunRecord, Task, TaskSnapshot } from '../../shared/contracts';
+import type { AgentRuntimeTurnEvent } from '../agent/AgentRuntimeCoordinator';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
@@ -61,7 +62,7 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
   it('lets the person dismiss and restore findings of the current review only', async () => {
     const { s, task, implementation, review, worktreePath } = await reviewedTask('task-monki-review-decisions');
     expect(await boardReview(s, task.id)).toMatchObject({
-      asksForChanges: true,
+      effectiveStatus: 'NEEDS_CHANGES',
       findingCounts: { MAJOR: 1, NIT: 1 }
     });
 
@@ -71,7 +72,7 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     expect(dismissed).toMatchObject({ actor: 'USER', kind: 'DISMISS', findingId: 'leak', note: 'Handled by the caller.' });
     await s.service.decideReviewFinding({ taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS' });
     // Dismissing the last open finding means the review no longer asks for changes.
-    expect(await boardReview(s, task.id)).toMatchObject({ status: 'NEEDS_CHANGES', asksForChanges: false, findingCounts: {} });
+    expect(await boardReview(s, task.id)).toMatchObject({ status: 'NEEDS_CHANGES', effectiveStatus: 'PASSED', findingCounts: {} });
 
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS'
@@ -88,9 +89,19 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS', note: 'x'.repeat(501)
     })).rejects.toThrow('at most 500 characters');
+    // A missing review or finding ID is refused up front, never treated as "the current review".
+    await expect(s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: undefined as unknown as string, findingId: 'naming', kind: 'DISMISS'
+    })).rejects.toThrow('A valid review run ID is required.');
+    await expect(s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: review.id, findingId: '', kind: 'DISMISS'
+    })).rejects.toThrow('A valid finding ID is required.');
+    await expect(s.service.askReviewer({
+      taskId: task.id, reviewRunId: '', messageId: randomUUID(), text: 'Which review?'
+    })).rejects.toThrow('A valid review run ID is required.');
 
     await s.service.decideReviewFinding({ taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'RESTORE' });
-    expect(await boardReview(s, task.id)).toMatchObject({ asksForChanges: true, findingCounts: { NIT: 1 } });
+    expect(await boardReview(s, task.id)).toMatchObject({ effectiveStatus: 'NEEDS_CHANGES', findingCounts: { NIT: 1 } });
     const recorded = reviewOf(await s.store.snapshot(), task.id)?.findingDecisions ?? [];
     expect(recorded.map((decision) => `${decision.kind}:${decision.findingId}`)).toEqual([
       'DISMISS:leak', 'DISMISS:naming', 'RESTORE:naming'
@@ -179,7 +190,24 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     await expect(s.service.continueRun({
       taskId: task.id, runId: implementation.id, instruction: 'Fix the review findings.'
     })).rejects.toThrow('Wait for the reviewer to answer, or stop the question, before starting follow-up work.');
+    // Stopping is a control action: another task action holding the task lock does not refuse it.
+    const recordDecisions = s.store.recordReviewFindingDecisions.bind(s.store);
+    let releaseDecision!: () => void;
+    let decisionHeld!: () => void;
+    const holding = new Promise<void>((resolve) => { decisionHeld = resolve; });
+    vi.spyOn(s.store, 'recordReviewFindingDecisions').mockImplementationOnce(async (taskId, decide) => {
+      decisionHeld();
+      await new Promise<void>((resolve) => { releaseDecision = resolve; });
+      return recordDecisions(taskId, decide);
+    });
+    const heldDecision = s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS'
+    });
+    await holding;
     await s.service.stopReviewerQuestion({ taskId: task.id, runId: pending.runId! });
+    releaseDecision();
+    await expect(heldDecision).rejects.toThrow('The reviewer withdrew this finding.');
+    vi.restoreAllMocks();
     await s.waitForSnapshot((state) => state.runs.find((run) => run.id === pending.runId)?.status === 'INTERRUPTED');
 
     s.agent.nextRuntimeTurnResult = {
@@ -232,5 +260,78 @@ describe('TaskManagerService review finding decisions and reviewer questions', (
     await expect(s.service.decideReviewFinding({
       taskId: task.id, reviewRunId: review.id, findingId: 'leak', kind: 'DISMISS'
     })).rejects.toThrow('Wait for the review to finish.');
+  }, 20_000);
+
+  it('observes local Git before admitting a question, so a diff changed since the review refuses it', async () => {
+    const { s, task, review, worktreePath } = await reviewedTask('task-monki-reviewer-question-observes-git');
+    const turns = s.agent.startedRuntimeTurns.length;
+    // No evidence refresh in between: the question itself observes the worktree.
+    await fs.writeFile(path.join(worktreePath, 'feature.ts'), 'export const value = 2;\n');
+    await expect(s.service.askReviewer({
+      taskId: task.id, reviewRunId: review.id, messageId: randomUUID(), text: 'Is the leak still there?', findingId: 'leak'
+    })).rejects.toThrow('The code changed after this review.');
+
+    const state = await s.store.snapshot();
+    expect(reviewOf(state, task.id)?.status).toBe('STALE');
+    expect(state.taskInstructions.filter((item) => item.role === 'REVIEW')).toEqual([]);
+    expect(s.agent.startedRuntimeTurns).toHaveLength(turns);
+  }, 20_000);
+
+  it('keeps the review of a canceled or archived task as a record that takes no questions or decisions', async () => {
+    const { s, task, review } = await reviewedTask('task-monki-reviewer-closed-task');
+    const ask = () => s.service.askReviewer({
+      taskId: task.id, reviewRunId: review.id, messageId: randomUUID(), text: 'Is this still a problem?'
+    });
+    const dismiss = () => s.service.decideReviewFinding({
+      taskId: task.id, reviewRunId: review.id, findingId: 'naming', kind: 'DISMISS'
+    });
+
+    await s.service.transitionTask({ taskId: task.id, toPhase: 'CANCELED' });
+    await expect(ask()).rejects.toThrow('This task is canceled');
+    await expect(dismiss()).rejects.toThrow('This task is canceled');
+    await s.service.transitionTask({ taskId: task.id, toPhase: 'ARCHIVED' });
+    await expect(ask()).rejects.toThrow('This task is archived');
+    await expect(dismiss()).rejects.toThrow('This task is archived');
+
+    const state = await s.store.snapshot();
+    expect(reviewOf(state, task.id)?.findingDecisions).toEqual([]);
+    expect(state.runs.filter((run) => run.mode === 'REVIEW_QUESTION')).toEqual([]);
+  }, 20_000);
+
+  it('reports the revisions an answer applied when its terminal event is replayed after the review went stale', async () => {
+    const { s, task, review, worktreePath } = await reviewedTask('task-monki-reviewer-revisions-replay');
+    const terminals: AgentRuntimeTurnEvent[] = [];
+    s.agent.onRuntimeTurnEvent((event) => {
+      if (event.type === 'TERMINAL') terminals.push(event);
+    });
+    s.agent.nextRuntimeTurnResult = {
+      output: revisionAnswer('The listener is removed when the view closes.', [
+        { finding: 'leak', action: 'withdraw', reason: 'The view removes the listener on close.' }
+      ])
+    };
+    const question = await s.service.askReviewer({
+      taskId: task.id, reviewRunId: review.id, messageId: randomUUID(), text: 'Is the listener really leaked?'
+    });
+    await s.waitForEvent((event) => event.type === 'run.terminal' && event.runId === question.runId);
+    const applied = reviewOf(await s.store.snapshot(), task.id)?.findingDecisions ?? [];
+    expect(applied).toHaveLength(1);
+
+    await fs.writeFile(path.join(worktreePath, 'feature.ts'), 'export const value = 2;\n');
+    await s.service.refreshEvidence({ taskId: task.id });
+    expect(reviewOf(await s.store.snapshot(), task.id)?.status).toBe('STALE');
+
+    // Restart recovery delivers the same terminal event again.
+    const replayed = s.waitForEvent((event) => event.type === 'run.terminal' && event.runId === question.runId);
+    s.agent.emitRuntimeTurnEvent(terminals.find((event) => event.runId === question.runId)!);
+    await replayed;
+
+    const state = await s.store.snapshot();
+    const completions = state.events.filter((event) => event.type === 'AGENT_RUN_COMPLETED' && event.runId === question.runId);
+    expect(completions.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ reviewerRevisions: { status: 'APPLIED', decisionIds: [applied[0]!.id] } })
+    ]);
+    const questionRun = state.runs.find((run) => run.id === question.runId)!;
+    expect(questionRun.status).toBe('COMPLETED');
+    expect(await s.runtimeStore.readArtifact(questionRun.diagnosticArtifactId)).not.toContain('ignored the reviewer');
   }, 20_000);
 });

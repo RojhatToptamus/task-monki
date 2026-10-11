@@ -124,6 +124,7 @@ import {
 } from './CodexToolConfig';
 import { resolveAgentGitMetadata } from '../../git/AgentGitMetadata';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
+import type { ItemGuardianApprovalReviewStartedNotification } from './protocol/generated/v2/ItemGuardianApprovalReviewStartedNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
 import type { ApprovalsReviewer } from './protocol/generated/v2/ApprovalsReviewer';
@@ -679,6 +680,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         readOnlyRoots: readRoots.map((root) => root.canonicalPath)
       },
       attachmentPaths: grantAttachments.map((attachment) => attachment.path),
+      gitMetadataRoots: await this.readOnlyGitMetadataRoots(readRoots),
       reasoningEffort: input.modelSettings.reasoningEffort
     });
     const context: AgentExecutionContext = {
@@ -707,6 +709,35 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     };
     assertReadOnlyExecutionContext(context);
     return context;
+  }
+
+  /**
+   * The common Git directories that the task checkout roots of a read-only turn need. Each
+   * is resolved from the worktree's registered repository and verified against Git's
+   * worktree list, as for task sessions, so a rewritten `.git` pointer cannot widen access.
+   * A snapshot root is a registered worktree of the same repository. The execution context
+   * and the turn compute this alike, so their permission hashes match.
+   */
+  private async readOnlyGitMetadataRoots(
+    readRoots: readonly AgentExecutionContext['readRoots'][number][]
+  ): Promise<string[]> {
+    const roots: string[] = [];
+    for (const root of readRoots) {
+      if ((root.kind !== 'WORKTREE' && root.kind !== 'WORKTREE_SNAPSHOT') || !root.entityId) continue;
+      const worktree = await this.taskStore.getWorktree(root.entityId);
+      const repository = worktree ? await this.taskStore.getRepository(worktree.repositoryId) : undefined;
+      if (!repository || repository.status !== 'AVAILABLE') {
+        throw new Error(
+          'Cannot resolve trusted Git metadata for the read-only turn: the task repository is unavailable.'
+        );
+      }
+      const metadata = await resolveAgentGitMetadata({
+        repositoryPath: repository.path,
+        worktreePath: root.canonicalPath
+      });
+      roots.push(metadata.gitCommonDir);
+    }
+    return roots;
   }
 
   onRuntimeTurnEvent(listener: (event: AgentRuntimeTurnEvent) => void): () => void {
@@ -882,6 +913,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
             )
           },
           attachmentPaths: attachmentDelivery.exactGrantPaths,
+          gitMetadataRoots: await this.readOnlyGitMetadataRoots(input.executionContext.readRoots),
           reasoningEffort: input.executionContext.modelSettings.reasoningEffort
         });
         if (profile.scopeHash !== input.executionContext.permissionProfileHash) {
@@ -915,7 +947,12 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         settings,
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
-        config: { ...profile.config, ...readOnlyMcpConfig },
+        config: {
+          ...profile.config,
+          ...readOnlyMcpConfig,
+          // Git inside the sandbox must not read the person's global configuration.
+          ...codexGitSubprocessConfig({ worktreePath: input.executionContext.primaryCwd, isolateHome: true })
+        },
         dynamicTools: [],
         validateResponse: (response) => {
           assertCodexReadOnlyModel(settings, settingsFromThreadResponse(response));
@@ -2624,11 +2661,19 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         } catch (error) {
           // A provider is waiting for this response. A health diagnostic alone
           // leaves it blocked forever when the interaction cannot be stored.
-          await client.respondError(request.id, {
-            code: -32603,
-            message: 'Task Monki could not display this request. Explain the failure to the user before asking again.'
-          });
-          await this.handleServerRequestResolved(request.id);
+          // A request that was already answered is never answered twice.
+          try {
+            if (client.awaitsResponse(request.id)) {
+              await client.respondError(request.id, {
+                code: -32603,
+                message: 'Task Monki could not display this request. Explain the failure to the user before asking again.'
+              });
+            }
+          } catch {
+            // The connection failed as well; the original failure is reported below.
+          } finally {
+            await this.handleServerRequestResolved(request.id);
+          }
           throw error;
         }
       });
@@ -3140,6 +3185,31 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           notification.params.message,
           raw
         );
+        return;
+      case 'guardianWarning':
+        await this.handleThreadWarning(
+          notification.params.threadId,
+          notification.params.message,
+          raw,
+          'guardianWarning'
+        );
+        return;
+      // Codex's automatic reviewer decides sandbox exceptions without a person; its
+      // decisions are recorded as run activity. The event types leave out the `item/`
+      // prefix, which the projection reads as turn progress.
+      case 'item/autoApprovalReview/started':
+        await this.recordTurnActivity(notification.params.turnId, 'autoApprovalReview/started', {
+          ...autoApprovalReviewActivity(notification.params),
+          provenance: raw
+        });
+        return;
+      case 'item/autoApprovalReview/completed':
+        await this.recordTurnActivity(notification.params.turnId, 'autoApprovalReview/completed', {
+          ...autoApprovalReviewActivity(notification.params),
+          decisionSource: notification.params.decisionSource,
+          completedAtMs: notification.params.completedAtMs,
+          provenance: raw
+        });
         return;
       case 'thread/status/changed':
         await this.handleThreadStatus(notification.params.threadId, notification.params.status, raw);
@@ -5004,7 +5074,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   private async handleThreadWarning(
     threadId: string | null,
     message: string,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    eventType: 'warning' | 'guardianWarning' = 'warning'
   ): Promise<void> {
     if (!threadId) {
       return;
@@ -5014,7 +5085,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       ? await this.taskRuntime.getActiveRunForSession(session.id)
       : undefined;
     if (run) {
-      await this.recordRunActivity(run, 'warning', {
+      await this.recordRunActivity(run, eventType, {
         message,
         provenance: raw
       });
@@ -6542,6 +6613,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         ...(config.features as Record<string, JsonValue>),
         request_permissions_tool: true
       };
+      // The analysis is read-only, so the person's MCP servers stay off, as in the shared
+      // read-only lane. Its own Preview tools are native dynamic tools, not MCP servers.
+      await this.ensureClient();
+      Object.assign(config, await this.readOnlyMcpConfig(session.worktreePath));
     }
     return {
       ...config,
@@ -6975,6 +7050,52 @@ function inboundRecoveryTargetsOverlap(
       candidate.providerTurnId === active.providerTurnId) ||
       (candidate.threadId && active.threadId && candidate.threadId === active.threadId)
   );
+}
+
+const AUTO_REVIEW_TEXT_LIMIT = 2_000;
+
+/**
+ * The evidence of one automatic approval review: what was asked, the decision, the risk the
+ * reviewer assigned, and its rationale. Text is bounded; the activity is redacted on record.
+ */
+function autoApprovalReviewActivity(
+  params: ItemGuardianApprovalReviewStartedNotification
+): Record<string, unknown> {
+  const bounded = (value: string | null | undefined) =>
+    value == null ? undefined : value.length > AUTO_REVIEW_TEXT_LIMIT ? `${value.slice(0, AUTO_REVIEW_TEXT_LIMIT)}…` : value;
+  const action = params.action;
+  const actionSummary: Record<string, unknown> = { type: action.type };
+  switch (action.type) {
+    case 'command':
+      Object.assign(actionSummary, { command: bounded(action.command), cwd: action.cwd });
+      break;
+    case 'execve':
+      Object.assign(actionSummary, { program: action.program, command: bounded(action.argv.join(' ')), cwd: action.cwd });
+      break;
+    case 'applyPatch':
+      Object.assign(actionSummary, { cwd: action.cwd, fileCount: action.files.length, files: action.files.slice(0, 20) });
+      break;
+    case 'networkAccess':
+      Object.assign(actionSummary, { host: action.host, port: action.port, protocol: action.protocol });
+      break;
+    case 'mcpToolCall':
+      Object.assign(actionSummary, { server: action.server, toolName: action.toolName });
+      break;
+    case 'requestPermissions':
+      Object.assign(actionSummary, { reason: bounded(action.reason) });
+      break;
+  }
+  return {
+    reviewId: params.reviewId,
+    targetItemId: params.targetItemId ?? undefined,
+    status: params.review.status,
+    riskLevel: params.review.riskLevel ?? undefined,
+    // Codex's `userAuthorization`; a key naming authorization would be redacted as a credential.
+    userApprovalLevel: params.review.userAuthorization ?? undefined,
+    rationale: bounded(params.review.rationale),
+    action: actionSummary,
+    startedAtMs: params.startedAtMs
+  };
 }
 
 function errorMessage(error: unknown): string {

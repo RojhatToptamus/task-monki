@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listGitWorktrees } from '../worktree/WorktreeService';
 import { git } from './gitCli';
-import { ReadOnlySnapshotService } from './ReadOnlySnapshotService';
+import { copyUntrackedEntry, ReadOnlySnapshotService, type UntrackedEntryCopy } from './ReadOnlySnapshotService';
 
 const roots: string[] = [];
 
@@ -176,4 +177,84 @@ describe('ReadOnlySnapshotService', () => {
     // The task's own worktree stays registered.
     expect((await listGitWorktrees(repository)).map((entry) => entry.path)).toContain(live);
   }, 30_000);
+});
+
+/**
+ * The implementation agent can swap untracked entries between the listing and the copy.
+ * Each case puts the swapped entry in place before the copy runs.
+ */
+describe('copyUntrackedEntry', () => {
+  async function copyRoots() {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-snapshot-copy-')));
+    roots.push(root);
+    const live = path.join(root, 'live');
+    const snapshot = path.join(root, 'snapshot');
+    const outside = path.join(root, 'outside');
+    for (const directory of [live, snapshot, outside]) await fs.mkdir(directory);
+    await fs.writeFile(path.join(outside, 'secret.txt'), 'private\n');
+    const copy = (relativePath: string, overrides: Partial<UntrackedEntryCopy> = {}) =>
+      copyUntrackedEntry({
+        liveRoot: live,
+        snapshotRoot: snapshot,
+        relativePath,
+        kind: 'FILE',
+        maxBytes: 1024,
+        fileLimitBytes: 1024,
+        ...overrides
+      });
+    return { live, snapshot, outside, copy };
+  }
+
+  it('copies a regular file but never reads through a symlink swapped in for it or a directory above it', async () => {
+    const { live, snapshot, outside, copy } = await copyRoots();
+    await fs.mkdir(path.join(live, 'notes'));
+    await fs.writeFile(path.join(live, 'notes', 'plan.md'), 'plan\n', { mode: 0o755 });
+    expect(await copy('notes/plan.md', { maxBytes: 5 })).toBe('COPIED');
+    expect(await fs.readFile(path.join(snapshot, 'notes', 'plan.md'), 'utf8')).toBe('plan\n');
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(snapshot, 'notes', 'plan.md'))).mode & 0o777).toBe(0o755);
+    }
+
+    await fs.symlink(path.join(outside, 'secret.txt'), path.join(live, 'listed-as-file.txt'));
+    expect(await copy('listed-as-file.txt')).toBe('CHANGED_DURING_SNAPSHOT');
+    await expect(fs.lstat(path.join(snapshot, 'listed-as-file.txt'))).rejects.toThrow();
+
+    await fs.symlink(outside, path.join(live, 'swapped'));
+    expect(await copy('swapped/secret.txt')).toBe('CHANGED_DURING_SNAPSHOT');
+    await expect(fs.lstat(path.join(snapshot, 'swapped'))).rejects.toThrow();
+  });
+
+  it('never writes through a symlinked directory in the snapshot', async () => {
+    const { live, snapshot, outside, copy } = await copyRoots();
+    await fs.mkdir(path.join(live, 'tracked-link'));
+    await fs.writeFile(path.join(live, 'tracked-link', 'escape.txt'), 'escape\n');
+    await fs.symlink('../outside', path.join(live, 'tracked-link', 'escape-link'));
+    // The checkout or a patch left a symlink where the live worktree now has a directory.
+    await fs.symlink(outside, path.join(snapshot, 'tracked-link'));
+
+    expect(await copy('tracked-link/escape.txt')).toBe('CHANGED_DURING_SNAPSHOT');
+    expect(await copy('tracked-link/escape-link', { kind: 'LINK' })).toBe('CHANGED_DURING_SNAPSHOT');
+    expect((await fs.readdir(outside)).sort()).toEqual(['secret.txt']);
+
+    // An existing destination is never overwritten or followed.
+    await fs.writeFile(path.join(live, 'existing.txt'), 'live\n');
+    await fs.symlink(path.join(outside, 'secret.txt'), path.join(snapshot, 'existing.txt'));
+    expect(await copy('existing.txt')).toBe('CHANGED_DURING_SNAPSHOT');
+    expect(await fs.readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('private\n');
+  });
+
+  it.skipIf(process.platform === 'win32')('skips a FIFO swapped in for a file without waiting for a writer', async () => {
+    const { live, snapshot, copy } = await copyRoots();
+    execFileSync('mkfifo', [path.join(live, 'pipe')]);
+    expect(await copy('pipe')).toBe('CHANGED_DURING_SNAPSHOT');
+    await expect(fs.lstat(path.join(snapshot, 'pipe'))).rejects.toThrow();
+  }, 5_000);
+
+  it('skips a file that grew past the bytes reserved for it', async () => {
+    const { live, snapshot, copy } = await copyRoots();
+    await fs.writeFile(path.join(live, 'grown.bin'), Buffer.alloc(2048, 1));
+    expect(await copy('grown.bin', { maxBytes: 100, fileLimitBytes: 1024 })).toBe('LARGER_THAN_FILE_LIMIT');
+    expect(await copy('grown.bin', { maxBytes: 100, fileLimitBytes: 4096 })).toBe('CHANGED_DURING_SNAPSHOT');
+    await expect(fs.lstat(path.join(snapshot, 'grown.bin'))).rejects.toThrow();
+  });
 });

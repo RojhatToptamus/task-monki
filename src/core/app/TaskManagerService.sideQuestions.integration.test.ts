@@ -218,6 +218,21 @@ describe('TaskManagerService side questions', () => {
     await reopened.close();
   }, 30_000);
 
+  it('admits a side question only on one of the profile\'s own read-only snapshots', async () => {
+    const s = await scenarios.create({ name: 'task-monki-side-question-foreign-snapshot' });
+    const task = await s.createTask({ title: 'Foreign snapshot', prompt: 'Work.' });
+    const worktree = await prepareTestWorktree(s.service, task.id);
+    const agents = (s.service as unknown as { agents: import('../agent/AgentOrchestrator').AgentOrchestrator }).agents;
+    // A folder that is laid out like a snapshot but sits outside the profile's snapshot root.
+    const foreign = path.join(s.rootDir, 'elsewhere', task.id, randomUUID());
+    await fs.mkdir(foreign, { recursive: true });
+    await expect(agents.startSideQuestion({
+      runId: randomUUID(), sessionId: randomUUID(), task, iteration: (await s.store.getCurrentIteration(task.id))!, worktree,
+      settings: task.agentSettings, prompt: 'What changed?', snapshotPath: foreign
+    })).rejects.toThrow('only a Task Monki read-only snapshot');
+    expect(s.agent.startedRuntimeTurns).toHaveLength(0);
+  });
+
   it('removes a snapshot when its task is deleted', async () => {
     const s = await scenarios.create({ name: 'task-monki-side-question-delete' });
     const task = await s.createTask({ title: 'Deleted with a snapshot', prompt: 'Work.' });

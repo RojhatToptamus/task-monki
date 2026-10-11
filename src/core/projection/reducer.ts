@@ -16,7 +16,8 @@ import {
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
   isDetachedRunMode,
-  isImplementationRunMode
+  isImplementationRunMode,
+  reviewGateStatusFor
 } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
@@ -1202,21 +1203,7 @@ function reviewGateStatusFromResult(
   NonNullable<StatusProjection['agentReview']>['status'],
   'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
 > | undefined {
-  if (!result) {
-    return undefined;
-  }
-  if (
-    result.verdict === 'NEEDS_CHANGES' ||
-    result.findings.some(
-      (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-    )
-  ) {
-    return 'NEEDS_CHANGES';
-  }
-  if (result.verdict === 'PASSED') {
-    return 'PASSED';
-  }
-  return 'INCONCLUSIVE';
+  return result ? reviewGateStatusFor(result.verdict, result.findings) : undefined;
 }
 
 function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | undefined {

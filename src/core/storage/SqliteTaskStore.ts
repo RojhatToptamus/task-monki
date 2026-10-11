@@ -78,9 +78,9 @@ import {
   isDetachedRunMode,
   isDetachedSessionRole,
   isImplementationRunMode,
+  effectiveReviewGateStatus,
   isTaskCreationToken,
   openReviewFindings,
-  reviewAsksForChanges,
   verifiedChecksMatchMergeHead,
   type ReviewFindingDecision
 } from '../../shared/contracts';
@@ -7415,7 +7415,7 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         runId: review?.runId,
         hasResult: Boolean(review?.result),
         findingCounts,
-        asksForChanges: reviewAsksForChanges(review)
+        effectiveStatus: effectiveReviewGateStatus(review)
       }
     }
   };

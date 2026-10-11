@@ -148,7 +148,7 @@ import {
   type DesignSkillPack
 } from '../../design/DesignSkillPack';
 import type { ClientToolBridge } from '../clientTools/ClientToolBridge';
-import type { ClientToolSet } from '../clientTools/ClientToolContract';
+import { CLIENT_TOOL_ENV_PREFIX, type ClientToolSet } from '../clientTools/ClientToolContract';
 import { clientToolSetForMode } from '../clientTools/ClientToolSets';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
@@ -2572,7 +2572,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     });
     const environment = grant.launch.environment;
     const sensitiveValues = Object.entries(environment)
-      .filter(([name]) => name.startsWith('TASK_MONKI_CLIENT_TOOL_'))
+      .filter(([name]) => name.startsWith(CLIENT_TOOL_ENV_PREFIX))
       .map(([, value]) => value);
     try {
       const registration = await client.post<unknown>('/mcp', {

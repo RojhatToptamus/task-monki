@@ -202,8 +202,12 @@ directory also include those companion tools. Thread configuration preserves tha
 With scoped filesystem access, shell discovery such as `command -v node` can
 fail even when Codex permits a command that invokes Node. Tool verification must
 observe the actual command result, not infer availability from that lookup.
-Review sessions additionally isolate home and XDG configuration inside the
-worktree; implementation sessions retain their ordinary home environment so
+Shared read-only turns (agent reviews, reviewer and side questions, prompt
+refinement, Preview recipe generation and Discourse) additionally isolate home
+and XDG configuration inside their working directory. Their task checkout roots,
+including a side question's read-only snapshot, which is a registered worktree
+of the same repository, get the validated common Git directory read-only;
+implementation sessions retain their ordinary home environment so
 unrelated developer tools keep working. This avoids macOS `xcrun` cache
 failures and out-of-sandbox Git metadata access without adding writable roots.
 Full access instead selects Codex's documented `:danger-full-access` built-in;

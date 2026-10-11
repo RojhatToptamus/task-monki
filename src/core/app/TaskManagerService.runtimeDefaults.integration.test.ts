@@ -10,6 +10,7 @@ import {
 } from '../../testSupport/taskMonkiScenario';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
+import { projectAgentExecutionSupport } from '../../shared/agentExecutionSupport';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 import {
@@ -240,6 +241,45 @@ describe('TaskManagerService runtime execution defaults', () => {
     ).rejects.toThrow('browser development');
     expect(resolveExecution).not.toHaveBeenCalled();
     expect((await store.snapshot()).tasks).toEqual([]);
+    await service.shutdown();
+  });
+
+  it.each([
+    {
+      surface: 'desktop',
+      allowAgentNetworkAccess: undefined,
+      presetId: 'approve-for-me',
+      expected: { sandbox: 'WORKSPACE_WRITE', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', networkAccess: false },
+      previewAgent: { supported: true }
+    },
+    {
+      surface: 'browser development',
+      allowAgentNetworkAccess: false,
+      presetId: 'restricted',
+      expected: { sandbox: 'WORKSPACE_WRITE', approvalPolicy: 'never', approvalsReviewer: 'user', networkAccess: false },
+      // Its folder requests need an escalatable approval policy.
+      previewAgent: { supported: false, reason: expect.stringContaining('Use the Electron app for the Preview agent') }
+    }
+  ])('defaults Codex tasks to a preset the $surface surface can start', async ({ allowAgentNetworkAccess, presetId, expected, previewAgent }) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-surface-default-'));
+    const { store, ...scriptedRuntime } = await openScriptedTaskManagerPersistence(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      ...scriptedRuntime.serviceOptions,
+      ...(allowAgentNetworkAccess === undefined ? {} : { allowAgentNetworkAccess })
+    });
+
+    const catalog = await service.getAgentRuntimeCatalog();
+    const codex = catalog.runtimes.find((runtime) => runtime.preflight.runtime.id === 'codex');
+    // The renderer preselects the catalog default; task creation must apply the same preset.
+    expect(codex?.preflight.capabilities.executionPolicy.defaultPresetId).toBe(presetId);
+    expect(projectAgentExecutionSupport(codex!.preflight.capabilities, 'PREVIEW_AGENT')).toMatchObject(previewAgent);
+    const task = await service.createTask({
+      runtimeId: 'codex',
+      title: 'Surface default',
+      prompt: 'Use the default access.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    expect(task.agentSettings).toMatchObject({ runtimeId: 'codex', ...expected });
     await service.shutdown();
   });
 

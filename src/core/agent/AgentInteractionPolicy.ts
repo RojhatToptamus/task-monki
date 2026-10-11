@@ -486,6 +486,35 @@ function permissionPolicyWarnings(
   return [...new Set(warnings)];
 }
 
+/** Folders of the operating system and its configuration; none is a project folder. */
+const SYSTEM_FOLDERS = [
+  '/etc', '/private/etc', '/System', '/Library', '/usr', '/bin', '/sbin', '/dev', '/proc', '/sys',
+  '/boot', '/root', '/var/root', '/private/var/root'
+];
+/** Application data under the home directory (macOS, Windows); it holds credentials, not projects. */
+const HOME_APPLICATION_DATA = ['Library', 'AppData'];
+/** Each path is resolved synchronously; a request naming more is refused outright. */
+const PREVIEW_INSPECTION_PATH_LIMIT = 32;
+
+/**
+ * Whether a person may approve the Preview agent reading `folder`: a project folder, not the
+ * home directory or an ancestor, a hidden folder such as `~/.ssh`, `~/.aws` or `~/.codex`,
+ * application data under home, or a system folder.
+ */
+function isGrantablePreviewInspectionFolder(folder: string, home: string | undefined): boolean {
+  if (folder === path.parse(folder).root) return false;
+  if (home && isAllowedWorkspacePath(folder, home)) return false;
+  if (folder.split(path.sep).some((segment) => segment.length > 1 && segment.startsWith('.'))) return false;
+  if (home) {
+    const relative = path.relative(home, folder);
+    if (!relative.startsWith('..') && !path.isAbsolute(relative) && HOME_APPLICATION_DATA.includes(relative.split(path.sep)[0]!)) {
+      return false;
+    }
+  }
+  return process.platform === 'win32' ||
+    !SYSTEM_FOLDERS.some((system) => folder === system || folder.startsWith(`${system}${path.sep}`));
+}
+
 /** Paths eligible for an explicit read-only Preview inspection approval, never an automatic grant. */
 export function previewInspectionReadPaths(
   request: AgentPermissionApprovalRequest,
@@ -498,6 +527,7 @@ export function previewInspectionReadPaths(
     ...(files?.entries ?? []).flatMap((entry) =>
       entry.access === 'read' && isConcretePathEntry(entry.path) ? [entry.path.path] : [])
   ];
+  if (paths.length > PREVIEW_INSPECTION_PATH_LIMIT) return [];
   const home = canonicalPath(os.homedir());
   return paths.filter((candidate) => {
     if (!path.isAbsolute(candidate)) return false;
@@ -513,8 +543,7 @@ export function previewInspectionReadPaths(
     } catch {
       return false;
     }
-    // The user approves one project folder, not the home directory or its ancestors.
-    return folder !== path.parse(folder).root && !(home && isAllowedWorkspacePath(folder, home));
+    return isGrantablePreviewInspectionFolder(folder, home);
   });
 }
 

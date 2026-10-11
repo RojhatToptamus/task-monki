@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
 import type {
@@ -53,6 +53,7 @@ import {
   assertBrowserDevRuntimeIsolation,
   assertBrowserDevSettingsSafe,
   BROWSER_DEV_BOUNDARY_MESSAGE,
+  browserDevCapabilities,
   browserDevSettingsViolations
 } from './BrowserDevAgentBoundary';
 import { agentServersOwnedByPreviousApplication } from './AgentRuntimeRecovery';
@@ -349,6 +350,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
       allowCandidateDesignModels?: boolean;
+      /** Whether a path is one of this profile's read-only snapshots; side questions read only those. */
+      ownsReadOnlySnapshot?: (candidate: string) => boolean;
     } = {}
   ) {
     this.runtimes =
@@ -392,6 +395,27 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       );
     }
     return adapter.buildExecutionContext(input);
+  }
+
+  /**
+   * The execution context every read-only lane (agent review, reviewer questions, side
+   * questions) runs in: the task checkout, or a read-only snapshot of it, as the only read
+   * root. Runtimes receive the checkout with its parent folders resolved; the session's
+   * Task context keeps the worktree path the task records, which the store requires.
+   */
+  private async buildReadOnlyCheckoutContext(
+    runtimeId: string,
+    input: Omit<BuildAgentRuntimeExecutionContextInput, 'primaryCwd' | 'readRoots'> & {
+      checkout: { path: string; kind: 'WORKTREE' | 'WORKTREE_SNAPSHOT'; worktreeId: string };
+    }
+  ) {
+    const { checkout, ...context } = input;
+    const checkoutPath = await canonicalCheckoutPath(checkout.path);
+    return this.buildExecutionContext(runtimeId, {
+      ...context,
+      primaryCwd: checkoutPath,
+      readRoots: [{ canonicalPath: checkoutPath, kind: checkout.kind, entityId: checkout.worktreeId }]
+    });
   }
 
   async prepareTurn(
@@ -1250,6 +1274,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (!run) return;
     const streamedAnswer = side ? this.takeSideAnswerStream(run.id) : '';
     if (event.type === 'RECOVERY_REQUIRED') {
+      // The run is lost; a later terminal event settles the answer from its output artifact.
+      if (side) this.sideAnswerRuns.delete(run.id);
       if (streamedAnswer.trim()) {
         await this.upsertSideAnswerItem(run, streamedAnswer, 'IN_PROGRESS');
       }
@@ -1525,6 +1551,16 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     const changed = 'The review changed before the reviewer answered, so its revisions were not applied.';
     const detail = await this.store.getTaskDetail(run.taskId);
     const gate = detail.task.projection.agentReview;
+    // A replayed terminal event finds the revisions this answer already applied, even
+    // after the review went stale, so they are looked up before the review is judged.
+    const appliedBy = (review: typeof gate) =>
+      reviewRunId && review?.runId === reviewRunId
+        ? (review.findingDecisions ?? []).filter((decision) => decision.questionRunId === run.id)
+        : [];
+    const alreadyApplied = appliedBy(gate);
+    if (alreadyApplied.length > 0) {
+      return { status: 'APPLIED', decisionIds: alreadyApplied.map((decision) => decision.id) };
+    }
     if (!reviewRunId || !reviewAcceptsDecisions(gate, reviewRunId)) {
       throw new ReviewerRevisionsRejected(changed);
     }
@@ -1532,14 +1568,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     let decisions: ReviewFindingDecision[] = [];
     await this.store.recordReviewFindingDecisions(run.taskId, (task) => {
       const current = task.projection.agentReview;
-      if (!reviewAcceptsDecisions(current, reviewRunId)) throw new ReviewerRevisionsRejected(changed);
-      const recorded = current?.findingDecisions ?? [];
-      // A replayed terminal event finds the revisions this answer already applied.
-      const applied = recorded.filter((decision) => decision.questionRunId === run.id);
+      const applied = appliedBy(current);
       if (applied.length > 0) {
         decisions = applied;
         return [];
       }
+      if (!reviewAcceptsDecisions(current, reviewRunId)) throw new ReviewerRevisionsRejected(changed);
+      const recorded = current?.findingDecisions ?? [];
       const findings = effectiveReviewFindings(current?.result, recorded);
       const outcome = reviewerRevisionsFromReply(output, { findings, diffPaths });
       if (outcome.status === 'REJECTED') throw new ReviewerRevisionsRejected(outcome.reason);
@@ -1931,6 +1966,24 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
   async getRuntimeCatalog(
     disabledRuntimeIds: ReadonlySet<AgentRuntimeId> = new Set()
   ): Promise<AgentRuntimeCatalog> {
+    const catalog = await this.readRuntimeCatalog(disabledRuntimeIds);
+    if (this.options.allowNetworkAccess !== false) return catalog;
+    // Task creation applies the same browser-safe default (TaskManagerService).
+    return {
+      ...catalog,
+      runtimes: catalog.runtimes.map((runtime) => ({
+        ...runtime,
+        preflight: {
+          ...runtime.preflight,
+          capabilities: browserDevCapabilities(runtime.preflight.capabilities)
+        }
+      }))
+    };
+  }
+
+  private async readRuntimeCatalog(
+    disabledRuntimeIds: ReadonlySet<AgentRuntimeId>
+  ): Promise<AgentRuntimeCatalog> {
     if (this.options.providerStartupDisabledReason) {
       const refreshedAt = new Date().toISOString();
       const runtimes = await Promise.all(
@@ -2266,17 +2319,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       target: input.target,
       previousReview: input.previousReview
     });
-    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
-    const executionContext = await this.buildExecutionContext(reviewRuntimeId, {
+    const executionContext = await this.buildReadOnlyCheckoutContext(reviewRuntimeId, {
       sessionId: reviewSessionId,
-      primaryCwd: worktreePath,
-      readRoots: [
-        {
-          canonicalPath: worktreePath,
-          kind: 'WORKTREE',
-          entityId: input.worktree.id
-        }
-      ],
+      checkout: { path: input.worktree.worktreePath, kind: 'WORKTREE', worktreeId: input.worktree.id },
       modelSettings: settings,
       clientOperationId: reviewSessionOperationId,
       attachments: preflightAttachments
@@ -2356,17 +2401,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (await this.runtimeStore.getSession(sessionId)) {
       throw new Error('Each reviewer question needs a new session.');
     }
-    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
-    const executionContext = await this.buildExecutionContext(runtimeId, {
+    const executionContext = await this.buildReadOnlyCheckoutContext(runtimeId, {
       sessionId,
-      primaryCwd: worktreePath,
-      readRoots: [
-        {
-          canonicalPath: worktreePath,
-          kind: 'WORKTREE',
-          entityId: input.worktree.id
-        }
-      ],
+      checkout: { path: input.worktree.worktreePath, kind: 'WORKTREE', worktreeId: input.worktree.id },
       modelSettings: settings,
       clientOperationId: `review-question-session:${input.task.id}:${sessionId}`,
       attachments: []
@@ -2428,6 +2465,9 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (input.task.kind !== 'NORMAL' || input.worktree.taskId !== input.task.id) {
       throw new Error('A side question requires its task worktree.');
     }
+    if (input.snapshotPath !== undefined && !this.options.ownsReadOnlySnapshot?.(input.snapshotPath)) {
+      throw new Error('A side question can read only a Task Monki read-only snapshot of its worktree.');
+    }
     const runtimeId = input.task.runtimeId;
     if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
       throw new Error('A side question uses the task runtime.');
@@ -2441,18 +2481,11 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (await this.runtimeStore.getSession(sessionId)) {
       throw new Error('Each side question needs a new session.');
     }
-    const worktreePath = await canonicalCheckoutPath(input.worktree.worktreePath);
-    const checkout = input.snapshotPath ? await canonicalCheckoutPath(input.snapshotPath) : worktreePath;
-    const executionContext = await this.buildExecutionContext(runtimeId, {
+    const executionContext = await this.buildReadOnlyCheckoutContext(runtimeId, {
       sessionId,
-      primaryCwd: checkout,
-      readRoots: [
-        {
-          canonicalPath: checkout,
-          kind: input.snapshotPath ? 'WORKTREE_SNAPSHOT' : 'WORKTREE',
-          entityId: input.worktree.id
-        }
-      ],
+      checkout: input.snapshotPath
+        ? { path: input.snapshotPath, kind: 'WORKTREE_SNAPSHOT', worktreeId: input.worktree.id }
+        : { path: input.worktree.worktreePath, kind: 'WORKTREE', worktreeId: input.worktree.id },
       modelSettings: settings,
       clientOperationId: `side-question-session:${input.task.id}:${sessionId}`,
       attachments: []
@@ -2834,15 +2867,27 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     }
   }
 
-  /** Ordinary task adapters publish terminal events; verify Preview before its queue advances. */
-  async verifyPreviewRepositoryBoundary(runId: string): Promise<void> {
+  /**
+   * Ordinary task adapters publish terminal events; verify Preview before its queue advances.
+   * Returns why the worktree is not verified unchanged, after failing the run, or nothing when
+   * it is unchanged.
+   */
+  async verifyPreviewRepositoryBoundary(runId: string): Promise<string | undefined> {
     const run = await this.runtimeStore.getRun(runId);
-    if (!run || run.purpose !== 'TASK_PREVIEW' || !isTerminalRuntimeRun(run.status)) return;
+    if (!run || run.purpose !== 'TASK_PREVIEW' || !isTerminalRuntimeRun(run.status)) return undefined;
+    const completedAt = run.endedAt ?? run.lastEventAt ?? run.createdAt;
     await this.verifyReadOnlyRuntimeBoundary({
       type: 'TERMINAL', runId, providerTurnId: run.providerTurnId ?? run.id,
       status: run.status === 'COMPLETED' ? 'completed' : run.status === 'INTERRUPTED' ? 'interrupted' : 'failed',
-      completedAt: run.endedAt ?? run.lastEventAt ?? run.createdAt
+      completedAt
     });
+    const verified = await this.runtimeStore.getRun(runId);
+    if (!verified || verified.repositoryIntegrity?.status === 'UNCHANGED') return undefined;
+    const reason = verified.repositoryIntegrity?.detail ??
+      'Task Monki could not verify the repository boundary for this read-only turn.';
+    // An earlier check can have recorded the violation without failing the run.
+    if (verified.status !== 'FAILED') await this.failRuntimeRunAfterIntegrityViolation(verified, reason, completedAt);
+    return reason;
   }
 
   private async startProviderTurn(
@@ -3092,10 +3137,13 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     mode?: AgentRunMode
   ): Promise<AgentExecutionSettings> {
     if (this.options.allowNetworkAccess === false) {
-      assertBrowserDevRuntimeIsolation(
-        adapter.descriptor,
-        await adapter.capabilities()
-      );
+      const capabilities = await adapter.capabilities();
+      assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
+      if (mode === 'PREVIEW') {
+        // Names the reason instead of the approval policy the person cannot change.
+        const support = projectAgentExecutionSupport(browserDevCapabilities(capabilities), 'PREVIEW_AGENT');
+        if (!support.supported) throw new Error(support.reason);
+      }
     }
     const resolved = await adapter.resolveExecution({ settings, attachments });
     const resolvedSettings = resolved.settings;
@@ -3516,11 +3564,18 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
 }
 
 /**
- * The path a read-only lane (agent review, reviewer questions, side questions)
- * hands the runtime and records on its session. Worktrees can sit under a
- * symlinked folder (on macOS the temporary folder is /var, a link to
- * /private/var), and the runtime only accepts a canonical directory.
+ * A checkout path with its parent folders resolved. Worktrees can sit under a symlinked
+ * folder (on macOS the temporary folder /var links to /private/var) and runtimes accept
+ * only canonical directories. The checkout folder itself is kept as named, so a checkout
+ * that is itself a symlink still reaches the runtime's own canonical-directory check.
  */
-async function canonicalCheckoutPath(value: string): Promise<string> {
-  return realpath(value).catch(() => path.resolve(value));
+async function canonicalCheckoutPath(checkout: string): Promise<string> {
+  const resolved = path.resolve(checkout);
+  const missing = () => new Error(`The task checkout is missing: ${resolved}`);
+  const parent = await realpath(path.dirname(resolved)).catch(() => {
+    throw missing();
+  });
+  const canonical = path.join(parent, path.basename(resolved));
+  if (!(await lstat(canonical).catch(() => undefined))) throw missing();
+  return canonical;
 }

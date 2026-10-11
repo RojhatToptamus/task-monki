@@ -235,6 +235,8 @@ import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseService } from '../discourse/DiscourseService';
 import {
   assertBrowserDevRuntimeIsolation,
+  browserDevExecutionPolicy,
+  executionPresetSettings,
   hasBrowserDevRuntimeIsolation
 } from '../agent/BrowserDevAgentBoundary';
 import {
@@ -267,7 +269,7 @@ import {
   type DesignBrowserOwner
 } from '../design/AgentBrowserRuntime';
 import { ClientToolBridge } from '../agent/clientTools/ClientToolBridge';
-import { resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
+import { LEGACY_CLIENT_TOOL_SCRATCH_DIRECTORY, resolveClientToolMcpServerPath } from '../agent/clientTools/ClientToolBridge';
 import {
   INSPECT_DESIGN_TOOL_DEFINITION,
   safeDesignClientToolFailure
@@ -487,14 +489,16 @@ export class TaskManagerService {
       questionSettings: (task, reviewRun) => this.reviewQuestionSettings(task, reviewRun),
       assertRuntimeEnabled: (runtimeId) => this.assertRuntimeEnabled(runtimeId)
     });
+    const clientToolScratchRoot = options.clientToolCredentialRoot ??
+      path.join(store.getStorageRoot(), 'client-tool-credentials');
     this.clientToolBridge = new ClientToolBridge({
       executablePath: options.clientToolMcpExecutablePath ?? process.execPath,
       serverPath:
         options.clientToolMcpServerPath ??
         resolveClientToolMcpServerPath({ isPackaged: false, resourcesPath: '', appPath: process.cwd() }),
-      scratchRoot:
-        options.clientToolCredentialRoot ??
-        path.join(store.getStorageRoot(), 'client-tool-credentials'),
+      scratchRoot: clientToolScratchRoot,
+      // Earlier releases kept the Design tool's grants beside it.
+      legacyScratchRoot: path.join(path.dirname(clientToolScratchRoot), LEGACY_CLIENT_TOOL_SCRATCH_DIRECTORY),
       runtimeStore: this.agentRuntimeStore,
       handlers: [
         {
@@ -534,7 +538,8 @@ export class TaskManagerService {
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
         providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
-        allowCandidateDesignModels: this.allowCandidateDesignModels
+        allowCandidateDesignModels: this.allowCandidateDesignModels,
+        ownsReadOnlySnapshot: (candidate) => this.snapshots.owns(candidate)
       }
     );
     this.promptRefiner = new PromptRefinementService((request) =>
@@ -1710,7 +1715,8 @@ export class TaskManagerService {
       const settings = await prepareTaskCreationSettings(
         adapter,
         requestedInput.agentSettings ?? { runtimeId },
-        []
+        [],
+        this.browserDevAgentBoundary
       );
       return this.store.createTask({
         ...requestedInput,
@@ -1731,7 +1737,8 @@ export class TaskManagerService {
       const settings = await prepareTaskCreationSettings(
         adapter,
         requestedInput.agentSettings ?? { runtimeId },
-        draft.attachments
+        draft.attachments,
+        this.browserDevAgentBoundary
       );
       return this.store.createTask({
         ...requestedInput,
@@ -2894,6 +2901,8 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(async () => {
       const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
       if (!record) throw new Error('Instruction not found.');
+      // A Preview message goes to the read-only Preview agent, never to the task's agent.
+      if (record.role === 'PREVIEW') throw new Error('Send this message from the Preview agent.');
       if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
       const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
       assertContinuable(run);
@@ -2929,7 +2938,8 @@ export class TaskManagerService {
     }
     if (attachments.length === 0) return;
     await prepareTaskCreationSettings(this.runtimeRegistry.require(task.runtimeId),
-      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments);
+      { ...task.agentSettings, ...run?.requestedSettings, ...settings, runtimeId: task.runtimeId }, attachments,
+      this.browserDevAgentBoundary);
   }
 
   private instructionText(text: string): string {
@@ -3323,7 +3333,8 @@ export class TaskManagerService {
     const resolvedAlternativeSettings = await prepareTaskCreationSettings(
       adapter,
       alternativeSettings,
-      sourceAttachments
+      sourceAttachments,
+      this.browserDevAgentBoundary
     );
     const alternativePrompt = buildForkAlternativeTaskPrompt({
       userContext: await readTaskUserContext(this.store, sourceTask.id, { throughRunId: input.sourceRun.id }),
@@ -3658,13 +3669,17 @@ export class TaskManagerService {
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
         await this.requireNormalTask(input.taskId, 'Reviewer question');
-        return this.reviews.ask(input);
+        // Local Git decides whether the review is still current: a changed diff makes it stale.
+        return this.reviews.ask(input, (taskId) =>
+          this.refreshEvidenceInternal({ taskId }, { persistOnlyIfChanged: true }));
       })
     );
   }
 
   stopReviewerQuestion(input: StopReviewerQuestionRequest): Promise<void> {
-    return this.withTaskAction(input.taskId, 'Reviewer question stop', () =>
+    // A control action, like stopping a side question: another task action holding
+    // the task lock, such as the question still recording its receipt, must not refuse it.
+    return this.withControlAction(() =>
       this.withRuntimeOperation(() => this.reviews.stop(input))
     );
   }
@@ -3905,7 +3920,8 @@ export class TaskManagerService {
     this.applications.chooseFile(await this.applicationWorktree(input.taskId), input.keep, input.files));
 
   startRetainedApplicationPreview: ApplicationPreviewApi['startRetainedApplicationPreview'] = input => this.withApplicationMutation(input.taskId, 'configure', async () =>
-    this.applications.startRetained(await this.applicationWorktree(input.taskId)));
+    this.applications.startRetained(await this.applicationWorktree(input.taskId),
+      (attemptId) => this.assertEditableApplicationAttempt(input.taskId, attemptId)));
 
   inspectApplicationPreviewSetup: ApplicationPreviewApi['inspectApplicationPreviewSetup'] = async input =>
     this.applications.inspectSetup(await this.applicationWorktree(input.taskId));
@@ -4025,7 +4041,11 @@ export class TaskManagerService {
     );
   }
 
-  /** Sends the next queued Preview message once its turn has ended; the coordinator holds the queue on any problem. */
+  /**
+   * Sends the next queued Preview message once its turn has ended. A turn that changed the
+   * worktree, or could not be checked, fails and holds the queue with the reason, as does
+   * any error here: no message waits behind a finished turn.
+   */
   private async dispatchPreviewAgentQueue(runId: string): Promise<void> {
     const run = await this.store.getRun(runId).catch(() => undefined);
     if (!run || run.mode !== 'PREVIEW') return;
@@ -4035,19 +4055,21 @@ export class TaskManagerService {
           await this.taskActionLocks.get(run.taskId)!.work.catch(() => undefined);
         }
         await this.withTaskAction(run.taskId, 'Preview agent completion', async () => {
-          await this.agents.verifyPreviewRepositoryBoundary(runId);
-          const verified = await this.agentRuntimeStore.getRun(runId);
-          if (verified?.repositoryIntegrity?.status !== 'UNCHANGED') {
+          const integrityFailure = await this.agents.verifyPreviewRepositoryBoundary(runId);
+          if (integrityFailure) {
             this.previewRecipeGenerator.discard(run.taskId);
             this.events.emit({ type: 'preview.recipe-generation.updated', taskId: run.taskId,
               payload: this.previewRecipeGenerator.get(run.taskId), at: new Date().toISOString() });
+            await this.previewAgent.hold(run.taskId, `${integrityFailure} Send each message when you are ready.`);
+          } else {
+            await this.previewAgent.dispatch(runId);
           }
-          await this.previewAgent.dispatch(runId);
           this.events.emit({ type: 'run.state.updated', taskId: run.taskId, runId, payload: {}, at: new Date().toISOString() });
         });
       });
-    } catch {
-      // The queue is held with the reason; the person sends the next message when ready.
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.previewAgent.hold(run.taskId, `${reason} Send each message when you are ready.`).catch(() => undefined);
     }
   }
 
@@ -5598,12 +5620,15 @@ async function prepareTaskCreationSettings(
   attachments: readonly Pick<
     AgentAttachmentSelection,
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
-  >[]
+  >[],
+  browserDevBoundary: boolean
 ): Promise<AgentExecutionSettings> {
   const { capabilities, settings } = await prepareAgentExecutionSettings(
     adapter,
     requestedSettings,
-    attachments
+    attachments,
+    'DEFAULT',
+    browserDevBoundary
   );
   if (attachments.length === 0) {
     // Task capture is local and must remain available while a runtime is
@@ -5683,7 +5708,9 @@ async function prepareAgentExecutionSettings(
     AgentAttachmentSelection,
     'kind' | 'mediaType' | 'byteCount' | 'sha256'
   >[],
-  presetKind: 'DEFAULT' | 'AUTONOMOUS_WRITE' = 'DEFAULT'
+  presetKind: 'DEFAULT' | 'AUTONOMOUS_WRITE' = 'DEFAULT',
+  /** The browser development server defaults to a preset it permits, as its catalog shows. */
+  browserDevBoundary = false
 ): Promise<{
   capabilities: Awaited<ReturnType<AgentRuntimeAdapter['capabilities']>>;
   settings: AgentExecutionSettings;
@@ -5695,7 +5722,9 @@ async function prepareAgentExecutionSettings(
     throw new Error('Agent runtime and execution settings runtime must match.');
   }
   const capabilities = await adapter.capabilities();
-  const policy = capabilities.executionPolicy;
+  const policy = browserDevBoundary
+    ? browserDevExecutionPolicy(capabilities.executionPolicy)
+    : capabilities.executionPolicy;
   const preset =
     presetKind === 'AUTONOMOUS_WRITE'
       ? policy.presets.find(
@@ -5724,12 +5753,7 @@ async function prepareAgentExecutionSettings(
   const explicitSettings = Object.fromEntries(
     Object.entries(requestedSettings).filter(([, value]) => value !== undefined)
   ) as AgentExecutionSettings;
-  const presetSettings: AgentExecutionSettings = {
-    sandbox: preset.sandbox,
-    approvalPolicy: preset.approvalPolicy,
-    approvalsReviewer: preset.approvalsReviewer,
-    networkAccess: preset.networkAccess === 'REQUIRED'
-  };
+  const presetSettings = executionPresetSettings(preset);
   if (presetKind === 'AUTONOMOUS_WRITE') {
     const networkPolicy = designNetworkAccessPolicy(capabilities);
     const requestedNetwork = requestedSettings.networkAccess;

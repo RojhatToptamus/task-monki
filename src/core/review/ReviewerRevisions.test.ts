@@ -136,4 +136,19 @@ describe('reviewer revision blocks', () => {
     expect(outcome.status).toBe('REJECTED');
     expect(outcome.status === 'REJECTED' ? outcome.reason : '').toContain(reason);
   });
+
+  it('keeps a rejection reason short when the answer names a huge finding, path or field', () => {
+    const huge = 'x'.repeat(10_000);
+    for (const entries of [
+      [{ finding: huge, action: 'withdraw', reason: 'x' }],
+      [{ action: 'add', reason: 'x', finding: { severity: 'MINOR', title: 'T', explanation: 'E', path: huge.slice(0, 2_000) } }],
+      [{ action: 'add', reason: 'x', finding: { severity: 'MINOR', title: 'T', explanation: 'E', path: 'src/a.ts', [huge]: 1 } }]
+    ]) {
+      const outcome = reviewerRevisionsFromReply(reply(entries), context);
+      expect(outcome.status).toBe('REJECTED');
+      const reason = outcome.status === 'REJECTED' ? outcome.reason : '';
+      expect(reason).toContain('x…');
+      expect(reason.length).toBeLessThan(200);
+    }
+  });
 });

@@ -4,7 +4,7 @@ import type {
   Task,
   VerifiedChecksEvidence
 } from '../../shared/contracts';
-import { reviewAsksForChanges, type AgentReviewGateProjection } from '../../shared/agentReviewFindings';
+import { effectiveReviewGateStatus, type AgentReviewGateProjection } from '../../shared/agentReviewFindings';
 import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
@@ -51,12 +51,12 @@ export function taskReviewGate(
 }
 
 /**
- * The review status the workflow acts on. A review that asked for changes no
- * longer does once every finding is dismissed or withdrawn: it reads as passed
- * for finishing and next steps, while the Review tab keeps the record.
+ * The review status finishing and next steps act on: the gate rule over the
+ * findings still open (`effectiveReviewGateStatus`), so the person's and the
+ * reviewer's decisions move it both ways while the Review tab keeps the record.
  */
 export function effectiveReviewStatus(gate: AgentReviewGateProjection): AgentReviewGateStatus {
-  return gate.status === 'NEEDS_CHANGES' && !reviewAsksForChanges(gate) ? 'PASSED' : gate.status;
+  return effectiveReviewGateStatus(gate);
 }
 
 export function getFinishEvidenceState(

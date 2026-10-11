@@ -30,6 +30,7 @@ export interface ReviewerRevisionContext {
 
 const TITLE_MAX_LENGTH = 200;
 const BODY_MAX_LENGTH = 2_000;
+const ECHO_MAX_LENGTH = 80;
 
 class RevisionRejected extends Error {}
 
@@ -130,7 +131,7 @@ function parseRevisions(json: string, context: ReviewerRevisionContext): Reviewe
         requireKeys(record, ['action', 'finding', 'reason', 'severity'], label);
         const finding = requireRevisableFinding(record.finding, context, revised, label);
         const severity = requireSeverity(record.severity, label);
-        if (severity === finding.severity) reject(`${label} keeps finding ${finding.id} at ${severity}.`);
+        if (severity === finding.severity) reject(`${label} keeps finding ${echo(finding.id)} at ${severity}.`);
         return { action: 'severity', findingId: finding.id, severity, reason };
       }
       case 'add': {
@@ -138,7 +139,7 @@ function parseRevisions(json: string, context: ReviewerRevisionContext): Reviewe
         const finding = requireRecord(record.finding, `${label} finding`);
         allowKeys(finding, ['severity', 'title', 'explanation', 'path', 'line', 'recommendation'], `${label} finding`);
         const path = requireText(finding.path, `${label} path`, BODY_MAX_LENGTH);
-        if (!context.diffPaths.has(path)) reject(`${label} names ${path}, which is not part of the reviewed diff.`);
+        if (!context.diffPaths.has(path)) reject(`${label} names ${echo(path)}, which is not part of the reviewed diff.`);
         if (finding.line !== undefined && (!Number.isSafeInteger(finding.line) || (finding.line as number) < 1)) {
           reject(`${label} line must be a positive whole number.`);
         }
@@ -172,9 +173,9 @@ function requireRevisableFinding(
 ): EffectiveReviewFinding {
   if (typeof value !== 'string' || !value.trim()) reject(`${label} must name a finding.`);
   const finding = context.findings.find((candidate) => candidate.id === value);
-  if (!finding) reject(`${label} names unknown finding ${value}.`);
-  if (finding.state === 'WITHDRAWN') reject(`${label} names withdrawn finding ${value}.`);
-  if (revised.has(finding.id)) reject(`${label} revises finding ${value} again.`);
+  if (!finding) reject(`${label} names unknown finding ${echo(value)}.`);
+  if (finding.state === 'WITHDRAWN') reject(`${label} names withdrawn finding ${echo(value)}.`);
+  if (revised.has(finding.id)) reject(`${label} revises finding ${echo(value)} again.`);
   revised.add(finding.id);
   return finding;
 }
@@ -193,7 +194,16 @@ function requireKeys(record: Record<string, unknown>, keys: readonly string[], l
 
 function allowKeys(record: Record<string, unknown>, keys: readonly string[], label: string): void {
   const unknown = Object.keys(record).find((key) => !keys.includes(key));
-  if (unknown) reject(`${label} has unsupported field ${unknown}.`);
+  if (unknown) reject(`${label} has unsupported field ${echo(unknown)}.`);
+}
+
+/**
+ * A value from the answer quoted in a rejection reason, which is stored with the
+ * run and written to its diagnostics: shortened so it cannot grow without bound.
+ */
+function echo(value: string): string {
+  if (value.length <= ECHO_MAX_LENGTH) return value;
+  return `${Array.from(value.slice(0, ECHO_MAX_LENGTH)).slice(0, -1).join('')}…`;
 }
 
 function requireText(value: unknown, label: string, maxLength: number): string {

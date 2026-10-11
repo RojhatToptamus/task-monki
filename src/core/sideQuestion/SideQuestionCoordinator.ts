@@ -54,7 +54,8 @@ const THREAD_HISTORY_LIMIT = 6;
 const OMISSION_REASONS: Record<ReadOnlySnapshotOmissionReason, string> = {
   LARGER_THAN_FILE_LIMIT: `larger than ${SIDE_QUESTION_SNAPSHOT_MAX_FILE_BYTES / 1024 / 1024} MiB`,
   TOTAL_LIMIT_REACHED: `the ${SIDE_QUESTION_SNAPSHOT_MAX_TOTAL_BYTES / 1024 / 1024} MiB snapshot limit was reached`,
-  NOT_A_FILE: 'not a regular file'
+  NOT_A_FILE: 'not a regular file',
+  CHANGED_DURING_SNAPSHOT: 'changed while the snapshot was taken'
 };
 
 interface QuestionTarget {

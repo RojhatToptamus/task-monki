@@ -13,6 +13,9 @@ const MAX_SSE_LINE_BYTES = OPENCODE_MAX_WIRE_BYTES;
 const MAX_SSE_EVENT_BYTES = OPENCODE_MAX_WIRE_BYTES;
 const REDACTED_ATTACHMENT_CONTENT = '[Task Monki attachment content omitted]';
 const REDACTED_PROVIDER_BYTES = '[Task Monki provider bytes omitted]';
+const INLINE_DATA_URL = /data:[\w.+-]+\/[\w.+-]+;base64,[A-Za-z0-9+/=]+/gu;
+/** Encoded binary in tool text; log lines and proposal results are not runs this long. */
+const LONG_BASE64_RUN = /[A-Za-z0-9+/]{2048,}={0,2}/gu;
 
 export interface OpenCodeJournalWriter {
   (
@@ -606,14 +609,18 @@ function sanitizeOpenCodeDesignToolState(
   if (typeof output !== 'string') {
     return sanitizeOpenCodeInlineAttachmentContent(state, depth) as Record<string, unknown>;
   }
-  let safeOutput = REDACTED_PROVIDER_BYTES;
+  let safeOutput: string;
   try {
     safeOutput = JSON.stringify(
       sanitizeOpenCodeInlineAttachmentContent(JSON.parse(output), depth + 1)
     );
   } catch {
-    // OpenCode persists native MCP results as JSON strings. An unexpected
-    // shape must not make screenshot bytes durable.
+    // OpenCode can also store an MCP result as its text parts joined, such as preview logs
+    // and proposal results; that text is kept. Image bytes reach it only as encoded runs,
+    // which never become durable.
+    safeOutput = output
+      .replace(INLINE_DATA_URL, REDACTED_PROVIDER_BYTES)
+      .replace(LONG_BASE64_RUN, REDACTED_PROVIDER_BYTES);
   }
   return {
     ...(sanitizeOpenCodeInlineAttachmentContent(

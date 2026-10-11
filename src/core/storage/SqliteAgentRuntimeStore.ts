@@ -4063,15 +4063,22 @@ function taskSessionCwdMatches(session: AgentRuntimeSessionRecord): boolean {
  * A side question can read a disposable read-only snapshot of its task worktree instead of
  * the live checkout. Its only read root names that snapshot and the task worktree it copies;
  * provider subagents inherit that context. The comparison is lexical: the snapshot is
- * removed when its thread ends.
+ * removed when its thread ends. Snapshots are laid out as `<snapshot root>/<taskId>/<threadId>`
+ * (ReadOnlySnapshotService), so the root must sit in a folder named for the session's task.
+ * The snapshot root itself is runtime configuration and the profile can move, so admission
+ * checks it (AgentOrchestrator) and loading does not.
  */
 function readsTaskWorktreeSnapshot(session: AgentRuntimeSessionRecord): boolean {
   const roots = session.executionContext.readRoots;
+  const snapshot = roots[0] ? path.resolve(roots[0].canonicalPath) : undefined;
   return (
     roots.length === 1 &&
     roots[0]!.kind === 'WORKTREE_SNAPSHOT' &&
     roots[0]!.entityId === session.taskContext?.worktreeId &&
-    path.resolve(roots[0]!.canonicalPath) === path.resolve(session.executionContext.primaryCwd)
+    session.owner.kind === 'TASK' &&
+    snapshot !== undefined &&
+    path.basename(path.dirname(snapshot)) === session.owner.taskId &&
+    snapshot === path.resolve(session.executionContext.primaryCwd)
   );
 }
 

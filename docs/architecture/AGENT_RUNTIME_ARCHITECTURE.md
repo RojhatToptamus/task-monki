@@ -365,20 +365,30 @@ Deletion removes unreferenced bytes through the attachment store owner.
 Task Monki cannot revoke bytes after a provider receives them.
 The product must not claim remote deletion or provider forgetting.
 
-## App-owned Design tool
+## App-owned client tools
 
-Task Monki has one app-owned Design tool: `inspect_design`.
-`DesignClientToolContract` owns its name, input schema, and bounded result.
-`DesignClientToolBridge` owns run grants and dispatch.
+Task Monki gives two kinds of runs app-owned tools (`ClientToolSets`):
+
+- Design runs get `inspect_design` (`DesignClientToolContract`).
+- Preview runs get `inspect_preview` and `propose_preview_configuration`
+  (`PreviewClientToolContract`).
+
+Each contract owns its tool names, input schemas, and bounded results.
+`ClientToolBridge` owns run grants and dispatch for both sets.
+A run is granted only its own mode's set.
 
 Provider transport stays local to the adapter:
 
 - Codex uses its native dynamic-tool protocol.
 - OpenCode uses one packaged local stdio MCP bridge.
-- ACP Design sessions use that bridge through ACP setup.
+- ACP sessions use that bridge through ACP setup.
+
+The bridge server's environment variables start with `TASK_MONKI_CLIENT_TOOL_`;
+their values are credentials and are redacted from protocol journals.
 
 The bridge contains no browser or Preview implementation.
-It forwards an authorized request to the existing Design browser owner.
+It forwards an authorized request to the owning handler: the Design browser
+owner, or the Preview agent coordinator.
 
 Each tool call must match the active run, provider session,
 provider tool identity, and short-lived grant.

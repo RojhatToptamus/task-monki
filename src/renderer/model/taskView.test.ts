@@ -304,6 +304,23 @@ describe('task card view model', () => {
     expect(inReview({ worktree: 'MISSING' })).toBe('Checkout missing');
   });
 
+  it('reads the board summary\'s effective review status, which reviewer revisions move both ways', () => {
+    // A board summary carries the status once every decision applies, so the card follows it.
+    const summarized = (agentReview: Record<string, unknown>) => describeTaskStatus(createTask({
+      projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', agentReview: agentReview as never },
+      workflowPhase: 'REVIEW'
+    })).label;
+
+    expect(summarized({ status: 'PASSED', hasResult: true, findingCounts: { BLOCKER: 1 }, effectiveStatus: 'NEEDS_CHANGES' }))
+      .toBe('Needs changes');
+    expect(summarized({ status: 'NEEDS_CHANGES', hasResult: true, findingCounts: {}, effectiveStatus: 'INCONCLUSIVE' }))
+      .toBe('Inconclusive');
+    expect(summarized({ status: 'NEEDS_CHANGES', hasResult: true, findingCounts: {}, effectiveStatus: 'PASSED' }))
+      .toBe('Review passed');
+    // A summary from before the field existed keeps its stored status.
+    expect(summarized({ status: 'NEEDS_CHANGES', hasResult: true, findingCounts: {} })).toBe('Needs changes');
+  });
+
   it('names a card pull request by number and state, and says delivery progress once', () => {
     const pullRequest = (projection: Partial<Task['projection']>) =>
       cardPullRequestForTask(createTask({
@@ -570,6 +587,39 @@ describe('task finish policy', () => {
     expect(describeTaskStatus(open).label).toBe('Needs changes');
     expect(getFinishEvidenceState(dismissed)).toEqual({ mode: 'clean', warnings: [] });
     expect(describeTaskStatus(dismissed).label).not.toBe('Needs changes');
+  });
+
+  it('follows reviewer revisions both ways when deciding whether finishing is clean', () => {
+    const style = { id: 'style', severity: 'MAJOR' as const, title: 'Long function', explanation: 'Split it.', path: 'src/a.ts' };
+    const review = (
+      status: 'PASSED' | 'NEEDS_CHANGES',
+      findings: typeof style[],
+      decisions: NonNullable<Task['projection']['agentReview']>['findingDecisions']
+    ) => createTask({
+      projection: {
+        ...createInitialProjection(now),
+        git: 'CLEAN',
+        agentReview: {
+          status, runId: 'review-1', findingDecisions: decisions,
+          result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Looks good.', findings }
+        }
+      },
+      workflowPhase: 'REVIEW'
+    });
+    const reviewer = { reviewRunId: 'review-1', actor: 'REVIEWER' as const, reason: 'Seen while answering.', questionRunId: 'question-1', createdAt: now };
+    const addedBlocker = review('PASSED', [], [{
+      ...reviewer, id: 'd1', kind: 'ADD', findingId: 'added-1',
+      finding: { id: 'added-1', severity: 'BLOCKER', title: 'Missing guard', explanation: 'Null input crashes.', path: 'src/a.ts' }
+    }]);
+    const downgraded = review('NEEDS_CHANGES', [style], [{
+      ...reviewer, id: 'd2', kind: 'CHANGE_SEVERITY', findingId: 'style', severity: 'MINOR'
+    }]);
+
+    expect(getFinishEvidenceState(addedBlocker)).toMatchObject({
+      mode: 'override',
+      warnings: [expect.objectContaining({ title: 'Review requested changes.' })]
+    });
+    expect(getFinishEvidenceState(downgraded)).toEqual({ mode: 'clean', warnings: [] });
   });
 
   it('allows clean local completion only when review and Git evidence are healthy', () => {

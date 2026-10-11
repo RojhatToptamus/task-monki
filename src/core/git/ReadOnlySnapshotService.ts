@@ -19,7 +19,9 @@ import { git } from './gitCli';
 export type ReadOnlySnapshotOmissionReason =
   | 'LARGER_THAN_FILE_LIMIT'
   | 'TOTAL_LIMIT_REACHED'
-  | 'NOT_A_FILE';
+  | 'NOT_A_FILE'
+  /** The entry, or a directory above it, changed type or size while it was copied. */
+  | 'CHANGED_DURING_SNAPSHOT';
 
 export interface ReadOnlySnapshotOmission {
   /** Path relative to the worktree root. */
@@ -185,6 +187,13 @@ export class ReadOnlySnapshotService {
     return this.remove(taskId);
   }
 
+  /** Whether `candidate` names a snapshot location of this service: `<root>/<taskId>/<threadId>`. */
+  owns(candidate: string): boolean {
+    const relative = path.relative(this.root, path.resolve(candidate));
+    const segments = relative.split(path.sep);
+    return !path.isAbsolute(relative) && segments.length === 2 && segments.every((segment) => SAFE_SEGMENT.test(segment));
+  }
+
   /**
    * Removes every snapshot under the root and every registration of one in the
    * repositories this process created snapshots in, plus `repositoryPaths`, including
@@ -289,6 +298,11 @@ export class ReadOnlySnapshotService {
     }
   }
 
+  /**
+   * Copies the untracked files in path order within the size limits. The agent keeps
+   * changing the live worktree meanwhile, so the listing only plans the copy:
+   * `copyUntrackedEntry` checks each entry again as it copies.
+   */
   private async copyUntracked(
     live: string,
     target: string,
@@ -298,15 +312,15 @@ export class ReadOnlySnapshotService {
       const source = path.resolve(live, relative);
       const destination = path.resolve(target, relative);
       if (relative.endsWith('/') || !isInside(live, source) || !isInside(target, destination)) {
-        return { relative, source, destination, kind: 'OTHER' as const, size: 0 };
+        return { relative, kind: 'OTHER' as const, size: 0 };
       }
       const stat = await fs.lstat(source).catch(() => undefined);
       if (!stat) return undefined;
       const kind = stat.isSymbolicLink() ? 'LINK' as const : stat.isFile() ? 'FILE' as const : 'OTHER' as const;
-      return { relative, source, destination, kind, size: kind === 'FILE' ? stat.size : 0 };
+      return { relative, kind, size: kind === 'FILE' ? stat.size : 0 };
     });
     const omitted: ReadOnlySnapshotOmission[] = [];
-    const copies: Array<NonNullable<(typeof inspected)[number]>> = [];
+    const copies: Array<{ relative: string; kind: 'FILE' | 'LINK'; size: number }> = [];
     let total = 0;
     for (const file of inspected) {
       if (!file) continue;
@@ -318,18 +332,23 @@ export class ReadOnlySnapshotService {
         omitted.push({ path: file.relative, reason: 'TOTAL_LIMIT_REACHED' });
       } else {
         total += file.size;
-        copies.push(file);
+        copies.push({ relative: file.relative, kind: file.kind, size: file.size });
       }
     }
-    await mapConcurrent(copies, async (file) => {
-      await fs.mkdir(path.dirname(file.destination), { recursive: true });
-      if (file.kind === 'LINK') {
-        await fs.symlink(await fs.readlink(file.source), file.destination);
-      } else {
-        await fs.copyFile(file.source, file.destination, fsConstants.COPYFILE_FICLONE);
-      }
+    const skipped = await mapConcurrent(copies, async (file) => {
+      const result = await copyUntrackedEntry({
+        liveRoot: live,
+        snapshotRoot: target,
+        relativePath: file.relative,
+        kind: file.kind,
+        // A file is copied only up to the bytes reserved for it.
+        maxBytes: file.size,
+        fileLimitBytes: this.maxFileBytes
+      });
+      return result === 'COPIED' || result === 'VANISHED' ? undefined : { path: file.relative, reason: result };
     });
-    return omitted;
+    for (const item of skipped) if (item) omitted.push(item);
+    return omitted.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   }
 
   /**
@@ -359,6 +378,164 @@ export class ReadOnlySnapshotService {
     });
     return work;
   }
+}
+
+export interface UntrackedEntryCopy {
+  /** The live worktree root. Trusted; only the directories below it are checked. */
+  liveRoot: string;
+  /** The snapshot root. Trusted; only the directories below it are checked. */
+  snapshotRoot: string;
+  /** Git's `/`-separated path relative to both roots. */
+  relativePath: string;
+  /** What the listing found at the path. */
+  kind: 'FILE' | 'LINK';
+  /** The most bytes copied for a regular file; a larger file is skipped. */
+  maxBytes: number;
+  /** The per-file limit, which names the reason a larger file is skipped. */
+  fileLimitBytes: number;
+}
+
+export type UntrackedEntryCopyResult = 'COPIED' | 'VANISHED' | ReadOnlySnapshotOmissionReason;
+
+const COPY_CHUNK_BYTES = 64 * 1024;
+const READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+/**
+ * Copies one untracked entry of the live worktree into the snapshot without following a
+ * symlink at either end. The implementation agent can swap entries while the snapshot is
+ * built, so a file is read only through a descriptor that opened it without following a
+ * symlink or blocking, and only while that descriptor is a regular file within
+ * `maxBytes` and still the file at the path under real directories; at most `maxBytes`
+ * are read. A listed symlink is recreated as a symlink. Destinations are created
+ * exclusively, without following a symlink, below directories of the snapshot that are
+ * real directories. Anything else is skipped.
+ */
+export async function copyUntrackedEntry(input: UntrackedEntryCopy): Promise<UntrackedEntryCopyResult> {
+  const segments = input.relativePath.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return 'NOT_A_FILE';
+  const source = path.join(input.liveRoot, ...segments);
+  const destination = path.join(input.snapshotRoot, ...segments);
+  const parents = segments.slice(0, -1);
+  if (!(await hasRealDirectories(input.liveRoot, parents))) return 'CHANGED_DURING_SNAPSHOT';
+  if (input.kind === 'LINK') {
+    const linkTarget = await fs.readlink(source).catch((error: unknown) => {
+      if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR') return null;
+      return undefined;
+    });
+    if (linkTarget === null) return 'VANISHED';
+    if (linkTarget === undefined) return 'CHANGED_DURING_SNAPSHOT';
+    if (!(await createRealDirectories(input.snapshotRoot, parents))) return 'CHANGED_DURING_SNAPSHOT';
+    return fs.symlink(linkTarget, destination).then(
+      () => 'COPIED' as const,
+      (error: unknown) => {
+        if (errorCode(error) === 'EEXIST') return 'CHANGED_DURING_SNAPSHOT' as const;
+        throw error;
+      }
+    );
+  }
+
+  let reader: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    reader = await fs.open(source, READ_FLAGS);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'VANISHED';
+    // A symlink (ELOOP; EMLINK on some BSDs), socket or device swapped in.
+    if (code === 'ELOOP' || code === 'EMLINK' || code === 'ENXIO' || code === 'EOPNOTSUPP' || code === 'ENODEV') {
+      return 'CHANGED_DURING_SNAPSHOT';
+    }
+    throw error;
+  }
+  try {
+    const opened = await reader.stat();
+    if (!opened.isFile()) return 'CHANGED_DURING_SNAPSHOT';
+    if (opened.size > input.maxBytes) {
+      return opened.size > input.fileLimitBytes ? 'LARGER_THAN_FILE_LIMIT' : 'CHANGED_DURING_SNAPSHOT';
+    }
+    // The descriptor must still be the file at the path under real directories: a
+    // parent swapped to a symlink and back could otherwise have redirected the open.
+    const current = await fs.lstat(source).catch(() => undefined);
+    if (!current || !sameFile(current, opened) || !(await hasRealDirectories(input.liveRoot, parents))) {
+      return 'CHANGED_DURING_SNAPSHOT';
+    }
+    if (!(await createRealDirectories(input.snapshotRoot, parents))) return 'CHANGED_DURING_SNAPSHOT';
+    let writer: Awaited<ReturnType<typeof fs.open>>;
+    try {
+      writer = await fs.open(destination, CREATE_FLAGS, opened.mode & 0o777);
+    } catch (error) {
+      if (errorCode(error) === 'EEXIST' || errorCode(error) === 'ELOOP') return 'CHANGED_DURING_SNAPSHOT';
+      throw error;
+    }
+    try {
+      await copyBytes(reader, writer, opened.size);
+      await enforcePosixMode(writer, opened.mode & 0o777);
+      await writer.close();
+    } catch (error) {
+      await writer.close().catch(() => undefined);
+      await fs.unlink(destination).catch(() => undefined);
+      throw error;
+    }
+    return 'COPIED';
+  } finally {
+    await reader.close().catch(() => undefined);
+  }
+}
+
+/** Whether each of `segments` below `root` is a directory and not a symlink. */
+async function hasRealDirectories(root: string, segments: readonly string[]): Promise<boolean> {
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const stat = await fs.lstat(current).catch(() => undefined);
+    if (!stat?.isDirectory()) return false;
+  }
+  return true;
+}
+
+/**
+ * Creates the missing `segments` below `root` one level at a time. Fails when one exists
+ * as anything but a real directory, such as a symlink the checkout or patch produced.
+ */
+async function createRealDirectories(root: string, segments: readonly string[]): Promise<boolean> {
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    // `mkdir` of a single level never follows a symlink at that level.
+    await fs.mkdir(current).catch((error: unknown) => {
+      if (errorCode(error) !== 'EEXIST') throw error;
+    });
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory()) return false;
+  }
+  return true;
+}
+
+/** Copies at most `limit` bytes, stopping early at end of file. */
+async function copyBytes(
+  reader: Awaited<ReturnType<typeof fs.open>>,
+  writer: Awaited<ReturnType<typeof fs.open>>,
+  limit: number
+): Promise<void> {
+  const buffer = Buffer.allocUnsafe(Math.min(COPY_CHUNK_BYTES, Math.max(limit, 1)));
+  let copied = 0;
+  while (copied < limit) {
+    const { bytesRead } = await reader.read(buffer, 0, Math.min(buffer.length, limit - copied), copied);
+    if (bytesRead === 0) return;
+    let written = 0;
+    while (written < bytesRead) {
+      written += (await writer.write(buffer, written, bytesRead - written, copied + written)).bytesWritten;
+    }
+    copied += bytesRead;
+  }
+}
+
+function sameFile(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && (left.ino === 0 || right.ino === 0 || left.ino === right.ino);
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
 }
 
 function snapshotFromEntry(entry: SnapshotEntry): Omit<ReadOnlySnapshot, 'reused'> {

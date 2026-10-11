@@ -211,3 +211,37 @@ it('rejects on manual Save exactly what it rejects in an agent proposal, without
   expect(saved.status?.candidate).toBeUndefined();
   expect(await fs.readFile(file, 'utf8')).toBe(safe);
 });
+
+it('starts a retained configuration again only when it is not a saved Design capture', async () => {
+  const scenario = await scenarios.create({ previewEnabled: true });
+  const task = await scenario.createTask({ title: 'Start the last configuration again' });
+  const worktree = await prepareTestWorktree(scenario.service, task.id);
+  const file = path.join(worktree.worktreePath, 'preview.yaml');
+  await fs.writeFile(file, JSON.stringify({
+    name: 'application', type: 'environment', primary: 'web', services: {
+      web: { type: 'command', cwd: '.', command: [process.execPath, '-e', 'process.exit(4)'] }
+    }
+  }));
+  const started = await scenario.service.startApplicationPreview({ taskId: task.id });
+  const attemptId = started.status!.candidate!.id;
+  await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).approval?.attemptId).toBe(attemptId);
+  await scenario.service.approveApplicationPreview({ taskId: task.id, attemptId });
+  await expect.poll(async () => (await scenario.service.getApplicationPreview({ taskId: task.id })).status?.latest?.state).toBe('failed');
+  await fs.rm(file);
+
+  // A Design capture shares the runtime name; its source stays read only.
+  const getPreviewGenerations = scenario.store.getPreviewGenerations.bind(scenario.store);
+  scenario.store.getPreviewGenerations = async (taskId?: string) => [
+    ...(await getPreviewGenerations(taskId)),
+    { runtimeAttemptId: attemptId } as Awaited<ReturnType<typeof getPreviewGenerations>>[number]
+  ];
+  await expect(scenario.service.startRetainedApplicationPreview({ taskId: task.id })).rejects.toThrow('Saved Design sources are read only');
+  expect((await scenario.service.getApplicationPreview({ taskId: task.id })).status?.latest?.id).toBe(attemptId);
+
+  scenario.store.getPreviewGenerations = getPreviewGenerations;
+  const restarted = await scenario.service.startRetainedApplicationPreview({ taskId: task.id });
+  // The retained configuration starts as a new run that waits for approval.
+  expect(restarted.status?.candidate?.id).toEqual(expect.any(String));
+  expect(restarted.status?.candidate?.id).not.toBe(attemptId);
+  expect(restarted.approval?.attemptId).toBe(restarted.status?.candidate?.id);
+}, 30_000);

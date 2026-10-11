@@ -201,8 +201,8 @@ Expected UI:
   - Secondary path: run review again or use the finish-panel Mark done anyway
     owner override.
   - Once every finding is dismissed or withdrawn, the review no longer asks for
-    changes (`reviewAsksForChanges`): finishing is clean without an override and
-    the card stops saying Needs changes.
+    changes: finishing is clean without an override and the card stops saying
+    Needs changes.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
   - Allow request changes only because the output is current to this reviewed
@@ -223,7 +223,17 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
   characters, and can restore it (`decideReviewFinding`). Dismissing is how a
   finding is left out of Request changes; there is no selection step.
 - Decisions are accepted only for the task's current, finished review. A stale,
-  running, or replaced review rejects them.
+  running, or replaced review rejects them, and so does a canceled or archived
+  task.
+- What the workflow acts on is `effectiveReviewGateStatus`: the gate rule
+  (`reviewGateStatusFor`: a NEEDS_CHANGES verdict or any BLOCKER/MAJOR finding
+  asks for changes) applied to the findings still open once every decision
+  applies. Decisions move it both ways: a BLOCKER or MAJOR finding the reviewer
+  adds or raises makes a passed or inconclusive review ask for changes, and
+  dismissing, withdrawing or downgrading those findings returns it to its
+  verdict. An inconclusive verdict never reads as passed, because the reviewer
+  never reached one. The finish policy, the next action, the board card and the
+  board summary (`effectiveStatus`) all read this one rule.
 - A new review starts with no decisions. Its prompt lists the earlier review's
   findings with their states, notes and reasons, and asks the reviewer not to
   raise a dismissed or withdrawn finding again without saying why.
@@ -231,9 +241,11 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
 ### Asking the reviewer
 
 1. From the Review tab the person asks a question about the review or about one
-   finding (`askReviewer`, idempotent by message id). It is stored as a
-   `TaskInstruction` with `role: "REVIEW"`, `reviewRunId` and an optional
-   `findingId`.
+   finding (`askReviewer`, idempotent by message id). Local Git state is observed
+   first, inside the task lock: if the code changed after the review, the review
+   turns stale and the question is refused. A canceled or archived task takes no
+   questions. The question is stored as a `TaskInstruction` with
+   `role: "REVIEW"`, `reviewRunId` and an optional `findingId`.
 2. A `REVIEW_QUESTION` run answers it in a fresh read-only session on the
    review's runtime and settings, through the same read-only lane and Git
    fingerprint check as the review. Every question rebuilds its context: the
@@ -241,7 +253,8 @@ change is an `AGENT_REVIEW_FINDING_DECIDED` event appended to the review's
    stat, and the last six exchanges.
 3. One question runs at a time. While it runs, follow-up, new runs, reviews,
    commits, publishing, pull requests and phase transitions wait for it, or for
-   the person to stop it (`stopReviewerQuestion`).
+   the person to stop it (`stopReviewerQuestion`, a control action that does not
+   wait for the task lock).
 4. The reviewer revises findings only through one fenced
    `task-monki-revisions` block that ends its answer: withdraw a finding, change
    its severity, or add one inside the reviewed diff, each with a reason, at

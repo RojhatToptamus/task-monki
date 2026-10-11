@@ -71,11 +71,18 @@ export function codexPermissionProfileId(
   return `${PROFILE_PREFIX}${sessionId}_${attachmentScope}`;
 }
 
-/** Builds a bounded, order-independent, offline read-only scope for Discourse. */
+/**
+ * Builds a bounded, order-independent, offline read-only scope for the shared read-only lane.
+ * `gitMetadataRoots` are the trusted common Git directories of linked worktree roots; Git
+ * cannot read a linked worktree without its common directory. One already inside a read
+ * root, such as a main checkout's `.git`, needs no entry. Without any, the scope and its
+ * hash are unchanged.
+ */
 export async function codexReadOnlyScopeProfile(input: {
   sessionId: string;
   scope: CodexReadOnlyExecutionScope;
   attachmentPaths?: readonly string[];
+  gitMetadataRoots?: readonly string[];
   reasoningEffort?: string;
 }): Promise<CodexReadOnlyScopeProfile> {
   if (!SAFE_SESSION_ID.test(input.sessionId)) {
@@ -94,6 +101,13 @@ export async function codexReadOnlyScopeProfile(input: {
     throw new Error('Codex read-only scope exceeds the filesystem-root safety limit.');
   }
   assertNonOverlappingRoots(roots);
+  const gitMetadataRoots = uniqueSorted(
+    await Promise.all(
+      (input.gitMetadataRoots ?? []).map((candidate) =>
+        requireCanonicalDirectory(candidate, 'Git metadata root')
+      )
+    )
+  ).filter((candidate) => !roots.some((root) => isSamePath(candidate, root) || isInside(candidate, root)));
   const attachmentPaths = uniqueSorted(
     await Promise.all(
       (input.attachmentPaths ?? []).map((candidate) =>
@@ -104,6 +118,7 @@ export async function codexReadOnlyScopeProfile(input: {
   const filesystemEntries = [
     ...Object.entries(RUNTIME_READ_GRANTS).map(([path, access]) => ({ path, access })),
     ...roots.map((candidate) => ({ path: candidate, access: 'read' as const })),
+    ...gitMetadataRoots.map((candidate) => ({ path: candidate, access: 'read' as const })),
     ...attachmentPaths.map((candidate) => ({ path: candidate, access: 'read' as const }))
   ];
   const encodedPathBytes = filesystemEntries.reduce(
@@ -136,6 +151,7 @@ export async function codexReadOnlyScopeProfile(input: {
   const profileId = codexReadOnlyScopeProfileId(input.sessionId, scopeHash);
   const filesystem: Record<string, 'read'> = { ...RUNTIME_READ_GRANTS };
   for (const candidate of roots) filesystem[candidate] = 'read';
+  for (const candidate of gitMetadataRoots) filesystem[candidate] = 'read';
   for (const candidate of attachmentPaths) filesystem[candidate] = 'read';
   return {
     profileId,

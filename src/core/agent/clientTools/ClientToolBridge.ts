@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Socket } from 'node:net';
 import type { AgentRuntimeStore } from '../AgentRuntimeStore';
 import {
+  CLIENT_TOOL_ENV_PREFIX,
   clientToolContent,
   safeClientToolFailure,
   type ClientToolContent,
@@ -15,11 +16,13 @@ import {
 import { clientToolSet } from './ClientToolSets';
 
 const REQUEST_LIMIT_BYTES = 64 * 1024;
-const SESSION_CREDENTIAL_ENV = 'TASK_MONKI_CLIENT_TOOL_SESSION_CREDENTIAL';
-const ENDPOINT_ENV = 'TASK_MONKI_CLIENT_TOOL_ENDPOINT';
-const GRANT_FILE_ENV = 'TASK_MONKI_CLIENT_TOOL_CREDENTIAL_FILE';
+const SESSION_CREDENTIAL_ENV = `${CLIENT_TOOL_ENV_PREFIX}SESSION_CREDENTIAL`;
+const ENDPOINT_ENV = `${CLIENT_TOOL_ENV_PREFIX}ENDPOINT`;
+const GRANT_FILE_ENV = `${CLIENT_TOOL_ENV_PREFIX}CREDENTIAL_FILE`;
 const TURN_CREDENTIAL_HEADER = 'x-task-monki-client-tool-grant';
 const ENDPOINT_PATH = '/client-tool';
+/** The grant folder of releases before the shared client tools, beside the current one. */
+export const LEGACY_CLIENT_TOOL_SCRATCH_DIRECTORY = 'design-tool-credentials';
 const ACTIVE_RUN_STATUSES = ['STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'];
 
 export interface ClientToolSessionIdentity {
@@ -44,6 +47,11 @@ export interface ClientToolBridgeOptions {
   executablePath: string;
   serverPath: string;
   scratchRoot: string;
+  /**
+   * Where earlier releases kept the Design tool's grants (`design-tool-credentials`). Recovery
+   * removes its stale grant folders, which hold credential files, and the folder once empty.
+   */
+  legacyScratchRoot?: string;
   handlers: readonly ClientToolHandler[];
   runtimeStore: Pick<AgentRuntimeStore, 'getSession' | 'getActiveRunForSession'>;
 }
@@ -268,6 +276,22 @@ export class ClientToolBridge {
         .filter((entry) => entry.name.startsWith('grant-'))
         .map((entry) => fs.rm(path.join(this.options.scratchRoot, entry.name), { recursive: true, force: true }))
     );
+    await this.removeLegacyGrantDirectories();
+  }
+
+  /** Only `grant-*` folders are removed from the legacy root; a symlinked root is left alone. */
+  private async removeLegacyGrantDirectories(): Promise<void> {
+    const legacyRoot = this.options.legacyScratchRoot;
+    if (!legacyRoot) return;
+    const stat = await fs.lstat(legacyRoot).catch(() => undefined);
+    if (!stat?.isDirectory()) return;
+    const entries = await fs.readdir(legacyRoot, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith('grant-'))
+        .map((entry) => fs.rm(path.join(legacyRoot, entry.name), { recursive: true, force: true }))
+    );
+    await fs.rmdir(legacyRoot).catch(() => undefined);
   }
 
   private async handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {

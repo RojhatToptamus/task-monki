@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   effectiveReviewFindings,
+  effectiveReviewGateStatus,
   openReviewFindings,
   reviewAcceptsDecisions,
   reviewAsksForChanges,
@@ -116,7 +117,7 @@ describe('effectiveReviewFindings', () => {
 });
 
 describe('reviewAsksForChanges', () => {
-  it('asks for changes only while a current NEEDS_CHANGES review has an open finding', () => {
+  it('asks for changes while a NEEDS_CHANGES verdict has an open finding, and never for a stale or failed review', () => {
     expect(reviewAsksForChanges(gate())).toBe(true);
     expect(reviewAsksForChanges(gate({
       findingDecisions: [
@@ -132,8 +133,64 @@ describe('reviewAsksForChanges', () => {
       ]
     }))).toBe(true);
     expect(reviewAsksForChanges(gate({ status: 'STALE' }))).toBe(false);
-    expect(reviewAsksForChanges(gate({ status: 'PASSED' }))).toBe(false);
+    expect(reviewAsksForChanges(gate({ status: 'FAILED' }))).toBe(false);
     expect(reviewAsksForChanges(undefined)).toBe(false);
+  });
+
+  it('asks for changes once the reviewer adds or raises a BLOCKER or MAJOR finding on a passed or inconclusive review', () => {
+    const passed: AgentReviewResult = {
+      schemaVersion: 'agent-review/v1',
+      verdict: 'PASSED',
+      summary: 'Looks good.',
+      findings: [{ id: 'style', severity: 'MINOR', title: 'Long function', explanation: 'Split it.', path: 'src/a.ts' }]
+    };
+    const added = (severity: AgentReviewResult['findings'][number]['severity']) => decision({
+      kind: 'ADD',
+      findingId: 'added-1',
+      reason: 'Found while answering.',
+      finding: { id: 'added-1', severity, title: 'Missing guard', explanation: 'Null input crashes.', path: 'src/a.ts' }
+    });
+    const passedGate = (findingDecisions: ReviewFindingDecision[]) =>
+      gate({ status: 'PASSED', result: passed, findingDecisions });
+
+    expect(effectiveReviewGateStatus(passedGate([]))).toBe('PASSED');
+    expect(effectiveReviewGateStatus(passedGate([added('MINOR')]))).toBe('PASSED');
+    expect(effectiveReviewGateStatus(passedGate([added('BLOCKER')]))).toBe('NEEDS_CHANGES');
+    expect(reviewAsksForChanges(passedGate([added('BLOCKER')]))).toBe(true);
+    expect(effectiveReviewGateStatus(passedGate([
+      decision({ kind: 'CHANGE_SEVERITY', findingId: 'style', severity: 'MAJOR', reason: 'Reachable in production.' })
+    ]))).toBe('NEEDS_CHANGES');
+    // Dismissing the added blocker returns the review to its passing verdict.
+    expect(effectiveReviewGateStatus(passedGate([added('BLOCKER'), decision({ kind: 'DISMISS', findingId: 'added-1' })])))
+      .toBe('PASSED');
+    expect(effectiveReviewGateStatus(gate({
+      status: 'INCONCLUSIVE',
+      result: { ...passed, verdict: 'INCONCLUSIVE' },
+      findingDecisions: [added('MAJOR')]
+    }))).toBe('NEEDS_CHANGES');
+  });
+
+  it('stops asking for changes once the findings that caused it are downgraded, returning to the verdict', () => {
+    const majorFindings = (verdict: AgentReviewResult['verdict']): AgentReviewResult => ({
+      ...result,
+      verdict,
+      findings: [{ ...result.findings[0]!, severity: 'MAJOR' }, result.findings[1]!]
+    });
+    const downgraded = [decision({ kind: 'CHANGE_SEVERITY', findingId: 'leak', severity: 'MINOR', reason: 'Only in tests.' })];
+
+    expect(effectiveReviewGateStatus(gate({ result: majorFindings('PASSED') }))).toBe('NEEDS_CHANGES');
+    expect(effectiveReviewGateStatus(gate({ result: majorFindings('PASSED'), findingDecisions: downgraded }))).toBe('PASSED');
+    expect(reviewAsksForChanges(gate({ result: majorFindings('PASSED'), findingDecisions: downgraded }))).toBe(false);
+    // The reviewer never reached a verdict, so clearing its findings never reads as passed.
+    expect(effectiveReviewGateStatus(gate({ result: majorFindings('INCONCLUSIVE'), findingDecisions: downgraded })))
+      .toBe('INCONCLUSIVE');
+    expect(effectiveReviewGateStatus(gate({
+      result: majorFindings('INCONCLUSIVE'),
+      findingDecisions: [decision({ kind: 'DISMISS', findingId: 'leak' }), decision({ kind: 'DISMISS', findingId: 'naming' })]
+    }))).toBe('INCONCLUSIVE');
+    // A NEEDS_CHANGES verdict keeps asking while any finding stays open, whatever its severity.
+    expect(effectiveReviewGateStatus(gate({ findingDecisions: downgraded }))).toBe('NEEDS_CHANGES');
+    expect(effectiveReviewGateStatus(gate({ status: 'STALE', findingDecisions: downgraded }))).toBe('STALE');
   });
 
   it('keeps a raw-output review without findings asking for changes', () => {

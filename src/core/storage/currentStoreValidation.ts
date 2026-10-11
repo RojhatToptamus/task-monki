@@ -9,6 +9,7 @@ import {
   TASK_STORE_SCHEMA_VERSION,
   isTaskCreationToken
 } from '../../shared/contracts';
+import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
 import type { StoreState } from '../projection/reducer';
 
 const WORKFLOW_PHASES = [
@@ -21,10 +22,11 @@ const RESOLUTIONS = [
 const COMPLETION_POLICIES = [
   'ARTIFACT_ACCEPTANCE', 'LOCAL_ACCEPTANCE', 'MERGED', 'MERGED_AND_VERIFIED', 'MANUAL'
 ] as const;
-const RUN_MODES = [
-  'ANALYSIS', 'IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW', 'REVIEW_QUESTION', 'SIDE_QUESTION', 'DESIGN',
-  'COMPACTION', 'SUBAGENT'
-] as const;
+// Records keyed by the contract unions, so a new mode or role cannot be left out.
+const RUN_MODES = Object.keys({
+  ANALYSIS: true, IMPLEMENTATION: true, FOLLOW_UP: true, RETRY: true, REVIEW: true,
+  REVIEW_QUESTION: true, SIDE_QUESTION: true, DESIGN: true, PREVIEW: true, COMPACTION: true, SUBAGENT: true
+} satisfies Record<AgentRunMode, true>);
 const RUN_STATUSES = [
   'QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT',
   'INTERRUPTING', 'COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'
@@ -35,7 +37,9 @@ const RECOVERY_STATES = [
 const SERVER_STATUSES = [
   'STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'
 ] as const;
-const SESSION_ROLES = ['PRIMARY', 'ALTERNATIVE', 'REVIEW', 'SIDE', 'SUBAGENT'] as const;
+const SESSION_ROLES = Object.keys({
+  PRIMARY: true, ALTERNATIVE: true, REVIEW: true, PREVIEW: true, SIDE: true, SUBAGENT: true
+} satisfies Record<AgentSessionRole, true>);
 const SESSION_STATUSES = [
   'NOT_MATERIALIZED', 'NOT_LOADED', 'IDLE', 'ACTIVE', 'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT', 'SYSTEM_ERROR', 'ARCHIVED', 'DELETED', 'UNKNOWN'

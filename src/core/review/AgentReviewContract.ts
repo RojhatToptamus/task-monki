@@ -1,8 +1,9 @@
-import type {
-  AgentReviewFinding,
-  AgentReviewFindingSeverity,
-  AgentReviewGateStatus,
-  AgentReviewResult
+import {
+  reviewGateStatusFor,
+  type AgentReviewFinding,
+  type AgentReviewFindingSeverity,
+  type AgentReviewGateStatus,
+  type AgentReviewResult
 } from '../../shared/contracts';
 
 const SEVERITIES: AgentReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'];
@@ -24,24 +25,11 @@ export function parseAgentReviewResult(text: string | undefined): AgentReviewRes
   }
 }
 
+/** The gate status a completed review records, before any finding decision. */
 export function agentReviewStatusFromResult(
   result: AgentReviewResult | undefined
 ): Extract<AgentReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> | undefined {
-  if (!result) {
-    return undefined;
-  }
-  if (
-    result.verdict === 'NEEDS_CHANGES' ||
-    result.findings.some(
-      (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
-    )
-  ) {
-    return 'NEEDS_CHANGES';
-  }
-  if (result.verdict === 'PASSED') {
-    return 'PASSED';
-  }
-  return 'INCONCLUSIVE';
+  return result ? reviewGateStatusFor(result.verdict, result.findings) : undefined;
 }
 
 export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {

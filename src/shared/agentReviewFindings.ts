@@ -179,14 +179,49 @@ export function reviewAcceptsDecisions(
 }
 
 /**
- * True when the current (non-stale) review still asks for changes: verdict
- * NEEDS_CHANGES and at least one OPEN finding, or verdict NEEDS_CHANGES with no
- * findings at all (raw-output reviews).
+ * The review gate rule: a review asks for changes when its verdict does or any of
+ * the findings is BLOCKER or MAJOR. Otherwise it passed when its verdict did, and
+ * is inconclusive when the reviewer gave no verdict.
  */
-export function reviewAsksForChanges(gate: AgentReviewGateProjection | undefined): boolean {
-  if (!gate || gate.status !== 'NEEDS_CHANGES') return false;
+export function reviewGateStatusFor(
+  verdict: AgentReviewResult['verdict'],
+  findings: readonly Pick<AgentReviewFinding, 'severity'>[]
+): Extract<AgentReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> {
+  if (
+    verdict === 'NEEDS_CHANGES' ||
+    findings.some((finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR')
+  ) {
+    return 'NEEDS_CHANGES';
+  }
+  return verdict === 'PASSED' ? 'PASSED' : 'INCONCLUSIVE';
+}
+
+/**
+ * The status the workflow acts on. For a current, finished review it is the gate
+ * rule applied to the findings still OPEN once every decision applies, so
+ * decisions move it both ways: a BLOCKER or MAJOR finding added or raised by the
+ * reviewer makes a passed or inconclusive review ask for changes, and dismissing,
+ * withdrawing or downgrading those findings returns it to its verdict. A
+ * NEEDS_CHANGES verdict reads as passed once every finding is dismissed or
+ * withdrawn, and keeps asking when the review recorded no findings at all
+ * (raw-output reviews). An inconclusive verdict never reads as passed. Every
+ * other status, stale included, is returned unchanged.
+ */
+export function effectiveReviewGateStatus(gate: AgentReviewGateProjection | undefined): AgentReviewGateStatus {
+  if (!gate) return 'NOT_RUN';
+  if (gate.status !== 'PASSED' && gate.status !== 'NEEDS_CHANGES' && gate.status !== 'INCONCLUSIVE') {
+    return gate.status;
+  }
   const findings = effectiveReviewFindings(gate.result, gate.findingDecisions ?? []);
-  return findings.length === 0 || findings.some((finding) => finding.state === 'OPEN');
+  const open = findings.filter((finding) => finding.state === 'OPEN');
+  const verdict = gate.result?.verdict ?? gate.status;
+  if (verdict === 'NEEDS_CHANGES' && findings.length > 0 && open.length === 0) return 'PASSED';
+  return reviewGateStatusFor(verdict, open);
+}
+
+/** True when the current (non-stale) review asks for changes once its decisions apply. */
+export function reviewAsksForChanges(gate: AgentReviewGateProjection | undefined): boolean {
+  return effectiveReviewGateStatus(gate) === 'NEEDS_CHANGES';
 }
 
 /**

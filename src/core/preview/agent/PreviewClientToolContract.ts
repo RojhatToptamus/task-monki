@@ -3,7 +3,6 @@ import type { ClientToolDefinition } from '../../agent/clientTools/ClientToolCon
 import { INSPECT_PREVIEW_TOOL_NAME, PROPOSE_PREVIEW_CONFIGURATION_TOOL_NAME } from '../../../shared/clientTools';
 
 export { INSPECT_PREVIEW_TOOL_NAME, PROPOSE_PREVIEW_CONFIGURATION_TOOL_NAME };
-export const PREVIEW_TOOL_NAMES = [INSPECT_PREVIEW_TOOL_NAME, PROPOSE_PREVIEW_CONFIGURATION_TOOL_NAME] as const;
 
 const MAX_LOG_LINES = 400;
 const MAX_PROPOSAL_BYTES = 65_536;

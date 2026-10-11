@@ -19,6 +19,7 @@ import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { projectAppUpdateEventForClient } from '../core/app/AppUpdateClientProjection';
 import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersistence';
+import { resolveDevSeedProfile } from './devSeedProfile';
 import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
@@ -191,14 +192,18 @@ const appId = 'dev.taskmonki.desktop';
  * shell opens the deterministic seed profile with live agents off, as the seeded
  * dev API does, so its synthetic runs keep their state. Packaged builds ignore it.
  */
-const devSeedProfileRoot = !app.isPackaged && process.env.TASK_MANAGER_DEV_SEED_MODE === '1'
-  ? process.env.TASK_MANAGER_PROFILE_ROOT
-  : undefined;
+const devSeedProfile = resolveDevSeedProfile({ isPackaged: app.isPackaged, env: process.env });
+const devSeedProfileRoot = devSeedProfile.profileRoot;
 if (devSeedProfileRoot) {
   app.setPath('userData', devSeedProfileRoot);
 }
+if (devSeedProfile.error) {
+  // Quits below without opening any profile.
+  console.error(devSeedProfile.error);
+  dialog.showErrorBox('Task Monki development seed', devSeedProfile.error);
+}
 
-const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+const ownsSingleInstanceLock = !devSeedProfile.error && app.requestSingleInstanceLock();
 
 if (!ownsSingleInstanceLock) {
   app.quit();

@@ -64,6 +64,8 @@ export interface ScenarioOptions {
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
   allowCandidateDesignModels?: boolean;
+  /** `false` applies the browser development server's agent boundary. */
+  allowAgentNetworkAccess?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -336,6 +338,7 @@ export async function createTaskMonkiScenario(
       previewEnabled: options.previewEnabled,
       previewRoot,
       allowCandidateDesignModels: options.allowCandidateDesignModels,
+      ...(options.allowAgentNetworkAccess === undefined ? {} : { allowAgentNetworkAccess: options.allowAgentNetworkAccess }),
       ...(options.designMode
         ? {
             designRepositoryRoot: persistence.paths.designRepositoryRoot,

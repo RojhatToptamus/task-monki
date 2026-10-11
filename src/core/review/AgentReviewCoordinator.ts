@@ -46,7 +46,7 @@ export interface AgentReviewCoordinatorOptions {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const FINDING_ID_MAX_LENGTH = 200;
+const ID_MAX_LENGTH = 200;
 const INSTRUCTION_HISTORY_LIMIT = 1_000;
 
 /**
@@ -63,6 +63,8 @@ export class AgentReviewCoordinator {
     if (input.kind !== 'DISMISS' && input.kind !== 'RESTORE') {
       throw new Error('A finding can only be dismissed or restored.');
     }
+    const reviewRunId = requireId(input.reviewRunId, 'review run');
+    const findingId = requireId(input.findingId, 'finding');
     if (input.note !== undefined && typeof input.note !== 'string') throw new Error('A note must be text.');
     const note = input.note?.trim();
     if (input.kind === 'RESTORE' && note) throw new Error('Only a dismissal takes a note.');
@@ -71,10 +73,11 @@ export class AgentReviewCoordinator {
     }
     let decision: ReviewFindingDecision | undefined;
     await this.options.store.recordReviewFindingDecisions(input.taskId, (task) => {
+      assertTaskTakesReviewWork(task);
       const gate = task.projection.agentReview;
-      assertCurrentReview(gate, input.reviewRunId);
+      assertCurrentReview(gate, reviewRunId);
       const finding = effectiveReviewFindings(gate?.result, gate?.findingDecisions ?? [])
-        .find((candidate) => candidate.id === input.findingId);
+        .find((candidate) => candidate.id === findingId);
       if (!finding) throw new Error('This finding is not part of the review.');
       if (finding.state === 'WITHDRAWN') throw new Error('The reviewer withdrew this finding.');
       if (input.kind === 'DISMISS' && finding.state !== 'OPEN') {
@@ -85,7 +88,7 @@ export class AgentReviewCoordinator {
       }
       decision = {
         id: randomUUID(),
-        reviewRunId: input.reviewRunId,
+        reviewRunId,
         findingId: finding.id,
         kind: input.kind,
         actor: 'USER',
@@ -98,40 +101,52 @@ export class AgentReviewCoordinator {
     return decision!;
   }
 
-  /** Records the question, then starts its answer run. A repeated message ID returns the recorded question. */
-  async ask(input: AskReviewerRequest): Promise<TaskInstruction> {
+  /**
+   * Records the question, then starts its answer run. A repeated message ID returns
+   * the recorded question. Before a new question is admitted, `observeGit` records
+   * the worktree's current Git state, so a diff that changed since the review makes
+   * the review stale and the question is refused.
+   */
+  async ask(
+    input: AskReviewerRequest,
+    observeGit: (taskId: string) => Promise<unknown>
+  ): Promise<TaskInstruction> {
     if (typeof input.messageId !== 'string' || !UUID.test(input.messageId)) {
       throw new Error('A valid message ID is required.');
     }
+    const reviewRunId = requireId(input.reviewRunId, 'review run');
     const text = questionText(input.text);
-    const findingId = input.findingId === undefined ? undefined : requireFindingId(input.findingId);
-    const detail = await this.options.store.getTaskDetail(input.taskId);
-    const task = detail.task;
-    if (task.kind !== 'NORMAL') throw new Error('Only a task review has a reviewer to ask.');
-    const existing = detail.taskInstructions.find((record) => record.id === input.messageId);
+    const findingId = input.findingId === undefined ? undefined : requireId(input.findingId, 'finding');
+    const recorded = await this.options.store.getTaskDetail(input.taskId);
+    if (recorded.task.kind !== 'NORMAL') throw new Error('Only a task review has a reviewer to ask.');
+    const existing = recorded.taskInstructions.find((record) => record.id === input.messageId);
     if (
       existing &&
       (existing.role !== 'REVIEW' ||
         existing.text !== text ||
-        existing.reviewRunId !== input.reviewRunId ||
+        existing.reviewRunId !== reviewRunId ||
         existing.findingId !== findingId)
     ) {
       throw new Error('This message ID has already been used for different content.');
     }
     const retry = Boolean(
-      existing?.status === 'FAILED' && existing.runId && !detail.runs.some((run) => run.id === existing.runId)
+      existing?.status === 'FAILED' && existing.runId && !recorded.runs.some((run) => run.id === existing.runId)
     );
     if (existing && !retry) return existing;
 
+    assertTaskTakesReviewWork(recorded.task);
+    await observeGit(input.taskId);
+    const detail = await this.options.store.getTaskDetail(input.taskId);
+    const task = detail.task;
     const gate = task.projection.agentReview;
-    assertCurrentReview(gate, input.reviewRunId);
+    assertCurrentReview(gate, reviewRunId);
     const findings = effectiveReviewFindings(gate?.result, gate?.findingDecisions ?? []);
     const focused = findingId ? findings.find((finding) => finding.id === findingId) : undefined;
     if (findingId && !focused) throw new Error('This finding is not part of the review.');
     if (detail.runs.some((run) => run.mode === 'REVIEW_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
       throw new Error('Wait for the reviewer to answer the current question.');
     }
-    const reviewRun = detail.runs.find((run) => run.id === input.reviewRunId && run.mode === 'REVIEW');
+    const reviewRun = detail.runs.find((run) => run.id === reviewRunId && run.mode === 'REVIEW');
     const iteration = detail.iterations.find((candidate) => candidate.id === reviewRun?.iterationId);
     const worktree = detail.worktrees.find((candidate) => candidate.id === reviewRun?.worktreeId);
     if (!reviewRun || !iteration || !worktree) throw new Error('The review run is unavailable.');
@@ -299,9 +314,18 @@ function questionText(text: unknown): string {
   return text.trim();
 }
 
-function requireFindingId(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > FINDING_ID_MAX_LENGTH || value.trim() !== value) {
-    throw new Error('A valid finding ID is required.');
+/** An archived or canceled task keeps its review as a record; it takes no new questions or decisions. */
+function assertTaskTakesReviewWork(task: Task): void {
+  if (task.workflowPhase === 'ARCHIVED' || task.workflowPhase === 'CANCELED') {
+    throw new Error(
+      `This task is ${task.workflowPhase === 'ARCHIVED' ? 'archived' : 'canceled'}, so its review takes no questions or decisions.`
+    );
+  }
+}
+
+function requireId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > ID_MAX_LENGTH || value.trim() !== value) {
+    throw new Error(`A valid ${label} ID is required.`);
   }
   return value;
 }
