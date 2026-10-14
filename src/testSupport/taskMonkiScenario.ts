@@ -580,6 +580,8 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly runtimeTurnListeners = new Set<
     (event: AgentRuntimeTurnEvent) => void
   >();
+  /** Scripted turns still finishing; shutdown waits for them, as a runtime stops its turns. */
+  private readonly runtimeTurnCompletions = new Set<Promise<void>>();
 
   constructor(
     private readonly runtime: TaskAgentRuntimeAccess,
@@ -814,15 +816,19 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     this.nextRuntimeTurnResult = undefined;
     this.beforeNextRuntimeTurnTerminal = undefined;
     if (result && this.rawRuntime) {
-      setImmediate(() => {
-        void this.completeRuntimeTurn(
-          input.run.id,
-          started.providerTurnId,
-          result,
-          undefined,
-          beforeTerminal
-        );
-      });
+      // The turn finishes after startTurn returns, as a provider's does.
+      const completion = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+        this.completeRuntimeTurn(input.run.id, started.providerTurnId, result, undefined, beforeTerminal)
+      );
+      this.runtimeTurnCompletions.add(completion);
+      // A completion that fails still fails the test; only its bookkeeping ends here.
+      completion.then(
+        () => this.runtimeTurnCompletions.delete(completion),
+        (error: unknown) => {
+          this.runtimeTurnCompletions.delete(completion);
+          throw error;
+        }
+      );
     }
     return {
       ...started,
@@ -883,8 +889,9 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
     });
   }
 
-  shutdown(): Promise<void> {
-    return Promise.resolve();
+  /** Nothing the adapter started writes after shutdown, so the stores can close behind it. */
+  async shutdown(): Promise<void> {
+    await Promise.allSettled([...this.runtimeTurnCompletions]);
   }
 
   private async completeRuntimeTurn(
