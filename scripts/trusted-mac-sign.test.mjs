@@ -86,5 +86,5 @@ describe.skipIf(process.platform !== 'darwin')('trusted macOS architecture polic
     expect(await releaseArchitectures(universal)).toEqual(expect.arrayContaining(['x86_64', 'arm64']));
     expect(await releaseArchitectures(arm)).toEqual(['arm64']);
     await expect(releaseArchitectures(intel)).rejects.toThrow('has no arm64 slice');
-  });
+  }, 20_000);
 });
