@@ -204,6 +204,21 @@ previous records.
 SQLite migration 13 removes the `sidebarCollapsed` and `showMascot`
 preferences and advances settings to schema 15.
 
+SQLite migration 14 (`task-remote-sources`) adds a unique expression index
+over the task payload's `remoteSource` identity (provider, host, lowercased
+repository path, kind, number), so the database refuses a second task opened
+from the same issue or pull request. Task store schema 31 carries
+`Task.remoteSource` and the `remote-source` artifact kind: the captured issue or
+pull request text as immutable JSON (title, body, labels, ten most recent
+comments, each bounded), owned by the task and deleted with it. A pull request
+source also records the opened head, merge base and branches. A push to an
+opened pull request's branch records `previousRemoteSha`, the head its lease
+names. Platform text is stored trimmed; a task source, pull request, check,
+review or merge observation is validated as it is written, so a value the store
+could not load fails that action instead of startup. Migration 15
+(`gitlab-cli-setting`) adds `externalExecutables.glabExecutablePath` and
+advances settings to schema 16.
+
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding
 decisions (`AgentReviewGateProjection.findingDecisions`): a dismissal with its

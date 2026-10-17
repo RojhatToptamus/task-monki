@@ -7,28 +7,19 @@ import type {
   GitHubRepositoryRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  RemoteProvider,
   ReviewRollupRecord,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
-import { git } from '../git/gitCli';
+import { git, gitSucceeds } from '../git/gitCli';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
 import { execFileOwnedPortable } from '../process/ownedProcess';
+import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
+import { UNTRUSTED_CHECKOUT_GIT_ENV } from '../remote/RemoteCheckout';
 
-export interface GitHubRemote {
-  remoteName: string;
-  remoteUrl: string;
-  host: string;
-  owner: string;
-  repo: string;
-}
-
-export interface GitHubPrSync {
-  pullRequest: Omit<PullRequestSnapshotRecord, 'id' | 'observedAt'>;
-  ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
-  reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
-  merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
-}
+export type GitHubRemote = DeliveryRemote;
+export type GitHubPrSync = PullRequestSync;
 
 interface ExecResult {
   stdout: string;
@@ -41,15 +32,21 @@ interface ExecError extends Error {
   stderr?: string | Buffer;
 }
 
-export class GitHubService {
+export class GitHubService implements PullRequestDelivery {
+  readonly provider = 'GITHUB' as const;
+
   constructor(private ghExecutable = 'gh') {}
 
   setExecutable(executable: string | undefined): void {
     this.ghExecutable = executable ?? 'gh';
   }
 
-  async preflight(task: Task, worktree: WorktreeRecord): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
-    const remote = await detectGitHubRemote(worktree.worktreePath);
+  async preflight(
+    task: Task,
+    worktree: WorktreeRecord,
+    pushRemote?: GitHubRemote
+  ): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
+    const remote = pushRemote ?? await detectGitHubRemote(worktree.worktreePath);
     if (!remote) {
       return {
         taskId: task.id,
@@ -108,17 +105,54 @@ export class GitHubService {
     remoteUrl?: string;
     expectedHeadSha?: string;
     expectedGitCommonDir?: string;
+    /**
+     * The branch of an opened pull request. The commit goes to that exact
+     * branch, fast-forward only, without changing upstream configuration.
+     */
+    remoteBranch?: string;
+    /** The branch's commit before this push, when known: still there means the push did not land. */
+    previousRemoteSha?: string;
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
     const remoteName = input.remoteName ?? 'origin';
-    const branchName = input.worktree.branchName;
+    const branchName = input.remoteBranch ?? input.worktree.branchName;
     const external = input.worktree.ownership === 'EXTERNAL';
     const headSha = external && input.expectedHeadSha
       ? input.expectedHeadSha : (await git(input.worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
     const base = {
       taskId: input.task.id, iterationId: input.worktree.iterationId, worktreeId: input.worktree.id,
       remoteName, branchName, remoteRef: `${remoteName}/${branchName}`, headSha,
-      ...(input.remoteUrl ? { remoteUrl: input.remoteUrl } : {})
+      ...(input.remoteUrl ? { remoteUrl: input.remoteUrl } : {}),
+      ...(input.remoteBranch && input.previousRemoteSha ? { previousRemoteSha: input.previousRemoteSha } : {})
     };
+    if (input.remoteBranch) {
+      // A pull request's branch moves only forward from the head last observed,
+      // and only while it is still there: the lease refuses a branch that moved
+      // or was deleted after its merge, and its author's hooks do not run.
+      if (!input.previousRemoteSha || !await gitSucceeds(input.worktree.worktreePath, ['merge-base', '--is-ancestor', input.previousRemoteSha, headSha])) {
+        return { ...base, status: 'FAILED', error: 'Push update only adds commits on top of the pull request.' };
+      }
+      try {
+        await git(input.worktree.worktreePath, [
+          'push', '--no-follow-tags', '--recurse-submodules=no',
+          `--force-with-lease=refs/heads/${branchName}:${input.previousRemoteSha}`,
+          '--', remoteName, `${headSha}:refs/heads/${branchName}`
+        ], { timeout: 120_000, env: { GIT_TERMINAL_PROMPT: '0', ...UNTRUSTED_CHECKOUT_GIT_ENV } });
+        return { ...base, status: 'PUSHED' };
+      } catch (error) {
+        if (isRejectedPushError(error)) {
+          return { ...base, status: 'FAILED', error: 'The pull request branch moved since Task Monki last read it. Refresh to see its new commits.' };
+        }
+        return this.reconcileBranchPublication({
+          task: input.task,
+          worktree: input.worktree,
+          remoteName,
+          remoteBranch: branchName,
+          previousRemoteSha: input.previousRemoteSha,
+          expectedHeadSha: headSha,
+          failureDetail: publishBranchErrorMessage(error)
+        });
+      }
+    }
     if (external) {
       if (!input.remoteUrl || !input.expectedHeadSha || !input.expectedGitCommonDir) {
         throw new Error('External publication requires a verified commit and an explicit destination.');
@@ -137,7 +171,8 @@ export class GitHubService {
     try {
       await git(input.worktree.worktreePath, external
         ? ['push', '--no-follow-tags', '--recurse-submodules=no', '--', input.remoteUrl!, `${headSha}:refs/heads/${branchName}`]
-        : ['push', '--set-upstream', remoteName, 'HEAD'], 120_000);
+        : ['push', '--set-upstream', remoteName, 'HEAD'],
+        120_000);
       return {
         ...base,
         status: 'PUSHED'
@@ -156,6 +191,8 @@ export class GitHubService {
         worktree: input.worktree,
         remoteName,
         remoteUrl: input.remoteUrl,
+        remoteBranch: input.remoteBranch,
+        previousRemoteSha: input.previousRemoteSha,
         expectedHeadSha: headSha,
         failureDetail: pushError
       });
@@ -167,10 +204,14 @@ export class GitHubService {
     worktree: WorktreeRecord;
     remoteName: string;
     remoteUrl?: string;
+    /** The recorded destination branch when it differs from the task branch. */
+    remoteBranch?: string;
+    /** The branch's commit before the push; finding it unchanged proves the push did not land. */
+    previousRemoteSha?: string;
     expectedHeadSha?: string;
     failureDetail?: string;
   }): Promise<Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>> {
-    const branchName = input.worktree.branchName;
+    const branchName = input.remoteBranch ?? input.worktree.branchName;
     const base = {
       taskId: input.task.id,
       iterationId: input.worktree.iterationId,
@@ -217,6 +258,13 @@ export class GitHubService {
         status: 'PUSHED'
       };
     }
+    if (input.previousRemoteSha && remoteHeadSha === input.previousRemoteSha) {
+      return {
+        ...base,
+        status: 'FAILED',
+        error: input.failureDetail ?? 'The push did not reach the remote branch. Retry is safe.'
+      };
+    }
     return {
       ...base,
       status: 'AMBIGUOUS',
@@ -231,14 +279,15 @@ export class GitHubService {
     baseRef?: string;
     body: string;
     title: string;
+    target?: DeliveryTarget;
   }): Promise<GitHubPrSync> {
-    const existing = await this.findOpenPullRequest(input.worktree);
+    const existing = await this.findOpenPullRequest(input.worktree, input.target);
     if (existing) {
       return existing;
     }
 
-    const remote = input.worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(input.worktree.worktreePath) : undefined;
-    if (input.worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
+    const remote = !input.target && input.worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(input.worktree.worktreePath) : undefined;
+    if (!input.target && input.worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
     const baseRef = input.baseRef ?? await this.pullRequestBase(input.worktree);
     const createResult = await this.exec(
       [
@@ -252,8 +301,8 @@ export class GitHubService {
         '--base',
         baseRef,
         '--head',
-        input.worktree.branchName,
-        ...(remote ? ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`] : [])
+        input.target?.headRepository ? `${headOwner(input.target.headRepository)}:${input.worktree.branchName}` : input.worktree.branchName,
+        ...repositoryArgs(input.target, remote)
       ],
       input.worktree.worktreePath,
       120_000,
@@ -262,10 +311,11 @@ export class GitHubService {
     );
 
     const url = createResult.stdout.trim().split(/\s+/).find((value) => value.startsWith('http'));
-    return this.viewPullRequest(input.worktree, url ?? input.worktree.branchName);
+    return this.viewPullRequest(input.worktree, url ?? input.worktree.branchName, input.target);
   }
 
-  async findOpenPullRequest(worktree: WorktreeRecord): Promise<GitHubPrSync | undefined> {
+  async findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<GitHubPrSync | undefined> {
+    if (target) return this.findTargetPullRequest(worktree, target);
     const remote = worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
     if (worktree.ownership === 'EXTERNAL' && !remote) return undefined;
     const result = await this.exec(
@@ -299,6 +349,26 @@ export class GitHubService {
       : match;
   }
 
+  /** An open pull request of the task branch in the target repository, pushed from the expected owner. */
+  private async findTargetPullRequest(worktree: WorktreeRecord, target: DeliveryTarget): Promise<GitHubPrSync | undefined> {
+    const result = await this.exec([
+      'pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10',
+      '--json', `${prJsonFields},headRepositoryOwner,isCrossRepository`, ...repositoryArgs(target)
+    ], worktree.worktreePath);
+    const rows = JSON.parse(result.stdout) as unknown;
+    if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
+    if (rows.length >= 10) throw new Error('The pull request lookup is incomplete. Inspect the branch on GitHub.');
+    const owner = headOwner(target.headRepository ?? target.repository).toLowerCase();
+    const matches = rows.filter((row) => {
+      const item = row as { headRefName?: unknown; isCrossRepository?: unknown; headRepositoryOwner?: { login?: unknown } };
+      return item.headRefName === worktree.branchName &&
+        item.isCrossRepository === Boolean(target.headRepository) &&
+        typeof item.headRepositoryOwner?.login === 'string' && item.headRepositoryOwner.login.toLowerCase() === owner;
+    }) as Array<{ number: number }>;
+    if (matches.length > 1) throw new Error('Multiple pull requests match this branch. Inspect the branch on GitHub.');
+    return matches[0] ? this.viewPullRequest(worktree, matches[0].number, target) : undefined;
+  }
+
   async pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string> {
     if (worktree.ownership !== 'EXTERNAL') return requestedBranch ?? worktree.baseRef ?? 'main';
     let baseRef = requestedBranch?.trim();
@@ -320,10 +390,10 @@ export class GitHubService {
     return baseRef;
   }
 
-  async viewPullRequest(worktree: WorktreeRecord, selector: string | number): Promise<GitHubPrSync> {
-    const remote = worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
-    if (worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
-    const repoArgs = remote ? ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`] : [];
+  async viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<GitHubPrSync> {
+    const remote = !target && worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
+    if (!target && worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
+    const repoArgs = repositoryArgs(target, remote);
     const [viewResult, checksResult] = await Promise.all([
       this.exec(['pr', 'view', String(selector), '--json', remote ? `${prJsonFields},headRepository,headRepositoryOwner,isCrossRepository` : prJsonFields, ...repoArgs], worktree.worktreePath),
       this.exec(
@@ -348,12 +418,18 @@ export class GitHubService {
     task: Task;
     gitDiffStat?: string;
     agentSummary?: string;
+    /** A closing or plain reference to the issue the task was opened from. */
+    issueLine?: string;
+    /** The platform that receives the body; GitHub when absent. */
+    provider?: RemoteProvider;
   }): string {
+    const gitLab = input.provider === 'GITLAB';
+    const request = input.task.prompt.trim().slice(0, 1200);
     return [
       `## Summary`,
       '',
-      input.task.prompt.trim().slice(0, 1200),
-      '',
+      ...(input.issueLine ? [input.issueLine, ''] : []),
+      ...(request || !input.issueLine ? [request, ''] : []),
       '## Local evidence',
       '',
       `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
@@ -364,7 +440,9 @@ export class GitHubService {
       '',
       '## Delivery note',
       '',
-      'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
+      gitLab
+        ? 'Created by Task Monki as a draft MR. Merge remains a human/GitLab decision.'
+        : 'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
       ''
     ].join('\n');
   }
@@ -405,6 +483,15 @@ export class GitHubService {
       throw error;
     }
   }
+}
+
+function headOwner(repository: { path: string }): string {
+  return repository.path.split('/')[0]!;
+}
+
+function repositoryArgs(target?: DeliveryTarget, remote?: GitHubRemote): string[] {
+  if (target) return ['--repo', `${target.repository.host}/${target.repository.path}`];
+  return remote ? ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`] : [];
 }
 
 function matchesExternalPullRequest(raw: unknown, worktree: WorktreeRecord, remote: GitHubRemote): boolean {
@@ -666,16 +753,18 @@ function parseCheckDetails(rawCheckDetails: unknown): GitHubCheckDetailRecord[] 
   const rows = Array.isArray(rawCheckDetails) ? rawCheckDetails : [];
   return rows.slice(0, MAX_CHECK_DETAILS).map((row) => {
     const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
+    // Platform text is stored trimmed, and an empty value is no value: the store loads neither.
+    const text = (key: string) => stringField(item, key)?.trim() || undefined;
     return {
-      name: stringField(item, 'name') ?? 'Unnamed check',
+      name: text('name') ?? 'Unnamed check',
       status: normalizeCheckStatus(stringField(item, 'bucket'), stringField(item, 'state')),
-      state: stringField(item, 'state'),
-      workflow: stringField(item, 'workflow'),
-      link: stringField(item, 'link'),
+      state: text('state'),
+      workflow: text('workflow'),
+      link: text('link'),
       description: stringField(item, 'description'),
-      event: stringField(item, 'event'),
-      startedAt: stringField(item, 'startedAt'),
-      completedAt: stringField(item, 'completedAt')
+      event: text('event'),
+      startedAt: text('startedAt'),
+      completedAt: text('completedAt')
     };
   });
 }
@@ -809,7 +898,9 @@ function isRejectedPushError(error: unknown): boolean {
     normalized.includes('fetch first') ||
     normalized.includes('non-fast-forward') ||
     normalized.includes('remote contains work') ||
-    normalized.includes('updates were rejected')
+    normalized.includes('updates were rejected') ||
+    // A lease that no longer holds: the branch moved or was deleted, and nothing landed.
+    normalized.includes('stale info')
   );
 }
 

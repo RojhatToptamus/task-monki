@@ -10,7 +10,8 @@ import type { ExternalExecutablePathSettings } from '../../shared/agent';
 const autoSettings: ExternalExecutablePathSettings = {
   gitExecutablePath: null,
   codexExecutablePath: null,
-  ghExecutablePath: null
+  ghExecutablePath: null,
+  glabExecutablePath: null
 };
 
 describe('ExternalToolResolver', () => {
@@ -160,7 +161,7 @@ describe('ExternalToolResolver', () => {
     });
 
     expect(result.status).toBe('error');
-    expect(result.error).toMatch(/ENOENT|no such file/i);
+    expect(result.error).toBe('/missing/git was not found.');
   });
 });
 

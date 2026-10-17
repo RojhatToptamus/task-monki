@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom';
 import { FolderGit2, GitBranch, RefreshCw } from 'lucide-react';
 import {
   EMPTY_REVIEW_DRAFT,
+  formatRemoteWorkNumber,
   getImplementationRetryReason,
   normalizePullRequestTitle,
   type AskSubject,
@@ -161,6 +162,10 @@ import {
   MarkDoneModal
 } from './TaskDetailModals';
 import { ReportedQuote } from './ReportedQuote';
+import { useRemoteSourceSnapshot } from './useRemoteSourceSnapshot';
+import { remoteSourceView } from '../model/remoteWork';
+import { deliveryNoun, deliveryProvider } from '../model/deliveryWords';
+import { startsFromExistingWork } from '../../shared/promptTemplates';
 
 interface TaskDetailProps {
   attachmentOptions: AgentSessionProps['attachmentOptions'];
@@ -197,6 +202,8 @@ interface TaskDetailProps {
   postRunEvidencePendingRunIds?: string[];
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
+  /** Every head observed for the task's pull request, so Sync knows when the branch has no commits of its own. */
+  pullRequestHeads?: string[];
   ciRollup?: CiRollupRecord;
   reviewRollup?: ReviewRollupRecord;
   mergeSnapshot?: MergeSnapshotRecord;
@@ -248,7 +255,8 @@ interface TaskDetailProps {
     decision: AgentInteractionDecision
   ): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
-  onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
+  onCreatePullRequest(taskId: string, title?: string, baseBranch?: string, closeIssue?: boolean): Promise<void>;
+  onSyncPullRequest?(taskId: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
@@ -303,6 +311,8 @@ export function TaskDetail(props: TaskDetailProps) {
     mergeSnapshot
   } = props;
   const captureRunIds = useMemo(() => conversationCaptureRunIds(props.runs, gitSnapshots), [props.runs, gitSnapshots]);
+  const remoteSource = task ? remoteSourceView(task) : undefined;
+  const remoteSnapshot = useRemoteSourceSnapshot(task?.remoteSource, props.onReadArtifact);
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
@@ -394,8 +404,11 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   const reviewPending = reviewStartPending && !reviewIsRunning;
   const headerState = task ? describeTaskStatus(task) : undefined;
+  const provider = task ? deliveryProvider(task, props.repository) : 'GITHUB';
+  const prNoun = deliveryNoun(provider);
   const prStatus = task
     ? buildPrStatusViewModel({
+        provider,
         task,
         worktree,
         gitSnapshot,
@@ -403,7 +416,8 @@ export function TaskDetail(props: TaskDetailProps) {
         pullRequest,
         ciRollup,
         reviewRollup,
-        mergeSnapshot
+        mergeSnapshot,
+        observedPullRequestHeads: props.pullRequestHeads
       })
     : undefined;
   useLayoutEffect(() => {
@@ -557,7 +571,9 @@ export function TaskDetail(props: TaskDetailProps) {
     props.runs
   );
   const externalWork = worktree?.ownership === 'EXTERNAL';
-  const importedBeforeFirstRun = externalWork && !task.currentRunId;
+  // An imported checkout or an opened pull request: reviewable before any turn, coded on from an instruction.
+  const existingWork = startsFromExistingWork(task, worktree);
+  const importedBeforeFirstRun = existingWork && !task.currentRunId;
   const externalReviewReady = canReviewExistingWork(task, worktree) && !gitSnapshot?.operationInProgress;
   const hasActionableReviewSource = Boolean(actionableReviewSourceRun) ||
     (externalReviewReady && ['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase));
@@ -596,6 +612,7 @@ export function TaskDetail(props: TaskDetailProps) {
         )
     );
   const prActionState = buildPrStatusActionState({
+    provider,
     view: prStatus,
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
@@ -791,13 +808,16 @@ export function TaskDetail(props: TaskDetailProps) {
     setDraftPrModalOpen(true);
   };
 
-  const submitDraftPr = async (baseBranch?: string) => {
+  const submitDraftPr = async (baseBranch?: string, closeIssue?: boolean) => {
     const title = draftPrTitle.replace(/\s+/g, ' ').trim();
     if (!title || prActionState.createOrPushDisabled) {
       return;
     }
     await runDeliveryAction(async () => {
-      await props.onCreatePullRequest(task.id, normalizePullRequestTitle(title, task.title), baseBranch);
+      const normalized = normalizePullRequestTitle(title, task.title);
+      await (closeIssue === undefined
+        ? props.onCreatePullRequest(task.id, normalized, baseBranch)
+        : props.onCreatePullRequest(task.id, normalized, baseBranch, closeIssue));
       setDraftPrModalOpen(false);
     });
   };
@@ -910,7 +930,12 @@ export function TaskDetail(props: TaskDetailProps) {
     worktreePreparationPending: props.worktreePreparationPending,
     worktree,
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: externalWork ? async () => setExistingWorkModal('instruction') : async (taskId) => {
+    // An opened pull request starts from the request saved in its composer; an
+    // imported checkout always confirms in the dialog that warns about its files.
+    onStart: existingWork ? async (taskId, request) => {
+      if (externalWork || !(request ?? task.prompt).trim()) { setExistingWorkModal('instruction'); return; }
+      setTab('agent'); await startWithSettings(taskId);
+    } : async (taskId) => {
       setTab('agent'); await startWithSettings(taskId);
     }
   });
@@ -1208,7 +1233,7 @@ export function TaskDetail(props: TaskDetailProps) {
             label: setup.label,
             disabled: setup.disabled || Boolean(blocked),
             reason: blocked,
-            onClick: setup.onClick
+            onClick: () => setup.onClick()
           }}
           secondary={ready && !externalWork ? [{ label: 'Edit setup', onClick: () => setTab('agent') }] : []}
         />
@@ -1241,6 +1266,11 @@ export function TaskDetail(props: TaskDetailProps) {
       onPushUpdate={() =>
         void runDeliveryAction(async () => {
           await props.onCreatePullRequest(task.id);
+        })
+      }
+      onSyncBranch={() =>
+        void runDeliveryAction(async () => {
+          await props.onSyncPullRequest?.(task.id);
         })
       }
       onRefresh={() =>
@@ -1279,7 +1309,7 @@ export function TaskDetail(props: TaskDetailProps) {
           label: primaryAction.label,
           disabled: primaryAction.disabled || Boolean(runtimeBlockedReason),
           reason: runtimeBlockedReason,
-          onClick: primaryAction.onClick
+          onClick: () => primaryAction.onClick()
         }
       : undefined;
   // Before a pull request exists, opening one is a way to finish, so it sits
@@ -1287,7 +1317,7 @@ export function TaskDetail(props: TaskDetailProps) {
   // What PR Status would have said, such as a failed push, comes with it.
   const createPrReason = prActionState.createOrPushDisabled ? prActionState.createOrPushReason : undefined;
   const createPrAction: SlotAction | undefined = prPlacement.createInNowPanel
-    ? { label: 'Create draft PR', disabled: prActionState.createOrPushDisabled, reason: createPrReason, onClick: openDraftPrModal }
+    ? { label: `Create draft ${prNoun}`, disabled: prActionState.createOrPushDisabled, reason: createPrReason, onClick: openDraftPrModal }
     : undefined;
   const createPrFacts = prPlacement.createInNowPanel
     ? [prStatus.freshnessLine, prStatus.leadLine, prStatus.guidanceLine].filter(
@@ -1653,8 +1683,13 @@ export function TaskDetail(props: TaskDetailProps) {
             <div className="tm-overview__main">
               <TaskWorkPanels>
                 {decision}
-                {requestRepeatsTitle(task) && props.attachments.length === 0 ? null : (
-                  <OverviewRequest prompt={task.prompt} attachments={props.attachments} />
+                {/* A pull request's link is PR Status's; its request is what its author and the person wrote. */}
+                {(remoteSource?.kind === 'PULL_REQUEST'
+                  ? !task.prompt.trim() && !remoteSnapshot?.body.trim() && props.attachments.length === 0
+                  : requestRepeatsTitle(task) && props.attachments.length === 0 && !remoteSource) ? null : (
+                  <OverviewRequest prompt={task.prompt} attachments={props.attachments}
+                    source={remoteSource} snapshot={remoteSnapshot} linked={remoteSource?.kind !== 'PULL_REQUEST'}
+                    sourceTitle={remoteSource && remoteSource.title !== task.title ? remoteSource.title : undefined} />
                 )}
                 {/* A run's result is what a completed run left behind; a running one has none yet. */}
                 {progressRun?.status === 'COMPLETED' ? (
@@ -1916,6 +1951,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       {existingWorkModal && worktree && props.onListExistingWorktrees ? (
         <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}
+          {...(remoteSource?.kind === 'PULL_REQUEST' ? { pullRequestReference: remoteSource.reference } : {})}
           onListCheckouts={props.onListExistingWorktrees}
           onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
           onSubmit={async (value) => {
@@ -1944,8 +1980,12 @@ export function TaskDetail(props: TaskDetailProps) {
 
       {draftPrModalOpen ? (
         <CreateDraftPrModal
+          noun={prNoun}
           title={draftPrTitle}
           worktree={worktree}
+          issueNumber={task.remoteSource?.kind === 'ISSUE'
+            ? formatRemoteWorkNumber(task.remoteSource.provider, 'ISSUE', task.remoteSource.number)
+            : undefined}
           busy={deliveryActionBusy}
           disabled={prActionState.createOrPushDisabled}
           disabledReason={prActionState.createOrPushReason}
@@ -2143,6 +2183,7 @@ function PrStatusCard({
   title,
   onCreateDraftPr,
   onPushUpdate,
+  onSyncBranch,
   onRefresh,
   onInvestigate
 }: {
@@ -2154,6 +2195,7 @@ function PrStatusCard({
   title?: string;
   onCreateDraftPr(): void;
   onPushUpdate(): void;
+  onSyncBranch(): void;
   onRefresh(): void;
   onInvestigate(): void;
 }) {
@@ -2163,10 +2205,11 @@ function PrStatusCard({
   );
   const leadAction = !prominent ? undefined
     : view.canInvestigateFailure ? 'investigate'
-      : view.canPushUpdate ? 'push'
-        : view.canCreateDraftPr ? 'create'
-          : undefined;
-  const actionClass = (action: 'investigate' | 'push' | 'create') =>
+      : view.canSyncBranch ? 'sync'
+        : view.canPushUpdate ? 'push'
+          : view.canCreateDraftPr ? 'create'
+            : undefined;
+  const actionClass = (action: 'investigate' | 'push' | 'create' | 'sync') =>
     leadAction === action ? 'primary-button' : 'outline-button';
   // A disabled action's reason is stated beside it and tied to it, so it is not
   // also listed among the facts.
@@ -2177,11 +2220,12 @@ function PrStatusCard({
   // A disabled action's reason is stated beside it, not only in a hover title
   // a disabled button can never show to the keyboard.
   const reasonPrefix = useId();
-  const slotReasons = view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure
+  const slotReasons = view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch
     ? [
         ...new Set(
           [
             createOrPushReason,
+            view.canSyncBranch && actionState.syncDisabled ? actionState.syncReason : undefined,
             view.canInvestigateFailure && actionState.investigateDisabled
               ? actionState.investigateReason
               : undefined
@@ -2192,19 +2236,21 @@ function PrStatusCard({
   const reasonId = (reason: string | undefined) =>
     reason && slotReasons.includes(reason) ? `${reasonPrefix}-${slotReasons.indexOf(reason)}` : undefined;
   const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind);
+  const gitLab = view.deliveryNoun === 'MR';
+  const noun = gitLab ? 'merge request' : 'pull request';
   const refresh = view.canRefresh ? (
     <span className="tm-prstatus__refreshline">
       {view.refreshedLine ? <span>Updated {view.refreshedLine}</span> : null}
       <ActionButtonTitle
         disabled={actionState.refreshDisabled}
-        title={actionState.refreshReason ?? 'Refresh pull request'}
+        title={actionState.refreshReason ?? `Refresh ${noun}`}
       >
         <button
           type="button"
           className="tm-prstatus__refresh"
           disabled={actionState.refreshDisabled}
           onClick={onRefresh}
-          aria-label="Refresh pull request"
+          aria-label={`Refresh ${noun}`}
         >
           <RefreshIcon />
         </button>
@@ -2213,9 +2259,9 @@ function PrStatusCard({
   ) : null;
   const identity = view.hasPullRequest ? (
     view.prUrl ? (
-      <a href={view.prUrl} target="_blank" rel="noreferrer">{view.prIdentityLine ?? 'Pull request'}</a>
+      <a href={view.prUrl} target="_blank" rel="noreferrer">{view.prIdentityLine ?? (gitLab ? 'Merge request' : 'Pull request')}</a>
     ) : (
-      <span>{view.prIdentityLine ?? 'Pull request'}</span>
+      <span>{view.prIdentityLine ?? (gitLab ? 'Merge request' : 'Pull request')}</span>
     )
   ) : null;
   // The PR's headline is stated once: as the panel's title, or beside its identity.
@@ -2230,11 +2276,11 @@ function PrStatusCard({
   ].filter((line): line is string => Boolean(line) && line !== createOrPushReason);
 
   return (
-    <section className={`tm-prstatus${prominent ? ' tm-prstatus--now' : ''}`} aria-label="Pull request">
+    <section className={`tm-prstatus${prominent ? ' tm-prstatus--now' : ''}`} aria-label={gitLab ? 'Merge request' : 'Pull request'}>
       <div className="tm-prstatus__head">
         {/* In the Now panel the PR's own state is the step; as a section it is one more fact. */}
         <h3 className={prominent ? 'tm-slot__headline' : 'tm-osection__title'}>
-          {prominent ? title ?? view.headline : 'Pull request'}
+          {prominent ? title ?? view.headline : gitLab ? 'Merge request' : 'Pull request'}
         </h3>
         {refresh}
       </div>
@@ -2254,8 +2300,21 @@ function PrStatusCard({
         <p key={line} className="tm-prstatus__fact">{line}</p>
       ))}
 
-      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure ? (
+      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch ? (
         <div className="tm-prstatus__actions">
+          {view.canSyncBranch ? (
+            <ActionButtonTitle disabled={actionState.syncDisabled} title={actionState.syncReason}>
+              <button
+                type="button"
+                className={actionClass('sync')}
+                disabled={actionState.syncDisabled}
+                aria-describedby={actionState.syncDisabled ? reasonId(actionState.syncReason) : undefined}
+                onClick={onSyncBranch}
+              >
+                Sync branch
+              </button>
+            </ActionButtonTitle>
+          ) : null}
           {view.canCreateDraftPr ? (
             <ActionButtonTitle
               disabled={actionState.createOrPushDisabled}
@@ -2270,7 +2329,7 @@ function PrStatusCard({
                 aria-describedby={actionState.createOrPushDisabled ? reasonId(createOrPushTitle) : undefined}
                 onClick={onCreateDraftPr}
               >
-                Create draft PR
+                Create draft {view.deliveryNoun ?? 'PR'}
               </button>
             </ActionButtonTitle>
           ) : null}
@@ -2315,15 +2374,15 @@ function PrStatusCard({
         </p>
       ))}
 
-      {view.checkGroups.length > 0 ? <PrCheckDetails groups={view.checkGroups} /> : null}
+      {view.checkGroups.length > 0 ? <PrCheckDetails groups={view.checkGroups} platform={gitLab ? 'GitLab' : 'GitHub'} /> : null}
     </section>
   );
 }
 
-function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
+function PrCheckDetails({ groups, platform }: { groups: PrCheckGroup[]; platform: 'GitHub' | 'GitLab' }) {
   const checks = groups.flatMap((group) => group.checks);
   return (
-    <details className="tm-prchecks" aria-label="GitHub check details">
+    <details className="tm-prchecks" aria-label={`${platform} check details`}>
       <summary className="tm-prchecks__head">
         <span className="tm-disclosure__label"><DisclosureChevron />Checks</span>
         <span>{checks.length}</span>
@@ -2448,8 +2507,8 @@ function getPrimaryAction(input: {
   worktree?: WorktreeRecord;
   worktreePreparationPending?: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
-  onStart(taskId: string): Promise<void>;
-}): { label: string; disabled?: boolean; onClick(): void } | undefined {
+  onStart(taskId: string, request?: string): Promise<void>;
+}): { label: string; disabled?: boolean; onClick(request?: string): void } | undefined {
   if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
     return undefined;
   }
@@ -2469,7 +2528,7 @@ function getPrimaryAction(input: {
   if (input.worktree.status === 'PRESENT' && canStartRun(input.task)) {
     return {
       label: 'Start implementation',
-      onClick: () => void input.onStart(input.task.id)
+      onClick: (request) => void input.onStart(input.task.id, request)
     };
   }
 

@@ -138,7 +138,7 @@ export function redactCredentialText(
         `${label}${quote}${REDACTED_CREDENTIAL}${quote}`
     )
     .replace(
-      /\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[oprsu]_[A-Za-z0-9_]{12,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gu,
+      /\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[oprsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,}|gl(?:pat|oas|dt|rt|ptt|soat|ft|imt|cbt)-[A-Za-z0-9_.-]{16,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gu,
       REDACTED_CREDENTIAL
     );
   for (const sensitive of normalizedSensitiveValues(sensitiveValues)) {

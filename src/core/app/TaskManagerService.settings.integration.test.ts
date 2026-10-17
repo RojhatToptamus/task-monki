@@ -534,7 +534,8 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
         externalExecutables: {
           gitExecutablePath: null,
           codexExecutablePath: customCodex,
-          ghExecutablePath: null
+          ghExecutablePath: null,
+          glabExecutablePath: null
         }
       }),
       worktreeRoot: path.join(dir, 'worktrees')

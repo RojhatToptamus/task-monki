@@ -12,10 +12,12 @@ import {
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export function ExistingWorkModal({
-  mode, worktree, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
+  mode, worktree, pullRequestReference, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
 }: {
   mode: 'instruction' | 'comparison' | 'reconnect';
   worktree: WorktreeRecord;
+  /** Work opened from a pull request runs in Task Monki's own copy, so nothing about the checkout needs saying. */
+  pullRequestReference?: string;
   onListCheckouts(repositoryId: string): Promise<ExistingWorktree[]>;
   onSubmit(value: string): Promise<void>;
   onCancel(): void;
@@ -64,9 +66,10 @@ export function ExistingWorkModal({
         <div>
           {mode === 'instruction' ? (
             <label className="field"><span id="checkout-instruction-label">What should the agent do?</span>
-              <textarea aria-labelledby="checkout-instruction-label" aria-describedby="checkout-instruction-help"
+              <textarea aria-labelledby="checkout-instruction-label"
+                aria-describedby={pullRequestReference ? undefined : 'checkout-instruction-help'}
                 value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
-              <small id="checkout-instruction-help">The agent will edit your original imported checkout.</small>
+              {pullRequestReference ? null : <small id="checkout-instruction-help">The agent will edit your original imported checkout.</small>}
             </label>
           ) : mode === 'comparison' ? (
             <label className="field"><span id="checkout-comparison-label">Compare against</span>
@@ -100,8 +103,10 @@ export function ExistingWorkModal({
 }
 
 export function CreateDraftPrModal({
+  noun = 'PR',
   title,
   worktree,
+  issueNumber,
   busy,
   disabled,
   disabledReason,
@@ -110,18 +115,24 @@ export function CreateDraftPrModal({
   onSubmit,
   fallbackReturnFocusRef
 }: {
+  /** PR on GitHub, MR on GitLab. */
+  noun?: 'PR' | 'MR';
   title: string;
   worktree?: WorktreeRecord;
+  /** The issue the task was opened from, which the pull request names. */
+  /** The issue the task was opened from, as the description writes it: `#42`. */
+  issueNumber?: string;
   busy: boolean;
   disabled: boolean;
   disabledReason?: string;
   onTitleChange(value: string): void;
   onCancel(): void;
-  onSubmit(baseBranch?: string): Promise<void>;
+  onSubmit(baseBranch?: string, closeIssue?: boolean): Promise<void>;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const cleanTitle = title.replace(/\s+/g, ' ').trim();
   const [baseBranch, setBaseBranch] = useState('');
+  const [closeIssue, setCloseIssue] = useState(true);
   const [error, setError] = useState<string>();
   const external = worktree?.ownership === 'EXTERNAL';
   const confirmDisabled = busy || disabled || !cleanTitle || (external && !baseBranch.trim());
@@ -139,7 +150,7 @@ export function CreateDraftPrModal({
     if (!confirmDisabled) {
       setError(undefined);
       try {
-        await onSubmit(external ? baseBranch.trim() : undefined);
+        await onSubmit(external ? baseBranch.trim() : undefined, issueNumber ? closeIssue : undefined);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : 'Could not create the pull request.');
       }
@@ -155,11 +166,11 @@ export function CreateDraftPrModal({
         tabIndex={-1}
         onSubmit={(event) => void submit(event)}
       >
-        <h3 id="draft-pr-title">Create draft PR</h3>
-        <p>Review the title before Task Monki opens the draft pull request.</p>
+        <h3 id="draft-pr-title">Create draft {noun}</h3>
+        <p>Review the title before Task Monki opens the draft {noun === 'MR' ? 'merge request' : 'pull request'}.</p>
 
         <label className="field tm-draftpr-modal__field">
-          <span className="field__label">PR title</span>
+          <span className="field__label">{noun} title</span>
           <input
             ref={titleInputRef}
             type="text"
@@ -171,6 +182,14 @@ export function CreateDraftPrModal({
           {/* The count matters only near the limit. */}
           {cleanTitle.length > PULL_REQUEST_TITLE_MAX_LENGTH * 0.8 ? <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small> : null}
         </label>
+
+        {/* The keyword is all Task Monki writes; the platform closes the issue when the change merges into the default branch. */}
+        {issueNumber ? (
+          <label className="tm-draftpr-modal__check">
+            <input type="checkbox" checked={closeIssue} disabled={busy} onChange={(event) => setCloseIssue(event.target.checked)} />
+            <span>Add “Closes {issueNumber}” to the description</span>
+          </label>
+        ) : null}
 
         {external ? (
           <label className="field tm-draftpr-modal__field">
@@ -203,7 +222,7 @@ export function CreateDraftPrModal({
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={confirmDisabled}>
-            {busy ? 'Creating…' : 'Create draft PR'}
+            {busy ? 'Creating…' : `Create draft ${noun}`}
           </button>
         </div>
       </form>

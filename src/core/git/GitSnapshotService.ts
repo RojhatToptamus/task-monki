@@ -27,16 +27,28 @@ const GIT_STATUS_ARGS = [
   '-z'
 ] as const;
 
-export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>> {
+/**
+ * The head of the pull request a task was opened from. It stands in for the
+ * branch's upstream: Task Monki never configures one for these branches.
+ */
+export interface PullRequestHead {
+  ref: string;
+  sha: string;
+}
+
+export async function inspectGitSnapshot(
+  worktree: WorktreeRecord,
+  options: { pullRequestHead?: PullRequestHead } = {}
+): Promise<Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>> {
   return {
-    ...await inspectWorkingCopy(worktree),
+    ...await inspectWorkingCopy(worktree, options.pullRequestHead),
     taskId: worktree.taskId,
     iterationId: worktree.iterationId,
     worktreeId: worktree.id
   };
 }
 
-async function inspectWorkingCopy(worktree: GitComparison): Promise<GitObservation> {
+async function inspectWorkingCopy(worktree: GitComparison, pullRequestHead?: PullRequestHead): Promise<GitObservation> {
   const [
     repoRoot,
     gitCommonDir,
@@ -68,6 +80,10 @@ async function inspectWorkingCopy(worktree: GitComparison): Promise<GitObservati
   ]);
 
   const parsedStatus = parseGitStatusPorcelain(statusOutput);
+  const relation = pullRequestHead
+    ? await relateToPullRequestHead(worktree.worktreePath, pullRequestHead)
+    : undefined;
+  if (relation) Object.assign(parsedStatus, relation);
   const committedDiffFileCount = countLines(committedDiffNames);
   const workingDiffFileCount = new Set([
     ...workingDiffNames.split('\n').filter(Boolean),
@@ -83,7 +99,7 @@ async function inspectWorkingCopy(worktree: GitComparison): Promise<GitObservati
     baseRef: worktree.baseRef,
     baseSha: worktree.baseSha,
     upstreamRef: parsedStatus.upstreamRef,
-    upstreamSha: upstreamSha.trim() || undefined,
+    upstreamSha: relation ? pullRequestHead!.sha : upstreamSha.trim() || undefined,
     aheadCount: parsedStatus.aheadCount,
     behindCount: parsedStatus.behindCount,
     stagedCount: parsedStatus.stagedCount,
@@ -396,6 +412,22 @@ export async function detectOperationInProgress(worktreePath: string): Promise<s
   }
 
   return undefined;
+}
+
+/**
+ * Commits on each side of the pull request head. A head that is not present
+ * locally has at least one commit this checkout lacks.
+ */
+async function relateToPullRequestHead(
+  worktreePath: string,
+  head: PullRequestHead
+): Promise<Pick<ParsedStatus, 'upstreamRef' | 'aheadCount' | 'behindCount'>> {
+  const counts = await git(worktreePath, ['rev-list', '--left-right', '--count', `HEAD...${head.sha}`])
+    .then((value) => value.trim().split(/\s+/u).map(Number))
+    .catch(() => undefined);
+  return counts && counts.length === 2 && counts.every(Number.isSafeInteger)
+    ? { upstreamRef: head.ref, aheadCount: counts[0]!, behindCount: counts[1]! }
+    : { upstreamRef: head.ref, aheadCount: 0, behindCount: 1 };
 }
 
 function deriveGitStatus(input: ParsedStatus & { committedDiffFileCount: number; commitsAheadOfBase: number }): GitStatus {

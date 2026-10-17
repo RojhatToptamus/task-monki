@@ -1,6 +1,16 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel, ExistingWorktree, ImportPreview, RefinePromptResponse, Repository } from '../../shared/contracts';
+import type {
+  AgentModel,
+  ExistingWorktree,
+  ImportPreview,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  RefinePromptResponse,
+  RemoteWorkListing,
+  RemoteWorkSummary,
+  Repository
+} from '../../shared/contracts';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
@@ -141,13 +151,13 @@ describe('mounted existing-work import', () => {
       models: [], runtimes: [], onImport, onCreate,
       onListExistingWorktrees: async () => [{ worktreePath: '/tmp/project', branchName: 'feature' }]
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     await screen.findByRole('option', { name: 'feature at /tmp/project', selected: true });
     fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
     fireEvent.click(screen.getByRole('option', { name: 'feature at /tmp/project', selected: true }));
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: true }));
     expect((screen.getByRole('button', { name: 'Import' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.submit(screen.getByRole('dialog', { name: 'New task' }));
     await waitFor(() => expect(onImport).toHaveBeenCalledOnce());
@@ -166,9 +176,9 @@ describe('mounted existing-work import', () => {
     const onImport = vi.fn();
     const onOpenExistingTask = vi.fn(async () => undefined);
     renderPanel({ onImport, onOpenExistingTask, onListExistingWorktrees });
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     fireEvent.click(screen.getByRole('button', { name: 'New work' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     await screen.findByRole('button', { name: 'Open existing task' });
     await act(async () => resolveOld([{ worktreePath: '/tmp/old', branchName: 'wrong' }]));
     expect(screen.queryByRole('option', { name: 'wrong at /tmp/old' })).toBeNull();
@@ -182,7 +192,7 @@ describe('mounted existing-work import', () => {
       { worktreePath: '/tmp/one', branchName: 'feat/add-search' },
       { worktreePath: '/tmp/two', branchName: 'fix/slow-list', existingTaskId: 'task-existing' }
     ] });
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     const first = await screen.findByRole('option', { name: 'feat/add-search at /tmp/one' });
     first.focus();
     // Selecting a tracked checkout replaces the list, so arrows must only move focus.
@@ -198,7 +208,7 @@ describe('mounted existing-work import', () => {
       { worktreePath: '/tmp/one', branchName: 'feat/add-search' },
       { worktreePath: '/tmp/two', branchName: 'fix/slow-list' }
     ] });
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     fireEvent.click(await screen.findByRole('option', { name: 'feat/add-search at /tmp/one' }));
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('add search');
     fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), { target: { value: 'Keep my title' } });
@@ -212,7 +222,7 @@ describe('mounted existing-work import', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New work' }));
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Sync badge');
     expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     await screen.findByRole('option', { name: 'fix/slow-list at /tmp/two', selected: true });
     expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Keep my title');
     expect(screen.queryByRole('textbox', { name: 'Description' })).toBeNull();
@@ -228,7 +238,7 @@ describe('mounted existing-work import', () => {
       .mockRejectedValueOnce(new Error('Enter a valid local branch or commit.'));
     const onImport = vi.fn();
     renderPanel({ onImport, onPreviewImport, onListExistingWorktrees: async () => [{ worktreePath: '/tmp/one', branchName: 'feat/title' }] });
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     await waitFor(() => expect(onPreviewImport).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('button', { name: 'HEAD' }));
     await screen.findByText('0 commits and 1 uncommitted file');
@@ -264,7 +274,7 @@ describe('mounted New task writing size', () => {
     // The chord works while writing; imported work has no description, so no writing size.
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Description' }), { key: 'F', metaKey: true, shiftKey: true });
     expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Import existing work', pressed: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout', pressed: false }));
     expect(screen.queryByRole('button', { name: 'Collapse' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'New work', pressed: false }));
     expect(screen.getByRole('button', { name: 'Collapse' })).toBeTruthy();
@@ -275,6 +285,92 @@ describe('mounted New task writing size', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+});
+
+describe('mounted remote work sources', () => {
+  const remote = { provider: 'GITHUB' as const, host: 'github.com', path: 'acme/widgets', remoteName: 'origin' };
+  const issue = (overrides: Partial<RemoteWorkSummary> = {}): RemoteWorkSummary => ({
+    ref: { repository: { provider: 'GITHUB', host: 'github.com', path: 'acme/widgets' }, kind: 'ISSUE', number: 12 },
+    url: 'https://github.com/acme/widgets/issues/12', title: 'Crash on save', state: 'OPEN', ...overrides
+  });
+  const listing = (items: RemoteWorkSummary[], exact = false): RemoteWorkListing =>
+    ({ repositories: [remote], remote, items, exact });
+
+  it('creates a task from a chosen issue and leaves the New work draft alone', async () => {
+    const onCreate = vi.fn(async () => undefined);
+    const onTextDraftChange = vi.fn();
+    const onListRemoteWork = vi.fn(async (_input: ListRemoteWorkRequest) => listing([issue()]));
+    renderPanel({ onCreate, onTextDraftChange, onListRemoteWork, onOpenPullRequest: async () => undefined });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Issue', pressed: false }));
+    fireEvent.click(await screen.findByRole('option', { name: '#12 Crash on save' }));
+    expect((screen.getByRole('textbox', { name: 'Title' }) as HTMLInputElement).value).toBe('Crash on save');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Instructions' }), { target: { value: 'Add a regression test.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create task in project' }));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Crash on save', prompt: 'Add a regression test.', issue: issue().ref, repositoryId: 'repository-1'
+    }));
+    expect(onListRemoteWork).toHaveBeenCalledWith({ repositoryId: 'repository-1', kind: 'ISSUE' });
+    expect(onTextDraftChange).not.toHaveBeenCalled();
+  });
+
+  it('chooses the one item a pasted link names and opens its existing task instead of creating another', async () => {
+    const onCreate = vi.fn();
+    const onOpenExistingTask = vi.fn(async () => undefined);
+    const link = 'https://github.com/acme/widgets/issues/12';
+    renderPanel({
+      onCreate, onOpenExistingTask, onOpenPullRequest: async () => undefined,
+      onListRemoteWork: async (input) => input.query === link
+        ? listing([issue({ existingTaskId: 'task-9', existingTaskTitle: 'Crash on save', existingTaskPhase: 'IN_PROGRESS' })], true)
+        : listing([])
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Issue', pressed: false }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Search issues' }), { target: { value: link } });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open existing task' }));
+    await waitFor(() => expect(onOpenExistingTask).toHaveBeenCalledWith('task-9'));
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('opens a chosen pull request with its title and the selected agent', async () => {
+    const onOpenPullRequest = vi.fn(async (_input: OpenPullRequestRequest) => undefined);
+    const pull: RemoteWorkSummary = {
+      ref: { repository: { provider: 'GITHUB', host: 'github.com', path: 'acme/widgets' }, kind: 'PULL_REQUEST', number: 7 },
+      url: 'https://github.com/acme/widgets/pull/7', title: 'Add retries', state: 'OPEN',
+      headRefName: 'main', crossRepository: true, headRepositoryPath: 'contributor/widgets'
+    };
+    renderPanel({ onOpenPullRequest, onListRemoteWork: async () => listing([pull]) });
+    fireEvent.click(screen.getByRole('button', { name: 'Pull request', pressed: false }));
+    const option = await screen.findByRole('option', { name: '#7 Add retries' });
+    // A fork's head reads owner:branch, and the footer says up front that Task Monki will not push there.
+    expect(option.textContent).toContain('contributor:main');
+    fireEvent.click(option);
+    expect(screen.getByText('Opens as In progress. No agent starts, and Task Monki does not push to forks.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open pull request' }));
+
+    await waitFor(() => expect(onOpenPullRequest).toHaveBeenCalledOnce());
+    expect(onOpenPullRequest).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: 'repository-1', pullRequest: pull.ref, title: 'Add retries', runtimeId: 'codex'
+    }));
+  });
+
+  it('states why issues cannot be listed and retries on request', async () => {
+    const onListRemoteWork = vi.fn(async (): Promise<RemoteWorkListing> => ({
+      ...listing([]), unavailable: { code: 'SIGNED_OUT', message: 'GitHub CLI is not signed in to github.com.' }
+    }));
+    renderPanel({ onListRemoteWork, onOpenPullRequest: async () => undefined });
+    fireEvent.click(screen.getByRole('button', { name: 'Issue', pressed: false }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('GitHub CLI is not signed in to github.com. Run gh auth login.');
+    expect(alert.querySelector('code')?.textContent).toBe('gh auth login');
+    // Searching cannot help a signed-out CLI.
+    expect((screen.getByRole('textbox', { name: 'Search issues' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Create task in project' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(onListRemoteWork).toHaveBeenCalledTimes(2));
   });
 });
 

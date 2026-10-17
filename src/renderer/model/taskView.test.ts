@@ -329,18 +329,22 @@ describe('task card view model', () => {
     // No pull request is the absence of delivery state, not a footer.
     expect(pullRequest({ git: 'CLEAN', githubPullRequest: 'NOT_CREATED' })).toBeUndefined();
     expect(pullRequest({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 82, ciChecks: 'PENDING' }))
-      .toEqual({ number: 82, state: 'draft', note: 'checks pending' });
+      .toEqual({ number: 82, label: '#82', state: 'draft', note: 'checks pending' });
     // The status word already says Checks failed, so the footer does not repeat it.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'FAILING' }))
-      .toEqual({ number: 82, state: 'open' });
+      .toEqual({ number: 82, label: '#82', state: 'open' });
     // Scalars alone never claim ready to merge.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
-      .toEqual({ number: 82, state: 'open', note: 'checks passing, mergeable' });
+      .toEqual({ number: 82, label: '#82', state: 'open', note: 'checks passing, mergeable' });
     // A merged or closed pull request says so with its state alone.
     expect(pullRequest({ githubPullRequest: 'MERGED', githubPullRequestNumber: 82, merge: 'MERGED', ciChecks: 'FAILING' }))
-      .toEqual({ number: 82, state: 'merged' });
+      .toEqual({ number: 82, label: '#82', state: 'merged' });
     expect(pullRequest({ githubPullRequest: 'CLOSED_UNMERGED', githubPullRequestNumber: 82 }))
-      .toEqual({ number: 82, state: 'closed' });
+      .toEqual({ number: 82, label: '#82', state: 'closed' });
+    // A GitLab merge request is written with its own sign.
+    expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 7,
+      githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }))
+      .toEqual({ number: 7, label: '!7', state: 'open' });
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {

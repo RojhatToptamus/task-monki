@@ -79,6 +79,8 @@
   min-height: 0;
   padding: 16px 16px 20px;
   overflow-y: auto;
+  /* Fields keep their place when a choice makes the body scroll. */
+  scrollbar-gutter: stable;
 }
 
 .newtask-section {
@@ -460,6 +462,13 @@
 .field.field--prompt textarea:focus {
   border-color: transparent;
   box-shadow: none;
+}
+
+/* Instructions beside an issue are optional: the composer's height, growing with what is written. */
+.field.field--prompt.field--instructions textarea {
+  min-height: 88px;
+  max-height: min(200px, 24vh);
+  field-sizing: content;
 }
 
 /* No hover fill on a text surface: at rest it already reads as a field, and
@@ -962,9 +971,27 @@
 .import-work__meta { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--muted); font-size: var(--t-help); }
 .import-work__existing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .import-work__footer-note { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
+/* The label row keeps one height while the list loads and after it names the
+   repository; the repository switcher gives back the height its target adds. */
+.remote-work__header { min-height: var(--lh-ui); }
+.remote-work__header .tm-composer-chip { margin-block: calc((var(--lh-ui) - var(--h-toolbar)) / 2); }
+/* Why the list could not be read, with Retry at its end when retrying can help. */
+.remote-work__problem { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px; }
+.remote-work__problem code { color: inherit; font-size: var(--t-meta); }
+/* An issue or pull request row: its number and title, then who and when, on one line. */
+.remote-work__identity { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.remote-work__title { flex: 1 1 0%; min-width: 0; overflow: hidden; color: inherit; font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
+.remote-work__number { margin-right: 6px; color: var(--muted); font-feature-settings: "tnum"; }
+/* The title keeps at least half the row; a long branch name gives way first and
+   the author and date stay whole. */
+.remote-work__meta { display: flex; flex: 0 1 auto; gap: 8px; max-width: 50%; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
+.remote-work__meta > * { flex: none; overflow: hidden; text-overflow: ellipsis; }
+.remote-work__meta code { flex: 0 1 auto; min-width: 0; color: inherit; font-size: var(--t-meta); }
 
 @container (max-width: 420px) {
-  .import-work__identity { flex-direction: column; gap: 2px; align-items: stretch; }
+  .import-work__identity,
+  .remote-work__identity { flex-direction: column; gap: 2px; align-items: stretch; }
+  .remote-work__meta { max-width: none; }
 }
 
 @media (max-width: 560px) {

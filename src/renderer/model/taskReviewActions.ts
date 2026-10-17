@@ -1,4 +1,5 @@
 import type { RunRecord, Task, WorktreeRecord } from '../../shared/contracts';
+import { startsFromExistingWork } from '../../shared/promptTemplates';
 import {
   isCompletedCurrentImplementationRun,
   isImplementationRetryRequired
@@ -6,7 +7,7 @@ import {
 import { isClosedPhase, isReviewPhase } from './taskPhase';
 
 export function canReviewExistingWork(task: Task, worktree?: WorktreeRecord): boolean {
-  return worktree?.ownership === 'EXTERNAL' && !task.currentRunId &&
+  return startsFromExistingWork(task, worktree) && !task.currentRunId &&
     task.projection.worktree === 'PRESENT' &&
     !['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(task.projection.git);
 }

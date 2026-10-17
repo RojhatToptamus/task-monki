@@ -67,6 +67,23 @@ describe('ReviewSnapshotStore', () => {
     expect(diff).not.toContain('staged.js');
   });
 
+  it('runs no repository hook, even one the checkout itself carries, while capturing', async () => {
+    const { repo, store } = await repository();
+    const marker = path.join(path.dirname(repo), 'hook-ran');
+    await git(repo, ['config', 'core.hooksPath', '.githooks']);
+    await write(repo, '.githooks/post-index-change', `#!/bin/sh\necho ran >> '${marker}'\n`);
+    await fs.chmod(path.join(repo, '.githooks', 'post-index-change'), 0o755);
+    await write(repo, 'app.js', 'changed\n');
+    const tree = await store.capture(repo);
+    await store.pin(repo, 'task-1', 'review-1', tree);
+    await write(repo, 'app.js', 'changed again\n');
+    expect((await store.changesSince(repo, 'task-1', 'review-1', tree)).status).toBe('READY');
+    await expect(fs.access(marker)).rejects.toThrow();
+    // Control: an ordinary index write in the checkout runs it.
+    await git(repo, ['add', 'app.js']);
+    await expect(fs.access(marker)).resolves.toBeUndefined();
+  });
+
   it('never shows another tree as a review\'s, and lets a deleted task\'s reviews go', async () => {
     const { repo, store } = await repository();
     const tree = await store.capture(repo);

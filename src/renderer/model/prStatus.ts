@@ -9,7 +9,8 @@ import type {
   WorktreeRecord,
   Task
 } from '../../shared/contracts';
-import { getImplementationRetryReason } from '../../shared/contracts';
+import { getImplementationRetryReason, type RemoteProvider } from '../../shared/contracts';
+import { deliveryNoun, deliveryWords } from './deliveryWords';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
@@ -65,17 +66,24 @@ export interface PrStatusViewModel {
   canRefresh: boolean;
   canInvestigateFailure: boolean;
   canPushUpdate: boolean;
+  /** A task opened from a pull request can move its clean worktree to the pull request's newer head. */
+  canSyncBranch?: boolean;
+  /** PR on GitHub, MR on GitLab. */
+  deliveryNoun?: 'PR' | 'MR';
   createDraftPrDisabledReason?: string;
   pushUpdateDisabledReason?: string;
+  syncBranchDisabledReason?: string;
 }
 
 export interface PrStatusActionState {
   refreshDisabled: boolean;
   createOrPushDisabled: boolean;
   investigateDisabled: boolean;
+  syncDisabled: boolean;
   refreshReason?: string;
   createOrPushReason?: string;
   investigateReason?: string;
+  syncReason?: string;
   hint?: string;
 }
 
@@ -117,8 +125,9 @@ export function buildPrStatusActionState(input: {
   pauseReason?: PrStatusActionPauseReason;
   implementationRetryReason?: string;
   hasInvestigationSource?: boolean;
+  provider?: RemoteProvider;
 }): PrStatusActionState {
-  const busyReason = input.deliveryBusy ? 'GitHub action is in progress.' : undefined;
+  const busyReason = input.deliveryBusy ? deliveryWords('GitHub action is in progress.', input.provider ?? 'GITHUB') : undefined;
   const mutationPauseReason =
     busyReason ??
     prStatusPauseText(input.pauseReason) ??
@@ -135,13 +144,16 @@ export function buildPrStatusActionState(input: {
         ? input.view.pushUpdateDisabledReason
         : undefined);
   const investigateReason = mutationPauseReason ?? missingInvestigationSource;
+  const syncReason = input.view.canSyncBranch ? mutationPauseReason ?? input.view.syncBranchDisabledReason : undefined;
   return {
     refreshDisabled: Boolean(input.deliveryBusy),
     createOrPushDisabled: Boolean(createOrPushReason),
     investigateDisabled: Boolean(investigateReason),
+    syncDisabled: Boolean(syncReason),
     refreshReason: busyReason,
     createOrPushReason,
     investigateReason,
+    syncReason,
     hint:
       mutationPauseReason &&
       (input.view.canCreateDraftPr || input.view.canPushUpdate || input.view.canInvestigateFailure)
@@ -177,7 +189,31 @@ function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): strin
   }
 }
 
-export function buildPrStatusViewModel(input: {
+/** PR Status in the delivering platform's words: GitLab tasks read MR, `!N` and GitLab. */
+export function buildPrStatusViewModel(input: Parameters<typeof buildPrStatusFacts>[0] & { provider?: RemoteProvider }): PrStatusViewModel {
+  const view = buildPrStatusFacts(input);
+  const provider = input.provider ?? 'GITHUB';
+  if (provider !== 'GITLAB') return view;
+  const words = <T extends string | undefined>(text: T) => deliveryWords(text, provider);
+  return {
+    ...view,
+    deliveryNoun: deliveryNoun(provider),
+    headline: words(view.headline),
+    prIdentityLine: view.prIdentityLine?.replace(/^#(\d+)/u, '!$1'),
+    checkSummaryLine: words(view.checkSummaryLine),
+    evidenceLine: words(view.evidenceLine),
+    reviewLine: words(view.reviewLine),
+    mergeLine: words(view.mergeLine),
+    freshnessLine: words(view.freshnessLine),
+    guidanceLine: words(view.guidanceLine),
+    leadLine: words(view.leadLine),
+    createDraftPrDisabledReason: words(view.createDraftPrDisabledReason),
+    pushUpdateDisabledReason: words(view.pushUpdateDisabledReason),
+    syncBranchDisabledReason: words(view.syncBranchDisabledReason)
+  };
+}
+
+function buildPrStatusFacts(input: {
   task: Task;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
@@ -186,6 +222,8 @@ export function buildPrStatusViewModel(input: {
   ciRollup?: CiRollupRecord;
   reviewRollup?: ReviewRollupRecord;
   mergeSnapshot?: MergeSnapshotRecord;
+  /** Every head of the linked pull request Task Monki has observed, newest first. */
+  observedPullRequestHeads?: readonly (string | undefined)[];
 }): PrStatusViewModel {
   const {
     task,
@@ -208,6 +246,22 @@ export function buildPrStatusViewModel(input: {
         : undefined
     : undefined;
 
+  const openedPullRequest = task.remoteSource?.kind === 'PULL_REQUEST' ? task.remoteSource.pullRequest : undefined;
+  if ((!hasPullRequest || !pullRequest) && openedPullRequest) {
+    // A task opened from a pull request never creates one; reading it again is the only step.
+    return {
+      kind: 'UNKNOWN',
+      headline: 'Unknown',
+      tone: 'neutral',
+      overviewRelevant: true,
+      hasPullRequest: false,
+      canCreateDraftPr: false,
+      canRefresh: true,
+      canInvestigateFailure: false,
+      canPushUpdate: false,
+      checkGroups: []
+    };
+  }
   if (!hasPullRequest || !pullRequest) {
     const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason, input.worktree?.ownership);
     return {
@@ -258,13 +312,36 @@ export function buildPrStatusViewModel(input: {
 
   const freshnessStatus = freshnessToStatus(freshness);
   if (freshnessStatus) {
+    // Sync moves a worktree that holds no commits of its own: one behind the pull
+    // request, or one still at a head the pull request had before it was rewritten.
+    const localHead = gitSnapshot?.headSha;
+    const canSyncBranch = Boolean(openedPullRequest) && (
+      freshness.kind === 'PR_NEWER_COMMITS' ||
+      (freshness.kind === 'BRANCH_DIVERGED' && Boolean(localHead) &&
+        branchPublication?.status !== 'AMBIGUOUS' &&
+        [openedPullRequest?.headSha, ...(input.observedPullRequestHeads ?? [])].includes(localHead))
+    );
+    const dirty = (gitSnapshot?.stagedCount ?? 0) + (gitSnapshot?.unstagedCount ?? 0) + (gitSnapshot?.untrackedCount ?? 0) > 0;
+    // A fork's branch belongs to its author: Task Monki never pushes there, so
+    // the card states that once instead of offering an update that cannot run.
+    const fork = Boolean(openedPullRequest?.crossRepository);
+    // A rewrite under a worktree with nothing of its own is news, not a conflict.
+    const rewritten = canSyncBranch && freshness.kind === 'BRANCH_DIVERGED';
     return {
       ...baseStatus(pullRequest),
       ...freshnessStatus,
-      freshnessLine: freshness.line,
+      ...(rewritten ? { headline: 'PR rewritten', tone: 'action' as const } : {}),
+      freshnessLine: rewritten ? 'This worktree has no commits of its own.' : freshness.line,
+      guidanceLine: fork && (freshness.kind === 'LOCAL_NOT_PUSHED' || freshness.kind === 'BRANCH_DIVERGED')
+        ? 'Task Monki does not push to forks.'
+        : undefined,
       canPushUpdate:
-        freshness.kind === 'LOCAL_NOT_PUSHED' ||
-        branchPublication?.status === 'AMBIGUOUS',
+        !fork &&
+        !canSyncBranch &&
+        (freshness.kind === 'LOCAL_NOT_PUSHED' ||
+          branchPublication?.status === 'AMBIGUOUS'),
+      canSyncBranch,
+      syncBranchDisabledReason: canSyncBranch && dirty ? 'Commit or discard the worktree changes first.' : undefined,
       pushUpdateDisabledReason: externalPublishReason ?? freshness.pushUpdateDisabledReason
     };
   }
@@ -643,6 +720,15 @@ function deriveFreshness(input: {
     return {
       kind: 'STALE',
       line: `Refresh PR status for the current head.`
+    };
+  }
+  // The branch measured against this pull request head: Task Monki observed that the
+  // pull request is ahead, so a push would be refused whatever the worktree holds.
+  if (gitSnapshot?.headSha && prHead && gitSnapshot.headSha !== prHead && gitSnapshot.upstreamSha === prHead &&
+      gitSnapshot.aheadCount === 0 && gitSnapshot.behindCount > 0) {
+    return {
+      kind: 'PR_NEWER_COMMITS',
+      line: 'This worktree is behind the PR.'
     };
   }
   const hasDirtyLocalChanges =

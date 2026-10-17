@@ -642,7 +642,7 @@ const PULL_REQUEST_ICONS = {
 /** GitHub's convention: the icon carries the state, the number names the PR. */
 function CardPullRequest({ pullRequest }: { pullRequest: TaskCardPullRequest }) {
   const Icon = PULL_REQUEST_ICONS[pullRequest.state];
-  const name = pullRequest.number ? `#${pullRequest.number}` : 'Pull request';
+  const name = pullRequest.label ?? (pullRequest.number ? `#${pullRequest.number}` : 'Pull request');
   return (
     <span className="tm-card__pr">
       <Icon aria-hidden="true" size={13} />

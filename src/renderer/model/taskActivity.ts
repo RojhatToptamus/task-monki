@@ -12,6 +12,7 @@ import type {
 } from '../../shared/contracts';
 import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
 import { pluralize, shortSha } from './formatting';
+import { deliveryProvider, deliveryWords } from './deliveryWords';
 
 export type TaskActivityActor =
   | 'User'
@@ -19,7 +20,8 @@ export type TaskActivityActor =
   | 'Agent'
   | 'Reviewer'
   | 'Git'
-  | 'GitHub';
+  | 'GitHub'
+  | 'GitLab';
 
 export type TaskActivityTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
@@ -125,7 +127,24 @@ const TERMINAL_RUN_STATUSES = new Set<RunRecord['status']>([
  */
 export function buildTaskActivityLedger(input: TaskActivityInput): TaskActivityItem[] {
   const built = buildTaskActivityItems(input);
-  return built.map(stripOrder);
+  const provider = input.task ? deliveryProvider(input.task) : 'GITHUB';
+  return built.map((item) => stripOrder(provider === 'GITLAB' ? inGitLabWords(item) : item));
+}
+
+/** A GitLab task's delivery history in GitLab's words. */
+function inGitLabWords<T extends TaskActivityItem>(item: T): T {
+  if (item.category !== 'delivery' && item.actor !== 'GitHub') return item;
+  return {
+    ...item,
+    actor: item.actor === 'GitHub' ? 'GitLab' : item.actor,
+    title: deliveryWords(item.title, 'GITLAB'),
+    ...(item.evidence ? {
+      evidence: {
+        summary: deliveryWords(item.evidence.summary, 'GITLAB'),
+        ...(item.evidence.rows ? { rows: item.evidence.rows.map((row) => ({ ...row, label: deliveryWords(row.label, 'GITLAB'), value: deliveryWords(row.value, 'GITLAB') })) } : {})
+      }
+    } : {})
+  };
 }
 
 export function buildOverviewTaskActivityViewModel(

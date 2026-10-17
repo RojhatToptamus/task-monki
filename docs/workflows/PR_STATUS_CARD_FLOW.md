@@ -131,6 +131,9 @@ browser dev server client. In browser/dev mode,
 ```text
 POST /api/github/pr/create   -> TaskManagerService.createPullRequest(...)
 POST /api/github/refresh     -> TaskManagerService.refreshGitHub(...)
+POST /api/remote/list        -> TaskManagerService.listRemoteWork(...)
+POST /api/remote/pull-request/open -> TaskManagerService.openPullRequest(...)
+POST /api/remote/pull-request/sync -> TaskManagerService.syncPullRequest(...)
 POST /api/git/delivery-commit -> TaskManagerService.createDeliveryCommit(...)
 POST /api/tasks/transition   -> TaskManagerService.transitionTask(...)
 POST /api/runs/continue      -> investigation follow-up run
@@ -142,7 +145,11 @@ two delivery mutations do not race for the same task.
 ## GitHub And Git Commands Used
 
 Task Monki uses the local `gh` CLI through `GitHubService`. It does not call
-GitHub REST or GraphQL directly from app code.
+GitHub REST or GraphQL directly from app code. On gitlab.com, `GitLabService`
+does the same through `glab api` and GitLab's REST API; the card, records and
+rules below are shared, and its words become MR, `!N` and GitLab. A task opened
+from GitLab, or whose checkout has GitLab remotes and no GitHub remote, is
+delivered on GitLab.
 
 Official GitHub CLI docs checked for the command surfaces:
 
@@ -257,6 +264,31 @@ observed PR and does not rename it.
 Dirty managed worktrees are allowed at the user action level because the backend first
 creates a delivery commit. Conflicted, diverged, unavailable, and unknown states
 are blocked. Managed tasks also require a committed diff.
+
+## Linked tasks
+
+A task opened from an issue passes the issue's repository explicitly (`gh ...
+--repo host/owner/repo`) and, when it pushes through a fork, names the head as
+`owner:branch`. The PR body's Summary starts with `Closes #N`, or
+`Related to #N` when the person turned off "Add “Closes #N” to the description".
+
+A task opened from a pull request never creates one. Its PR Status reads the
+linked pull request by number. Push update publishes local commits to the pull
+request's own branch with `git push --force-with-lease=refs/heads/<branch>:<last
+seen head> -- <remote> <sha>:refs/heads/<branch>`: same repository only, the
+remote's single push URL naming it, fast forward from the last seen head only,
+no upstream change, hooks off. A fork pull request offers no Push update; while
+the worktree holds work the pull request does not, the card states "Task Monki
+does not push to forks." After a push, PR Status waits up to about six seconds
+for the platform to report the pushed head before it records the pull request.
+A push the lease refuses records "The pull request branch moved since Task
+Monki last read it. Refresh to see its new commits."
+
+`PR_NEWER_COMMITS` and a rewritten pull request the worktree has no commits of
+its own against (headline "PR rewritten") offer Sync branch, the lead action;
+it is disabled while the worktree has changes. Git evidence for these tasks measures
+the branch against the observed pull request head, so ahead, behind and
+diverged are exact. Without a recorded snapshot, the card offers Refresh only.
 
 ## Refresh Flow
 

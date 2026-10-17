@@ -1,0 +1,188 @@
+import {
+  REMOTE_WORK_LIMITS,
+  formatRemoteWorkNumber,
+  normalizeRepositoryPath,
+  type RemoteRepositoryRef,
+  type RemoteWorkKind,
+  type RemoteWorkRef,
+  type RemoteWorkSummary
+} from '../../shared/remoteWork';
+import { RemoteWorkError } from '../remote/RemoteWorkError';
+import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
+import { GitLabCli, gitLabProject } from './GitLabCli';
+
+interface GitLabItem {
+  iid?: number;
+  title?: string;
+  description?: string | null;
+  state?: string;
+  web_url?: string;
+  updated_at?: string;
+  author?: { username?: string } | null;
+  labels?: string[];
+  user_notes_count?: number;
+  draft?: boolean;
+  source_branch?: string;
+  target_branch?: string;
+  source_project_id?: number;
+  target_project_id?: number;
+  sha?: string;
+  diff_refs?: { base_sha?: string; head_sha?: string; start_sha?: string } | null;
+}
+
+interface GitLabNote {
+  body?: string;
+  system?: boolean;
+  created_at?: string;
+  author?: { username?: string } | null;
+}
+
+/** GitLab issues and merge requests through the signed-in GitLab CLI. */
+export class GitLabRemoteWork implements RemoteWorkReader {
+  readonly provider = 'GITLAB' as const;
+
+  constructor(private readonly cli = new GitLabCli()) {}
+
+  setExecutable(executable: string | undefined): void {
+    this.cli.setExecutable(executable);
+  }
+
+  async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {
+    const query = new URLSearchParams({ state: 'opened', order_by: 'updated_at', sort: 'desc', per_page: String(REMOTE_WORK_LIMITS.listItems) });
+    const words = text?.trim().slice(0, REMOTE_WORK_LIMITS.query);
+    if (words) query.set('search', words);
+    const rows = await this.cli.request<unknown>({
+      host: repository.host,
+      endpoint: `projects/${gitLabProject(repository.path)}/${kind === 'ISSUE' ? 'issues' : 'merge_requests'}?${query}`,
+      cwd,
+      subject: repository.path
+    });
+    if (!Array.isArray(rows)) throw new RemoteWorkError('FAILED', 'GitLab returned an invalid list.');
+    return rows.map((row) => summary(repository, kind, row as GitLabItem));
+  }
+
+  async readIssue(ref: RemoteWorkRef, cwd: string) {
+    const item = await this.readItem(ref, cwd);
+    return {
+      summary: summary(ref.repository, 'ISSUE', item),
+      snapshot: buildRemoteWorkSnapshot({
+        ref, url: requireUrl(ref, item), title: item.title ?? '', state: itemState(item),
+        author: item.author?.username, labels: item.labels ?? [], body: item.description ?? '',
+        comments: await this.recentComments(ref, cwd), commentCount: item.user_notes_count ?? 0,
+        capturedAt: new Date().toISOString()
+      })
+    };
+  }
+
+  async readPullRequest(ref: RemoteWorkRef, cwd: string): Promise<RemotePullRequest> {
+    const item = await this.readItem(ref, cwd);
+    const headSha = item.sha;
+    const baseSha = item.diff_refs?.base_sha;
+    if (!item.source_branch || !item.target_branch || !isObjectId(headSha)) {
+      throw new RemoteWorkError('FAILED', 'GitLab did not report the merge request’s branches.');
+    }
+    if (!isObjectId(baseSha)) {
+      throw new RemoteWorkError('FAILED', 'GitLab has not prepared this merge request’s changes yet. Try again shortly.');
+    }
+    const crossRepository = typeof item.source_project_id === 'number' && item.source_project_id !== item.target_project_id;
+    const headRepositoryPath = crossRepository ? await this.projectPath(ref.repository, item.source_project_id!, cwd) : ref.repository.path;
+    return {
+      summary: { ...summary(ref.repository, 'PULL_REQUEST', item), ...(headRepositoryPath ? { headRepositoryPath } : {}) },
+      snapshot: buildRemoteWorkSnapshot({
+        ref, url: requireUrl(ref, item), title: item.title ?? '', state: itemState(item),
+        author: item.author?.username, labels: item.labels ?? [], body: item.description ?? '',
+        comments: await this.recentComments(ref, cwd), commentCount: item.user_notes_count ?? 0,
+        capturedAt: new Date().toISOString()
+      }),
+      headRefName: item.source_branch,
+      headSha,
+      ...(headRepositoryPath ? { headRepositoryPath } : {}),
+      crossRepository,
+      baseRefName: item.target_branch,
+      baseSha,
+      baseIsMergeBase: true,
+      headFetchRef: `refs/merge-requests/${ref.number}/head`
+    };
+  }
+
+  private async readItem(ref: RemoteWorkRef, cwd: string): Promise<GitLabItem> {
+    const number = formatRemoteWorkNumber('GITLAB', ref.kind, ref.number);
+    try {
+      return await this.cli.request<GitLabItem>({
+        host: ref.repository.host,
+        endpoint: `projects/${gitLabProject(ref.repository.path)}/${ref.kind === 'ISSUE' ? 'issues' : 'merge_requests'}/${ref.number}`,
+        cwd,
+        subject: ref.repository.path
+      });
+    } catch (error) {
+      if (error instanceof RemoteWorkError && error.code === 'NOT_FOUND') {
+        throw new RemoteWorkError('NOT_FOUND', `${ref.repository.path}${number} does not exist, or it is not visible to this account.`);
+      }
+      throw error;
+    }
+  }
+
+  /** The most recent comments people wrote, oldest first; system notes are left out. */
+  private async recentComments(ref: RemoteWorkRef, cwd: string) {
+    const notes = await this.cli.request<unknown>({
+      host: ref.repository.host,
+      endpoint: `projects/${gitLabProject(ref.repository.path)}/${ref.kind === 'ISSUE' ? 'issues' : 'merge_requests'}/${ref.number}/notes?sort=desc&order_by=created_at&per_page=50`,
+      cwd,
+      subject: ref.repository.path
+    });
+    return (Array.isArray(notes) ? notes as GitLabNote[] : [])
+      .filter((note) => !note.system && note.body)
+      .slice(0, REMOTE_WORK_LIMITS.comments)
+      .reverse()
+      .map((note) => ({ author: note.author?.username, createdAt: note.created_at, body: note.body }));
+  }
+
+  private async projectPath(repository: RemoteRepositoryRef, projectId: number, cwd: string): Promise<string | undefined> {
+    try {
+      const project = await this.cli.request<{ path_with_namespace?: string }>({
+        host: repository.host, endpoint: `projects/${projectId}`, cwd
+      });
+      return project.path_with_namespace ? normalizeRepositoryPath('GITLAB', project.path_with_namespace) : undefined;
+    } catch {
+      // A source project the account cannot see stays unnamed; its commits are still in the target.
+      return undefined;
+    }
+  }
+}
+
+function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, item: GitLabItem): RemoteWorkSummary {
+  if (typeof item.iid !== 'number' || !item.web_url) {
+    throw new RemoteWorkError('FAILED', 'GitLab did not report the item’s identity.');
+  }
+  return {
+    ref: { repository, kind, number: item.iid },
+    url: item.web_url,
+    title: (item.title ?? '').trim(),
+    state: itemState(item) as RemoteWorkSummary['state'],
+    ...(item.author?.username ? { author: item.author.username } : {}),
+    ...(item.updated_at ? { updatedAt: item.updated_at } : {}),
+    ...(kind === 'PULL_REQUEST' ? {
+      draft: Boolean(item.draft),
+      ...(item.source_branch ? { headRefName: item.source_branch } : {}),
+      crossRepository: typeof item.source_project_id === 'number' && item.source_project_id !== item.target_project_id
+    } : {})
+  };
+}
+
+function itemState(item: GitLabItem): string {
+  return item.state === 'merged' ? 'MERGED' : item.state === 'opened' ? 'OPEN' : 'CLOSED';
+}
+
+function requireUrl(ref: RemoteWorkRef, item: GitLabItem): string {
+  const base = `https://${ref.repository.host}/${ref.repository.path}/-/`.toLowerCase();
+  const url = item.web_url?.toLowerCase() ?? '';
+  const kinds = ref.kind === 'ISSUE' ? ['issues', 'work_items'] : ['merge_requests'];
+  if (item.iid !== ref.number || !kinds.some((kind) => url === `${base}${kind}/${ref.number}`)) {
+    throw new RemoteWorkError('FAILED', 'GitLab returned a different item than requested.');
+  }
+  return item.web_url!;
+}
+
+function isObjectId(value: string | undefined): value is string {
+  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+}

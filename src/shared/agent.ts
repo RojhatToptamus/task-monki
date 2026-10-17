@@ -217,6 +217,7 @@ export interface ExternalExecutablePathSettings {
   gitExecutablePath: string | null;
   codexExecutablePath: string | null;
   ghExecutablePath: string | null;
+  glabExecutablePath: string | null;
 }
 
 export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
@@ -246,7 +247,7 @@ export function isTaskManagerThemePreset(value: unknown): value is TaskManagerTh
   return TASK_MANAGER_THEME_PRESETS.includes(value as TaskManagerThemePreset);
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 15 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 16 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -293,7 +294,8 @@ export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
 export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSettings = {
   gitExecutablePath: null,
   codexExecutablePath: null,
-  ghExecutablePath: null
+  ghExecutablePath: null,
+  glabExecutablePath: null
 };
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {

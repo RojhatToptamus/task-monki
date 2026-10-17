@@ -1,0 +1,233 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { git } from '../core/git/gitCli';
+import { writeNodeExecutable } from './fakeExecutable';
+
+/** An issue or pull request the fake platform serves. */
+export interface FakeGitHubItem {
+  owner: string;
+  repo: string;
+  number: number;
+  kind: 'ISSUE' | 'PULL_REQUEST';
+  title: string;
+  body?: string;
+  state?: 'OPEN' | 'CLOSED' | 'MERGED';
+  author?: string;
+  labels?: string[];
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
+  updatedAt?: string;
+  /** Pull requests. */
+  isDraft?: boolean;
+  headRefName?: string;
+  headRefOid?: string;
+  baseRefName?: string;
+  baseRefOid?: string;
+  headRepository?: string;
+  isCrossRepository?: boolean;
+}
+
+interface FakeGitHubState {
+  viewer: string;
+  signedIn: boolean;
+  items: FakeGitHubItem[];
+}
+
+export interface FakeGitHubCall {
+  args: string[];
+  stdin: string;
+}
+
+/**
+ * A local stand-in for github.com: bare repositories reached through
+ * `ssh://git@github.com/<owner>/<repo>.git` by an ssh shim, and a `gh` that
+ * answers from fixture state. Real Git fetches, pushes and refs run against it.
+ */
+export interface FakeGitHub {
+  ghPath: string;
+  /** Set as `GIT_SSH_COMMAND` while the fake serves Git traffic. */
+  sshCommand: string;
+  remoteUrl(owner: string, repo: string): string;
+  barePath(owner: string, repo: string): string;
+  /** Creates the repository on the fake platform from a local repository's `main`. */
+  publish(owner: string, repo: string, sourceRepository: string): Promise<void>;
+  /** Points a ref of the hosted repository at a commit of a local repository. */
+  pushRef(owner: string, repo: string, sourceRepository: string, sha: string, ref: string): Promise<void>;
+  refSha(owner: string, repo: string, ref: string): Promise<string | undefined>;
+  setItem(item: FakeGitHubItem): Promise<void>;
+  setSignedIn(signedIn: boolean): Promise<void>;
+  calls(): Promise<FakeGitHubCall[]>;
+}
+
+export async function createFakeGitHub(rootDir: string): Promise<FakeGitHub> {
+  const hostRoot = path.join(rootDir, 'fake-github');
+  const binDir = path.join(rootDir, 'fake-github-bin');
+  const statePath = path.join(rootDir, 'fake-github-state.json');
+  const logPath = path.join(rootDir, 'fake-github-calls.ndjson');
+  await fs.mkdir(hostRoot, { recursive: true });
+  const state: FakeGitHubState = { viewer: 'octo-tester', signedIn: true, items: [] };
+  await writeState();
+  const sshCommand = await writeNodeExecutable(binDir, 'fake-ssh', `
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+const command = process.argv[process.argv.length - 1];
+const match = /^(git-upload-pack|git-receive-pack) '?\\/?([^']+?)'?$/.exec(command);
+if (!match || match[2].split('/').includes('..')) { console.error('fake ssh: unexpected command ' + command); process.exit(128); }
+const result = spawnSync('git', [match[1].slice(4), path.join(${JSON.stringify(hostRoot)}, match[2])], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`);
+  const ghPath = await writeNodeExecutable(binDir, 'gh', fakeGhScript(statePath, logPath, hostRoot));
+
+  async function writeState(): Promise<void> {
+    await fs.writeFile(statePath, JSON.stringify(state), 'utf8');
+  }
+
+  const barePath = (owner: string, repo: string) => path.join(hostRoot, owner, `${repo}.git`);
+  return {
+    ghPath,
+    sshCommand,
+    remoteUrl: (owner, repo) => `ssh://git@github.com/${owner}/${repo}.git`,
+    barePath,
+    async publish(owner, repo, sourceRepository) {
+      await fs.mkdir(path.dirname(barePath(owner, repo)), { recursive: true });
+      await git(rootDir, ['init', '--bare', '-b', 'main', barePath(owner, repo)]);
+      await git(sourceRepository, ['push', barePath(owner, repo), 'main:refs/heads/main']);
+    },
+    async pushRef(owner, repo, sourceRepository, sha, ref) {
+      await git(sourceRepository, ['push', '--force', barePath(owner, repo), `${sha}:${ref}`]);
+    },
+    async refSha(owner, repo, ref) {
+      return git(barePath(owner, repo), ['rev-parse', '--verify', '--quiet', ref]).then((value) => value.trim(), () => undefined);
+    },
+    async setItem(item) {
+      state.items = [...state.items.filter((candidate) =>
+        !(candidate.owner === item.owner && candidate.repo === item.repo && candidate.number === item.number)), item];
+      await writeState();
+    },
+    async setSignedIn(signedIn) {
+      state.signedIn = signedIn;
+      await writeState();
+    },
+    async calls() {
+      const text = await fs.readFile(logPath, 'utf8').catch(() => '');
+      return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as FakeGitHubCall);
+    }
+  };
+}
+
+function fakeGhScript(statePath: string, logPath: string, hostRoot: string): string {
+  return `
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const args = process.argv.slice(2);
+let stdin = '';
+try { if (args.includes('-')) stdin = fs.readFileSync(0, 'utf8'); } catch {}
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + '\\n');
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(statePath)}, 'utf8'));
+const fields = {};
+for (let index = 0; index < args.length; index += 1) {
+  if ((args[index] === '-f' || args[index] === '-F') && args[index + 1]) {
+    const value = args[index + 1];
+    const split = value.indexOf('=');
+    fields[value.slice(0, split)] = value.slice(split + 1);
+  }
+}
+const option = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : undefined; };
+const out = (value) => { process.stdout.write(JSON.stringify(value) + '\\n'); process.exit(0); };
+const fail = (value, code = 1) => { process.stdout.write(JSON.stringify(value)); process.stderr.write('gh: ' + (value.errors?.[0]?.message ?? 'failed') + '\\n'); process.exit(code); };
+if (args[0] === '--version') { console.log('gh version 2.81.0 (fake)'); process.exit(0); }
+if (!state.signedIn) { process.stderr.write('To get started with GitHub CLI, please run:  gh auth login\\n'); process.exit(4); }
+if (args[0] === 'auth' && args[1] === 'status') process.exit(0);
+const repoOf = (item) => item.owner + '/' + item.repo;
+const bare = (owner, repo) => path.join(${JSON.stringify(hostRoot)}, owner, repo + '.git');
+const revParse = (gitDir, ref) => { try { return execFileSync('git', ['--git-dir', gitDir, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8' }).trim(); } catch { return undefined; } };
+// As on GitHub, a same-repository pull request follows its branch, and refs/pull/N/head follows the head.
+for (const item of state.items) {
+  if (item.kind !== 'PULL_REQUEST' || (item.state ?? 'OPEN') !== 'OPEN') continue;
+  const gitDir = bare(item.owner, item.repo);
+  const branchHead = !item.isCrossRepository && item.headRefName ? revParse(gitDir, 'refs/heads/' + item.headRefName) : undefined;
+  if (branchHead) {
+    item.headRefOid = branchHead;
+    execFileSync('git', ['--git-dir', gitDir, 'update-ref', 'refs/pull/' + item.number + '/head', branchHead]);
+  } else {
+    item.headRefOid = revParse(gitDir, 'refs/pull/' + item.number + '/head') ?? item.headRefOid;
+  }
+  item.baseRefOid = revParse(gitDir, 'refs/heads/' + (item.baseRefName ?? 'main')) ?? item.baseRefOid;
+}
+const url = (item) => 'https://github.com/' + repoOf(item) + '/' + (item.kind === 'ISSUE' ? 'issues' : 'pull') + '/' + item.number;
+const node = (item) => ({
+  __typename: item.kind === 'ISSUE' ? 'Issue' : 'PullRequest',
+  number: item.number, title: item.title, url: url(item), body: item.body ?? '',
+  state: item.state === 'MERGED' ? 'MERGED' : item.state ?? 'OPEN', merged: item.state === 'MERGED',
+  updatedAt: item.updatedAt ?? '2026-10-01T00:00:00Z', author: { login: item.author ?? 'someone' },
+  labels: { nodes: (item.labels ?? []).map((name) => ({ name })) },
+  comments: { totalCount: (item.comments ?? []).length, nodes: (item.comments ?? []).map((comment) => ({ author: { login: comment.author }, body: comment.body, createdAt: comment.createdAt })) },
+  isDraft: Boolean(item.isDraft), headRefName: item.headRefName, headRefOid: item.headRefOid,
+  baseRefName: item.baseRefName, baseRefOid: item.baseRefOid, isCrossRepository: Boolean(item.isCrossRepository),
+  headRepository: item.headRepository ? { nameWithOwner: item.headRepository } : null,
+  repository: { nameWithOwner: repoOf(item) }
+});
+if (args[0] === 'api' && args[1] === 'graphql') {
+  const query = fields.query ?? '';
+  if (query.includes('viewer')) out({ data: { viewer: { login: state.viewer } } });
+  if (query.includes('search(')) {
+    const kind = fields.q.includes('is:pr') ? 'PULL_REQUEST' : 'ISSUE';
+    const repo = /repo:(\\S+)/.exec(fields.q)[1];
+    const words = fields.q.replace(/\\S+:\\S+/g, '').trim().toLowerCase();
+    out({ data: { search: { nodes: state.items.filter((item) => item.kind === kind && repoOf(item) === repo &&
+      (item.state ?? 'OPEN') === 'OPEN' && item.title.toLowerCase().includes(words)).map(node) } } });
+  }
+  const repoItems = state.items.filter((item) => item.owner.toLowerCase() === (fields.owner ?? '').toLowerCase() &&
+    item.repo.toLowerCase() === (fields.name ?? '').toLowerCase());
+  if (!fs.existsSync(path.join(${JSON.stringify(hostRoot)}, fields.owner ?? '', (fields.name ?? '') + '.git'))) {
+    fail({ data: { repository: null }, errors: [{ type: 'NOT_FOUND', path: ['repository'], message: "Could not resolve to a Repository with the name '" + fields.owner + '/' + fields.name + "'." }] });
+  }
+  if (query.includes('issueOrPullRequest')) {
+    const item = repoItems.find((candidate) => candidate.number === Number(fields.number));
+    if (!item) fail({ data: { repository: { issueOrPullRequest: null } }, errors: [{ type: 'NOT_FOUND', path: ['repository', 'issueOrPullRequest'], message: 'Could not resolve to an issue or pull request.' }] });
+    out({ data: { repository: { issueOrPullRequest: node(item) } } });
+  }
+  const kind = query.includes('pullRequests(') ? 'PULL_REQUEST' : 'ISSUE';
+  const connection = kind === 'ISSUE' ? 'issues' : 'pullRequests';
+  out({ data: { repository: { [connection]: { nodes: repoItems.filter((item) => item.kind === kind && (item.state ?? 'OPEN') === 'OPEN').map(node) } } } });
+}
+const repoArg = option('--repo');
+const pulls = state.items.filter((item) => item.kind === 'PULL_REQUEST' && (!repoArg || repoArg.endsWith('/' + repoOf(item))));
+const view = (item) => ({
+  number: item.number, url: url(item), state: item.state ?? 'OPEN', isDraft: Boolean(item.isDraft),
+  mergedAt: item.state === 'MERGED' ? '2026-10-02T00:00:00Z' : null, reviewDecision: '', statusCheckRollup: [],
+  headRefOid: item.headRefOid, headRefName: item.headRefName, baseRefName: item.baseRefName,
+  mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', title: item.title,
+  headRepository: { name: (item.headRepository ?? repoOf(item)).split('/')[1] },
+  headRepositoryOwner: { login: (item.headRepository ?? repoOf(item)).split('/')[0] },
+  isCrossRepository: Boolean(item.isCrossRepository)
+});
+if (args[0] === 'pr' && args[1] === 'checks') { console.log('[]'); process.exit(0); }
+if (args[0] === 'pr' && args[1] === 'view') {
+  const selector = args[2];
+  const item = pulls.find((candidate) => String(candidate.number) === selector || url(candidate) === selector || candidate.headRefName === selector);
+  if (!item) { process.stderr.write('no pull requests found\\n'); process.exit(1); }
+  out(view(item));
+}
+if (args[0] === 'pr' && args[1] === 'list') {
+  const head = option('--head');
+  out(pulls.filter((item) => (item.state ?? 'OPEN') === 'OPEN' && item.headRefName === head).map(view));
+}
+if (args[0] === 'pr' && args[1] === 'create') {
+  const [owner, repo] = repoArg.split('/').slice(-2);
+  const head = option('--head');
+  const branch = head.includes(':') ? head.split(':')[1] : head;
+  const headOwner = head.includes(':') ? head.split(':')[0] : owner;
+  const headSha = execFileSync('git', ['--git-dir', path.join(${JSON.stringify(hostRoot)}, headOwner, repo + '.git'), 'rev-parse', 'refs/heads/' + branch], { encoding: 'utf8' }).trim();
+  const number = Math.max(0, ...state.items.filter((item) => item.owner === owner && item.repo === repo).map((item) => item.number)) + 1;
+  const item = { owner, repo, number, kind: 'PULL_REQUEST', title: option('--title'), body: stdin, isDraft: args.includes('--draft'),
+    headRefName: branch, headRefOid: headSha, baseRefName: option('--base'), headRepository: headOwner + '/' + repo, isCrossRepository: headOwner !== owner };
+  state.items.push(item);
+  fs.writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));
+  console.log(url(item));
+  process.exit(0);
+}
+process.stderr.write('fake gh: unexpected invocation ' + args.join(' ') + '\\n');
+process.exit(1);
+`;
+}

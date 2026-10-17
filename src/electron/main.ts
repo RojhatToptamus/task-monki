@@ -33,6 +33,9 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  SyncPullRequestRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -750,6 +753,9 @@ function installIpcHandlers(): void {
     return task;
   });
   handleTrustedIpc('task:import', (_, input: ImportTaskRequest) => service.importTask(input));
+  handleTrustedIpc('remote:list', (_, input: ListRemoteWorkRequest) => service.listRemoteWork(input));
+  handleTrustedIpc('remote:openPullRequest', (_, input: OpenPullRequestRequest) => service.openPullRequest(input));
+  handleTrustedIpc('remote:syncPullRequest', (_, input: SyncPullRequestRequest) => service.syncPullRequest(input));
   handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
   handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
   handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));

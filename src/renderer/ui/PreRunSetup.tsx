@@ -44,7 +44,8 @@ export function PreRunSetup({
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
-  action?: { label: string; disabled?: boolean; title?: string; onClick(): void };
+  /** Starting receives the request just saved. */
+  action?: { label: string; disabled?: boolean; title?: string; onClick(request: string): void };
   onSettingsChange(settings: AgentExecutionSettings): void;
   onDiscoverModels?(runtimeId: string): Promise<void>;
 }) {
@@ -89,7 +90,7 @@ export function PreRunSetup({
   // Starting saves the prompt first, so there is no separate save step.
   const submit = async () => {
     if (dirty && !(await savePrompt())) return;
-    if (action && !action.disabled) action.onClick();
+    if (action && !action.disabled) action.onClick(text.trim());
   };
   const availableRuntimes = runtimes.filter((runtime) => runtime.preflight.runtime.id === runtimeId);
   const readiness = availableRuntimes[0]?.preflight.readiness;

@@ -16,8 +16,88 @@ import {
   buildPrStatusViewModel,
   shouldShowPrStatusOnOverview
 } from './prStatus';
+import { deliveryWords } from './deliveryWords';
 
 const now = '2026-07-01T10:00:00.000Z';
+
+describe('a GitLab merge request', () => {
+  it('reads in GitLab words while GitHub tasks keep theirs', () => {
+    const input = {
+      task: taskFixture(),
+      gitSnapshot: gitFixture(),
+      pullRequest: prFixture({ url: 'https://gitlab.com/group/project/-/merge_requests/82' }),
+      reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED' as const })
+    };
+    expect(buildPrStatusViewModel({ ...input, provider: 'GITLAB' })).toMatchObject({
+      headline: 'GitLab changes requested', prIdentityLine: '!82 Odd Minute Check', deliveryNoun: 'MR'
+    });
+    expect(buildPrStatusViewModel(input)).toMatchObject({ headline: 'GitHub changes requested', prIdentityLine: '#82 Odd Minute Check' });
+    // Numbers in running text take GitLab's sign too.
+    expect(deliveryWords('PR #82 and pull request #83', 'GITLAB')).toBe('MR !82 and merge request !83');
+  });
+});
+
+describe('a task opened from a pull request', () => {
+  const opened = (crossRepository = false) => taskFixture({
+    prompt: '',
+    remoteSource: {
+      provider: 'GITHUB', host: 'github.com', repositoryPath: 'example/repo', kind: 'PULL_REQUEST', number: 82,
+      url: 'https://github.com/example/repo/pull/82', title: 'Odd Minute Check',
+      snapshotArtifactId: '00000000-0000-4000-8000-000000000001', capturedAt: now,
+      pullRequest: { headRefName: 'feature', baseRefName: 'main', crossRepository, headSha: 'aaa111', mergeBaseSha: 'base' }
+    }
+  });
+
+  it('never offers to create a pull request while its own is unread', () => {
+    const view = buildPrStatusViewModel({ task: opened(), gitSnapshot: gitFixture() });
+    expect(view).toMatchObject({ canCreateDraftPr: false, canPushUpdate: false, canRefresh: true });
+  });
+
+  it('offers Sync branch when the pull request moved ahead of a clean worktree', () => {
+    const view = buildPrStatusViewModel({
+      task: opened(),
+      gitSnapshot: gitFixture({ headSha: 'aaa111', upstreamSha: 'bbb222', behindCount: 1, status: 'PUSHED' }),
+      pullRequest: prFixture({ headRefOid: 'bbb222' })
+    });
+    expect(view).toMatchObject({ kind: 'PR_NEWER_COMMITS', canSyncBranch: true, canPushUpdate: false });
+    expect(buildPrStatusActionState({ view }).syncDisabled).toBe(false);
+  });
+
+  it('offers Sync branch after a rewrite only while the worktree holds nothing of its own', () => {
+    const rewritten = { pullRequest: prFixture({ headRefOid: 'ccc333' }) };
+    const atOldHead = buildPrStatusViewModel({
+      task: opened(), ...rewritten, observedPullRequestHeads: ['ccc333', 'bbb222'],
+      gitSnapshot: gitFixture({ headSha: 'bbb222', upstreamSha: 'ccc333', aheadCount: 1, behindCount: 1, status: 'DIVERGED' })
+    });
+    const withLocalCommit = buildPrStatusViewModel({
+      task: opened(), ...rewritten, observedPullRequestHeads: ['ccc333', 'bbb222'],
+      gitSnapshot: gitFixture({ headSha: 'ddd444', upstreamSha: 'ccc333', aheadCount: 2, behindCount: 1, status: 'DIVERGED' })
+    });
+    // Nothing of the worktree's own is at stake, so the card reads as a rewrite, not a conflict.
+    expect(atOldHead).toMatchObject({ kind: 'BRANCH_DIVERGED', canSyncBranch: true, headline: 'PR rewritten', tone: 'action' });
+    expect(withLocalCommit).toMatchObject({ kind: 'BRANCH_DIVERGED', canSyncBranch: false, headline: 'Branch diverged' });
+  });
+
+  it('holds Sync while the worktree has changes and states the reason', () => {
+    const view = buildPrStatusViewModel({
+      task: opened(),
+      gitSnapshot: gitFixture({ headSha: 'aaa111', upstreamSha: 'bbb222', behindCount: 1, unstagedCount: 1, status: 'DIRTY' }),
+      pullRequest: prFixture({ headRefOid: 'bbb222' })
+    });
+    expect(buildPrStatusActionState({ view })).toMatchObject({
+      syncDisabled: true, syncReason: 'Commit or discard the worktree changes first.'
+    });
+  });
+
+  it('states that Task Monki does not push to a fork instead of offering an update that cannot run', () => {
+    const view = buildPrStatusViewModel({
+      task: opened(true),
+      gitSnapshot: gitFixture({ headSha: 'eee555', upstreamSha: 'aaa111', aheadCount: 1, status: 'COMMITTED_UNPUSHED' }),
+      pullRequest: prFixture({ headRefOid: 'aaa111' })
+    });
+    expect(view).toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canPushUpdate: false, guidanceLine: 'Task Monki does not push to forks.' });
+  });
+});
 
 describe('buildPrStatusViewModel', () => {
   it('shows no PR before delivery exists', () => {

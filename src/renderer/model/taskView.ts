@@ -1,4 +1,5 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
+import { deliveryNumber, deliveryProvider } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -28,6 +29,8 @@ import type { Tone } from './viewTypes';
 export interface TaskCardPullRequest {
   /** Undefined while the pull request is linked but not yet numbered. */
   number?: number;
+  /** The number as its platform writes it: `#82`, or `!82` for a GitLab merge request. */
+  label?: string;
   state: 'draft' | 'open' | 'merged' | 'closed';
   /** Delivery progress the card's status word does not already say, e.g. "checks pending". */
   note?: string;
@@ -415,8 +418,10 @@ export function cardPullRequestForTask(
     return undefined;
   }
   const note = state === 'draft' || state === 'open' ? cardPullRequestNote(projection) : undefined;
+  const provider = deliveryProvider({ remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection });
   return {
     number: projection.githubPullRequestNumber,
+    ...(projection.githubPullRequestNumber ? { label: deliveryNumber(provider, projection.githubPullRequestNumber) } : {}),
     state,
     ...(note && !CARD_NOTE_STATED_BY[note]?.includes(stateLabel) ? { note } : {})
   };

@@ -175,6 +175,7 @@ import {
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
 import {
+  taskGoal,
   buildDesignAgentDeveloperInstructions,
   PREVIEW_AGENT_DEVELOPER_INSTRUCTIONS
 } from '../../../shared/promptTemplates';
@@ -4824,7 +4825,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     const stored = await this.recordGoalSnapshot({
       session,
-      authoritativeGoal: task.prompt,
+      authoritativeGoal: taskGoal(task),
       goal,
       source: 'PROVIDER_NOTIFICATION',
       rawMessage: raw
@@ -4856,7 +4857,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       iterationId: session.iterationId,
       sessionId: session.id,
       runtimeId: session.runtimeId,
-      taskGoalHash: hashGoal(task.prompt),
+      taskGoalHash: hashGoal(taskGoal(task)),
       lastSynchronizedTaskGoalHash: latest?.lastSynchronizedTaskGoalHash,
       syncState: 'CLEARED',
       source: 'PROVIDER_CLEARED',

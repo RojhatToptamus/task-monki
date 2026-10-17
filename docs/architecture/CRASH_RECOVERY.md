@@ -21,7 +21,8 @@ what happened:
 - Preview's authenticated launcher or container labels own live Preview
   resource identity.
 - the Git remote owns the published branch ref.
-- GitHub owns pull requests, checks, reviews, and merge state.
+- GitHub and GitLab own issues, pull and merge requests, checks, reviews, and
+  merge state.
 
 Recovery may adopt a proven active or completed result, mark an interrupted
 operation honestly, or expose an explicit retry or cleanup action. It never
@@ -168,6 +169,21 @@ searches for an existing open PR on the task branch. It adopts a match and
 never invokes PR creation. The normal explicit creation path also searches
 before creating. A failed recovery lookup records `GITHUB_SYNC_FAILED` so the
 task exposes the failed observation and retains an explicit retry path.
+
+A push to an opened pull request's own branch records the branch and the head
+Task Monki last observed for it, and is leased on that head. Finding the branch
+still at that head proves the push did not land: the record becomes FAILED and
+a retry is safe. A lease the remote refuses is FAILED as well, with nothing
+changed. A different unexpected head stays AMBIGUOUS. Sync branch refuses while
+that push is unresolved, and never moves off a commit the task pushed.
+
+Opening a pull request fetches objects only, then records the task, iteration
+and worktree in one transaction before the checkout. An interrupted checkout
+leaves a CREATING or failed worktree that Recover recreates at the recorded
+head, fetching it again when the objects are gone; a head the platform no
+longer has requires opening the pull request in a new task. Sync branch first
+records a base both the old and the new head descend from when the pull
+request was rewritten, so an interruption leaves a worktree that verifies.
 
 GitHub refresh is read-only and has no durable in-progress state. If it is
 interrupted, the last complete snapshot remains current until the user retries

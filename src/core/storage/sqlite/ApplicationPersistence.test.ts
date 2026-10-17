@@ -245,8 +245,11 @@ describe('ApplicationPersistence', () => {
     await fs.chmod(paths.databasePath, 0o600);
     let persistence = await open(profileRoot);
     try {
-      // Migration 13 drops the retired shell preferences the fixture still carries.
-      expect(await persistence.settings.get()).toEqual({ ...settings, schemaVersion: 15, theme: 'light', agentProfiles: [] });
+      // Migration 13 drops the retired shell preferences the fixture still carries; 15 adds the GitLab CLI path.
+      expect(await persistence.settings.get()).toEqual({
+        ...settings, schemaVersion: 16, theme: 'light', agentProfiles: [],
+        externalExecutables: { ...settings.externalExecutables, glabExecutablePath: null }
+      });
       const backups = await fs.readdir(paths.backupsRoot);
       expect(backups).toHaveLength(1);
       const backup = await persistence.backups.verifyBackup(backups[0]!);

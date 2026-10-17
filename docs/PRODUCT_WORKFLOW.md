@@ -236,6 +236,71 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Issues and pull requests
+
+The task composer's source switch offers New work, Issue, Pull request (Merge
+request on GitLab) and Checkout. Issue and Pull request list the open items of
+the selected checkout's GitHub or GitLab repository, most recently updated
+first. When the checkout has several platform remotes, a menu chooses one;
+`upstream` leads, then `origin`. One search field searches the platform and
+also takes a link, `#12`, `!12` or `owner/repo#12`; a link or number names one
+item, which is chosen. Only github.com and gitlab.com are supported. Lists are
+read when the source opens and as the person searches; Task Monki does not poll
+or keep a copy.
+
+Reads go through the platform's CLI (`gh`, `glab`) with its signed-in account.
+A missing CLI, a signed-out CLI, an item in another repository, a pull request
+chosen as an issue, and an unreachable host each show their reason in the list
+with Retry where retrying can help. Task Monki stores no platform token.
+
+An issue starts new work. Task Monki reads the issue again when the task is
+created and keeps its title, body, labels and ten most recent comments as an
+immutable snapshot. The title defaults to the issue's; instructions are
+optional. Agents receive the snapshot quoted with its author and capture time,
+between boundary lines named by the snapshot, as data that grants no permission
+and cannot change the execution boundary or the person's instructions. Later
+edits on the platform do not change what agents read. The Overview's Request
+shows the issue's link and its captured text.
+
+A pull request opens existing work. Task Monki reads it, fetches its exact
+head (`refs/pull/N/head`, or `refs/merge-requests/N/head` on GitLab) and its
+target into the repository's objects without creating a remote, a
+remote-tracking ref or FETCH_HEAD, and checks it out in a managed worktree on
+a new task branch with repository hooks turned off. The recorded base is the
+merge base, so the diff equals the platform's. The task opens idle In
+progress, with the pull request linked in PR Status. Nothing runs: agent
+review is available before any turn, coding needs an explicit instruction, and
+Preview keeps its per-start approval. The request saved in the Agent tab's
+composer is that instruction; without one, Start asks for it. Open pull
+requests only.
+
+Choosing an issue or pull request that already has a task, including an
+archived one or a task that delivered that pull request, opens that task. One
+task holds each item; a Fork alternative keeps the issue through its prompt.
+
+A task opened from an issue opens its draft pull request in the issue's
+repository. It pushes through `origin`, a contributor's fork when that is a
+different repository, else through the remote that is the issue's repository.
+Create draft PR offers "Add “Closes #N” to the description", on by default; the
+body then starts `Closes #N`, otherwise `Related to #N`. The platform closes the issue
+when the pull request merges into the default branch; agent completion never
+does.
+
+For an opened pull request, Refresh reads the platform and fetches the current
+head, so Git evidence states whether the branch is ahead of it, behind it or
+both. Sync branch moves a clean worktree to the newer head: a fast forward, or,
+after the author rewrote the pull request, a move that is allowed only while
+the branch holds no commits of its own, counting the ones Task Monki pushed.
+Push update sends new commits to the pull request's own branch, fast forward
+only, for a same-repository pull request whose remote pushes to that repository
+alone. The push is leased on the head Task Monki last saw, so a branch that
+moved or was deleted after its merge is left as it is. A pull request from a
+fork stays local. Task Monki's own Git commands in these worktrees (staging,
+commits, moves, pushes and review snapshots) run no repository hooks and skip
+LFS downloads. A push that did not land, proved by the branch still at the
+leased head, is a failed push that is safe to retry; any other uncertain result
+follows the existing AMBIGUOUS rules.
+
 ## Import existing work
 
 The task composer can attach an existing primary checkout or registered linked

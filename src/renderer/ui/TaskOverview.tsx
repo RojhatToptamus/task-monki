@@ -7,6 +7,8 @@ import type {
 } from '../../shared/contracts';
 import { MoreHorizontal } from 'lucide-react';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
+import type { RemoteWorkSnapshot } from '../../shared/remoteWork';
+import type { RemoteSourceView } from '../model/remoteWork';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
@@ -309,16 +311,30 @@ export function OverviewSection({
 /** The request as written: prose first, collapsed past a few lines. */
 export function OverviewRequest({
   prompt,
-  attachments
+  attachments,
+  source,
+  sourceTitle,
+  snapshot,
+  linked = true
 }: {
   prompt: string;
   attachments: TaskAttachmentRecord[];
+  /** The issue or pull request the task was opened from: its link, then its text as captured. */
+  source?: RemoteSourceView;
+  /** Its title, only when the task's own title differs. */
+  sourceTitle?: string;
+  snapshot?: RemoteWorkSnapshot;
+  /** False where another surface already links the source. */
+  linked?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const bodyId = useId();
   const body = useRef<HTMLParagraphElement>(null);
+  const quote = useRef<HTMLQuoteElement>(null);
+  const quoted = source ? snapshot?.body.trim() : undefined;
   const overflowing = useClampOverflow(body, expanded, prompt);
-  const long = overflowing || expanded;
+  const quoteOverflowing = useClampOverflow(quote, expanded, quoted);
+  const long = overflowing || quoteOverflowing || expanded;
   return (
     <OverviewSection
       title="Request"
@@ -336,13 +352,28 @@ export function OverviewRequest({
         ) : undefined
       }
     >
-      <p
-        ref={body}
-        id={bodyId}
-        className={`tm-orequest__prompt${expanded ? '' : ' tm-orequest__prompt--clamped'}`}
-      >
-        {prompt}
-      </p>
+      {source && linked ? (
+        <p className="tm-orequest__source">
+          <a href={source.url} target="_blank" rel="noreferrer">{source.reference}</a>
+          {sourceTitle ? <span>{sourceTitle}</span> : null}
+        </p>
+      ) : null}
+      {/* The platform's text, quoted and attributed: other people wrote it. */}
+      {quoted ? (
+        <figure className={`tm-oresult__report tm-orequest__quote${expanded ? ' tm-orequest__quote--expanded' : ''}`}>
+          <figcaption>{snapshot?.author ? `@${snapshot.author}` : source?.providerName}</figcaption>
+          <blockquote ref={quote} id={source && !prompt ? bodyId : undefined}>{quoted}</blockquote>
+        </figure>
+      ) : null}
+      {prompt ? (
+        <p
+          ref={body}
+          id={bodyId}
+          className={`tm-orequest__prompt${expanded ? '' : ' tm-orequest__prompt--clamped'}`}
+        >
+          {prompt}
+        </p>
+      ) : null}
       {attachments.length > 0 ? (
         <ul className="tm-orequest__attachments" aria-label="Task attachments">
           {attachments.map((attachment) => (

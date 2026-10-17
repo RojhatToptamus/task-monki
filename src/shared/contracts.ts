@@ -73,6 +73,7 @@ export * from './attachments';
 export * from './discourse';
 export * from './design';
 export * from './preview';
+export * from './remoteWork';
 
 export interface DesignRepositoryInspection {
   repository: Repository;
@@ -86,7 +87,7 @@ export interface DesignRepositorySetup {
   workspaceSnapshotId?: string;
 }
 
-export const TASK_STORE_SCHEMA_VERSION = 30 as const;
+export const TASK_STORE_SCHEMA_VERSION = 31 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -367,6 +368,7 @@ export const ARTIFACT_KINDS = [
   'diff',
   'git-snapshot',
   'pr-body',
+  'remote-source',
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -533,6 +535,8 @@ export interface Task {
   sourceDesignRevisionId?: string;
   designPreviewTarget?: import('./design').DesignPreviewTarget;
   acceptedWorkspaceSnapshotId?: string;
+  /** The GitHub or GitLab issue or pull request the task was opened from. Immutable. */
+  remoteSource?: import('./remoteWork').TaskRemoteSource;
   agentSettings: AgentExecutionSettings;
   createdAt: string;
   updatedAt: string;
@@ -670,6 +674,11 @@ export interface BranchPublicationRecord {
   branchName: string;
   remoteRef: string;
   headSha?: string;
+  /**
+   * An opened pull request's branch head when the push was requested. The push
+   * is leased on it, and finding the branch still there proves the push did not land.
+   */
+  previousRemoteSha?: string;
   status: BranchPublicationStatus;
   error?: string;
   requestedAt: string;
@@ -960,6 +969,7 @@ export type BoardStatusProjection = Pick<
   | 'git'
   | 'githubPullRequest'
   | 'githubPullRequestNumber'
+  | 'githubPullRequestUrl'
   | 'ciChecks'
   | 'reviews'
   | 'merge'
@@ -1049,6 +1059,8 @@ export interface CreateTaskRequest {
   runtimeId?: AgentRuntimeId;
   agentSettings?: AgentExecutionSettings;
   attachmentDraftId?: string;
+  /** An issue the task works on. Its text is captured when the task is created. */
+  issue?: import('./remoteWork').RemoteWorkRef;
 }
 
 export interface ExistingWorktree {
@@ -1364,7 +1376,7 @@ export interface UpdateAppSettingsRequest {
   selectedRepositoryId?: string | null;
 }
 
-export type ExternalToolId = 'git' | 'codex' | 'gh';
+export type ExternalToolId = 'git' | 'codex' | 'gh' | 'glab';
 export type ExternalToolResolutionSource = 'env' | 'override' | 'settings' | 'auto';
 export type ExternalToolProbeStatus = 'ok' | 'error';
 
@@ -1504,6 +1516,8 @@ export interface CreatePullRequestRequest {
   title?: string;
   /** Target for a new imported-work PR. An existing PR keeps its own target. */
   baseBranch?: string;
+  /** For a task opened from an issue: close it when the new pull request merges. */
+  closeIssue?: boolean;
 }
 
 export interface RefreshGitHubRequest {
@@ -1595,6 +1609,12 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   listExistingWorktrees(repositoryId: string): Promise<ExistingWorktree[]>;
   previewImport(input: PreviewImportRequest): Promise<ImportPreview>;
   importTask(input: ImportTaskRequest): Promise<Task>;
+  /** Open issues or pull requests of a registered checkout's remote repository. */
+  listRemoteWork(input: import('./remoteWork').ListRemoteWorkRequest): Promise<import('./remoteWork').RemoteWorkListing>;
+  /** Opens a pull request in a new task at its exact head; an already opened one returns its task. */
+  openPullRequest(input: import('./remoteWork').OpenPullRequestRequest): Promise<Task>;
+  /** Moves a clean pull request task to the pull request's newer head. */
+  syncPullRequest(input: import('./remoteWork').SyncPullRequestRequest): Promise<Task>;
   reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
   updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;
   listDesigns(): Promise<DesignListItem[]>;

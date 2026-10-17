@@ -594,6 +594,32 @@
   -webkit-line-clamp: 6;
 }
 
+/* The issue or pull request the task was opened from: its reference links to the platform. */
+.tm-orequest__source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+}
+
+.tm-orequest__source a {
+  color: var(--accent-ink);
+  text-decoration: none;
+}
+
+.tm-orequest__source a:hover {
+  color: var(--accent);
+}
+
+/* Expanded, the whole captured text shows; the report clamp below would win otherwise. */
+.tm-oresult__report.tm-orequest__quote--expanded blockquote {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
 .tm-orequest__attachments {
   display: grid;
   gap: 4px;
@@ -1788,6 +1814,16 @@
 
 .tm-draftpr-modal__field small {
   text-align: right;
+}
+
+.tm-draftpr-modal__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--h-compact);
+  margin-top: 12px;
+  color: var(--text-soft);
+  font-size: var(--t-body);
 }
 
 .tm-draftpr-modal__context {

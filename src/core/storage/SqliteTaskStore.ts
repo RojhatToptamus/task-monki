@@ -66,6 +66,13 @@ import type {
 } from '../../shared/contracts';
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
+  parseRemoteWorkReference,
+  remoteWorkKey,
+  taskRemoteSourceRef,
+  type RemoteWorkRef,
+  type TaskRemoteSource
+} from '../../shared/remoteWork';
+import {
   BOARD_COLORS,
   REVIEW_FINDING_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
@@ -104,7 +111,9 @@ import {
 import { AttachmentStoreError } from './AttachmentErrors';
 import {
   validateCurrentStoreRecords,
-  validateTaskInstructionConversation
+  validatePullRequestObservation,
+  validateTaskInstructionConversation,
+  validateTaskRemoteSource
 } from './currentStoreValidation';
 import {
   AppDatabase
@@ -134,6 +143,24 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
    * resolved settings. It is never copied into the durable task record.
    */
   creationFingerprintInput?: CreateTaskRequest;
+  /** The issue the task was opened from, as the service read it from the platform. */
+  remote?: RemoteTaskSourceInput;
+}
+
+export interface RemoteTaskSourceInput {
+  /** The source without its artifact, which the store creates from `snapshot`. */
+  source: Omit<TaskRemoteSource, 'snapshotArtifactId'>;
+  /** The captured text agents read, stored as the task's `remote-source` artifact. */
+  snapshot: string;
+}
+
+/** A pull request opened as a task: its managed worktree starts at the exact head. */
+export interface OpenRemoteWorktreeInput {
+  branchName: string;
+  worktreePath: string;
+  baseRef?: string;
+  baseSha: string;
+  headSha: string;
 }
 
 export interface ImportedTaskEvidence {
@@ -300,6 +327,7 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
+  'remote-source': 256 * 1024,
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -504,6 +532,7 @@ function taskCreationMetadata(
       runtimeId: requestedRuntimeId,
       agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
       ...(fingerprintInput.agentProfileId !== undefined ? { agentProfileId: fingerprintInput.agentProfileId } : {}),
+      ...(fingerprintInput.issue !== undefined ? { issue: remoteWorkKey(fingerprintInput.issue) } : {}),
       attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
@@ -3231,6 +3260,41 @@ export class SqliteTaskStore {
     return worktree ? this.state.tasks.find((task) => task.id === worktree.taskId) : undefined;
   }
 
+  /** The task opened from this issue or pull request, or that delivered this pull request. */
+  async findTaskForRemoteWork(ref: RemoteWorkRef): Promise<Task | undefined> {
+    await this.init();
+    return clone(this.findTaskForRemoteWorkFromState(ref));
+  }
+
+  private findTaskForRemoteWorkFromState(ref: RemoteWorkRef): Task | undefined {
+    const key = remoteWorkKey(ref);
+    const opened = this.state.tasks.find((task) =>
+      task.remoteSource && remoteWorkKey(taskRemoteSourceRef(task.remoteSource)) === key);
+    if (opened || ref.kind !== 'PULL_REQUEST') return opened;
+    const delivered = this.state.pullRequests.find((pullRequest) => {
+      const linked = pullRequest.url ? parseRemoteWorkReference(pullRequest.url) : undefined;
+      return linked?.repository && linked.kind === 'PULL_REQUEST' &&
+        remoteWorkKey({ repository: linked.repository, kind: linked.kind, number: linked.number }) === key;
+    });
+    return delivered ? this.state.tasks.find((task) => task.id === delivered.taskId) : undefined;
+  }
+
+  /**
+   * Opens a pull request as a task with its managed worktree record, or returns
+   * the task that already holds it. The caller creates the worktree on disk.
+   */
+  openPullRequestTask(
+    input: CreateTaskStoreInput & { remote: RemoteTaskSourceInput },
+    worktree: (task: Task) => OpenRemoteWorktreeInput
+  ): Promise<{ task: Task; created: boolean }> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(input.remote.source));
+      if (existing) return { task: clone(existing), created: false };
+      return { task: await this.createTaskRecord(input, 'ui', undefined, undefined, worktree), created: true };
+    });
+  }
+
   importTask(input: ImportTaskRequest, evidence: ImportedTaskEvidence): Promise<Task> {
     return this.serializeMutation(async () => {
       if (!evidence.snapshot.headSha || !evidence.snapshot.baseSha ||
@@ -3483,7 +3547,8 @@ export class SqliteTaskStore {
     input: CreateTaskStoreInput,
     source: DomainEvent['source'],
     fork?: { sourceTaskId: string; sourceRunId: string },
-    imported?: ImportedTaskEvidence
+    imported?: ImportedTaskEvidence,
+    openedWorktree?: (task: Task) => OpenRemoteWorktreeInput
   ): Promise<Task> {
     await this.init();
 
@@ -3492,6 +3557,26 @@ export class SqliteTaskStore {
       if (existing) {
         return clone(existing);
       }
+    }
+    const remote = fork ? undefined : input.remote;
+    if (remote) {
+      if (input.issue && remoteWorkKey(input.issue) !== remoteWorkKey(taskRemoteSourceRef(remote.source))) {
+        throw new Error('The captured issue does not match the request.');
+      }
+      if ((remote.source.kind === 'PULL_REQUEST') !== Boolean(openedWorktree)) {
+        throw new Error('A pull request opens with its worktree; an issue opens without one.');
+      }
+      // One task per remote item: choosing it again opens the task it already has.
+      const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(remote.source));
+      if (existing) return clone(existing);
+      // Checked as stored, before anything is written: a value the store could not load fails this action, not startup.
+      try {
+        validateTaskRemoteSource({ ...remote.source, snapshotArtifactId: randomUUID() });
+      } catch {
+        throw new Error('This item has a value Task Monki cannot record.');
+      }
+    } else if (input.issue || openedWorktree) {
+      throw new Error('The issue was not captured.');
     }
 
     const now = new Date().toISOString();
@@ -3525,7 +3610,7 @@ export class SqliteTaskStore {
       repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
-      workflowPhase: imported ? 'IN_PROGRESS' : 'READY',
+      workflowPhase: imported || openedWorktree ? 'IN_PROGRESS' : 'READY',
       resolution: 'NONE',
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
@@ -3541,7 +3626,7 @@ export class SqliteTaskStore {
     if (!task.title) {
       throw new Error('Task title is required.');
     }
-    if (!task.prompt && !imported) {
+    if (!task.prompt && !imported && !remote) {
       throw new Error('Task prompt is required.');
     }
     const repository = this.state.repositories.find(
@@ -3611,10 +3696,31 @@ export class SqliteTaskStore {
             repositoryId: task.repositoryId,
             forkedFromTaskId: task.forkedFromTaskId,
             forkedFromRunId: task.forkedFromRunId,
-            attachmentIds: attachmentRecords.map((attachment) => attachment.id)
+            attachmentIds: attachmentRecords.map((attachment) => attachment.id),
+            ...(remote ? {
+              remoteSource: {
+                provider: remote.source.provider,
+                host: remote.source.host,
+                repositoryPath: remote.source.repositoryPath,
+                kind: remote.source.kind,
+                number: remote.source.number,
+                url: remote.source.url
+              }
+            } : {})
           }
         })
       );
+
+      // An alternative keeps the issue through its prompt; only the opened task holds the source.
+      if (remote) {
+        const snapshot = await this.createTextArtifact(task.id, 'remote-source', remote.snapshot);
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((candidate) => candidate.id === task.id
+            ? { ...candidate, remoteSource: { ...remote.source, snapshotArtifactId: snapshot.id } }
+            : candidate)
+        };
+      }
 
       if (fork) {
         this.state = applyEventToState(
@@ -3646,6 +3752,10 @@ export class SqliteTaskStore {
         await this.recordGitSnapshotInternal({
           ...snapshot, taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id
         }, diffEvidence, false);
+      }
+      if (openedWorktree) {
+        const created = this.state.tasks.find((candidate) => candidate.id === task.id)!;
+        await this.createIterationAndWorktreeInternal({ task: created, ...openedWorktree(created), ownership: 'MANAGED' }, false);
       }
       await this.persistSnapshot();
     } catch (error) {
@@ -4384,6 +4494,38 @@ export class SqliteTaskStore {
     return clone(stored);
   }
 
+  /**
+   * The diff base of a pull request task, after its branch moved to a newer head:
+   * the merge base the platform diffs against. Both stay ancestors of the head.
+   */
+  async updatePullRequestBase(
+    worktreeId: string,
+    base: { baseRef: string; baseSha: string; headSha?: string }
+  ): Promise<WorktreeRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const worktree = this.state.worktrees.find((candidate) => candidate.id === worktreeId);
+      const task = worktree ? this.state.tasks.find((candidate) => candidate.id === worktree.taskId) : undefined;
+      if (!worktree || !task || task.remoteSource?.kind !== 'PULL_REQUEST' || worktree.ownership !== 'MANAGED' ||
+          task.currentWorktreeId !== worktree.id || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(base.baseSha)) {
+        throw new Error('Only the current worktree of a pull request task can change its base.');
+      }
+      const now = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        iterations: this.state.iterations.map((iteration) => iteration.id === worktree.iterationId
+          ? { ...iteration, baseRef: base.baseRef, baseSha: base.baseSha, updatedAt: now }
+          : iteration)
+      };
+      return this.updateWorktreeInternal({
+        ...worktree,
+        baseRef: base.baseRef,
+        baseSha: base.baseSha,
+        ...(base.headSha ? { headSha: base.headSha } : {})
+      }, 'WORKTREE_VERIFIED');
+    });
+  }
+
   async updateExistingWorktree(
     worktree: WorktreeRecord,
     evidence: ImportedTaskEvidence
@@ -4602,17 +4744,23 @@ export class SqliteTaskStore {
     worktree: WorktreeRecord,
     remoteName: string,
     headSha: string,
-    remoteUrl?: string
+    remoteUrl?: string,
+    /** An opened pull request's branch, when the push goes there instead of the task branch. */
+    remoteBranch?: string,
+    /** That branch's head as last observed, which the push is leased on. */
+    previousRemoteSha?: string
   ): Promise<BranchPublicationRecord> {
+    const branchName = remoteBranch ?? worktree.branchName;
     return this.recordBranchPublication({
       taskId: task.id,
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
       remoteName,
       ...(remoteUrl ? { remoteUrl } : {}),
-      branchName: worktree.branchName,
-      remoteRef: `${remoteName}/${worktree.branchName}`,
+      branchName,
+      remoteRef: `${remoteName}/${branchName}`,
       headSha,
+      ...(previousRemoteSha ? { previousRemoteSha } : {}),
       status: 'PUSHING'
     });
   }
@@ -4727,6 +4875,11 @@ export class SqliteTaskStore {
       ...input.merge,
       observedAt
     };
+    try {
+      validatePullRequestObservation({ pullRequest, ci, reviews, merge });
+    } catch {
+      throw new Error('The platform reported a pull request value Task Monki cannot record.');
+    }
 
     this.state = {
       ...this.state,
@@ -5378,7 +5531,26 @@ function validateLoadedTaskState(current: StoreState): void {
   validatePersistedRepositoryReferences(current);
   validatePersistedBoards(current);
   validatePersistedTaskCreationMetadata(current);
+  validatePersistedRemoteSources(current);
   validatePersistedAttachments(current);
+}
+
+/** A task's remote source names its own captured text, and only one task claims an item. */
+function validatePersistedRemoteSources(state: StoreState): void {
+  const keys = new Set<string>();
+  for (const task of state.tasks) {
+    const source = task.remoteSource;
+    if (!source) continue;
+    const artifact = state.artifacts.find((candidate) => candidate.id === source.snapshotArtifactId);
+    const key = remoteWorkKey(taskRemoteSourceRef(source));
+    if (task.kind !== 'NORMAL' || task.forkedFromTaskId !== undefined || keys.has(key) ||
+        artifact?.taskId !== task.id || artifact.kind !== 'remote-source') {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: tasks contains an invalid remote source.`
+      );
+    }
+    keys.add(key);
+  }
 }
 
 function validatePersistedRelationships(state: StoreState): void {
@@ -7407,6 +7579,7 @@ function projectBoardTask(task: Task): BoardTaskSummary {
       git: task.projection.git,
       githubPullRequest: task.projection.githubPullRequest,
       githubPullRequestNumber: task.projection.githubPullRequestNumber,
+      githubPullRequestUrl: task.projection.githubPullRequestUrl,
       ciChecks: task.projection.ciChecks,
       reviews: task.projection.reviews,
       merge: task.projection.merge,

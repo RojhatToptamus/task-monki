@@ -11,9 +11,11 @@ import {
   EMPTY_REVIEW_DRAFT,
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
+  leavablePullRequestHeads,
   type CreateTaskRequest,
   type DecideReviewFindingRequest,
   type ImportTaskRequest,
+  type OpenPullRequestRequest,
   type CreateBoardRequest,
   type Board,
   type BoardSnapshot,
@@ -1594,6 +1596,11 @@ export function App() {
   const selectedPullRequest = selectedTask && taskDetail
     ? selectLatestPullRequest(taskDetail, selectedTask)
     : undefined;
+  const selectedPullRequestHeads = useMemo(
+    () => taskDetail ? leavablePullRequestHeads(
+      taskDetail.task.remoteSource?.pullRequest?.headSha, taskDetail.pullRequests, taskDetail.branchPublications) : [],
+    [taskDetail]
+  );
   const selectedCiRollup = selectedTask && taskDetail
     ? selectLatestCiRollup(taskDetail, selectedTask)
     : undefined;
@@ -1794,7 +1801,8 @@ export function App() {
       const created = await taskManagerApi.createTask(input);
       rememberRepository(input.repositoryId);
       taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
-      setNewTaskTextDraft({ title: '', prompt: '' });
+      // A task from an issue used its own text, so the New work draft stays.
+      if (!input.issue) setNewTaskTextDraft({ title: '', prompt: '' });
       await taskDataCoordinator.refreshBoard();
       await openTaskDetail(created.id);
     } catch (caught) {
@@ -1813,6 +1821,19 @@ export function App() {
       await openTaskDetail(imported.id);
     } catch (caught) {
       reportActionError(caught, 'Could not import existing work.');
+      throw caught;
+    }
+  };
+
+  const openPullRequest = async (input: OpenPullRequestRequest) => {
+    try {
+      const opened = await taskManagerApi.openPullRequest(input);
+      rememberRepository(input.repositoryId);
+      taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
+      await taskDataCoordinator.refreshBoard();
+      await openTaskDetail(opened.id);
+    } catch (caught) {
+      reportActionError(caught, 'Could not open the pull request.');
       throw caught;
     }
   };
@@ -2027,16 +2048,27 @@ export function App() {
     }
   };
 
-  const createPullRequest = async (taskId: string, title?: string, baseBranch?: string) => {
+  const createPullRequest = async (taskId: string, title?: string, baseBranch?: string, closeIssue?: boolean) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch }));
-      notify('Draft pull request created.', 'success');
+      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch, closeIssue }));
+      // Only the creation dialog creates a pull request; Push update shows its result in PR Status.
+      if (title !== undefined) notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {
       // The creation dialog keeps its inputs and displays the failure for retry.
       if (title !== undefined) throw caught;
       reportActionError(caught, 'Failed to create pull request.');
+    }
+  };
+
+  const syncPullRequest = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.syncPullRequest({ taskId }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not sync the branch.');
     }
   };
 
@@ -2829,6 +2861,7 @@ export function App() {
             gitSnapshots={selectedGitSnapshots}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
+            pullRequestHeads={selectedPullRequestHeads}
             ciRollup={selectedCiRollup}
             reviewRollup={selectedReviewRollup}
             mergeSnapshot={selectedMergeSnapshot}
@@ -2893,6 +2926,7 @@ export function App() {
             onRespondToInteraction={respondToInteraction}
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
+            onSyncPullRequest={syncPullRequest}
             onRefreshGitHub={refreshGitHub}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
@@ -3093,6 +3127,8 @@ export function App() {
           onCreate={createTask}
           onImport={importTask}
           onPreviewImport={taskManagerApi.previewImport}
+          onListRemoteWork={taskManagerApi.listRemoteWork}
+          onOpenPullRequest={openPullRequest}
           onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
           onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
           onRefinePrompt={refinePrompt}

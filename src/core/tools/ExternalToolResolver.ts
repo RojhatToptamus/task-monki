@@ -46,6 +46,14 @@ const TOOL_DEFINITIONS: Record<
     versionArgs: ['--version'],
     envVar: 'TASK_MANAGER_GH_PATH',
     settingKey: 'ghExecutablePath'
+  },
+  glab: {
+    label: 'GitLab CLI',
+    command: 'glab',
+    required: false,
+    versionArgs: ['--version'],
+    envVar: 'TASK_MANAGER_GLAB_PATH',
+    settingKey: 'glabExecutablePath'
   }
 };
 
@@ -59,13 +67,14 @@ export class ExternalToolResolver {
   constructor(private readonly options: ExternalToolResolverOptions = {}) {}
 
   async getStatus(settings: ExternalExecutablePathSettings): Promise<ExternalToolStatusReport> {
-    const [git, codex, gh] = await Promise.all([
+    const [git, codex, gh, glab] = await Promise.all([
       this.probe('git', settings),
       this.probe('codex', settings),
-      this.probe('gh', settings)
+      this.probe('gh', settings),
+      this.probe('glab', settings)
     ]);
     return {
-      tools: { git, codex, gh },
+      tools: { git, codex, gh, glab },
       refreshedAt: new Date().toISOString()
     };
   }
@@ -144,9 +153,16 @@ export async function probeExecutable(input: {
       resolvedPath,
       status: 'error',
       version: null,
-      error: error instanceof Error ? error.message : String(error)
+      error: describeProbeError(error, input.executable)
     };
   }
+}
+
+function describeProbeError(error: unknown, executable: string): string {
+  if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+    return `${executable} was not found.`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function resolveConfiguredExecutable(input: {

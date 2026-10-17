@@ -5,9 +5,15 @@ import {
   type Task
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
+import { deliveryProvider, deliveryWords } from './deliveryWords';
 import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
+
+/** A board summary names its platform only through its recorded pull request. */
+function attentionDeliverySource(task: TaskAttentionSource): Parameters<typeof deliveryProvider>[0] {
+  return { remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection: task.projection };
+}
 
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
@@ -190,13 +196,13 @@ function describeDeliveryAttention(
     projection.githubPullRequest === 'CLOSED_UNMERGED' ||
     projection.merge === 'CLOSED_UNMERGED'
   ) {
-    return { label: 'PR closed without merge', kind: 'delivery', tone: 'error' };
+    return { label: deliveryWords('PR closed without merge', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'error' };
   }
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
     return { label: 'Checks failed', kind: 'delivery', tone: 'error' };
   }
   if (projection.reviews === 'CHANGES_REQUESTED') {
-    return { label: 'GitHub changes requested', kind: 'delivery', tone: 'warning' };
+    return { label: deliveryWords('GitHub changes requested', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'warning' };
   }
   if (projection.merge === 'BLOCKED') {
     return { label: 'Merge blocked', kind: 'delivery', tone: 'error' };
