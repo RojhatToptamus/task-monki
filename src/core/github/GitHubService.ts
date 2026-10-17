@@ -12,11 +12,22 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
+import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
 import { git, gitSucceeds } from '../git/gitCli';
+import {
+  GITHUB_FEEDBACK_QUERY,
+  GITHUB_THREADS_PAGE_QUERY,
+  GITHUB_THREAD_PAGES,
+  gitHubPullRequestLocation,
+  parseGitHubPullRequestFeedback,
+  type GitHubFeedbackData,
+  type GitHubThreadConnection
+} from './GitHubPullRequestFeedback';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
 import { UNTRUSTED_CHECKOUT_GIT_ENV } from '../remote/RemoteCheckout';
+import { canonicalPlatformTime } from '../remote/platformTime';
 
 export type GitHubRemote = DeliveryRemote;
 export type GitHubPrSync = PullRequestSync;
@@ -407,11 +418,43 @@ export class GitHubService implements PullRequestDelivery {
     if (remote && !matchesExternalPullRequest(raw, worktree, remote)) {
       throw new Error('The pull request does not match this external checkout.');
     }
-    return parsePrView(
+    const sync = parsePrView(
       raw,
       worktree,
       checksResult ? parseJson<unknown[]>(checksResult.stdout, []) : undefined
     );
+    // Feedback is read from the pull request GitHub reported; without it, the status still stands.
+    const feedback = await this.readPullRequestFeedback(worktree.worktreePath, sync.pullRequest.url).catch(() => undefined);
+    return feedback ? { ...sync, feedback } : sync;
+  }
+
+  /**
+   * What people said on the pull request: review threads, a page at a time up
+   * to a bound, review summaries and the conversation.
+   */
+  async readPullRequestFeedback(cwd: string, url: string | undefined): Promise<PullRequestFeedback | undefined> {
+    const location = gitHubPullRequestLocation(url);
+    if (!location) return undefined;
+    const query = async <T>(text: string, extra: string[] = []): Promise<T | undefined> => parseJson<{ data?: T }>((await this.exec([
+      'api', 'graphql', '--hostname', location.host,
+      '-f', `query=${text}`,
+      '-f', `owner=${location.owner}`,
+      '-f', `name=${location.name}`,
+      '-F', `number=${location.number}`,
+      ...extra
+    ], cwd)).stdout, {}).data;
+    const data = await query<GitHubFeedbackData>(GITHUB_FEEDBACK_QUERY);
+    const threads = data?.repository?.pullRequest?.reviewThreads;
+    if (!data || !threads) return data ? parseGitHubPullRequestFeedback(data, location.number, new Date().toISOString()) : undefined;
+    let page: GitHubThreadConnection = threads;
+    for (let pages = 1; page.pageInfo?.hasNextPage && page.pageInfo.endCursor && pages < GITHUB_THREAD_PAGES; pages += 1) {
+      const next = (await query<GitHubFeedbackData>(GITHUB_THREADS_PAGE_QUERY, ['-f', `after=${page.pageInfo.endCursor}`]))
+        ?.repository?.pullRequest?.reviewThreads;
+      if (!next) break;
+      threads.nodes = [...(threads.nodes ?? []), ...(next.nodes ?? [])];
+      page = next;
+    }
+    return parseGitHubPullRequestFeedback(data, location.number, new Date().toISOString());
   }
 
   buildPullRequestBody(input: {
@@ -560,8 +603,9 @@ export function parsePrView(
   const headSha = stringField(data, 'headRefOid');
   const state = stringField(data, 'state');
   const isDraft = booleanField(data, 'isDraft');
-  const mergedAt = stringOrNullField(data, 'mergedAt');
-  const status = derivePullRequestStatus({ state, isDraft, mergedAt });
+  const reportedMergedAt = stringOrNullField(data, 'mergedAt');
+  const status = derivePullRequestStatus({ state, isDraft, mergedAt: reportedMergedAt });
+  const mergedAt = canonicalPlatformTime(reportedMergedAt);
 
   return {
     pullRequest: {
@@ -691,22 +735,15 @@ export function parseMergeSnapshot(
   headSha?: string
 ): Omit<MergeSnapshotRecord, 'id' | 'observedAt'> {
   const state = stringField(raw, 'state');
-  const mergedAt = stringOrNullField(raw, 'mergedAt');
-  const mergeable = stringField(raw, 'mergeable')?.toUpperCase();
-  const mergeStateStatus = stringField(raw, 'mergeStateStatus')?.toUpperCase();
-  const status = mergedAt
+  const reportedMergedAt = stringOrNullField(raw, 'mergedAt');
+  const mergedAt = canonicalPlatformTime(reportedMergedAt);
+  const status: MergeSnapshotRecord['status'] = reportedMergedAt
     ? 'MERGED'
     : state === 'CLOSED'
       ? 'CLOSED_UNMERGED'
       : state === 'MERGED'
         ? 'MERGED'
-        : mergeStateStatus === 'CLEAN' || mergeStateStatus === 'HAS_HOOKS' || mergeable === 'MERGEABLE'
-          ? 'MERGEABLE'
-          : ['BLOCKED', 'DIRTY', 'BEHIND', 'DRAFT'].includes(mergeStateStatus ?? '')
-            ? 'BLOCKED'
-            : mergeStateStatus === 'UNKNOWN' || mergeable === 'UNKNOWN'
-              ? 'UNKNOWN'
-              : 'NOT_MERGED';
+        : gitHubMergeStatus(stringField(raw, 'mergeStateStatus')?.toUpperCase(), stringField(raw, 'mergeable')?.toUpperCase());
   return {
     taskId: worktree.taskId,
     iterationId: worktree.iterationId,
@@ -717,6 +754,37 @@ export function parseMergeSnapshot(
     mergedAt,
     raw
   };
+}
+
+/**
+ * An open pull request's merge state. `mergeable` speaks only of Git
+ * conflicts, so GitHub's merge state decides: a draft, or one held by branch
+ * protection (required reviews, checks or resolved conversations), is not
+ * mergeable yet, for reasons its own evidence states, and only conflicts or a
+ * branch that must be updated block it outright.
+ */
+function gitHubMergeStatus(mergeStateStatus: string | undefined, mergeable: string | undefined): MergeSnapshotRecord['status'] {
+  switch (mergeStateStatus) {
+    case 'CLEAN':
+    case 'HAS_HOOKS':
+    // Mergeable while checks that are not required fail; the checks say so.
+    case 'UNSTABLE':
+      return 'MERGEABLE';
+    case 'DIRTY':
+    case 'BEHIND':
+      return 'BLOCKED';
+    case 'DRAFT':
+      return mergeable === 'CONFLICTING' ? 'BLOCKED' : 'NOT_MERGED';
+    case 'BLOCKED':
+      return mergeable === 'CONFLICTING' ? 'BLOCKED' : 'NOT_MERGED';
+    case 'UNKNOWN':
+      return 'UNKNOWN';
+    default:
+      return mergeable === 'MERGEABLE' ? 'MERGEABLE'
+        : mergeable === 'CONFLICTING' ? 'BLOCKED'
+          : mergeable === 'UNKNOWN' ? 'UNKNOWN'
+            : 'NOT_MERGED';
+  }
 }
 
 const prJsonFields = [

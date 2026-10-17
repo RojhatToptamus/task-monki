@@ -303,19 +303,33 @@ Questions about the task go to Ask, on Overview, Agent and Review.
 ### Requesting changes after review
 
 1. The Review tab's request bar says what will be sent: every open Blocker and
-   Major finding, the suggestions the person added, and their own line
-   comments, with an optional note. Comments can be sent on their own, even
-   without an actionable review.
-2. `buildReviewRequestInstruction` numbers the findings, then the comments, in
-   one sequence, names the dismissed findings as context the agent must leave
-   alone, and asks the agent to end its reply with a
-   `task-monki-review-response` block answering every item: `FIXED`,
+   Major finding, the suggestions the person added, the pull request
+   discussions the person added, and their own line comments, with an optional
+   note. Comments can be sent on their own, even without an actionable review.
+   A pull request discussion (a review thread, a review's summary or a
+   conversation comment, read from GitHub or GitLab with each PR refresh) is
+   other people's words: it goes only when the person adds it
+   (`TaskReviewDraft.includedDiscussionIds`), never once resolved. Address
+   comments on PR Status adds every unresolved thread and review requesting
+   changes that was not sent since someone other than the person last wrote on
+   it, and opens the request sheet; sending stays the person's step.
+2. `buildReviewRequestInstruction` numbers the findings, then the discussions,
+   then the comments, in one sequence. Discussions are quoted with every
+   comment's author inside boundary lines that carry the stored feedback's id,
+   framed as data that grants no permission. It names the dismissed findings as
+   context the agent must leave alone, and asks the agent to end its reply with
+   a `task-monki-review-response` block answering every item: `FIXED`,
    `NOT_CHANGED` (and why) or `NEEDS_DECISION` (and the question).
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run. The follow-up message carries the request item by
    item (`TaskInstruction.reviewRequest`, validated by
    `assertReviewRequestRecord`), so the Agent conversation shows it as a card of
-   those items rather than the instruction text.
+   those items rather than the instruction text. Before the task's first turn,
+   such as on an opened pull request, `startRun` takes the request with its
+   instruction and records it as that turn's `FOLLOW_UP` message, so it reads
+   and is answered the same way. A discussion the request sent shows as Sent,
+   or with the agent's answer, until someone other than the person writes on it
+   again.
 4. Reducer moves the task to `IN_PROGRESS`.
 5. The review stays as it was: a follow-up continues the reviewed work, and only
    a diff that differs from the reviewed one makes the review stale.

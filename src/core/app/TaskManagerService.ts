@@ -3131,6 +3131,10 @@ export class TaskManagerService {
         if (mode === 'REVIEW') {
           throw new Error('Start a code review with the review action.');
         }
+        if (input.reviewRequest !== undefined) {
+          if (mode !== 'IMPLEMENTATION' || !input.instruction?.trim()) throw new Error('A review request starts implementation with its instruction.');
+          assertReviewRequestRecord(input.reviewRequest);
+        }
         if (task.currentRunId) {
           if (isImplementationRunMode(mode)) {
             await this.awaitPostRunEvidence(task.currentRunId);
@@ -3168,15 +3172,32 @@ export class TaskManagerService {
               'Prepare or restore the worktree before starting implementation.'
           );
         }
-        return this.startPreparedRun({
+        const run = await this.startPreparedRun({
           task,
           worktree,
           mode,
           settings: input.settings,
           instruction: input.instruction
         });
+        if (input.reviewRequest && input.instruction) await this.recordStartedReviewRequest(task, run, input.instruction, input.reviewRequest);
+        return run;
       })
     );
+  }
+
+  /**
+   * A request sent from the Review tab before the task's first turn, such as on
+   * an opened pull request, is that turn's authored message, so its items read as
+   * a request card and the agent's answers are read like any follow-up's. The run
+   * has started by now; a failure to record the round leaves it running.
+   */
+  private async recordStartedReviewRequest(task: Task, run: RunRecord, instruction: string, request: ReviewRequestRecord): Promise<void> {
+    try {
+      const record = await this.addInstruction(randomUUID(), task, run, instruction, 'FOLLOW_UP', 'SUBMITTED', undefined, undefined, request);
+      await this.setInstructionReceipt(record, 'SUBMITTED', undefined, run.id, false);
+    } catch {
+      // The turn runs without its request card; nothing the person sent is lost.
+    }
   }
 
   private async startPreparedRun(input: {

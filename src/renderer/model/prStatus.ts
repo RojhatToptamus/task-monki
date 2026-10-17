@@ -9,8 +9,9 @@ import type {
   WorktreeRecord,
   Task
 } from '../../shared/contracts';
-import { getImplementationRetryReason, type RemoteProvider } from '../../shared/contracts';
+import { getImplementationRetryReason, pullRequestRewrittenUnder, type RemoteProvider } from '../../shared/contracts';
 import { deliveryNoun, deliveryWords } from './deliveryWords';
+import { pullRequestFeedbackLine } from './pullRequestFeedback';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
@@ -60,6 +61,8 @@ export interface PrStatusViewModel {
   freshnessLine?: string;
   guidanceLine?: string;
   leadLine?: string;
+  /** What the pull request's people ask of it: who requested changes, who it waits on, unresolved threads. */
+  feedbackLine?: string;
   refreshedLine?: string;
   checkGroups: PrCheckGroup[];
   canCreateDraftPr: boolean;
@@ -207,6 +210,7 @@ export function buildPrStatusViewModel(input: Parameters<typeof buildPrStatusFac
     freshnessLine: words(view.freshnessLine),
     guidanceLine: words(view.guidanceLine),
     leadLine: words(view.leadLine),
+    feedbackLine: words(view.feedbackLine),
     createDraftPrDisabledReason: words(view.createDraftPrDisabledReason),
     pushUpdateDisabledReason: words(view.pushUpdateDisabledReason),
     syncBranchDisabledReason: words(view.syncBranchDisabledReason)
@@ -314,12 +318,14 @@ function buildPrStatusFacts(input: {
   if (freshnessStatus) {
     // Sync moves a worktree that holds no commits of its own: one behind the pull
     // request, or one still at a head the pull request had before it was rewritten.
-    const localHead = gitSnapshot?.headSha;
     const canSyncBranch = Boolean(openedPullRequest) && (
       freshness.kind === 'PR_NEWER_COMMITS' ||
-      (freshness.kind === 'BRANCH_DIVERGED' && Boolean(localHead) &&
-        branchPublication?.status !== 'AMBIGUOUS' &&
-        [openedPullRequest?.headSha, ...(input.observedPullRequestHeads ?? [])].includes(localHead))
+      pullRequestRewrittenUnder({
+        leavableHeads: [openedPullRequest?.headSha, ...(input.observedPullRequestHeads ?? [])].filter((head): head is string => Boolean(head)),
+        localHead: gitSnapshot?.headSha,
+        diverged: freshness.kind === 'BRANCH_DIVERGED',
+        pushUnconfirmed: branchPublication?.status === 'AMBIGUOUS'
+      })
     );
     const dirty = (gitSnapshot?.stagedCount ?? 0) + (gitSnapshot?.unstagedCount ?? 0) + (gitSnapshot?.untrackedCount ?? 0) > 0;
     // A fork's branch belongs to its author: Task Monki never pushes there, so
@@ -409,12 +415,17 @@ function buildPrStatusFacts(input: {
   };
 
   function baseStatus(pr: PullRequestSnapshotRecord): PrStatusViewModel {
+    // Feedback read with this pull request; a merged or closed one asks nothing more.
+    const feedback = reviewRollup?.feedback && reviewRollup.pullRequestNumber === pr.number &&
+      (pr.status === 'OPEN_DRAFT' || pr.status === 'OPEN_READY') ? reviewRollup.feedback : undefined;
+    const feedbackLine = feedback ? pullRequestFeedbackLine(feedback) : undefined;
     return {
       kind: 'UNKNOWN',
       headline: 'Unknown',
       tone: 'neutral',
       overviewRelevant: true,
       hasPullRequest: true,
+      ...(feedbackLine ? { feedbackLine } : {}),
       prNumber: pr.number,
       prUrl: pr.url,
       prTitle: cleanPrTitle(pr.title),

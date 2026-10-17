@@ -74,6 +74,7 @@ export * from './discourse';
 export * from './design';
 export * from './preview';
 export * from './remoteWork';
+export * from './pullRequestFeedback';
 
 export interface DesignRepositoryInspection {
   repository: Repository;
@@ -369,6 +370,7 @@ export const ARTIFACT_KINDS = [
   'git-snapshot',
   'pr-body',
   'remote-source',
+  'pull-request-feedback',
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -734,6 +736,8 @@ export interface ReviewRollupRecord {
   headSha?: string;
   status: ReviewStatus;
   reviewDecision?: string;
+  /** What people said on the pull request, as last read; kept from the previous observation when a read fails. */
+  feedback?: import('./pullRequestFeedback').PullRequestFeedbackSummary;
   observedAt: string;
   raw?: unknown;
 }
@@ -991,6 +995,8 @@ export interface BoardTaskSummary {
   forkedFromTaskId?: string;
   updatedAt: string;
   projection: BoardStatusProjection;
+  /** The pull request it was opened from was rewritten under a worktree with nothing of its own (`pullRequestRewrittenUnder`). */
+  pullRequestRewritten?: boolean;
 }
 
 export interface BoardSnapshot {
@@ -1117,6 +1123,8 @@ export interface StartRunRequest {
   instruction?: string;
   mode?: Exclude<AgentRunMode, 'REVIEW'>;
   settings?: AgentExecutionSettings;
+  /** A request from the Review tab that starts the task's first turn: the instruction item by item. */
+  reviewRequest?: ReviewRequestRecord;
 }
 
 export interface CancelRunRequest {

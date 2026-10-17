@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
+import type { DiscussionView } from '../model/pullRequestFeedback';
 import { planReviewRequest } from '../model/reviewFollowUp';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
@@ -45,7 +46,7 @@ function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(draft: T
       artifacts={[artifact()]}
       draft={draft}
       onDraftChange={setDraft}
-      plan={planReviewRequest(findings, draft, { runId: review?.runId, findingsSendable, asksForChanges: false })}
+      plan={planReviewRequest(findings, draft, { runId: review?.runId, findingsSendable, asksForChanges: false }, overrides.discussions ?? [])}
       findingsSendable={findingsSendable}
       requestChanges={{ busy: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
       {...overrides}
@@ -367,6 +368,79 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getByText('Codex asked a question')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Go to request' }));
     expect(onOpen).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ReviewWorkspace pull request discussions', () => {
+  beforeEach(() => {
+    api.readArtifact.mockReset();
+  });
+  const discussion = (id: string, extra: Partial<DiscussionView> = {}): DiscussionView => ({
+    id, kind: 'THREAD', provider: 'GITHUB', path: 'src/rateLimit.ts', side: 'NEW', line: 1, resolvable: true, resolved: false,
+    outdated: false, open: true, url: `https://github.com/acme/widgets/pull/9#${id}`, commentCount: 2,
+    comments: [
+      { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Return **seconds** here.', truncated: false },
+      { author: 'bob', createdAt: '2026-07-07T09:30:00.000Z', body: 'Agreed.', truncated: false }
+    ],
+    ...extra
+  });
+  const resolved = discussion('done', {
+    resolved: true, open: false, commentCount: 1, comments: [{ author: 'carol', body: 'Rename the limiter.', truncated: false }]
+  });
+
+  it('shows a reviewer\'s thread with its replies, sends it only once added, and folds a resolved one to a line', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const onSubmit = vi.fn();
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), resolved]} discussionsOnLines onSubmit={onSubmit} />);
+
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(thread).getByText('seconds').tagName).toBe('STRONG');
+    expect(within(thread).getByText('Agreed.')).toBeDefined();
+    expect(within(thread).getByRole('link', { name: 'Open on GitHub' }).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/9#open');
+    // On its own line, the thread does not repeat where it is.
+    expect(within(thread).queryByText('Line 1')).toBeNull();
+    // Other people's words go to the agent only when the person adds them.
+    expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
+    fireEvent.click(within(thread).getByRole('button', { name: 'Add to request' }));
+    fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
+    const sheet = screen.getByRole('dialog', { name: 'Request changes' });
+    expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Return seconds here.')).toBeDefined();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Request changes' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ includedDiscussionIds: ['open'] }));
+    // Sending answers the sheet.
+    expect(screen.queryByRole('dialog', { name: 'Request changes' })).toBeNull();
+    // Taking out the last item empties the request, and the sheet goes with it.
+    fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' }))
+      .getByRole('button', { name: 'Take the comment by alice out of the request' }));
+    expect(screen.queryByRole('dialog', { name: 'Request changes' })).toBeNull();
+
+    // A resolved thread is one line that opens; it cannot be added.
+    const folded = screen.getByRole('button', { name: /carol/ });
+    expect(folded.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(folded);
+    const opened = screen.getByRole('article', { name: 'GitHub comment by carol' });
+    expect(within(opened).queryByRole('button', { name: 'Add to request' })).toBeNull();
+  });
+
+  it('says which line a thread is about once the code it was written on may have moved, and lists threads by what happens to them', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const sent = discussion('sent', { comments: [{ author: 'dave', body: 'Cap the burst.', truncated: false }], commentCount: 1,
+      sent: { at: '2026-07-07T10:00:00.000Z', outcome: 'FIXED' } });
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), sent, resolved]} discussionsOnLines={false} />);
+
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(thread).getByText('Line 1')).toBeDefined();
+    expect(within(screen.getByRole('article', { name: 'GitHub comment by dave' })).getByText('Fixed')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
+    const rail = screen.getByRole('navigation', { name: 'Feedback' });
+    const onGitHub = within(rail).getByText('On GitHub').parentElement!;
+    // What still needs a decision comes before what was sent.
+    expect(within(onGitHub).getAllByRole('button').map((row) => row.textContent)).toEqual([
+      expect.stringContaining('alice'), expect.stringContaining('dave')
+    ]);
+    expect(within(within(rail).getByText('Resolved on GitHub').parentElement!).getByText('Rename the limiter.')).toBeDefined();
   });
 });
 

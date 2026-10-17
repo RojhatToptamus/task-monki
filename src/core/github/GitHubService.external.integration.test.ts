@@ -167,7 +167,13 @@ else { process.stderr.write('Unexpected mutation'); process.exit(1); }
     await fs.writeFile(dataPath, JSON.stringify({ error: 'GitHub is unavailable' }));
     await expect(service.findOpenPullRequest(worktree)).rejects.toThrow();
     const commands = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[]);
-    expect(commands.every((args) => args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]!))).toBe(true);
-    expect(commands.every((args) => args.includes('github.com/example/project'))).toBe(true);
+    // Every lookup is a read of this repository: the pull request commands, and the GraphQL query for its feedback.
+    const feedbackReads = commands.filter((args) => args[0] === 'api' && args[1] === 'graphql');
+    expect(feedbackReads.length).toBeGreaterThan(0);
+    expect(feedbackReads.every((args) => args.includes('owner=example') && args.includes('name=project') &&
+      args.some((arg) => arg.startsWith('query=query(')) && !args.some((arg) => /mutation/u.test(arg)))).toBe(true);
+    const pullRequestCommands = commands.filter((args) => !feedbackReads.includes(args));
+    expect(pullRequestCommands.every((args) => args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]!))).toBe(true);
+    expect(pullRequestCommands.every((args) => args.includes('github.com/example/project'))).toBe(true);
   });
 });

@@ -192,6 +192,11 @@ function describeDeliveryAttention(
   ) {
     return { label: 'Ready to mark done', kind: 'finish', tone: 'info' };
   }
+  // A merged pull request asks nothing more: its last review decision or check
+  // run stays on the platform, but delivery is over.
+  if (isMerged(projection)) {
+    return undefined;
+  }
   if (
     projection.githubPullRequest === 'CLOSED_UNMERGED' ||
     projection.merge === 'CLOSED_UNMERGED'

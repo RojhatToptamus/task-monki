@@ -97,6 +97,46 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
   return { byLine, byFile };
 }
 
+/** Where each pull request discussion sits: under its last line, at its file's top, or above the files. */
+export interface AnchoredDiscussions<T> {
+  byLine: Map<string, T[]>;
+  byFile: Map<string, T[]>;
+  general: T[];
+}
+
+/**
+ * Anchors pull request discussions like comments. A discussion's lines are the
+ * pull request's, so it sits on them only while the diff shown is the head the
+ * platform reported (`onLines`); otherwise, or once its code has changed since it
+ * was written, it sits at its file's top. One about the whole change, or about a
+ * file the diff does not hold, sits above the files.
+ */
+export function anchorReviewDiscussions<T extends { path?: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number; outdated: boolean }>(
+  files: readonly DiffFile[],
+  discussions: readonly T[],
+  onLines: boolean
+): AnchoredDiscussions<T> {
+  const byLine = new Map<string, T[]>();
+  const byFile = new Map<string, T[]>();
+  const general: T[] = [];
+  const filesByPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
+  for (const discussion of discussions) {
+    const file = discussion.path ? filesByPath.get(normalizeReviewPath(discussion.path)) : undefined;
+    if (!file) {
+      general.push(discussion);
+      continue;
+    }
+    // A platform's old side is the base file, unchanged lines included, not only removed ones.
+    const anchor = onLines && !discussion.outdated && discussion.line && discussion.side
+      ? findRowAnchor(file, discussion.side === 'OLD' ? 'REVIEWED' : 'NEW', discussion.line, discussion.endLine)
+      : undefined;
+    const map = anchor ? byLine : byFile;
+    const key = anchor ?? file.id;
+    map.set(key, [...(map.get(key) ?? []), discussion]);
+  }
+  return { byLine, byFile, general };
+}
+
 /**
  * The last displayed row of a line range on one side, preferring the latest
  * block. Hidden unchanged lines are not displayed. A comment's old side is its

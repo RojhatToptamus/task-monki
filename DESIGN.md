@@ -1557,7 +1557,8 @@ beneath, with each entry's evidence left to the full ledger in Debug. An empty s
 rendered: the Now panel offers what has not happened yet.
 
 **The Review tab.** The change is read in the order that matters, with the
-reviewer's findings and the person's own comments on the code they are about.
+reviewer's findings, what people said on the pull request, and the person's own
+comments on the code they are about.
 Like every working tab, Review has no page head: the title row sits in the
 window's top bar and the code gets the room. Nothing on the tab explains itself in words a
 control's icon, state or tooltip already carries.
@@ -1582,8 +1583,13 @@ control's icon, state or tooltip already carries.
   collapsed. One 28px row each: the name in mono, its folder muted, a comment
   count when it has feedback, then the counts or the viewed check. Feedback
   lists every finding and comment by what happens to it: To send, Suggestions,
-  Settled, and after a re-review Resolved (a check and the reviewer's note; it
-  has no place in the code to go to).
+  On GitHub (the pull request's discussions not added: unsent ones that still
+  ask for something, then sent ones, then remarks), Settled, after a re-review
+  Resolved (a check and the reviewer's note; it has no place in the code to go
+  to), and Resolved on GitHub. A discussion's row leads with its author, then its
+  first line, with its state and place beneath; on GitLab the words are GitLab's.
+  When the platform has more discussions than were read, More on GitHub ends
+  the list.
 - *Brief.* Facts before opinions: the request, what the agent reported (quoted),
   then the review's summary. After the agent answers a request, its answer to
   each item spans the brief under them (Fixed, Not changed, Needs your decision,
@@ -1632,16 +1638,34 @@ control's icon, state or tooltip already carries.
   never raises an Incorrect finding again, raises an Intentional one only when
   the code around it changed, and leaves a deferred one alone. A dismissed
   finding folds to one line with its reason and Restore.
+- *Pull request discussions* are other people's words on the same card as a
+  finding: the author at 500, a review's verdict and the comment's age muted,
+  its state at the end of the head (Resolved, Sent, the agent's answer, or
+  Outdated), then Add to request and Open on GitHub. Each comment is rendered
+  markdown under its author, HTML the platform renders reads as its words, and
+  a long comment is clamped until Show full comment; past three replies, all
+  but the latest fold behind a count, and replies the platform has beyond those
+  read say so with a link. Once the pull request is merged or closed, none asks
+  for anything. A thread
+  sits under the last line of its range while the diff shown is the head the
+  platform read it on; otherwise, or once its lines changed, it sits at its
+  file's top and says its line, and one about the whole change sits above the
+  files. A resolved thread, or a remark that asks for nothing, folds to one line
+  that opens it. None goes to the agent unless added; N and P step through open
+  discussions after the findings.
 - *Comments* sit on `--field` (`--r-sm`, as does the composer in the diff) with icon-only Edit and Delete; they can be written
   any time the current diff is shown and are saved with the task as written.
   The line composer's Ask, at its left, hands the lines and the text to Ask
   instead of the request.
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
-  comments"), which opens the request sheet; a note that grows to four lines;
-  and one primary: Request changes when something is queued, otherwise the step
-  that finishes the task. The sheet lists what goes out in send order, what is
-  left out, and the instruction, one disclosure away. A request goes out
-  numbered, findings then comments; in the Agent conversation it reads as a
+  GitHub comments, 1 comment"), which opens the request sheet; a note that grows
+  to four lines; and one primary: Request changes when something is queued,
+  otherwise the step that finishes the task. The sheet lists what goes out in
+  send order (To fix, From GitHub, Your comments), what is left out (with Add on
+  a suggestion or an open discussion), and the instruction, one disclosure away.
+  Sending closes the sheet, and so does taking out its last item. A request
+  goes out numbered, findings, then discussions quoted with their authors, then
+  comments; in the Agent conversation it reads as a
   card of those items, and the agent's reply ends with its answer to each,
   shown as a list under the reply. A review asks for changes only while an open
   Blocker or Major would be sent.

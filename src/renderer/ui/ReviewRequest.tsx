@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, type RefObject } from 'react';
 import { ChevronUp, X } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import { formatFindingLocation } from '../model/findings';
-import { isBlockingFinding } from '../../shared/contracts';
+import { isBlockingFinding, remoteProviderName } from '../../shared/contracts';
+import { discussionAuthor, discussionSummary, formatDiscussionLocation } from '../model/pullRequestFeedback';
 import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
 import { DisclosureChevron } from './DisclosureChevron';
 import { settledLabel, severityLabel } from './ReviewFindingThread';
@@ -33,11 +34,13 @@ export interface ReviewOutcomeProps {
   sheetOpen: boolean;
   onSheetOpenChange(open: boolean): void;
   onIncludeFinding(findingId: string, included: boolean): void;
+  onIncludeDiscussion(discussionId: string, included: boolean): void;
   /** A blocking finding leaves the request only by being dismissed. */
   onDismissFinding(findingId: string): void;
   onDeleteComment(commentId: string): void;
   onShowFinding(findingId: string): void;
   onShowComment(commentId: string): void;
+  onShowDiscussion(discussionId: string): void;
 }
 
 function count(value: number, one: string, many: string): string {
@@ -56,11 +59,25 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   const sheetId = useId();
   const reasonId = useId();
   const summaryRef = useRef<HTMLButtonElement>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
+  // A sheet that closes on its own, once sent or emptied, takes the focus it held with it; the note gets it back.
+  const sheetWasOpen = useRef(props.sheetOpen);
+  useEffect(() => {
+    if (sheetWasOpen.current && !props.sheetOpen && (!document.activeElement || document.activeElement === document.body)) {
+      noteRef.current?.focus();
+    }
+    sheetWasOpen.current = props.sheetOpen;
+  }, [props.sheetOpen]);
   const findings = plan.send;
   const queued = plan.queued;
-  const summary = findings.length || comments.length
-    ? [findings.length ? count(findings.length, 'fix', 'fixes') : '', comments.length ? count(comments.length, 'comment', 'comments') : '']
-      .filter(Boolean).join(', ')
+  const discussions = plan.discussions;
+  const platform = discussions[0] ? remoteProviderName(discussions[0].provider) : '';
+  const summary = findings.length || discussions.length || comments.length
+    ? [
+      findings.length ? count(findings.length, 'fix', 'fixes') : '',
+      discussions.length ? count(discussions.length, `${platform} comment`, `${platform} comments`) : '',
+      comments.length ? count(comments.length, 'comment', 'comments') : ''
+    ].filter(Boolean).join(', ')
     : plan.reviewNotes ? 'Review notes' : 'Note';
   const primary = queued && request ? (
     <>
@@ -98,6 +115,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
         <label className="tm-review__note">
           <span className="tm-visually-hidden">A note for the agent</span>
           <textarea
+            ref={noteRef}
             rows={1}
             value={props.note}
             placeholder="Add a note"
@@ -126,7 +144,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
         ) : null}
         {primary}
       </div>
-      {props.sheetOpen ? <ReviewRequestSheet {...props} id={sheetId} summaryRef={summaryRef} /> : null}
+      {props.sheetOpen ? <ReviewRequestSheet {...props} id={sheetId} reasonId={reasonId} summaryRef={summaryRef} /> : null}
     </div>
   );
 }
@@ -136,11 +154,14 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
  * person's comments, and what is left out on purpose, with the exact instruction
  * one disclosure away. It rises over the diff without blocking it.
  */
-function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef: RefObject<HTMLButtonElement | null> }) {
+function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: string; summaryRef: RefObject<HTMLButtonElement | null> }) {
   const { plan, comments, request, onSheetOpenChange, summaryRef } = props;
   const sheetRef = useRef<HTMLDivElement>(null);
   const findings = plan.send;
   const leftOut = [...plan.suggestions, ...plan.settled];
+  const discussions = plan.discussions;
+  const platform = [...discussions, ...plan.discussionsLeftOut][0];
+  const platformName = platform ? remoteProviderName(platform.provider) : '';
   const instruction = request?.instruction() ?? '';
 
   // Escape and a click outside close the sheet; the summary toggles it itself.
@@ -192,6 +213,32 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
             ))}
           </section>
         ) : null}
+        {discussions.length ? (
+          <section className="tm-review-sheet__group" aria-label={`From ${platformName}`}>
+            <h3>From {platformName}</h3>
+            {discussions.map((discussion) => {
+              const location = formatDiscussionLocation(discussion);
+              return (
+                <div key={discussion.id} className="tm-review-sheet__item tm-review-sheet__item--discussion">
+                  <span className="tm-review-sheet__n">{(position += 1)}</span>
+                  <span className="tm-review-sheet__who">{discussionAuthor(discussion) ?? 'Unknown'}</span>
+                  <button type="button" className="tm-review-sheet__title" onClick={() => props.onShowDiscussion(discussion.id)}>{discussionSummary(discussion)}</button>
+                  {location ? <code className="tm-review-sheet__loc">{location}</code> : <span />}
+                  <Tooltip label="Take out">
+                    <button
+                      type="button"
+                      className="tm-iconbtn"
+                      aria-label={`Take the comment by ${discussionAuthor(discussion) ?? 'unknown'} out of the request`}
+                      onClick={() => props.onIncludeDiscussion(discussion.id, false)}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </Tooltip>
+                </div>
+              );
+            })}
+          </section>
+        ) : null}
         {comments.length ? (
           <section className="tm-review-sheet__group" aria-label="Your comments">
             <h3>Your comments</h3>
@@ -209,9 +256,17 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
             ))}
           </section>
         ) : null}
-        {leftOut.length ? (
+        {leftOut.length || plan.discussionsLeftOut.length ? (
           <section className="tm-review-sheet__group" aria-label="Left out">
             <h3>Left out</h3>
+            {plan.discussionsLeftOut.map((discussion) => (
+              <div key={discussion.id} className="tm-review-sheet__item tm-review-sheet__item--out tm-review-sheet__item--discussion-out">
+                <span className="tm-review-sheet__who">{discussionAuthor(discussion) ?? 'Unknown'}</span>
+                <button type="button" className="tm-review-sheet__title" onClick={() => props.onShowDiscussion(discussion.id)}>{discussionSummary(discussion)}</button>
+                {formatDiscussionLocation(discussion) ? <code className="tm-review-sheet__loc">{formatDiscussionLocation(discussion)}</code> : <span />}
+                <button type="button" className="ghost-button" onClick={() => props.onIncludeDiscussion(discussion.id, true)}>Add</button>
+              </div>
+            ))}
             {leftOut.map((finding) => (
               <div key={finding.id} className="tm-review-sheet__item tm-review-sheet__item--out">
                 <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
@@ -240,6 +295,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; summaryRef
             type="button"
             className="primary-button button--sm"
             disabled={Boolean(request.disabledReason) || request.busy || !plan.queued}
+            aria-describedby={request.disabledReason && plan.queued ? props.reasonId : undefined}
             onClick={request.onSubmit}
           >
             Request changes

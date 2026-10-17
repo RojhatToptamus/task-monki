@@ -7,7 +7,11 @@ import { AGENT_REVIEW_FINDING_SEVERITIES, type AgentReviewFindingSeverity } from
  * `task-monki-review-response` block. The next review reads both.
  */
 
-/** One numbered item of a request: a finding of the review, or the person's comment on lines of the diff. */
+/**
+ * One numbered item of a request: a finding of the review, the person's comment
+ * on lines of the diff, or a discussion from the pull request, which other
+ * people wrote on the platform.
+ */
 export type ReviewRequestItem =
   | {
       number: number;
@@ -27,6 +31,23 @@ export type ReviewRequestItem =
       line?: number;
       endLine?: number;
       text: string;
+    }
+  | {
+      number: number;
+      kind: 'DISCUSSION';
+      provider: 'GITHUB' | 'GITLAB';
+      discussionId: string;
+      /** Who started it on the platform. */
+      author?: string;
+      path?: string;
+      side?: 'NEW' | 'OLD';
+      line?: number;
+      endLine?: number;
+      /** Its first comment as sent, bounded. */
+      text: string;
+      url?: string;
+      /** Its latest comment when sent, in the platform's clock: a later one asks again. */
+      seenAt?: string;
     };
 
 export interface ReviewRequestRecord {
@@ -128,6 +149,16 @@ export function assertReviewRequestRecord(value: unknown): asserts value is Revi
       if (Object.keys(entry).some((key) => !['number', 'kind', 'path', 'side', 'line', 'endLine', 'text'].includes(key))) fail();
       if (!boundedString(entry.path, PATH_LIMIT) || !boundedString(entry.text, REVIEW_REQUEST_TEXT_LIMIT)) fail();
       if (entry.side !== 'NEW' && entry.side !== 'OLD') fail();
+    } else if (entry.kind === 'DISCUSSION') {
+      if (Object.keys(entry).some((key) => !['number', 'kind', 'provider', 'discussionId', 'author', 'path', 'side', 'line', 'endLine', 'text', 'url', 'seenAt'].includes(key))) fail();
+      if (entry.seenAt !== undefined && (!boundedString(entry.seenAt, 64) || !Number.isFinite(Date.parse(entry.seenAt as string)))) fail();
+      if (entry.provider !== 'GITHUB' && entry.provider !== 'GITLAB') fail();
+      if (!boundedString(entry.discussionId, 200) || !boundedString(entry.text, REVIEW_REQUEST_TEXT_LIMIT)) fail();
+      if (entry.author !== undefined && !boundedString(entry.author, 200)) fail();
+      if (entry.path !== undefined && !boundedString(entry.path, PATH_LIMIT)) fail();
+      if (entry.side !== undefined && entry.side !== 'NEW' && entry.side !== 'OLD') fail();
+      if (entry.line !== undefined && (entry.path === undefined || entry.side === undefined)) fail();
+      if (entry.url !== undefined && (!boundedString(entry.url, 2_000) || !/^https:\/\//u.test(entry.url as string))) fail();
     } else {
       fail();
     }

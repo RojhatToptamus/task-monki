@@ -16,9 +16,11 @@ import {
   formatRemoteWorkNumber,
   getImplementationRetryReason,
   normalizePullRequestTitle,
+  REVIEW_REQUEST_ITEM_LIMIT,
   type AskSubject,
   type DecideReviewFindingRequest,
   type ReviewRequestRecord,
+  type ReviewResponseAnswer,
   type TaskReviewDraft
 } from '../../shared/contracts';
 import { effectiveReviewFindings, effectiveReviewGateStatus, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
@@ -79,7 +81,8 @@ import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
-import { answeredReviewRound } from '../model/reviewRounds';
+import { buildDiscussionViews, sentDiscussions, unaddressedDiscussions } from '../model/pullRequestFeedback';
+import { answeredReviewRound, reviewRequestRounds } from '../model/reviewRounds';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import {
   findCompletedCurrentImplementationRun,
@@ -162,6 +165,7 @@ import {
   MarkDoneModal
 } from './TaskDetailModals';
 import { ReportedQuote } from './ReportedQuote';
+import { usePullRequestFeedback } from './usePullRequestFeedback';
 import { useRemoteSourceSnapshot } from './useRemoteSourceSnapshot';
 import { remoteSourceView } from '../model/remoteWork';
 import { deliveryNoun, deliveryProvider } from '../model/deliveryWords';
@@ -235,7 +239,7 @@ interface TaskDetailProps {
   /** Restores a missing managed worktree at its recorded commit without a confirmation dialog; the Preview block carries the consent. */
   onRestoreWorktree(taskId: string): Promise<void>;
   worktreePreparationPending?: boolean;
-  onStart(taskId: string, instruction?: string, settings?: AgentExecutionSettings): Promise<void>;
+  onStart(taskId: string, instruction?: string, settings?: AgentExecutionSettings, reviewRequest?: ReviewRequestRecord): Promise<void>;
   onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
   onReconnectWorktree?(taskId: string, worktreePath: string): Promise<void>;
   onUpdateWorktreeComparison?(taskId: string, baseRef: string): Promise<void>;
@@ -313,6 +317,19 @@ export function TaskDetail(props: TaskDetailProps) {
   const captureRunIds = useMemo(() => conversationCaptureRunIds(props.runs, gitSnapshots), [props.runs, gitSnapshots]);
   const remoteSource = task ? remoteSourceView(task) : undefined;
   const remoteSnapshot = useRemoteSourceSnapshot(task?.remoteSource, props.onReadArtifact);
+  // What people said on the pull request, with what the person already sent the agent and its answers.
+  const pullRequestFeedback = usePullRequestFeedback(reviewRollup, props.onReadArtifact);
+  // A finished turn's answers do not change, so live items of a running turn do not re-read them.
+  const roundAnswers = useRef(new Map<string, { fingerprint: string; answers: ReviewResponseAnswer[] }>());
+  const requestRounds = useMemo(
+    () => reviewRequestRounds(props.agentInstructions, props.runs, props.items, roundAnswers.current),
+    [props.agentInstructions, props.runs, props.items]
+  );
+  const pullRequestOpen = pullRequest?.status === 'OPEN_DRAFT' || pullRequest?.status === 'OPEN_READY';
+  const discussionViews = useMemo(
+    () => buildDiscussionViews(pullRequestFeedback, sentDiscussions(requestRounds), pullRequestOpen),
+    [pullRequestFeedback, requestRounds, pullRequestOpen]
+  );
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
@@ -403,7 +420,6 @@ export function TaskDetail(props: TaskDetailProps) {
     [reviewGate?.result, reviewGate?.findingDecisions]
   );
   const reviewPending = reviewStartPending && !reviewIsRunning;
-  const headerState = task ? describeTaskStatus(task) : undefined;
   const provider = task ? deliveryProvider(task, props.repository) : 'GITHUB';
   const prNoun = deliveryNoun(provider);
   const prStatus = task
@@ -420,6 +436,11 @@ export function TaskDetail(props: TaskDetailProps) {
         observedPullRequestHeads: props.pullRequestHeads
       })
     : undefined;
+  // The status word reads what PR Status read from the records, as the board summary does.
+  const statusTask = task && prStatus?.kind === 'BRANCH_DIVERGED' && prStatus.canSyncBranch
+    ? { ...task, pullRequestRewritten: true }
+    : task;
+  const headerState = statusTask ? describeTaskStatus(statusTask) : undefined;
   useLayoutEffect(() => {
     props.onModalOpenChange(taskDetailModalOpen);
   }, [props.onModalOpenChange, taskDetailModalOpen]);
@@ -547,7 +568,9 @@ export function TaskDetail(props: TaskDetailProps) {
   }
 
   const executionSettings = draftSettings?.taskId === task.id ? draftSettings.settings : task.agentSettings;
-  const startWithSettings = (taskId: string, instruction?: string) => props.onStart(taskId, instruction, executionSettings);
+  const startWithSettings = (taskId: string, instruction?: string, reviewRequest?: ReviewRequestRecord) => reviewRequest
+    ? props.onStart(taskId, instruction, executionSettings, reviewRequest)
+    : props.onStart(taskId, instruction, executionSettings);
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
   const activeTurnSteeringSupported = Boolean(
     props.runtimeState &&
@@ -728,7 +751,21 @@ export function TaskDetail(props: TaskDetailProps) {
     runId: reviewGate.runId,
     findingsSendable: reviewIsCurrent,
     asksForChanges: reviewHasActionableFindings
-  });
+  }, discussionViews);
+  // A request holds at most so many numbered items; past it, sending is held with the count.
+  const requestItemCount = reviewPlan.send.length + reviewPlan.discussions.length + props.reviewDraft.comments.length;
+  const requestOverLimit = requestItemCount > REVIEW_REQUEST_ITEM_LIMIT
+    ? `${requestItemCount} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`
+    : undefined;
+  // Address comments adds what still asks for something and was not sent, then shows the request to send.
+  const unaddressed = unaddressedDiscussions(discussionViews);
+  const canAddressComments = unaddressed.length > 0 && hasActionableReviewSource &&
+    (prStatus.kind !== 'MERGED' && prStatus.kind !== 'CLOSED_UNMERGED');
+  const addressComments = () => {
+    const ids = props.reviewDraft.includedDiscussionIds ?? [];
+    props.onReviewDraftChange({ ...props.reviewDraft, includedDiscussionIds: [...new Set([...ids, ...unaddressed.map((discussion) => discussion.id)])] });
+    openRequestChanges();
+  };
 
   const requestInput = (reviewOutput?: string): ReviewRequestInput => ({
     taskTitle: task.title,
@@ -738,6 +775,15 @@ export function TaskDetail(props: TaskDetailProps) {
     summary: reviewIsCurrent ? reviewGate.result?.summary ?? reviewGate.summary : undefined,
     findings: reviewPlan.send,
     dismissed: reviewPlan.settled.map((finding) => ({ finding, reason: finding.dismissal?.reason, note: finding.dismissal?.note })),
+    ...(reviewPlan.discussions.length && pullRequestFeedback && reviewRollup?.feedback ? {
+      discussions: {
+        provider: pullRequestFeedback.provider,
+        number: pullRequestFeedback.number,
+        boundary: reviewRollup.feedback.artifactId.slice(0, 8),
+        ...(pullRequestFeedback.viewer ? { viewer: pullRequestFeedback.viewer } : {}),
+        items: reviewPlan.discussions
+      }
+    } : {}),
     comments: props.reviewDraft.comments,
     note: props.reviewDraft.note,
     reviewOutput
@@ -752,7 +798,7 @@ export function TaskDetail(props: TaskDetailProps) {
       return;
     }
     let reviewOutput: string | undefined;
-    if (reviewPlan.send.length === 0 && props.reviewDraft.comments.length === 0) {
+    if (reviewPlan.send.length === 0 && reviewPlan.discussions.length === 0 && props.reviewDraft.comments.length === 0) {
       try {
         reviewOutput = await loadAvailableReviewOutput();
       } catch {
@@ -769,7 +815,7 @@ export function TaskDetail(props: TaskDetailProps) {
             ? props.onSendReviewRequest(actionableReviewSourceRun.id, instruction, request)
             : props.onContinue(actionableReviewSourceRun.id, instruction));
         } else {
-          await startWithSettings(task.id, instruction);
+          await startWithSettings(task.id, instruction, request);
         }
         props.onReviewDraftChange(EMPTY_REVIEW_DRAFT);
       } catch {
@@ -1027,7 +1073,7 @@ export function TaskDetail(props: TaskDetailProps) {
     hasActionableReviewSource &&
     headerState.label === reviewWord.label &&
     (reviewWord.tone === 'action' || reviewWord.tone === 'error');
-  const lifecycle = describeTaskLifecycle(task);
+  const lifecycle = describeTaskLifecycle(statusTask ?? task);
   // A status word that only restates the task's lane ("In review" in Review)
   // says nothing the lifecycle track does not; the step's own words lead then.
   const statusIsStage = stateRestatesColumn(
@@ -1262,6 +1308,7 @@ export function TaskDetail(props: TaskDetailProps) {
       actionState={prActionState}
       prominent={prominent}
       title={title}
+      addressComments={canAddressComments ? { onRun: addressComments } : undefined}
       onCreateDraftPr={() => openDraftPrModal()}
       onPushUpdate={() =>
         void runDeliveryAction(async () => {
@@ -1865,7 +1912,7 @@ export function TaskDetail(props: TaskDetailProps) {
             findingsSendable={reviewIsCurrent}
             requestChanges={hasActionableReviewSource ? {
               disabledReason: reviewIsRunning || reviewPending ? 'Sending waits for the review'
-                : reviewActionsPaused ? reviewActionPauseTitle : props.reviewDraftError,
+                : reviewActionsPaused ? reviewActionPauseTitle : requestOverLimit ?? props.reviewDraftError,
               busy: reviewActionBusy,
               instruction: () => buildRequestInstruction(loadedReviewOutput),
               onSubmit: () => void submitRequestChanges()
@@ -1877,6 +1924,10 @@ export function TaskDetail(props: TaskDetailProps) {
             } : undefined}
             requestSheetPending={requestSheetPending}
             onRequestSheetOpened={() => setRequestSheetPending(false)}
+            discussions={discussionViews}
+            moreDiscussionsUrl={pullRequestFeedback?.truncated ? pullRequest?.url : undefined}
+            discussionsOnLines={Boolean(pullRequestFeedback?.headSha && gitSnapshot?.headSha === pullRequestFeedback.headSha &&
+              !gitSnapshot.stagedCount && !gitSnapshot.unstagedCount && !gitSnapshot.untrackedCount)}
             agentRequest={pendingInteraction ? {
               label: interactionHeadline(pendingInteraction, runtimeName),
               action: 'Go to request',
@@ -2181,6 +2232,7 @@ function PrStatusCard({
   actionState,
   prominent = false,
   title,
+  addressComments,
   onCreateDraftPr,
   onPushUpdate,
   onSyncBranch,
@@ -2193,6 +2245,8 @@ function PrStatusCard({
   prominent?: boolean;
   /** In the Now panel, the board card's word for the task; the PR's own headline follows it only when it adds something. */
   title?: string;
+  /** Unresolved discussions not yet sent: adds them to the request and opens it on the Review tab. */
+  addressComments?: { onRun(): void };
   onCreateDraftPr(): void;
   onPushUpdate(): void;
   onSyncBranch(): void;
@@ -2207,9 +2261,10 @@ function PrStatusCard({
     : view.canInvestigateFailure ? 'investigate'
       : view.canSyncBranch ? 'sync'
         : view.canPushUpdate ? 'push'
-          : view.canCreateDraftPr ? 'create'
-            : undefined;
-  const actionClass = (action: 'investigate' | 'push' | 'create' | 'sync') =>
+          : addressComments ? 'address'
+            : view.canCreateDraftPr ? 'create'
+              : undefined;
+  const actionClass = (action: 'investigate' | 'push' | 'create' | 'sync' | 'address') =>
     leadAction === action ? 'primary-button' : 'outline-button';
   // A disabled action's reason is stated beside it and tied to it, so it is not
   // also listed among the facts.
@@ -2272,6 +2327,7 @@ function PrStatusCard({
     !freshnessProblem ? view.freshnessLine : undefined,
     view.leadLine,
     view.guidanceLine,
+    view.feedbackLine,
     view.evidenceLine
   ].filter((line): line is string => Boolean(line) && line !== createOrPushReason);
 
@@ -2300,7 +2356,7 @@ function PrStatusCard({
         <p key={line} className="tm-prstatus__fact">{line}</p>
       ))}
 
-      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch ? (
+      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch || addressComments ? (
         <div className="tm-prstatus__actions">
           {view.canSyncBranch ? (
             <ActionButtonTitle disabled={actionState.syncDisabled} title={actionState.syncReason}>
@@ -2348,6 +2404,11 @@ function PrStatusCard({
                 Push update
               </button>
             </ActionButtonTitle>
+          ) : null}
+          {addressComments ? (
+            <button type="button" className={actionClass('address')} onClick={addressComments.onRun}>
+              Address comments
+            </button>
           ) : null}
           {view.canInvestigateFailure ? (
             <ActionButtonTitle

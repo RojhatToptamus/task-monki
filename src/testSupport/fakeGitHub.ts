@@ -24,6 +24,26 @@ export interface FakeGitHubItem {
   baseRefOid?: string;
   headRepository?: string;
   isCrossRepository?: boolean;
+  /** GitHub's review decision and merge state for `gh pr view`. */
+  reviewDecision?: string;
+  mergeable?: string;
+  mergeStateStatus?: string;
+  /** Review feedback the GraphQL API reports. */
+  reviewThreads?: FakeGitHubReviewThread[];
+  reviews?: Array<{ id: string; author: string; state: 'CHANGES_REQUESTED' | 'APPROVED' | 'COMMENTED' | 'DISMISSED'; body?: string; submittedAt: string }>;
+  reviewRequests?: string[];
+}
+
+export interface FakeGitHubReviewThread {
+  id: string;
+  path: string;
+  /** The last line; absent for a comment on the whole file. */
+  line?: number;
+  startLine?: number;
+  side?: 'LEFT' | 'RIGHT';
+  resolved?: boolean;
+  outdated?: boolean;
+  comments: Array<{ id?: string; author: string; body: string; createdAt: string; minimized?: boolean }>;
 }
 
 interface FakeGitHubState {
@@ -142,9 +162,15 @@ const repoOf = (item) => item.owner + '/' + item.repo;
 const bare = (owner, repo) => path.join(${JSON.stringify(hostRoot)}, owner, repo + '.git');
 const revParse = (gitDir, ref) => { try { return execFileSync('git', ['--git-dir', gitDir, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8' }).trim(); } catch { return undefined; } };
 // As on GitHub, a same-repository pull request follows its branch, and refs/pull/N/head follows the head.
+// A merged or closed one keeps reporting the head it ended at.
 for (const item of state.items) {
-  if (item.kind !== 'PULL_REQUEST' || (item.state ?? 'OPEN') !== 'OPEN') continue;
+  if (item.kind !== 'PULL_REQUEST') continue;
   const gitDir = bare(item.owner, item.repo);
+  if ((item.state ?? 'OPEN') !== 'OPEN') {
+    item.headRefOid = revParse(gitDir, 'refs/pull/' + item.number + '/head') ?? item.headRefOid;
+    item.baseRefOid = revParse(gitDir, 'refs/heads/' + (item.baseRefName ?? 'main')) ?? item.baseRefOid;
+    continue;
+  }
   const branchHead = !item.isCrossRepository && item.headRefName ? revParse(gitDir, 'refs/heads/' + item.headRefName) : undefined;
   if (branchHead) {
     item.headRefOid = branchHead;
@@ -169,6 +195,36 @@ const node = (item) => ({
 });
 if (args[0] === 'api' && args[1] === 'graphql') {
   const query = fields.query ?? '';
+  if (query.includes('reviewThreads')) {
+    const item = state.items.find((candidate) => candidate.kind === 'PULL_REQUEST' && candidate.owner === fields.owner &&
+      candidate.repo === fields.name && candidate.number === Number(fields.number));
+    if (!item) fail({ data: { viewer: { login: state.viewer }, repository: { pullRequest: null } }, errors: [{ type: 'NOT_FOUND', path: ['repository', 'pullRequest'], message: 'Could not resolve to a PullRequest.' }] });
+    const comment = (thread, value, index) => ({ id: value.id ?? thread.id + '-' + index, body: value.body, createdAt: value.createdAt,
+      url: url(item) + '#discussion_r' + (1000 + index), isMinimized: Boolean(value.minimized), author: { login: value.author } });
+    const reviews = (item.reviews ?? []).map((review) => ({ id: review.id, state: review.state, body: review.body ?? '', submittedAt: review.submittedAt,
+      url: url(item) + '#pullrequestreview-' + review.id, author: { login: review.author } }));
+    // As on GitHub: a hundred threads a page, the next one after the cursor.
+    const threads = item.reviewThreads ?? [];
+    const start = fields.after ? Number(fields.after) : 0;
+    const shown = threads.slice(start, start + 100);
+    out({ data: { viewer: { login: state.viewer }, repository: { pullRequest: {
+      headRefOid: item.headRefOid,
+      reviewThreads: { totalCount: threads.length, pageInfo: { hasNextPage: start + shown.length < threads.length, endCursor: String(start + shown.length) }, nodes: shown.map((thread) => ({
+        id: thread.id, isResolved: Boolean(thread.resolved), isOutdated: Boolean(thread.outdated), path: thread.path,
+        line: thread.outdated ? null : thread.line ?? null, startLine: thread.outdated ? null : thread.startLine ?? null,
+        originalLine: thread.line ?? null, originalStartLine: thread.startLine ?? null,
+        diffSide: thread.side ?? 'RIGHT', startDiffSide: thread.startLine ? thread.side ?? 'RIGHT' : null,
+        subjectType: thread.line ? 'LINE' : 'FILE',
+        first: { totalCount: thread.comments.length, nodes: thread.comments.slice(0, 1).map((value, index) => comment(thread, value, index)) },
+        recent: { nodes: thread.comments.slice(-9).map((value, index) => comment(thread, value, thread.comments.length - Math.min(9, thread.comments.length) + index)) }
+      })) },
+      latestReviews: { nodes: reviews },
+      latestOpinionatedReviews: { nodes: reviews.filter((review) => review.state !== 'COMMENTED') },
+      reviewRequests: { nodes: (item.reviewRequests ?? []).map((login) => ({ requestedReviewer: { __typename: 'User', login } })) },
+      comments: { totalCount: (item.comments ?? []).length, nodes: (item.comments ?? []).map((value, index) => ({ id: 'IC_' + item.number + '_' + index,
+        body: value.body, createdAt: value.createdAt, url: url(item) + '#issuecomment-' + index, isMinimized: false, author: { __typename: 'User', login: value.author } })) }
+    } } } });
+  }
   if (query.includes('viewer')) out({ data: { viewer: { login: state.viewer } } });
   if (query.includes('search(')) {
     const kind = fields.q.includes('is:pr') ? 'PULL_REQUEST' : 'ISSUE';
@@ -195,9 +251,9 @@ const repoArg = option('--repo');
 const pulls = state.items.filter((item) => item.kind === 'PULL_REQUEST' && (!repoArg || repoArg.endsWith('/' + repoOf(item))));
 const view = (item) => ({
   number: item.number, url: url(item), state: item.state ?? 'OPEN', isDraft: Boolean(item.isDraft),
-  mergedAt: item.state === 'MERGED' ? '2026-10-02T00:00:00Z' : null, reviewDecision: '', statusCheckRollup: [],
+  mergedAt: item.state === 'MERGED' ? '2026-10-02T00:00:00Z' : null, reviewDecision: item.reviewDecision ?? '', statusCheckRollup: [],
   headRefOid: item.headRefOid, headRefName: item.headRefName, baseRefName: item.baseRefName,
-  mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', title: item.title,
+  mergeable: item.mergeable ?? 'MERGEABLE', mergeStateStatus: item.mergeStateStatus ?? (item.isDraft ? 'DRAFT' : 'CLEAN'), title: item.title,
   headRepository: { name: (item.headRepository ?? repoOf(item)).split('/')[1] },
   headRepositoryOwner: { login: (item.headRepository ?? repoOf(item)).split('/')[0] },
   isCrossRepository: Boolean(item.isCrossRepository)

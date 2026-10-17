@@ -1876,10 +1876,10 @@ export function App() {
     }
   };
 
-  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings) => {
+  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings, reviewRequest?: ReviewRequestRecord) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings }));
+      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings, ...(reviewRequest ? { reviewRequest } : {}) }));
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');

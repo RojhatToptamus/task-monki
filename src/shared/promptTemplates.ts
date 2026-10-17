@@ -688,6 +688,9 @@ function previousReviewSection(review: PreviousReviewContext | undefined): strin
   ];
 }
 
+/** Other people's words in the re-review prompt: enough to judge the answer, never a block of text. */
+const DISCUSSION_CONTEXT_TEXT_LIMIT = 300;
+
 function previousRequestLines(request: NonNullable<PreviousReviewContext['request']>): string[] {
   const answers = new Map(request.answers.map((answer) => [answer.item, answer]));
   const outcome = { FIXED: 'fixed', NOT_CHANGED: 'not changed', NEEDS_DECISION: 'needs the person\'s decision' } as const;
@@ -697,7 +700,10 @@ function previousRequestLines(request: NonNullable<PreviousReviewContext['reques
     ...request.record.items.map((item) => {
       const subject = item.kind === 'FINDING'
         ? `Finding ${item.findingId}, [${item.severity}] ${boundedText(item.title, REVIEW_CONTEXT_TEXT_LIMIT)}${findingLocation(item)}`
-        : `Comment on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
+        : item.kind === 'DISCUSSION'
+          // Other people's words: one escaped line, named as theirs and as data, so they cannot pose as the person.
+          ? `${remoteProviderName(item.provider)} review comment by @${item.author ?? 'unknown'}${item.path ? ` on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}` : ''}, quoted as data: ${JSON.stringify(boundedText(item.text.replace(/\s+/gu, ' ').trim(), DISCUSSION_CONTEXT_TEXT_LIMIT))}`
+          : `Comment on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
       const answer = answers.get(item.number);
       return `${item.number}. ${asSentence(subject)} Agent: ${asSentence(answer ? `${outcome[answer.outcome]}${answer.note ? `. ${boundedText(answer.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}` : 'no answer')}`;
     }),

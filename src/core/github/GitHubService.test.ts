@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import type { Task, WorktreeRecord } from '../../shared/contracts';
+import { PULL_REQUEST_FEEDBACK_LIMITS, type Task, type WorktreeRecord } from '../../shared/contracts';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
+import { createFakeGitHub } from '../../testSupport/fakeGitHub';
 import {
   GitHubService,
   parseCiRollup,
@@ -97,6 +98,36 @@ describe('GitHub PR rollups', () => {
     expect(parsed.merge.status).toBe('NOT_MERGED');
   });
 
+  it('reads mergeability from GitHub\'s merge state, which conflicts alone do not decide', () => {
+    const merge = (mergeStateStatus: string | undefined, mergeable = 'MERGEABLE', isDraft = false) => parsePrView({
+      number: 9, url: 'https://github.com/openai/task-manager/pull/9', state: 'OPEN', isDraft,
+      headRefOid: 'abc', mergeable, ...(mergeStateStatus ? { mergeStateStatus } : {})
+    }, worktreeFixture('/tmp/repo')).merge.status;
+
+    expect(merge('CLEAN')).toBe('MERGEABLE');
+    // Checks that are not required may fail; the checks say so.
+    expect(merge('UNSTABLE')).toBe('MERGEABLE');
+    // A draft, and a pull request held by required reviews or checks, can merge cleanly and still not merge.
+    expect(merge('DRAFT', 'MERGEABLE', true)).toBe('NOT_MERGED');
+    expect(merge('BLOCKED')).toBe('NOT_MERGED');
+    // Conflicts and a branch that must be updated block it.
+    expect(merge('DRAFT', 'CONFLICTING', true)).toBe('BLOCKED');
+    expect(merge('DIRTY', 'CONFLICTING')).toBe('BLOCKED');
+    expect(merge('BEHIND')).toBe('BLOCKED');
+    expect(merge('UNKNOWN', 'UNKNOWN')).toBe('UNKNOWN');
+    // Without a merge state, Git's answer is all there is.
+    expect(merge(undefined)).toBe('MERGEABLE');
+  });
+
+  it('keeps GitHub\'s merge time in the store\'s canonical form', () => {
+    const parsed = parsePrView({
+      number: 9, url: 'https://github.com/openai/task-manager/pull/9', state: 'MERGED', headRefOid: 'abc',
+      mergedAt: '2026-10-17T00:51:22Z'
+    }, worktreeFixture('/tmp/repo'));
+    expect(parsed.pullRequest).toMatchObject({ status: 'MERGED', mergedAt: '2026-10-17T00:51:22.000Z' });
+    expect(parsed.merge).toMatchObject({ status: 'MERGED', mergedAt: '2026-10-17T00:51:22.000Z' });
+  });
+
   it('omits GitHub blank review decisions from the durable review rollup', () => {
     const parsed = parsePrView(
       {
@@ -142,6 +173,27 @@ describe('GitHub PR rollups', () => {
     expect(rollup.status).toBe('CANCELED');
     expect(rollup.canceledCount).toBe(1);
     expect(rollup.failingCount).toBe(0);
+  });
+});
+
+describe('GitHubService pull request feedback', () => {
+  it('reads review threads past the first page, so a new open thread is never dropped', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-pr-threads-'));
+    const github = await createFakeGitHub(dir);
+    // GitHub lists threads oldest first: the open one is the newest, on the second page.
+    const reviewThreads = Array.from({ length: 130 }, (_, index) => ({
+      id: `PRRT_${index}`, path: 'save.js', line: 1, resolved: index < 129,
+      comments: [{ author: 'alice', body: `Thread ${index}.`, createdAt: new Date(Date.UTC(2026, 9, 10, 10, index)).toISOString() }]
+    }));
+    await github.setItem({ owner: 'acme', repo: 'widgets', number: 9, kind: 'PULL_REQUEST', title: 'Save layouts', reviewThreads });
+
+    const feedback = await new GitHubService(github.ghPath).readPullRequestFeedback(dir, 'https://github.com/acme/widgets/pull/9');
+    expect(feedback?.discussions.find((discussion) => discussion.id === 'PRRT_129')).toMatchObject({ resolved: false });
+    // Past the bound, the oldest resolved threads are what is left out, and the reading says so.
+    expect(feedback?.discussions).toHaveLength(PULL_REQUEST_FEEDBACK_LIMITS.discussions);
+    expect(feedback?.discussions.some((discussion) => discussion.id === 'PRRT_0')).toBe(false);
+    expect(feedback?.truncated).toBe(true);
+    expect((await github.calls()).filter((call) => call.args.includes('after=100'))).toHaveLength(1);
   });
 });
 

@@ -264,6 +264,23 @@ describe('task card view model', () => {
     expect(status({ git: 'PUSHED', ciChecks: 'STALE' })).toBe('Checks stale');
     // A merged pull request ends delivery even before the task is done.
     expect(status({ githubPullRequest: 'MERGED', merge: 'MERGED', ciChecks: 'STALE' })).toBe('Merged');
+    // Between turns, a pull request's progress names the task in any phase: one opened as a task starts in progress.
+    const between = (projection: Partial<Task['projection']>) => describeTaskStatus(createTask({
+      projection: { ...createInitialProjection(now), githubPullRequest: 'OPEN_READY', ...projection },
+      workflowPhase: 'IN_PROGRESS'
+    })).label;
+    expect(between({ git: 'DIVERGED' })).toBe('Branch diverged');
+    // A pull request rewritten under a worktree with nothing of its own reads as PR Status says it.
+    const rewritten = (projection: Partial<Task['projection']>) => describeTaskStatus({ ...createTask({
+      projection: { ...createInitialProjection(now), githubPullRequest: 'OPEN_READY', git: 'DIVERGED', ...projection },
+      workflowPhase: 'IN_PROGRESS'
+    }), pullRequestRewritten: true });
+    expect(rewritten({})).toEqual({ label: 'PR rewritten', tone: 'action' });
+    expect(rewritten({ githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }).label).toBe('MR rewritten');
+    expect(between({ git: 'COMMITTED_UNPUSHED', agentRun: 'COMPLETED' })).toBe('Changes not pushed');
+    expect(between({ git: 'PUSHED' })).toBe('In progress');
+    // Work in flight still leads.
+    expect(between({ git: 'DIRTY', agentRun: 'RUNNING' })).toBe('Running');
     // In the Review lane, "In review" only restates the lane.
     const vm = buildTaskCardVM(createTask({
       projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', git: 'PUSHED' },
@@ -336,6 +353,15 @@ describe('task card view model', () => {
     // Scalars alone never claim ready to merge.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
       .toEqual({ number: 82, label: '#82', state: 'open', note: 'checks passing, mergeable' });
+    // A draft is never mergeable, and neither is a pull request held back by its branch protection.
+    expect(pullRequest({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
+      .toEqual({ number: 82, label: '#82', state: 'draft', note: 'checks passing' });
+    expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'NOT_MERGED' }))
+      .toEqual({ number: 82, label: '#82', state: 'open', note: 'checks passing' });
+    // Changes requested is the status word on either platform, so the footer leaves it out.
+    expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 7, reviews: 'CHANGES_REQUESTED',
+      githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }))
+      .toEqual({ number: 7, label: '!7', state: 'open' });
     // A merged or closed pull request says so with its state alone.
     expect(pullRequest({ githubPullRequest: 'MERGED', githubPullRequestNumber: 82, merge: 'MERGED', ciChecks: 'FAILING' }))
       .toEqual({ number: 82, label: '#82', state: 'merged' });

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
-import { EMPTY_REVIEW_DRAFT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
+import { EMPTY_REVIEW_DRAFT, REVIEW_REQUEST_ITEM_LIMIT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
 
@@ -196,10 +196,12 @@ describe('imported task actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' }));
+    // The first turn carries the request item by item, so its answers read as a round.
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
       'task-1',
       expect.stringContaining('Invalid input accepted'),
-      props.task!.agentSettings
+      props.task!.agentSettings,
+      expect.objectContaining({ reviewRunId: 'review-1', items: [expect.objectContaining({ number: 1, kind: 'FINDING', findingId: 'finding-1' })] })
     ));
     expect(props.onContinue).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
@@ -287,6 +289,74 @@ describe('Overview decision slot', () => {
     // owner's override: offered, never promoted to the recommended action.
     expect(within(slot).getByRole('button', { name: 'Mark done anyway' }).className).not.toContain('primary-button');
     expect(within(slot).queryByRole('button', { name: 'Run agent review' })).toBeNull();
+  });
+});
+
+describe('Pull request feedback', () => {
+  function feedbackDetail(threads: number) {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const props = detailProps();
+    const artifactId = '00000000-0000-4000-8000-0000000000fb';
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      githubPullRequestUrl: 'https://github.com/acme/widgets/pull/82', reviews: 'CHANGES_REQUESTED'
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: 'f'.repeat(40), upstreamSha: 'f'.repeat(40) });
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY',
+      state: 'OPEN', isDraft: false, headRefOid: 'f'.repeat(40), title: 'Save layouts', observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: 'f'.repeat(40), status: 'CHANGES_REQUESTED',
+      observedAt: TEST_NOW, feedback: { artifactId, digest: 'a'.repeat(64), capturedAt: TEST_NOW, unresolvedCount: threads, discussionCount: threads,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }] } };
+    props.onReadArtifact = vi.fn(async () => JSON.stringify({
+      schema: 'task-monki/pull-request-feedback/v1', provider: 'GITHUB', number: 82, headSha: 'f'.repeat(40), capturedAt: TEST_NOW,
+      reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+      discussions: Array.from({ length: threads }, (_, index) => ({
+        id: `PRRT_${index + 1}`, kind: 'THREAD', path: 'output.txt', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+        comments: [{ author: 'alice', body: index ? `Thread ${index + 1}.` : 'Handle a null layout.', truncated: false }], commentCount: 1
+      }))
+    }));
+    function Stateful() {
+      const [draft, setDraft] = useState(EMPTY_REVIEW_DRAFT);
+      return <TaskDetail {...props} reviewDraft={draft} onReviewDraftChange={setDraft} />;
+    }
+    render(<Stateful />);
+    return props;
+  }
+
+  it('offers to address what reviewers left unresolved, and shows the request before anything is sent', async () => {
+    const props = feedbackDetail(1);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByText('alice requested changes, 1 unresolved thread')).toBeDefined();
+    const address = await within(slot).findByRole('button', { name: 'Address comments' });
+    expect(address.className).toContain('primary-button');
+    fireEvent.click(address);
+
+    expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
+    const sheet = await screen.findByRole('dialog', { name: 'Request changes' });
+    expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Handle a null layout.')).toBeDefined();
+    // Nothing went to the agent: sending is the sheet's own step.
+    expect(props.onSendReviewRequest).not.toHaveBeenCalled();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Request changes' }));
+    await waitFor(() => expect(props.onSendReviewRequest).toHaveBeenCalledWith(
+      'run-1',
+      expect.stringContaining('----- BEGIN GITHUB REVIEW 00000000 -----'),
+      expect.objectContaining({ items: [expect.objectContaining({ kind: 'DISCUSSION', discussionId: 'PRRT_1', author: 'alice' })] })
+    ));
+  });
+
+  it('holds a request with more items than one can carry, and says why before anything is sent', async () => {
+    const props = feedbackDetail(REVIEW_REQUEST_ITEM_LIMIT + 1);
+    fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByRole('button', { name: 'Address comments' }));
+    const send = within(await screen.findByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById(send.getAttribute('aria-describedby')!)?.textContent).toBe(`${REVIEW_REQUEST_ITEM_LIMIT + 1} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`);
+    fireEvent.click(send);
+    expect(props.onSendReviewRequest).not.toHaveBeenCalled();
   });
 });
 

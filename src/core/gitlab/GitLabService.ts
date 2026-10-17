@@ -6,13 +6,23 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
+import type { PullRequestReviewer } from '../../shared/pullRequestFeedback';
 import type { RemoteRepositoryRef } from '../../shared/remoteWork';
 import { git } from '../git/gitCli';
 import { parseCiRollup } from '../github/GitHubService';
 import { listCheckoutRemoteRepositories } from '../remote/RemoteCheckout';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
+import { canonicalPlatformTime } from '../remote/platformTime';
 import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
 import { GitLabCli, gitLabProject } from './GitLabCli';
+import {
+  GITLAB_DISCUSSION_PAGE,
+  GITLAB_DISCUSSION_PAGES,
+  gitLabReviewers,
+  parseGitLabMergeRequestFeedback,
+  type GitLabDiscussion,
+  type GitLabReviewer
+} from './GitLabPullRequestFeedback';
 
 interface GitLabMergeRequest {
   iid?: number;
@@ -28,6 +38,12 @@ interface GitLabMergeRequest {
   merged_at?: string | null;
   detailed_merge_status?: string;
   head_pipeline?: { id?: number; project_id?: number; sha?: string; status?: string } | null;
+}
+
+interface GitLabApprovals {
+  approved?: boolean;
+  approvals_left?: number;
+  approved_by?: Array<{ user?: { username?: string } | null }>;
 }
 
 interface GitLabJob {
@@ -123,8 +139,8 @@ export class GitLabService implements PullRequestDelivery {
     const base = `projects/${gitLabProject(project.path)}/merge_requests/${iid}`;
     const cwd = worktree.worktreePath;
     const mergeRequest = await this.cli.request<GitLabMergeRequest>({ host: project.host, endpoint: base, cwd, subject: project.path });
-    const [approvals, jobs] = await Promise.all([
-      this.cli.request<{ approved?: boolean; approvals_left?: number }>({ host: project.host, endpoint: `${base}/approvals`, cwd })
+    const [approvals, jobs, reviewers, discussions, viewer] = await Promise.all([
+      this.cli.request<GitLabApprovals>({ host: project.host, endpoint: `${base}/approvals`, cwd })
         .catch(() => undefined),
       mergeRequest.head_pipeline?.id
         ? this.cli.request<unknown>({
@@ -132,9 +148,45 @@ export class GitLabService implements PullRequestDelivery {
           endpoint: `projects/${mergeRequest.head_pipeline.project_id ?? gitLabProject(project.path)}/pipelines/${mergeRequest.head_pipeline.id}/jobs?per_page=100`,
           cwd
         }).catch(() => undefined)
-        : Promise.resolve([])
+        : Promise.resolve([]),
+      this.cli.request<unknown>({ host: project.host, endpoint: `${base}/reviewers`, cwd }).catch(() => undefined),
+      this.readDiscussions(project.host, base, cwd).catch(() => undefined),
+      this.cli.request<{ username?: string }>({ host: project.host, endpoint: 'user', cwd }).catch(() => undefined)
     ]);
-    return parseMergeRequest(mergeRequest, worktree, approvals, Array.isArray(jobs) ? jobs as GitLabJob[] : undefined);
+    const people = Array.isArray(reviewers) || approvals?.approved_by
+      ? gitLabReviewers(Array.isArray(reviewers) ? reviewers as GitLabReviewer[] : undefined, approvals?.approved_by)
+      : undefined;
+    const sync = parseMergeRequest(mergeRequest, worktree, approvals, Array.isArray(jobs) ? jobs as GitLabJob[] : undefined, people);
+    // Without the discussions, the status still stands and the last reading of them is kept.
+    if (!discussions || typeof mergeRequest.iid !== 'number') return sync;
+    return {
+      ...sync,
+      feedback: parseGitLabMergeRequestFeedback({
+        number: mergeRequest.iid,
+        webUrl: mergeRequest.web_url,
+        headSha: mergeRequest.sha,
+        discussions: discussions.rows,
+        reviewers: people ?? [],
+        capturedAt: new Date().toISOString(),
+        ...(viewer?.username ? { viewer: viewer.username } : {}),
+        more: discussions.more
+      })
+    };
+  }
+
+  /**
+   * A merge request's discussions, oldest first, a page at a time up to a
+   * bound; system notes fill pages too, so the newest are past the first page.
+   */
+  private async readDiscussions(host: string, base: string, cwd: string): Promise<{ rows: GitLabDiscussion[]; more: boolean } | undefined> {
+    const rows: GitLabDiscussion[] = [];
+    for (let page = 1; page <= GITLAB_DISCUSSION_PAGES; page += 1) {
+      const batch = await this.cli.request<unknown>({ host, endpoint: `${base}/discussions?per_page=${GITLAB_DISCUSSION_PAGE}&page=${page}`, cwd });
+      if (!Array.isArray(batch)) return undefined;
+      rows.push(...(batch as GitLabDiscussion[]));
+      if (batch.length < GITLAB_DISCUSSION_PAGE) return { rows, more: false };
+    }
+    return { rows, more: true };
   }
 
   async pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string> {
@@ -190,12 +242,30 @@ export function draftTitle(title: string): string {
   return /^\s*(?:draft:|\[draft\]|\(draft\))/iu.test(title) ? title : `Draft: ${title}`;
 }
 
+/**
+ * GitLab reports the first reason a merge request cannot merge. Reasons that
+ * the draft, review or check evidence already states, or that a person settles
+ * on GitLab, leave it not mergeable yet; a conflict or a branch that must change
+ * blocks it. A reason GitLab adds later is unknown, not a block.
+ */
+const NOT_YET_MERGEABLE = new Set([
+  'draft_status', 'not_approved', 'requested_changes', 'ci_must_pass', 'ci_still_running', 'not_open',
+  'discussions_not_resolved', 'status_checks_must_pass', 'security_policy_pipeline_check', 'merge_time',
+  'jira_association_missing', 'title_regex'
+]);
+const MERGE_BLOCKERS = new Set([
+  'conflict', 'need_rebase', 'commits_status', 'merge_request_blocked', 'locked_paths', 'locked_lfs_files',
+  'security_policy_violations', 'broken_status', 'blocked_status'
+]);
+
 /** One GitLab observation split into Task Monki's PR, check, review and merge evidence. */
 export function parseMergeRequest(
   raw: GitLabMergeRequest,
   worktree: WorktreeRecord,
   approvals?: { approved?: boolean; approvals_left?: number },
-  jobs?: readonly GitLabJob[]
+  jobs?: readonly GitLabJob[],
+  /** Reviewers' own states: a request for changes holds even when GitLab reports another reason first, such as a draft. */
+  reviewers?: readonly PullRequestReviewer[]
 ): PullRequestSync {
   const owner = { taskId: worktree.taskId, iterationId: worktree.iterationId, worktreeId: worktree.id };
   const number = raw.iid;
@@ -218,15 +288,20 @@ export function parseMergeRequest(
     startedAt: job.started_at ?? undefined,
     completedAt: job.finished_at ?? undefined
   }));
-  const reviewStatus: ReviewStatus = raw.detailed_merge_status === 'requested_changes' ? 'CHANGES_REQUESTED'
+  const changesRequested = raw.detailed_merge_status === 'requested_changes' ||
+    Boolean(reviewers?.some((reviewer) => reviewer.state === 'CHANGES_REQUESTED'));
+  const reviewStatus: ReviewStatus = changesRequested ? 'CHANGES_REQUESTED'
     : approvals?.approved && (approvals.approvals_left ?? 0) === 0 ? 'APPROVED'
       : (approvals?.approvals_left ?? 0) > 0 || raw.detailed_merge_status === 'not_approved' ? 'REQUESTED'
         : 'NOT_REQUESTED';
+  const detailed = raw.detailed_merge_status ?? '';
   const mergeStatus: MergeStatus = state === 'MERGED' ? 'MERGED'
     : state === 'CLOSED' ? 'CLOSED_UNMERGED'
-      : raw.detailed_merge_status === 'mergeable' ? 'MERGEABLE'
-        : COMPUTING_MERGE_STATUSES.has(raw.detailed_merge_status ?? '') ? 'COMPUTING'
-          : raw.detailed_merge_status ? 'BLOCKED' : 'UNKNOWN';
+      : detailed === 'mergeable' ? 'MERGEABLE'
+        : COMPUTING_MERGE_STATUSES.has(detailed) ? 'COMPUTING'
+          : NOT_YET_MERGEABLE.has(detailed) ? 'NOT_MERGED'
+            : MERGE_BLOCKERS.has(detailed) ? 'BLOCKED'
+              : 'UNKNOWN';
   return {
     pullRequest: {
       ...owner,
@@ -238,13 +313,13 @@ export function parseMergeRequest(
       headRefName: raw.source_branch,
       headRefOid: headSha,
       baseRefName: raw.target_branch,
-      mergedAt: raw.merged_at ?? null,
+      mergedAt: canonicalPlatformTime(raw.merged_at) ?? null,
       title: raw.title,
       raw
     },
     // A pipeline for an older commit is evidence for that commit, which PR Status marks stale.
     ci: parseCiRollup(undefined, worktree, number, pipeline ? pipeline.sha : headSha, checks.length ? checks : undefined),
     reviews: { ...owner, pullRequestNumber: number, headSha, status: reviewStatus, ...(raw.detailed_merge_status ? { reviewDecision: raw.detailed_merge_status } : {}), raw: approvals },
-    merge: { ...owner, pullRequestNumber: number, headSha, status: mergeStatus, mergedAt: raw.merged_at ?? null, raw: { detailed_merge_status: raw.detailed_merge_status } }
+    merge: { ...owner, pullRequestNumber: number, headSha, status: mergeStatus, mergedAt: canonicalPlatformTime(raw.merged_at) ?? null, raw: { detailed_merge_status: raw.detailed_merge_status } }
   };
 }

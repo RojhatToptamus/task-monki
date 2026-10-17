@@ -7,6 +7,7 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
+import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
 import type { RemoteProvider, RemoteRepositoryRef } from '../../shared/remoteWork';
 
 /**
@@ -34,6 +35,8 @@ export interface PullRequestSync {
   ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
   reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
+  /** What people said on it; absent when it could not be read, so the last reading stands. */
+  feedback?: PullRequestFeedback;
 }
 
 /**

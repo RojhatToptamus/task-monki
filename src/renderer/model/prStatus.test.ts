@@ -453,6 +453,21 @@ describe('buildPrStatusViewModel', () => {
     expect(changesRequested.reviewLine).toBeUndefined();
   });
 
+  it('says who asked for changes and what is unresolved, for the open pull request the feedback was read with', () => {
+    const feedback = {
+      artifactId: '00000000-0000-4000-8000-000000000002', digest: 'a'.repeat(64), capturedAt: now,
+      unresolvedCount: 2, discussionCount: 3, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' as const }]
+    };
+    const view = (pullRequest: Partial<PullRequestSnapshotRecord>, reviewRollup: Partial<ReviewRollupRecord> = {}) => buildPrStatusViewModel({
+      task: taskFixture(), gitSnapshot: gitFixture(), pullRequest: prFixture(pullRequest),
+      reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED', feedback, ...reviewRollup })
+    });
+    expect(view({})).toMatchObject({ headline: 'GitHub changes requested', feedbackLine: 'alice requested changes, 2 unresolved threads' });
+    // A merged pull request asks nothing more, and another pull request's feedback is not this one's.
+    expect(view({ status: 'MERGED', state: 'MERGED' }).feedbackLine).toBeUndefined();
+    expect(view({}, { pullRequestNumber: 81 }).feedbackLine).toBeUndefined();
+  });
+
   it('does not carry ready evidence copy into terminal or freshness states', () => {
     const merged = buildPrStatusViewModel({
       task: taskFixture(),

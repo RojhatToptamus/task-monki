@@ -213,9 +213,18 @@ pull request text as immutable JSON (title, body, labels, ten most recent
 comments, each bounded), owned by the task and deleted with it. A pull request
 source also records the opened head, merge base and branches. A push to an
 opened pull request's branch records `previousRemoteSha`, the head its lease
-names. Platform text is stored trimmed; a task source, pull request, check,
-review or merge observation is validated as it is written, so a value the store
-could not load fails that action instead of startup. Migration 15
+names. Platform text is stored trimmed, and HTML comments, which the platforms
+hide from readers, are left out of captured text. A task source, pull request,
+check, review or merge observation is validated as it is written, so a value the
+store could not load fails that action instead of startup. Schema 31 also
+carries pull request feedback: each review observation may keep a `feedback`
+summary (artifact id, digest, unresolved and discussion counts, reviewers) whose
+`pull-request-feedback` artifact belongs to the same task and holds the bounded
+threads, reviews and comments; unchanged feedback reuses its artifact, and a
+failed read keeps the last one. Startup refuses a summary whose artifact is
+missing or another task's. A review request may hold `DISCUSSION` items, a
+review draft `includedDiscussionIds`, and a request sent before the task's first
+turn is stored as that turn's `FOLLOW_UP` instruction. Migration 15
 (`gitlab-cli-setting`) adds `externalExecutables.glabExecutablePath` and
 advances settings to schema 16.
 

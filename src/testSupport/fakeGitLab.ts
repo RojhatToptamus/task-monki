@@ -19,7 +19,25 @@ export interface FakeGitLabItem {
   sourceProject?: string;
   /** A finished pipeline for the head: each job's name, stage and status. */
   jobs?: Array<{ name: string; stage: string; status: string; allow_failure?: boolean }>;
+  /** GitLab's first reason it cannot merge; a draft reports `draft_status` unless set. */
   detailedMergeStatus?: string;
+  /** Merge request discussions, as the discussions API returns them. */
+  discussions?: FakeGitLabDiscussion[];
+  reviewers?: Array<{ username: string; state: string }>;
+}
+
+export interface FakeGitLabDiscussion {
+  id: string;
+  /** A single comment on the merge request rather than a thread. */
+  individualNote?: boolean;
+  /** A diff thread: its file and line on the new side, or on the old side. */
+  path?: string;
+  newLine?: number;
+  oldLine?: number;
+  /** The head the note was written on; the merge request's head when absent. */
+  headSha?: string;
+  resolved?: boolean;
+  notes: Array<{ id: number; author: string; body: string; created_at: string; system?: boolean }>;
 }
 
 export interface FakeGitLabCall {
@@ -148,7 +166,7 @@ const mergeRequest = (item) => {
     draft: Boolean(item.draft), source_branch: item.sourceBranch, target_branch: item.targetBranch ?? 'main',
     source_project_id: idOf(source), target_project_id: idOf(item.project), sha: head,
     diff_refs: base ? { base_sha: base, head_sha: head, start_sha: target } : null,
-    detailed_merge_status: item.detailedMergeStatus ?? 'mergeable', merged_at: null,
+    detailed_merge_status: item.detailedMergeStatus ?? (item.draft ? 'draft_status' : 'mergeable'), merged_at: null,
     head_pipeline: item.jobs ? { id: 900 + item.iid, project_id: idOf(item.project), sha: head, status: 'running' } : null
   };
 };
@@ -183,7 +201,25 @@ if (parts.length === 3) out(list.map((item) => kind === 'ISSUE' ? issue(item) : 
 const item = items.find((candidate) => candidate.kind === kind && candidate.iid === Number(parts[3]));
 if (!item) notFound();
 if (parts[4] === 'notes') out([...(item.notes ?? [])].reverse().map((note) => ({ body: note.body, system: Boolean(note.system), created_at: note.created_at, author: { username: note.author } })));
-if (parts[4] === 'approvals') out({ approved: false, approvals_left: 0 });
+if (parts[4] === 'approvals') out({ approved: false, approvals_left: 0, approved_by: [] });
+if (parts[4] === 'reviewers') out((item.reviewers ?? []).map((reviewer) => ({ user: { username: reviewer.username }, state: reviewer.state, created_at: '2026-10-01T00:00:00Z' })));
+if (parts[4] === 'discussions') {
+  const head = mergeRequest(item).sha;
+  // As on GitLab: 20 a page unless asked, oldest first.
+  const perPage = Number(query.get('per_page') ?? 20);
+  const page = Number(query.get('page') ?? 1);
+  out((item.discussions ?? []).slice((page - 1) * perPage, page * perPage).map((discussion) => ({
+    id: discussion.id,
+    individual_note: Boolean(discussion.individualNote),
+    notes: discussion.notes.map((note) => ({
+      id: note.id, type: discussion.individualNote ? null : discussion.path ? 'DiffNote' : 'DiscussionNote', body: note.body,
+      author: { username: note.author }, created_at: note.created_at, system: Boolean(note.system),
+      resolvable: !discussion.individualNote && !note.system, resolved: Boolean(discussion.resolved),
+      position: discussion.path ? { position_type: 'text', new_path: discussion.path, old_path: discussion.path, head_sha: discussion.headSha ?? head,
+        new_line: discussion.newLine ?? null, old_line: discussion.newLine ? null : discussion.oldLine ?? null } : null
+    }))
+  })));
+}
 out(kind === 'ISSUE' ? issue(item) : mergeRequest(item));
 `;
 }

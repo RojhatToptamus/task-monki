@@ -16,7 +16,8 @@ It answers:
 - does this task have a linked PR?
 - is the local worktree ahead of the PR, behind it, dirty, stale, or diverged?
 - are GitHub checks passing, pending, canceled, blocked, or failing?
-- is GitHub review waiting or requesting changes?
+- is GitHub review waiting or requesting changes, from whom, and how many
+  review threads are unresolved?
 - is GitHub reporting the PR mergeable, merged, or closed without merge?
 - which GitHub delivery action is currently valid?
 
@@ -158,6 +159,42 @@ Official GitHub CLI docs checked for the command surfaces:
 - `gh pr view`: https://cli.github.com/manual/gh_pr_view
 - `gh pr checks`: https://cli.github.com/manual/gh_pr_checks
 - `gh auth status`: https://cli.github.com/manual/gh_auth_status
+- `gh api graphql`, for review feedback: `PullRequest.reviewThreads`,
+  `latestReviews`, `latestOpinionatedReviews`, `reviewRequests` and `comments`
+  (https://docs.github.com/en/graphql/reference/objects#pullrequest)
+
+GitLab review feedback comes from `GET .../merge_requests/:iid/discussions`
+(pages of 100, up to five), `.../reviewers` and `.../approvals`
+(https://docs.gitlab.com/api/discussions/, https://docs.gitlab.com/api/merge_requests/).
+
+## Review Feedback
+
+Each PR observation also reads what people said: review threads on lines and
+files, review summaries, and conversation comments, with each reviewer's
+state (requested changes, approved, commented, or asked and waiting). It is a
+read; nothing is written back. `PullRequestFeedback` is stored as the task's
+immutable `pull-request-feedback` artifact, and `ReviewRollupRecord.feedback`
+keeps a summary the card reads without the artifact: the artifact id, a
+digest, the unresolved thread count, the discussion count and the reviewers.
+An unchanged reading keeps its artifact; a read that fails keeps the last
+reading of the same PR, and the PR status still records.
+
+Review threads (GitHub) and discussions (GitLab) are read a page of 100 at a
+time, up to five pages, so the newest are read too; a GitHub conversation is
+its last 30 comments.
+
+What is kept is what a reader sees on the platform: HTML comments outside code
+and invisible characters (zero-width, bidirectional controls and tag
+characters), which both platforms hide, and comments a maintainer minimized are
+left out, and a bot's conversation comment (a deployment or coverage report) is
+not feedback; a bot's review threads are. An agent is sent the text the Review
+tab shows, never markup or attributes it hides. A thread keeps its first
+comment and its nine most recent replies. Every body is bounded, and past a
+shared budget, open discussions keep their bodies at the bound while resolved
+ones keep only their start. Past 100 discussions, open ones are kept first,
+then the most recent; a reading that left anything out says so, and the Review
+tab links to the rest on the platform. A GitLab diff note written on an earlier
+head than the MR's is outdated.
 
 Local Git evidence is collected with the configured `git` executable through
 `src/core/git/gitCli.ts`.
@@ -433,18 +470,31 @@ reviewDecision REVIEW_REQUIRED   -> REQUESTED
 otherwise                        -> NOT_REQUESTED
 ```
 
-Merge status:
+Merge status. `mergeable` reports only Git conflicts, so GitHub's merge state
+decides; a draft, or a PR held by branch protection (required reviews, checks
+or resolved conversations), is not mergeable yet for reasons its own evidence
+states, and only conflicts or a branch that must be updated block it:
 
 ```text
-mergedAt exists                  -> MERGED
-state == CLOSED                  -> CLOSED_UNMERGED
-state == MERGED                  -> MERGED
-mergeStateStatus CLEAN/HAS_HOOKS -> MERGEABLE
-mergeable == MERGEABLE           -> MERGEABLE
-mergeStateStatus BLOCKED/DIRTY/BEHIND/DRAFT -> BLOCKED
-mergeStateStatus UNKNOWN or mergeable UNKNOWN -> UNKNOWN
-otherwise                        -> NOT_MERGED
+mergedAt exists                          -> MERGED
+state == CLOSED                          -> CLOSED_UNMERGED
+state == MERGED                          -> MERGED
+mergeStateStatus CLEAN/HAS_HOOKS/UNSTABLE -> MERGEABLE
+mergeStateStatus DIRTY/BEHIND            -> BLOCKED
+mergeStateStatus DRAFT/BLOCKED           -> NOT_MERGED, or BLOCKED when mergeable == CONFLICTING
+mergeStateStatus UNKNOWN                 -> UNKNOWN
+no mergeStateStatus                      -> from mergeable: MERGEABLE, BLOCKED (CONFLICTING), UNKNOWN, else NOT_MERGED
 ```
+
+GitLab reports the first reason an MR cannot merge in `detailed_merge_status`.
+`mergeable` is MERGEABLE; `checking`, `unchecked`, `preparing` and
+`approvals_syncing` are COMPUTING; reasons the draft, review or check evidence
+states, or that a person settles on GitLab (`draft_status`, `not_approved`,
+`requested_changes`, `ci_must_pass`, `ci_still_running`,
+`discussions_not_resolved`, and the policy checks) are NOT_MERGED; a conflict,
+a needed rebase or a lock is BLOCKED; a reason GitLab adds later is UNKNOWN.
+Because GitLab names the draft first, a reviewer's own `requested_changes`
+state also makes the review CHANGES_REQUESTED.
 
 Only the first 80 check detail rows are stored.
 
@@ -835,10 +885,20 @@ return individual check rows; otherwise the expandable rows are the evidence.
 PR Status                         Jul 2, 10:56
 o GitHub changes requested
 #82 Refresh auth token
-[refresh]
+alice requested changes, 3 unresolved threads
+[Address comments] [refresh]
 ```
 
 Tone: `error`. This is GitHub review evidence, not Task Monki agent-review evidence.
+
+The feedback line, on any open PR whose feedback was read with it, says who
+requested changes, who it waits on and how many threads are unresolved;
+approvals are left to the review state. `Address comments` appears while an
+unresolved thread, or a review requesting changes, was not sent to the agent
+since anyone else last wrote on it: it adds those to the review request and
+opens the Review tab's request sheet. Nothing is sent until the person sends
+it there. It leads the panel after Investigate failure, Sync branch and Push
+update.
 
 ### GITHUB_REVIEW_WAITING
 
@@ -1001,12 +1061,28 @@ checks canceled
 changes requested
 review waiting
 checks passing, mergeable
+checks passing
 ```
 
 Projection scalars alone never claim "ready to merge"; that needs delivery
-evidence for the current head. A note the card's status word already states is
-dropped, so "Checks failed" never sits beside "checks failing". The note takes
-no tone: the status word carries it.
+evidence for the current head. "mergeable" needs a ready PR GitHub or GitLab
+calls mergeable; a draft with passing checks reads "checks passing". A note the
+card's status word already states is dropped on either platform, so "Checks
+failed" never sits beside "checks failing" and "GitLab changes requested" never
+beside "changes requested". The note takes no tone: the status word carries it.
+
+Between turns, an open PR's own progress (Branch diverged, Changes not pushed,
+Checks stale) is the task's status word in any phase, so a PR opened as a task,
+which starts In progress, reads as the PR card does. A PR rewritten under a
+worktree that holds nothing of its own reads "PR rewritten", as PR Status says
+it: the board summary carries `pullRequestRewritten`, decided by the same
+`pullRequestRewrittenUnder` rule PR Status uses. A merged PR asks nothing more:
+its last review decision or check result raises no attention, and the word is
+Merged (or Ready to mark done under a manual policy).
+
+Platform times are recorded in the store's canonical form: GitHub reports
+`mergedAt` without milliseconds, and an observation is refused at write time
+when a value could not be loaded again.
 
 ## Evidence Updates And Projection
 

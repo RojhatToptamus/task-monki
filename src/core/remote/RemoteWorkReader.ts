@@ -2,6 +2,7 @@ import {
   REMOTE_WORK_LIMITS,
   REMOTE_WORK_SNAPSHOT_SCHEMA,
   boundRemoteText,
+  visibleRemoteText,
   type RemoteProvider,
   type RemoteRepositoryRef,
   type RemoteWorkComment,
@@ -53,16 +54,21 @@ export function buildRemoteWorkSnapshot(input: {
   commentCount: number;
   capturedAt: string;
 }): RemoteWorkSnapshot {
-  const body = boundRemoteText(input.body, REMOTE_WORK_LIMITS.body);
-  const comments: RemoteWorkComment[] = input.comments.slice(-REMOTE_WORK_LIMITS.comments).map((comment) => {
-    const text = boundRemoteText(comment.body, REMOTE_WORK_LIMITS.comment);
-    return {
-      ...(comment.author ? { author: comment.author } : {}),
-      ...(comment.createdAt ? { createdAt: comment.createdAt } : {}),
-      body: text.text,
-      truncated: text.truncated
-    };
-  });
+  const body = boundRemoteText(visibleRemoteText(input.body).trim(), REMOTE_WORK_LIMITS.body);
+  const comments: RemoteWorkComment[] = input.comments
+    .map((comment) => ({ ...comment, body: visibleRemoteText(comment.body).trim() }))
+    // A comment that holds only hidden text says nothing a reader sees.
+    .filter((comment) => comment.body)
+    .slice(-REMOTE_WORK_LIMITS.comments)
+    .map((comment) => {
+      const text = boundRemoteText(comment.body, REMOTE_WORK_LIMITS.comment);
+      return {
+        ...(comment.author ? { author: comment.author } : {}),
+        ...(comment.createdAt ? { createdAt: comment.createdAt } : {}),
+        body: text.text,
+        truncated: text.truncated
+      };
+    });
   return {
     schema: REMOTE_WORK_SNAPSHOT_SCHEMA,
     provider: input.ref.repository.provider,

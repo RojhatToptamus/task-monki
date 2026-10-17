@@ -1,5 +1,5 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
-import { deliveryNumber, deliveryProvider } from './deliveryWords';
+import { deliveryNumber, deliveryProvider, deliveryWords } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -216,7 +216,11 @@ export interface TaskCardRepositoryIdentity {
   repositoryName: string;
 }
 
-export type TaskCardSource = Task | BoardTaskSummary;
+/**
+ * A task as the status function reads it. A full task can carry the facts a
+ * board summary derives from its records, so both read the same word.
+ */
+export type TaskCardSource = Task | BoardTaskSummary | (Task & Pick<BoardTaskSummary, 'pullRequestRewritten'>);
 
 /**
  * The one status word for a task. The board card, the task header and Active
@@ -267,6 +271,12 @@ export function describeTaskStatus(task: TaskCardSource): { label: string; tone:
     const status = cardReviewStatus(task);
     return describeDeliveryProgress(task, status) ?? describeReviewGateStatus(task, status);
   }
+  // Between turns, an open pull request's own progress is the task's state in any
+  // phase, such as a pull request opened as a task before its first turn.
+  const delivery = describeDeliveryProgress(task, cardReviewStatus(task));
+  if (delivery) {
+    return delivery;
+  }
   if (run === 'COMPLETED') {
     return { label: 'Completed', tone: 'success' };
   }
@@ -306,7 +316,10 @@ function describeDeliveryProgress(
     return undefined;
   }
   if (projection.git === 'DIVERGED') {
-    return { label: 'Branch diverged', tone: 'error' };
+    // A pull request rewritten under a worktree with nothing of its own is news, not a conflict.
+    return 'pullRequestRewritten' in task && task.pullRequestRewritten
+      ? { label: deliveryWords('PR rewritten', deliveryProvider({ remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection })), tone: 'action' }
+      : { label: 'Branch diverged', tone: 'error' };
   }
   if (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED') {
     return { label: 'Changes not pushed', tone: 'action' };
@@ -444,14 +457,17 @@ function cardPullRequestNote(projection: TaskCardSource['projection']): string |
   if (projection.reviews === 'CHANGES_REQUESTED') return 'changes requested';
   if (projection.reviews === 'REQUESTED' || projection.reviews === 'PENDING') return 'review waiting';
   // Scalars alone never claim ready to merge; that needs evidence for the current head.
-  if (projection.ciChecks === 'PASSING' && projection.merge === 'MERGEABLE') return 'checks passing, mergeable';
+  // A draft is never mergeable, whatever Git says of its conflicts.
+  if (projection.ciChecks === 'PASSING') {
+    return projection.merge === 'MERGEABLE' && projection.githubPullRequest === 'OPEN_READY' ? 'checks passing, mergeable' : 'checks passing';
+  }
   return undefined;
 }
 
-/** Status words that already carry a delivery note, so the card says it once. */
+/** Status words that already carry a delivery note, so the card says it once, on either platform. */
 const CARD_NOTE_STATED_BY: Record<string, string[]> = {
   'checks failing': ['Checks failed'],
-  'changes requested': ['GitHub changes requested']
+  'changes requested': ['GitHub changes requested', 'GitLab changes requested']
 };
 
 const FINDING_SEVERITY_LABELS: Array<{

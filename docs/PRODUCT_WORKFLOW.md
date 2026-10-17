@@ -708,6 +708,14 @@ one draft PR for the Task Monki-owned branch, then records PR identity, check
 details, GitHub review rollup, merge state, and whether the PR head is fresh
 against the local worktree.
 
+Each refresh also reads what reviewers said on the pull request: review
+threads, review summaries, conversation comments and each reviewer's state.
+PR Status says who requested changes, who it waits on and how many threads are
+unresolved, and Address comments adds the unresolved ones the agent was not
+sent to the review request and opens it on the Review tab, where the threads
+sit on their lines. People's words reach the agent only when the person sends
+them, quoted and attributed; replying and resolving stay on the platform.
+
 Push update is shown only here, and so is Create draft PR once a PR exists.
 Before then, Create draft PR sits with the finishing actions when finishing
 holds the Overview's Now panel, and in PR Status otherwise, under the same

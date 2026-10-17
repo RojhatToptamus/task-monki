@@ -12,6 +12,7 @@ import {
   reviewDraftProblem
 } from '../../shared/contracts';
 import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
+import { PULL_REQUEST_FEEDBACK_LIMITS, PULL_REQUEST_REVIEWER_STATES } from '../../shared/pullRequestFeedback';
 import { parseRemoteRepositoryUrl } from '../../shared/remoteWork';
 import { assertReviewRequestRecord } from '../../shared/reviewRounds';
 import type { StoreState } from '../projection/reducer';
@@ -1210,6 +1211,30 @@ function reviewRollupRecord(record: object): void {
   optionalStrings(record, 'reviewRollups', ['headSha', 'reviewDecision']);
   enumField(record, 'status', REVIEW_STATUSES, 'reviewRollups');
   timestamp(record, 'observedAt', 'reviewRollups');
+  const feedback = (record as Record<string, unknown>).feedback;
+  if (feedback !== undefined) validatePullRequestFeedbackSummary(feedback);
+}
+
+/**
+ * What a review observation keeps of its feedback, checked on its own before it
+ * is written, so feedback the store could not load is left out of an
+ * observation rather than failing it.
+ */
+export function validatePullRequestFeedbackSummary(value: unknown): void {
+  const summary = persistedRecord(value, 'reviewRollups');
+  uuidField(summary, 'artifactId', 'reviewRollups');
+  sha256Field(summary, 'digest', 'reviewRollups');
+  timestamp(summary, 'capturedAt', 'reviewRollups');
+  integer(summary, 'unresolvedCount', 'reviewRollups', 0);
+  integer(summary, 'discussionCount', 'reviewRollups', 0);
+  if (!Array.isArray(summary.reviewers) || summary.reviewers.length > PULL_REQUEST_FEEDBACK_LIMITS.reviewers) {
+    invalid('reviewRollups');
+  }
+  for (const reviewer of summary.reviewers as unknown[]) {
+    const entry = persistedRecord(reviewer, 'reviewRollups');
+    strings(entry, 'reviewRollups', ['name']);
+    enumField(entry, 'state', PULL_REQUEST_REVIEWER_STATES, 'reviewRollups');
+  }
 }
 
 function mergeSnapshotRecord(record: object): void {

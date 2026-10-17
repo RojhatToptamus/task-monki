@@ -66,7 +66,15 @@ import type {
 } from '../../shared/contracts';
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
+  PULL_REQUEST_FEEDBACK_LIMITS,
+  unresolvedDiscussionCount,
+  type PullRequestFeedback,
+  type PullRequestFeedbackSummary
+} from '../../shared/pullRequestFeedback';
+import {
+  leavablePullRequestHeads,
   parseRemoteWorkReference,
+  pullRequestRewrittenUnder,
   remoteWorkKey,
   taskRemoteSourceRef,
   type RemoteWorkRef,
@@ -111,6 +119,7 @@ import {
 import { AttachmentStoreError } from './AttachmentErrors';
 import {
   validateCurrentStoreRecords,
+  validatePullRequestFeedbackSummary,
   validatePullRequestObservation,
   validateTaskInstructionConversation,
   validateTaskRemoteSource
@@ -254,6 +263,7 @@ interface PrSyncInput {
   ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
   reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
+  feedback?: PullRequestFeedback;
 }
 
 function completionPolicyAfterPullRequestSync(
@@ -328,6 +338,7 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
   'remote-source': 256 * 1024,
+  'pull-request-feedback': PULL_REQUEST_FEEDBACK_LIMITS.bytes,
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -909,7 +920,7 @@ export class SqliteTaskStore {
       boards: state.boards,
       tasks: state.tasks
         .filter((task) => task.kind === 'NORMAL')
-        .map(projectBoardTask),
+        .map((task) => projectBoardTask(task, state)),
       interactionRequests: state.interactionRequests.filter(
         (interaction) =>
           (interaction.status === 'PENDING' || interaction.status === 'RESPONDING') &&
@@ -4865,9 +4876,11 @@ export class SqliteTaskStore {
       ...input.ci,
       observedAt
     };
+    const feedback = await this.pullRequestFeedbackSummary(pullRequest, input.feedback);
     const reviews: ReviewRollupRecord = {
       id: randomUUID(),
       ...input.reviews,
+      ...(feedback.summary ? { feedback: feedback.summary } : {}),
       observedAt
     };
     const merge: MergeSnapshotRecord = {
@@ -4878,6 +4891,7 @@ export class SqliteTaskStore {
     try {
       validatePullRequestObservation({ pullRequest, ci, reviews, merge });
     } catch {
+      if (feedback.artifact) await this.cleanupUnpublishedArtifacts([feedback.artifact]);
       throw new Error('The platform reported a pull request value Task Monki cannot record.');
     }
 
@@ -4970,8 +4984,46 @@ export class SqliteTaskStore {
       };
     }
 
-    await this.persistSnapshot();
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      if (feedback.artifact) await this.cleanupUnpublishedArtifacts([feedback.artifact]);
+      throw error;
+    }
     return clone(pullRequest);
+  }
+
+  /**
+   * What a review observation keeps of its feedback. Unchanged feedback keeps
+   * the artifact it has; feedback that could not be read, or does not fit,
+   * keeps the last reading of the same pull request.
+   */
+  private async pullRequestFeedbackSummary(
+    pullRequest: PullRequestSnapshotRecord,
+    feedback: PullRequestFeedback | undefined
+  ): Promise<{ summary?: PullRequestFeedbackSummary; artifact?: ArtifactRecord }> {
+    const previous = this.state.reviewRollups.find((record) =>
+      record.taskId === pullRequest.taskId && record.feedback && record.pullRequestNumber === pullRequest.number)?.feedback;
+    if (!feedback || feedback.number !== pullRequest.number) return { summary: previous };
+    const content = JSON.stringify(feedback);
+    if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
+    const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
+    if (previous?.digest === digest) return { summary: previous };
+    const candidate: PullRequestFeedbackSummary = {
+      artifactId: randomUUID(),
+      digest,
+      capturedAt: feedback.capturedAt,
+      unresolvedCount: unresolvedDiscussionCount(feedback.discussions),
+      discussionCount: feedback.discussions.length,
+      reviewers: feedback.reviewers
+    };
+    try {
+      validatePullRequestFeedbackSummary(candidate);
+    } catch {
+      return { summary: previous };
+    }
+    const artifact = await this.createTextArtifact(pullRequest.taskId, 'pull-request-feedback', content);
+    return { artifact, summary: { ...candidate, artifactId: artifact.id } };
   }
 
   async appendEvent(event: DomainEvent, persist = true): Promise<void> {
@@ -5725,6 +5777,18 @@ function validatePersistedRelationships(state: StoreState): void {
         pullRequest.bodyArtifactId,
         'pr-body',
         'pull request body artifact ownership'
+      );
+    }
+  }
+
+  for (const review of reviewRollups.values()) {
+    if (review.feedback) {
+      assertTaskArtifact(
+        artifacts,
+        review.taskId,
+        review.feedback.artifactId,
+        'pull-request-feedback',
+        'pull request feedback artifact ownership'
       );
     }
   }
@@ -7558,7 +7622,25 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return Number.isFinite(time) && new Date(time).toISOString() === value;
 }
 
-function projectBoardTask(task: Task): BoardTaskSummary {
+/** The opened pull request was rewritten under a worktree with nothing of its own, as PR Status reads it. */
+function boardPullRequestRewritten(task: Task, state: StoreState): boolean {
+  const opened = task.remoteSource?.kind === 'PULL_REQUEST' ? task.remoteSource.pullRequest : undefined;
+  if (!opened || task.projection.git !== 'DIVERGED') return false;
+  const latest = <T extends { iterationId: string }>(records: readonly T[], key: keyof T & string) => records
+    .filter((record) => record.iterationId === task.currentIterationId)
+    .sort((left, right) => String(right[key]).localeCompare(String(left[key])))[0];
+  const ownRecords = <T extends { taskId: string }>(records: readonly T[]) => records.filter((record) => record.taskId === task.id);
+  const git = latest(ownRecords(state.gitSnapshots), 'capturedAt');
+  const publications = ownRecords(state.branchPublications);
+  return pullRequestRewrittenUnder({
+    leavableHeads: leavablePullRequestHeads(opened.headSha, ownRecords(state.pullRequests), publications),
+    localHead: git?.headSha,
+    diverged: true,
+    pushUnconfirmed: latest(publications, 'updatedAt')?.status === 'AMBIGUOUS'
+  });
+}
+
+function projectBoardTask(task: Task, state: StoreState): BoardTaskSummary {
   const review = task.projection.agentReview;
   const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
   for (const finding of openReviewFindings(review?.result, review?.findingDecisions ?? [])) {
@@ -7595,7 +7677,8 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         effectiveStatus: effectiveReviewGateStatus(review),
         ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
       }
-    }
+    },
+    ...(boardPullRequestRewritten(task, state) ? { pullRequestRewritten: true } : {})
   };
 }
 

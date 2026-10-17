@@ -91,6 +91,33 @@ describe('validateCurrentStoreRecords', () => {
     expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
   });
 
+  it('accepts a review observation\'s feedback summary only in its durable shape', () => {
+    const rollup = {
+      id: randomUUID(), taskId: randomUUID(), iterationId: randomUUID(), worktreeId: randomUUID(),
+      pullRequestNumber: 82, headSha: 'head', status: 'CHANGES_REQUESTED', observedAt: NOW,
+      feedback: {
+        artifactId: randomUUID(), digest: 'a'.repeat(64), capturedAt: NOW, unresolvedCount: 2, discussionCount: 3,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }]
+      }
+    };
+    const stateWith = (record: unknown) => {
+      const state = createEmptyState();
+      state.reviewRollups = [record as never];
+      return state;
+    };
+    expect(() => validateCurrentStoreRecords(stateWith(rollup))).not.toThrow();
+    for (const feedback of [
+      { ...rollup.feedback, artifactId: 'feedback.json' },
+      { ...rollup.feedback, digest: 'abc' },
+      { ...rollup.feedback, unresolvedCount: -1 },
+      { ...rollup.feedback, reviewers: [{ name: 'alice', state: 'BLOCKED' }] },
+      { ...rollup.feedback, reviewers: [{ name: ' alice ', state: 'APPROVED' }] },
+      { ...rollup.feedback, reviewers: Array.from({ length: 21 }, (_, index) => ({ name: `r${index}`, state: 'REQUESTED' })) }
+    ]) {
+      expect(() => validateCurrentStoreRecords(stateWith({ ...rollup, feedback }))).toThrow('reviewRollups contains a malformed record');
+    }
+  });
+
   it('requires a side question to name its thread and keeps its fields off other messages', () => {
     const task = validTask();
     const iteration = {

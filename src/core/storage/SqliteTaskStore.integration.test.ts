@@ -9,11 +9,13 @@ import type {
   AgentSessionRecord,
   CiChecksStatus,
   MergeStatus,
+  PullRequestFeedback,
   RunRecord,
   Task,
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import { boundPullRequestFeedback, parsePullRequestFeedback } from '../../shared/pullRequestFeedback';
 import { SqliteTaskStore } from './SqliteTaskStore';
 import { SqliteAgentRuntimeStore } from './SqliteAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
@@ -722,6 +724,53 @@ describe('SqliteTaskStore', () => {
     expect(linked?.completionPolicy).toBe('MERGED');
     expect(linked?.phaseVersion).toBe(linkedTask.phaseVersion + 1);
     expect(untouched?.completionPolicy).toBe('LOCAL_ACCEPTANCE');
+  });
+
+  it('keeps pull request feedback as the task\'s artifact, reused while unchanged and kept when a read fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-feedback-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Feedback', prompt: 'Read the review.', repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/feedback', worktreePath: path.join(dir, 'feedback'), baseSha: 'base'
+    });
+    const owner = { taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id };
+    const sync = (feedback?: PullRequestFeedback) => store.recordPullRequestSync({
+      pullRequest: { ...owner, number: 82, url: 'https://github.com/example/repo/pull/82', status: 'OPEN_READY', headRefOid: 'head' },
+      ci: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NO_CHECKS', requiredStatus: 'UNKNOWN', totalCount: 0,
+        pendingCount: 0, passingCount: 0, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [] },
+      reviews: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'CHANGES_REQUESTED' },
+      merge: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_MERGED' },
+      ...(feedback ? { feedback } : {})
+    });
+    const reading = (capturedAt: string, body = 'Handle a null layout.') => boundPullRequestFeedback({
+      provider: 'GITHUB', number: 82, capturedAt, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+      discussions: [{ id: 'PRRT_1', kind: 'THREAD', path: 'a.ts', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+        comments: [{ author: 'alice', body }] }]
+    });
+    const feedbackOf = async (target: SqliteTaskStore) => (await target.snapshot()).reviewRollups
+      .filter((record) => record.taskId === task.id).map((record) => record.feedback?.artifactId);
+
+    await sync(reading('2026-10-10T10:00:00.000Z'));
+    await sync(reading('2026-10-10T11:00:00.000Z'));
+    // A read that failed keeps the last reading of the same pull request.
+    await sync();
+    expect(new Set(await feedbackOf(store)).size).toBe(1);
+    await sync(reading('2026-10-10T12:00:00.000Z', 'Also add a test.'));
+    expect(new Set(await feedbackOf(store)).size).toBe(2);
+    // A reading the store cannot keep never costs the status it came with: the last reading stands.
+    await sync({ ...reading('2026-10-10T13:00:00.000Z', 'Changed again.'), capturedAt: 'later' });
+    expect((await feedbackOf(store))[0]).toBe((await feedbackOf(store))[1]);
+    await closeStore(store);
+
+    const reopened = await createStore(dir);
+    const latest = (await reopened.snapshot()).reviewRollups.find((record) => record.taskId === task.id)!;
+    expect(latest.feedback).toMatchObject({ unresolvedCount: 1, discussionCount: 1, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }] });
+    expect(parsePullRequestFeedback(await reopened.readArtifact(latest.feedback!.artifactId), 82)?.discussions[0]?.comments[0]?.body)
+      .toBe('Also add a test.');
+    expect((await reopened.snapshot()).artifacts.filter((artifact) => artifact.kind === 'pull-request-feedback')).toHaveLength(2);
+    await closeStore(reopened);
   });
 
   it('records in-progress branch publication as a request, not a failure', async () => {

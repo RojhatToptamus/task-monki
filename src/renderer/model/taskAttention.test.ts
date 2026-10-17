@@ -178,6 +178,15 @@ describe('describeTaskAttention', () => {
     }
   });
 
+  it('asks nothing of a merged pull request, whatever its last review decision or checks said', () => {
+    const merged = makeTaskRecord({ workflowPhase: 'IN_PROGRESS', projection: {
+      githubPullRequest: 'MERGED', merge: 'MERGED', reviews: 'CHANGES_REQUESTED', ciChecks: 'FAILING'
+    } });
+    expect(describeTaskAttention(merged)).toBeUndefined();
+    // Finishing it by hand is still the person's step.
+    expect(describeTaskAttention({ ...merged, completionPolicy: 'MANUAL' })).toMatchObject({ label: 'Ready to mark done' });
+  });
+
   it('sanitizes generic delivery attention and returns nothing for neutral state', () => {
     const delivery = describeTaskAttention(
       makeTaskRecord({

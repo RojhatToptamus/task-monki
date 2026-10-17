@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { RemoteWorkRef } from '../../shared/contracts';
+import { parsePullRequestFeedback, type RemoteWorkRef } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { createFakeGitLab, type FakeGitLab } from '../../testSupport/fakeGitLab';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
@@ -52,9 +52,64 @@ describe('TaskManagerService GitLab work', () => {
     const detail = await scenario.service.getTaskDetail(task.id);
     expect(detail.pullRequests[0]).toMatchObject({ number: 5, headRefOid: head, status: 'OPEN_READY' });
     expect(detail.ciRollups[0]).toMatchObject({ status: 'FAILING', failingCount: 1, passingCount: 1, skippedCount: 1, headSha: head });
-    expect(detail.mergeSnapshots[0]).toMatchObject({ status: 'BLOCKED', headSha: head });
+    // A required pipeline that failed is the checks' to state; the merge itself is not yet mergeable, not blocked.
+    expect(detail.mergeSnapshots[0]).toMatchObject({ status: 'NOT_MERGED', headSha: head });
     expect((await scenario.service.openPullRequest({ repositoryId: scenario.repositoryId, pullRequest: ref })).id).toBe(task.id);
     await expect(scenario.service.createPullRequest({ taskId: task.id })).rejects.toThrow('comes from a fork');
+  }, 60_000);
+
+  it('reads merge request discussions and a reviewer\'s request for changes that GitLab reports behind the draft', async () => {
+    const { scenario, gitlab, root } = await gitlabScenario('task-monki-gitlab-feedback');
+    const teammate = path.join(root, 'teammate');
+    await git(root, ['clone', '--quiet', gitlab.barePath('group/sub/widgets'), teammate]);
+    await git(teammate, ['checkout', '--quiet', '-b', 'fix-save']);
+    const head = await commit(teammate, 'save.js', 'export function save(layout) {\n  if (!layout) return null;\n  return JSON.stringify(layout);\n}\n', 'Guard');
+    await git(teammate, ['push', '--quiet', gitlab.barePath('group/sub/widgets'), 'HEAD:refs/heads/fix-save']);
+    await gitlab.setItem({
+      project: 'group/sub/widgets', iid: 6, kind: 'MERGE_REQUEST', title: 'Guard an empty layout', draft: true,
+      sourceBranch: 'fix-save', targetBranch: 'main',
+      reviewers: [{ username: 'alice', state: 'requested_changes' }, { username: 'bob', state: 'unreviewed' }],
+      discussions: [
+        // System notes fill the first page; what people wrote comes after them.
+        ...Array.from({ length: 100 }, (_, index) => ({
+          id: index.toString(16).padStart(40, '0'), individualNote: true,
+          notes: [{ id: 1000 + index, author: 'alice', body: 'changed this line', created_at: '2026-10-08T10:00:00Z', system: true }]
+        })),
+        { id: 'a'.repeat(40), path: 'save.js', newLine: 2, notes: [
+          { id: 11, author: 'alice', body: 'Return undefined instead.', created_at: '2026-10-10T10:00:00Z' },
+          { id: 12, author: 'lab-tester', body: 'Why?', created_at: '2026-10-10T11:00:00Z' }
+        ] },
+        { id: 'b'.repeat(40), path: 'save.js', newLine: 1, headSha: 'c'.repeat(40), notes: [
+          { id: 13, author: 'alice', body: 'Rename this.', created_at: '2026-10-09T10:00:00Z' }
+        ] },
+        { id: 'd'.repeat(40), individualNote: true, notes: [{ id: 14, author: 'bob', body: 'Looks close.', created_at: '2026-10-10T12:00:00Z' }] },
+        { id: 'e'.repeat(40), individualNote: true, notes: [{ id: 15, author: 'alice', body: 'requested changes', created_at: '2026-10-10T12:01:00Z', system: true }] }
+      ]
+    });
+    const task = await scenario.service.openPullRequest({
+      repositoryId: scenario.repositoryId, pullRequest: { repository: project, kind: 'PULL_REQUEST', number: 6 }
+    });
+    const detail = await scenario.service.getTaskDetail(task.id);
+    // GitLab names the draft first; the reviewer's own state still says changes were requested.
+    expect(detail.pullRequests[0]).toMatchObject({ number: 6, status: 'OPEN_DRAFT', headRefOid: head });
+    expect(detail.reviewRollups[0]).toMatchObject({
+      status: 'CHANGES_REQUESTED', reviewDecision: 'draft_status',
+      feedback: { unresolvedCount: 2, discussionCount: 3, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'bob', state: 'REQUESTED' }] }
+    });
+    // A draft is not mergeable yet, which is no block of its own.
+    expect(detail.mergeSnapshots[0]).toMatchObject({ status: 'NOT_MERGED' });
+    const feedback = parsePullRequestFeedback(await scenario.service.readArtifact({ artifactId: detail.reviewRollups[0]!.feedback!.artifactId }), 6)!;
+    expect(feedback).toMatchObject({ provider: 'GITLAB', headSha: head, viewer: 'lab-tester' });
+    expect(feedback.discussions).toEqual([
+      expect.objectContaining({
+        id: 'a'.repeat(40), kind: 'THREAD', path: 'save.js', side: 'NEW', line: 2, resolvable: true, resolved: false, outdated: false,
+        url: 'https://gitlab.com/group/sub/widgets/-/merge_requests/6#note_11',
+        comments: [expect.objectContaining({ author: 'alice' }), expect.objectContaining({ author: 'lab-tester', body: 'Why?' })]
+      }),
+      // Written on an earlier head: its lines changed since.
+      expect.objectContaining({ id: 'b'.repeat(40), outdated: true, line: 1 }),
+      expect.objectContaining({ id: 'd'.repeat(40), kind: 'COMMENT', resolvable: false })
+    ]);
   }, 60_000);
 
   it('creates one task per GitLab issue and opens a linked draft merge request', async () => {

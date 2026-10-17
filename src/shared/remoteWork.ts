@@ -332,7 +332,6 @@ export function selectRemoteRepositories(
   return options;
 }
 
-/** Bounded text, cut at a character boundary. */
 /**
  * Heads a worktree may move off when its pull request is rewritten: the ones
  * the platform reported, never one this task pushed, which holds its own commits.
@@ -347,6 +346,44 @@ export function leavablePullRequestHeads(
     .filter((head): head is string => Boolean(head) && !pushed.has(head!));
 }
 
+/**
+ * Characters that change no visible glyph: zero-width and joining marks, the
+ * byte-order mark, bidirectional controls and Unicode tag characters, which can
+ * carry text no reader sees.
+ */
+const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
+
+/**
+ * Platform text as a reader sees it. Invisible characters are dropped, and so
+ * are HTML comments, which GitHub and GitLab hide; code, fenced or inline,
+ * keeps every character it shows. What remains is what Task Monki shows the
+ * person, and only that is ever sent to an agent.
+ */
+export function visibleRemoteText(value: string | undefined): string {
+  return (value ?? '').replace(/\r\n?/gu, '\n').replace(INVISIBLE_CHARACTERS, '')
+    .split(/(```[\s\S]*?```)/u)
+    .map((part, fence) => fence % 2 === 1 ? part
+      : part.split(/(`[^`\n]+`)/u).map((piece, code) => code % 2 === 1 ? piece : piece.replace(/<!--[\s\S]*?-->/gu, '')).join(''))
+    .join('');
+}
+
+/**
+ * The pull request was rewritten under a worktree that holds nothing of its
+ * own: the branch and the pull request diverged, and the worktree is still at
+ * a head the pull request had. Sync moves it and loses nothing. While the last
+ * push is unconfirmed, the remote branch is unknown, so it is not.
+ */
+export function pullRequestRewrittenUnder(input: {
+  /** Heads the worktree may move off, from `leavablePullRequestHeads`. */
+  leavableHeads: readonly string[];
+  localHead?: string;
+  diverged: boolean;
+  pushUnconfirmed: boolean;
+}): boolean {
+  return input.diverged && !input.pushUnconfirmed && Boolean(input.localHead) && input.leavableHeads.includes(input.localHead!);
+}
+
+/** Bounded text, cut at a character boundary. */
 export function boundRemoteText(value: string | undefined, limit: number): { text: string; truncated: boolean } {
   const text = (value ?? '').replace(/\r\n?/gu, '\n');
   if (text.length <= limit) return { text, truncated: false };

@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
 import { Check, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { remoteProviderName } from '../../shared/contracts';
 import type {
   AgentReviewGateStatus,
   ArtifactRecord,
@@ -14,11 +15,13 @@ import type {
 import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
+import { discussionAuthor, discussionSummary, formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
 import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
 import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
 import {
   anchorReviewComments,
+  anchorReviewDiscussions,
   anchorReviewFindings,
   buildReviewDiffRows,
   buildReviewIndex,
@@ -36,6 +39,7 @@ import { MessageTime } from './Message';
 import { useNotify } from './NotifyContext';
 import { OpenTargetContextMenu, useOpenTargetMenuItems } from './OpenTargetMenu';
 import { ReviewBrief, type ReviewBriefContent } from './ReviewBrief';
+import { ReviewDiscussionThread, discussionStateWord } from './ReviewDiscussionThread';
 import { ReviewFindingThread, settledLabel, severityLabel } from './ReviewFindingThread';
 import { ReviewGap } from './ReviewGap';
 import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from './ReviewRequest';
@@ -101,9 +105,16 @@ export interface ReviewWorkspaceProps {
   onRequestSheetOpened?(): void;
   /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
   agentRequest?: { label: string; action: string; onOpen(): void };
+  /** What people said on the pull request, with what the person did about each. */
+  discussions?: DiscussionView[];
+  /** The diff shown is the head the platform read the discussions on, so they sit on their lines. */
+  discussionsOnLines?: boolean;
+  /** The platform holds more discussions than were read: where to see them all. */
+  moreDiscussionsUrl?: string;
 }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
+const NO_DISCUSSIONS: DiscussionView[] = [];
 /** A file shown alone moves to the top of the column, and back to its place. */
 const FILE_MOTION: ExpandMotion = { duration: '--motion-move', easing: '--ease-in-out' };
 
@@ -209,6 +220,15 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const findingSide = exactChanges && props.changesSince?.reviewRunId === review?.runId ? 'REVIEWED' : 'NEW';
   const anchored = useMemo(() => anchorReviewFindings(files, visibleFindings, findingSide), [files, visibleFindings, findingSide]);
   const anchoredComments = useMemo(() => anchorReviewComments(files, draft.comments), [files, draft.comments]);
+  // Discussions wait for the diff as findings do, and belong to the current head, not an earlier capture.
+  const discussions = props.historical || loading ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
+  const discussionsOnLines = Boolean(props.discussionsOnLines) && effectiveScope !== 'since-review';
+  const anchoredDiscussions = useMemo(() => anchorReviewDiscussions(files, discussions, discussionsOnLines), [files, discussions, discussionsOnLines]);
+  const discussionsByFile = useMemo(() => new Map(files.map((file) => [file.id, [
+    ...(anchoredDiscussions.byFile.get(file.id) ?? []),
+    ...file.blocks.flatMap((block) => block.lines.flatMap((line, index) => anchoredDiscussions.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []))
+  ]])), [files, anchoredDiscussions]);
+  const includedDiscussions = useMemo(() => new Set(plan.discussions.map((discussion) => discussion.id)), [plan.discussions]);
   const findingsByFile = useMemo(() => new Map(buildReviewIndex(files, anchored).map((entry) => [entry.file.id, entry.findings])), [files, anchored]);
   const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);
   const ordered = useMemo(() => orderReviewFiles(files, findingsByFile, order), [files, findingsByFile, order]);
@@ -236,6 +256,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
 
   const [rail, setRail] = useState<'files' | 'feedback'>('files');
   const [focusedFindingId, setFocusedFindingId] = useState<string>();
+  const [focusedDiscussionId, setFocusedDiscussionId] = useState<string>();
   const [dismissingId, setDismissingId] = useState<string>();
   const [activeFileId, setActiveFileId] = useState<string>();
   // Show only this file: the file alone at the top of the column, the navigator
@@ -331,10 +352,19 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   };
   const scrollToFinding = (findingId: string) => {
     setFocusedFindingId(findingId);
+    setFocusedDiscussionId(undefined);
     const entry = fileOfFinding(findingId);
     followFocus(entry?.file.id);
     if (entry && isCollapsed(entry)) expand(entry.file.id);
     setPendingScroll({ attribute: 'data-finding-id', value: findingId, focus: true });
+  };
+  const scrollToDiscussion = (discussionId: string) => {
+    setFocusedDiscussionId(discussionId);
+    setFocusedFindingId(undefined);
+    const entry = ordered.find((candidate) => (discussionsByFile.get(candidate.file.id) ?? []).some((discussion) => discussion.id === discussionId));
+    followFocus(entry?.file.id);
+    if (entry && isCollapsed(entry)) expand(entry.file.id);
+    setPendingScroll({ attribute: 'data-discussion-id', value: discussionId, focus: true });
   };
   const scrollToComment = (commentId: string) => {
     const comment = draft.comments.find((candidate) => candidate.id === commentId);
@@ -354,6 +384,11 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     });
   };
   const toggleIncluded = (findingId: string) => setIncluded(findingId, !included.has(findingId));
+  const setDiscussionIncluded = (discussionId: string, include: boolean) => {
+    const ids = draft.includedDiscussionIds ?? [];
+    updateDraft({ includedDiscussionIds: include ? [...new Set([...ids, discussionId])] : ids.filter((id) => id !== discussionId) });
+  };
+  const toggleDiscussion = (discussionId: string) => setDiscussionIncluded(discussionId, !includedDiscussions.has(discussionId));
   const openDismiss = (findingId: string) => {
     setSheetOpen(false);
     setDismissingId(findingId);
@@ -422,12 +457,25 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   };
   const deleteComment = (commentId: string) => updateDraft({ comments: draft.comments.filter((comment) => comment.id !== commentId) });
 
-  const readingOrderFindings = [
-    ...anchored.general,
-    ...ordered.flatMap((entry) => findingsByFile.get(entry.file.id) ?? [])
-  ].filter((finding) => finding.state === 'OPEN');
+  // N and P step through what still asks for something, in reading order: findings, then discussions, file by file.
+  const readingOrder = [
+    ...anchored.general.filter((finding) => finding.state === 'OPEN').map((finding) => `f:${finding.id}`),
+    ...anchoredDiscussions.general.filter((discussion) => discussion.open).map((discussion) => `d:${discussion.id}`),
+    ...ordered.flatMap((entry) => [
+      ...(findingsByFile.get(entry.file.id) ?? []).filter((finding) => finding.state === 'OPEN').map((finding) => `f:${finding.id}`),
+      ...(discussionsByFile.get(entry.file.id) ?? []).filter((discussion) => discussion.open).map((discussion) => `d:${discussion.id}`)
+    ])
+  ];
   const focusedFinding = findings.find((finding) => finding.id === focusedFindingId);
-  const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy && plan.queued);
+  const focusedDiscussion = discussions.find((discussion) => discussion.id === focusedDiscussionId);
+  // An emptied request has nothing to show and loses the summary the sheet rises from, so the sheet closes with it.
+  if (sheetOpen && !plan.queued) setSheetOpen(false);
+  // Sending answers the sheet, so it closes; a send that fails keeps the draft, and the summary opens it again.
+  const requestChanges = props.requestChanges && {
+    ...props.requestChanges,
+    onSubmit: () => { setSheetOpen(false); props.requestChanges!.onSubmit(); }
+  };
+  const canSubmit = Boolean(requestChanges && !requestChanges.disabledReason && !requestChanges.busy && plan.queued);
 
   // J/K files, N/P open findings, V viewed and on, D/A/F the focused finding, C the selected lines.
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -435,7 +483,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     if (target.closest('input, textarea, [contenteditable="true"], [role="menu"]')) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
       event.preventDefault();
-      if (sheetOpen && canSubmit) props.requestChanges?.onSubmit();
+      if (sheetOpen && canSubmit) requestChanges?.onSubmit();
       else setSheetOpen(true);
       return;
     }
@@ -456,8 +504,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       const next = step(fileIds, activeFileId ?? fileIds[0], key === 'j' ? 1 : -1);
       if (next) { event.preventDefault(); scrollToFile(next); }
     } else if (key === 'n' || key === 'p') {
-      const next = step(readingOrderFindings.map((finding) => finding.id), focusedFindingId, key === 'n' ? 1 : -1);
-      if (next) { event.preventDefault(); scrollToFinding(next); }
+      const current = focusedFindingId ? `f:${focusedFindingId}` : focusedDiscussionId ? `d:${focusedDiscussionId}` : undefined;
+      const next = step(readingOrder, current, key === 'n' ? 1 : -1);
+      if (next) {
+        event.preventDefault();
+        if (next.startsWith('f:')) scrollToFinding(next.slice(2));
+        else scrollToDiscussion(next.slice(2));
+      }
     } else if (key === 'v') {
       const entry = ordered.find((candidate) => candidate.file.id === (activeFileId ?? fileIds[0]));
       if (!entry) return;
@@ -472,6 +525,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     } else if (key === 'a' && focusedFinding && findingsActionable && props.onAskAboutFinding) {
       event.preventDefault();
       props.onAskAboutFinding(focusedFinding.id);
+    } else if (key === 'f' && focusedDiscussion && !focusedDiscussion.resolved && canComment) {
+      event.preventDefault();
+      toggleDiscussion(focusedDiscussion.id);
     } else if (key === 'f' && focusedFinding?.state === 'OPEN' && !isBlockingFinding(focusedFinding) && findingsActionable) {
       event.preventDefault();
       toggleIncluded(focusedFinding.id);
@@ -537,6 +593,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   // An answered item shows where it is: its finding when the review still has it, else its file.
   const showRequestItem = (item: ReviewRequestItem) => {
     if (item.kind === 'FINDING' && findings.some((finding) => finding.id === item.findingId)) { scrollToFinding(item.findingId); return; }
+    if (item.kind === 'DISCUSSION' && discussions.some((discussion) => discussion.id === item.discussionId)) { scrollToDiscussion(item.discussionId); return; }
     const entry = item.path ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(item.path!)) : undefined;
     if (!entry) return;
     if (isCollapsed(entry)) expand(entry.file.id);
@@ -563,6 +620,23 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       onRestore={props.onRestoreFinding}
       onAsk={props.onAskAboutFinding}
       onToggleInclude={props.findingsSendable ? toggleIncluded : undefined}
+    />
+  ));
+
+  // A discussion on its line says nothing more of its place; at its file's top or above the files, it says where it points.
+  const renderDiscussions = (items: DiscussionView[] | undefined, place: 'line' | 'file' | 'general') => items?.map((discussion) => (
+    <ReviewDiscussionThread
+      key={discussion.id}
+      discussion={discussion}
+      location={place === 'general' ? formatDiscussionLocation(discussion) : undefined}
+      about={place === 'file' ? (discussion.line ? commentAbout({ side: discussion.side ?? 'NEW', line: discussion.line, endLine: discussion.endLine }) : undefined)
+        : place === 'line' && commentNeedsAbout({ side: discussion.side ?? 'NEW', line: discussion.line, endLine: discussion.endLine })
+          ? commentAbout({ side: discussion.side ?? 'NEW', line: discussion.line, endLine: discussion.endLine }) : undefined}
+      folded={discussion.resolved || (!discussion.open && !discussion.path)}
+      focused={focusedDiscussionId === discussion.id}
+      inRequest={includedDiscussions.has(discussion.id)}
+      onFocus={() => { setFocusedDiscussionId(discussion.id); setFocusedFindingId(undefined); }}
+      onToggleInclude={canComment ? toggleDiscussion : undefined}
     />
   ));
 
@@ -642,7 +716,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   ));
 
   const viewedLabel = viewedCount ? `${viewedCount}/${files.length}` : `${files.length}`;
-  const feedbackCount = (props.findingsSendable ? plan.send.length + plan.suggestions.length : openFindings.length) + draft.comments.length;
+  const feedbackCount = (props.findingsSendable ? plan.send.length + plan.suggestions.length : openFindings.length) + draft.comments.length +
+    discussions.filter((discussion) => !discussion.resolved).length;
 
   return (
     <section className="tm-review" aria-label="Review" data-file-full-screen={focusedFile ? '' : undefined} onKeyDown={onKeyDown}>
@@ -732,7 +807,8 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           {rail === 'files' ? ordered.map((entry) => {
             const fileFindings = (findingsByFile.get(entry.file.id) ?? []).filter((finding) => finding.state === 'OPEN');
             const comments = draft.comments.filter((comment) => normalizeReviewPath(comment.path) === normalizeReviewPath(entry.file.path)).length;
-            const feedback = fileFindings.length + comments;
+            const fileDiscussions = (discussionsByFile.get(entry.file.id) ?? []).filter((discussion) => !discussion.resolved).length;
+            const feedback = fileFindings.length + comments + fileDiscussions;
             const parts = entry.file.path.split('/');
             const name = parts.pop() ?? entry.file.path;
             return (
@@ -761,10 +837,14 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
               findingsSendable={props.findingsSendable}
               findings={findings}
               comments={draft.comments}
+              discussions={discussions}
+              moreDiscussionsUrl={props.moreDiscussionsUrl}
               resolved={props.resolvedFindings ?? []}
               focusedFindingId={focusedFindingId}
+              focusedDiscussionId={focusedDiscussionId}
               onShowFinding={scrollToFinding}
               onShowComment={scrollToComment}
+              onShowDiscussion={scrollToDiscussion}
             />
           )}
         </nav>
@@ -778,9 +858,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             />
           ) : null}
           {unavailable || emptyScope ? <p className="tm-review__empty">{unavailable ?? emptyScope}</p> : null}
-          {anchored.general.length > 0 ? (
-            <section className="tm-review-general" aria-label="Findings without a location">
+          {anchored.general.length > 0 || anchoredDiscussions.general.length > 0 ? (
+            <section className="tm-review-general" aria-label="Feedback without a location">
               {renderThreads(anchored.general)}
+              {renderDiscussions(anchoredDiscussions.general, 'general')}
             </section>
           ) : null}
           {ordered.map((entry) => {
@@ -789,6 +870,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             const collapsed = isCollapsed(entry);
             const fileFindings = findingsByFile.get(file.id) ?? [];
             const openHere = fileFindings.filter((finding) => finding.state === 'OPEN');
+            const openDiscussionsHere = (discussionsByFile.get(file.id) ?? []).filter((discussion) => discussion.open);
             const parts = file.path.split('/');
             const name = parts.pop() ?? file.path;
             const fileKey = `file:${file.id}`;
@@ -852,16 +934,25 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                   />
                 </header>
                 {collapsed ? (
-                  // A collapsed file still lists its open findings: Viewed never hides one.
-                  openHere.map((finding) => (
-                    <button key={finding.id} type="button" className="tm-review-checkpoint" onClick={() => scrollToFinding(finding.id)}>
-                      <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
-                      <span className="tm-review-checkpoint__title">{finding.title}</span>
-                    </button>
-                  ))
+                  // A collapsed file still lists what asks for something there: Viewed never hides it.
+                  <>
+                    {openHere.map((finding) => (
+                      <button key={finding.id} type="button" className="tm-review-checkpoint" onClick={() => scrollToFinding(finding.id)}>
+                        <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
+                        <span className="tm-review-checkpoint__title">{finding.title}</span>
+                      </button>
+                    ))}
+                    {openDiscussionsHere.map((discussion) => (
+                      <button key={discussion.id} type="button" className="tm-review-checkpoint" onClick={() => scrollToDiscussion(discussion.id)}>
+                        <span className="tm-review-checkpoint__who">{discussionAuthor(discussion) ?? 'Unknown'}</span>
+                        <span className="tm-review-checkpoint__title">{discussionSummary(discussion)}</span>
+                      </button>
+                    ))}
+                  </>
                 ) : (
                   <>
                     {renderThreads(anchored.byFile.get(file.id))}
+                    {renderDiscussions(anchoredDiscussions.byFile.get(file.id), 'file')}
                     {renderComments(anchoredComments.byFile.get(file.id))}
                     {renderComposer(fileKey)}
                     {file.blocks.map((block) => (
@@ -919,6 +1010,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                 </code>
                               </div>
                               {renderThreads(anchored.byLine.get(anchor))}
+                              {renderDiscussions(anchoredDiscussions.byLine.get(anchor), 'line')}
                               {renderComments(anchoredComments.byLine.get(anchor))}
                               {renderComposer(anchor)}
                             </div>
@@ -940,11 +1032,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
           comments={draft.comments}
           note={draft.note}
           onNoteChange={(note) => updateDraft({ note })}
-          request={props.requestChanges}
+          request={requestChanges}
           finish={props.finish}
           sheetOpen={sheetOpen}
           onSheetOpenChange={setSheetOpen}
           onIncludeFinding={setIncluded}
+          onIncludeDiscussion={setDiscussionIncluded}
+          onShowDiscussion={(discussionId) => { setSheetOpen(false); scrollToDiscussion(discussionId); }}
           onDismissFinding={openDismiss}
           onDeleteComment={deleteComment}
           onShowFinding={(findingId) => { setSheetOpen(false); scrollToFinding(findingId); }}
@@ -1019,19 +1113,24 @@ function FileMenu({ path, target, onComment, wholeFile, onError }: {
 }
 
 /**
- * Every finding and comment, grouped by what happens to it: sent with the
- * request, offered as a suggestion, or settled. A finding of an out-of-date
- * review is only context, so those are listed apart.
+ * Every finding, comment and pull request discussion, grouped by what happens
+ * to it: sent with the request, offered as a suggestion, still on the platform,
+ * or settled. A finding of an out-of-date review is only context, so those are
+ * listed apart.
  */
-function FeedbackList({ plan, findingsSendable, findings, comments, resolved, focusedFindingId, onShowFinding, onShowComment }: {
+function FeedbackList({ plan, findingsSendable, findings, comments, discussions, moreDiscussionsUrl, resolved, focusedFindingId, focusedDiscussionId, onShowFinding, onShowComment, onShowDiscussion }: {
   plan: ReviewRequestPlan;
   findingsSendable: boolean;
   findings: readonly ReviewFindingView[];
   comments: readonly ReviewComment[];
+  discussions: readonly DiscussionView[];
+  moreDiscussionsUrl?: string;
   resolved: readonly AgentReviewResolvedFinding[];
   focusedFindingId?: string;
+  focusedDiscussionId?: string;
   onShowFinding(findingId: string): void;
   onShowComment(commentId: string): void;
+  onShowDiscussion(discussionId: string): void;
 }) {
   const findingRow = (finding: ReviewFindingView, state?: string) => (
     <button
@@ -1053,6 +1152,29 @@ function FeedbackList({ plan, findingsSendable, findings, comments, resolved, fo
       <span className="tm-review__index-loc">{formatCommentLocation(comment)}</span>
     </button>
   );
+  // Other people's words lead with who wrote them; the state and place follow.
+  const discussionRow = (discussion: DiscussionView) => {
+    const state = discussion.resolved ? undefined : discussionStateWord(discussion);
+    const location = formatDiscussionLocation(discussion);
+    return (
+      <button
+        key={discussion.id}
+        type="button"
+        className={`tm-review__index-finding tm-review__index-discussion${focusedDiscussionId === discussion.id ? ' tm-review__index-finding--active' : ''}`}
+        data-state={discussion.resolved ? 'RESOLVED' : undefined}
+        onClick={() => onShowDiscussion(discussion.id)}
+      >
+        <span className="tm-review__index-who">{discussionAuthor(discussion) ?? 'Unknown'}</span>
+        <span className="tm-review__index-title">{discussionSummary(discussion)}</span>
+        {state || location ? (
+          <span className="tm-review__index-meta">
+            {state ? <span>{state}</span> : null}
+            {location ? <span className="tm-review__index-place">{location}</span> : null}
+          </span>
+        ) : null}
+      </button>
+    );
+  };
   // A resolved finding is no longer in the code, so it has nowhere to go to.
   const resolvedRow = (finding: AgentReviewResolvedFinding) => (
     <div key={finding.previousFindingId} className="tm-review__index-finding tm-review__index-finding--resolved">
@@ -1061,16 +1183,34 @@ function FeedbackList({ plan, findingsSendable, findings, comments, resolved, fo
       {finding.note ? <span className="tm-review__index-note">{finding.note}</span> : null}
     </div>
   );
+  const platform = discussions[0] ? remoteProviderName(discussions[0].provider) : undefined;
+  const added = new Set(plan.discussions.map((discussion) => discussion.id));
+  // On the platform: what still asks for something and was not sent, then what was sent, then remarks.
+  const onPlatform = discussions
+    .filter((discussion) => !discussion.resolved && !added.has(discussion.id))
+    .sort((left, right) => discussionRank(left) - discussionRank(right));
+  // A bounded read says so where the discussions are listed, with the way to the rest.
+  const more = platform && moreDiscussionsUrl ? [
+    <a key="more" className="tm-review__index-more" href={moreDiscussionsUrl} target="_blank" rel="noreferrer">More on {platform}</a>
+  ] : [];
+  const onPlatformGroup = platform ? [{ label: `On ${platform}`, rows: [...onPlatform.map(discussionRow), ...more] }] : [];
+  const resolvedOnPlatformGroup = platform
+    ? [{ label: `Resolved on ${platform}`, rows: discussions.filter((discussion) => discussion.resolved).map(discussionRow) }]
+    : [];
   const groups: Array<{ label: string; rows: ReactElement[] }> = findingsSendable
     ? [
-      { label: 'To send', rows: [...plan.send.map((finding) => findingRow(finding)), ...comments.map(commentRow)] },
+      { label: 'To send', rows: [...plan.send.map((finding) => findingRow(finding)), ...plan.discussions.map(discussionRow), ...comments.map(commentRow)] },
       { label: 'Suggestions', rows: plan.suggestions.map((finding) => findingRow(finding)) },
+      ...onPlatformGroup,
       { label: 'Settled', rows: plan.settled.map((finding) => findingRow(finding, settledLabel(finding))) },
-      { label: 'Resolved', rows: resolved.map(resolvedRow) }
+      { label: 'Resolved', rows: resolved.map(resolvedRow) },
+      ...resolvedOnPlatformGroup
     ]
     : [
-      { label: 'Your comments', rows: comments.map(commentRow) },
-      { label: 'From the earlier review', rows: findings.map((finding) => findingRow(finding)) }
+      { label: 'To send', rows: [...plan.discussions.map(discussionRow), ...comments.map(commentRow)] },
+      ...onPlatformGroup,
+      { label: 'From the earlier review', rows: findings.map((finding) => findingRow(finding)) },
+      ...resolvedOnPlatformGroup
     ];
   const shown = groups.filter((group) => group.rows.length > 0);
   if (!shown.length) return <p className="tm-review__index-empty">No findings or comments yet.</p>;
@@ -1084,4 +1224,9 @@ function FeedbackList({ plan, findingsSendable, findings, comments, resolved, fo
       ))}
     </>
   );
+}
+
+/** Open and unsent first, then sent, then remarks that ask for nothing. */
+function discussionRank(discussion: DiscussionView): number {
+  return discussion.open ? (discussion.sent ? 1 : 0) : 2;
 }
