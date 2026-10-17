@@ -460,6 +460,8 @@ describe('Task Monki development seed data', () => {
     );
     expect(verifiedPassing.completionPolicy).toBe('MERGED_AND_VERIFIED');
     expect(verifiedPassing.workflowPhase).toBe('DONE');
+    // A merged scenario's worktree holds only what was pushed, as after a real push, so the merge completes it.
+    expect(taskForScenario(manifest, snapshot, 'delivery-merged').workflowPhase).toBe('DONE');
 
     const manualMerged = taskForScenario(manifest, snapshot, 'completion-manual-merged');
     expect(manualMerged.completionPolicy).toBe('MANUAL');

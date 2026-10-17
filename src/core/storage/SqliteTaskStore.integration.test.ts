@@ -8,6 +8,7 @@ import type {
   AgentRunMode,
   AgentSessionRecord,
   CiChecksStatus,
+  GitSnapshotRecord,
   MergeStatus,
   PullRequestFeedback,
   RunRecord,
@@ -1107,6 +1108,51 @@ describe('SqliteTaskStore', () => {
         agentRun: 'FAILED'
       }
     });
+  });
+
+  it('keeps a merged task open while its worktree holds fixes the pull request does not', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-unshipped-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Fix the failing check',
+      prompt: 'Make the requested change.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/unshipped-follow-up',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, { task, iteration, worktree, runtimeId: task.runtimeId });
+    const run = await createTestRun(store, { task, session, mode: 'IMPLEMENTATION', prompt: task.prompt });
+    await store.appendEvent(createDomainEvent({
+      type: 'AGENT_RUN_COMPLETED',
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      worktreeId: worktree.id,
+      agentSessionId: session.id,
+      source: 'provider',
+      payload: { terminalReason: 'completed' }
+    }));
+    const observe = (status: GitSnapshotRecord['status']) => store.recordGitSnapshot({
+      taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id, worktreePath: worktree.worktreePath,
+      repoRoot: dir, gitCommonDir: path.join(dir, '.git'), headSha: 'head', branch: worktree.branchName, baseSha: 'base',
+      aheadCount: 0, behindCount: 0, stagedCount: 0, unstagedCount: status === 'DIRTY' ? 1 : 0, untrackedCount: 0,
+      conflictedCount: 0, commitsAheadOfBase: 1, committedDiffFileCount: 1, workingDiffFileCount: status === 'DIRTY' ? 1 : 0,
+      diffStat: '', dirtyFingerprint: status, status
+    }, '');
+
+    // The follow-up's fix is still only in the worktree when someone merges the pull request.
+    await observe('DIRTY');
+    await recordOpenPullRequest(store, task.id, iteration, worktree, { mergeStatus: 'MERGED' });
+    expect(await store.getTask(task.id)).toMatchObject({ workflowPhase: 'REVIEW', resolution: 'NONE', projection: { merge: 'MERGED' } });
+
+    // Once the worktree holds nothing the pull request lacks, the merge completes the task.
+    await observe('PUSHED');
+    await recordOpenPullRequest(store, task.id, iteration, worktree, { mergeStatus: 'MERGED' });
+    expect(await store.getTask(task.id)).toMatchObject({ workflowPhase: 'DONE' });
   });
 
   it('deletes only the selected task records and repairs fork links', async () => {

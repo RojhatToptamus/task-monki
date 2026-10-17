@@ -467,7 +467,8 @@ function cardPullRequestNote(projection: TaskCardSource['projection']): string |
 /** Status words that already carry a delivery note, so the card says it once, on either platform. */
 const CARD_NOTE_STATED_BY: Record<string, string[]> = {
   'checks failing': ['Checks failed'],
-  'changes requested': ['GitHub changes requested', 'GitLab changes requested']
+  'changes requested': ['Changes requested'],
+  'review waiting': ['Waiting for review']
 };
 
 const FINDING_SEVERITY_LABELS: Array<{

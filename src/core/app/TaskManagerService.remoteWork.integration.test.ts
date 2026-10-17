@@ -81,6 +81,116 @@ describe('TaskManagerService remote work', () => {
     await expect(fs.access(marker)).resolves.toBeUndefined();
   }, 60_000);
 
+  it('finishes a pull request opened as a task once it merges on the platform, before any turn', async () => {
+    const { scenario, github, contributor } = await githubScenario('task-monki-merged-pr');
+    await git(contributor, ['checkout', '-b', 'feature']);
+    await commit(contributor, 'feature.txt', 'change\n', 'Add a change');
+    await git(contributor, ['push', github.barePath('acme', 'widgets'), 'feature:refs/heads/feature']);
+    const item = {
+      owner: 'acme', repo: 'widgets', number: 12, kind: 'PULL_REQUEST' as const, title: 'Add a change',
+      headRefName: 'feature', baseRefName: 'main', headRepository: 'acme/widgets'
+    };
+    await github.setItem(item);
+    const task = await scenario.service.openPullRequest({ repositoryId: scenario.repositoryId, pullRequest: pullRequest(12) });
+    expect(task.workflowPhase).toBe('IN_PROGRESS');
+
+    await github.setItem({ ...item, state: 'MERGED' });
+    await scenario.service.refreshGitHub({ taskId: task.id });
+    expect((await scenario.service.getTaskDetail(task.id)).task).toMatchObject({ workflowPhase: 'DONE', completionPolicy: 'MERGED' });
+  }, 60_000);
+
+  it('takes a pull request from draft to merged: reads failing logs, answers reviewers, and merges only the head it saw', async () => {
+    const { scenario, github, contributor } = await githubScenario('task-monki-pr-loop');
+    await git(contributor, ['checkout', '-b', 'feature']);
+    const head = await commit(contributor, 'save.js', 'export const save = (layout) => JSON.stringify(layout);\n', 'Add save');
+    await git(contributor, ['push', github.barePath('acme', 'widgets'), 'feature:refs/heads/feature']);
+    await github.setItem({
+      owner: 'acme', repo: 'widgets', number: 14, kind: 'PULL_REQUEST', title: 'Save layouts', isDraft: true,
+      headRefName: 'feature', baseRefName: 'main', headRepository: 'acme/widgets',
+      reviewThreads: [{ id: 'PRRT_null', path: 'save.js', line: 1, comments: [
+        { author: 'alice', body: 'Handle a null layout.', createdAt: '2026-10-10T10:00:00Z' }
+      ] }],
+      reviews: [{ id: 'PRR_1', author: 'alice', state: 'CHANGES_REQUESTED', body: 'See the thread.', submittedAt: '2026-10-10T10:01:00Z' }],
+      checks: [{ name: 'test', bucket: 'fail', workflow: 'CI', link: 'https://github.com/acme/widgets/actions/runs/77/job/88' }],
+      jobLogs: { '88': '2026-10-10T10:00:00.1234567Z \u001b[31mFAIL save.test.js\u001b[0m\n2026-10-10T10:00:01.0000000Z Expected undefined, got null\n' }
+    });
+    const task = await scenario.service.openPullRequest({ repositoryId: scenario.repositoryId, pullRequest: pullRequest(14) });
+
+    // The failing job's log, as a terminal shows it: no colour codes, no timestamps.
+    expect(await scenario.service.readPullRequestCheckLogs({ taskId: task.id })).toEqual([{
+      name: 'test', link: 'https://github.com/acme/widgets/actions/runs/77/job/88',
+      text: 'FAIL save.test.js\nExpected undefined, got null', truncated: false
+    }]);
+
+    await scenario.service.markPullRequestReady({ taskId: task.id });
+    expect((await github.item('acme', 'widgets', 14))?.isDraft).toBe(false);
+    expect((await scenario.service.getTaskDetail(task.id)).pullRequests[0]).toMatchObject({ status: 'OPEN_READY' });
+
+    const replies = await scenario.service.replyToPullRequest({
+      taskId: task.id,
+      replies: [
+        { discussionId: 'PRRT_null', body: 'Fixed: null now returns undefined.', resolve: true },
+        { discussionId: 'PRR_1', body: 'Covered in the thread.', resolve: false }
+      ],
+      requestReviewFrom: ['alice']
+    });
+    expect(replies).toEqual({ posted: 2, resolved: 1, requested: ['alice'], failed: [] });
+    // Which discussions were answered is recorded: the review's answer is a comment of its own.
+    expect((await scenario.service.getTaskDetail(task.id)).events.find((event) => event.type === 'PR_REPLIES_POSTED')?.payload)
+      .toMatchObject({ replied: ['PRRT_null', 'PRR_1'] });
+    const replied = (await github.item('acme', 'widgets', 14))!;
+    expect(replied.reviewThreads![0]).toMatchObject({ resolved: true });
+    expect(replied.reviewThreads![0]!.comments.at(-1)).toMatchObject({ author: 'octo-tester', body: 'Fixed: null now returns undefined.' });
+    // A review has no thread of its own: its answer is a comment that quotes what it answers.
+    expect(replied.comments?.at(-1)?.body).toBe('> @alice: See the thread.\n\nCovered in the thread.');
+    expect(replied.reviewRequests).toEqual(['alice']);
+    // Only people who reviewed can be asked again, and only discussions Task Monki read can be answered.
+    await expect(scenario.service.replyToPullRequest({ taskId: task.id, replies: [], requestReviewFrom: ['mallory'] }))
+      .rejects.toThrow('Ask only people who reviewed');
+    await expect(scenario.service.replyToPullRequest({ taskId: task.id, replies: [{ discussionId: 'PRRT_other', body: 'x', resolve: false }], requestReviewFrom: [] }))
+      .rejects.toThrow('has not read');
+
+    // A merge is refused for a head the person did not see, and while the worktree holds work the pull request does not.
+    await expect(scenario.service.mergePullRequest({ taskId: task.id, method: 'SQUASH', expectedHeadSha: 'a'.repeat(40), deleteBranch: true }))
+      .rejects.toThrow('changed since it was read');
+    // The merge reads the worktree itself: an edit made since Task Monki last looked is still found.
+    const worktree = await requireWorktree(scenario, task.id);
+    await fs.writeFile(path.join(worktree.worktreePath, 'notes.txt'), 'local only\n');
+    await expect(scenario.service.mergePullRequest({ taskId: task.id, method: 'SQUASH', expectedHeadSha: head, deleteBranch: true }))
+      .rejects.toThrow('has changes the pull request does not');
+    await fs.rm(path.join(worktree.worktreePath, 'notes.txt'));
+
+    await scenario.service.mergePullRequest({ taskId: task.id, method: 'SQUASH', expectedHeadSha: head, deleteBranch: true });
+    expect(await github.item('acme', 'widgets', 14)).toMatchObject({ state: 'MERGED', mergedWith: 'squash' });
+    expect(await github.refSha('acme', 'widgets', 'refs/heads/feature')).toBeUndefined();
+    const merged = await scenario.service.getTaskDetail(task.id);
+    expect(merged.task.workflowPhase).toBe('DONE');
+    expect(merged.events.filter((event) => event.type === 'PR_MERGE_REQUESTED').map((event) => event.payload))
+      .toEqual([{ number: 14, headSha: head, method: 'SQUASH', deleteBranch: true }]);
+  }, 90_000);
+
+  it('fetches a base that moved ahead for the agent to merge, without creating or moving a ref', async () => {
+    const { scenario, github, contributor } = await githubScenario('task-monki-pr-update');
+    await git(contributor, ['checkout', '-b', 'feature']);
+    await commit(contributor, 'feature.txt', 'one\n', 'One');
+    await git(contributor, ['push', github.barePath('acme', 'widgets'), 'feature:refs/heads/feature']);
+    await github.setItem({
+      owner: 'acme', repo: 'widgets', number: 15, kind: 'PULL_REQUEST', title: 'Feature',
+      headRefName: 'feature', baseRefName: 'main', headRepository: 'acme/widgets'
+    });
+    const task = await scenario.service.openPullRequest({ repositoryId: scenario.repositoryId, pullRequest: pullRequest(15) });
+    await git(contributor, ['checkout', '--quiet', 'main']);
+    const moved = await commit(contributor, 'main.txt', 'base\n', 'Base moves');
+    await git(contributor, ['push', github.barePath('acme', 'widgets'), 'main:refs/heads/main']);
+    const refsBefore = await refs(scenario.repositoryPath);
+
+    expect(await scenario.service.fetchPullRequestUpdate({ taskId: task.id, from: 'BASE' })).toEqual({ sha: moved, ref: 'main', commits: 1 });
+    // The agent merges it from the objects alone; the checkout's refs and FETCH_HEAD stay as they were.
+    expect(await hasObject(scenario.repositoryPath, moved)).toBe(true);
+    expect(await refs(scenario.repositoryPath)).toEqual(refsBefore);
+    await expect(fs.access(path.join(scenario.repositoryPath, '.git', 'FETCH_HEAD'))).rejects.toThrow();
+  }, 60_000);
+
   it('syncs a same-repository pull request, pushes fast-forward only, and keeps unpublished commits', async () => {
     const { scenario, github, contributor } = await githubScenario('task-monki-sync-pr');
     const marker = path.join(scenario.rootDir, 'hook-ran');

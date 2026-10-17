@@ -32,6 +32,12 @@ export interface FakeGitHubItem {
   reviewThreads?: FakeGitHubReviewThread[];
   reviews?: Array<{ id: string; author: string; state: 'CHANGES_REQUESTED' | 'APPROVED' | 'COMMENTED' | 'DISMISSED'; body?: string; submittedAt: string }>;
   reviewRequests?: string[];
+  /** Check rows `gh pr checks` reports for the pull request's head. */
+  checks?: Array<{ name: string; bucket: 'pass' | 'fail' | 'pending' | 'skipping' | 'cancel'; state?: string; workflow?: string; link?: string }>;
+  /** GitHub Actions job logs by job id. */
+  jobLogs?: Record<string, string>;
+  /** How the pull request was merged, when the fake merged it. */
+  mergedWith?: string;
 }
 
 export interface FakeGitHubReviewThread {
@@ -50,6 +56,16 @@ interface FakeGitHubState {
   viewer: string;
   signedIn: boolean;
   items: FakeGitHubItem[];
+  /** Repository merge settings by `owner/repo`; every method is allowed when absent. */
+  mergeSettings?: Record<string, FakeGitHubMergeSettings>;
+}
+
+export interface FakeGitHubMergeSettings {
+  mergeCommitAllowed: boolean;
+  squashMergeAllowed: boolean;
+  rebaseMergeAllowed: boolean;
+  deleteBranchOnMerge: boolean;
+  viewerDefaultMergeMethod: 'MERGE' | 'SQUASH' | 'REBASE';
 }
 
 export interface FakeGitHubCall {
@@ -74,6 +90,9 @@ export interface FakeGitHub {
   pushRef(owner: string, repo: string, sourceRepository: string, sha: string, ref: string): Promise<void>;
   refSha(owner: string, repo: string, ref: string): Promise<string | undefined>;
   setItem(item: FakeGitHubItem): Promise<void>;
+  /** The item as the fake holds it now, after any writes `gh` made. */
+  item(owner: string, repo: string, number: number): Promise<FakeGitHubItem | undefined>;
+  setMergeSettings(owner: string, repo: string, settings: FakeGitHubMergeSettings): Promise<void>;
   setSignedIn(signedIn: boolean): Promise<void>;
   calls(): Promise<FakeGitHubCall[]>;
 }
@@ -119,8 +138,18 @@ process.exit(result.status ?? 1);
       return git(barePath(owner, repo), ['rev-parse', '--verify', '--quiet', ref]).then((value) => value.trim(), () => undefined);
     },
     async setItem(item) {
+      Object.assign(state, JSON.parse(await fs.readFile(statePath, 'utf8')) as FakeGitHubState);
       state.items = [...state.items.filter((candidate) =>
         !(candidate.owner === item.owner && candidate.repo === item.repo && candidate.number === item.number)), item];
+      await writeState();
+    },
+    async item(owner, repo, number) {
+      const current = JSON.parse(await fs.readFile(statePath, 'utf8')) as FakeGitHubState;
+      return current.items.find((candidate) => candidate.owner === owner && candidate.repo === repo && candidate.number === number);
+    },
+    async setMergeSettings(owner, repo, settings) {
+      Object.assign(state, JSON.parse(await fs.readFile(statePath, 'utf8')) as FakeGitHubState);
+      state.mergeSettings = { ...state.mergeSettings, [`${owner}/${repo}`]: settings };
       await writeState();
     },
     async setSignedIn(signedIn) {
@@ -141,7 +170,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const args = process.argv.slice(2);
 let stdin = '';
-try { if (args.includes('-')) stdin = fs.readFileSync(0, 'utf8'); } catch {}
+try { if (args.includes('-') || args.some((arg) => arg.endsWith('=@-'))) stdin = fs.readFileSync(0, 'utf8'); } catch {}
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + '\\n');
 const state = JSON.parse(fs.readFileSync(${JSON.stringify(statePath)}, 'utf8'));
 const fields = {};
@@ -153,6 +182,8 @@ for (let index = 0; index < args.length; index += 1) {
   }
 }
 const option = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : undefined; };
+const save = () => fs.writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));
+const restFail = (status, message) => { process.stdout.write(JSON.stringify({ message })); process.stderr.write('gh: ' + message + ' (HTTP ' + status + ')\\n'); process.exit(1); };
 const out = (value) => { process.stdout.write(JSON.stringify(value) + '\\n'); process.exit(0); };
 const fail = (value, code = 1) => { process.stdout.write(JSON.stringify(value)); process.stderr.write('gh: ' + (value.errors?.[0]?.message ?? 'failed') + '\\n'); process.exit(code); };
 if (args[0] === '--version') { console.log('gh version 2.81.0 (fake)'); process.exit(0); }
@@ -195,6 +226,34 @@ const node = (item) => ({
 });
 if (args[0] === 'api' && args[1] === 'graphql') {
   const query = fields.query ?? '';
+  const threadOf = (id) => {
+    for (const item of state.items) {
+      const thread = (item.reviewThreads ?? []).find((candidate) => candidate.id === id);
+      if (thread) return thread;
+    }
+    fail({ data: null, errors: [{ type: 'NOT_FOUND', message: "Could not resolve to a node with the global id of '" + id + "'." }] });
+  };
+  if (query.includes('addPullRequestReviewThreadReply')) {
+    const thread = threadOf(fields.threadId);
+    const body = fields.body === '@-' ? stdin : fields.body;
+    thread.comments.push({ author: state.viewer, body, createdAt: new Date().toISOString() });
+    save();
+    out({ data: { addPullRequestReviewThreadReply: { comment: { id: 'PRRC_' + thread.comments.length } } } });
+  }
+  if (query.includes('resolveReviewThread')) {
+    const thread = threadOf(fields.threadId);
+    thread.resolved = true;
+    save();
+    out({ data: { resolveReviewThread: { thread: { id: thread.id, isResolved: true } } } });
+  }
+  if (query.includes('squashMergeAllowed')) {
+    const item = state.items.find((candidate) => candidate.kind === 'PULL_REQUEST' && candidate.owner === fields.owner &&
+      candidate.repo === fields.name && candidate.number === Number(fields.number));
+    const settings = state.mergeSettings?.[fields.owner + '/' + fields.name] ??
+      { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true, deleteBranchOnMerge: false, viewerDefaultMergeMethod: 'MERGE' };
+    out({ data: { repository: { ...settings, defaultBranchRef: { name: 'main' }, pullRequest: item
+      ? { headRefName: item.headRefName, baseRefName: item.baseRefName ?? 'main', isCrossRepository: Boolean(item.isCrossRepository) } : null } } });
+  }
   if (query.includes('reviewThreads')) {
     const item = state.items.find((candidate) => candidate.kind === 'PULL_REQUEST' && candidate.owner === fields.owner &&
       candidate.repo === fields.name && candidate.number === Number(fields.number));
@@ -258,7 +317,62 @@ const view = (item) => ({
   headRepositoryOwner: { login: (item.headRepository ?? repoOf(item)).split('/')[0] },
   isCrossRepository: Boolean(item.isCrossRepository)
 });
-if (args[0] === 'pr' && args[1] === 'checks') { console.log('[]'); process.exit(0); }
+if (args[0] === 'api') {
+  const endpoint = args.find((arg) => /^repos\\//.test(arg)) ?? '';
+  const method = option('--method') ?? 'GET';
+  const rest = /^repos\\/([^/]+)\\/([^/]+)\\/(.*)$/.exec(endpoint);
+  if (!rest) { process.stderr.write('fake gh: unexpected api ' + args.join(' ') + '\\n'); process.exit(1); }
+  const [, owner, repo, route] = rest;
+  const pull = /^pulls\\/(\\d+)\\/(merge|requested_reviewers)$/.exec(route);
+  const item = pull && state.items.find((candidate) => candidate.kind === 'PULL_REQUEST' && candidate.owner === owner && candidate.repo === repo && candidate.number === Number(pull[1]));
+  if (pull && !item) restFail(404, 'Not Found');
+  if (pull && pull[2] === 'merge' && method === 'PUT') {
+    if ((item.state ?? 'OPEN') !== 'OPEN') restFail(405, 'Pull Request is not mergeable');
+    if (item.isDraft) restFail(405, 'Pull Request is still a draft');
+    if (fields.sha !== item.headRefOid) restFail(409, 'Head branch was modified. Review and try the merge again.');
+    item.state = 'MERGED';
+    item.mergedWith = fields.merge_method;
+    save();
+    out({ sha: item.headRefOid, merged: true, message: 'Pull Request successfully merged' });
+  }
+  if (pull && pull[2] === 'requested_reviewers' && method === 'POST') {
+    const asked = args.filter((arg) => arg.startsWith('reviewers[]=')).map((arg) => arg.slice('reviewers[]='.length));
+    item.reviewRequests = [...new Set([...(item.reviewRequests ?? []), ...asked])];
+    save();
+    out({ number: item.number });
+  }
+  const ref = /^git\\/refs\\/heads\\/(.+)$/.exec(route);
+  if (ref && method === 'DELETE') {
+    const gitDir = bare(owner, repo);
+    if (!revParse(gitDir, 'refs/heads/' + decodeURIComponent(ref[1]))) restFail(422, 'Reference does not exist');
+    execFileSync('git', ['--git-dir', gitDir, 'update-ref', '-d', 'refs/heads/' + decodeURIComponent(ref[1])]);
+    process.exit(0);
+  }
+  const job = /^actions\\/jobs\\/(\\d+)\\/logs$/.exec(route);
+  if (job) {
+    const log = state.items.map((candidate) => candidate.jobLogs?.[job[1]]).find((value) => value !== undefined);
+    if (log === undefined) restFail(404, 'Not Found');
+    process.stdout.write(log);
+    process.exit(0);
+  }
+  process.stderr.write('fake gh: unexpected api ' + args.join(' ') + '\\n');
+  process.exit(1);
+}
+if (args[0] === 'pr' && (args[1] === 'ready' || args[1] === 'comment')) {
+  const item = pulls.find((candidate) => url(candidate) === args[2]);
+  if (!item) { process.stderr.write('no pull requests found\\n'); process.exit(1); }
+  if (args[1] === 'ready') item.isDraft = false;
+  else item.comments = [...(item.comments ?? []), { author: state.viewer, body: stdin, createdAt: new Date().toISOString() }];
+  save();
+  process.exit(0);
+}
+if (args[0] === 'pr' && args[1] === 'checks') {
+  const selector = args[2];
+  const item = pulls.find((candidate) => String(candidate.number) === selector || url(candidate) === selector || candidate.headRefName === selector);
+  console.log(JSON.stringify((item?.checks ?? []).map((check) => ({ state: check.bucket === 'pass' ? 'SUCCESS' : check.bucket === 'fail' ? 'FAILURE' : 'PENDING', ...check }))));
+  process.exit(check_exit(item));
+}
+function check_exit(item) { return (item?.checks ?? []).some((check) => check.bucket === 'pending') ? 8 : 0; }
 if (args[0] === 'pr' && args[1] === 'view') {
   const selector = args[2];
   const item = pulls.find((candidate) => String(candidate.number) === selector || url(candidate) === selector || candidate.headRefName === selector);

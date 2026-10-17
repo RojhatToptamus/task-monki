@@ -9,7 +9,7 @@ import type {
   WorktreeRecord,
   Task
 } from '../../shared/contracts';
-import { getImplementationRetryReason, pullRequestRewrittenUnder, type RemoteProvider } from '../../shared/contracts';
+import { baseMovedReason, getImplementationRetryReason, pullRequestRewrittenUnder, type RemoteProvider } from '../../shared/contracts';
 import { deliveryNoun, deliveryWords } from './deliveryWords';
 import { pullRequestFeedbackLine } from './pullRequestFeedback';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
@@ -71,6 +71,19 @@ export interface PrStatusViewModel {
   canPushUpdate: boolean;
   /** A task opened from a pull request can move its clean worktree to the pull request's newer head. */
   canSyncBranch?: boolean;
+  /** A current draft whose checks did not fail can be marked ready for review. */
+  canMarkReady?: boolean;
+  /** Task Monki's evidence for the current head says the platform would merge it. */
+  canMerge?: boolean;
+  /** The pull request's branch has commits beside the worktree's own: the agent can merge them in. */
+  canPullChanges?: boolean;
+  /** The base moved: the pull request is behind it or conflicts with it, and the agent can merge it in. */
+  baseUpdate?: { base: string; reason: 'BEHIND' | 'CONFLICTS' };
+  /**
+   * The one fact the step turns on, as the Now panel states it under its title:
+   * which checks failed, who asked for changes, what is not pushed.
+   */
+  fact?: string;
   /** PR on GitHub, MR on GitLab. */
   deliveryNoun?: 'PR' | 'MR';
   createDraftPrDisabledReason?: string;
@@ -87,6 +100,8 @@ export interface PrStatusActionState {
   createOrPushReason?: string;
   investigateReason?: string;
   syncReason?: string;
+  /** Why no delivery step can run now: another action, a review or the agent is working. */
+  pauseReason?: string;
   hint?: string;
 }
 
@@ -157,6 +172,7 @@ export function buildPrStatusActionState(input: {
     createOrPushReason,
     investigateReason,
     syncReason,
+    ...(mutationPauseReason ? { pauseReason: mutationPauseReason } : {}),
     hint:
       mutationPauseReason &&
       (input.view.canCreateDraftPr || input.view.canPushUpdate || input.view.canInvestigateFailure)
@@ -211,13 +227,93 @@ export function buildPrStatusViewModel(input: Parameters<typeof buildPrStatusFac
     guidanceLine: words(view.guidanceLine),
     leadLine: words(view.leadLine),
     feedbackLine: words(view.feedbackLine),
+    fact: words(view.fact),
     createDraftPrDisabledReason: words(view.createDraftPrDisabledReason),
     pushUpdateDisabledReason: words(view.pushUpdateDisabledReason),
     syncBranchDisabledReason: words(view.syncBranchDisabledReason)
   };
 }
 
-function buildPrStatusFacts(input: {
+function buildPrStatusFacts(input: Parameters<typeof buildPrStatusCore>[0]): PrStatusViewModel {
+  const view = buildPrStatusCore(input);
+  const failing = view.checkGroups.find((group) => group.status === 'failed')?.checks ?? [];
+  const open = input.pullRequest?.status === 'OPEN_DRAFT' || input.pullRequest?.status === 'OPEN_READY';
+  const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind);
+  // A fork's branch is its author's: commits merged here could not be pushed back.
+  const fork = Boolean(input.task.remoteSource?.pullRequest?.crossRepository);
+  const baseUpdate = open && !freshnessProblem && input.pullRequest ? baseMoved(input.pullRequest, input.mergeSnapshot) : undefined;
+  return {
+    ...view,
+    // Ready once the draft is what the worktree holds and nothing it ran failed.
+    canMarkReady: open && Boolean(input.pullRequest?.isDraft) && !freshnessProblem && view.kind !== 'CHECKS_FAILED' && !baseUpdate,
+    canMerge: view.kind === 'READY_TO_MERGE',
+    canPullChanges: open && !fork && !view.canSyncBranch && (view.kind === 'BRANCH_DIVERGED' || view.kind === 'PR_NEWER_COMMITS') &&
+      input.branchPublication?.status !== 'AMBIGUOUS',
+    ...(baseUpdate && !fork ? { baseUpdate } : {}),
+    fact: baseUpdate && view.kind !== 'CHECKS_FAILED'
+      ? `${baseUpdate.reason === 'CONFLICTS' ? 'Conflicts with' : 'Behind'} ${baseUpdate.base}`
+      : stepFact(view, failing)
+  };
+}
+
+/** Whether the platform holds the pull request back because its base moved: behind it, or conflicting with it. */
+function baseMoved(pullRequest: PullRequestSnapshotRecord, merge: MergeSnapshotRecord | undefined): PrStatusViewModel['baseUpdate'] {
+  if (!merge || merge.status !== 'BLOCKED' || deliveryEvidenceIdentity(pullRequest, merge) !== 'CURRENT' || !pullRequest.baseRefName) return undefined;
+  const reason = baseMovedReason(merge.raw);
+  return reason ? { base: pullRequest.baseRefName, reason } : undefined;
+}
+
+/** The one fact a step turns on; the record beside it holds the rest. */
+function stepFact(view: PrStatusViewModel, failing: readonly GitHubCheckDetailRecord[]): string | undefined {
+  switch (view.kind) {
+    case 'CHECKS_FAILED':
+      return failing.length === 0 ? view.checkSummaryLine
+        : failing.length <= 2 ? `${failing.map((check) => check.name).join(' and ')} failed`
+          : `${failing.length} checks failed`;
+    case 'GITHUB_CHANGES_REQUESTED':
+    case 'GITHUB_REVIEW_WAITING':
+      return view.feedbackLine;
+    case 'STALE':
+    case 'LOCAL_NOT_PUSHED':
+    case 'PR_NEWER_COMMITS':
+    case 'BRANCH_DIVERGED':
+      return view.freshnessLine ?? view.guidanceLine;
+    case 'READY_TO_MERGE':
+    case 'DRAFT':
+    case 'OPEN':
+      // What is missing is the record's to say ("Checks: None"); the step says only what is there.
+      return view.feedbackLine ?? (view.checkSummaryLine || view.evidenceLine?.includes(' passed')
+        ? view.evidenceLine?.replace(/ for head [0-9a-f]+/u, '')
+        : undefined);
+    case 'CLOSED_UNMERGED':
+      return view.guidanceLine;
+    default:
+      return view.leadLine ?? view.feedbackLine ?? view.checkSummaryLine;
+  }
+}
+
+/** How long a pushed head can report no checks before its CI has registered them. */
+const CHECKS_REGISTER_WITHIN_MS = 60_000;
+
+/**
+ * Whether "no checks" for the pull request's head may only mean they have not
+ * started. A head reports none until its CI registers them, moments after the
+ * push. When an earlier head of the same pull request had checks, only a
+ * reading of this head taken a minute after it first appeared says it has none.
+ */
+export function checksMayNotHaveStarted(
+  pullRequest: Pick<PullRequestSnapshotRecord, 'number' | 'headRefOid'> | undefined,
+  ciRollups: readonly CiRollupRecord[]
+): boolean {
+  const head = pullRequest?.headRefOid;
+  if (!pullRequest?.number || !head) return false;
+  const own = ciRollups.filter((record) => record.pullRequestNumber === pullRequest.number);
+  if (!own.some((record) => record.headSha && record.headSha !== head && record.totalCount > 0)) return false;
+  const seen = own.filter((record) => record.headSha === head).map((record) => Date.parse(record.observedAt)).filter(Number.isFinite);
+  return seen.length > 0 && Math.max(...seen) - Math.min(...seen) < CHECKS_REGISTER_WITHIN_MS;
+}
+
+function buildPrStatusCore(input: {
   task: Task;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
@@ -228,6 +324,8 @@ function buildPrStatusFacts(input: {
   mergeSnapshot?: MergeSnapshotRecord;
   /** Every head of the linked pull request Task Monki has observed, newest first. */
   observedPullRequestHeads?: readonly (string | undefined)[];
+  /** No checks so far may only mean they have not started (`checksMayNotHaveStarted`). */
+  checksMayNotHaveStarted?: boolean;
 }): PrStatusViewModel {
   const {
     task,
@@ -361,12 +459,17 @@ function buildPrStatusFacts(input: {
     };
   }
 
-  const checksStatus = checksToStatus(ciRollup);
+  // A head just pushed is not ready to merge before its checks have had a chance to start.
+  const checksStarting = Boolean(input.checksMayNotHaveStarted) && ciRollup?.status === 'NO_CHECKS' && !ciRollup.totalCount;
+  const checksStatus = checksStarting
+    ? { kind: 'CHECKS_PENDING' as const, headline: 'Checks pending', tone: 'action' as const }
+    : checksToStatus(ciRollup);
   if (checksStatus && ciRollup) {
     return {
       ...baseStatus(pullRequest),
       ...checkEvidence(ciRollup),
       ...checksStatus,
+      ...(checksStarting ? { leadLine: 'No checks reported yet' } : {}),
       canInvestigateFailure: checksStatus.kind === 'CHECKS_FAILED'
     };
   }
@@ -643,11 +746,16 @@ function createDraftPrAvailability(
   };
 }
 
-export function buildFailingChecksInvestigationPrompt(view: PrStatusViewModel): string {
+export function buildFailingChecksInvestigationPrompt(
+  view: PrStatusViewModel,
+  logs?: { entries: Array<{ name: string; text: string; truncated: boolean }>; boundary: string }
+): string {
   const failingChecks = view.checkGroups
     .find((group) => group.status === 'failed')
     ?.checks ?? [];
   return buildFailingChecksInvestigationPromptTemplate({
+    ...(view.deliveryNoun === 'MR' ? { provider: 'GITLAB' as const } : {}),
+    ...(logs ? { logs: logs.entries, boundary: logs.boundary } : {}),
     prNumber: view.prNumber,
     prHeadSha: view.prHeadSha,
     prUrl: view.prUrl,
@@ -776,9 +884,9 @@ function freshnessToStatus(
     case 'BRANCH_DIVERGED':
       return { kind: 'BRANCH_DIVERGED', headline: 'Branch diverged', tone: 'error' };
     case 'STALE':
-      return { kind: 'STALE', headline: 'Stale', tone: 'action' };
+      return { kind: 'STALE', headline: 'Checks stale', tone: 'action' };
     case 'LOCAL_NOT_PUSHED':
-      return { kind: 'LOCAL_NOT_PUSHED', headline: 'Local changes not pushed', tone: 'action' };
+      return { kind: 'LOCAL_NOT_PUSHED', headline: 'Changes not pushed', tone: 'action' };
     case 'PR_NEWER_COMMITS':
       return { kind: 'PR_NEWER_COMMITS', headline: 'PR has newer commits', tone: 'action' };
     default:
@@ -860,10 +968,10 @@ function reviewToStatus(
   reviewRollup?: ReviewRollupRecord
 ): Pick<PrStatusViewModel, 'kind' | 'headline' | 'tone'> | undefined {
   if (reviewRollup?.status === 'CHANGES_REQUESTED') {
-    return { kind: 'GITHUB_CHANGES_REQUESTED', headline: 'GitHub changes requested', tone: 'error' };
+    return { kind: 'GITHUB_CHANGES_REQUESTED', headline: 'Changes requested', tone: 'error' };
   }
   if (reviewRollup?.status === 'REQUESTED' || reviewRollup?.status === 'PENDING') {
-    return { kind: 'GITHUB_REVIEW_WAITING', headline: 'GitHub review waiting', tone: 'action' };
+    return { kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', tone: 'action' };
   }
   return undefined;
 }
@@ -884,7 +992,9 @@ function isReadyToMerge(
   ) {
     return false;
   }
-  const checksSatisfied = ciRollup.status === 'PASSING';
+  // A repository without CI reports no checks at all; the platform's own merge
+  // state already holds back a pull request whose required checks have not run.
+  const checksSatisfied = ciRollup.status === 'PASSING' || (ciRollup.status === 'NO_CHECKS' && !ciRollup.totalCount);
   const reviewSatisfied =
     ['APPROVED', 'SATISFIED', 'NOT_REQUESTED', 'NOT_APPLICABLE'].includes(reviewRollup.status);
   return checksSatisfied && reviewSatisfied && mergeSnapshot?.status === 'MERGEABLE';
@@ -939,7 +1049,8 @@ function formatMergeLine(mergeSnapshot?: MergeSnapshotRecord): string | undefine
   }
 }
 
-function formatRefreshLine(value?: string): string | undefined {
+/** When the pull request was last read: the time today, the day before that. */
+function formatRefreshLine(value?: string, now = new Date()): string | undefined {
   if (!value) {
     return undefined;
   }
@@ -947,12 +1058,11 @@ function formatRefreshLine(value?: string): string | undefined {
   if (!Number.isFinite(timestamp)) {
     return undefined;
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(new Date(timestamp));
+  const read = new Date(timestamp);
+  const today = read.toDateString() === now.toDateString();
+  return new Intl.DateTimeFormat(undefined, today
+    ? { hour: 'numeric', minute: '2-digit' }
+    : { month: 'short', day: 'numeric' }).format(read);
 }
 
 function groupChecks(checks: GitHubCheckDetailRecord[]): PrCheckGroup[] {

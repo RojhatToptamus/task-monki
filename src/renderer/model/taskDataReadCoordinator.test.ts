@@ -155,6 +155,7 @@ function board(title: string): BoardSnapshot {
         ciChecks: 'NOT_APPLICABLE',
         reviews: 'NOT_APPLICABLE',
         merge: 'NOT_APPLICABLE',
+        branchPublication: 'NOT_PUSHED',
         health: 'INFO',
         summary: title,
         updatedAt: '2026-07-26T00:00:00.000Z',

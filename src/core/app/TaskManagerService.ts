@@ -145,6 +145,24 @@ import {
 } from '../../shared/contracts';
 import type { AgentRuntimeId } from '../../shared/agent';
 import {
+  CHECK_LOG_LIMITS,
+  assertMergePullRequestRequest,
+  assertReplyToPullRequestRequest,
+  boundCheckLog,
+  UNSHIPPED_GIT_STATUSES,
+  type FetchPullRequestUpdateRequest,
+  type MarkPullRequestReadyRequest,
+  type MergePullRequestRequest,
+  type PullRequestCheckLog,
+  type PullRequestMergeOptions,
+  type PullRequestUpdate,
+  type ReadPullRequestCheckLogsRequest,
+  type ReadPullRequestMergeOptionsRequest,
+  type ReplyToPullRequestRequest,
+  type ReplyToPullRequestResult
+} from '../../shared/pullRequestActions';
+import { parsePullRequestFeedback, type PullRequestDiscussion, type PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import {
   designNetworkAccessPolicy,
   projectAgentExecutionSupport
 } from '../../shared/agentExecutionSupport';
@@ -185,7 +203,7 @@ import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
-import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery } from '../remote/PullRequestDelivery';
+import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
 import { GitHubRemoteWork } from '../github/GitHubRemoteWork';
 import { GitLabCli } from '../gitlab/GitLabCli';
 import { GitLabRemoteWork } from '../gitlab/GitLabRemoteWork';
@@ -210,6 +228,7 @@ import {
   remoteWorkNoun,
   sameRemoteRepository,
   taskRemoteSourceRef,
+  visibleRemoteText,
   type ListRemoteWorkRequest,
   type OpenPullRequestRequest,
   type RemoteProvider,
@@ -5013,6 +5032,266 @@ export class TaskManagerService {
     });
   }
 
+  /** Marks the task's draft pull request ready for review; the person's step on the platform. */
+  async markPullRequestReady(input: MarkPullRequestReadyRequest): Promise<PullRequestSnapshotRecord> {
+    return this.withTaskAction(input.taskId, 'Ready for review', async () => {
+      const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Ready for review');
+      const action = await this.pullRequestAction(task);
+      if (action.latest.status !== 'OPEN_DRAFT') throw new Error(`The ${action.noun} is not a draft.`);
+      this.assertNoActiveTaskRun(await this.store.snapshot(), task.id, `marking the ${action.noun} ready`);
+      await action.delivery.markReadyForReview(action.worktree, action.address);
+      // The platform took the step; a read that fails afterwards leaves it to the next refresh.
+      return this.recordPullRequestAfterAction(task, action, (sync) => !sync.pullRequest.isDraft).catch(() => action.latest);
+    });
+  }
+
+  /** How the platform lets the task's pull request merge: read-only, for the merge dialog. */
+  async readPullRequestMergeOptions(input: ReadPullRequestMergeOptionsRequest): Promise<PullRequestMergeOptions> {
+    const task = await this.requireTask(input.taskId);
+    const action = await this.pullRequestAction(task);
+    return action.delivery.readMergeOptions(action.worktree, action.address);
+  }
+
+  /**
+   * Merges the head the person saw, and only that head. Task Monki's own
+   * evidence must agree first: the pull request is open and ready, and the
+   * worktree holds nothing it does not, so no local work is left behind.
+   */
+  async mergePullRequest(input: MergePullRequestRequest): Promise<PullRequestSnapshotRecord> {
+    assertMergePullRequestRequest(input);
+    return this.withTaskAction(input.taskId, 'Merge', async () => {
+      const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+      this.assertNormalTask(task, 'Merge');
+      const action = await this.pullRequestAction(task);
+      const { latest, noun, worktree } = action;
+      if (latest.status === 'OPEN_DRAFT') throw new Error(`Mark the ${noun} ready for review before merging.`);
+      if (latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      if (latest.headRefOid !== input.expectedHeadSha) throw new Error(`The ${noun} changed since it was read. Refresh, then merge.`);
+      this.assertNoActiveTaskRun(await this.store.snapshot(), task.id, `merging the ${noun}`);
+      // The worktree as it is now, not as last read: an edit since then is work the merge would leave behind.
+      const observed = await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
+      if (UNSHIPPED_GIT_STATUSES.has(observed.status)) {
+        throw new Error(`The worktree has changes the ${noun} does not. Push or discard them first.`);
+      }
+      const options = await action.delivery.readMergeOptions(worktree, action.address);
+      if (!options.methods.includes(input.method)) throw new Error('This repository does not allow that merge method.');
+      const deleteBranch = input.deleteBranch && options.canDeleteBranch ? options.head : undefined;
+      // The request is recorded first; after a crash, the platform says whether it merged.
+      await this.store.appendEvent(createDomainEvent({
+        type: 'PR_MERGE_REQUESTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'github',
+        payload: { number: latest.number, headSha: input.expectedHeadSha, method: input.method, deleteBranch: Boolean(deleteBranch) }
+      }));
+      await action.delivery.mergePullRequest(worktree, action.address, {
+        method: input.method,
+        expectedHeadSha: input.expectedHeadSha,
+        ...(deleteBranch ? { deleteBranch } : {})
+      });
+      // The merge landed; a read that fails afterwards must not report it refused. The next refresh records it.
+      return this.recordPullRequestAfterAction(task, action, (sync) => sync.pullRequest.status === 'MERGED').catch(() => latest);
+    });
+  }
+
+  /**
+   * Posts the person's replies to the discussions Task Monki read on the task's
+   * pull request, resolves the threads they chose, and asks reviewers again.
+   * Each reply is the person's own words as they approved them; one that the
+   * platform refuses does not stop the rest.
+   */
+  async replyToPullRequest(input: ReplyToPullRequestRequest): Promise<ReplyToPullRequestResult> {
+    assertReplyToPullRequestRequest(input);
+    return this.withTaskAction(input.taskId, 'Replies', async () => {
+      const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Replies');
+      const action = await this.pullRequestAction(task);
+      const { latest, noun, worktree, address, delivery } = action;
+      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      const feedback = await this.latestPullRequestFeedback(task.id, latest.number!);
+      if (!feedback) throw new Error(`Refresh the ${noun} first.`);
+      const discussions = new Map(feedback.discussions.map((discussion) => [discussion.id, discussion]));
+      if (input.replies.some((reply) => !discussions.has(reply.discussionId))) {
+        throw new Error('A reply names a discussion Task Monki has not read. Refresh, then reply.');
+      }
+      const reviewers = new Set(feedback.reviewers.map((reviewer) => reviewer.name));
+      if (input.requestReviewFrom.some((name) => !reviewers.has(name) || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u.test(name))) {
+        throw new Error(`Ask only people who reviewed this ${noun}.`);
+      }
+      if (input.requestReviewFrom.length > 0 && !delivery.canRequestReviewers) {
+        throw new Error('Reviewers are asked again on the platform.');
+      }
+      const result: ReplyToPullRequestResult = { posted: 0, resolved: 0, requested: [], failed: [] };
+      const replied: string[] = [];
+      const failure = (error: unknown) => error instanceof RemoteWorkError ? error.message : safeCliMessage(error);
+      for (const reply of input.replies.filter((candidate) => discussions.get(candidate.discussionId)!.kind === 'THREAD')) {
+        const discussion = discussions.get(reply.discussionId)!;
+        try {
+          await delivery.replyToDiscussion(worktree, address, discussion, reply.body.trim());
+          result.posted += 1;
+        } catch (error) {
+          result.failed.push({ discussionId: discussion.id, error: failure(error) });
+          continue;
+        }
+        replied.push(discussion.id);
+        if (reply.resolve && discussion.resolvable && !discussion.resolved) {
+          try {
+            await delivery.resolveDiscussion(worktree, address, discussion.id);
+            result.resolved += 1;
+          } catch (error) {
+            result.failed.push({ discussionId: discussion.id, replied: true, error: `Replied, but the thread was not resolved: ${failure(error)}` });
+          }
+        }
+      }
+      // A review or a comment has no thread to reply in: their answers share one comment, each under what it answers.
+      const remarks = input.replies.filter((candidate) => discussions.get(candidate.discussionId)!.kind !== 'THREAD');
+      if (remarks.length > 0) {
+        const body = remarks
+          .map((reply) => `${quotedDiscussion(discussions.get(reply.discussionId)!)}\n\n${reply.body.trim()}`)
+          .join('\n\n');
+        try {
+          await delivery.commentOnPullRequest(worktree, address, body);
+          result.posted += remarks.length;
+          replied.push(...remarks.map((reply) => reply.discussionId));
+        } catch (error) {
+          for (const reply of remarks) result.failed.push({ discussionId: reply.discussionId, error: failure(error) });
+        }
+      }
+      if (input.requestReviewFrom.length > 0) {
+        try {
+          await delivery.requestReviewers(worktree, address, input.requestReviewFrom);
+          result.requested = [...input.requestReviewFrom];
+        } catch (error) {
+          result.failed.push({ reviewer: input.requestReviewFrom.join(', '), error: failure(error) });
+        }
+      }
+      if (result.posted > 0 || result.requested.length > 0) {
+        await this.store.appendEvent(createDomainEvent({
+          type: 'PR_REPLIES_POSTED',
+          taskId: task.id,
+          iterationId: worktree.iterationId,
+          worktreeId: worktree.id,
+          source: 'github',
+          // The discussions answered: a review's answer is a comment of its own, so only this says it was answered.
+          payload: { number: latest.number, posted: result.posted, resolved: result.resolved, requested: result.requested, replied }
+        }));
+      }
+      // The replies are the platform's now; reading it again shows them where they landed.
+      await this.recordPullRequestAfterAction(task, action).catch(() => undefined);
+      return result;
+    });
+  }
+
+  /** The end of each failing check's log for the pull request's current head, read-only and bounded. */
+  async readPullRequestCheckLogs(input: ReadPullRequestCheckLogsRequest): Promise<PullRequestCheckLog[]> {
+    const task = await this.requireTask(input.taskId);
+    const action = await this.pullRequestAction(task);
+    const snapshot = await this.store.snapshot();
+    const ci = snapshot.ciRollups.find((record) =>
+      record.taskId === task.id && record.pullRequestNumber === action.latest.number && record.headSha === action.latest.headRefOid);
+    const failing = (ci?.checkDetails ?? []).filter((check) => check.status === 'failed').slice(0, CHECK_LOG_LIMITS.checks);
+    const logs: PullRequestCheckLog[] = [];
+    for (const check of failing) {
+      const raw = await action.delivery.readCheckLog(action.worktree, action.address, check).catch(() => undefined);
+      const bounded = raw === undefined ? undefined : boundCheckLog(raw);
+      if (bounded?.text) logs.push({ name: check.name, ...(check.link ? { link: check.link } : {}), ...bounded });
+    }
+    return logs;
+  }
+
+  /**
+   * Fetches what the worktree lacks so the agent can merge it: the pull
+   * request's newer commits, or its base that moved ahead. Objects only: no
+   * branch, remote-tracking ref or FETCH_HEAD moves, and nothing is merged here.
+   */
+  async fetchPullRequestUpdate(input: FetchPullRequestUpdateRequest): Promise<PullRequestUpdate> {
+    return this.withTaskAction(input.taskId, 'Branch update', async () => {
+      const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Branch update');
+      const action = await this.pullRequestAction(task);
+      const { latest, noun, worktree } = action;
+      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      const repository = await this.requireAvailableRepository(task.repositoryId);
+      const location = parseRemoteRepositoryUrl(latest.url.replace(/\/(?:pull|-\/merge_requests)\/\d+.*$/u, ''));
+      if (!location) throw new Error(`The ${noun} is not recorded.`);
+      const remote = requireCheckoutRemote(await listCheckoutRemoteRepositories(repository.path), location);
+      let sha: string | undefined;
+      let ref: string;
+      let fetchRef: string;
+      if (input.from === 'BASE') {
+        if (!latest.baseRefName) throw new Error(`The ${noun} names no base branch.`);
+        ref = latest.baseRefName;
+        fetchRef = `refs/heads/${latest.baseRefName}`;
+        const url = await remoteFetchUrl(repository.path, remote);
+        sha = (await git(repository.path, ['ls-remote', '--', url, fetchRef], { timeout: 60_000, env: { GIT_TERMINAL_PROMPT: '0' } }))
+          .split(/\s+/u)[0] || undefined;
+      } else {
+        ref = latest.headRefName ?? `the ${noun}`;
+        sha = latest.headRefOid;
+        fetchRef = pullRequestHeadRef(action.delivery.provider, latest.number);
+      }
+      if (!sha || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(sha)) throw new Error(`Could not read ${ref} on the platform.`);
+      await fetchRemoteObjects(repository.path, remote, [fetchRef]);
+      if (!await hasCommit(repository.path, sha)) throw new Error(`${ref} changed while it was being read. Refresh, then try again.`);
+      const commits = Number((await git(worktree.worktreePath, ['rev-list', '--count', `HEAD..${sha}`])).trim());
+      return { sha, ref, commits: Number.isFinite(commits) ? commits : 0 };
+    });
+  }
+
+  /** The pull request a task delivers through, as Task Monki last recorded it, and the platform that serves it. */
+  private async pullRequestAction(task: Task): Promise<{
+    worktree: WorktreeRecord;
+    delivery: PullRequestDelivery;
+    address: PullRequestAddress;
+    latest: PullRequestSnapshotRecord & { number: number; url: string };
+    noun: string;
+  }> {
+    const worktree = await this.requireWorktree(task);
+    const delivery = await this.deliveryFor(task, worktree);
+    const noun = delivery.provider === 'GITLAB' ? 'merge request' : 'pull request';
+    const latest = await this.store.getLatestPullRequest(task.id);
+    if (!latest?.number || !latest.url) throw new Error(`The task has no ${noun}.`);
+    const target = task.remoteSource?.kind === 'PULL_REQUEST'
+      ? linkedDeliveryTarget(task)
+      : await this.linkedPushRemote(task, worktree).then((linked) => linked ? linkedDeliveryTarget(task, linked.headRepository) : undefined);
+    return {
+      worktree,
+      delivery,
+      address: { number: latest.number, url: latest.url, ...(target ? { target } : {}) },
+      latest: latest as PullRequestSnapshotRecord & { number: number; url: string },
+      noun
+    };
+  }
+
+  /**
+   * Reads the pull request again after a step on it and records what the
+   * platform reports; the platform may take a moment to show the step's result.
+   */
+  private async recordPullRequestAfterAction(
+    task: Task,
+    action: Awaited<ReturnType<TaskManagerService['pullRequestAction']>>,
+    landed?: (sync: PullRequestSync) => boolean
+  ): Promise<PullRequestSnapshotRecord> {
+    let sync = await action.delivery.viewPullRequest(action.worktree, action.latest.number, action.address.target);
+    for (let attempt = 1; landed && !landed(sync) && attempt <= 3; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      sync = await action.delivery.viewPullRequest(action.worktree, action.latest.number, action.address.target);
+    }
+    const stored = await this.store.recordPullRequestSync(sync);
+    this.emitGitHubUpdate(task.id, action.worktree, stored);
+    if (task.remoteSource?.kind === 'PULL_REQUEST') await this.refreshEvidenceInternal({ taskId: task.id }).catch(() => undefined);
+    return stored;
+  }
+
+  /** The last reading of what people said on the task's pull request. */
+  private async latestPullRequestFeedback(taskId: string, number: number): Promise<PullRequestFeedback | undefined> {
+    const summary = (await this.store.snapshot()).reviewRollups.find((record) =>
+      record.taskId === taskId && record.pullRequestNumber === number && record.feedback)?.feedback;
+    return summary ? parsePullRequestFeedback(await this.store.readArtifact(summary.artifactId), number) : undefined;
+  }
+
   async transitionTask(input: TransitionTaskRequest): Promise<Task> {
     return this.withTaskAction(input.taskId, 'Workflow transition', async () => {
       const task = ['REVIEW', 'IN_REVIEW', 'DONE'].includes(input.toPhase)
@@ -6135,6 +6414,14 @@ function issueReferenceLine(task: Task, closeIssue: boolean): string | undefined
   const source = task.remoteSource;
   if (source?.kind !== 'ISSUE') return undefined;
   return `${closeIssue ? 'Closes' : 'Related to'} ${formatRemoteWorkNumber(source.provider, 'ISSUE', source.number)}`;
+}
+
+/** What a reply answers when it cannot sit in a thread of its own: the discussion's author and first line, quoted. */
+function quotedDiscussion(discussion: PullRequestDiscussion): string {
+  const first = discussion.comments[0];
+  const line = visibleRemoteText(first?.body).split('\n').map((value) => value.trim()).find(Boolean) ?? '';
+  const excerpt = line.length > 120 ? `${line.slice(0, 119)}…` : line;
+  return `> @${first?.author ?? 'someone'}: ${excerpt}`;
 }
 
 /** The repository a linked task's pull request belongs to, and the fork it is pushed to, if any. */

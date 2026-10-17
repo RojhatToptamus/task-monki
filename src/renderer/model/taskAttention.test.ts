@@ -53,9 +53,9 @@ describe('describeTaskAttention', () => {
       expected: { label: 'Checks failed', tone: 'error' }
     },
     {
-      name: 'GitHub changes requested',
+      name: 'Changes requested',
       task: makeTaskRecord({ projection: { reviews: 'CHANGES_REQUESTED' } }),
-      expected: { label: 'GitHub changes requested', tone: 'warning' }
+      expected: { label: 'Changes requested', tone: 'warning' }
     },
     {
       name: 'blocked merge',
@@ -185,6 +185,27 @@ describe('describeTaskAttention', () => {
     expect(describeTaskAttention(merged)).toBeUndefined();
     // Finishing it by hand is still the person's step.
     expect(describeTaskAttention({ ...merged, completionPolicy: 'MANUAL' })).toMatchObject({ label: 'Ready to mark done' });
+  });
+
+  it('says what a delivery waits on beneath its word, from the facts a board summary carries', () => {
+    const open = { githubPullRequest: 'OPEN_READY' as const, githubPullRequestNumber: 9 };
+    const withFacts = (projection: NonNullable<NonNullable<Parameters<typeof makeTaskRecord>[0]>['projection']>, delivery: object) =>
+      ({ ...makeTaskRecord({ projection: { ...open, ...projection } }), delivery });
+    expect(describeTaskAttention(withFacts({ ciChecks: 'FAILING' }, { failingChecks: { names: ['unit', 'lint', 'build'], count: 3 } })))
+      .toMatchObject({ label: 'Checks failed', detail: 'unit, lint and build failed' });
+    // Names only the first few, never as if they were all.
+    expect(describeTaskAttention(withFacts({ ciChecks: 'FAILING' }, { failingChecks: { names: ['unit', 'lint', 'build'], count: 5 } })))
+      .toMatchObject({ detail: 'unit, lint and 3 more failed' });
+    expect(describeTaskAttention(withFacts({ reviews: 'CHANGES_REQUESTED' }, {
+      feedback: { unresolvedCount: 2, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }] }
+    }))).toMatchObject({ label: 'Changes requested', detail: 'alice requested changes, 2 unresolved threads' });
+    expect(describeTaskAttention(withFacts({ merge: 'BLOCKED' }, { baseMoved: { base: 'main', reason: 'CONFLICTS' } })))
+      .toMatchObject({ label: 'Merge blocked', detail: 'Conflicts with main' });
+    expect(describeTaskAttention(withFacts({ health: 'ERROR', branchPublication: 'FAILED' }, { pushError: 'Remote branch has newer commits.' })))
+      .toMatchObject({ label: 'Push failed', detail: 'Remote branch has newer commits.' });
+    // A push that may have landed is not called failed.
+    expect(describeTaskAttention(withFacts({ health: 'ERROR', branchPublication: 'AMBIGUOUS' }, {})))
+      .toMatchObject({ label: 'Push unconfirmed' });
   });
 
   it('sanitizes generic delivery attention and returns nothing for neutral state', () => {

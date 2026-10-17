@@ -17,13 +17,24 @@ export interface FakeGitLabItem {
   sourceBranch?: string;
   targetBranch?: string;
   sourceProject?: string;
+  /** The merge request's own "Delete source branch" choice, which a merge follows unless told otherwise. */
+  forceRemoveSourceBranch?: boolean;
   /** A finished pipeline for the head: each job's name, stage and status. */
-  jobs?: Array<{ name: string; stage: string; status: string; allow_failure?: boolean }>;
+  jobs?: Array<{ id?: number; name: string; stage: string; status: string; allow_failure?: boolean }>;
   /** GitLab's first reason it cannot merge; a draft reports `draft_status` unless set. */
   detailedMergeStatus?: string;
   /** Merge request discussions, as the discussions API returns them. */
   discussions?: FakeGitLabDiscussion[];
   reviewers?: Array<{ username: string; state: string }>;
+  /** Job logs by job id, as the trace API returns them. */
+  jobTraces?: Record<string, string>;
+  /** Whether the fake squashed when it merged. */
+  mergedWith?: { squash: boolean; removedBranch: boolean };
+}
+
+/** A project's merge settings, as `GET /projects/:id` reports them. */
+export interface FakeGitLabProjectSettings {
+  squash_option: 'never' | 'always' | 'default_on' | 'default_off';
 }
 
 export interface FakeGitLabDiscussion {
@@ -60,6 +71,7 @@ export interface FakeGitLab {
   pushRef(project: string, sourceRepository: string, sha: string, ref: string): Promise<void>;
   refSha(project: string, ref: string): Promise<string | undefined>;
   setItem(item: FakeGitLabItem): Promise<void>;
+  setProjectSettings(project: string, settings: FakeGitLabProjectSettings): Promise<void>;
   items(): Promise<FakeGitLabItem[]>;
   calls(): Promise<FakeGitLabCall[]>;
 }
@@ -70,7 +82,8 @@ export async function createFakeGitLab(rootDir: string): Promise<FakeGitLab> {
   const statePath = path.join(rootDir, 'fake-gitlab-state.json');
   const logPath = path.join(rootDir, 'fake-gitlab-calls.ndjson');
   await fs.mkdir(hostRoot, { recursive: true });
-  const state: { username: string; projects: string[]; items: FakeGitLabItem[] } = { username: 'lab-tester', projects: [], items: [] };
+  const state: { username: string; projects: string[]; items: FakeGitLabItem[]; settings?: Record<string, FakeGitLabProjectSettings> } =
+    { username: 'lab-tester', projects: [], items: [] };
   const writeState = () => fs.writeFile(statePath, JSON.stringify(state), 'utf8');
   await writeState();
   const sshCommand = await writeNodeExecutable(binDir, 'fake-ssh', `
@@ -111,6 +124,11 @@ process.exit(result.status ?? 1);
     async setItem(item) {
       const current = JSON.parse(await fs.readFile(statePath, 'utf8')) as typeof state;
       state.items = [...current.items.filter((candidate) => !(candidate.project === item.project && candidate.iid === item.iid && candidate.kind === item.kind)), item];
+      await writeState();
+    },
+    async setProjectSettings(project, settings) {
+      Object.assign(state, JSON.parse(await fs.readFile(statePath, 'utf8')) as typeof state);
+      state.settings = { ...state.settings, [project]: settings };
       await writeState();
     },
     async items() {
@@ -164,9 +182,9 @@ const mergeRequest = (item) => {
     iid: item.iid, title: item.title, description: item.description ?? '', state: item.state ?? 'opened', web_url: url(item),
     author: { username: item.author ?? 'someone' }, labels: [], user_notes_count: (item.notes ?? []).length, updated_at: '2026-10-01T00:00:00Z',
     draft: Boolean(item.draft), source_branch: item.sourceBranch, target_branch: item.targetBranch ?? 'main',
-    source_project_id: idOf(source), target_project_id: idOf(item.project), sha: head,
+    source_project_id: idOf(source), target_project_id: idOf(item.project), sha: head, force_remove_source_branch: item.forceRemoveSourceBranch ?? null,
     diff_refs: base ? { base_sha: base, head_sha: head, start_sha: target } : null,
-    detailed_merge_status: item.detailedMergeStatus ?? (item.draft ? 'draft_status' : 'mergeable'), merged_at: null,
+    detailed_merge_status: item.detailedMergeStatus ?? (item.draft ? 'draft_status' : 'mergeable'), merged_at: item.state === 'merged' ? '2026-10-02T00:00:00.000Z' : null,
     head_pipeline: item.jobs ? { id: 900 + item.iid, project_id: idOf(item.project), sha: head, status: 'running' } : null
   };
 };
@@ -178,11 +196,18 @@ if (parts[0] !== 'projects') notFound();
 const project = projectOf(parts[1] ?? '');
 if (!project || !state.projects.includes(project)) notFound();
 const items = state.items.filter((item) => item.project === project);
-if (parts.length === 2) out({ id: idOf(project), path_with_namespace: project });
+if (parts.length === 2) out({ id: idOf(project), path_with_namespace: project, default_branch: 'main', merge_method: 'merge',
+  squash_option: 'default_off', ...(state.settings?.[project] ?? {}) });
+if (parts[2] === 'jobs' && parts[4] === 'trace') {
+  const trace = state.items.map((candidate) => candidate.jobTraces?.[parts[3]]).find((value) => value !== undefined);
+  if (trace === undefined) notFound();
+  process.stdout.write(trace);
+  process.exit(0);
+}
 if (parts[2] === 'repository' && parts[3] === 'branches') { const name = decodeURIComponent(parts[4]); rev(project, 'refs/heads/' + name) ? out({ name }) : notFound(); }
 if (parts[2] === 'pipelines' && parts[4] === 'jobs') {
   const item = state.items.find((candidate) => 900 + candidate.iid === Number(parts[3]));
-  out((item?.jobs ?? []).map((job) => ({ ...job, web_url: 'https://gitlab.com/' + project + '/-/jobs/1', started_at: null, finished_at: null })));
+  out((item?.jobs ?? []).map((job) => ({ ...job, web_url: 'https://gitlab.com/' + project + '/-/jobs/' + (job.id ?? 1), started_at: null, finished_at: null })));
 }
 const kind = parts[2] === 'issues' ? 'ISSUE' : parts[2] === 'merge_requests' ? 'MERGE_REQUEST' : undefined;
 if (!kind) notFound();
@@ -200,6 +225,42 @@ const list = items.filter((item) => item.kind === kind && (!query.get('state') |
 if (parts.length === 3) out(list.map((item) => kind === 'ISSUE' ? issue(item) : mergeRequest(item)));
 const item = items.find((candidate) => candidate.kind === kind && candidate.iid === Number(parts[3]));
 if (!item) notFound();
+if (parts.length === 4 && method === 'PUT' && kind === 'MERGE_REQUEST') {
+  item.title = fields.title.replace(/^\\s*(?:draft:|\\[draft\\]|\\(draft\\))\\s*/i, '');
+  item.draft = /^\\s*(?:draft:|\\[draft\\]|\\(draft\\))/i.test(fields.title);
+  save();
+  out(mergeRequest(item));
+}
+if (parts[4] === 'merge' && method === 'PUT') {
+  const current = mergeRequest(item);
+  if ((item.state ?? 'opened') !== 'opened' || item.draft) { process.stdout.write('{"message":"405 Method Not Allowed"}'); process.stderr.write('glab: 405 Method Not Allowed\\n'); process.exit(1); }
+  if (fields.sha !== current.sha) { process.stdout.write('{"message":"409 SHA does not match HEAD of source branch"}'); process.stderr.write('glab: 409 Conflict\\n'); process.exit(1); }
+  item.state = 'merged';
+  item.mergedWith = { squash: fields.squash === 'true', removedBranch: fields.should_remove_source_branch === undefined ? Boolean(item.forceRemoveSourceBranch) : fields.should_remove_source_branch === 'true' };
+  if (item.mergedWith.removedBranch) execFileSync('git', ['--git-dir', bare(item.sourceProject ?? item.project), 'update-ref', '-d', 'refs/heads/' + item.sourceBranch]);
+  save();
+  out({ ...current, state: 'merged' });
+}
+if (parts[4] === 'notes' && method === 'POST') {
+  item.notes = [...(item.notes ?? []), { author: state.username, body: stdin, created_at: new Date().toISOString() }];
+  item.discussions = [...(item.discussions ?? []), { id: 'note-' + Date.now(), individualNote: true, notes: [{ id: Date.now(), author: state.username, body: stdin, created_at: new Date().toISOString() }] }];
+  save();
+  out({ id: Date.now(), body: stdin });
+}
+if (parts[4] === 'discussions' && parts[5]) {
+  const discussion = (item.discussions ?? []).find((candidate) => candidate.id === decodeURIComponent(parts[5]));
+  if (!discussion) notFound();
+  if (parts[6] === 'notes' && method === 'POST') {
+    discussion.notes.push({ id: Date.now(), author: state.username, body: stdin, created_at: new Date().toISOString() });
+    save();
+    out({ id: Date.now(), body: stdin });
+  }
+  if (!parts[6] && method === 'PUT') {
+    discussion.resolved = fields.resolved === 'true';
+    save();
+    out({ id: discussion.id, resolved: discussion.resolved });
+  }
+}
 if (parts[4] === 'notes') out([...(item.notes ?? [])].reverse().map((note) => ({ body: note.body, system: Boolean(note.system), created_at: note.created_at, author: { username: note.author } })));
 if (parts[4] === 'approvals') out({ approved: false, approvals_left: 0, approved_by: [] });
 if (parts[4] === 'reviewers') out((item.reviewers ?? []).map((reviewer) => ({ user: { username: reviewer.username }, state: reviewer.state, created_at: '2026-10-01T00:00:00Z' })));

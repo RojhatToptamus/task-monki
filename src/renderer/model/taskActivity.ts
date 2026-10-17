@@ -364,6 +364,8 @@ function itemForEvent(
       return mergeItem(event, payload, state);
     case 'GITHUB_SYNC_FAILED':
       return githubFailureItem(event, payload, state);
+    case 'PR_REPLIES_POSTED':
+      return repliesPostedItem(event, payload);
     case 'TRANSITION_COMPLETED':
       return transitionCompletedItem(event, payload);
     case 'TRANSITION_BLOCKED':
@@ -841,7 +843,7 @@ function githubReviewItem(
         event,
         'delivery',
         'GitHub',
-        'GitHub review requested',
+        'Review requested',
         undefined,
         'action'
       );
@@ -850,7 +852,7 @@ function githubReviewItem(
         event,
         'delivery',
         'GitHub',
-        'GitHub review pending',
+        'Review pending',
         undefined,
         'action'
       );
@@ -859,7 +861,7 @@ function githubReviewItem(
         event,
         'delivery',
         'GitHub',
-        'GitHub requested changes',
+        changesRequestedTitle(payload),
         rowFacts(prEvidenceRows(payload)),
         'error'
       );
@@ -869,7 +871,7 @@ function githubReviewItem(
         event,
         'delivery',
         'GitHub',
-        'GitHub review approved',
+        'Review approved',
         undefined,
         'success'
       );
@@ -885,6 +887,20 @@ function githubReviewItem(
     default:
       return undefined;
   }
+}
+
+/**
+ * Who asked for changes, by name when the reading has them: the platform is the
+ * item's actor, and a reviewer, not the platform, asked.
+ */
+function changesRequestedTitle(payload: Record<string, unknown>): string {
+  const feedback = payload.feedback && typeof payload.feedback === 'object' ? payload.feedback as { reviewers?: unknown } : undefined;
+  const names = (Array.isArray(feedback?.reviewers) ? feedback.reviewers : [])
+    .filter((reviewer): reviewer is { name: string } =>
+      typeof reviewer?.name === 'string' && reviewer.state === 'CHANGES_REQUESTED')
+    .map((reviewer) => reviewer.name);
+  if (names.length === 0) return 'Changes requested';
+  return `${names.length <= 2 ? names.join(' and ') : `${names[0]} and ${names.length - 1} others`} requested changes`;
 }
 
 function mergeItem(
@@ -946,6 +962,19 @@ function mergeItem(
     default:
       return undefined;
   }
+}
+
+/** The person's replies on the platform: how many, what they resolved, who they asked again. */
+function repliesPostedItem(event: DomainEvent, payload: Record<string, unknown>): TaskActivityCandidate {
+  const posted = numberField(payload, 'posted') ?? 0;
+  const resolved = numberField(payload, 'resolved') ?? 0;
+  const requested = Array.isArray(payload.requested) ? payload.requested.filter((name): name is string => typeof name === 'string') : [];
+  const summary = [
+    posted ? `${posted} ${posted === 1 ? 'reply' : 'replies'}` : '',
+    resolved ? `${resolved} ${resolved === 1 ? 'thread' : 'threads'} resolved` : '',
+    requested.length ? `asked ${requested.map((name) => `@${name}`).join(' and ')} again` : ''
+  ].filter(Boolean).join(', ');
+  return item(event, 'delivery', 'User', posted ? 'Replied on GitHub' : 'Asked for review on GitHub', fact(summary || undefined), 'info');
 }
 
 function githubFailureItem(

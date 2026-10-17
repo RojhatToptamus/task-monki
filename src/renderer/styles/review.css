@@ -75,13 +75,14 @@
 .tm-review-brief__toggle:hover { color: var(--text-soft); }
 .tm-review-brief[data-folded] .tm-review-brief__toggle { grid-column: 1 / -1; }
 .tm-review-brief__line { min-width: 0; overflow: hidden; font-size: var(--t-body); text-overflow: ellipsis; white-space: nowrap; }
-.tm-review-brief__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 32px; }
-.tm-review-brief__block { display: grid; align-content: start; gap: 2px; min-width: 0; }
+/* Facts share a row and wrap; the answers below take a row of their own, so they never narrow the facts to a column each. */
+.tm-review-brief__grid { display: flex; flex-wrap: wrap; gap: 12px 32px; }
+.tm-review-brief__block { display: grid; flex: 1 1 220px; align-content: start; gap: 2px; min-width: 0; }
 .tm-review-brief__label { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); line-height: 20px; }
 .tm-review-brief__label span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: var(--w-regular); text-overflow: ellipsis; white-space: nowrap; }
-.tm-review-brief__text { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__text { max-width: 72ch; margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
 /* Provider text is quoted: attributed above, with a 2px rule along its left edge. */
-.tm-review-brief__quote { margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__quote { max-width: 72ch; margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
 .tm-review-brief__clamped--2,
 .tm-review-brief__clamped--3 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; }
 .tm-review-brief__clamped--2 { -webkit-line-clamp: 2; }
@@ -282,7 +283,7 @@
 }
 
 /* The agent's answers to the last request span the brief, under what was asked and reported. */
-.tm-review-brief__round { grid-column: 1 / -1; gap: 6px; }
+.tm-review-brief__round { flex-basis: 100%; gap: 6px; }
 .tm-review-brief__round .tm-review-brief__label .ghost-button { margin-left: auto; }
 /* A re-review marks an earlier finding still open, or a new one, beside its severity. */
 .tm-review-thread__round { color: var(--muted); font-size: var(--t-help); white-space: nowrap; }

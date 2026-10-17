@@ -75,6 +75,7 @@ export * from './design';
 export * from './preview';
 export * from './remoteWork';
 export * from './pullRequestFeedback';
+export * from './pullRequestActions';
 
 export interface DesignRepositoryInspection {
   repository: Repository;
@@ -316,6 +317,8 @@ export const DOMAIN_EVENT_TYPES = [
   'BRANCH_PUBLISHED',
   'BRANCH_PUBLISH_FAILED',
   'PR_CREATE_REQUESTED',
+  'PR_MERGE_REQUESTED',
+  'PR_REPLIES_POSTED',
   'PR_BODY_ARTIFACT_CREATED',
   'PR_SNAPSHOT_CAPTURED',
   'CI_ROLLUP_CAPTURED',
@@ -977,6 +980,7 @@ export type BoardStatusProjection = Pick<
   | 'ciChecks'
   | 'reviews'
   | 'merge'
+  | 'branchPublication'
   | 'health'
   | 'summary'
   | 'implementationRetry'
@@ -984,6 +988,18 @@ export type BoardStatusProjection = Pick<
 > & {
   agentReview: BoardAgentReviewSummary;
 };
+
+/** The facts behind a delivery state, read from the task's latest pull request evidence. */
+export interface BoardDeliveryFacts {
+  /** The checks that failed for the pull request's head: the first three names, and how many failed. */
+  failingChecks?: { names: string[]; count: number };
+  /** Who asked for changes and how many threads are unresolved. */
+  feedback?: Pick<import('./pullRequestFeedback').PullRequestFeedbackSummary, 'unresolvedCount' | 'reviewers'>;
+  /** The platform holds the merge back on a base that moved. */
+  baseMoved?: { base: string; reason: 'BEHIND' | 'CONFLICTS' };
+  /** Why the last push failed, as recorded. */
+  pushError?: string;
+}
 
 export interface BoardTaskSummary {
   id: string;
@@ -997,6 +1013,8 @@ export interface BoardTaskSummary {
   projection: BoardStatusProjection;
   /** The pull request it was opened from was rewritten under a worktree with nothing of its own (`pullRequestRewrittenUnder`). */
   pullRequestRewritten?: boolean;
+  /** What a delivery that waits on the person turns on, for the Inbox to say beside its word. */
+  delivery?: BoardDeliveryFacts;
 }
 
 export interface BoardSnapshot {
@@ -1623,6 +1641,18 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   openPullRequest(input: import('./remoteWork').OpenPullRequestRequest): Promise<Task>;
   /** Moves a clean pull request task to the pull request's newer head. */
   syncPullRequest(input: import('./remoteWork').SyncPullRequestRequest): Promise<Task>;
+  /** Marks the task's draft pull request ready for review. */
+  markPullRequestReady(input: import('./pullRequestActions').MarkPullRequestReadyRequest): Promise<PullRequestSnapshotRecord>;
+  /** How the task's pull request can merge, for the merge dialog. */
+  readPullRequestMergeOptions(input: import('./pullRequestActions').ReadPullRequestMergeOptionsRequest): Promise<import('./pullRequestActions').PullRequestMergeOptions>;
+  /** Merges exactly the head the person saw. */
+  mergePullRequest(input: import('./pullRequestActions').MergePullRequestRequest): Promise<PullRequestSnapshotRecord>;
+  /** Posts the person's replies on the task's pull request, resolves the threads they chose and asks reviewers again. */
+  replyToPullRequest(input: import('./pullRequestActions').ReplyToPullRequestRequest): Promise<import('./pullRequestActions').ReplyToPullRequestResult>;
+  /** Fetches the commits the worktree lacks, for the agent to merge. */
+  fetchPullRequestUpdate(input: import('./pullRequestActions').FetchPullRequestUpdateRequest): Promise<import('./pullRequestActions').PullRequestUpdate>;
+  /** The end of each failing check's log for the pull request's current head. */
+  readPullRequestCheckLogs(input: import('./pullRequestActions').ReadPullRequestCheckLogsRequest): Promise<import('./pullRequestActions').PullRequestCheckLog[]>;
   reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
   updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;
   listDesigns(): Promise<DesignListItem[]>;

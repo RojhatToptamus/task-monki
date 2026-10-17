@@ -614,16 +614,24 @@ lost runs do not need this separate resolution action.
 
 In Review:
 
-- Prioritize PR Status: one linked PR identity, one headline, exact check rows
-  when available, review line when delivery-affecting, merge line when known,
-  and freshness.
-- For failed checks, show the `Investigate failure` action and expandable check
-  rows instead of repeating a prose explanation of the failure.
-- Allow GitHub refresh actions.
-- Offer failing-CI investigation only when the selected PR Status state is
+- Prioritize PR Status: the Now panel holds the pull request's one step (its
+  blocker, one fact, the actions that take it); the record column holds the
+  pull request itself, with a row per gate (checks, reviews, threads, merge).
+- For failed checks, list the failed checks with the end of each log on request
+  and offer `Fix checks`, which sends the agent the logs as quoted data.
+- Allow GitHub refresh actions from the pull request's record.
+- Offer failing-CI repair only when the selected PR Status state is
   `Checks failed`; stale, diverged, or locally unpublished work should surface
-  its own next action instead. Investigation starts implementation-side work,
-  not a GitHub state update.
+  its own next action instead. Repair starts implementation-side work, not a
+  GitHub state update.
+- The person's writes to the platform are explicit steps: `Ready for review`,
+  `Merge` (the head they saw, through a dialog with the repository's methods
+  and Delete branch), and `Reply on GitHub` (the agent's answers as editable
+  replies, Resolve thread, and asking reviewers again). Nothing posts on its
+  own or on an agent's behalf.
+- A branch that moved beside the worktree (`Pull changes`) or a base that moved
+  ahead (`Update with <base>`) is merged by the agent from commits Task Monki
+  fetched; the person reviews and pushes.
 
 Done:
 
@@ -736,12 +744,12 @@ competing badges. Headline priority is:
 1. Merged.
 2. Closed without merge.
 3. Branch diverged or stale.
-4. Local changes not pushed.
+4. Changes not pushed.
 5. PR has newer commits.
 6. Checks failed.
 7. Checks pending, canceled, or no required checks ran.
-8. GitHub changes requested.
-9. GitHub review waiting.
+8. Changes requested.
+9. Waiting for review.
 10. Ready to merge.
 11. Draft PR.
 12. Open PR.
@@ -756,8 +764,10 @@ canceled buckets from `gh pr checks`. Canceled checks are distinct from
 failures, but they still block ready-to-merge status until GitHub reports merge
 readiness. Ready to merge requires explicit current PR, check, review, and
 merge evidence for the same PR head; absent check or review evidence must not
-be treated as success. The PR number is the link to GitHub; do not add a
-separate Open PR button when the number can be rendered as a link.
+be treated as success, except that a repository without CI reports no checks
+at all, and then the platform's own merge state decides. The PR number is the
+link to GitHub; do not add a separate Open PR button when the number can be
+rendered as a link.
 
 The detailed PR Status source of truth is
 `docs/workflows/PR_STATUS_CARD_FLOW.md`.

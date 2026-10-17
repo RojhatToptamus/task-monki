@@ -36,6 +36,12 @@ import type {
   ListRemoteWorkRequest,
   OpenPullRequestRequest,
   SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ReadPullRequestMergeOptionsRequest,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReadPullRequestCheckLogsRequest,
+  FetchPullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -756,6 +762,12 @@ function installIpcHandlers(): void {
   handleTrustedIpc('remote:list', (_, input: ListRemoteWorkRequest) => service.listRemoteWork(input));
   handleTrustedIpc('remote:openPullRequest', (_, input: OpenPullRequestRequest) => service.openPullRequest(input));
   handleTrustedIpc('remote:syncPullRequest', (_, input: SyncPullRequestRequest) => service.syncPullRequest(input));
+  handleTrustedIpc('remote:markPullRequestReady', (_, input: MarkPullRequestReadyRequest) => service.markPullRequestReady(input));
+  handleTrustedIpc('remote:readPullRequestMergeOptions', (_, input: ReadPullRequestMergeOptionsRequest) => service.readPullRequestMergeOptions(input));
+  handleTrustedIpc('remote:mergePullRequest', (_, input: MergePullRequestRequest) => service.mergePullRequest(input));
+  handleTrustedIpc('remote:replyToPullRequest', (_, input: ReplyToPullRequestRequest) => service.replyToPullRequest(input));
+  handleTrustedIpc('remote:readPullRequestCheckLogs', (_, input: ReadPullRequestCheckLogsRequest) => service.readPullRequestCheckLogs(input));
+  handleTrustedIpc('remote:fetchPullRequestUpdate', (_, input: FetchPullRequestUpdateRequest) => service.fetchPullRequestUpdate(input));
   handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
   handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
   handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));

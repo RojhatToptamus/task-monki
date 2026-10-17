@@ -224,7 +224,11 @@ threads, reviews and comments; unchanged feedback reuses its artifact, and a
 failed read keeps the last one. Startup refuses a summary whose artifact is
 missing or another task's. A review request may hold `DISCUSSION` items, a
 review draft `includedDiscussionIds`, and a request sent before the task's first
-turn is stored as that turn's `FOLLOW_UP` instruction. Migration 15
+turn is stored as that turn's `FOLLOW_UP` instruction. Schema 31 also records the
+person's writes to a pull request: `PR_MERGE_REQUESTED` (number, head, method,
+whether the branch is deleted) before a merge, and `PR_REPLIES_POSTED` (number,
+counts posted and resolved, reviewers asked again, and the ids of the
+discussions answered) after replies land. Migration 15
 (`gitlab-cli-setting`) adds `externalExecutables.glabExecutablePath` and
 advances settings to schema 16.
 

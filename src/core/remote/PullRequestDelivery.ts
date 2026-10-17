@@ -1,5 +1,6 @@
 import type {
   CiRollupRecord,
+  GitHubCheckDetailRecord,
   GitHubRepositoryRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
@@ -7,7 +8,8 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
-import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import type { PullRequestMergeMethod, PullRequestMergeOptions } from '../../shared/pullRequestActions';
+import type { PullRequestDiscussion, PullRequestFeedback } from '../../shared/pullRequestFeedback';
 import type { RemoteProvider, RemoteRepositoryRef } from '../../shared/remoteWork';
 
 /**
@@ -39,9 +41,17 @@ export interface PullRequestSync {
   feedback?: PullRequestFeedback;
 }
 
+/** The pull or merge request an action addresses, as Task Monki last recorded it. */
+export interface PullRequestAddress {
+  number: number;
+  url: string;
+  target?: DeliveryTarget;
+}
+
 /**
  * A platform's pull or merge request delivery. Git pushes stay with Git; this is
- * what the platform's CLI does: readiness, creation, lookup and status.
+ * what the platform's CLI does: readiness, creation, lookup and status, and the
+ * person's own steps on it: ready, merge, replies and resolving, review requests.
  */
 export interface PullRequestDelivery {
   readonly provider: RemoteProvider;
@@ -56,4 +66,22 @@ export interface PullRequestDelivery {
   findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<PullRequestSync | undefined>;
   viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<PullRequestSync>;
   pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string>;
+  markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void>;
+  readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions>;
+  /** Merges exactly `expectedHeadSha`; the platform refuses when the head moved. */
+  mergePullRequest(worktree: WorktreeRecord, address: PullRequestAddress, input: {
+    method: PullRequestMergeMethod;
+    expectedHeadSha: string;
+    /** The branch to delete after the merge, when the person asked and it can be deleted. */
+    deleteBranch?: string;
+  }): Promise<void>;
+  /** Replies on a discussion's own thread; a discussion that has none takes a comment on the pull request. */
+  replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussion: Pick<PullRequestDiscussion, 'id' | 'kind'>, body: string): Promise<void>;
+  resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void>;
+  commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;
+  /** Asks people for another review; false when the platform cannot be asked from here. */
+  readonly canRequestReviewers: boolean;
+  requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
+  /** The raw log of a failing check, when its link names a job this platform serves. */
+  readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined>;
 }

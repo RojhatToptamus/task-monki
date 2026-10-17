@@ -7,6 +7,20 @@ import {
   safeCliMessage
 } from '../remote/RemoteWorkError';
 
+export interface GitLabRequest {
+  host: string;
+  endpoint: string;
+  cwd: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  /** String fields, sent as they are. */
+  fields?: Record<string, string>;
+  /** One long string field, sent on stdin. */
+  stdinField?: { name: string; value: string };
+  /** Names the project in a not-found message. */
+  subject?: string;
+  timeout?: number;
+}
+
 /**
  * GitLab's REST API through the signed-in GitLab CLI (`glab api`). The CLI owns
  * the token; Task Monki passes no credential and keeps none. Responses are the
@@ -19,37 +33,34 @@ export class GitLabCli {
     this.executable = executable ?? 'glab';
   }
 
-  async request<T>(input: {
-    host: string;
-    endpoint: string;
-    cwd: string;
-    method?: 'GET' | 'POST';
-    /** String fields, sent as they are. */
-    fields?: Record<string, string>;
-    /** One long string field, sent on stdin. */
-    stdinField?: { name: string; value: string };
-    /** Names the project in a not-found message. */
-    subject?: string;
-    timeout?: number;
-  }): Promise<T> {
-    const argv = ['api', input.endpoint, '--hostname', input.host];
-    if (input.method && input.method !== 'GET') argv.push('--method', input.method);
-    for (const [key, value] of Object.entries(input.fields ?? {})) argv.push('--raw-field', `${key}=${value}`);
-    if (input.stdinField) argv.push('--field', `${input.stdinField.name}=@-`);
-    let stdout: string;
-    try {
-      ({ stdout } = await execFileOwnedPortable(this.executable, argv, {
-        cwd: input.cwd,
-        timeout: input.timeout ?? 30_000,
-        maxBuffer: 20 * 1024 * 1024
-      }, input.stdinField?.value));
-    } catch (error) {
-      throw await this.classify(error, input.host, input.cwd, input.subject);
-    }
+  async request<T>(input: GitLabRequest): Promise<T> {
+    const stdout = await this.run(input);
     try {
       return JSON.parse(stdout) as T;
     } catch {
       throw new RemoteWorkError('FAILED', 'GitLab returned an unreadable response.');
+    }
+  }
+
+  /** A response that is text, not JSON, such as a job's log. */
+  async requestText(input: GitLabRequest): Promise<string> {
+    return this.run(input);
+  }
+
+  private async run(input: GitLabRequest): Promise<string> {
+    const argv = ['api', input.endpoint, '--hostname', input.host];
+    if (input.method && input.method !== 'GET') argv.push('--method', input.method);
+    for (const [key, value] of Object.entries(input.fields ?? {})) argv.push('--raw-field', `${key}=${value}`);
+    if (input.stdinField) argv.push('--field', `${input.stdinField.name}=@-`);
+    try {
+      const { stdout } = await execFileOwnedPortable(this.executable, argv, {
+        cwd: input.cwd,
+        timeout: input.timeout ?? 30_000,
+        maxBuffer: 20 * 1024 * 1024
+      }, input.stdinField?.value);
+      return stdout;
+    } catch (error) {
+      throw await this.classify(error, input.host, input.cwd, input.subject);
     }
   }
 

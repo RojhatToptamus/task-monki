@@ -1531,13 +1531,38 @@ override: never the filled primary, always last. Three actions sit side by
 side; past three, the first two stay and the rest — the overrides — move under
 a More menu, each keeping its disabled reason inline.
 
+An open pull request's step is one blocker and its way through, in this order:
+a worktree out of step with it (Sync branch, Push update, Pull changes), a base
+that moved (Update with main), failed checks (Fix checks, with each failed
+check and the end of its log listed in the panel), comments to address or
+answers to post (Address comments, Reply on GitHub), then Ready for review and
+Merge. The fact line names the blocker: the checks that failed, who asked for
+changes and how many threads are open, what is not pushed, the base it is
+behind. Writes to the platform are the person's: Ready for review is one
+click; Merge and Reply open a dialog that shows what goes out (the method the
+repository allows, the branch to delete, each reply as an editable text with
+its Resolve thread choice) before anything is sent. When another step holds the
+Now panel, such as an agent review asking for action, the same actions sit in a
+quiet Delivery section below it, as Finishing does, with the pull request's word
+and fact as its facts; the section is left out while every action is paused.
+
+**The pull request record.** First in the record column while a task has a pull
+request: the platform's state icon, the number in `--muted` and the title at
+`--t-body`/500 (two lines at most, a link to the platform), the branch and its
+base in mono `--t-help`, then one `tm-props` row per gate — Checks, Reviews (a
+line per reviewer, the state in its tone's ink), Threads (a link to the Review
+tab while any is open), Merge. A gate's word takes its tone's ink, and nothing
+else in the group does. The Checks summary opens into 28px rows: the mark, the
+name, the time it ran, and an icon link to the platform. The refresh control
+and "Updated" time sit in the group's head. The group holds no action.
+
 Provider text is quoted, never set as Task Monki's own: under a title or caption
 that names the agent, with a 2px `--edge-raised` rule along its left edge.
 
 Everything else on the page is a section: a quiet label (`--t-help`/500,
 `--muted`), then content. Space separates sections; no rule runs under a label.
 The story's sections (request, result) are flat: no card, no fill. Record
-content — Details, the preview, History, and the agent review and pull request
+content — the pull request, Details, the preview, History, and the agent review
 in the story — is an inset group: `--panel` fill, `--r-md` corners, a 16px
 inset, no ring or shadow. Recessed reads as reference and raised as "act", so
 the groups never compete with the Now panel. Record groups sit 12px apart. The panel's primary is the page's primary; actions in a
@@ -1548,8 +1573,8 @@ button cannot take focus, so a tooltip alone never reaches the keyboard).
 **A task page reads in lifecycle order.** The work column is the story: the Now
 panel, the request (omitted when it only repeats the title), the result (what
 the agent reported, attributed, above the files Task Monki captured, or "No file
-changes"), the agent review once one exists, and the pull request. A fixed
-300px record column beside it holds Details (one label and value per row; a
+changes"), and the agent review once one exists. A fixed
+300px record column beside it holds the pull request once one exists, then Details (one label and value per row; a
 setting's companion, such as the effort beside the model, follows in muted ink
 and wraps beneath rather than being cut off), the preview, and History: the date
 once per day, then what happened with its time on the right and who recorded it

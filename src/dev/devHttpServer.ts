@@ -693,6 +693,30 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.syncPullRequest((await readJson()) as never));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/ready') {
+        sendJson(response, requestId, 200, await options.service.markPullRequestReady((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/merge-options') {
+        sendJson(response, requestId, 200, await options.service.readPullRequestMergeOptions((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/merge') {
+        sendJson(response, requestId, 200, await options.service.mergePullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/replies') {
+        sendJson(response, requestId, 200, await options.service.replyToPullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/update') {
+        sendJson(response, requestId, 200, await options.service.fetchPullRequestUpdate((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/check-logs') {
+        sendJson(response, requestId, 200, await options.service.readPullRequestCheckLogs((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/tasks/import/preview') {
         sendJson(response, requestId, 200, await options.service.previewImport((await readJson()) as never));
         return;

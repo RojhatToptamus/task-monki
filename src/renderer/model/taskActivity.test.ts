@@ -136,7 +136,7 @@ describe('task activity model', () => {
     expect(view.items.map((item) => item.title)).toEqual([
       'Draft PR available',
       'Checks running',
-      'GitHub review requested'
+      'Review requested'
     ]);
     expect(view.items.find((item) => item.title === 'Draft PR available')?.evidence).toBeUndefined();
     expect(allVisibleText(view.items)).not.toMatch(/sync|synced|refresh|refreshed/i);
@@ -314,15 +314,17 @@ describe('task activity model', () => {
         event('REVIEW_ROLLUP_CAPTURED', {
           pullRequestNumber: 82,
           headSha: 'abc123456789',
-          status: 'CHANGES_REQUESTED'
+          status: 'CHANGES_REQUESTED',
+          feedback: { reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'bob', state: 'APPROVED' }] }
         })
       ],
       limit: 10
     });
 
+    // A reviewer asked, not the platform: the platform is the actor, the reviewer is named.
     expect(view.items.map((item) => `${item.actor}: ${item.title}`)).toEqual([
       'Reviewer: Review requested changes',
-      'GitHub: GitHub requested changes'
+      'GitHub: alice requested changes'
     ]);
     expect(view.items[0].evidence).toBeUndefined();
   });

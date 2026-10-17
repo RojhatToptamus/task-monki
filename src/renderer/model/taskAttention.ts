@@ -7,6 +7,7 @@ import {
 import { isImplementationOutcomeBlocked } from './nextAction';
 import { deliveryProvider, deliveryWords } from './deliveryWords';
 import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
+import { pullRequestFeedbackLine } from './pullRequestFeedback';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
 
@@ -203,14 +204,19 @@ function describeDeliveryAttention(
   ) {
     return { label: deliveryWords('PR closed without merge', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'error' };
   }
+  // A board summary carries the facts behind the word, which the Inbox states beneath it.
+  const facts = 'delivery' in task ? task.delivery : undefined;
+  const detail = (value: string | undefined) => value ? { detail: deliveryWords(value, deliveryProvider(attentionDeliverySource(task))) } : {};
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
-    return { label: 'Checks failed', kind: 'delivery', tone: 'error' };
+    return { label: 'Checks failed', kind: 'delivery', tone: 'error', ...detail(failedChecksLine(facts?.failingChecks)) };
   }
   if (projection.reviews === 'CHANGES_REQUESTED') {
-    return { label: deliveryWords('GitHub changes requested', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'warning' };
+    return { label: 'Changes requested', kind: 'delivery', tone: 'warning', ...detail(facts?.feedback ? pullRequestFeedbackLine(facts.feedback) : undefined) };
   }
   if (projection.merge === 'BLOCKED') {
-    return { label: 'Merge blocked', kind: 'delivery', tone: 'error' };
+    const moved = facts?.baseMoved;
+    return { label: 'Merge blocked', kind: 'delivery', tone: 'error',
+      ...detail(moved ? `${moved.reason === 'CONFLICTS' ? 'Conflicts with' : 'Behind'} ${moved.base}` : undefined) };
   }
   const hasDeliveryEvidence =
     hasPullRequest(projection) ||
@@ -218,10 +224,24 @@ function describeDeliveryAttention(
     projection.reviews !== 'NOT_APPLICABLE' ||
     projection.merge !== 'NOT_APPLICABLE';
   if (projection.health === 'ERROR' && hasDeliveryEvidence) {
+    // A push the remote refused is the usual cause, and the one word that says what failed;
+    // one that may have landed is unconfirmed until a retry checks the remote.
+    if (projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS') {
+      return { label: projection.branchPublication === 'FAILED' ? 'Push failed' : 'Push unconfirmed', kind: 'delivery', tone: 'error', ...detail(facts?.pushError) };
+    }
     // The summary here can carry raw GitHub states; the label is the fact.
     return { label: 'Delivery needs attention', kind: 'delivery', tone: 'error' };
   }
   return undefined;
+}
+
+/** The failed checks by name: "unit and lint failed", or "unit, lint and 3 more failed". */
+function failedChecksLine(failed: { names: readonly string[]; count: number } | undefined): string | undefined {
+  if (!failed?.names.length) return undefined;
+  const { names, count } = failed;
+  if (count > names.length) return `${names.slice(0, 2).join(', ')} and ${count - Math.min(2, names.length)} more failed`;
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  return `${list} failed`;
 }
 
 /**

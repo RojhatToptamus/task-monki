@@ -19,6 +19,7 @@ import type {
   Board,
   BoardColor,
   BoardSnapshot,
+  BoardDeliveryFacts,
   BoardTaskSummary,
   BranchPublicationRecord,
   CiRollupRecord,
@@ -86,6 +87,7 @@ import {
   TASK_STORE_SCHEMA_VERSION,
   ARTIFACT_KINDS,
   CODEX_RUNTIME_ID,
+  baseMovedReason,
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
@@ -98,6 +100,7 @@ import {
   isTaskCreationToken,
   openReviewFindings,
   reviewDraftProblem,
+  UNSHIPPED_GIT_STATUSES,
   verifiedChecksMatchMergeHead,
   type ReviewFindingDecision,
   type TaskReviewDraft
@@ -286,9 +289,10 @@ function shouldCompleteFromPullRequestSync(
   task: Task,
   pullRequest: PullRequestSnapshotRecord,
   ci: CiRollupRecord,
-  merge: MergeSnapshotRecord
+  merge: MergeSnapshotRecord,
+  git: GitSnapshotRecord | undefined
 ): boolean {
-  if (!taskAllowsMergeCompletion(task)) {
+  if (!taskAllowsMergeCompletion(task, git)) {
     return false;
   }
   if (merge.status !== 'MERGED' || !completionPolicyRequiresMerge(task.completionPolicy)) {
@@ -313,9 +317,18 @@ function shouldCompleteFromPullRequestSync(
   );
 }
 
-function taskAllowsMergeCompletion(task: Task): boolean {
+// A task In progress completes on merge only when no turn is open or unsettled:
+// a pull request opened as a task starts In progress, and merging it on the
+// platform ends it. A failed, interrupted or lost turn stays the person's to settle.
+const MERGE_COMPLETION_SETTLED_RUNS = new Set<Task['projection']['agentRun']>(['IDLE', 'COMPLETED']);
+
+// Work the worktree held when last observed, such as fixes never pushed, keeps
+// the task open: a merge someone else made does not ship it.
+function taskAllowsMergeCompletion(task: Task, git: GitSnapshotRecord | undefined): boolean {
   return (
-    ['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) &&
+    (['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) ||
+      (task.workflowPhase === 'IN_PROGRESS' && MERGE_COMPLETION_SETTLED_RUNS.has(task.projection.agentRun))) &&
+    !(git && UNSHIPPED_GIT_STATUSES.has(git.status)) &&
     task.projection.agentReview?.status !== 'RUNNING' &&
     !getImplementationRetryReason(task)
   );
@@ -1984,12 +1997,13 @@ export class SqliteTaskStore {
   async getLatestGitSnapshot(taskId: string): Promise<GitSnapshotRecord | undefined> {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
-    const iterationId = task?.currentIterationId;
-    return clone(
-      this.state.gitSnapshots
-        .filter((snapshot) => snapshot.taskId === taskId && snapshot.iterationId === iterationId)
-        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0]
-    );
+    return clone(task ? this.latestGitSnapshot(task) : undefined);
+  }
+
+  private latestGitSnapshot(task: Task): GitSnapshotRecord | undefined {
+    return this.state.gitSnapshots
+      .filter((snapshot) => snapshot.taskId === task.id && snapshot.iterationId === task.currentIterationId)
+      .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
   }
 
   async getLatestPullRequest(taskId: string): Promise<PullRequestSnapshotRecord | undefined> {
@@ -4952,7 +4966,7 @@ export class SqliteTaskStore {
     );
     const taskBeforeMerge = this.state.tasks.find((task) => task.id === merge.taskId);
     const shouldComplete = taskBeforeMerge
-      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge)
+      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge, this.latestGitSnapshot(taskBeforeMerge))
       : false;
     await this.appendEvent(
       createDomainEvent({
@@ -7640,6 +7654,35 @@ function boardPullRequestRewritten(task: Task, state: StoreState): boolean {
   });
 }
 
+/**
+ * The facts behind a delivery state the person owes a step on, read only for
+ * a task whose projection asks: the latest records are first in each list.
+ */
+function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts | undefined {
+  const projection = task.projection;
+  const failing = projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED';
+  const changes = projection.reviews === 'CHANGES_REQUESTED';
+  const blocked = projection.merge === 'BLOCKED';
+  const pushFailed = projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS';
+  if (projection.githubPullRequest === 'MERGED' || (!failing && !changes && !blocked && !pushFailed)) return undefined;
+  const number = projection.githubPullRequestNumber;
+  const own = (record: { taskId: string }) => record.taskId === task.id;
+  const pullRequest = state.pullRequests.find((record) => own(record) && record.number === number);
+  const ci = failing ? state.ciRollups.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
+  const feedback = changes ? state.reviewRollups.find((record) => own(record) && record.pullRequestNumber === number)?.feedback : undefined;
+  const merge = blocked ? state.mergeSnapshots.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
+  const reason = merge ? baseMovedReason(merge.raw) : undefined;
+  const pushError = pushFailed ? state.branchPublications.find(own)?.error?.split('\n')[0]?.slice(0, 200) : undefined;
+  const failed = ci?.checkDetails?.filter((check) => check.status === 'failed') ?? [];
+  const facts: BoardDeliveryFacts = {
+    ...(failed.length ? { failingChecks: { names: failed.slice(0, 3).map((check) => check.name), count: failed.length } } : {}),
+    ...(feedback ? { feedback: { unresolvedCount: feedback.unresolvedCount, reviewers: feedback.reviewers } } : {}),
+    ...(reason && pullRequest?.baseRefName ? { baseMoved: { base: pullRequest.baseRefName, reason } } : {}),
+    ...(pushError ? { pushError } : {})
+  };
+  return Object.keys(facts).length > 0 ? facts : undefined;
+}
+
 function projectBoardTask(task: Task, state: StoreState): BoardTaskSummary {
   const review = task.projection.agentReview;
   const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
@@ -7665,6 +7708,7 @@ function projectBoardTask(task: Task, state: StoreState): BoardTaskSummary {
       ciChecks: task.projection.ciChecks,
       reviews: task.projection.reviews,
       merge: task.projection.merge,
+      branchPublication: task.projection.branchPublication,
       health: task.projection.health,
       summary: task.projection.summary,
       implementationRetry: task.projection.implementationRetry,
@@ -7678,7 +7722,8 @@ function projectBoardTask(task: Task, state: StoreState): BoardTaskSummary {
         ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
       }
     },
-    ...(boardPullRequestRewritten(task, state) ? { pullRequestRewritten: true } : {})
+    ...(boardPullRequestRewritten(task, state) ? { pullRequestRewritten: true } : {}),
+    ...((delivery) => delivery ? { delivery } : {})(boardDeliveryFacts(task, state))
   };
 }
 

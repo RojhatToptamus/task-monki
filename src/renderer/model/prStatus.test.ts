@@ -14,6 +14,7 @@ import {
   buildPrStatusActionState,
   buildPrStatusCreateOrPushTitle,
   buildPrStatusViewModel,
+  checksMayNotHaveStarted,
   shouldShowPrStatusOnOverview
 } from './prStatus';
 import { deliveryWords } from './deliveryWords';
@@ -29,9 +30,9 @@ describe('a GitLab merge request', () => {
       reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED' as const })
     };
     expect(buildPrStatusViewModel({ ...input, provider: 'GITLAB' })).toMatchObject({
-      headline: 'GitLab changes requested', prIdentityLine: '!82 Odd Minute Check', deliveryNoun: 'MR'
+      headline: 'Changes requested', prIdentityLine: '!82 Odd Minute Check', deliveryNoun: 'MR'
     });
-    expect(buildPrStatusViewModel(input)).toMatchObject({ headline: 'GitHub changes requested', prIdentityLine: '#82 Odd Minute Check' });
+    expect(buildPrStatusViewModel(input)).toMatchObject({ headline: 'Changes requested', prIdentityLine: '#82 Odd Minute Check' });
     // Numbers in running text take GitLab's sign too.
     expect(deliveryWords('PR #82 and pull request #83', 'GITLAB')).toBe('MR !82 and merge request !83');
   });
@@ -174,7 +175,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view.leadLine).toBe('A worktree is required before a draft PR can be opened.');
   });
 
-  it('prioritizes failing checks over GitHub review waiting', () => {
+  it('prioritizes failing checks over Waiting for review', () => {
     const view = buildPrStatusViewModel({
       task: taskFixture(),
       pullRequest: prFixture(),
@@ -311,7 +312,7 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(current.evidenceLine).toBe('2 checks passed for head abc123');
-    expect(stale).toMatchObject({ kind: 'STALE', headline: 'Stale' });
+    expect(stale).toMatchObject({ kind: 'STALE', headline: 'Checks stale' });
     expect(stale.evidenceLine).toBeUndefined();
     expect(unknown).toMatchObject({ kind: 'UNKNOWN', headline: 'Checks identity unknown' });
   });
@@ -354,6 +355,24 @@ describe('buildPrStatusViewModel', () => {
     expect(unknown.evidenceLine).toBe('Checks unknown');
   });
 
+  it('does not call a pushed head ready to merge before its checks had a minute to start', () => {
+    const pullRequest = prFixture();
+    const earlier = ciFixture({ id: 'ci-0', headSha: 'old111', status: 'PASSING', totalCount: 2, passingCount: 2, observedAt: '2026-10-17T10:00:00.000Z' });
+    const pushed = ciFixture({ headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:05:00.000Z' });
+    // Earlier heads had checks, so none yet for this one may only mean they have not started.
+    expect(checksMayNotHaveStarted(pullRequest, [pushed, earlier])).toBe(true);
+    const view = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest, ciRollup: pushed, checksMayNotHaveStarted: true,
+      reviewRollup: reviewFixture({ status: 'NOT_REQUESTED' }), mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
+    });
+    expect(view).toMatchObject({ kind: 'CHECKS_PENDING', headline: 'Checks pending', canMerge: false, fact: 'No checks reported yet' });
+    // A reading a minute after the head appeared that still has none says this head has no checks.
+    const later = ciFixture({ id: 'ci-2', headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:06:10.000Z' });
+    expect(checksMayNotHaveStarted(pullRequest, [later, pushed, earlier])).toBe(false);
+    // A pull request that never had checks is a repository without CI.
+    expect(checksMayNotHaveStarted(pullRequest, [pushed])).toBe(false);
+  });
+
   it('keeps GitHub review and draft state visible in a repository without CI', () => {
     const changesRequested = buildPrStatusViewModel({
       task: taskFixture(),
@@ -367,7 +386,7 @@ describe('buildPrStatusViewModel', () => {
       ciRollup: ciFixture({ status: 'NOT_APPLICABLE' })
     });
 
-    expect(changesRequested.headline).toBe('GitHub changes requested');
+    expect(changesRequested.headline).toBe('Changes requested');
     expect(changesRequested.evidenceLine).toBe('No checks reported');
     expect(draft.headline).toBe('Draft PR');
     expect(draft.evidenceLine).toBeUndefined();
@@ -402,7 +421,7 @@ describe('buildPrStatusViewModel', () => {
       mergeSnapshot: mergeFixture({ headSha: 'old-head', status: 'MERGED' })
     });
 
-    expect(view).toMatchObject({ kind: 'STALE', headline: 'Stale' });
+    expect(view).toMatchObject({ kind: 'STALE', headline: 'Checks stale' });
   });
 
   it('does not call a PR ready to merge when CI or review evidence is missing', () => {
@@ -447,9 +466,9 @@ describe('buildPrStatusViewModel', () => {
       reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED' })
     });
 
-    expect(waiting.headline).toBe('GitHub review waiting');
+    expect(waiting.headline).toBe('Waiting for review');
     expect(waiting.reviewLine).toBeUndefined();
-    expect(changesRequested.headline).toBe('GitHub changes requested');
+    expect(changesRequested.headline).toBe('Changes requested');
     expect(changesRequested.reviewLine).toBeUndefined();
   });
 
@@ -462,7 +481,7 @@ describe('buildPrStatusViewModel', () => {
       task: taskFixture(), gitSnapshot: gitFixture(), pullRequest: prFixture(pullRequest),
       reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED', feedback, ...reviewRollup })
     });
-    expect(view({})).toMatchObject({ headline: 'GitHub changes requested', feedbackLine: 'alice requested changes, 2 unresolved threads' });
+    expect(view({})).toMatchObject({ headline: 'Changes requested', feedbackLine: 'alice requested changes, 2 unresolved threads' });
     // A merged pull request asks nothing more, and another pull request's feedback is not this one's.
     expect(view({ status: 'MERGED', state: 'MERGED' }).feedbackLine).toBeUndefined();
     expect(view({}, { pullRequestNumber: 81 }).feedbackLine).toBeUndefined();
@@ -486,7 +505,7 @@ describe('buildPrStatusViewModel', () => {
     expect(merged.headline).toBe('Merged');
     expect(merged.reviewLine).toBeUndefined();
     expect(merged.mergeLine).toBeUndefined();
-    expect(stale.headline).toBe('Stale');
+    expect(stale.headline).toBe('Checks stale');
     expect(stale.reviewLine).toBeUndefined();
     expect(stale.mergeLine).toBeUndefined();
   });
@@ -574,7 +593,7 @@ describe('buildPrStatusViewModel', () => {
           pullRequest: prFixture(),
           reviewRollup: reviewFixture({ status: 'REQUESTED' })
         },
-        expected: { kind: 'GITHUB_REVIEW_WAITING', headline: 'GitHub review waiting', tone: 'action' }
+        expected: { kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', tone: 'action' }
       },
       {
         name: 'changes requested',
@@ -585,7 +604,7 @@ describe('buildPrStatusViewModel', () => {
         },
         expected: {
           kind: 'GITHUB_CHANGES_REQUESTED',
-          headline: 'GitHub changes requested',
+          headline: 'Changes requested',
           tone: 'error'
         }
       },
@@ -596,6 +615,18 @@ describe('buildPrStatusViewModel', () => {
           pullRequest: prFixture(),
           ciRollup: ciFixture({ status: 'PASSING', passingCount: 3 }),
           reviewRollup: reviewFixture({ status: 'APPROVED' }),
+          mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
+        },
+        expected: { kind: 'READY_TO_MERGE', headline: 'Ready to merge', tone: 'success' }
+      },
+      {
+        // A repository without CI never reports a check; the platform's merge state decides.
+        name: 'ready to merge without CI',
+        input: {
+          task: taskFixture(),
+          pullRequest: prFixture(),
+          ciRollup: ciFixture({ status: 'NO_CHECKS', totalCount: 0 }),
+          reviewRollup: reviewFixture({ status: 'NOT_REQUESTED' }),
           mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
         },
         expected: { kind: 'READY_TO_MERGE', headline: 'Ready to merge', tone: 'success' }
@@ -637,7 +668,7 @@ describe('buildPrStatusViewModel', () => {
         },
         expected: {
           kind: 'STALE',
-          headline: 'Stale',
+          headline: 'Checks stale',
           tone: 'action',
           canInvestigateFailure: false
         }
@@ -651,7 +682,7 @@ describe('buildPrStatusViewModel', () => {
         },
         expected: {
           kind: 'LOCAL_NOT_PUSHED',
-          headline: 'Local changes not pushed',
+          headline: 'Changes not pushed',
           tone: 'action',
           canInvestigateFailure: false,
           canPushUpdate: true
@@ -693,7 +724,7 @@ describe('buildPrStatusViewModel', () => {
       ciRollup: ciFixture({ headSha: 'old-head', status: 'PASSING', passingCount: 3 })
     });
 
-    expect(view.headline).toBe('Stale');
+    expect(view.headline).toBe('Checks stale');
     expect(view.freshnessLine).toBe('Refresh PR status for the current head.');
   });
 
@@ -745,7 +776,7 @@ describe('buildPrStatusViewModel', () => {
       }
     });
 
-    expect(view.headline).toBe('Local changes not pushed');
+    expect(view.headline).toBe('Changes not pushed');
     expect(view.canPushUpdate).toBe(true);
   });
 
@@ -849,7 +880,7 @@ describe('buildPrStatusViewModel', () => {
     });
     const actions = buildPrStatusActionState({ view });
 
-    expect(view.headline).toBe('Local changes not pushed');
+    expect(view.headline).toBe('Changes not pushed');
     expect(view.freshnessLine).toBe('Last push failed: GitHub authentication required.');
     expect(view.canPushUpdate).toBe(true);
     expect(actions.createOrPushDisabled).toBe(false);
@@ -904,12 +935,12 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(buildFailingChecksInvestigationPrompt(view)).toContain(
-      'Investigate the failing GitHub checks for PR #82 at head abc123.'
+      'Fix the failing GitHub checks for PR #82 at head abc123.'
     );
     expect(buildFailingChecksInvestigationPrompt(view)).toContain(
       '- build (CI): status failed | https://github.com/example/repo/actions/runs/2'
     );
-    expect(buildFailingChecksInvestigationPrompt(view)).toContain('Do not push unless the user approves.');
+    expect(buildFailingChecksInvestigationPrompt(view)).toContain('Do not push; the person pushes the update from Task Monki.');
   });
 });
 
@@ -1114,6 +1145,48 @@ function taskFixture(overrides: Partial<Task> = {}): Task {
     ...overrides
   };
 }
+
+describe('the pull request step', () => {
+  it('offers ready for review only for a current draft whose checks did not fail, and merge only when the evidence says it would merge', () => {
+    const draft = (extra: Partial<Parameters<typeof buildPrStatusViewModel>[0]> = {}) => buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture({ status: 'OPEN_DRAFT', isDraft: true }), gitSnapshot: gitFixture({ status: 'PUSHED' }),
+      branchPublication: branchPublicationFixture(), ...extra
+    });
+    expect(draft()).toMatchObject({ kind: 'DRAFT', canMarkReady: true, canMerge: false });
+    // Work the draft does not hold yet is pushed first; a failure is fixed first.
+    expect(draft({ gitSnapshot: gitFixture({ status: 'DIRTY', unstagedCount: 1 }) })).toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canMarkReady: false });
+    const failed = draft({ ciRollup: ciFixture({ status: 'FAILING', totalCount: 2, failingCount: 2, checkDetails: [
+      { name: 'unit', status: 'failed' }, { name: 'lint', status: 'failed' }
+    ] }) });
+    expect(failed).toMatchObject({ kind: 'CHECKS_FAILED', canMarkReady: false, fact: 'unit and lint failed' });
+
+    const ready = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'PUSHED' }), branchPublication: branchPublicationFixture(),
+      ciRollup: ciFixture({ status: 'PASSING', totalCount: 3, passingCount: 3 }),
+      reviewRollup: reviewFixture({ status: 'APPROVED' }), mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
+    });
+    expect(ready).toMatchObject({ kind: 'READY_TO_MERGE', canMerge: true, canMarkReady: false });
+    const waiting = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'PUSHED' }), branchPublication: branchPublicationFixture(),
+      reviewRollup: reviewFixture({ status: 'REQUESTED' }), mergeSnapshot: mergeFixture({ status: 'NOT_MERGED' })
+    });
+    expect(waiting).toMatchObject({ kind: 'GITHUB_REVIEW_WAITING', canMerge: false });
+
+    // A base that moved holds the merge back; the agent can merge it in, and the step says which way it moved.
+    const behind = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'PUSHED' }), branchPublication: branchPublicationFixture(),
+      reviewRollup: reviewFixture({ status: 'APPROVED' }),
+      mergeSnapshot: mergeFixture({ status: 'BLOCKED', raw: { mergeStateStatus: 'BEHIND', mergeable: 'MERGEABLE' } })
+    });
+    expect(behind).toMatchObject({ baseUpdate: { base: 'main', reason: 'BEHIND' }, fact: 'Behind main', canMerge: false });
+    // Commits on the pull request's branch beside the worktree's own are pulled in, never pushed over.
+    const diverged = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'DIVERGED', aheadCount: 1, behindCount: 2 }),
+      branchPublication: branchPublicationFixture()
+    });
+    expect(diverged).toMatchObject({ kind: 'BRANCH_DIVERGED', canPullChanges: true, canPushUpdate: false });
+  });
+});
 
 function prFixture(overrides: Partial<PullRequestSnapshotRecord> = {}): PullRequestSnapshotRecord {
   return {

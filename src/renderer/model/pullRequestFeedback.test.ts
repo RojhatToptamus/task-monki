@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import type { PullRequestDiscussion, PullRequestFeedback } from '../../shared/contracts';
-import { buildDiscussionViews, discussionSummary, displayPlatformText, pullRequestFeedbackLine, sentDiscussions, unaddressedDiscussions } from './pullRequestFeedback';
+import type { DomainEvent, PullRequestDiscussion, PullRequestFeedback } from '../../shared/contracts';
+import {
+  buildDiscussionViews,
+  buildReplyDrafts,
+  discussionSummary,
+  displayPlatformText,
+  pullRequestFeedbackLine,
+  repliedDiscussions,
+  sentDiscussions,
+  unaddressedDiscussions
+} from './pullRequestFeedback';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest } from './reviewFollowUp';
 
 const discussion = (id: string, extra: Partial<PullRequestDiscussion> = {}): PullRequestDiscussion => ({
@@ -37,6 +46,33 @@ describe('discussion views', () => {
     expect(views.find((view) => view.id === 'replied-by-them')?.sent).toBeUndefined();
     // Address comments adds what still asks for something and was not sent: never a resolved thread or a remark.
     expect(unaddressedDiscussions(views).map((view) => view.id)).toEqual(['replied-by-them', 'never-sent']);
+  });
+});
+
+describe('replies to post', () => {
+  it('drafts the agent\'s answer for each discussion until the person answers it, on the platform or from here', () => {
+    const review = discussion('review', { kind: 'REVIEW', resolvable: false, reviewState: 'CHANGES_REQUESTED', path: undefined, side: undefined, line: undefined });
+    const answeredThere = discussion('answered-there', {
+      comments: [...discussion('x').comments, { author: 'me', createdAt: '2026-10-10T13:00:00Z', body: 'Fixed.', truncated: false }]
+    });
+    const all = feedback([discussion('thread'), review, answeredThere]);
+    const first = round(['thread', 'review', 'answered-there'], [{ item: 1, outcome: 'FIXED' }, { item: 2, outcome: 'NOT_CHANGED' }, { item: 3, outcome: 'FIXED' }]);
+    const views = buildDiscussionViews(all, sentDiscussions([first]));
+    expect(buildReplyDrafts(views, 'me', 'abcdef1234567').map((draft) => [draft.discussionId, draft.body, draft.resolvable])).toEqual([
+      ['thread', 'Fixed in abcdef1.', true],
+      ['review', 'Not changed.', false]
+    ]);
+
+    // A review's answer is a comment of its own, so only the record of posting it says it was answered.
+    const posted = repliedDiscussions([
+      { type: 'PR_REPLIES_POSTED', occurredAt: '2026-10-10T14:00:00.000Z', payload: { replied: ['review'] } } as unknown as DomainEvent
+    ]);
+    expect(buildReplyDrafts(views, 'me', 'abcdef1234567', posted).map((draft) => draft.discussionId)).toEqual(['thread']);
+
+    // A later request sends it again, and its new answer is a new reply.
+    const later = { ...round(['review'], [{ item: 1, outcome: 'FIXED' }]), at: '2026-10-10T15:00:00.000Z' };
+    const again = buildDiscussionViews(all, sentDiscussions([first, later]));
+    expect(buildReplyDrafts(again, 'me', 'abcdef1234567', posted).map((draft) => draft.discussionId)).toEqual(['thread', 'review']);
   });
 });
 

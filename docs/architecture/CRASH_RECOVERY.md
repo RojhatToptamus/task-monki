@@ -185,6 +185,21 @@ longer has requires opening the pull request in a new task. Sync branch first
 records a base both the old and the new head descend from when the pull
 request was rewritten, so an interruption leaves a worktree that verifies.
 
+Marking a pull request ready, merging it and replying on it are the person's
+explicit writes, and nothing repeats them. Before a merge Task Monki records
+`PR_MERGE_REQUESTED` with the head and the method; the merge itself is pinned
+to that head (`sha`), so a retry can never merge a different commit, and after
+a crash the next refresh reads whether the platform merged. Marking ready is
+idempotent on the platform. Replies post one at a time and are recorded as
+`PR_REPLIES_POSTED` once they land, naming the discussions answered; a thread's
+reply also shows in the thread itself, so after a crash Reply offers only the
+discussions the person has not answered since the agent did. A review's answer
+is a comment of its own, so a crash after it lands and before the record is
+written leaves Reply offering it once more; the comment is on the platform to
+see. Merging observes the worktree before the write, so a crash cannot leave
+local work behind a merge Task Monki made. Fetching a branch update writes
+objects only.
+
 GitHub refresh is read-only and has no durable in-progress state. If it is
 interrupted, the last complete snapshot remains current until the user retries
 Refresh; startup does not manufacture or repeat a refresh.

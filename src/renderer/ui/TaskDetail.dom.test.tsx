@@ -6,6 +6,7 @@ import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/co
 import { EMPTY_REVIEW_DRAFT, REVIEW_REQUEST_ITEM_LIMIT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
+import { ReplyToReviewersModal } from './PullRequestDialogs';
 
 vi.mock('../api/taskManagerClient', () => ({
   taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })) }
@@ -357,6 +358,136 @@ describe('Pull request feedback', () => {
     expect(document.getElementById(send.getAttribute('aria-describedby')!)?.textContent).toBe(`${REVIEW_REQUEST_ITEM_LIMIT + 1} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`);
     fireEvent.click(send);
     expect(props.onSendReviewRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('Pull request steps', () => {
+  it('merges only the head the person saw, with the method and branch they chose', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const head = 'f'.repeat(40);
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      ciChecks: 'PASSING', reviews: 'APPROVED', merge: 'MERGEABLE'
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head });
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+      isDraft: false, headRefOid: head, headRefName: 'task/save', baseRefName: 'main', title: 'Save layouts', observedAt: TEST_NOW };
+    props.ciRollup = { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'PASSING', requiredStatus: 'UNKNOWN', totalCount: 1,
+      pendingCount: 0, passingCount: 1, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [{ name: 'unit', status: 'passed' }], observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: head, status: 'APPROVED', observedAt: TEST_NOW };
+    props.mergeSnapshot = { ...owner, id: 'merge-1', pullRequestNumber: 82, headSha: head, status: 'MERGEABLE', mergedAt: null, observedAt: TEST_NOW };
+    props.onReadPullRequestMergeOptions = vi.fn(async () => ({
+      methods: ['MERGE', 'SQUASH'] as Array<'MERGE' | 'SQUASH'>, defaultMethod: 'MERGE' as const,
+      deletesBranchOnMerge: false, canDeleteBranch: true, head: 'task/save', base: 'main'
+    }));
+    props.onMergePullRequest = vi.fn(async () => undefined);
+    render(<TaskDetail {...props} />);
+
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('heading', { name: 'Ready to merge' })).toBeDefined();
+    // A pull request already ready for review is not offered as a draft step.
+    expect(within(slot).queryByRole('button', { name: 'Ready for review' })).toBeNull();
+    fireEvent.click(within(slot).getByRole('button', { name: 'Merge' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Merge pull request' });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Squash' }));
+    // The task's own branch is deleted with the merge unless the person keeps it.
+    expect((within(dialog).getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    expect(props.onMergePullRequest).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Squash and merge' }));
+    await waitFor(() => expect(props.onMergePullRequest).toHaveBeenCalledWith('task-1', 'SQUASH', head, true));
+  });
+
+  it('keeps the pull request steps on the page while the agent review holds the Now panel', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const head = 'f'.repeat(40);
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      ciChecks: 'PASSING', reviews: 'APPROVED', merge: 'MERGEABLE',
+      agentReview: { status: 'NEEDS_CHANGES', runId: 'review-1', result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.',
+        findings: [{ id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.' }] } }
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run, makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head });
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+      isDraft: false, headRefOid: head, headRefName: 'task/save', baseRefName: 'main', title: 'Save layouts', observedAt: TEST_NOW };
+    props.ciRollup = { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'PASSING', requiredStatus: 'UNKNOWN', totalCount: 1,
+      pendingCount: 0, passingCount: 1, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [{ name: 'unit', status: 'passed' }], observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: head, status: 'APPROVED', observedAt: TEST_NOW };
+    props.mergeSnapshot = { ...owner, id: 'merge-1', pullRequestNumber: 82, headSha: head, status: 'MERGEABLE', mergedAt: null, observedAt: TEST_NOW };
+    props.onReadPullRequestMergeOptions = vi.fn(async () => ({
+      methods: ['MERGE'] as Array<'MERGE'>, defaultMethod: 'MERGE' as const, deletesBranchOnMerge: false, canDeleteBranch: true, head: 'task/save', base: 'main'
+    }));
+    props.onMergePullRequest = vi.fn(async () => undefined);
+    render(<TaskDetail {...props} />);
+
+    // The review's step leads; merging is still a step the page offers, beside it.
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('button', { name: 'Request changes' })).toBeDefined();
+    expect(within(slot).queryByRole('button', { name: 'Merge' })).toBeNull();
+    const delivery = screen.getByRole('heading', { name: 'Delivery' }).closest('section')!;
+    expect(within(delivery).getByText('Ready to merge')).toBeDefined();
+    fireEvent.click(within(delivery).getByRole('button', { name: 'Merge' }));
+    expect(await screen.findByRole('dialog', { name: 'Merge pull request' })).toBeDefined();
+    expect(props.onMergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it('keeps a reply that landed in view when only resolving its thread failed, and never posts it again', async () => {
+    const drafts = [{ discussionId: 'PRRT_1', kind: 'THREAD' as const, author: 'alice', summary: 'Handle a null layout.', location: 'save.js:2',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4.', resolvable: true }];
+    const onSubmit = vi.fn(async () => ({ posted: 1, resolved: 0, requested: [],
+      failed: [{ discussionId: 'PRRT_1', replied: true, error: 'Replied, but the thread was not resolved: GitHub refused.' }] }));
+    const modal = (current: typeof drafts) => (
+      <ReplyToReviewersModal platform="GitHub" drafts={current} reviewers={[]} onSubmit={onSubmit} onCancel={vi.fn()} fallbackReturnFocusRef={{ current: null }} />
+    );
+    const mounted = render(modal(drafts));
+    const dialog = screen.getByRole('dialog', { name: 'Reply on GitHub' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Post 1 reply' }));
+    expect(await within(dialog).findByText('Replied, but the thread was not resolved: GitHub refused.')).toBeDefined();
+    // The refresh that follows answers the discussion, so its draft leaves; what became of the reply stays in view.
+    mounted.rerender(modal([]));
+    expect(within(dialog).getByText('Replied, but the thread was not resolved: GitHub refused.')).toBeDefined();
+    expect(within(dialog).queryByRole('textbox', { name: 'Reply to @alice' })).toBeNull();
+    expect((within(dialog).getByRole('button', { name: 'Post replies' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts only the replies the person kept, as they edited them, with the resolving they chose', async () => {
+    const drafts = [
+      { discussionId: 'PRRT_1', kind: 'THREAD' as const, author: 'alice', summary: 'Handle a null layout.', location: 'save.js:2',
+        outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Null returns undefined.', resolvable: true },
+      { discussionId: 'PRR_1', kind: 'REVIEW' as const, author: 'bob', summary: 'Keep the export name.',
+        outcome: 'NOT_CHANGED' as const, body: 'Not changed. Other packages import it.', resolvable: false }
+    ];
+    const onSubmit = vi.fn(async () => ({ posted: 1, resolved: 0, requested: [], failed: [{ discussionId: 'PRR_1', error: 'GitHub refused the comment.' }] }));
+    const onCancel = vi.fn();
+    render(<ReplyToReviewersModal platform="GitHub" drafts={drafts} reviewers={['alice']} onSubmit={onSubmit} onCancel={onCancel}
+      fallbackReturnFocusRef={{ current: null }} />);
+    const dialog = screen.getByRole('dialog', { name: 'Reply on GitHub' });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Reply to @alice' }), { target: { value: 'Fixed: null now returns undefined.' } });
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Resolve thread' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Ask @alice to review again' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Post 2 replies' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith([
+      { discussionId: 'PRRT_1', body: 'Fixed: null now returns undefined.', resolve: false },
+      { discussionId: 'PRR_1', body: 'Not changed. Other packages import it.', resolve: false }
+    ], []));
+    // What landed leaves the list; what was refused stays with its reason, for another try.
+    expect(await within(dialog).findByText('GitHub refused the comment.')).toBeDefined();
+    expect(within(dialog).queryByRole('textbox', { name: 'Reply to @alice' })).toBeNull();
+    expect(within(dialog).getByRole('textbox', { name: 'Reply to @bob' })).toBeDefined();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
 

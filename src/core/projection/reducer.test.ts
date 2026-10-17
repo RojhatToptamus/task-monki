@@ -45,6 +45,13 @@ describe('projection reducer', () => {
     }), run)).toEqual(projection);
   });
 
+  it('keeps an open pull request open while an update to it is requested', () => {
+    const open = { ...createInitialProjection(now), githubPullRequest: 'OPEN_DRAFT' as const, githubPullRequestNumber: 3 };
+    expect(reduceProjection(open, createEvent('PR_CREATE_REQUESTED', {}))).toMatchObject({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 3 });
+    // A closed one is being replaced, so none is open until the new one is read.
+    expect(reduceProjection({ ...open, githubPullRequest: 'CLOSED_UNMERGED' }, createEvent('PR_CREATE_REQUESTED', {})).githubPullRequest).toBe('NOT_CREATED');
+  });
+
   it('keeps preview lifecycle events out of task workflow and agent projections', () => {
     const state = createEmptyState();
     const task = createTask();

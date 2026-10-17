@@ -112,6 +112,55 @@ describe('TaskManagerService GitLab work', () => {
     ]);
   }, 60_000);
 
+  it('marks a merge request ready, answers its threads, reads a failed job, and merges the head it saw', async () => {
+    const { scenario, gitlab, root } = await gitlabScenario('task-monki-gitlab-mr-loop');
+    const teammate = path.join(root, 'teammate');
+    await git(root, ['clone', '--quiet', gitlab.barePath('group/sub/widgets'), teammate]);
+    await git(teammate, ['checkout', '--quiet', '-b', 'fix-save']);
+    const head = await commit(teammate, 'save.js', 'export const save = (layout) => layout ?? undefined;\n', 'Guard');
+    await git(teammate, ['push', '--quiet', gitlab.barePath('group/sub/widgets'), 'HEAD:refs/heads/fix-save']);
+    await gitlab.setProjectSettings('group/sub/widgets', { squash_option: 'default_on' });
+    const thread = 'f'.repeat(40);
+    await gitlab.setItem({
+      project: 'group/sub/widgets', iid: 8, kind: 'MERGE_REQUEST', title: 'Draft: Guard an empty layout', draft: true,
+      sourceBranch: 'fix-save', targetBranch: 'main', forceRemoveSourceBranch: true, reviewers: [{ username: 'alice', state: 'requested_changes' }],
+      jobs: [{ id: 41, name: 'unit', stage: 'test', status: 'failed' }],
+      jobTraces: { '41': 'section_start:1700000000:step_script\r\u001b[0KRunning tests\n\u001b[31m1 failed\u001b[0m\nsection_end:1700000001:step_script\r\u001b[0K\n' },
+      discussions: [{ id: thread, path: 'save.js', newLine: 1, notes: [{ id: 21, author: 'alice', body: 'Return undefined.', created_at: '2026-10-10T10:00:00Z' }] }]
+    });
+    const task = await scenario.service.openPullRequest({
+      repositoryId: scenario.repositoryId, pullRequest: { repository: project, kind: 'PULL_REQUEST', number: 8 }
+    });
+    const mergeRequest = async () => (await gitlab.items()).find((item) => item.kind === 'MERGE_REQUEST' && item.iid === 8)!;
+
+    // The job's trace without GitLab's section markers and colour codes.
+    expect(await scenario.service.readPullRequestCheckLogs({ taskId: task.id })).toEqual([{
+      name: 'test: unit', link: 'https://gitlab.com/group/sub/widgets/-/jobs/41', text: 'Running tests\n1 failed', truncated: false
+    }]);
+
+    // GitLab marks a draft by its title, so ready is the title without the marker.
+    await scenario.service.markPullRequestReady({ taskId: task.id });
+    expect(await mergeRequest()).toMatchObject({ title: 'Guard an empty layout', draft: false });
+    expect(await scenario.service.readPullRequestMergeOptions({ taskId: task.id })).toEqual({
+      methods: ['SQUASH', 'MERGE'], defaultMethod: 'SQUASH', deletesBranchOnMerge: true, canDeleteBranch: true, head: 'fix-save', base: 'main'
+    });
+
+    expect(await scenario.service.replyToPullRequest({ taskId: task.id, replies: [{ discussionId: thread, body: 'Done.', resolve: true }], requestReviewFrom: [] }))
+      .toEqual({ posted: 1, resolved: 1, requested: [], failed: [] });
+    const answered = (await mergeRequest()).discussions![0]!;
+    expect(answered.resolved).toBe(true);
+    expect(answered.notes.at(-1)).toMatchObject({ author: 'lab-tester', body: 'Done.' });
+    // A reply already notifies a GitLab reviewer; asking again is GitLab's own step.
+    await expect(scenario.service.replyToPullRequest({ taskId: task.id, replies: [], requestReviewFrom: ['alice'] }))
+      .rejects.toThrow('asked again on the platform');
+
+    // The merge request deletes its branch itself, so the dialog offers no box and sends no choice.
+    await scenario.service.mergePullRequest({ taskId: task.id, method: 'SQUASH', expectedHeadSha: head, deleteBranch: false });
+    expect(await mergeRequest()).toMatchObject({ state: 'merged', mergedWith: { squash: true, removedBranch: true } });
+    expect(await gitlab.refSha('group/sub/widgets', 'refs/heads/fix-save')).toBeUndefined();
+    expect((await scenario.service.getTaskDetail(task.id)).task.workflowPhase).toBe('DONE');
+  }, 90_000);
+
   it('creates one task per GitLab issue and opens a linked draft merge request', async () => {
     const { scenario, gitlab } = await gitlabScenario('task-monki-gitlab-issue');
     await gitlab.setItem({

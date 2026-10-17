@@ -1,4 +1,5 @@
 import type {
+  GitHubCheckDetailRecord,
   GitHubRepositoryRecord,
   MergeStatus,
   PullRequestSnapshotRecord,
@@ -6,14 +7,15 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
-import type { PullRequestReviewer } from '../../shared/pullRequestFeedback';
+import type { PullRequestMergeMethod, PullRequestMergeOptions } from '../../shared/pullRequestActions';
+import type { PullRequestDiscussion, PullRequestReviewer } from '../../shared/pullRequestFeedback';
 import type { RemoteRepositoryRef } from '../../shared/remoteWork';
 import { git } from '../git/gitCli';
 import { parseCiRollup } from '../github/GitHubService';
 import { listCheckoutRemoteRepositories } from '../remote/RemoteCheckout';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
 import { canonicalPlatformTime } from '../remote/platformTime';
-import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
+import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
 import { GitLabCli, gitLabProject } from './GitLabCli';
 import {
   GITLAB_DISCUSSION_PAGE,
@@ -34,6 +36,8 @@ interface GitLabMergeRequest {
   target_branch?: string;
   source_project_id?: number;
   target_project_id?: number;
+  /** The merge request's own choice, which a merge follows unless it says otherwise. */
+  force_remove_source_branch?: boolean | null;
   sha?: string;
   merged_at?: string | null;
   detailed_merge_status?: string;
@@ -204,6 +208,105 @@ export class GitLabService implements PullRequestDelivery {
     return branch;
   }
 
+  async markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void> {
+    const { project, base } = await this.address(worktree, address);
+    const mergeRequest = await this.cli.request<GitLabMergeRequest>({ host: project.host, endpoint: base, cwd: worktree.worktreePath, subject: project.path });
+    // GitLab marks a draft by its title, so ready is the title without the marker.
+    const title = (mergeRequest.title ?? '').replace(DRAFT_PREFIX, '').trim();
+    if (!title) throw new RemoteWorkError('FAILED', 'GitLab did not report the merge request title.');
+    await this.cli.request({ host: project.host, endpoint: base, method: 'PUT', fields: { title }, cwd: worktree.worktreePath, subject: project.path });
+  }
+
+  async readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions> {
+    const { project, base } = await this.address(worktree, address);
+    const cwd = worktree.worktreePath;
+    const [settings, mergeRequest] = await Promise.all([
+      this.cli.request<GitLabProjectSettings>({ host: project.host, endpoint: `projects/${gitLabProject(project.path)}`, cwd, subject: project.path }),
+      this.cli.request<GitLabMergeRequest>({ host: project.host, endpoint: base, cwd, subject: project.path })
+    ]);
+    return gitLabMergeOptions(settings, mergeRequest);
+  }
+
+  async mergePullRequest(worktree: WorktreeRecord, address: PullRequestAddress, input: {
+    method: PullRequestMergeMethod;
+    expectedHeadSha: string;
+    deleteBranch?: string;
+  }): Promise<void> {
+    const { project, base } = await this.address(worktree, address);
+    try {
+      await this.cli.request({
+        host: project.host, endpoint: `${base}/merge`, method: 'PUT', cwd: worktree.worktreePath, timeout: 120_000,
+        fields: {
+          sha: input.expectedHeadSha,
+          squash: String(input.method === 'SQUASH'),
+          // Sent only to delete: an explicit false would override the merge request's own choice to delete.
+          ...(input.deleteBranch ? { should_remove_source_branch: 'true' } : {})
+        }
+      });
+    } catch (error) {
+      throw new Error(gitLabMergeFailure(error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  async replyToDiscussion(
+    worktree: WorktreeRecord,
+    address: PullRequestAddress,
+    discussion: Pick<PullRequestDiscussion, 'id' | 'kind'>,
+    body: string
+  ): Promise<void> {
+    if (discussion.kind !== 'THREAD') {
+      await this.commentOnPullRequest(worktree, address, body);
+      return;
+    }
+    const { project, base } = await this.address(worktree, address);
+    await this.cli.request({
+      host: project.host, endpoint: `${base}/discussions/${encodeURIComponent(discussion.id)}/notes`, method: 'POST',
+      stdinField: { name: 'body', value: body }, cwd: worktree.worktreePath, timeout: 60_000
+    });
+  }
+
+  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void> {
+    const { project, base } = await this.address(worktree, address);
+    await this.cli.request({
+      host: project.host, endpoint: `${base}/discussions/${encodeURIComponent(discussionId)}`, method: 'PUT',
+      fields: { resolved: 'true' }, cwd: worktree.worktreePath, timeout: 60_000
+    });
+  }
+
+  async commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void> {
+    const { project, base } = await this.address(worktree, address);
+    await this.cli.request({
+      host: project.host, endpoint: `${base}/notes`, method: 'POST',
+      stdinField: { name: 'body', value: body }, cwd: worktree.worktreePath, timeout: 60_000
+    });
+  }
+
+  // A reply on GitLab already notifies the reviewer; asking again has no REST call to make.
+  readonly canRequestReviewers = false;
+
+  async requestReviewers(): Promise<void> {
+    throw new RemoteWorkError('FAILED', 'GitLab reviewers are asked again on GitLab.');
+  }
+
+  async readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined> {
+    const { project } = await this.address(worktree, address);
+    const match = /^https:\/\/([^/]+)\/(.+)\/-\/jobs\/(\d+)(?:[/?#].*)?$/u.exec(check.link ?? '');
+    // Only a job of this merge request's own project; a link elsewhere is not read.
+    if (!match || match[1]!.toLowerCase() !== project.host.toLowerCase() || match[2]!.toLowerCase() !== project.path.toLowerCase()) {
+      return undefined;
+    }
+    return this.cli.requestText({
+      host: project.host, endpoint: `projects/${gitLabProject(project.path)}/jobs/${match[3]}/trace`,
+      cwd: worktree.worktreePath, timeout: 60_000
+    });
+  }
+
+  private async address(worktree: WorktreeRecord, address: PullRequestAddress): Promise<{ project: RemoteRepositoryRef; base: string }> {
+    const project = address.target?.repository ?? await this.requireProject(worktree);
+    if (!Number.isSafeInteger(address.number) || address.number < 1) throw new Error('The merge request is not recorded.');
+    return { project, base: `projects/${gitLabProject(project.path)}/merge_requests/${address.number}` };
+  }
+
   private async requireProject(worktree: WorktreeRecord): Promise<RemoteRepositoryRef> {
     const project = await detectGitLabProject(worktree.worktreePath);
     if (!project) throw new Error('No GitLab remote was found.');
@@ -237,9 +340,46 @@ async function detectGitLabRemote(worktreePath: string): Promise<DeliveryRemote 
   };
 }
 
+const DRAFT_PREFIX = /^\s*(?:draft:|\[draft\]|\(draft\))\s*/iu;
+
 /** GitLab marks a draft by its title. */
 export function draftTitle(title: string): string {
-  return /^\s*(?:draft:|\[draft\]|\(draft\))/iu.test(title) ? title : `Draft: ${title}`;
+  return DRAFT_PREFIX.test(title) ? title : `Draft: ${title}`;
+}
+
+interface GitLabProjectSettings {
+  default_branch?: string;
+  merge_method?: string;
+  squash_option?: string;
+}
+
+/**
+ * GitLab merges the way the project is set up (a merge commit, semi-linear or
+ * fast-forward); squashing is the choice a merge request makes, as the project allows.
+ */
+export function gitLabMergeOptions(settings: GitLabProjectSettings, mergeRequest: GitLabMergeRequest): PullRequestMergeOptions {
+  const squash = settings.squash_option ?? 'default_off';
+  const methods: PullRequestMergeMethod[] = squash === 'never' ? ['MERGE']
+    : squash === 'always' ? ['SQUASH']
+      : squash === 'default_on' ? ['SQUASH', 'MERGE'] : ['MERGE', 'SQUASH'];
+  const head = mergeRequest.source_branch || undefined;
+  return {
+    methods,
+    defaultMethod: methods[0]!,
+    // The project's default only sets the box when the merge request is created; its own setting is what a merge follows.
+    deletesBranchOnMerge: mergeRequest.force_remove_source_branch === true,
+    canDeleteBranch: mergeRequest.source_project_id === mergeRequest.target_project_id && Boolean(head) && head !== settings.default_branch,
+    ...(head ? { head } : {}),
+    ...(mergeRequest.target_branch ? { base: mergeRequest.target_branch } : {})
+  };
+}
+
+/** A merge GitLab refused, in words that say what to do about it. */
+export function gitLabMergeFailure(text: string): string {
+  if (/\b409\b|sha does not match/iu.test(text)) return 'The merge request changed since Task Monki read it. Refresh, then merge.';
+  if (/\b405\b|method not allowed|not mergeable|cannot be merged/iu.test(text)) return 'GitLab refused the merge: the merge request cannot merge yet.';
+  if (/\b401\b|\b403\b|forbidden|unauthorized/iu.test(text)) return 'The signed-in GitLab account cannot merge this merge request.';
+  return 'GitLab could not merge the merge request.';
 }
 
 /**

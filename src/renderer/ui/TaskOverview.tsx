@@ -15,6 +15,8 @@ import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { ActionMenu } from './ActionMenu';
 import { useClampOverflow } from './useClampOverflow';
 import { ReportedQuote } from './ReportedQuote';
+import { MessageMarkdown } from './MessageMarkdown';
+import { displayPlatformText } from '../model/pullRequestFeedback';
 
 /**
  * The Overview's one raised element: what the task needs now. Every owner —
@@ -362,7 +364,8 @@ export function OverviewRequest({
       {quoted ? (
         <figure className={`tm-oresult__report tm-orequest__quote${expanded ? ' tm-orequest__quote--expanded' : ''}`}>
           <figcaption>{snapshot?.author ? `@${snapshot.author}` : source?.providerName}</figcaption>
-          <blockquote ref={quote} id={source && !prompt ? bodyId : undefined}>{quoted}</blockquote>
+          {/* Written for the platform, which renders it: markdown here too, its HTML read as the words it shows. */}
+          <blockquote ref={quote} id={source && !prompt ? bodyId : undefined}><MessageMarkdown text={displayPlatformText(quoted)} /></blockquote>
         </figure>
       ) : null}
       {prompt ? (

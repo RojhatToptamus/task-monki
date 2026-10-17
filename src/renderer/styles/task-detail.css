@@ -614,10 +614,17 @@
   color: var(--accent);
 }
 
-/* Expanded, the whole captured text shows; the report clamp below would win otherwise. */
-.tm-oresult__report.tm-orequest__quote--expanded blockquote {
+/* The platform's text is markdown with blocks of its own, so it is cut at a
+   height rather than a line count; expanded, all of it shows. */
+.tm-oresult__report.tm-orequest__quote blockquote {
   display: block;
+  max-height: calc(var(--t-body) * var(--lh-prose) * 6);
+  white-space: normal;
   -webkit-line-clamp: unset;
+}
+
+.tm-oresult__report.tm-orequest__quote--expanded blockquote {
+  max-height: none;
 }
 
 .tm-orequest__attachments {
@@ -2561,3 +2568,411 @@
 .tm-detail__assistant:hover { background-color: var(--hover); color: var(--text); }
 .tm-detail__assistant[aria-pressed='true'] { background-color: var(--sel); color: var(--text); }
 .tm-detail__assistant-dot { position: absolute; top: 5px; left: 21px; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }
+
+/* The pull request in the task's record: what it is, where it goes, and each
+   gate a merge waits on. A record group like Details: recessed, no actions. */
+.tm-prrecord .tm-osection__title {
+  white-space: nowrap;
+}
+
+.tm-prrecord__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-body);
+  text-decoration: none;
+}
+
+/* The mark sits with the first line, not the middle of a title that wraps to two. */
+.tm-prrecord__identity > svg {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: calc((var(--lh-body) - 13px) / 2);
+  color: var(--muted);
+}
+
+a.tm-prrecord__identity:hover .tm-prrecord__title {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tm-prrecord__number {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: var(--w-regular);
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-prrecord__title {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+/* The branch it merges and the base it merges into: strings to copy, so mono. */
+.tm-prrecord__branches {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.tm-prrecord__branches code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-prrecord__branches code:last-child {
+  flex: 0 0 auto;
+}
+
+/* Gate values wrap rather than cut: a reviewer list has a line per person. */
+.tm-prrecord__gates .tm-props__row > dd {
+  overflow: visible;
+  white-space: normal;
+}
+
+.tm-prrecord__toggle,
+.tm-prrecord__value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  color: var(--text);
+  font-size: var(--t-body);
+  text-align: left;
+}
+
+.tm-prrecord__toggle {
+  margin: -2px -4px;
+  padding: 2px 4px;
+  border-radius: var(--r-xs);
+}
+
+.tm-prrecord__toggle:hover {
+  background-color: var(--hover);
+}
+
+.tm-prrecord__toggle .tm-disclosure__chevron {
+  color: var(--muted);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.tm-prrecord__toggle[aria-expanded='true'] .tm-disclosure__chevron {
+  transform: rotate(90deg);
+}
+
+.tm-prrecord__idle {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+.tm-prrecord__people {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tm-prrecord__people li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tm-prrecord__person {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A gate's word takes its tone's ink; the record has no other colour. */
+.tm-prrecord__word {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: var(--t-help);
+}
+
+.tm-prrecord__word[data-tone='success'] { color: var(--verified-ink); }
+.tm-prrecord__word[data-tone='error'] { color: var(--blocked-ink); }
+.tm-prrecord__word[data-tone='action'] { color: var(--waiting-ink); }
+
+.tm-prrecord__link {
+  font-size: var(--t-body);
+}
+
+/* Checks as dense rows: the mark, the name, how long it ran, its page. */
+.tm-prrecord__checks {
+  display: grid;
+  margin: -2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tm-prrecord__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: var(--h-row-dense);
+  font-size: var(--t-help);
+}
+
+.tm-prrecord__check > svg {
+  flex: 0 0 auto;
+}
+
+.tm-prrecord__checkname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-prrecord__duration {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--t-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-prrecord__open {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--h-compact);
+  height: var(--h-compact);
+  border-radius: var(--r-xs);
+  color: var(--muted);
+}
+
+.tm-prrecord__open:hover {
+  background-color: var(--hover);
+  color: var(--text);
+}
+
+/* In the Now panel, the failed checks the step names, each with its log. */
+.tm-prstep__checks {
+  display: grid;
+  gap: 6px;
+  max-width: 72ch;
+}
+
+/* A failed check's actions stay beside its name, not across the panel. */
+.tm-prstep__checks > .tm-prrecord__checks {
+  max-width: 480px;
+}
+
+.tm-prstep__logtoggle {
+  flex: 0 0 auto;
+}
+
+.tm-prstep__log {
+  display: grid;
+  gap: 6px;
+}
+
+.tm-prstep__log pre {
+  max-height: 280px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--well);
+  color: var(--text-soft);
+  font: var(--t-help)/var(--lh-ui) var(--font-mono);
+  white-space: pre;
+}
+
+.tm-prstep__lognote {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+/* Merge: the branches, the method the repository allows, the branch to delete. */
+.tm-merge-modal {
+  width: min(480px, 100%);
+}
+
+.tm-merge-modal__branches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.tm-merge-modal__branches code {
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
+}
+
+.tm-merge-modal__branches .tm-merge-modal__sha {
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.tm-merge-modal__methods {
+  margin-top: 4px;
+}
+
+.tm-merge-modal__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--h-compact);
+  margin-top: 12px;
+  color: var(--text-soft);
+  font-size: var(--t-body);
+}
+
+.tm-merge-modal__check code {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
+}
+
+.tm-merge-modal .tm-modal__actions,
+.tm-reply-modal .tm-modal__actions {
+  margin-top: 20px;
+}
+
+/* Replies: each discussion's answer, the person's to edit, keep or leave out. */
+.tm-reply-modal {
+  width: min(640px, 100%);
+}
+
+.tm-reply-modal__list {
+  display: grid;
+  gap: 8px;
+  max-height: min(56vh, 560px);
+  margin-top: 4px;
+  overflow: auto;
+}
+
+.tm-reply {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--well);
+}
+
+.tm-reply[data-included='false'] .tm-reply__summary {
+  color: var(--faint);
+}
+
+.tm-reply__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--t-body);
+}
+
+.tm-reply__author {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: var(--w-medium);
+}
+
+.tm-reply__where {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-reply__outcome {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-soft);
+  font-size: var(--t-help);
+}
+
+.tm-reply__outcome[data-outcome='FIXED'] {
+  color: var(--verified-ink);
+}
+
+.tm-reply__summary {
+  margin: 0;
+  overflow: hidden;
+  padding-left: 24px;
+  color: var(--muted);
+  font-size: var(--t-help);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-reply textarea {
+  min-height: 56px;
+  margin-left: 24px;
+  width: calc(100% - 24px);
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--text);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  resize: vertical;
+}
+
+.tm-reply__resolve {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--h-compact);
+  color: var(--text-soft);
+  font-size: var(--t-help);
+}
+
+.tm-reply > .tm-reply__resolve,
+.tm-reply > .form-error {
+  padding-left: 24px;
+}
+
+/* A reply that landed holds the checkbox's place with its mark. */
+.tm-reply__mark {
+  flex: 0 0 auto;
+  width: 16px;
+  color: var(--verified-ink);
+}
+
+.tm-reply-modal__reviewers {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+}

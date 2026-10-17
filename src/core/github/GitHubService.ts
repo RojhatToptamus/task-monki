@@ -12,6 +12,7 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
+import type { PullRequestMergeOptions } from '../../shared/pullRequestActions';
 import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
 import { git, gitSucceeds } from '../git/gitCli';
 import {
@@ -23,9 +24,17 @@ import {
   type GitHubFeedbackData,
   type GitHubThreadConnection
 } from './GitHubPullRequestFeedback';
+import {
+  GITHUB_MERGE_OPTIONS_QUERY,
+  GITHUB_RESOLVE_THREAD_MUTATION,
+  GITHUB_THREAD_REPLY_MUTATION,
+  gitHubActionsJob,
+  gitHubMergeFailure,
+  parseGitHubMergeOptions
+} from './GitHubPullRequestActions';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
 import { execFileOwnedPortable } from '../process/ownedProcess';
-import type { DeliveryRemote, DeliveryTarget, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
+import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
 import { UNTRUSTED_CHECKOUT_GIT_ENV } from '../remote/RemoteCheckout';
 import { canonicalPlatformTime } from '../remote/platformTime';
 
@@ -457,6 +466,104 @@ export class GitHubService implements PullRequestDelivery {
     return parseGitHubPullRequestFeedback(data, location.number, new Date().toISOString());
   }
 
+  async markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void> {
+    requireGitHubLocation(address);
+    await this.exec(['pr', 'ready', address.url], worktree.worktreePath, 60_000);
+  }
+
+  async readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions> {
+    const location = requireGitHubLocation(address);
+    const result = await this.exec([
+      'api', 'graphql', '--hostname', location.host,
+      '-f', `query=${GITHUB_MERGE_OPTIONS_QUERY}`,
+      '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`
+    ], worktree.worktreePath);
+    return parseGitHubMergeOptions(parseJson<{ data?: Parameters<typeof parseGitHubMergeOptions>[0] }>(result.stdout, {}).data);
+  }
+
+  /**
+   * Through the REST API rather than `gh pr merge`, which also deletes and
+   * switches local branches: the task's worktree is Task Monki's to manage.
+   */
+  async mergePullRequest(worktree: WorktreeRecord, address: PullRequestAddress, input: {
+    method: 'SQUASH' | 'MERGE' | 'REBASE';
+    expectedHeadSha: string;
+    deleteBranch?: string;
+  }): Promise<void> {
+    const location = requireGitHubLocation(address);
+    const repository = `repos/${location.owner}/${location.name}`;
+    try {
+      await this.exec([
+        'api', '--hostname', location.host, '--method', 'PUT', `${repository}/pulls/${location.number}/merge`,
+        '-f', `merge_method=${input.method.toLowerCase()}`, '-f', `sha=${input.expectedHeadSha}`
+      ], worktree.worktreePath, 120_000);
+    } catch (error) {
+      throw new Error(gitHubMergeFailure(commandText(error)));
+    }
+    if (input.deleteBranch) {
+      // The repository may delete it itself; a branch already gone is the outcome asked for.
+      await this.exec([
+        'api', '--hostname', location.host, '--method', 'DELETE',
+        `${repository}/git/refs/heads/${input.deleteBranch.split('/').map(encodeURIComponent).join('/')}`
+      ], worktree.worktreePath).catch(() => undefined);
+    }
+  }
+
+  async replyToDiscussion(
+    worktree: WorktreeRecord,
+    address: PullRequestAddress,
+    discussion: { id: string; kind: 'THREAD' | 'REVIEW' | 'COMMENT' },
+    body: string
+  ): Promise<void> {
+    const location = requireGitHubLocation(address);
+    if (discussion.kind !== 'THREAD') {
+      await this.commentOnPullRequest(worktree, address, body);
+      return;
+    }
+    await this.exec([
+      'api', 'graphql', '--hostname', location.host,
+      '-f', `query=${GITHUB_THREAD_REPLY_MUTATION}`, '-f', `threadId=${discussion.id}`, '-F', 'body=@-'
+    ], worktree.worktreePath, 60_000, [], body);
+  }
+
+  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void> {
+    const location = requireGitHubLocation(address);
+    await this.exec([
+      'api', 'graphql', '--hostname', location.host,
+      '-f', `query=${GITHUB_RESOLVE_THREAD_MUTATION}`, '-f', `threadId=${discussionId}`
+    ], worktree.worktreePath, 60_000);
+  }
+
+  async commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void> {
+    requireGitHubLocation(address);
+    await this.exec(['pr', 'comment', address.url, '--body-file', '-'], worktree.worktreePath, 60_000, [], body);
+  }
+
+  readonly canRequestReviewers = true;
+
+  async requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void> {
+    const location = requireGitHubLocation(address);
+    if (names.length === 0) return;
+    await this.exec([
+      'api', '--hostname', location.host, '--method', 'POST',
+      `repos/${location.owner}/${location.name}/pulls/${location.number}/requested_reviewers`,
+      ...names.flatMap((name) => ['-f', `reviewers[]=${name}`])
+    ], worktree.worktreePath, 60_000);
+  }
+
+  async readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined> {
+    const location = requireGitHubLocation(address);
+    const job = gitHubActionsJob(check.link);
+    // Only a job of this pull request's own repository; a link elsewhere is not read.
+    if (!job || job.owner.toLowerCase() !== location.owner.toLowerCase() || job.name.toLowerCase() !== location.name.toLowerCase()) {
+      return undefined;
+    }
+    const result = await this.exec([
+      'api', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/jobs/${job.job}/logs`
+    ], worktree.worktreePath, 60_000);
+    return result.stdout;
+  }
+
   buildPullRequestBody(input: {
     task: Task;
     gitDiffStat?: string;
@@ -526,6 +633,17 @@ export class GitHubService implements PullRequestDelivery {
       throw error;
     }
   }
+}
+
+function requireGitHubLocation(address: PullRequestAddress): NonNullable<ReturnType<typeof gitHubPullRequestLocation>> {
+  const location = gitHubPullRequestLocation(address.url);
+  if (!location || location.number !== address.number) throw new Error('The pull request is not recorded.');
+  return location;
+}
+
+function commandText(error: unknown): string {
+  const execError = error as ExecError;
+  return `${bufferToString(execError?.stderr)}\n${bufferToString(execError?.stdout)}\n${error instanceof Error ? error.message : ''}`;
 }
 
 function headOwner(repository: { path: string }): string {

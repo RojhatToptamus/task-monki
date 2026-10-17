@@ -1,5 +1,6 @@
 import {
   isOpenDiscussion,
+  type DomainEvent,
   type PullRequestComment,
   type PullRequestDiscussion,
   type PullRequestFeedback,
@@ -79,6 +80,76 @@ export function buildDiscussionViews(
       open: pullRequestOpen && isOpenDiscussion(discussion),
       ...(request && !answeredSince ? { sent: request } : {})
     };
+  });
+}
+
+/** An answer to a discussion, ready for the person to post where the discussion lives. */
+export interface ReplyDraft {
+  discussionId: string;
+  kind: PullRequestDiscussion['kind'];
+  author?: string;
+  /** The discussion's first line, so the person sees what the reply answers. */
+  summary: string;
+  location?: string;
+  outcome: 'FIXED' | 'NOT_CHANGED';
+  /** Written from the agent's answer; the person edits it before anything is posted. */
+  body: string;
+  /** A thread the reply can resolve. */
+  resolvable: boolean;
+}
+
+/**
+ * When the person last answered each discussion from Task Monki. A review's
+ * answer is a comment of its own on the pull request, never one of the
+ * review's comments, so only these records say it was answered.
+ */
+export function repliedDiscussions(events: readonly DomainEvent[]): Map<string, string> {
+  const replied = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== 'PR_REPLIES_POSTED') continue;
+    const ids = (event.payload as { replied?: unknown } | undefined)?.replied;
+    for (const id of Array.isArray(ids) ? ids : []) {
+      if (typeof id === 'string' && time(event.occurredAt) > time(replied.get(id) ?? '')) replied.set(id, event.occurredAt);
+    }
+  }
+  return replied;
+}
+
+/**
+ * Discussions the agent answered that no one has replied to on the platform
+ * since: each answer becomes a reply the person can post. A fix names the head
+ * it is in; a decision the agent left to the person is the person's to answer.
+ */
+export function buildReplyDrafts(
+  discussions: readonly DiscussionView[],
+  viewer: string | undefined,
+  headSha: string | undefined,
+  /** When the person answered each discussion from Task Monki, in this clock. */
+  replied: ReadonlyMap<string, string> = new Map()
+): ReplyDraft[] {
+  return discussions.flatMap((discussion): ReplyDraft[] => {
+    const sent = discussion.sent;
+    if (!discussion.open || (sent?.outcome !== 'FIXED' && sent?.outcome !== 'NOT_CHANGED')) return [];
+    // Answered from here after the request went out: a later request sends it again.
+    if (time(replied.get(discussion.id) ?? '') > time(sent.at)) return [];
+    const since = time(sent.seenAt ?? sent.at);
+    if (viewer && discussion.comments.some((comment) => comment.author === viewer && time(comment.createdAt) > since)) return [];
+    const note = sent.note?.trim();
+    const body = sent.outcome === 'FIXED'
+      ? [headSha ? `Fixed in ${headSha.slice(0, 7)}.` : 'Fixed.', note].filter(Boolean).join(' ')
+      : note ? `Not changed. ${note}` : 'Not changed.';
+    const location = formatDiscussionLocation(discussion);
+    const author = discussionAuthor(discussion);
+    return [{
+      discussionId: discussion.id,
+      kind: discussion.kind,
+      ...(author ? { author } : {}),
+      summary: discussionSummary(discussion),
+      ...(location ? { location } : {}),
+      outcome: sent.outcome,
+      body,
+      resolvable: discussion.resolvable && !discussion.resolved
+    }];
   });
 }
 

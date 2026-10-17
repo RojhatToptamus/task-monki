@@ -586,7 +586,8 @@ export function reduceProjection(
     case 'PR_CREATE_REQUESTED':
       return {
         ...base,
-        githubPullRequest: 'NOT_CREATED',
+        // Push update takes this path too: an open pull request stays open while its update goes out.
+        githubPullRequest: base.githubPullRequest === 'OPEN_DRAFT' || base.githubPullRequest === 'OPEN_READY' ? base.githubPullRequest : 'NOT_CREATED',
         summary: 'Creating or locating a draft pull request.',
         findings,
         updatedAt: event.receivedAt

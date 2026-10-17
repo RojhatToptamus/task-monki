@@ -36,6 +36,8 @@ import {
   type RepositoryImpact,
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
+  type PullRequestMergeMethod,
+  type PullRequestReply,
   type RefinePromptRequest,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
@@ -68,6 +70,7 @@ import {
   selectTaskEvents,
   selectTaskRuns
 } from '../model/selectors';
+import { checksMayNotHaveStarted } from '../model/prStatus';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import {
   createUpdateRefreshScheduler,
@@ -1604,6 +1607,10 @@ export function App() {
   const selectedCiRollup = selectedTask && taskDetail
     ? selectLatestCiRollup(taskDetail, selectedTask)
     : undefined;
+  const selectedChecksMayNotHaveStarted = useMemo(
+    () => Boolean(taskDetail && checksMayNotHaveStarted(selectedPullRequest, taskDetail.ciRollups)),
+    [taskDetail, selectedPullRequest]
+  );
   const selectedReviewRollup = selectedTask && taskDetail
     ? selectLatestReviewRollup(taskDetail, selectedTask)
     : undefined;
@@ -2059,6 +2066,43 @@ export function App() {
       // The creation dialog keeps its inputs and displays the failure for retry.
       if (title !== undefined) throw caught;
       reportActionError(caught, 'Failed to create pull request.');
+    }
+  };
+
+  const markPullRequestReady = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.markPullRequestReady({ taskId }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not mark it ready for review.');
+    }
+  };
+
+  // The merge dialog shows its own failure and keeps its choices for another try.
+  const mergePullRequest = async (taskId: string, method: PullRequestMergeMethod, expectedHeadSha: string, deleteBranch: boolean) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.mergePullRequest({ taskId, method, expectedHeadSha, deleteBranch }));
+    } finally {
+      await refresh();
+    }
+  };
+
+  const replyToPullRequest = async (taskId: string, replies: PullRequestReply[], reviewers: string[]) => {
+    setError(undefined);
+    try {
+      const result = await withAppAction(() => taskManagerApi.replyToPullRequest({ taskId, replies, requestReviewFrom: reviewers }));
+      // The replies land on the platform, out of view, so a toast says they did.
+      if (result.posted > 0 || result.requested.length > 0) {
+        const posted = result.posted > 0 ? `Posted ${result.posted} ${result.posted === 1 ? 'reply' : 'replies'}` : '';
+        const asked = result.requested.length > 0 ? `asked ${result.requested.map((name) => `@${name}`).join(' and ')} to review again` : '';
+        const message = [posted, asked].filter(Boolean).join(' and ');
+        notify(`${message.charAt(0).toUpperCase()}${message.slice(1)}.`, 'success');
+      }
+      return result;
+    } finally {
+      await refresh();
     }
   };
 
@@ -2862,6 +2906,7 @@ export function App() {
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
             pullRequestHeads={selectedPullRequestHeads}
+            checksMayNotHaveStarted={selectedChecksMayNotHaveStarted}
             ciRollup={selectedCiRollup}
             reviewRollup={selectedReviewRollup}
             mergeSnapshot={selectedMergeSnapshot}
@@ -2928,6 +2973,12 @@ export function App() {
             onCreatePullRequest={createPullRequest}
             onSyncPullRequest={syncPullRequest}
             onRefreshGitHub={refreshGitHub}
+            onMarkPullRequestReady={markPullRequestReady}
+            onReadPullRequestMergeOptions={(taskId) => taskManagerApi.readPullRequestMergeOptions({ taskId })}
+            onMergePullRequest={mergePullRequest}
+            onReplyToPullRequest={replyToPullRequest}
+            onReadPullRequestCheckLogs={(taskId) => taskManagerApi.readPullRequestCheckLogs({ taskId })}
+            onFetchPullRequestUpdate={(taskId, from) => taskManagerApi.fetchPullRequestUpdate({ taskId, from })}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}

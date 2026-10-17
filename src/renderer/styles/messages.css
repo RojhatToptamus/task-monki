@@ -50,7 +50,8 @@
   border-radius: var(--r-2xs);
   background: var(--well);
   color: var(--text-soft);
-  font: 0.92em var(--font-mono);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
 }
 
 /* A code block is the shared well: --r-sm, mono meta on its 16px line at
@@ -282,3 +283,29 @@
 .tm-round__answers li[data-outcome='NONE'] .tm-round__outcome { color: var(--faint); }
 /* Under the agent's reply the answers start after a hairline. */
 .tm-message-content > .tm-round__answers:not(:first-child) { margin-top: 12px; padding-top: 12px; box-shadow: inset 0 1px 0 var(--hair); }
+
+/* A table in a message: hairlines between rows, a muted head, scrolling in its own frame. */
+.tm-message-markdown__table {
+  max-width: 100%;
+  margin: 12px 0 0;
+  overflow-x: auto;
+}
+
+.tm-message-markdown table {
+  border-collapse: collapse;
+  font-size: var(--t-help);
+  line-height: var(--lh-ui);
+}
+
+.tm-message-markdown th,
+.tm-message-markdown td {
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--hair);
+  text-align: left;
+  vertical-align: top;
+}
+
+.tm-message-markdown th {
+  color: var(--muted);
+  font-weight: var(--w-medium);
+}
