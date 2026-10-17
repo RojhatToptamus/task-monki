@@ -83,8 +83,7 @@ function revealLabel(): string {
 }
 
 function openTargetErrorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof Error)) return fallback;
-  return error.message.replace(/^Error invoking remote method 'openTarget:(?:inspect|execute)': (?:Error: )?/, '');
+  return error instanceof Error ? error.message : fallback;
 }
 
 async function writeClipboard(text: string): Promise<void> {

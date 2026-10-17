@@ -22,12 +22,7 @@ import { SourceFolderActions } from './PreviewSourceFolder';
 import { useNotify } from '../NotifyContext';
 
 export const message = (error: unknown) =>
-  error instanceof Error
-    ? error.message.replace(
-        /^Error invoking remote method '[^']+': (?:\w*Error: )?/,
-        ''
-      )
-    : 'The preview request failed.';
+  error instanceof Error ? error.message : 'The preview request failed.';
 export const expected = (status?: PreviewStatus) => ({
   active: status?.active?.id ?? null,
   candidate: status?.candidate?.id ?? null,

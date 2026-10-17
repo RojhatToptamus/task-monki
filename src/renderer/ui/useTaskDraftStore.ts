@@ -31,7 +31,7 @@ export function useTaskDraftStore<T>(write: (taskId: string, value: T) => Promis
       } while (saved !== entry.value);
       setErrors((current) => ({ ...current, [taskId]: undefined }));
     })().catch((caught: unknown) => {
-      entry.error = `Draft could not be saved: ${String(caught)}`;
+      entry.error = `Draft could not be saved: ${caught instanceof Error ? caught.message : String(caught)}`;
       setErrors((current) => ({ ...current, [taskId]: entry.error }));
       throw caught;
     }).finally(() => {
