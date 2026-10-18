@@ -4422,11 +4422,23 @@ export class TaskManagerService {
   };
 
   allowBugReplayRuns: BugReplayApi['allowBugReplayRuns'] = (input) => {
-    const { taskId, templateDigest } = bugReplayInput.lease(input);
+    const { taskId, approvalDigest, keep } = bugReplayInput.lease(input);
     return this.withControlAction(async () => {
       await this.assertBugTaskOpen(taskId);
-      await this.requireBugReplay().replay.allowRuns(taskId, templateDigest);
+      await this.requireBugReplay().replay.allowRuns(taskId, approvalDigest, keep);
       return this.bugSnapshot(taskId);
+    });
+  };
+
+  listBugReplayApprovals: BugReplayApi['listBugReplayApprovals'] = async () =>
+    this.bugReplay ? this.bugReplay.keptApprovals() : [];
+
+  revokeBugReplayApproval: BugReplayApi['revokeBugReplayApproval'] = (input) => {
+    const { approvalId } = bugReplayInput.approval(input);
+    return this.withControlAction(async () => {
+      const { replay } = this.requireBugReplay();
+      await replay.revokeApproval(approvalId);
+      return replay.keptApprovals();
     });
   };
 

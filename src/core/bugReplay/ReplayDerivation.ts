@@ -53,6 +53,11 @@ export interface ReplayCommandSummary {
 export interface DerivedReplaySpec {
   spec: PreviewSpec;
   templateDigest: string;
+  /**
+   * What the person approves: the template with the env files replays get and every outside host
+   * they call, so a change to any of them asks again.
+   */
+  approvalDigest: string;
   commands: ReplayCommandSummary[];
   addedInstallJobs: string[];
   outsideHosts: string[];
@@ -192,12 +197,15 @@ export async function deriveReplaySpec(input: ReplayDerivationInput): Promise<De
     .filter(([, service]) => service.type === 'postgres' || service.type === 'redis')
     .map(([id]) => id);
   const derived = environment as unknown as PreviewSpec;
+  const template = templateDigest(derived, input);
+  const hosts = [...outsideHosts].sort();
   return {
     spec: derived,
-    templateDigest: templateDigest(derived, input),
+    templateDigest: template,
+    approvalDigest: approvalDigest(template, input.envFiles.map((file) => file.relativePath), hosts),
     commands,
     addedInstallJobs,
-    outsideHosts: [...outsideHosts].sort().slice(0, 10),
+    outsideHosts: hosts.slice(0, 10),
     secretIds,
     managedDatabases,
     serviceDirectories
@@ -385,6 +393,11 @@ function templateDigest(spec: PreviewSpec, input: ReplayDerivationInput): string
     return value.split(input.exportRoot).join('<export>').split(input.ceiling).join('<ceiling>').split(input.runName).join('<name>');
   });
   return createHash('sha256').update(stableJson(JSON.parse(text))).digest('hex');
+}
+
+/** The template with what the lease sheet states beside it: the env files and every outside host. */
+function approvalDigest(template: string, envFiles: string[], hosts: string[]): string {
+  return createHash('sha256').update(stableJson({ template, envFiles: [...envFiles].sort(), hosts })).digest('hex');
 }
 
 export function stableJson(value: unknown): string {

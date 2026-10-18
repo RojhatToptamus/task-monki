@@ -160,11 +160,14 @@ needs the desktop app on macOS, a configuration file, and an open task; while th
 agent changes the task's files, it waits and says why.
 
 Before anything starts, choose which git-ignored `.env` files the copy gets and
-select **Start clean copy**, then read **Clean runs need your approval** (what
-runs and as whom, when runs happen, the commands, source, data, secrets, env
-files and network) and select **Approve clean runs**. The approval covers 30
-runs of this task's app until Task Monki quits; clean runs also follow agent
-turns automatically.
+select **Start the app**, then read **Replays need approval** (what runs and as
+whom, when replays happen, the commands, data, secrets, env files and network).
+**Approve replays** covers 30 replays of this task's app until Task Monki quits.
+**Always approve in this repository** keeps the approval for every task of the
+repository, after restarts too, until you revoke it under Settings,
+Repositories, Replay approvals; a recipe that runs other commands, gets other
+env files or calls other hosts asks again. Replays also follow agent turns
+automatically.
 
 Use the page as you did when the bug happened. **Reload page** reloads it as a
 step. **Mark bug** stops recording and lets you point at what is wrong; click an

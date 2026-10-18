@@ -622,6 +622,8 @@ function installIpcHandlers(): void {
   handleTrustedIpc('bug:recording:start', (_, input: Parameters<TaskManagerService['startBugRecording']>[0]) => service.startBugRecording(input));
   handleTrustedIpc('bug:recording:envFiles', (_, input: Parameters<TaskManagerService['chooseBugEnvFiles']>[0]) => service.chooseBugEnvFiles(input));
   handleTrustedIpc('bug:runs:allow', (_, input: Parameters<TaskManagerService['allowBugReplayRuns']>[0]) => service.allowBugReplayRuns(input));
+  handleTrustedIpc('bug:approvals:list', () => service.listBugReplayApprovals());
+  handleTrustedIpc('bug:approvals:revoke', (_, input: Parameters<TaskManagerService['revokeBugReplayApproval']>[0]) => service.revokeBugReplayApproval(input));
   handleTrustedIpc('bug:recording:cancel', (_, input: Parameters<TaskManagerService['cancelBugRecording']>[0]) => service.cancelBugRecording(input));
   handleTrustedIpc('bug:recording:mark', (_, input: Parameters<TaskManagerService['markBug']>[0]) => service.markBug(input));
   handleTrustedIpc('bug:recording:pick', (_, input: Parameters<TaskManagerService['pickBugCheck']>[0]) => service.pickBugCheck(input));

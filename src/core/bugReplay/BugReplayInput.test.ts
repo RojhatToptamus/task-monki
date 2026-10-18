@@ -30,16 +30,19 @@ describe('Bug Replay request validation', () => {
     expect(() => bugReplayInput.send({ taskId: 'task-1', clientOperationId: 'not-a-uuid' })).toThrow(refused);
   });
 
-  it('allows runs only for a whole template digest', () => {
-    expect(bugReplayInput.lease({ taskId: 'task-1', templateDigest: 'a'.repeat(64) })).toEqual({ taskId: 'task-1', templateDigest: 'a'.repeat(64) });
-    expect(() => bugReplayInput.lease({ taskId: 'task-1', templateDigest: 'A'.repeat(64) })).toThrow(refused);
-    expect(() => bugReplayInput.lease({ taskId: 'task-1', templateDigest: 'a'.repeat(63) })).toThrow(refused);
+  it('allows runs only for a whole approval digest, and keeps the approval only on an explicit yes', () => {
+    expect(bugReplayInput.lease({ taskId: 'task-1', approvalDigest: 'a'.repeat(64) })).toEqual({ taskId: 'task-1', approvalDigest: 'a'.repeat(64), keep: false });
+    expect(bugReplayInput.lease({ taskId: 'task-1', approvalDigest: 'a'.repeat(64), keep: true })).toMatchObject({ keep: true });
+    expect(() => bugReplayInput.lease({ taskId: 'task-1', approvalDigest: 'A'.repeat(64) })).toThrow(refused);
+    expect(() => bugReplayInput.lease({ taskId: 'task-1', approvalDigest: 'a'.repeat(63) })).toThrow(refused);
+    // Anything but a boolean is refused rather than read as keeping.
+    expect(() => bugReplayInput.lease({ taskId: 'task-1', approvalDigest: 'a'.repeat(64), keep: 'yes' })).toThrow(refused);
   });
 
   it('routes only the generic bug actions through the action request', () => {
     expect(bugReplayInput.action({ taskId: 'task-1', action: 'verify-again' })).toEqual({ taskId: 'task-1', action: 'verify-again' });
     // These carry their own inputs and checks: an idempotency key, a digest, a run.
-    for (const action of ['send-to-agent', 'allow-runs', 'cancel-run', 'record-again', 'delete-everything']) {
+    for (const action of ['send-to-agent', 'allow-runs', 'always-allow-runs', 'cancel-run', 'record-again', 'delete-everything']) {
       expect(() => bugReplayInput.action({ taskId: 'task-1', action })).toThrow(refused);
     }
   });

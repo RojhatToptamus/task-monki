@@ -1,5 +1,5 @@
 import { compileBugCase } from '../../core/bugReplay/BugCaseCompiler';
-import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, StoredBugReplayRun } from '../../core/bugReplay/BugReplayRecords';
+import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayKeptApprovalRecord, StoredBugReplayRun } from '../../core/bugReplay/BugReplayRecords';
 import type { BugReplayDomObservation, BugReplayFrame, BugReplayRequestFact } from '../../core/bugReplay/runner/protocol';
 import type { BugCaseV1 } from '../../shared/bugCase';
 import { BUG_RECORDING_SCHEMA, type BugRecordingLogV1, type BugRecordingPick } from '../../shared/bugRecording';
@@ -203,6 +203,23 @@ export function versionRecord(overrides: Partial<BugCaseVersionRecord> = {}): Bu
     baselineTreeId: 'tree-recorded',
     toolchain: TOOLCHAIN,
     createdAt: at(0),
+    ...overrides
+  };
+}
+
+/** Replays of the checkout recipe the person kept approved for its repository. */
+export function keptApprovalRecord(overrides: Partial<BugReplayKeptApprovalRecord> = {}): BugReplayKeptApprovalRecord {
+  return {
+    id: '7f4c1a52-0d6e-4b8a-9c3f-2e1d5a6b7c8d',
+    repositoryId: 'repository-1',
+    approvalDigest: 'a'.repeat(64),
+    commands: [
+      { service: 'install', command: 'npm ci --no-audit --no-fund', directory: '.' },
+      { service: 'web', command: 'node server.js', directory: '.' }
+    ],
+    envFiles: [],
+    calls: [],
+    keptAt: at(0),
     ...overrides
   };
 }

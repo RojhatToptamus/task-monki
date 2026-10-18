@@ -235,7 +235,7 @@ async function gate(w: Workspace) {
 async function allowRuns(w: Workspace, service = w.service): Promise<void> {
   await until(async () => Boolean(await service.pendingLease(w.task.id)), 'a run to ask for permission');
   const lease = (await service.pendingLease(w.task.id))!;
-  await service.allowRuns(w.task.id, lease.templateDigest);
+  await service.allowRuns(w.task.id, lease.approvalDigest);
 }
 
 function sha256(text: string): string {
@@ -405,46 +405,46 @@ describe('Whether a verdict is about the files the worktree holds', () => {
   }, 90_000);
 });
 
-describe('Saving a recording', () => {
-  /** A recorded page as the in-app browser host would open it, with the bug already marked. */
-  function stubHost(): RecordingBrowserHost {
-    const recorder = {
-      title: 'Checkout',
-      seal() {},
-      unseal() {},
-      noteStart() {},
-      noteReload() {},
-      markIncomplete() {},
-      dispose() {},
-      log: () => checkoutRecording(),
-      pick: async (): Promise<BugRecordingPick> => TOTAL_PICK,
-      cancelPick: async () => undefined,
-      noteShot: async () => undefined,
-      showMarks: async () => undefined,
-      timeline: () => ({ entries: [], steps: 0, omitted: 0 }),
-      onlyStart: () => false,
-      restartAt: () => false,
+/** A recorded page as the in-app browser host would open it, with the bug already marked. */
+function stubHost(): RecordingBrowserHost {
+  const recorder = {
+    title: 'Checkout',
+    seal() {},
+    unseal() {},
+    noteStart() {},
+    noteReload() {},
+    markIncomplete() {},
+    dispose() {},
+    log: () => checkoutRecording(),
+    pick: async (): Promise<BugRecordingPick> => TOTAL_PICK,
+    cancelPick: async () => undefined,
+    noteShot: async () => undefined,
+    showMarks: async () => undefined,
+    timeline: () => ({ entries: [], steps: 0, omitted: 0 }),
+    onlyStart: () => false,
+    restartAt: () => false,
+    screenshot: async () => Buffer.from('png')
+  };
+  return {
+    open: async () => ({
+      recorder: recorder as unknown as RecorderSession,
+      chromium: '152.0.0.0',
+      reload: async () => undefined,
+      open: async () => undefined,
+      close: async () => undefined,
       screenshot: async () => Buffer.from('png')
-    };
-    return {
-      open: async () => ({
-        recorder: recorder as unknown as RecorderSession,
-        chromium: '152.0.0.0',
-        reload: async () => undefined,
-        open: async () => undefined,
-        close: async () => undefined,
-        screenshot: async () => Buffer.from('png')
-      })
-    };
-  }
+    })
+  };
+}
 
+describe('Saving a recording', () => {
   it('keeps the name and notes the person wrote where a panel mounting again reads them, announcing only a change', async () => {
     const w = await openWorkspace();
     const recording = new BugRecordingService(w.service, () => stubHost(), async () => undefined);
     w.service.attachRecording(recording);
     await recording.start(w.task.id);
     await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
-    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.templateDigest);
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.approvalDigest);
     await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
     const { sessionId } = recording.sessionView(w.task.id)!;
     await recording.mark(sessionId);
@@ -470,7 +470,7 @@ describe('Saving a recording', () => {
     w.service.attachRecording(recording);
     await recording.start(w.task.id);
     await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
-    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.templateDigest);
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.approvalDigest);
     await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
     const { sessionId } = recording.sessionView(w.task.id)!;
     await recording.mark(sessionId);
@@ -547,7 +547,7 @@ describe('Starting a recording on another page', () => {
     w.service.attachRecording(recording);
     await recording.start(w.task.id);
     await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
-    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.templateDigest);
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.approvalDigest);
     await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
     const { sessionId } = recording.sessionView(w.task.id)!;
 
@@ -567,5 +567,73 @@ describe('Starting a recording on another page', () => {
     // The page's bar shows where it is, query included.
     expect(recording.sessionView(w.task.id)?.routePath).toBe('/checkout?step=2');
     await recording.cancel(sessionId);
+  }, 60_000);
+});
+
+describe('Replay approvals kept for a repository', () => {
+  /** Starts recording the task and waits until it either asks for approval or opens the page. */
+  async function recordUntilAsked(w: Workspace, service = w.service, taskId = w.task.id) {
+    const recording = new BugRecordingService(service, () => stubHost(), async () => undefined);
+    service.attachRecording(recording);
+    await recording.start(taskId);
+    await until(() => ['NEEDS_APPROVAL', 'RECORDING', 'FAILED'].includes(recording.sessionView(taskId)?.phase ?? ''), 'the recording to ask or open the page');
+    return recording;
+  }
+
+  async function keepFrom(w: Workspace, recording: BugRecordingService) {
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.approvalDigest, true);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
+    await recording.cancel(recording.sessionView(w.task.id)!.sessionId);
+  }
+
+  it('records and replays without asking after a restart, and asks again for a changed recipe or once revoked', async () => {
+    const w = await openWorkspace();
+    const first = await recordUntilAsked(w);
+    expect(first.sessionView(w.task.id)?.phase).toBe('NEEDS_APPROVAL');
+    await keepFrom(w, first);
+
+    // Task Monki quits, and the next start finds the approval kept for the repository.
+    w.service.beginShutdown();
+    await w.service.drain();
+    const restarted = w.open();
+    await restarted.service.init();
+    const second = await recordUntilAsked(w, restarted.service);
+    expect(second.sessionView(w.task.id)?.phase).toBe('RECORDING');
+    await second.cancel(second.sessionView(w.task.id)!.sessionId);
+
+    // The bug's replays run the same recipe, so they start without asking too.
+    const { version } = await savedBug(w);
+    await restarted.service.queueQualification(w.task.id, version.caseId, version.id);
+    await until(async () => (await gate(w))?.state === 'REPRODUCED', 'the bug to reproduce without asking');
+
+    // A recipe that runs something else asks again.
+    await fs.writeFile(path.join(w.repo, 'preview.yaml'), RECIPE.replace('[node, server.js]', '[node, --trace-warnings, server.js]'));
+    const changed = await recordUntilAsked(w, restarted.service);
+    expect(changed.sessionView(w.task.id)?.phase).toBe('NEEDS_APPROVAL');
+    await changed.cancel(changed.sessionView(w.task.id)!.sessionId);
+    await fs.writeFile(path.join(w.repo, 'preview.yaml'), RECIPE);
+
+    // Revoked, it ends at once, not at the next restart: the kept recipe's replays wait for the person.
+    const [kept] = await restarted.service.keptApprovals();
+    expect(kept).toMatchObject({ repositoryId: w.task.repositoryId, repositoryName: 'shop', commands: [{ service: 'web', command: 'node server.js', directory: '.' }] });
+    await restarted.service.revokeApproval(kept.id);
+    expect(await restarted.service.keptApprovals()).toEqual([]);
+    await restarted.service.runAgain(w.task.id);
+    await until(async () => (await gate(w))?.activeRun?.waitingFor === 'APPROVAL', 'the replays to ask again');
+  }, 90_000);
+
+  it('keeps only what the task asks to approve, and only for the task’s own repository', async () => {
+    const w = await openWorkspace();
+    // A digest the task is not asking about keeps nothing.
+    await expect(w.service.allowRuns(w.task.id, 'f'.repeat(64), true)).rejects.toThrow('What replays run has changed. Read it again.');
+    expect(await w.service.keptApprovals()).toEqual([]);
+    await keepFrom(w, await recordUntilAsked(w));
+
+    // Another repository that runs the very same recipe is asked for its own approval.
+    const fork = await addTestRepository(w.persistence.tasks, path.join(w.root, 'fork'));
+    const forkTask = await w.persistence.tasks.createTask({ title: 'Checkout total', prompt: 'Fix it in the fork.', repositoryId: fork.id });
+    const forked = await recordUntilAsked(w, w.service, forkTask.id);
+    expect(forked.sessionView(forkTask.id)?.phase).toBe('NEEDS_APPROVAL');
+    await forked.cancel(forked.sessionView(forkTask.id)!.sessionId);
   }, 60_000);
 });

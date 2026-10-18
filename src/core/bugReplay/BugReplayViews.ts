@@ -63,8 +63,6 @@ export async function buildBugReplaySnapshot(
     storage: { usedBytes: data.used, limitBytes: BUG_REPLAY_STORAGE_LIMIT_BYTES }
   };
   if (recording) snapshot.recording = recording;
-  const lease = service.authorization.anyLease(taskId);
-  if (lease) snapshot.lease = lease;
   if (data.active && data.gate && data.capture) {
     const view = await caseView(service, data.active, data.capture, data.versions, data.decisions, data.runs, data.gate, data.captureFiles, data.runFiles);
     // A closed task keeps its bug as a record: nothing more runs or goes to the agent.
@@ -305,7 +303,7 @@ function actionsFor(view: BugCaseView, gate: BugReplayGateProjection, runs: Stor
   const fixing = gate.handoff && (gate.handoff.status === 'QUEUED' || gate.handoff.status === 'RUNNING');
   const sendable = !fixing;
   const waiting = gate.activeRun?.waitingFor;
-  if (waiting === 'APPROVAL') actions.push('allow-runs');
+  if (waiting === 'APPROVAL') actions.push('allow-runs', 'always-allow-runs');
   if (waiting === 'KEYSTORE') actions.push('unlock-secrets');
   const firstReproduced = runs.some((run) => run.versionId === gate.versionId && run.kind === 'BASELINE' && run.outcome === 'REPRODUCED');
   switch (gate.state) {

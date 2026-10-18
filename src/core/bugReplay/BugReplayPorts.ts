@@ -5,6 +5,7 @@ import type {
   BugCaseReference,
   BugRecordingSessionView,
   BugReplayGateProjection,
+  BugReplayLeaseRequest,
   BugReplayRunFailure,
   BugReplayRunOutcome
 } from '../../shared/bugReplay';
@@ -65,17 +66,28 @@ export interface BugReplayCore {
   insertQualification(transaction: AppDatabaseTransaction, taskId: string, caseId: string, versionId: string): void;
   /** Admits queued runs that can start now. */
   schedule(): void;
+  /** Replays of this recipe may start for the task: approved for now, or kept for its repository. */
+  approved(taskId: string, approvalDigest: string): Promise<boolean>;
   replaceActiveCase(transaction: AppDatabaseTransaction, taskId: string): Promise<void>;
   track<T>(promise: Promise<T>): Promise<T>;
   gateIn(reader: SqlReader, taskId: string): BugReplayGateProjection | undefined;
 }
 
+/** What a task asks the person to approve right now: the sheet, and what sets this recipe apart. */
+export interface PendingReplayApproval {
+  request: BugReplayLeaseRequest;
+  envFiles: string[];
+  calls: string[];
+}
+
 /** The recording sessions the orchestration service reports to. */
 export interface BugRecordingSessions {
   sessionView(taskId: string): BugRecordingSessionView | undefined;
+  /** What the task's recording asks the person to approve, while it asks. */
+  pendingApproval(taskId: string): PendingReplayApproval | undefined;
   /** Another task's recording is open, so this one cannot start. */
   busyElsewhere(taskId: string): boolean;
-  leaseGranted(taskId: string, templateDigest: string): Promise<void>;
+  leaseGranted(taskId: string, approvalDigest: string): Promise<void>;
   forgetTask(taskId: string): void;
   cancelForTask(taskId: string): Promise<void>;
 }

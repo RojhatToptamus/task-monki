@@ -273,5 +273,13 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 .tm-bugearlier .tm-table:focus { outline: none; }
 .tm-bugearlier__ended { white-space: nowrap; }
 
+/* Settings' replay approvals: what each one runs, then the env files and hosts it gives replays. */
+.tm-replayapprovals:focus { outline: none; }
+.tm-replayapprovals__runs { max-width: 0; width: 100%; }
+.tm-replayapprovals__line { display: block; overflow: hidden; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); line-height: var(--lh-ui); text-overflow: ellipsis; white-space: nowrap; }
+.tm-replayapprovals__line--uses { font-size: var(--t-meta); line-height: var(--lh-meta); }
+.tm-replayapprovals__item + .tm-replayapprovals__item { margin-left: 12px; }
+.tm-replayapprovals__when { white-space: nowrap; }
+
 /* Why Record bug waits, beside it on the Preview status row, in full. */
 .tm-preview-record-reason { max-width: 280px; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-align: right; }

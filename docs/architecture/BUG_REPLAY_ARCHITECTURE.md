@@ -39,7 +39,7 @@ prompts, or any surface that shows a bug.
 | `BugCaseCompiler` | A sealed recording plus the person's checks → a strict `bug-case/v1` document and its failure signature. |
 | `BugReplayService` | Cases, versions, runs, scheduling, qualification, verification, refills, hand-off tracking, pruning, startup recovery. |
 | `ReplayDerivation`, `ReplayEnvironment`, `ReplaySourceFreezer` | The `br-` Previewhost spec derived from the task's recipe, its start and teardown, and frozen source exports. |
-| `ReplayAuthorization` | The per-task approval to run clean copies, and Previewhost's per-start approval. |
+| `ReplayAuthorization` | The leases that let a task run clean copies, given for now or from an approval kept for its repository, and Previewhost's per-start approval. |
 | `BugReplayRunner`, `runner/*` | The runner process (Task Monki's Node, playwright-core, Chrome for Testing) and its framed output. |
 | `BugReplayGate`, `BugReplayVerdict` | Pure rules: what a run means, and the bug's state from its runs. |
 | `BugReplayContext` | Everything that leaves Task Monki about a bug: the agent brief, the reviewer section, the pull request block. |
@@ -243,17 +243,34 @@ result, or files that could not be compared are refused with the reason.
 ## Approval to run
 
 Replays execute the task's code, including agent changes, as the person,
-without a sandbox. The person approves them per task and recipe template
-("Replays need approval", then Approve replays; Cancel comes first), after
-reading what will run, as label and value rows: runs as their user without a
-sandbox, a copy of the task's files with the agent's changes, after each agent
-turn, 30 replays until Task Monki quits, then the data, secrets, env files, the
-network and outside hosts, and the commands. The Now panel states what waits
-("2 replays wait to check the fix") with the rows under What runs. The approval
-lives in memory. A run without it waits, and every surface calls the state
-"Replays need approval". Previewhost asks Task Monki before every `br-` start,
-and only a start Task Monki is making right now, with exactly the spec it
-derived, under a current approval, is approved.
+without a sandbox. Nothing runs until the person approves it ("Replays need
+approval") after reading what will run, as label and value rows: runs as their
+user without a sandbox, a copy of the task's files with the agent's changes,
+after each agent turn, 30 replays until Task Monki quits, then the data,
+secrets, env files, the network and outside hosts, and the commands. The Now
+panel states what waits ("2 replays wait to check the fix") with the rows under
+What runs. An approval is for exactly those rows: its digest covers the
+recipe's template digest, the env files replays get and every outside host they
+call, and approving names that digest, so nothing else is approved. Cancel comes
+first, then the two ways to approve:
+
+- **Approve replays** gives the task a lease in memory for 30 environment
+  starts, which ends when Task Monki quits.
+- **Always approve in this repository** keeps the approval for the task's
+  repository until the person revokes it. Task Monki keeps only what the task
+  asks to approve at that moment, as its sheet states it, with the commands, env
+  files and hosts the person read; a repository keeps its newest ten. Any task
+  of that repository whose replays derive the same digest gets a lease without a
+  start bound, for recording and runs alike and after a restart. A recipe that
+  runs other commands, gets other env files or calls other hosts derives another
+  digest and asks again.
+
+Settings lists kept approvals under Repositories, Replay approvals. Revoking one
+deletes it and ends every lease it gave at once, so the next replay of that
+recipe asks again; runs already started finish. A run without an approval waits,
+and every surface calls the state "Replays need approval". Previewhost asks Task
+Monki before every `br-` start, and only a start Task Monki is making right now,
+with exactly the spec it derived, under a current lease, is approved.
 
 ## Hand-off to the agent
 
@@ -311,7 +328,9 @@ text as Markdown code, so it never renders as a link, an image or a mention.
 
 Schema 31, migration 14, adds `bug_captures`, `bug_cases`, `bug_case_versions`,
 `bug_case_decisions`, `bug_replay_runs` and `bug_replay_files`. Cases and runs
-use optimistic revisions; a stale write is refused. Evidence (screenshots,
+use optimistic revisions; a stale write is refused. Migration 15 adds
+`bug_replay_approvals`, one row per repository and approval digest, which goes
+with its repository and is deleted when revoked. Evidence (screenshots,
 action, network and console logs, run frames, service logs) is stored as managed
 files under `replay/<task>/<owner>/`, each kind with its own size limit, and 256
 MB in all. Evidence is written without request or response bodies, and with
@@ -331,8 +350,9 @@ that were executing become `INTERRUPTED`; exported sources and runner scratch of
 runs no longer open are removed; open sets are refilled for every task with an
 active bug, and a version without a qualification gets one; gates are
 republished; and every `br-` environment not owned by an executing run is torn
-down. Waiting runs with no approval for their task are not checked again until
-one is given. Shutdown stops admitting runs, forgets every approval, interrupts
+down. Waiting runs with no lease for their task are not checked again until one
+is given, unless their repository kept an approval that may cover them. Shutdown
+stops admitting runs, forgets every lease (kept approvals stay), interrupts
 in-flight runs (each tears down its own environment), queues nothing new, and
 closes the recording view; anything left is collected at the next startup. A
 task that is done, canceled or archived stops its runs and recording, and its
@@ -353,17 +373,23 @@ bug becomes a record with no actions.
   `BugReplayGate.test.ts`, `BugReplayContext.test.ts`, `BugReplayInput.test.ts`,
   `ProtectedInputs.test.ts`, `src/shared/bugCase.test.ts`,
   `src/shared/bugReplayClaims.test.ts`, `src/renderer/model/bugReplay.test.ts`.
-- Store and deletion: `SqliteBugReplayStore.test.ts`.
+- What an approval covers: `ReplayDerivation.test.ts`.
+- Store and deletion, and kept approvals across restarts, their bound and
+  revocation: `SqliteBugReplayStore.test.ts`; the upgrade to kept approvals:
+  `DatabaseMigrations.test.ts`.
 - The queue over real storage and Git with a stand-in Previewhost and a
   scripted runner (admission, approval, shutdown, cancel, replacements,
-  unreadable worktrees, pruning, saving a recording):
+  unreadable worktrees, pruning, saving a recording, approvals kept across a
+  restart, a changed recipe, another repository and revocation):
   `BugReplayService.integration.test.ts`.
 - Hand-off through the service: `TaskManagerService.bugReplay.integration.test.ts`.
 - The engine with a real browser, including WebSockets to undeclared hosts:
   `BugReplayRunner.integration.test.ts` (skipped without
   `.local/design-browser-runtime`).
 - Mounted UI: `TaskDetail.dom.test.tsx` (Remove bug),
-  `bug/BugRecordingWorkspace.dom.test.tsx`, `bug/BugCapturePanel.dom.test.tsx`
-  (expectations, focus and naming), `bug/BugSection.dom.test.tsx` (the
-  verdict, the results table and the replay drawer).
+  `bug/BugRecordingWorkspace.dom.test.tsx` (including the approval's order),
+  `bug/BugCapturePanel.dom.test.tsx` (expectations, focus and naming),
+  `bug/BugSection.dom.test.tsx` (the verdict, the results table, the replay
+  drawer and the Now panel's approval), `bug/ReplayApprovalSettings.dom.test.tsx`
+  (listing and revoking kept approvals).
 - Seeded states: the `bug` scenario set in `docs/DEV_SEEDING.md`.

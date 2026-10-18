@@ -70,9 +70,13 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
           host.onOpenRecording();
         });
       case 'allow-runs':
-        return snapshot?.pendingLease
-          ? void run(action, () => taskManagerApi.allowBugReplayRuns({ taskId, templateDigest: snapshot.pendingLease!.templateDigest }))
+      case 'always-allow-runs': {
+        // Approving names exactly what the sheet states, so nothing else is approved or kept.
+        const approvalDigest = snapshot?.pendingLease?.approvalDigest;
+        return approvalDigest
+          ? void run(action, () => taskManagerApi.allowBugReplayRuns({ taskId, approvalDigest, keep: action === 'always-allow-runs' }))
           : undefined;
+      }
       case 'unlock-secrets':
         return setUnlocking(true);
       case 'cancel-run':
@@ -140,8 +144,9 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
 /**
  * The Now panel when the bug holds the next step: the state, the one fact that drives the step,
  * and its actions; the Bug section below names the bug. Approving replays states what waits on
- * it in one line; what will run sits under Details, read before anything runs, and declining
- * comes first, as every approval does.
+ * it in one line; what will run sits under Details, read before anything runs. Declining comes
+ * first, as every approval does, then keeping the approval for the repository, then approving
+ * for now.
  */
 export function BugNowPanel({ view, snapshot, actions }: {
   view: BugCaseView;

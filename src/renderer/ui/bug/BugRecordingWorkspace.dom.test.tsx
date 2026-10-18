@@ -9,6 +9,7 @@ vi.mock('../../api/taskManagerClient', () => ({
     markBug: vi.fn(async () => undefined),
     startBugRecording: vi.fn(async () => undefined),
     chooseBugEnvFiles: vi.fn(async () => undefined),
+    allowBugReplayRuns: vi.fn(async () => undefined),
     stopBugPick: vi.fn(async () => undefined),
     returnToBugRecording: vi.fn(async () => undefined),
     cancelBugRecording: vi.fn(async () => undefined),
@@ -52,6 +53,26 @@ describe('Recording a bug', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start the app' }));
 
     await waitFor(() => expect(taskManagerApi.chooseBugEnvFiles).toHaveBeenCalledWith({ taskId: 'task-1', sessionId: 'session-1', include: ['.env'] }));
+  });
+
+  it('asks to approve replays declining first, and keeps the approval for the repository only from its own button', async () => {
+    const approvalDigest = 'a'.repeat(64);
+    render(workspace(recording({
+      phase: 'NEEDS_APPROVAL',
+      detail: undefined,
+      lease: { approvalDigest, title: 'Replays need approval', facts: [{ label: 'Runs as', value: 'Your user, without a sandbox' }], commands: [], sameAsRunningPreview: false }
+    })));
+
+    const decline = screen.getByRole('button', { name: 'Cancel' });
+    const keep = screen.getByRole('button', { name: 'Always approve in this repository' });
+    const approve = screen.getByRole('button', { name: 'Approve replays' });
+    expect(decline.compareDocumentPosition(keep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(keep.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(keep);
+    await waitFor(() => expect(taskManagerApi.allowBugReplayRuns).toHaveBeenCalledWith({ taskId: 'task-1', approvalDigest, keep: true }));
+    fireEvent.click(approve);
+    await waitFor(() => expect(taskManagerApi.allowBugReplayRuns).toHaveBeenLastCalledWith({ taskId: 'task-1', approvalDigest }));
   });
 
   it('never leaves the person stuck while the page waits for a click', async () => {

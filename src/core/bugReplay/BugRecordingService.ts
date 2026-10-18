@@ -19,7 +19,7 @@ import type {
 import { DEFAULT_BUG_CASE_ENVIRONMENT } from '../../shared/bugReplay';
 import { serviceStoppedSentence } from '../../shared/bugReplayClaims';
 import { compileBugCase, describeCapture, numbersIn, suggestValue, BUG_CASE_COMPILER_VERSION } from './BugCaseCompiler';
-import type { BugRecordingSessions, BugReplayCore } from './BugReplayPorts';
+import type { BugRecordingSessions, BugReplayCore, PendingReplayApproval } from './BugReplayPorts';
 import { ceilingFor, versionDigest } from './BugReplayIdentity';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
 import { deriveReplaySpec, replayEnvironmentName, ReplayEligibilityError, staticEligibility, type DerivedReplaySpec } from './ReplayDerivation';
@@ -232,9 +232,15 @@ export class BugRecordingService implements BugRecordingSessions {
     this.track(session, this.derive(session));
   }
 
-  async leaseGranted(taskId: string, templateDigest: string): Promise<void> {
+  pendingApproval(taskId: string): PendingReplayApproval | undefined {
     const session = this.session;
-    if (!session || session.taskId !== taskId || session.phase !== 'NEEDS_APPROVAL' || session.derived?.templateDigest !== templateDigest) return;
+    if (!session || session.taskId !== taskId || session.phase !== 'NEEDS_APPROVAL' || !session.lease || !session.derived) return undefined;
+    return { request: session.lease, envFiles: session.included.map((file) => file.relativePath), calls: session.derived.outsideHosts };
+  }
+
+  async leaseGranted(taskId: string, approvalDigest: string): Promise<void> {
+    const session = this.session;
+    if (!session || session.taskId !== taskId || session.phase !== 'NEEDS_APPROVAL' || session.derived?.approvalDigest !== approvalDigest) return;
     this.track(session, this.launch(session));
   }
 
@@ -585,7 +591,8 @@ export class BugRecordingService implements BugRecordingSessions {
         tree: await this.replay.treeReader(session.worktreePath, session.treeId),
         envFiles: session.included.map((file) => ({ relativePath: file.relativePath, text: file.bytes.toString('utf8') }))
       });
-      if (!this.replay.authorization.lease(session.taskId, session.derived.templateDigest)) {
+      // An approval kept for the task's repository starts the copy without asking.
+      if (!(await this.replay.approved(session.taskId, session.derived.approvalDigest))) {
         session.lease = await this.leaseRequest(session, session.derived);
         this.setPhase(session, 'NEEDS_APPROVAL');
         return;
@@ -622,7 +629,7 @@ export class BugRecordingService implements BugRecordingSessions {
           taskId: session.taskId,
           name: session.run.name,
           spec: derived.spec,
-          templateDigest: derived.templateDigest,
+          approvalDigest: derived.approvalDigest,
           secretIds: derived.secretIds,
           signal: session.controller.signal,
           onPhase: (phase) => {

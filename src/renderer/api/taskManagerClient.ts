@@ -522,6 +522,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     startBugRecording: input => post(baseUrl, '/api/bug/recording/start', input),
     chooseBugEnvFiles: input => post(baseUrl, '/api/bug/recording/envFiles', input),
     allowBugReplayRuns: input => post(baseUrl, '/api/bug/runs/allow', input),
+    listBugReplayApprovals: () => post(baseUrl, '/api/bug/approvals/list', {}),
+    revokeBugReplayApproval: input => post(baseUrl, '/api/bug/approvals/revoke', input),
     cancelBugRecording: input => post(baseUrl, '/api/bug/recording/cancel', input),
     markBug: input => post(baseUrl, '/api/bug/recording/mark', input),
     pickBugCheck: input => post(baseUrl, '/api/bug/recording/pick', input),

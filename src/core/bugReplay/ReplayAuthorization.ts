@@ -3,56 +3,73 @@ import { parsePreviewSpec, type AuthorizationRequest, type PreviewRuntime, type 
 import { REPLAY_NAME_PATTERN } from './ReplayDerivation';
 
 /**
- * Who may start clean copies. The person grants one lease per task and recipe template ("Run
- * clean copies of this app"): it lives in memory, ends when Task Monki quits, and covers a
- * bounded number of environment starts. Previewhost asks before every start; only a `br-` name
- * Task Monki is starting right now, with exactly the spec it derived, under a current lease with
- * starts left, is approved. Everything else about `br-` names is refused at once, never parked.
+ * Who may start clean copies. The person approves the replays of one recipe for a task, as
+ * exactly what they read (its approval digest), in one of two ways: for now, a lease that lives
+ * in memory, ends when Task Monki quits and covers a bounded number of environment starts; or
+ * kept for the task's repository, which the service turns into a lease without a bound that ends
+ * when the person revokes the kept approval. Previewhost asks before every start; only a `br-`
+ * name Task Monki is starting right now, with exactly the spec it derived, under a current lease,
+ * is approved. Everything else about `br-` names is refused at once, never parked.
  */
 
 export const REPLAY_LEASE_STARTS = 30;
 
 interface ReplayLease {
-  templateDigest: string;
   startsLeft: number;
+  /** The kept approval this lease stands for: it covers every start until that is revoked. */
+  keptId?: string;
   grantedAt: string;
 }
 
 interface ExpectedStart {
   taskId: string;
-  templateDigest: string;
+  approvalDigest: string;
   spec: PreviewSpec;
   secretIds: string[];
 }
 
 export class ReplayAuthorization {
-  private readonly leases = new Map<string, ReplayLease>();
+  /** A task's leases, by the approval digest each covers. */
+  private readonly leases = new Map<string, Map<string, ReplayLease>>();
+  /** Kept approvals revoked while Task Monki runs: a read that raced the revocation grants nothing. */
+  private readonly revokedKept = new Set<string>();
   private readonly expected = new Map<string, ExpectedStart>();
   private readonly owned = new Set<string>();
 
   constructor(private readonly runtime: () => PreviewRuntime) {}
 
-  grant(taskId: string, templateDigest: string, starts = REPLAY_LEASE_STARTS): void {
-    const current = this.leases.get(taskId);
-    if (current && current.templateDigest === templateDigest) {
-      current.startsLeft += starts;
-      return;
-    }
-    this.leases.set(taskId, { templateDigest, startsLeft: starts, grantedAt: new Date().toISOString() });
+  /** Approves replays of one recipe for the task: for now, or as the kept approval `keptId`. */
+  grant(taskId: string, approvalDigest: string, keptId?: string): void {
+    if (keptId && this.revokedKept.has(keptId)) return;
+    const leases = this.leases.get(taskId) ?? new Map<string, ReplayLease>();
+    const current = leases.get(approvalDigest);
+    if (current && keptId) current.keptId = keptId;
+    else if (current) current.startsLeft += REPLAY_LEASE_STARTS;
+    else leases.set(approvalDigest, { startsLeft: keptId ? 0 : REPLAY_LEASE_STARTS, ...(keptId ? { keptId } : {}), grantedAt: new Date().toISOString() });
+    this.leases.set(taskId, leases);
   }
 
-  lease(taskId: string, templateDigest: string): { startsLeft: number } | undefined {
-    const lease = this.leases.get(taskId);
-    return lease && lease.templateDigest === templateDigest && lease.startsLeft > 0 ? { startsLeft: lease.startsLeft } : undefined;
+  /** Whether the task may start a replay of the recipe with this approval digest now. */
+  covers(taskId: string, approvalDigest: string): boolean {
+    const lease = this.leases.get(taskId)?.get(approvalDigest);
+    return Boolean(lease && (lease.keptId || lease.startsLeft > 0));
   }
 
-  anyLease(taskId: string): { startsLeft: number } | undefined {
-    const lease = this.leases.get(taskId);
-    return lease ? { startsLeft: lease.startsLeft } : undefined;
+  hasLease(taskId: string): boolean {
+    return (this.leases.get(taskId)?.size ?? 0) > 0;
   }
 
   revoke(taskId: string): void {
     this.leases.delete(taskId);
+  }
+
+  /** A kept approval was revoked: every lease it stood for ends now, not when Task Monki quits. */
+  revokeKept(keptId: string): void {
+    this.revokedKept.add(keptId);
+    for (const [taskId, leases] of this.leases) {
+      for (const [digest, lease] of leases) if (lease.keptId === keptId) leases.delete(digest);
+      if (leases.size === 0) this.leases.delete(taskId);
+    }
   }
 
   /** Marks a `br-` name as one Task Monki owns, so cleanup operations on it are allowed. */
@@ -101,9 +118,9 @@ export class ReplayAuthorization {
         if (!isDeepStrictEqual(request.spec, parsed)) return false;
         const references = secretIdsOf(request.spec);
         if (references.some((id) => !expected.secretIds.includes(id))) return false;
-        const lease = this.leases.get(expected.taskId);
-        if (!lease || lease.templateDigest !== expected.templateDigest || lease.startsLeft < 1) return false;
-        lease.startsLeft -= 1;
+        const lease = this.leases.get(expected.taskId)?.get(expected.approvalDigest);
+        if (!lease || (!lease.keptId && lease.startsLeft < 1)) return false;
+        if (!lease.keptId) lease.startsLeft -= 1;
         if (references.length > 0) {
           const setup = await this.runtime().prepareSecretSetup(request.spec, request.signal);
           await setup.approve?.(request.signal);

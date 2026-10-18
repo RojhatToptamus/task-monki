@@ -25,10 +25,12 @@ describe('Bug actions', () => {
       secondary: [],
       menu: ['verify-again', 'run-again', 'remove']
     });
-    expect(layoutBugActions(['allow-runs', 'cancel-run', 'remove'], 'VERIFYING')).toEqual({
+    // Replays waiting on approval hold the step alone: keeping the approval stays beside approving
+    // for now, and the state's own steps wait in the menu instead of pushing it out of view.
+    expect(layoutBugActions(['allow-runs', 'always-allow-runs', 'send-to-agent', 'cancel-run', 'remove'], 'REPRODUCING')).toEqual({
       primary: 'allow-runs',
-      secondary: ['cancel-run'],
-      menu: ['remove']
+      secondary: ['always-allow-runs', 'cancel-run'],
+      menu: ['send-to-agent', 'remove']
     });
     // Nothing is owed once the fix is verified: every action waits in the menu.
     expect(layoutBugActions(['verify-again', 'remove'], 'FIX_VERIFIED')).toEqual({ secondary: [], menu: ['verify-again', 'remove'] });

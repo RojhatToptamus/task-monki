@@ -62,7 +62,7 @@ export function SlotContent({
   reported?: { source?: string; text: string };
   primary?: SlotAction;
   secondary?: SlotAction[];
-  /** Declining a request the person approves: shown before the primary, as approvals are. */
+  /** Declining a request the person approves: shown first and the primary last, as approvals are. */
   decline?: SlotAction;
   children?: ReactNode;
 }) {
@@ -90,7 +90,10 @@ export function SlotActions({
 }: {
   primary?: SlotAction;
   secondary?: SlotAction[];
-  /** Declining comes first, then the primary, as in every approval. */
+  /**
+   * Declining comes first and the primary last, as in every approval; the other answers sit
+   * between them.
+   */
   decline?: SlotAction;
   /** Outside the decision slot nothing competes with its primary. */
   quiet?: boolean;
@@ -99,15 +102,17 @@ export function SlotActions({
   if (!primary && secondary.length === 0 && !decline) {
     return null;
   }
-  const all = [
-    ...(decline ? [{ action: decline, primary: false }] : []),
-    ...(primary ? [{ action: primary, primary: true }] : []),
-    ...secondary.map((action) => ({ action, primary: false }))
-  ];
+  const lead = primary ? [{ action: primary, primary: true }] : [];
+  const others = secondary.map((action) => ({ action, primary: false }));
   // Three actions fit beside each other; past that, the first two stay and the
-  // rest, which are overrides, wait under More with their reasons inline.
-  const actions = all.length > 3 ? all.slice(0, 2) : all;
-  const overflow = all.length > 3 ? all.slice(2).map(({ action }) => action) : [];
+  // rest, which are overrides, wait under More with their reasons inline. An
+  // approval keeps declining and its primary in view.
+  const room = decline ? Math.max(0, 2 - lead.length) : 0;
+  const all = decline
+    ? [{ action: decline, primary: false }, ...others.slice(0, room), ...lead]
+    : [...lead, ...others];
+  const actions = !decline && all.length > 3 ? all.slice(0, 2) : all;
+  const overflow = (decline ? others.slice(room) : all.length > 3 ? all.slice(2) : []).map(({ action }) => action);
   // One sentence per distinct reason: two actions paused for the same cause
   // share it instead of repeating it under each button.
   const reasons = [

@@ -320,7 +320,8 @@ export interface BugReplayLeaseFact {
 }
 
 export interface BugReplayLeaseRequest {
-  templateDigest: string;
+  /** Exactly what the facts and commands state; approving names it, so nothing else is approved. */
+  approvalDigest: string;
   title: string;
   /** The execution boundary first, then when runs happen, the approval, code, data, secrets, files and network. */
   facts: BugReplayLeaseFact[];
@@ -519,6 +520,7 @@ export type BugCaseAction =
   | 'run-again'
   | 'record-again'
   | 'allow-runs'
+  | 'always-allow-runs'
   | 'unlock-secrets'
   | 'use-new-env-files'
   | 'keep-browser-storage'
@@ -555,7 +557,6 @@ export interface BugReplaySnapshot {
   runs: BugReplayRunView[];
   runCount: number;
   earlierCases: BugReplayEarlierCase[];
-  lease?: { startsLeft: number };
   /** Present while a clean run waits for the person to allow clean runs of this app. */
   pendingLease?: BugReplayLeaseRequest;
   storage: { usedBytes: number; limitBytes: number };
@@ -563,6 +564,19 @@ export interface BugReplaySnapshot {
 
 export interface BugReplayTaskRequest {
   taskId: string;
+}
+
+/** Replays of one recipe the person approved for a repository until they revoke it, as Settings lists them. */
+export interface BugReplayKeptApproval {
+  id: string;
+  repositoryId: string;
+  repositoryName: string;
+  /** The commands the person read when they approved. */
+  commands: Array<{ service: string; command: string; directory: string }>;
+  /** The ignored env files replays get and the outside hosts they call, as the person read them. */
+  envFiles: string[];
+  calls: string[];
+  keptAt: string;
 }
 
 export interface BugRecordingRequest extends BugReplayTaskRequest {
@@ -573,7 +587,10 @@ export interface BugReplayApi {
   getBugReplay(input: BugReplayTaskRequest): Promise<BugReplaySnapshot>;
   startBugRecording(input: BugReplayTaskRequest & { clientOperationId: string }): Promise<BugReplaySnapshot>;
   chooseBugEnvFiles(input: BugRecordingRequest & { include: string[] }): Promise<BugReplaySnapshot>;
-  allowBugReplayRuns(input: BugReplayTaskRequest & { templateDigest: string }): Promise<BugReplaySnapshot>;
+  /** Approves what the task asks to run now: for now, or kept for its repository until revoked. */
+  allowBugReplayRuns(input: BugReplayTaskRequest & { approvalDigest: string; keep?: boolean }): Promise<BugReplaySnapshot>;
+  listBugReplayApprovals(): Promise<BugReplayKeptApproval[]>;
+  revokeBugReplayApproval(input: { approvalId: string }): Promise<BugReplayKeptApproval[]>;
   cancelBugRecording(input: BugRecordingRequest): Promise<BugReplaySnapshot>;
   markBug(input: BugRecordingRequest): Promise<BugReplaySnapshot>;
   pickBugCheck(input: BugRecordingRequest & { draft?: BugCaptureDraft }): Promise<BugReplaySnapshot>;

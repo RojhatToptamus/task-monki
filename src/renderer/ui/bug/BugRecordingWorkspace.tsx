@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { BugRecordingSessionView } from '../../../shared/bugReplay';
 import { taskManagerApi } from '../../api/taskManagerClient';
 import {
+  bugActionLabel,
   canReturnToRecording,
   fitRecordingViewport,
   formatElapsed,
@@ -255,9 +256,13 @@ export function BugRecordingWorkspace({
                 actions={
                   <>
                     <button type="button" className="outline-button" disabled={Boolean(busy)} onClick={() => void discard()}>Cancel</button>
+                    <button type="button" className="outline-button" disabled={Boolean(busy)}
+                      onClick={() => void act('keep', () => taskManagerApi.allowBugReplayRuns({ taskId, approvalDigest: recording.lease!.approvalDigest, keep: true }))}>
+                      {bugActionLabel('always-allow-runs')}
+                    </button>
                     <button type="button" className="primary-button" disabled={Boolean(busy)}
-                      onClick={() => void act('allow', () => taskManagerApi.allowBugReplayRuns({ taskId, templateDigest: recording.lease!.templateDigest }))}>
-                      Approve replays
+                      onClick={() => void act('allow', () => taskManagerApi.allowBugReplayRuns({ taskId, approvalDigest: recording.lease!.approvalDigest }))}>
+                      {bugActionLabel('allow-runs')}
                     </button>
                   </>
                 }

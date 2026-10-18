@@ -10,6 +10,7 @@ import type {
   BugCaseVersionRecord,
   BugReplayFileKind,
   BugReplayFileRecord,
+  BugReplayKeptApprovalRecord,
   StoredBugReplayRun
 } from '../../bugReplay/BugReplayRecords';
 
@@ -23,6 +24,8 @@ import type {
 const FILE_DOMAIN = 'TASK';
 const STORAGE_PREFIX = 'replay';
 const RECEIPT_DOMAIN = 'BUG_REPLAY';
+/** A repository keeps the approvals of its newest recipes; older ones ask again. */
+export const KEPT_APPROVALS_PER_REPOSITORY = 10;
 
 export const BUG_REPLAY_FILE_LIMITS: Record<BugReplayFileKind, number> = {
   ACTION_LOG: 2 * 1024 * 1024,
@@ -362,6 +365,52 @@ export class SqliteBugReplayStore {
     transaction.run(`DELETE FROM bug_captures WHERE task_id = ?`, [taskId]);
   }
 
+  // Kept approvals
+
+  /** The approval the person kept for this recipe in the repository, if they kept one. */
+  keptApproval(reader: SqlReader, repositoryId: string, approvalDigest: string): BugReplayKeptApprovalRecord | undefined {
+    const row = reader.get<ApprovalRow>(
+      `SELECT ${APPROVAL_COLUMNS} FROM bug_replay_approvals WHERE repository_id = ? AND approval_digest = ?`,
+      [repositoryId, approvalDigest]
+    );
+    return row ? approvalFromRow(row) : undefined;
+  }
+
+  hasKeptApprovals(reader: SqlReader, repositoryId: string): boolean {
+    return Boolean(reader.get(`SELECT 1 AS kept FROM bug_replay_approvals WHERE repository_id = ? LIMIT 1`, [repositoryId]));
+  }
+
+  /** Every kept approval, newest first. */
+  listKeptApprovals(reader: SqlReader): BugReplayKeptApprovalRecord[] {
+    return reader.all<ApprovalRow>(`SELECT ${APPROVAL_COLUMNS} FROM bug_replay_approvals ORDER BY created_at DESC, id`).map(approvalFromRow);
+  }
+
+  /**
+   * Keeps an approval for its repository; keeping the same recipe again returns the first one.
+   * Returns the approval and the ids of the oldest ones the repository's bound let go.
+   */
+  keepApproval(transaction: AppDatabaseTransaction, record: BugReplayKeptApprovalRecord): { approval: BugReplayKeptApprovalRecord; released: string[] } {
+    const existing = this.keptApproval(transaction, record.repositoryId, record.approvalDigest);
+    if (existing) return { approval: existing, released: [] };
+    transaction.run(
+      `INSERT INTO bug_replay_approvals (id, repository_id, approval_digest, payload_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [record.id, record.repositoryId, record.approvalDigest, JSON.stringify(record), record.keptAt]
+    );
+    const released = transaction
+      .all<{ id: string }>(
+        `SELECT id FROM bug_replay_approvals WHERE repository_id = ? ORDER BY created_at DESC, id LIMIT -1 OFFSET ?`,
+        [record.repositoryId, KEPT_APPROVALS_PER_REPOSITORY]
+      )
+      .map((row) => row.id);
+    for (const id of released) transaction.run(`DELETE FROM bug_replay_approvals WHERE id = ?`, [id]);
+    return { approval: record, released };
+  }
+
+  /** Deletes a kept approval, whatever its payload holds; false when it was already gone. */
+  revokeApproval(transaction: AppDatabaseTransaction, id: string): boolean {
+    return Number(transaction.run(`DELETE FROM bug_replay_approvals WHERE id = ?`, [id]).changes) === 1;
+  }
+
   // Receipts
 
   readReceipt(reader: SqlReader, ownerId: string, operationId: string): { fingerprint: string; result: Record<string, unknown> } | undefined {
@@ -441,6 +490,24 @@ function caseFromRow(row: { id: string; task_id: string; status: string; record_
   const record = parse<BugCaseRecord>(row.payload_json);
   if (record.id !== row.id || record.taskId !== row.task_id || record.status !== row.status || record.revision !== row.record_revision) {
     throw new Error('A bug case record failed its integrity check.');
+  }
+  return record;
+}
+
+interface ApprovalRow {
+  id: string;
+  repository_id: string;
+  approval_digest: string;
+  payload_json: string;
+}
+
+const APPROVAL_COLUMNS = 'id, repository_id, approval_digest, payload_json';
+
+/** A kept approval is read by its columns; a payload that says otherwise approves nothing. */
+function approvalFromRow(row: ApprovalRow): BugReplayKeptApprovalRecord {
+  const record = parse<BugReplayKeptApprovalRecord>(row.payload_json);
+  if (record.id !== row.id || record.repositoryId !== row.repository_id || record.approvalDigest !== row.approval_digest) {
+    throw new Error('A kept replay approval failed its integrity check.');
   }
   return record;
 }
