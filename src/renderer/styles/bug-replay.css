@@ -1,158 +1,269 @@
-/* Bug Replay: the recording workspace on the Preview tab, the capture panel, and the Bug
-   section on the Overview. Tone lives in one ink per state word (DESIGN.md 6.6). */
+/* Bug Replay: the recording workspace on the Preview tab (its bar, the page with its own bar,
+   the steps rail and the composer), the Bug section on the Overview with its before and after
+   pictures, results table, replays and the replay drawer. Tone lives in one ink per state word
+   (DESIGN.md 6.6). */
 
-/* Tone inks shared by state words and run rows. */
+/* Tone inks shared by state words and replay rows. */
 .tm-bug__state--neutral { color: var(--text-soft); }
 .tm-bug__state--info { color: var(--accent-ink); }
 .tm-bug__state--action { color: var(--waiting-ink); }
 .tm-bug__state--success { color: var(--verified-ink); }
 .tm-bug__state--error { color: var(--blocked-ink); }
 
-/* A screenshot Bug Replay kept: the page at the case's viewport. */
-.tm-bugimage { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: contain; border-radius: var(--r-xs); background: var(--well); }
-.tm-bugimage--loading { display: block; }
-.tm-bugimage--missing { display: grid; place-items: center; color: var(--muted); font-size: var(--t-meta); }
-
-/* What clean runs will run: facts, then the commands in a well. */
-.tm-buglease__facts { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); }
+/* What replays will run: label and value rows as the task's Details are, then the commands. */
+.tm-buglease { display: grid; gap: 12px; min-width: 0; }
 .tm-buglease__commands { display: grid; gap: 2px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--well); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
-.tm-buglease__command { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 10px; min-width: 0; }
+.tm-buglease__command { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 8px; min-width: 0; }
 .tm-buglease__service { color: var(--muted); }
 .tm-buglease__command code { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .tm-buglease__directory { color: var(--faint); }
 
-/* The recording workspace: the Preview tab's head line, then the page or the step it waits on. */
-.tm-bugrecord { position: relative; display: grid; flex: 1; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
+/* The recording workspace: a 40px bar under the tab bar, then the page or the step it waits on. */
+.tm-bugrecord { --bug-side-width: 380px; position: relative; display: grid; flex: 1; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
 .tm-bugrecord > .tm-bugrecord__body { grid-row: 3; }
-.tm-bugrecord__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: calc(var(--h-head) + 4px); padding: 4px var(--tm-gutter) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
-.tm-bugrecord__status { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; }
+.tm-bugrecord__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: var(--h-bar); padding: 0 16px 0 var(--tm-gutter); background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-bugrecord__status { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
 .tm-bugrecord__status > * { flex: 0 0 auto; }
-.tm-bugrecord__glyph { color: var(--accent-ink); }
-.tm-bugrecord__title { color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); white-space: nowrap; }
-.tm-bugrecord__title--action { color: var(--waiting-ink); }
-.tm-bugrecord__title--error { color: var(--blocked-ink); }
-.tm-bugrecord__elapsed { color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; min-width: 4ch; }
-.tm-bugrecord__route,
-.tm-bugrecord__detail,
-.tm-bugrecord__coverage { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-bugrecord__route { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
-.tm-bugrecord__detail { color: var(--text-soft); font-size: var(--t-help); }
-.tm-bugrecord__coverage { color: var(--waiting-ink); font-size: var(--t-help); }
+.tm-bugrecord__title { color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); line-height: var(--lh-ui); white-space: nowrap; }
+.tm-bugrecord__elapsed { min-width: 5ch; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bugrecord__coverage { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--waiting-ink); font-size: var(--t-help); text-overflow: ellipsis; white-space: nowrap; }
 .tm-bugrecord__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
-.tm-bugrecord__actions :is(.primary-button, .outline-button, .ghost-button) { height: var(--h-toolbar); padding: 0 12px; }
+.tm-bugrecord__count { color: var(--faint); font-weight: var(--w-regular); font-variant-numeric: tabular-nums; }
+.tm-bugrecord__railtoggle[aria-pressed='true'] { background-color: var(--sel); color: var(--text); }
+/* A failure across the pane is a square band under the bar. */
+.tm-bugrecord__error.tm-error { margin: 0; padding: 8px 16px 8px var(--tm-gutter); border-radius: 0; }
 
 .tm-bugrecord__body { container: bug-record / inline-size; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); }
-.tm-bugrecord__body--split { grid-template-columns: minmax(0, 1fr) 380px; }
-.tm-bugrecord__stage { display: grid; place-items: center; min-width: 0; min-height: 0; padding: 16px; }
+.tm-bugrecord__body[data-side] { grid-template-columns: minmax(0, 1fr) var(--bug-side-width); }
+
+/* The page and its bar as one framed card, top-anchored and centred, as the design canvas's
+   viewport is. The page sits 4px inside the frame so its 8px corners are concentric with the
+   frame's: a native view cannot be clipped. */
+.tm-bugrecord__stage { display: grid; justify-items: center; align-content: start; min-width: 0; min-height: 0; padding: 16px; }
+.tm-bugrecord__frame { display: grid; grid-template-rows: var(--h-row) auto; min-width: 0; padding: 0 4px 4px; border-radius: var(--r-md); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-panel); }
 .tm-bugview { border-radius: var(--r-sm); background: var(--well); }
 
-/* While the clean copy starts, the page's place holds a quiet note; the head states the step. */
-.tm-bugrecord__placeholder { display: grid; align-content: start; width: 100%; height: 100%; padding: 16px; }
-.tm-bugrecord__note { max-width: 52ch; margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
-.tm-bugrecord__error { margin: 8px var(--tm-gutter) 0; }
-.tm-bugrecord__decision { align-self: start; width: min(640px, 100%); padding: 24px var(--tm-gutter); }
+.tm-bugbar { display: grid; grid-template-columns: var(--h-compact) minmax(0, 1fr) auto; align-items: center; column-gap: 8px; height: var(--h-row); min-width: 0; padding: 0 8px 0 2px; }
+.tm-bugbar__reload { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
+.tm-bugbar__address { display: flex; align-items: center; height: var(--h-compact); min-width: 0; padding: 0 10px; overflow: hidden; border: 0; border-radius: var(--r-xs); background: var(--well); color: var(--text-soft); font: var(--t-meta)/var(--lh-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugbar__address[data-disabled] { color: var(--faint); }
+/* Before the first step the address takes a path: a field, so it reads as one. */
+input.tm-bugbar__address { width: 100%; background-color: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); outline: none; }
+input.tm-bugbar__address:not(:disabled):not(:focus):hover { background-color: var(--field-hover); }
+input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shadow: inset 0 0 0 1px var(--field-edge-focus); }
+.app-shell[data-input-modality='keyboard'] input.tm-bugbar__address:focus { box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring); }
+.tm-bugbar__size { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* While the copy starts, or after it stopped, the page's place holds what happens instead,
+   anchored at the top so the list grows down without moving. */
+.tm-bugrecord__placeholder { display: grid; justify-items: center; align-content: start; padding: 24px; }
+.tm-bugrecord__progress { width: min(320px, 100%); }
+.tm-bugrecord__stopped { max-width: 320px; margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); }
+
+/* A decision takes the page's place before the page exists, on the frame's top anchor. */
+.tm-bugrecord__decision { display: grid; justify-items: center; align-content: start; min-height: 0; padding: 16px; overflow-y: auto; }
+.tm-bugrecord__decision > .tm-decision { width: min(560px, 100%); }
 .tm-bugrecord__choices { display: grid; gap: 6px; }
 .tm-bugrecord__choices code { color: var(--text); font: var(--t-help)/var(--lh-ui) var(--font-mono); }
 .tm-bugrecord__command { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--well); color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* Narrow: the panel takes the space, and the page returns while the person points at it. */
+/* Narrow: the composer takes the space, and the page returns while the person points at it. */
 @container bug-record (max-width: 760px) {
-  .tm-bugrecord__body--split { grid-template-columns: minmax(0, 1fr); }
-  .tm-bugrecord__body--split:not([data-picking]) > .tm-bugrecord__stage { display: none; }
-  .tm-bugrecord__body--split[data-picking] > .tm-bugcapture { display: none; }
+  .tm-bugrecord__body[data-side='composer'] { grid-template-columns: minmax(0, 1fr); }
+  .tm-bugrecord__body[data-side='composer']:not([data-picking]) > .tm-bugrecord__stage { display: none; }
+  .tm-bugrecord__body[data-side='composer'][data-picking] > .tm-bugcapture { display: none; }
 }
 
 .tm-bugconfirm { width: min(440px, 100%); }
 
-/* The capture panel: a column beside the page with its own scroll and a fixed foot. */
+/* The steps rail: its 36px head on the page bar's line, then one dense row per step or page
+   event, newest last. */
+.tm-bugrail { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding-top: 16px; background: var(--surface); box-shadow: inset 1px 0 0 var(--hair); }
+.tm-bugrail__head { display: flex; align-items: center; gap: 8px; height: var(--h-row); padding: 0 16px; }
+.tm-bugrail__title { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugrail__count { color: var(--faint); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bugrail__empty { display: flex; align-items: center; min-height: var(--h-row-dense); margin: 0; padding: 0 16px; color: var(--muted); font-size: var(--t-help); }
+.tm-bugrail__list { margin: 0; padding: 0 calc(16px - var(--scrollbar)) 16px 16px; overflow-y: auto; overflow-anchor: auto; list-style: none; scrollbar-gutter: stable; }
+.tm-bugrail__omitted { display: flex; align-items: center; min-height: var(--h-row-dense); padding-left: calc(2ch + 13px + 16px); color: var(--faint); font-size: var(--t-meta); }
+
+/* One step or page event: its number, what it is, what it did. The same row in the rail, the
+   composer's Steps and the Overview's Steps. */
+.tm-bugsteps { display: grid; margin: 0; padding: 0; list-style: none; }
+.tm-bugstep { display: grid; grid-template-columns: 2ch 13px minmax(0, 1fr); align-items: center; column-gap: 8px; min-height: var(--h-row-dense); color: var(--text-soft); font-size: var(--t-help); }
+.tm-bugstep__number { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; text-align: right; }
+.tm-bugstep__icon { color: var(--muted); }
+.tm-bugstep__text { min-width: 0; overflow: hidden; line-height: var(--lh-ui); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugstep[data-newest] .tm-bugstep__text { color: var(--text); }
+.tm-bugstep[data-tone='error'] :is(.tm-bugstep__icon, .tm-bugstep__text) { color: var(--blocked-ink); }
+.tm-bugstep[data-tone='warning'] :is(.tm-bugstep__icon, .tm-bugstep__text) { color: var(--waiting-ink); }
+.tm-bugstep[data-kind='request']:not([data-tone]) .tm-bugstep__text { color: var(--muted); }
+
+/* The composer: a column beside the page with its own scroll and a fixed foot. */
 .tm-bugcapture { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--surface); box-shadow: inset 1px 0 0 var(--hair); }
-.tm-bugcapture__body { display: grid; align-content: start; gap: 16px; min-height: 0; padding: 16px; overflow-y: auto; scrollbar-gutter: stable; }
+.tm-bugcapture__body { display: grid; align-content: start; gap: 16px; min-height: 0; padding: 16px calc(16px - var(--scrollbar)) 24px 16px; overflow-y: auto; scrollbar-gutter: stable; }
 .tm-bugcapture__notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); }
-.tm-bugcapture .field textarea.tm-bugcapture__statement { min-height: calc(var(--lh-body) * 3 + 16px); padding: 8px 12px; resize: vertical; }
-.tm-bugcapture__group { display: grid; gap: 10px; min-width: 0; }
-.tm-bugcapture__label { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
-.tm-bugcapture__muted { margin: 0; color: var(--muted); font-size: var(--t-help); }
-.tm-bugcapture__add { justify-self: start; }
-.tm-bugcapture__more > summary { display: inline-flex; align-items: center; gap: 6px; height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
-.tm-bugcapture__more[open] > summary { margin-bottom: 8px; }
+.tm-bugcapture .field textarea.tm-bugcapture__notes { min-height: calc(var(--lh-body) * 2 + 12px); max-height: calc(var(--lh-body) * 6 + 12px); padding: 6px 12px; field-sizing: content; resize: none; }
+.tm-bugcapture__more > summary { display: flex; align-items: center; gap: 8px; height: var(--h-row-dense); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugcapture__more[open] > summary { margin-bottom: 4px; }
 .tm-bugcapture__count { color: var(--faint); font-weight: var(--w-regular); font-variant-numeric: tabular-nums; }
-.tm-bugcapture__rows { display: grid; gap: 8px; }
-.tm-bugcapture__steps,
-.tm-bug__steps { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); }
 .tm-bugcapture__errors { max-height: 160px; margin: 0; padding: 8px 12px; overflow: auto; border-radius: var(--r-sm); background: var(--well); color: var(--text-soft); font: var(--t-meta)/var(--lh-meta) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.tm-bugcapture__checks,
-.tm-bug__checks { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-help); line-height: var(--lh-ui); }
-.tm-bugcapture__checks li,
-.tm-bug__checks li { display: grid; gap: 2px; }
-.tm-bugcapture__recorded,
-.tm-bug__recorded { color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
-.tm-bugcapture__foot { display: grid; gap: 8px; padding: 12px 16px 16px; box-shadow: inset 0 1px 0 var(--hair); }
-.tm-bugcapture__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.tm-bugcapture__reason { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-align: right; }
 .tm-bugcapture__note { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugcapture__foot { display: grid; gap: 8px; padding: 16px; box-shadow: inset 0 1px 0 var(--hair); }
+.tm-bugcapture__actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.tm-bugcapture__actions > button { flex: none; }
+.tm-bugcapture__replaces { min-width: 0; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugcapture__reason { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-align: right; }
 
-/* One check on a picked element: its name, what it showed, then what it should do. */
-.tm-bugcheck { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 10px 12px 12px; border: 0; border-radius: var(--r-sm); background: var(--panel); }
-/* Floated, the legend is an ordinary row inside the card, not drawn across its top edge. */
-.tm-bugcheck__head { display: flex; float: left; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 0; }
-.tm-bugcheck__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
-.tm-bugcheck__remove { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
-.tm-bugcheck__observed { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
-.tm-bugcheck__row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; }
-.tm-bugcheck__row > :only-child { grid-column: 1 / -1; justify-self: start; }
+/* Expected: one row per expectation, divided by hairlines; no card inside the column. */
+.tm-bugexpect { display: grid; gap: 4px; min-width: 0; }
+.tm-bugexpect__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: var(--h-toolbar); }
+.tm-bugexpect__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); line-height: var(--lh-ui); }
+/* A ghost control at the column's edge hangs its padding outside it, so its words end on the edge. */
+.tm-bugexpect__add,
+.tm-bugexpect__stop { margin-right: -8px; }
+.tm-bugexpect__add .tm-action-menu__trigger { display: inline-flex; align-items: center; gap: 6px; height: var(--h-toolbar); padding: 0 8px; border-radius: var(--r-sm); color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugexpect__add .tm-action-menu__trigger:not(:disabled):hover { background-color: var(--hover); color: var(--text-soft); }
+.tm-bugexpect__empty { margin: 0; padding: 8px 0; color: var(--muted); font-size: var(--t-help); }
+.tm-bugexpect__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.tm-bugexpect__row { display: grid; gap: 6px; min-width: 0; padding: 12px 0; }
+.tm-bugexpect__row + .tm-bugexpect__row { border-top: 1px solid var(--hair); }
+.tm-bugexpect__line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: var(--h-compact); }
+.tm-bugexpect__line > :first-child:not(.tm-bugexpect__badge) { grid-column: 1 / 3; }
+.tm-bugexpect__badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--r-2xs); background: var(--accent); color: var(--on-primary); font-size: var(--t-meta); font-weight: var(--w-medium); font-variant-numeric: tabular-nums; line-height: var(--lh-meta); }
+.tm-bugexpect__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugexpect__request { min-width: 0; overflow: hidden; color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugexpect__status { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-bugexpect__status--failed { color: var(--blocked-ink); }
+.tm-bugexpect__line > :last-child { grid-column: -2; }
+.tm-bugexpect__remove { width: var(--h-compact); height: var(--h-compact); margin-right: -6px; border-radius: var(--r-xs); }
+.tm-bugexpect__was { display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.tm-bugexpect__controls { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.tm-bugexpect__controls > :only-child { grid-column: 1 / -1; justify-self: start; }
+.tm-bugexpect__controls--value { grid-template-columns: auto minmax(0, 1fr); }
+.tm-bugexpect__verb { color: var(--text-soft); font-size: var(--t-help); }
+
 .tm-bugcontrol { height: var(--h-toolbar); min-width: 0; padding: 0 10px; border: 0; border-radius: var(--r-sm); background-color: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--w-regular) var(--t-help)/var(--lh-ui) var(--font-ui); }
-/* The shared chevron sits 10px from the right edge; the text stops before it. */
-select.tm-bugcontrol { padding-right: 30px; }
 .tm-bugcontrol:not(:disabled):not(:focus):hover { background-color: var(--field-hover); }
+.tm-bugcontrol:focus { background-color: var(--field-focus); box-shadow: inset 0 0 0 1px var(--field-edge-focus); outline: none; }
+.app-shell[data-input-modality='keyboard'] .tm-bugcontrol:focus { box-shadow: inset 0 0 0 1px var(--field-edge-focus), 0 0 0 3px var(--focus-ring); }
 .tm-bugcontrol:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
-.tm-bugcheck__option { display: inline-flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: var(--t-help); }
+.tm-bugcontrol--mono { font-family: var(--font-mono); font-size: var(--t-meta); }
+.tm-bugcontrol--count { width: 88px; }
+.tm-bugcheck__option { display: inline-flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
 
-/* A request of the marked action and its check. */
-.tm-bugreq { display: grid; gap: 6px; min-width: 0; padding-bottom: 8px; box-shadow: inset 0 -1px 0 var(--hair); }
-.tm-bugreq:last-child { padding-bottom: 0; box-shadow: none; }
-.tm-bugreq__line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; }
-.tm-bugreq__line code { min-width: 0; overflow: hidden; color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.tm-bugreq__observed { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
-.tm-bugreq__observed--failed { color: var(--blocked-ink); }
-.tm-bugreq__controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
-.tm-bugreq__value { flex: 1 1 120px; font-family: var(--font-mono); }
-
-/* The Bug section: the bug and its state, the evidence, then the record behind disclosures. */
+/* The Bug section: the bug and its state, before and after, the results, the replays, the steps. */
 .tm-bug { gap: 12px; }
 .tm-bug__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
 .tm-bug__title { min-width: 0; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); line-height: var(--lh-body); overflow-wrap: anywhere; }
 .tm-bug__state { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-bug__statement { margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bug__head + .tm-bug__statement { margin-top: -8px; }
 .tm-bug__fact,
 .tm-bug__line { margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
-.tm-slot .tm-bug__fact { margin-top: -6px; }
-.tm-bug__evidence { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-body); line-height: var(--lh-body); overflow-wrap: anywhere; }
-.tm-bug__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
-.tm-bug__meta code { color: var(--faint); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
 .tm-bug__notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
 .tm-bug__menu .tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); color: var(--muted); }
-.tm-bug__screens { display: flex; flex-wrap: wrap; gap: 12px; }
-.tm-bug__screen { display: grid; gap: 4px; width: 168px; padding: 0; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-meta); text-align: left; }
-.app-shell[data-input-modality='keyboard'] .tm-bug__screen:focus-visible { outline: 0; box-shadow: var(--focus-halo); }
-.tm-bug__more > summary { display: inline-flex; align-items: center; gap: 6px; height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
-.tm-bug__more[open] > summary { margin-bottom: 6px; }
+
+/* Before and after: two equal columns, each framed on the checked element. */
+.tm-bug__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 880px; }
+.tm-bug__shot { display: grid; gap: 6px; min-width: 0; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: inherit; text-align: left; }
+.app-shell[data-input-modality='keyboard'] .tm-bug__shot:focus-visible { outline: 0; box-shadow: var(--focus-halo); }
+.tm-bug__caption { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.tm-bug__captionname { color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bug__caption time { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+/* A picture that opens something answers the pointer by its caption's ink and its frame's edge. */
+.tm-bug__captionname,
+.tm-bugpic::after { transition: color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out); }
+.tm-bug__shot:hover .tm-bug__captionname { color: var(--text); }
+.tm-bug__shot:hover .tm-bugpic::after { box-shadow: inset 0 0 0 1px var(--edge); }
+
+/* A kept screenshot framed on a region of the page; the element outlined in the accent. */
+.tm-bugpic { position: relative; display: block; width: 100%; overflow: hidden; border-radius: var(--r-sm); background: var(--well); }
+.tm-bugpic::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--edge-raised); pointer-events: none; }
+.tm-bugpic__image { position: absolute; display: block; max-width: none; height: auto; user-select: none; }
+.tm-bugpic__outline { position: absolute; border-radius: var(--r-2xs); box-shadow: 0 0 0 2px var(--accent); pointer-events: none; }
+.tm-bugpic__missing { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: var(--t-meta); }
+
+/* Expected, Before and After: what each expectation showed on either side of the fix. */
+.tm-bugtable td { height: var(--h-row); padding-block: 8px; color: var(--text); vertical-align: top; }
+.tm-bugtable tbody tr:hover td { background-color: transparent; }
+.tm-bugtable__statement { line-height: var(--lh-body); overflow-wrap: anywhere; }
+.tm-bugtable .tm-bugtable__side { width: 26%; }
+.tm-bugtable__earlier { margin-left: 6px; color: var(--faint); font-weight: var(--w-regular); }
+.tm-bugtable__cell { display: grid; grid-template-columns: 13px minmax(0, 1fr); align-items: baseline; column-gap: 8px; min-width: 0; }
+.tm-bugtable__value { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-help); line-height: var(--lh-body); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tm-bugtable__reload { grid-column: 2; color: var(--blocked-ink); font-size: var(--t-meta); line-height: var(--lh-meta); }
+.tm-bugtable__none { color: var(--faint); font-size: var(--t-help); }
+
+/* Whether an expectation held: the verified check or the blocked cross, quiet before the fix. */
+.tm-bugresult__mark { display: inline-flex; align-self: center; }
+.tm-bugresult__mark .tm-status-glyph--verified { color: var(--verified); }
+.tm-bugresult__mark .tm-status-glyph--blocked { color: var(--blocked); }
+.tm-bugresult__mark--quiet .tm-status-glyph { color: var(--muted); }
+
+/* Disclosures: Replays and Steps, each its own row with its summary beside the label. */
+.tm-bug__more > summary { display: flex; align-items: center; gap: 8px; height: var(--h-row-dense); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-bug__more[open] { display: grid; gap: 8px; }
 .tm-bug__count { color: var(--faint); font-weight: var(--w-regular); font-variant-numeric: tabular-nums; }
+.tm-bug__summary { margin-left: 4px; color: var(--muted); font-weight: var(--w-regular); }
 .tm-bug__scope { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; }
-.tm-bug__runs { display: grid; margin: 0; padding: 0; list-style: none; }
-.tm-bug__run { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: var(--h-row-dense); font-size: var(--t-help); }
-.tm-bug__runkind { color: var(--muted); }
-.tm-bug__runword { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-bug__runtime { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
-.tm-bug__rundetail { grid-column: 2 / -1; padding-bottom: 6px; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; }
+.tm-bug__details > summary { display: flex; align-items: center; gap: 8px; height: var(--h-row-dense); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+/* Disclosure rows answer the pointer by ink. */
+:is(.tm-bugcapture__more, .tm-bug__more, .tm-bug__details) > summary:hover { color: var(--text); }
+.tm-bug__details[open] { display: grid; gap: 8px; }
 
-/* A kept screenshot at the payload modal's size. */
-.tm-modal__panel.tm-bugshot { width: min(720px, 100%); }
-.tm-bugshot__image { max-height: calc(100vh - 220px); }
+/* Replays: rows that open their replay; the first cell's button stretches over the row. */
+.tm-bugruns td { height: var(--h-row); }
+.tm-bugruns__row { position: relative; }
+.tm-bugruns__open { padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-weight: var(--w-medium); }
+.tm-bugruns__open::after { content: ''; position: absolute; inset: 0; }
+.tm-bugruns__row:has(.tm-bugruns__open:active) td { background-image: linear-gradient(var(--press), var(--press)); }
+/* The row is the target: one ring, drawn inward around the row, never a second one around the word. */
+.app-shell[data-input-modality='keyboard'] .tm-bugruns__open:focus { outline: 0; box-shadow: none; }
+.app-shell[data-input-modality='keyboard'] .tm-bugruns__open:focus::after { box-shadow: var(--focus-halo-inset); }
+.tm-bug__runword { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
+
+/* Before and after in one place, switched in place. */
+.tm-modal__panel.tm-bugcompare { width: min(880px, 100%); }
+.tm-bugcompare__head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tm-bugcompare__head h3 { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugcompare__side-name { margin-left: auto; color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugcompare__time { color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bugcompare__switch { margin-left: auto; }
+.tm-bugcompare__stack { display: grid; }
+.tm-bugcompare__side { grid-area: 1 / 1; }
+
+/* A replay's drawer: placed as the floating side sheet is, 8px inside the page sheet, on the
+   side panel's layer, with no dimming. A click beside it closes it. */
+.tm-bugdrawer { position: fixed; inset: 0; z-index: var(--layer-overlay); }
+.tm-bugdrawer__scrim { position: absolute; inset: 0; }
+.tm-bugdrawer__panel { position: absolute; top: calc(var(--h-titlebar) + 8px); right: 16px; bottom: 16px; display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(560px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); outline: none; overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
+.tm-bugdrawer__head { display: flex; align-items: center; gap: 8px; height: var(--h-head); padding: 0 10px 0 16px; box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-bugdrawer__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-bugdrawer__word { display: inline-flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-bugdrawer__body { display: grid; align-content: start; gap: 24px; min-height: 0; padding: 16px calc(16px - var(--scrollbar)) 24px 16px; outline: none; overflow-y: auto; scrollbar-gutter: stable; }
+/* Focus starts here so the keys scroll the replay; for the keyboard it is drawn inward, as on a list row. */
+:root[data-input-modality='keyboard'] .tm-bugdrawer__body:focus { box-shadow: var(--focus-halo-inset); }
+.tm-bugdrawer__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bugdrawer__meta code { color: var(--faint); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
+.tm-bugdrawer__notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bugdrawer__notice--error { background: var(--blocked-bg); color: var(--blocked-ink); }
+.tm-bugdrawer__notice--action { background: var(--waiting-bg); color: var(--waiting-ink); }
+.tm-bugdrawer__notice:is(.tm-bugdrawer__notice--neutral, .tm-bugdrawer__notice--info, .tm-bugdrawer__notice--success) { padding: 0; background: none; color: var(--text-soft); }
+.tm-bugdrawer__shot { display: block; min-width: 0; }
+.tm-bugdrawer__section { display: grid; gap: 8px; min-width: 0; }
+.tm-bugdrawer__label { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugdrawer__facts { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); }
+
+/* An expectation in a replay: its mark, what it expects, then what the replay saw. */
+.tm-bugresults { display: grid; margin: 0; padding: 0; list-style: none; }
+.tm-bugresult { display: grid; grid-template-columns: 13px minmax(0, 1fr); align-items: baseline; column-gap: 8px; row-gap: 2px; padding: 8px 0; border-top: 1px solid var(--hair); }
+.tm-bugresult:first-child { border-top: 0; }
+.tm-bugresult__statement { color: var(--text); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bugresult__value,
+.tm-bugresult__reload { grid-column: 2; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
 
 /* The Review brief's Behaviour block: what Task Monki observed, facts before the agent's claims. */
 .tm-review-brief__behaviour { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-body); line-height: var(--lh-body); overflow-wrap: anywhere; }
-.tm-review-brief__scope { margin: 4px 0 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
 
 /* Debug's earlier bugs: one row each, Delete evidence at the right. */
 .tm-bugearlier { display: grid; gap: 8px; }

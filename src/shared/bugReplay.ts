@@ -78,14 +78,29 @@ export interface BugReplayRunFailure {
 }
 
 /** What one counted run observed for one check. */
+/**
+ * Where an element sat in a screenshot, in CSS pixels of the case's viewport, so a surface can
+ * outline it at any size the screenshot is drawn.
+ */
+export interface BugElementBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface BugReplayAssertionObservation {
   assertionId: string;
   passed: boolean;
   /** Observed text, value, visibility, count, status or JSON, in words. */
   observed?: string;
-  afterReload?: { passed: boolean; observed?: string };
+  /** The same observation as a value alone, for a column: '"$40.00"', '200', 'Not shown'. */
+  value?: string;
+  afterReload?: { passed: boolean; observed?: string; value?: string };
   /** Which of the target's candidates found the element on the page: 0 is the first. */
   locator?: number;
+  /** Where the checked element sat in the run's final screenshot. */
+  box?: BugElementBox;
 }
 
 export interface BugReplayRunRecord {
@@ -237,6 +252,8 @@ export interface BugCapturePickView {
   volatileTokens: string[];
   /** A short name for the element, e.g. `"Total"` or the test id. */
   label: string;
+  /** Where it sat in the capture's screenshot. */
+  box?: BugElementBox;
 }
 
 export type BugCaptureCheckTemplate = 'equals' | 'contains' | 'visible' | 'hidden' | 'count';
@@ -270,6 +287,13 @@ export interface BugCaptureDraft {
   checks: BugCaptureCheckDraft[];
   requestRules: BugCaptureRequestRule[];
   valueChecks: BugCaptureValueCheck[];
+  /** The page should raise no uncaught error. */
+  noPageError?: boolean;
+  /**
+   * How many picks this draft has taken in. A later pick joins it with its own expectation; an
+   * earlier one whose expectation the person removed stays out.
+   */
+  picksSeen?: number;
 }
 
 export type BugRecordingPhase =
@@ -289,13 +313,63 @@ export interface BugRecordingEnvFileChoice {
   include: boolean;
 }
 
+/** A fact the person reads before approving clean runs: "Runs as", "Your user, without a sandbox". */
+export interface BugReplayLeaseFact {
+  label: string;
+  value: string;
+}
+
 export interface BugReplayLeaseRequest {
   templateDigest: string;
   title: string;
-  /** One fact per line: the commands, source, data, secrets, env files, network and the execution boundary. */
-  facts: string[];
+  /** The execution boundary first, then when runs happen, the approval, code, data, secrets, files and network. */
+  facts: BugReplayLeaseFact[];
   commands: Array<{ service: string; command: string; directory: string }>;
   sameAsRunningPreview: boolean;
+}
+
+/** What a replayed step does; `step` when an older record kept only its words. */
+export type BugStepKind = 'navigate' | 'reload' | 'click' | 'check' | 'uncheck' | 'fill' | 'select' | 'press' | 'dialog' | 'step';
+
+/** A step a clean run replays, in the product's words: 'Click "Apply coupon"'. */
+export interface BugStepView {
+  kind: BugStepKind;
+  text: string;
+}
+
+/**
+ * One row of a recording's live timeline: a step the person took, an input a clean run can't
+ * replay, or something the page did that a person looks for when a bug shows (a failed or
+ * refused request, an uncaught error).
+ */
+export interface BugTimelineEntry {
+  /** Stable for the row while the recording lasts. */
+  id: string;
+  kind: BugStepKind | 'unsupported' | 'request' | 'error';
+  text: string;
+  /** The step's number in a replay, on steps. */
+  step?: number;
+  /** A server error or no answer is an error; a refused outside host is a warning; a 4xx answer has no tone. */
+  tone?: 'error' | 'warning';
+}
+
+export interface BugRecordingTimeline {
+  /** The newest entries, oldest first. */
+  entries: BugTimelineEntry[];
+  /** Steps a clean run replays, in all. */
+  steps: number;
+  /** Entries before the first one shown. */
+  omitted: number;
+}
+
+/** One step of starting a clean copy, read by its mark. */
+export interface BugStartStep {
+  id: string;
+  /** "Copy this task's files", "Install dependencies", "Start web", "Open the app". */
+  label: string;
+  state: 'pending' | 'active' | 'done' | 'failed';
+  startedAt?: string;
+  endedAt?: string;
 }
 
 export interface BugRecordingSessionView {
@@ -304,6 +378,12 @@ export interface BugRecordingSessionView {
   phase: BugRecordingPhase;
   /** The observed step of preparation, e.g. "Installing dependencies". */
   detail?: string;
+  /** While the clean copy starts: its steps, in order. */
+  progress?: BugStartStep[];
+  /** While recording: what was recorded so far. */
+  timeline?: BugRecordingTimeline;
+  /** Nothing was recorded after the start page yet, so the recording can start on another page. */
+  startEditable?: boolean;
   startedAt: string;
   recordingStartedAt?: string;
   lastInputAt?: string;
@@ -326,8 +406,10 @@ export interface BugCaptureView {
   valueRows: BugCaptureValueRow[];
   otherRequests: string[];
   pageErrors: string[];
+  /** The marked action raised an uncaught error: "No page error" can reproduce the bug. */
+  uncaughtError: boolean;
   stepCount: number;
-  stepSummaries: string[];
+  steps: BugStepView[];
   screenshotFileId?: string;
   suggestedTitle: string;
   /** The person's draft as last saved by the modal. */
@@ -356,6 +438,15 @@ export interface BugReplayRunView {
   settledAt?: string;
 }
 
+/** What one run, or the recording, observed for a check. */
+export interface BugCheckResult {
+  held: boolean;
+  /** The observed value alone: '"$40.00"', '200', 'Not shown'. */
+  value?: string;
+  /** The check's second look after a reload, when it has one. */
+  afterReload?: { held: boolean; value?: string };
+}
+
 export interface BugCaseCheckView {
   id: string;
   /** "Total should read "$45.00"". */
@@ -363,6 +454,19 @@ export interface BugCaseCheckView {
   inSignature: boolean;
   /** What the recording showed, in words. */
   recorded?: string;
+  /** Before the fix: the run that reproduced the bug, or the recording before any run counted. */
+  before?: BugCheckResult;
+  /** After the fix: the verdict's decisive run, once a fix was checked. */
+  after?: BugCheckResult;
+}
+
+/** A screenshot the Bug section shows, with where each checked element sat in it. */
+export interface BugShotView {
+  fileId: string;
+  /** The run that took it; absent for the recording's own. */
+  runId?: string;
+  at: string;
+  boxes: Array<{ checkId: string; box: BugElementBox }>;
 }
 
 export interface BugCaseView {
@@ -384,7 +488,7 @@ export interface BugCaseView {
   };
   gate: BugReplayGateProjection;
   /** The recorded steps, in the product's words, with or without a check. */
-  steps: string[];
+  steps: BugStepView[];
   /** Lines in the product's words: "Before: total showed $40.00". */
   before?: string[];
   after?: string[];
@@ -397,6 +501,8 @@ export interface BugCaseView {
   recipeDiffers?: boolean;
   envFilesChanged?: string[];
   screenshotFileIds: string[];
+  /** The pair the Bug section compares: before the fix (the reproducing run, or the recording) and after it. */
+  shots: { before?: BugShotView; after?: BugShotView };
   partial?: string;
   /** Actions the Bug section offers now, already filtered by state. */
   actions: BugCaseAction[];
@@ -536,6 +642,8 @@ export interface BugRecordingViewApi {
   show(input: ShowBugRecordingViewRequest): Promise<void>;
   hide(input: HideBugRecordingViewRequest): Promise<void>;
   reload(input: { taskId: string; sessionId: string }): Promise<void>;
+  /** Before the first step: start the recording on another page of the app. */
+  open(input: { taskId: string; sessionId: string; path: string }): Promise<void>;
 }
 
 export const BUG_REPLAY_STORAGE_LIMIT_BYTES = 256 * 1024 * 1024;

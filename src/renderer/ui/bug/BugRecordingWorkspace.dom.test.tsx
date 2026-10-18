@@ -23,9 +23,10 @@ const capture: BugCaptureView = {
   valueRows: [],
   otherRequests: [],
   pageErrors: [],
+  uncaughtError: false,
   stepCount: 1,
-  stepSummaries: ['Open /'],
-  suggestedTitle: 'Wrong value on the page'
+  steps: [{ kind: 'navigate', text: 'Open /' }],
+  suggestedTitle: ''
 };
 
 function recording(overrides: Partial<BugRecordingSessionView>): BugRecordingSessionView {
@@ -48,7 +49,7 @@ describe('Recording a bug', () => {
 
     expect((screen.getByRole('checkbox', { name: '.env' }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole('checkbox', { name: '.env.local' }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Start clean copy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start the app' }));
 
     await waitFor(() => expect(taskManagerApi.chooseBugEnvFiles).toHaveBeenCalledWith({ taskId: 'task-1', sessionId: 'session-1', include: ['.env'] }));
   });
@@ -96,7 +97,7 @@ describe('Recording a bug', () => {
     expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Bug' }));
   });
 
-  it('offers a stopped recording’s steps without a check, or a new recording, from one place', () => {
+  it('offers a stopped recording’s steps alone, or a new recording, from one place', () => {
     render(workspace(recording({
       phase: 'INTERRUPTED',
       detail: undefined,
@@ -106,7 +107,7 @@ describe('Recording a bug', () => {
 
     expect(screen.getByRole('status').textContent).toBe('Recording stopped');
     const again = screen.getByRole('button', { name: 'Record again' });
-    const keep = screen.getByRole('button', { name: 'Save without a check' });
+    const keep = screen.getByRole('button', { name: 'Save steps only' });
     // Recording again comes first; keeping the steps is the primary choice, last.
     expect(again.compareDocumentPosition(keep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(keep.className).toContain('primary-button');

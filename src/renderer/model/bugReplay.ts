@@ -7,14 +7,17 @@ import type {
   BugCaptureView,
   BugCaseAction,
   BugCaseView,
+  BugCheckResult,
   BugRecordingPhase,
   BugRecordingSessionView,
   BugReplayGateProjection,
   BugReplayGateState,
   BugReplayRunView,
-  BugReplayWaitReason
+  BugReplayWaitReason,
+  BugStartStep,
+  BugStepView
 } from '../../shared/bugReplay';
-import { bugReason, bugStateWord } from '../../shared/bugReplayClaims';
+import { bugCountParts, bugReason, bugStateWord, suggestBugTitle } from '../../shared/bugReplayClaims';
 import type { Tone } from './viewTypes';
 
 /**
@@ -100,11 +103,11 @@ export function bugActionLabel(action: BugCaseAction, view?: Pick<BugCaseView, '
       // Before any fix was checked, it is the first verification.
       return view?.gate && !view.gate.candidate ? 'Verify fix' : 'Verify again';
     case 'run-again':
-      return 'Run again';
+      return 'Reproduce again';
     case 'record-again':
       return 'Record again';
     case 'allow-runs':
-      return 'Approve clean runs';
+      return 'Approve replays';
     case 'unlock-secrets':
       return 'Unlock secrets';
     case 'use-new-env-files':
@@ -112,11 +115,11 @@ export function bugActionLabel(action: BugCaseAction, view?: Pick<BugCaseView, '
     case 'keep-browser-storage':
       return view?.keepBrowserStorage ? 'Clear browser storage on reload' : 'Keep browser storage on reload';
     case 'save-without-check':
-      return 'Remove the check';
+      return 'Keep steps only';
     case 'remove':
       return 'Remove bug';
     case 'cancel-run':
-      return 'Cancel runs';
+      return 'Cancel replays';
   }
 }
 
@@ -220,14 +223,16 @@ const WAIT_WORDS: Record<BugReplayWaitReason, string> = {
 
 export interface BugRunRow {
   id: string;
-  /** "Before", "After" or "Recheck": the recorded code run again before a fix counts. */
-  kind: string;
+  /** "Before" (the recorded code) or "After" (the code with the fix). */
+  kind: 'Before' | 'After';
   word: string;
   tone: Tone;
   inFlight: boolean;
   detail?: string;
   /** When it settled or started, for the row's age. */
   at: string;
+  /** How long it ran, once it settled. */
+  durationMs?: number;
   screenshotFileIds: string[];
 }
 
@@ -236,15 +241,18 @@ export function bugRunRows(runs: BugReplayRunView[]): BugRunRow[] {
     .filter((run) => run.kind !== 'RECORD')
     .slice(0, 8)
     .map((run) => {
-      const kind = run.control ? 'Recheck' : run.kind === 'CANDIDATE' ? 'After' : 'Before';
+      // A control run replays the recorded code too: it is a before run.
+      const kind = run.kind === 'CANDIDATE' ? 'After' : 'Before';
       const settled = run.state === 'SETTLED' && run.outcome;
       const word = settled ? OUTCOME_WORDS[run.outcome!] : run.waitingFor ? WAIT_WORDS[run.waitingFor] : run.phase ?? (run.state === 'QUEUED' ? 'Queued' : 'Running');
       const tone: Tone = !settled
         ? run.waitingFor === 'APPROVAL' || run.waitingFor === 'KEYSTORE' ? 'action' : 'info'
-        : run.outcome === 'PASSED' || run.outcome === 'REPRODUCED' ? (run.kind === 'CANDIDATE' && !run.control ? 'success' : 'neutral')
+        : run.outcome === 'PASSED' ? 'success'
           : run.outcome === 'FAILED' ? 'error'
             : ['ENVIRONMENT_FAILED', 'BLOCKED', 'PROTECTED_INPUT_CHANGED', 'ENV_FILES_CHANGED'].includes(run.outcome!) ? 'action'
               : 'neutral';
+      const started = run.startedAt ? Date.parse(run.startedAt) : NaN;
+      const ended = run.settledAt ? Date.parse(run.settledAt) : NaN;
       return {
         id: run.id,
         kind,
@@ -253,9 +261,89 @@ export function bugRunRows(runs: BugReplayRunView[]): BugRunRow[] {
         inFlight: !settled && !run.waitingFor,
         ...(run.failure?.detail && run.outcome !== 'CANCELED' && run.outcome !== 'SUPERSEDED' ? { detail: run.failure.detail } : {}),
         at: run.settledAt ?? run.startedAt ?? run.queuedAt,
+        ...(Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? { durationMs: ended - started } : {}),
         screenshotFileIds: run.screenshotFileIds
       };
     });
+}
+
+/** A duration in the app's words: "14 s", "2 min 5 s". */
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
+}
+
+/** The Replays disclosure's summary: what the replays support, one polarity per side. */
+export function bugReplaysSummary(gate: Pick<BugReplayGateProjection, 'baseline' | 'candidate' | 'state'>): string[] {
+  const parts = bugCountParts(gate);
+  return [
+    parts.reproduced ? `Reproduced ${parts.reproduced.count} of ${parts.reproduced.total}` : undefined,
+    parts.passed ? `Passed ${parts.passed.count} of ${parts.passed.total}` : undefined
+  ].filter((part): part is string => Boolean(part));
+}
+
+export interface BugResultRow {
+  id: string;
+  statement: string;
+  before?: BugCheckResult;
+  after?: BugCheckResult;
+}
+
+export interface BugResultsTable {
+  rows: BugResultRow[];
+  /** A fix was checked: the After column shows. */
+  hasAfter: boolean;
+  /** The After results are about code that changed since, or could not be checked again. */
+  afterEarlier: boolean;
+}
+
+/** The Expected, Before and After table: what each expectation showed before the fix and after it. */
+export function bugResultsTable(view: Pick<BugCaseView, 'version' | 'gate'>): BugResultsTable | undefined {
+  const checks = view.version?.checks ?? [];
+  if (checks.length === 0) return undefined;
+  const rows = checks.map((check) => ({
+    id: check.id,
+    statement: check.statement,
+    ...(check.before ? { before: check.before } : {}),
+    ...(check.after ? { after: check.after } : {})
+  }));
+  const hasAfter = rows.some((row) => row.after);
+  return { rows, hasAfter, afterEarlier: hasAfter && (view.gate.state === 'STALE' || view.gate.state === 'COULDNT_VERIFY') };
+}
+
+/** Steps as a checklist: how far a replay got, or the startup of a clean copy. */
+export interface BugChecklistStep {
+  step: string;
+  status: 'COMPLETED' | 'IN_PROGRESS' | 'PENDING';
+}
+
+/** A replay's steps: done up to where it stopped, the failed step marked, the rest not run. */
+export function runStepList(steps: BugStepView[], run: Pick<BugReplayRunView, 'state' | 'outcome' | 'failure'>): { steps: BugChecklistStep[]; failedIndex?: number } {
+  const settled = run.state === 'SETTLED';
+  const failedIndex = run.failure?.stepIndex;
+  const reachedChecks = settled && (run.outcome === 'REPRODUCED' || run.outcome === 'NOT_REPRODUCED' || run.outcome === 'PASSED' || (run.outcome === 'FAILED' && failedIndex === undefined));
+  return {
+    steps: steps.map((step, index) => ({
+      step: step.text,
+      status: reachedChecks || (failedIndex !== undefined && index < failedIndex) ? 'COMPLETED' : 'PENDING'
+    })),
+    ...(failedIndex !== undefined && failedIndex < steps.length ? { failedIndex } : {})
+  };
+}
+
+/** The clean copy's start as a checklist, with the failed step marked. */
+export function startStepList(progress: BugStartStep[]): { steps: BugChecklistStep[]; failedIndex?: number } {
+  const failedIndex = progress.findIndex((step) => step.state === 'failed');
+  return {
+    steps: progress.map((step) => ({
+      step: step.label,
+      status: step.state === 'done' ? 'COMPLETED' : step.state === 'active' ? 'IN_PROGRESS' : 'PENDING'
+    })),
+    ...(failedIndex >= 0 ? { failedIndex } : {})
+  };
 }
 
 /** The verdict Mark done displayed, sent so a verdict about code that changed since is caught. */
@@ -279,23 +367,23 @@ export function recordingHead(recording: BugRecordingSessionView): RecordingHead
   switch (recording.phase) {
     case 'CHECKING':
     case 'STARTING':
-      return { title: 'Starting a clean copy', tone: 'info', working: true, ...(recording.detail ? { detail: recording.detail } : {}) };
+      return { title: 'Starting the app', tone: 'neutral', working: true };
     case 'CHOOSING_ENV_FILES':
     case 'NEEDS_APPROVAL':
     case 'FAILED':
-      // The decision block below carries the step, or what went wrong, and its tone.
+      // The card in the page's place carries the step, or what went wrong, and its tone.
       return { title: 'Record a bug', tone: 'neutral', working: false };
     case 'INTERRUPTED':
-      // The block below says why; the steps so far wait in the panel.
-      return { title: 'Recording stopped', tone: 'action', working: false };
+      // The notice beside the steps says why; the composer's foot holds the choices.
+      return { title: 'Recording stopped', tone: 'neutral', working: false };
     case 'RECORDING':
-      return { title: 'Recording', tone: 'info', working: false, ...(recording.routePath ? { detail: recording.routePath, detailMono: true } : {}) };
+      return { title: 'Recording', tone: 'neutral', working: false };
     case 'MARKING':
       return recording.detail
-        ? { title: "Point at what's wrong", tone: 'action', working: false }
-        : { title: 'Mark the bug', tone: 'info', working: false };
+        ? { title: "Point at what's wrong", tone: 'neutral', working: false }
+        : { title: 'Mark the bug', tone: 'neutral', working: false };
     case 'SAVING':
-      return { title: 'Saving the bug', tone: 'info', working: true };
+      return { title: 'Saving the bug', tone: 'neutral', working: true };
   }
 }
 
@@ -339,7 +427,11 @@ export function defaultCheck(pick: BugCapturePickView): BugCaptureCheckDraft {
   return { pickIndex: pick.index, template: pick.visible ? 'hidden' : 'visible', alsoAfterReload: false };
 }
 
-/** The draft the modal opens with: the saved one if any, with a check for every pick it lacks. */
+/**
+ * The draft the composer opens with, or the current one with the picks it has not taken in yet:
+ * each new pick joins with its own expectation, and an expectation the person removed stays
+ * removed when they point at another element.
+ */
 export function captureDraft(capture: BugCaptureView, current?: BugCaptureDraft): BugCaptureDraft {
   const base: BugCaptureDraft = current ?? capture.draft ?? {
     title: capture.suggestedTitle,
@@ -348,13 +440,18 @@ export function captureDraft(capture: BugCaptureView, current?: BugCaptureDraft)
     valueChecks: []
   };
   const covered = new Set(base.checks.map((check) => check.pickIndex));
-  const added = capture.picks.filter((pick) => !covered.has(pick.index)).map(defaultCheck);
+  const added = capture.picks.filter((pick) => !covered.has(pick.index) && pick.index >= (base.picksSeen ?? 0)).map(defaultCheck);
   const known = new Set(base.requestRules.map((rule) => rule.requestKey));
   const rules = [
     ...base.requestRules.filter((rule) => capture.requests.some((row) => row.key === rule.requestKey)),
     ...capture.requests.filter((row) => !known.has(row.key)).map((row) => ({ requestKey: row.key, check: row.defaultCheck, sentOnce: row.defaultSentOnce }))
   ];
-  return { ...base, checks: [...base.checks.filter((check) => capture.picks.some((pick) => pick.index === check.pickIndex)), ...added], requestRules: rules };
+  return {
+    ...base,
+    checks: [...base.checks.filter((check) => capture.picks.some((pick) => pick.index === check.pickIndex)), ...added],
+    requestRules: rules,
+    picksSeen: capture.picks.length
+  };
 }
 
 export interface CaptureSaveState {
@@ -369,25 +466,39 @@ export interface CaptureSaveState {
 export function captureSaveState(
   draft: BugCaptureDraft,
   preview: BugCapturePreview | undefined,
-  capture: BugCaptureView,
-  pending: boolean
+  capture: BugCaptureView
 ): CaptureSaveState {
   const titled = draft.title.trim().length > 0;
   if (!titled) return { reproducible: false, reason: 'Name the bug first', canSaveEvidence: false };
   if (capture.partial) return { reproducible: false, reason: capture.partial, canSaveEvidence: true };
   const unfilled = draft.checks.find((check) => (check.template === 'equals' || check.template === 'contains') && !check.expected?.trim());
   if (unfilled) return { reproducible: false, reason: 'Write what it should read', canSaveEvidence: true };
-  if (pending || !preview || preview.draftRevision !== capture.draftRevision) return { reproducible: false, canSaveEvidence: true };
-  if (!preview.reproducible) return { reproducible: false, reason: preview.reason ?? 'These checks cannot be reproduced', canSaveEvidence: true };
+  // While a newer preview is on its way, the last verdict for these picks stands: the save
+  // itself is checked again, so a stale yes can only end in its reason.
+  if (!preview || preview.draftRevision !== capture.draftRevision) return { reproducible: false, canSaveEvidence: true };
+  if (!preview.reproducible) return { reproducible: false, reason: preview.reason ?? 'These expectations cannot be reproduced', canSaveEvidence: true };
   return { reproducible: true, canSaveEvidence: true };
 }
 
-/** The request rows' check choices, in the order the select lists them. */
-export const REQUEST_CHECK_OPTIONS: Array<{ value: 'success' | 'answered' | 'none'; label: string }> = [
-  { value: 'success', label: 'Should succeed' },
-  { value: 'answered', label: 'Should be answered' },
-  { value: 'none', label: 'Not checked' }
+/** The request rows' expectations, in the order the select lists them. */
+export const REQUEST_CHECK_OPTIONS: Array<{ value: 'success' | 'answered'; label: string }> = [
+  { value: 'answered', label: 'Should get no server error' },
+  { value: 'success', label: 'Should succeed' }
 ];
+
+/** The suggested name for the bug from its first expectation; empty without one. */
+export function suggestedCaptureTitle(capture: Pick<BugCaptureView, 'picks'>, draft: Pick<BugCaptureDraft, 'checks'>): string {
+  const check = draft.checks[0];
+  const pick = check ? capture.picks.find((item) => item.index === check.pickIndex) : undefined;
+  if (!check || !pick) return '';
+  return suggestBugTitle({
+    label: pick.label,
+    template: check.template,
+    ...(check.expected !== undefined ? { expected: check.expected } : {}),
+    ...(check.count !== undefined ? { count: check.count } : {}),
+    shown: pick.value ?? pick.text
+  });
+}
 
 export const CHECK_TEMPLATE_OPTIONS: Array<{ value: BugCaptureCheckDraft['template']; label: string }> = [
   { value: 'equals', label: 'Should read' },
@@ -397,16 +508,14 @@ export const CHECK_TEMPLATE_OPTIONS: Array<{ value: BugCaptureCheckDraft['templa
   { value: 'count', label: 'Should appear' }
 ];
 
-/** The Review brief's Bug block: the bug's word, what was observed, and the scope. */
-export function reviewBehaviour(view: BugCaseView | undefined): { word: string; tone: Tone; lines: string[]; scope?: string } | undefined {
+/**
+ * The Review brief's Bug block: the bug's word and what was observed before and after the fix.
+ * What the replays could not see is stated where a replay is opened, not beside the diff.
+ */
+export function reviewBehaviour(view: BugCaseView | undefined): { word: string; tone: Tone; lines: string[] } | undefined {
   if (!view?.version) return undefined;
   const lines = [...(view.before ?? []), ...(view.after ?? [])];
   if (lines.length === 0) return undefined;
   const status = describeBugStatus(view.gate);
-  return {
-    word: status.word,
-    tone: status.tone,
-    lines,
-    ...(view.scopeLine ? { scope: view.scopeLine } : {})
-  };
+  return { word: status.word, tone: status.tone, lines };
 }

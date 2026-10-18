@@ -56,6 +56,8 @@ interface IndexedFrames {
   signals: Extract<BugReplayFrame, { type: 'signal' }>[];
   requests: BugReplayRequestFact[];
   windows: Extract<BugReplayFrame, { type: 'window' }>[];
+  /** Where each checked element sat in the final screenshot. */
+  marks: Map<string, { x: number; y: number; width: number; height: number }>;
 }
 
 export function evaluateRun(
@@ -360,7 +362,7 @@ function stepFailure(step: Extract<BugReplayFrame, { type: 'step' }>): BugReplay
 }
 
 function indexFrames(frames: BugReplayFrame[]): IndexedFrames {
-  const indexed: IndexedFrames = { steps: [], main: new Map(), afterReload: new Map(), signals: [], requests: [], windows: [] };
+  const indexed: IndexedFrames = { steps: [], main: new Map(), afterReload: new Map(), signals: [], requests: [], windows: [], marks: new Map() };
   for (const frame of frames) {
     switch (frame.type) {
       case 'step':
@@ -378,6 +380,9 @@ function indexFrames(frames: BugReplayFrame[]): IndexedFrames {
         break;
       case 'window':
         indexed.windows.push(frame);
+        break;
+      case 'screenshot':
+        if (frame.purpose === 'final') for (const mark of frame.marks ?? []) indexed.marks.set(mark.assertionId, mark.box);
         break;
       default:
         break;
@@ -459,13 +464,69 @@ function observationView(assertion: BugCaseAssertion, indexed: IndexedFrames, do
   if (dom?.found && dom.candidateIndex !== undefined) view.locator = dom.candidateIndex;
   const observed = describeObserved(assertion, observation, document, indexed);
   if (observed !== undefined) view.observed = observed;
+  const value = observedValue(assertion, observation);
+  if (value !== undefined) view.value = value;
+  const box = indexed.marks.get(assertion.id);
+  if (box) view.box = { ...box };
   if (isDomAssertion(assertion) && assertion.alsoAfterReload) {
     const after = indexed.afterReload.get(assertion.id);
     if (after) {
-      view.afterReload = { passed: after.matched && after.held, ...(domValue(after) !== undefined ? { observed: afterReloadText(assertion, after) } : {}) };
+      const afterValue = observedValue(assertion, after);
+      view.afterReload = {
+        passed: after.matched && after.held,
+        ...(domValue(after) !== undefined ? { observed: afterReloadText(assertion, after) } : {}),
+        ...(afterValue !== undefined ? { value: afterValue } : {})
+      };
     }
   }
   return view;
+}
+
+/** What a run observed for a check, as a value alone for a results column: '"$40.00"', '200', 'Not shown'. */
+export function observedValue(assertion: BugCaseAssertion, observation: BugReplayObservation | undefined): string | undefined {
+  switch (assertion.kind) {
+    case 'dom.text': {
+      const dom = asDom(observation);
+      return dom?.found ? quote(clipValue(dom.text ?? '')) : 'Not shown';
+    }
+    case 'dom.value': {
+      const dom = asDom(observation);
+      return dom?.found ? quote(clipValue(dom.value ?? '')) : 'Not shown';
+    }
+    case 'dom.visible': {
+      const dom = asDom(observation);
+      return dom?.visible ? 'Visible' : 'Not visible';
+    }
+    case 'dom.count': {
+      const dom = asDom(observation);
+      return sentenceStart(times(dom?.count ?? 0));
+    }
+    case 'page.path':
+      return observation?.kind === 'path' ? observation.path : undefined;
+    case 'console.noUncaughtError':
+      if (observation?.kind !== 'console') return undefined;
+      return observation.errors.length > 0 ? clipValue(observation.errors[0].split('\n')[0]) : 'No error';
+    case 'request': {
+      if (observation?.kind !== 'request') return undefined;
+      if (observation.matches.length === 0) return 'Not sent';
+      if (assertion.count.op === 'exactly') return `Sent ${times(observation.matches.length)}`;
+      const first = observation.matches.find((match) => !statusHolds(assertion.status, factOutcome(match))) ?? observation.matches[0];
+      return first.gateway || first.outcome !== 'response' ? 'No response' : String(first.status);
+    }
+    case 'request.json': {
+      if (observation?.kind !== 'request') return undefined;
+      const first = observation.matches[0];
+      if (!first) return 'Not sent';
+      const values = assertion.side === 'request' ? first.requestValues : first.responseValues;
+      const value = values?.[assertion.pointer];
+      return value === undefined || value === null ? 'No value' : clipValue(value);
+    }
+  }
+}
+
+function clipValue(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 80 ? `${flat.slice(0, 79)}…` : flat;
 }
 
 /** What the run showed for a check, in words: "total showed $40.00". */
@@ -560,6 +621,11 @@ function asDom(observation: BugReplayObservation | undefined): BugReplayDomObser
 
 function factOutcome(fact: BugReplayRequestFact): { outcome: 'response' | 'failed' | 'blocked' | 'pending'; gateway?: boolean; status?: number } {
   return { outcome: fact.outcome, ...(fact.gateway ? { gateway: true } : {}), ...(fact.status === undefined ? {} : { status: fact.status }) };
+}
+
+/** What the recording showed for a check it violated, as a value alone: '"$40.00"', 'No response'. */
+export function capturedValue(captured: BugCaseCaptured): string {
+  return sentenceStart(capturedText(captured));
 }
 
 function capturedText(captured: BugCaseCaptured): string {

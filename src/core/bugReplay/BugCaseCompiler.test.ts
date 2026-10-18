@@ -18,7 +18,7 @@ describe('Bug case compiler', () => {
     });
     expect(document.failureSignature).toEqual([{ assertionId: document.assertions[0].id, mode: 'CAPTURED', captured: { kind: 'text', token: '$40.00' } }]);
     expect(compiled.checks).toEqual([
-      { id: document.assertions[0].id, statement: '"Cart total" should read "$45.00"', inSignature: true, recorded: 'Showed "$40.00"' }
+      { id: document.assertions[0].id, statement: 'Cart total should read "$45.00"', inSignature: true, recorded: 'Showed "$40.00"' }
     ]);
     // What is saved parses as the strict document the runner accepts.
     expect(parseBugCase(JSON.parse(JSON.stringify(document)))).toEqual(document);
@@ -28,13 +28,13 @@ describe('Bug case compiler', () => {
     const compiled = compileBugCase(checkoutRecording(), totalDraft({}, '$40.00'));
 
     expect(compiled.reproducible).toBe(false);
-    expect(compiled.reason).toBe('Write what "Cart total" should read; it shows "$40.00" now');
+    expect(compiled.reason).toBe('Write what Cart total should read; it shows "$40.00" now');
   });
 
   it('states a reload guard on the check itself', () => {
     const compiled = compileBugCase(checkoutRecording(), totalDraft({}, '$45.00', true));
 
-    expect(compiled.checks[0].statement).toBe('"Cart total" should read "$45.00", also after reload');
+    expect(compiled.checks[0].statement).toBe('Cart total should read "$45.00", also after reload');
   });
 
   it('does not name an element by text that holds the value being checked', () => {
@@ -63,7 +63,7 @@ describe('Bug case compiler', () => {
     expect(compiled.document!.failureSignature).toEqual([
       expect.objectContaining({ mode: 'CAPTURED', captured: { kind: 'status', value: 'no-response' } })
     ]);
-    expect(compiled.checks[0].statement).toBe('POST /api/coupons/apply should be answered');
+    expect(compiled.checks[0].statement).toBe('POST /api/coupons/apply should get no server error');
   });
 
   it('keeps an incomplete recording as evidence only', () => {
@@ -107,7 +107,7 @@ describe('Bug case compiler', () => {
     const compiled = compileBugCase(log, { title: 'Notes', checks: [{ pickIndex: 0, template: 'equals', expected: '1', alsoAfterReload: false }], requestRules: [], valueChecks: [] });
 
     expect(capture.picks[0].label).toBe('Note count');
-    expect(compiled.checks[0].statement).toBe('"Note count" should read "1"');
+    expect(compiled.checks[0].statement).toBe('Note count should read "1"');
   });
 
   it('writes a suggested value in the representation the request used', () => {
@@ -115,5 +115,41 @@ describe('Bug case compiler', () => {
     expect(suggestValue('"40.00"', 40, '$45.00')).toBe('"45.00"');
     expect(suggestValue('4000', 40, '$45.00')).toBe('4500');
     expect(suggestValue('true', 40, '$45.00')).toBeUndefined();
+  });
+
+  it('expects a write that failed with a 4xx only to get an answer, so the app’s own refusal is never the bug by default', () => {
+    const log = checkoutRecording();
+    log.requests[2] = { ...log.requests[2], status: 400 };
+    const row = describeCapture(log).requests.find((candidate) => candidate.method === 'POST')!;
+
+    expect(row).toMatchObject({ succeeded: false, defaultCheck: 'answered', defaultSentOnce: true });
+    // With only the default request expectations, a 400 is not a failure the replay can reproduce.
+    const compiled = compileBugCase(log, totalDraft({ checks: [], requestRules: [{ requestKey: row.key, check: row.defaultCheck, sentOnce: false }] }));
+    expect(compiled.reproducible).toBe(false);
+  });
+
+  it('makes a page error part of the failure only when the marked action raised it', () => {
+    const raised = checkoutRecording();
+    raised.console = [{ t: 1600, level: 'exception', text: 'TypeError: total is not a function' }];
+    const before = checkoutRecording();
+    before.console = [{ t: 400, level: 'exception', text: 'TypeError: a page load error' }];
+
+    const fromAction = compileBugCase(raised, totalDraft({ noPageError: true }));
+    const unrelated = compileBugCase(before, totalDraft({ noPageError: true }));
+
+    const consoleCheck = (document: NonNullable<typeof fromAction.document>) => document.assertions.find((assertion) => assertion.kind === 'console.noUncaughtError')!;
+    expect(fromAction.document!.failureSignature.some((entry) => entry.assertionId === consoleCheck(fromAction.document!).id)).toBe(true);
+    // An error before the marked action guards the fix but is not what the bug looks like.
+    expect(unrelated.document!.failureSignature.some((entry) => entry.assertionId === consoleCheck(unrelated.document!).id)).toBe(false);
+    expect(describeCapture(raised).uncaughtError).toBe(true);
+    expect(describeCapture(before).uncaughtError).toBe(false);
+  });
+
+  it('suggests a name from what the element showed, and keeps each step’s kind beside its words', () => {
+    const described = describeCapture(checkoutRecording());
+
+    expect(described.suggestedTitle).toBe('Cart total shows "$40.00"');
+    expect(described.stepKinds).toEqual(['navigate', 'fill', 'click']);
+    expect(describeCapture(checkoutRecording({ picks: [] })).suggestedTitle).toBe('');
   });
 });

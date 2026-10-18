@@ -25,6 +25,13 @@
   /* The page gutter: every page's title, tabs and content start here. */
   --tm-gutter: 32px;
 
+  /* The scrollbar's width. A scroller that reserves its gutter takes it out of its end
+     padding, so its content ends on the same edge as a neighbour that does not scroll. */
+  --scrollbar: 9px;
+
+  /* The window's top bar, above every sheet. */
+  --h-titlebar: 44px;
+
   /* Icons draw one line weight at every size (DESIGN.md 8.3). */
   --icon-stroke: 1.25px;
 
@@ -57,6 +64,8 @@
   /* Something moving on screen (a toggle's knob) eases both ways over this. */
   --motion-move: 200ms;
   --motion-toast: 240ms;
+  /* The one loop: the live line's shimmer, while work actually runs. */
+  --motion-shimmer: 2.4s;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
@@ -147,7 +156,7 @@ body {
   align-items: center;
   gap: 8px;
   max-width: 100%;
-  padding: 9px 12px;
+  padding: 8px 12px;
   border: 0;
   border-radius: var(--r-sm);
   background: var(--overlay);
@@ -155,7 +164,7 @@ body {
   box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
-  line-height: 1.35;
+  line-height: var(--lh-body);
   pointer-events: auto;
   animation: tm-toast-in var(--motion-toast) var(--ease-out);
 }
@@ -175,8 +184,8 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: var(--scrollbar);
+  height: var(--scrollbar);
 }
 
 /* A scroll thumb shows only while the pointer is over its scroller, as on the
@@ -222,6 +231,11 @@ body {
   from {
     opacity: 0;
   }
+}
+
+/* Something that arrives while its surface is open fades in once; the list makes room at once. */
+[data-arrived] {
+  animation: tm-scrim-in var(--motion-standard) var(--ease-out);
 }
 
 @keyframes tm-toast-in {
@@ -294,20 +308,41 @@ summary,
     box-shadow var(--motion-fast) var(--ease-out);
 }
 
-.app-shell :where(button, [role='button'], input, textarea, select):disabled,
-.app-shell :where(button, [role='button'])[aria-disabled='true'] {
+/* Keyboard focus is found, not eased: the rim and the halo land with the caret. */
+:root[data-input-modality='keyboard'] :where(
+  input:not([type='checkbox']):not([type='radio']),
+  textarea,
+  select,
+  .tm-composer,
+  .field__prompt-shell,
+  .tm-listrail__search,
+  .tm-filefilter__search,
+  .tm-agent-console__search,
+  .import-work__search,
+  .tm-theme-picker__trigger,
+  .tm-agent-console__trigger,
+  .tm-repository-select__trigger,
+  .tm-review-thread
+):focus,
+:root[data-input-modality='keyboard'] input[type='checkbox']:not(.tm-visually-hidden):focus {
+  transition: none;
+}
+
+/* Keyed on the document, as focus is, so dialogs portaled outside the shell show it too. */
+:root :where(button, [role='button'], input, textarea, select):disabled,
+:root :where(button, [role='button'])[aria-disabled='true'] {
   cursor: default;
   color: var(--text-disabled);
 }
 
-.app-shell :where(.outline-button, .danger-button, .segmented__btn):disabled {
-  background: var(--field-disabled);
+:root :where(.outline-button, .danger-button, .segmented__btn):is(:disabled, [aria-disabled='true']) {
+  background-color: var(--field-disabled);
   color: var(--text-disabled);
 }
 
 /* A disabled primary keeps its place but not its fill (DESIGN.md A.4), so it
    matches the disabled half of a split send control beside it. */
-.app-shell :where(.primary-button):disabled {
+:root :where(.primary-button):is(:disabled, [aria-disabled='true']) {
   background: var(--primary-disabled);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text-disabled);
@@ -341,8 +376,9 @@ summary,
   .tm-card__hit,
   .tm-inbox-row__hit,
   .tm-previews__identity,
-  .tm-preview-entry--toggle
-):not(:disabled):active {
+  .tm-preview-entry--toggle,
+  .tm-review-gap__all
+):not(:disabled, [aria-disabled='true']):active {
   background-image: linear-gradient(var(--press), var(--press));
 }
 
@@ -366,12 +402,13 @@ summary,
   opacity: 1;
 }
 
-.app-shell[data-input-modality='pointer'] :where(
+/* Focus is keyed on the document, which carries the input modality too, so dialogs and drawers
+   portaled outside the app shell get the same rims and halos as the page beneath them. */
+:root[data-input-modality='pointer'] :where(
   button,
   a,
   select,
   summary,
-  [role='menu'],
   [role='separator']
 ):focus {
   outline: none;
@@ -379,13 +416,13 @@ summary,
 
 /* Text entry is exempt from modality suppression: a caret with no visible host
    is the most reported dark-theme complaint in the product. */
-.app-shell :where(input:not([type='checkbox']):not([type='radio']), textarea:not(.tm-composer textarea), select):focus,
-.app-shell :where(
+:root :where(input:not([type='checkbox']):not([type='radio']), textarea:not(.tm-composer textarea), select):focus,
+:root :where(
   .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
 ):focus-within,
-.app-shell :where(
+:root :where(
   .tm-theme-picker__trigger,
   .tm-agent-console__trigger,
   .tm-repository-select__trigger
@@ -395,7 +432,7 @@ summary,
   box-shadow: inset 0 0 0 1px var(--field-edge-focus);
 }
 
-.app-shell[data-input-modality='keyboard'] :where(
+:root[data-input-modality='keyboard'] :where(
   input:not([type='checkbox']):not([type='radio']),
   textarea:not(.tm-composer textarea),
   select,
@@ -403,7 +440,7 @@ summary,
   .tm-agent-console__trigger,
   .tm-repository-select__trigger
 ):focus,
-.app-shell[data-input-modality='keyboard'] :where(
+:root[data-input-modality='keyboard'] :where(
   .tm-listrail__search,
   .tm-filefilter__search,
   .tm-agent-console__search
@@ -415,11 +452,10 @@ summary,
     var(--focus-halo);
 }
 
-.app-shell[data-input-modality='keyboard'] :where(
+:root[data-input-modality='keyboard'] :where(
   button,
   a,
   summary,
-  [role='menu'],
   [role='separator']
 ):focus {
   outline: 0;
@@ -427,27 +463,26 @@ summary,
 }
 
 /* Controls that rest on a rim keep it under the halo. */
-.app-shell[data-input-modality='keyboard'] :where(.outline-button, .tm-slot-more__trigger):focus {
+:root[data-input-modality='keyboard'] :where(.outline-button, .tm-slot-more__trigger):focus {
   box-shadow: inset 0 0 0 1px var(--field-edge), var(--focus-halo);
 }
 
-.app-shell[data-input-modality='keyboard'] .segmented__btn[aria-pressed='true']:focus {
+:root[data-input-modality='keyboard'] .segmented__btn[aria-pressed='true']:focus {
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--focus-halo);
 }
 
-.app-shell[data-input-modality='keyboard'] .tm-send-menu__trigger.tm-action-menu__trigger:focus {
+:root[data-input-modality='keyboard'] .tm-send-menu__trigger.tm-action-menu__trigger:focus {
   box-shadow: inset 1px 0 0 var(--primary-hover), var(--focus-halo);
 }
 
 @media (forced-colors: active) {
-  .app-shell[data-input-modality='keyboard'] :where(
+  :root[data-input-modality='keyboard'] :where(
     button,
     a,
     input,
     textarea,
     select,
     summary,
-    [role='menu'],
     [role='separator']
   ):focus {
     outline: 1px solid Highlight;

@@ -273,7 +273,9 @@ export function App() {
       document.removeEventListener('pointermove', onPointerMove, true);
     };
   }, []);
-  useEffect(() => {
+  // Shared focus and disabled rules key on the document's modality (portaled dialogs included):
+  // set before paint, so no frame shows a control without it.
+  useLayoutEffect(() => {
     document.documentElement.dataset.inputModality = inputModality;
   }, [inputModality]);
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptyBoardSnapshot);

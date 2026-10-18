@@ -33,8 +33,10 @@ import type {
   BugCapturePickView,
   BugCaptureRequestRow,
   BugCaptureValueRow,
-  BugCaseCheckView
+  BugCaseCheckView,
+  BugStepKind
 } from '../../shared/bugReplay';
+import { suggestBugTitle, type BugTitleSeed } from '../../shared/bugReplayClaims';
 
 /**
  * Pure compiler from a sealed recording and the person's checks to a `bug-case/v1` document.
@@ -53,7 +55,11 @@ export interface CompiledCapture {
   valueRows: BugCaptureValueRow[];
   otherRequests: string[];
   pageErrors: string[];
+  /** The marked window raised an uncaught error, so "No page error" can reproduce. */
+  uncaughtError: boolean;
   stepSummaries: string[];
+  /** What each step does, beside its summary. */
+  stepKinds: BugStepKind[];
   suggestedTitle: string;
   /** Why the recording cannot become an executable case at all. */
   partial?: string;
@@ -94,15 +100,18 @@ export function describeCapture(log: BugRecordingLogV1, pageTitle?: string): Com
     .filter((entry) => (entry.level === 'error' || entry.level === 'exception') && entry.t <= markT)
     .slice(-10)
     .map((entry) => entry.text.slice(0, 240));
-  const steps = window ? compileSteps(window.actions) : { steps: [], sensitiveInputs: [] };
+  const steps = window ? compileSteps(window.actions) : { steps: [], sensitiveInputs: [], times: [] };
+  void pageTitle;
   return {
     picks,
     requests,
     valueRows,
     otherRequests,
     pageErrors,
+    uncaughtError: window ? uncaughtIn(log, window) : false,
     stepSummaries: steps.steps.map((step) => describeStep(step)),
-    suggestedTitle: suggestTitle(pageTitle, picks[0]),
+    stepKinds: steps.steps.map((step) => step.kind),
+    suggestedTitle: suggestBugTitle(picks[0] ? titleSeed(picks[0]) : undefined),
     ...(partial ? { partial } : {})
   };
 }
@@ -137,8 +146,17 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
     if (entry) signature.push(entry);
     else if (!alreadyHolds && (assertion.kind === 'dom.text' || assertion.kind === 'dom.value')) {
       const shown = assertion.kind === 'dom.value' ? pick.value ?? '' : normalizeVisibleText(pick.text);
-      alreadyHolds = `Write what ${describeTarget(assertion.target)} should read; it shows "${shown.slice(0, 60)}" now`;
+      const subject = describeTarget(assertion.target);
+      alreadyHolds = `Write what ${subject === 'The element' ? 'it' : subject} should read; it shows "${shown.slice(0, 60)}" now`;
     }
+  }
+
+  // Page errors count from the marked action on, in the recording as in a replay: an error that
+  // action raised is the failure; with none, the check guards the fix.
+  if (draft.noPageError) {
+    const assertion: BugCaseAssertion = { id: nextId('c'), kind: 'console.noUncaughtError' };
+    assertions.push(assertion);
+    if (uncaughtIn(log, window)) signature.push({ assertionId: assertion.id, mode: 'ANY_MISMATCH' });
   }
 
   const rows = requestRows(window.requests);
@@ -228,14 +246,14 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
     keepBrowserStorageAfterReload: false
   };
   const checks = checkViews(document);
-  if (assertions.length === 0) return { checks, reproducible: false, reason: 'Add a check first.' };
+  if (assertions.length === 0) return { checks, reproducible: false, reason: 'Add an expectation first' };
   if (signature.length === 0) {
-    return { checks, reproducible: false, reason: alreadyHolds ?? 'Nothing you checked was wrong in the recording' };
+    return { checks, reproducible: false, reason: alreadyHolds ?? 'Nothing you expect was wrong in the recording' };
   }
   try {
     validateBugCaseStructure(document);
   } catch (error) {
-    const reason = error instanceof BugCaseValidationError ? error.reason : 'The checks cannot be saved for reproduction.';
+    const reason = error instanceof BugCaseValidationError ? error.reason : 'These expectations cannot be reproduced.';
     return { checks, reproducible: false, reason: reason.replace(/\.$/, '') };
   }
   return { document, checks, reproducible: true };
@@ -308,17 +326,22 @@ function markedWindow(log: BugRecordingLogV1): MarkedWindow | undefined {
 interface CompiledSteps {
   steps: BugCaseStep[];
   sensitiveInputs: Array<{ id: string; value: string }>;
+  /** When each step's last action happened, in the recording's milliseconds. */
+  times: number[];
 }
 
 /** Actions become steps in order; consecutive clicks on one target within 500ms become one click. */
 export function compileSteps(actions: BugRecordingAction[]): CompiledSteps {
   const steps: BugCaseStep[] = [];
   const sensitiveInputs: Array<{ id: string; value: string }> = [];
+  const times: number[] = [];
   let lastClick: { step: Extract<BugCaseStep, { kind: 'click' }>; t: number; css: string; times: number[] } | undefined;
   let stepNumber = 0;
   const id = () => `s${++stepNumber}`;
   for (const action of actions) {
     if (action.kind !== 'click') lastClick = undefined;
+    const countBefore = steps.length;
+    const lastBefore = steps[steps.length - 1];
     switch (action.kind) {
       case 'navigate':
         if (steps.length === 0 && action.location) {
@@ -382,8 +405,11 @@ export function compileSteps(actions: BugRecordingAction[]): CompiledSteps {
       case 'unsupported':
         break;
     }
+    // The step this action made or changed: a merged click or field keeps its latest time.
+    const changed = steps.length !== countBefore || steps[steps.length - 1] !== lastBefore || (action.kind === 'click' && lastClick?.t === action.t);
+    if (steps.length > 0 && changed) times[steps.length - 1] = action.t;
   }
-  return { steps, sensitiveInputs };
+  return { steps, sensitiveInputs, times };
 }
 
 function sameTarget(left: BugCaseTarget, right: BugCaseTarget): boolean {
@@ -582,7 +608,8 @@ function pickView(pick: BugRecordingPick, index: number): BugCapturePickView {
     visible: pick.visible,
     count: pick.count,
     volatileTokens: volatileTokens(pick.text),
-    label: elementName(pick.target, pick.value ?? pick.text) ?? tagWord(pick.target.tag)
+    label: elementName(pick.target, pick.value ?? pick.text) ?? tagWord(pick.target.tag),
+    ...(pick.box ? { box: pick.box } : {})
   };
 }
 
@@ -593,18 +620,20 @@ function tagWord(tag: string): string {
   return words[tag] ?? 'Text';
 }
 
-/** A title that states the observation: "Cart total shows "$40.00"". The person can change it. */
-function suggestTitle(pageTitle: string | undefined, pick: BugCapturePickView | undefined): string {
-  const page = pageTitle ? normalizeVisibleText(pageTitle).slice(0, 60) : undefined;
-  if (!pick) return page ? `Bug on ${page}` : 'Bug on the page';
-  const name = elementName(pick.target, pick.value ?? pick.text) ?? page;
-  const shown = normalizeVisibleText(pick.value ?? pick.text);
-  if (!name) return shown ? `The page shows "${clip(shown, 40)}"` : 'Bug on the page';
-  return shown ? `${name} shows "${clip(shown, 40)}"` : `${name} is empty`;
+/** The first expectation a pick gets by default, as a title seed: what it showed, not yet what it should. */
+function titleSeed(pick: BugCapturePickView): BugTitleSeed {
+  const shown = pick.value ?? pick.text;
+  if (shown) return { label: pick.label, template: 'equals', expected: shown, shown };
+  return { label: pick.label, template: pick.visible ? 'hidden' : 'visible' };
 }
 
-function clip(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+/**
+ * Whether the marked action raised an uncaught error before the bug was marked: from the action's
+ * start (a fill's first keystroke, the start page's load) to the mark, the span a replay counts.
+ */
+function uncaughtIn(log: BugRecordingLogV1, window: MarkedWindow): boolean {
+  const end = log.mark?.t ?? Number.POSITIVE_INFINITY;
+  return log.console.some((entry) => entry.level === 'exception' && entry.t >= window.markedAction.t && entry.t <= end);
 }
 
 export function requestKey(request: Pick<BugRecordingRequest, 'method' | 'role' | 'path' | 'queryKeys'>): string {
@@ -655,7 +684,9 @@ export function requestRows(requests: BugRecordingRequest[]): BugCaptureRequestR
       ...row,
       observed: failing ? observedStatus(failing) : row.observed,
       succeeded: allSucceeded,
-      defaultCheck: isWrite ? (allSucceeded ? 'answered' : 'success') : 'none',
+      // A server error is almost always the bug; a 4xx answer is often what the app means to
+      // say, so a write is only required to get an answer the person can change to success.
+      defaultCheck: isWrite ? 'answered' : 'none',
       defaultSentOnce: isWrite && row.count === 1
     };
   });

@@ -1,11 +1,13 @@
 # Bug Replay Architecture
 
-Date: 2026-10-17
+Date: 2026-10-18
 
-Bug Replay turns a bug the person saw in the running app into a check Task Monki
-runs itself. The person records the bug in a clean copy of the task's app and
-marks what is wrong; Task Monki confirms the bug on the recorded code, hands it to
-the task's agent, and verifies every agent turn against it on a fresh clean copy.
+Bug Replay turns a bug the person saw in the running app into expectations Task
+Monki checks itself. The person records the bug in a clean copy of the task's app
+and marks what is wrong; Task Monki replays it to confirm the bug on the recorded
+code, hands it to the task's agent, and replays every agent turn on a fresh clean
+copy to verify the fix. The interface calls a clean run a replay and a check an
+expectation.
 
 Read this before changing `src/core/bugReplay`, the recording host
 (`src/electron/BugRecordingViewHost.ts`), the Bug Replay store, the bug brief in
@@ -47,9 +49,12 @@ prompts, or any surface that shows a bug.
 ## Recording
 
 Record bug is offered on the Preview tab of a normal task with a worktree and a
-preview recipe, in the desktop app on macOS, while the task is open. It is shown
-but disabled while the agent changes the task's files, while another task is
-recording, or when evidence storage is full; the reason is stated beside it.
+preview recipe, in the desktop app on macOS, while the task is open, and in the
+Ready task's Now panel beside Start implementation while the task has no bug: a
+bug recorded first goes to the agent with its first turn. It is shown but
+disabled on the Preview tab while the agent changes the task's files, while
+another task is recording, or when evidence storage is full; the reason is
+stated beside it.
 
 1. **Freeze.** The worktree, including uncommitted and untracked files, is
    captured as a Git tree and pinned under `refs/tasks/<task>/bug-replay/*`.
@@ -61,40 +66,66 @@ recording, or when evidence storage is full; the reason is stated beside it.
    contents stay on the machine and are copied only into the clean copy.
 3. **Approval.** See "Approval to run". Nothing starts before it.
 4. **Start.** The recipe is derived into a `br-<12 hex>` environment over the
-   frozen export, on fresh data. The person's own preview keeps running.
-5. **Record.** The page loads in the native view at a pinned 1280×800 viewport.
+   frozen export, on fresh data. The person's own preview keeps running. The
+   start is shown as steps in the order they run (copying the files, installs,
+   databases, other jobs, the app's processes, opening the app), each with its
+   time, from Previewhost's service states.
+5. **Record.** The page loads in the native view at a pinned 1280×800 viewport,
+   framed with its own bar: Reload, where the page is, and the recorded size.
+   Until the first step, the address takes a path of the app's own origin, and
+   the start step becomes that page, so a recording starts where the bug is.
    The view's session is private to the recording, allows only the run's own
    origins (plus `about:blank` and same-view `data:`/`blob:` subresources),
    denies popups, downloads and permission prompts, and is cleared when the
-   recording ends. A typed password is kept in the case so runs can type it
-   again, masked on every surface and left out of the stored action log; the
-   capture panel says so.
-6. **Mark.** Mark bug seals the window since the last action and starts
-   pointing. Pointing never blocks the person: Stop pointing, Escape, Back to
-   recording and Discard stay available, and marking returns at once while the
-   pick arrives in the background. Only the person's own input points: events
-   the page dispatches are ignored, the recorder listens ahead of the page's
-   document listeners, stopping never sends the page an event, and only the top
-   frame's recorder world can point.
-7. **Name.** One rule names an element on its pick, in its checks and in their
-   evidence: its label or accessible name, its test id read as words
+   recording ends. A steps rail beside the page shows what was recorded as it
+   happens: each step a replay takes, inputs it cannot replay, requests that
+   failed or were refused, and uncaught errors, the newest 80 rows, sent at
+   most four times a second. A typed password is kept in the case so runs can
+   type it again, masked on every surface and left out of the stored action
+   log; the composer says so.
+6. **Mark.** Mark bug seals the window since the last action, notes the page's
+   scroll, takes the screenshot and starts pointing. Pointing never blocks the
+   person: Stop pointing, Escape, Back to recording and Discard stay available,
+   and marking returns at once while the pick arrives in the background. Only
+   the person's own input points: events the page dispatches are ignored, the
+   recorder listens ahead of the page's document listeners, stopping never sends
+   the page an event, and only the top frame's recorder world can point. A pick
+   keeps where its element sat, placed on the screenshot by the scroll the
+   screenshot was taken at, and each element an expectation reads keeps a
+   numbered outline on the page while the bug is marked.
+7. **Name.** One rule names an element on its pick, in its expectations and in
+   their evidence: its label or accessible name, its test id read as words
    ("noteCount" is "Note count"), the words beside it on its own line, or its
-   placeholder, never text that repeats what a check reads. The suggested title
-   states the observation ("Cart total shows "$40.00""), or names the page when
-   nothing was picked; the person can change it.
-8. **Save.** Save and reproduce needs at least one check the recording itself
-   violated (the failure signature); otherwise the capture can only be saved
-   without a check, as evidence. Saving pins the recorded tree, then commits the
-   capture, the case, its approved version and the version's two qualification
-   runs together, so a saved check is always reproduced. Saving replaces the
+   placeholder, never text that repeats what an expectation reads. The bug's
+   suggested name follows its first expectation and states what should be true
+   ('Cart total should read "$45.00"'), so it still reads right once the fix is
+   verified; until the expectation differs from what the element showed it
+   states the observation, and without an element there is no suggestion.
+8. **Expect.** Each picked element gets an expectation, whose value takes focus
+   with its text selected. A write request the marked action sent is expected
+   to get no server error and, when it was sent once, to be sent once; Should
+   succeed is the person's choice, so an app's own 4xx answer never becomes the
+   bug by default. No page error is offered when the page raised errors. It
+   counts uncaught errors from the marked action's start (a fill's first
+   keystroke, the start page's load) to the checks, in the recording and in
+   every replay alike, so an error an outside script raised earlier is never the
+   bug's; it is part of the failure only when that action raised one.
+   An expectation the person removes stays removed when they point at another
+   element (the draft counts the picks it has taken in).
+9. **Save.** Save and reproduce needs at least one expectation the recording
+   itself violated (the failure signature); otherwise the capture can only be
+   saved as steps, without expectations. Saving pins the recorded tree, then
+   commits the capture (with each step's kind and the picked elements' places),
+   the case, its approved version and the version's two qualification runs
+   together, so saved expectations are always reproduced. Saving replaces the
    task's current bug, which moves to Earlier bugs. A save that fails deletes
-   the evidence it wrote and returns the person to the capture.
+   the evidence it wrote and returns the person to the composer.
 
 A recording ends as interrupted when the environment stops, the view crashes or
 the 60 minute limit is reached, and as ended after 20 minutes without input. An
 interrupted recording stops its clean copy and closes the page at once; its
-steps can still be saved without a check, or recorded again. A recording
-discarded while its copy starts tears down whatever the start brought up.
+steps can still be saved, or recorded again. A recording discarded while its
+copy starts tears down whatever the start brought up.
 
 ## The case document
 
@@ -129,6 +160,12 @@ page controls in a report (paths, query keys, request matches, hang signals,
 JSON values) is bounded so the page cannot make a report too large to count;
 a run that exceeds its time limit is still uncounted (Couldn't verify), since
 a slow machine looks the same.
+
+After the expectations are read, the runner scrolls the first element it found
+into view and reports where each found element sat in the final screenshot;
+core accepts only boxes for the case's own page expectations, at most five, on
+the final screenshot. Each observation keeps a short value for results tables
+('"$40.00"', '200', 'Not shown') beside its sentence, and its box.
 
 A check finds its element through the target's candidates in order. A
 candidate run whose check found its element by a later, weaker candidate than
@@ -166,11 +203,11 @@ qualification and verification attempt, and the case's observed tree:
 code than the verdict is about.
 
 Every surface, History included, names a state the same way, from
-`bugReplayClaims`: Saved without a check, Reproducing bug, Bug reproduced, Bug
-not reproduced, Bug reproduced only sometimes, Bug reproduction blocked,
-Verifying fix, Fix verified, Bug still failing, Couldn't verify the fix and Fix
-verification out of date. A decision the person owes comes first: Clean runs
-need approval, Secrets locked. While the agent has the bug: Fixing the bug.
+`bugReplayClaims`: Bug recorded, Reproducing bug, Bug reproduced, Bug not
+reproduced, Bug reproduced sometimes, Replay blocked, Verifying fix, Fix
+verified, Bug still failing, Couldn't verify the fix and Verification out of
+date. A decision the person owes comes first: Replays need approval, Secrets
+locked. While the agent has the bug: Fixing the bug.
 
 - A run waiting on the person (approval, a locked keystore) leads the gate,
   even when newer runs wait behind it.
@@ -179,8 +216,9 @@ need approval, Secrets locked. While the agent has the bug: Fixing the bug.
   reason until a read succeeds.
 - When the worktree returns to code an earlier attempt already decided under
   the same toolchain, that verdict is reused instead of running again.
-- Counts state only results: an attempt in flight, or one that could not run,
-  adds no "passed 0 of 2".
+- Counts state only results, one polarity per side ("reproduced 2 of 2",
+  "passed 2 of 2"): an attempt in flight, or one that could not run, adds no
+  "passed 0 of 2".
 - Every surface reads Before and After from the attempt the gate decided on
   (`verdictAttempt`).
 
@@ -204,17 +242,18 @@ result, or files that could not be compared are refused with the reason.
 
 ## Approval to run
 
-Clean runs execute the task's code, including agent changes, as the person,
+Replays execute the task's code, including agent changes, as the person,
 without a sandbox. The person approves them per task and recipe template
-("Clean runs need your approval", then Approve clean runs; Cancel runs comes
-first), after reading what will run: that it runs as their user without a
-sandbox, that it runs again after each agent turn, that the approval covers 30
-runs until Task Monki quits, then the source, data, secrets, env files, the
-outside hosts, the server's network and the commands. The approval lives in
-memory. A run without it waits; the Now panel asks, and every surface calls the
-state "Clean runs need approval". Previewhost asks Task Monki before every
-`br-` start, and only a start Task Monki is making right now, with exactly the
-spec it derived, under a current approval, is approved.
+("Replays need approval", then Approve replays; Cancel comes first), after
+reading what will run, as label and value rows: runs as their user without a
+sandbox, a copy of the task's files with the agent's changes, after each agent
+turn, 30 replays until Task Monki quits, then the data, secrets, env files, the
+network and outside hosts, and the commands. The Now panel states what waits
+("2 replays wait to check the fix") with the rows under What runs. The approval
+lives in memory. A run without it waits, and every surface calls the state
+"Replays need approval". Previewhost asks Task Monki before every `br-` start,
+and only a start Task Monki is making right now, with exactly the spec it
+derived, under a current approval, is approved.
 
 ## Hand-off to the agent
 
@@ -228,6 +267,10 @@ The bug reaches the agent the way a person's request would:
 - the agent finished: a follow-up continues the same conversation;
 - the agent waits for an answer, or is starting or stopping: Send to agent is
   disabled with the reason.
+
+The turn's message in the Agent tab shows the bug as an attachment, read from
+the hand-off events and the instruction's bug reference; it opens the bug on the
+Overview, and the turn's View sent prompt shows the exact brief.
 
 The instruction carries no text from the page. The brief is built when the turn
 is sent, from the case as it is then, and is added only to that turn's prompt,
@@ -246,6 +289,23 @@ hosts) and added lines that special-case a checked value or detect the replay
 environment, those as data too. A pull request body (2,000 characters) states
 the bug, its checks and whether the checked code is the PR head, with recorded
 text as Markdown code, so it never renders as a link, an image or a mention.
+
+## Surfaces
+
+- **Overview.** The Bug group leads with the verdict: the bug's name and state
+  (unless the Now panel holds its step), the page before the fix and after it,
+  each framed on the first checked element with every checked element
+  outlined, and an Expected, Before and After table of what each expectation
+  showed. Before is the run that reproduced the bug, or the recording until one
+  counted; After is the verdict's decisive run, marked as earlier code while the
+  verdict is out of date or could not be checked. A picture opens both sides in
+  one place, switched by the segment or the arrow keys. Replays lists the runs;
+  each opens a drawer with its page, what each expectation saw, how far its
+  steps got, and where it ran (environment facts and what replays do not
+  control). Steps lists the recorded steps by kind.
+- **Review.** The brief's Bug block states the word and the Before and After
+  lines.
+- **Board, Inbox, History.** The state words above.
 
 ## Evidence and persistence
 
@@ -303,5 +363,7 @@ bug becomes a record with no actions.
   `BugReplayRunner.integration.test.ts` (skipped without
   `.local/design-browser-runtime`).
 - Mounted UI: `TaskDetail.dom.test.tsx` (Remove bug),
-  `bug/BugRecordingWorkspace.dom.test.tsx`.
+  `bug/BugRecordingWorkspace.dom.test.tsx`, `bug/BugCapturePanel.dom.test.tsx`
+  (expectations, focus and naming), `bug/BugSection.dom.test.tsx` (the
+  verdict, the results table and the replay drawer).
 - Seeded states: the `bug` scenario set in `docs/DEV_SEEDING.md`.

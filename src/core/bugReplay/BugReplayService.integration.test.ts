@@ -419,6 +419,11 @@ describe('Saving a recording', () => {
       log: () => checkoutRecording(),
       pick: async (): Promise<BugRecordingPick> => TOTAL_PICK,
       cancelPick: async () => undefined,
+      noteShot: async () => undefined,
+      showMarks: async () => undefined,
+      timeline: () => ({ entries: [], steps: 0, omitted: 0 }),
+      onlyStart: () => false,
+      restartAt: () => false,
       screenshot: async () => Buffer.from('png')
     };
     return {
@@ -426,11 +431,38 @@ describe('Saving a recording', () => {
         recorder: recorder as unknown as RecorderSession,
         chromium: '152.0.0.0',
         reload: async () => undefined,
+        open: async () => undefined,
         close: async () => undefined,
         screenshot: async () => Buffer.from('png')
       })
     };
   }
+
+  it('keeps the name and notes the person wrote where a panel mounting again reads them, announcing only a change', async () => {
+    const w = await openWorkspace();
+    const recording = new BugRecordingService(w.service, () => stubHost(), async () => undefined);
+    w.service.attachRecording(recording);
+    await recording.start(w.task.id);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.templateDigest);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
+    const { sessionId } = recording.sessionView(w.task.id)!;
+    await recording.mark(sessionId);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'MARKING' && !recording.sessionView(w.task.id)?.detail, 'the pick');
+
+    const announced = vi.spyOn(w.service, 'emitUpdate');
+    const named = totalDraft({ title: 'Coupon is applied twice', statement: 'Seen at checkout.' });
+    recording.preview(sessionId, named);
+    expect(announced).toHaveBeenCalledWith(w.task.id);
+    expect(recording.sessionView(w.task.id)?.capture?.draft).toMatchObject({ title: 'Coupon is applied twice', statement: 'Seen at checkout.' });
+
+    // The same draft again changes nothing and says nothing.
+    announced.mockClear();
+    recording.preview(sessionId, { ...named });
+    expect(announced).not.toHaveBeenCalled();
+    announced.mockRestore();
+    await recording.cancel(sessionId);
+  }, 60_000);
 
   it('keeps the capture when saving fails, leaves nothing behind, and saves with its first clean runs on retry', async () => {
     const w = await openWorkspace();
@@ -472,5 +504,68 @@ describe('Saving a recording', () => {
     expect(new Set(saved.map((run) => run.setId)).size).toBe(1);
     expect(await gate(w)).toMatchObject({ state: 'REPRODUCING', title: 'Coupon total is wrong' });
     await until(() => !w.runtime.statuses.has(w.runtime.started[0]), 'the recording’s clean copy to be removed');
+  }, 60_000);
+});
+
+describe('Starting a recording on another page', () => {
+  it('moves the start only to a page that opened and that a replay can open', async () => {
+    const restartAt = vi.fn(() => true);
+    // The app sends /account to a sign-in page on another site: the navigation guard stops it.
+    const open = vi.fn(async (target: string) => {
+      if (target.startsWith('/account')) throw new Error("That page didn't open.");
+    });
+    const recorder = {
+      title: 'Checkout',
+      seal() {},
+      unseal() {},
+      noteStart() {},
+      noteReload() {},
+      markIncomplete() {},
+      dispose() {},
+      log: () => checkoutRecording(),
+      pick: async () => undefined,
+      cancelPick: async () => undefined,
+      noteShot: async () => undefined,
+      showMarks: async () => undefined,
+      timeline: () => ({ entries: [], steps: 1, omitted: 0 }),
+      onlyStart: () => true,
+      restartAt,
+      now: () => 4_200
+    };
+    const host: RecordingBrowserHost = {
+      open: async () => ({
+        recorder: recorder as unknown as RecorderSession,
+        chromium: '152.0.0.0',
+        reload: async () => undefined,
+        open,
+        close: async () => undefined,
+        screenshot: async () => Buffer.from('png')
+      })
+    };
+    const w = await openWorkspace();
+    const recording = new BugRecordingService(w.service, () => host, async () => undefined);
+    w.service.attachRecording(recording);
+    await recording.start(w.task.id);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'NEEDS_APPROVAL', 'the recording to ask for permission');
+    await w.service.allowRuns(w.task.id, recording.sessionView(w.task.id)!.lease!.templateDigest);
+    await until(() => recording.sessionView(w.task.id)?.phase === 'RECORDING', 'the page to open');
+    const { sessionId } = recording.sessionView(w.task.id)!;
+
+    // What a replay could not open is refused before anything moves.
+    await expect(recording.openPage(sessionId, '/.//x')).rejects.toThrow('Write a path such as /checkout.');
+    await expect(recording.openPage(sessionId, '/cart?=1')).rejects.toThrow('Write a path such as /checkout.');
+    await expect(recording.openPage(sessionId, 'https://example.com/cart')).rejects.toThrow('Open a page of this app.');
+    expect(open).not.toHaveBeenCalled();
+
+    // A page that did not open leaves the start where it was.
+    await expect(recording.openPage(sessionId, '/account')).rejects.toThrow("That page didn't open.");
+    expect(restartAt).not.toHaveBeenCalled();
+
+    // A page that opened becomes the start, timed from before its load.
+    await recording.openPage(sessionId, '/checkout?step=2');
+    expect(restartAt).toHaveBeenCalledWith('/checkout', [['step', '2']], 'primary', 4_200);
+    // The page's bar shows where it is, query included.
+    expect(recording.sessionView(w.task.id)?.routePath).toBe('/checkout?step=2');
+    await recording.cancel(sessionId);
   }, 60_000);
 });

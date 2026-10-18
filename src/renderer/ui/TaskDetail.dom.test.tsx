@@ -631,10 +631,11 @@ describe('Recorded bug', () => {
       status: 'ACTIVE',
       keepBrowserStorage: false,
       gate: { caseId: 'case-1', title: 'Coupon total is wrong', state: 'REPRODUCED', versionId: 'version-1', version: 1, baseline: { matched: 2, total: 2 }, updatedAt: TEST_NOW },
-      steps: ['Open /', 'Click "Apply coupon"'],
+      steps: [{ kind: 'navigate', text: 'Open /' }, { kind: 'click', text: 'Click "Apply coupon"' }],
       before: ['Before: Cart total showed "$40.00"'],
-      countsLine: 'Clean runs: failed 2 of 2 before',
+      countsLine: 'Replays: reproduced 2 of 2 before the fix',
       screenshotFileIds: [],
+      shots: {},
       actions: ['send-to-agent', 'verify-again', 'run-again', 'remove'],
       createdAt: TEST_NOW
     }

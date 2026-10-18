@@ -59,6 +59,7 @@ interface RecordingWebContents {
   isDestroyed(): boolean;
   close(): void;
   loadURL(url: string): Promise<void>;
+  getURL(): string;
   reload(): void;
   capturePage(): Promise<RecordingImage>;
   setWindowOpenHandler(handler: (details: { url: string }) => { action: 'deny' }): void;
@@ -276,6 +277,22 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
       chromium: this.runtime.chromiumVersion,
       reload: async () => {
         if (!contents.isDestroyed()) contents.reload();
+      },
+      open: async (path: string) => {
+        const appOrigin = new URL(input.startUrl).origin;
+        const target = new URL(path, input.startUrl);
+        // Only the app's own pages; the navigation guard refuses the rest as well.
+        if (target.origin !== appOrigin) throw new Error('Open a page of this app.');
+        if (contents.isDestroyed()) throw new Error('The recording ended.');
+        const before = contents.getURL();
+        try {
+          await withDeadline(contents.loadURL(target.toString()), PAGE_LOAD_TIMEOUT_MS);
+        } catch {
+          // The app may send the page on to another of its own pages while it loads; a page that
+          // stayed where it was, or went to another site, did not open.
+          const now = contents.isDestroyed() ? '' : contents.getURL();
+          if (originOf(now) !== appOrigin || now === before) throw new Error("That page didn't open.");
+        }
       },
       close: () => this.close(active),
       screenshot: async () => {

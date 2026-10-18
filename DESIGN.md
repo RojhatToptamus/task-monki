@@ -76,12 +76,13 @@ that cannot answer them is not ready to build.
 9. **Pass the quality gate** (§15) in the running app, on real data, in both
    modes, at the minimum window. Then hand it to an independent reviewer.
 
-**Study references first.** Before designing a surface, look at how Linear,
-Claude, Codex and Cursor handle the same moment: a diff, a composer, a list, a
+**Study references first.** Before designing a surface, look at how the best
+professional desktop tools handle the same moment: a diff, a composer, a list, a
 settings row. Take the idea: what is shown, what is left out, where the action
 lives. Never take the measurements, colours or type; build the idea from this
-system's tokens and components. Say in the PR which reference you used and what
-you took.
+system's tokens and components. Say in the PR what idea you took. Repository
+docs, comments, agent guides and skills never name another company or its
+products as a reference; describe the quality instead.
 
 ---
 
@@ -104,8 +105,8 @@ you took.
 7. **Density with air.** Operators scan long lists. Whitespace organises; it does
    not pad. An empty-feeling panel is a layout problem, not a content gap.
 8. **Native desktop, not web page.** No hero sections, no marketing gradients, no
-   full-width centred columns, no bouncy easing. The reference points are Linear,
-   Claude, Codex and Cursor, and macOS system apps.
+   full-width centred columns, no bouncy easing. The reference points are the
+   best professional desktop tools and the operating system's own apps.
 9. **Facts, not instructions.** A title states what is true; a button says what
    it does. A sentence earns its place only when it changes the decision in front
    of the user (§5).
@@ -211,8 +212,8 @@ Copy is held to the same budget as colour. The best label is no label.
 
 **Rules**
 
-- A title states what is true ("Ready for review", "Codex wants to run a
-  command"); a button says what it does, as a verb and an object: "Request
+- A title states what is true ("Ready for review", "The agent wants to run a
+  command", with the runtime's name from data in place of "The agent"); a button says what it does, as a verb and an object: "Request
   changes", "Delete branch", never "Submit" or a bare "OK". Sentence case, no
   closing period, no ellipsis on a resting label, and a gerund only as a state
   ("Saving…"). Labels don't change on hover.
@@ -234,7 +235,8 @@ Copy is held to the same budget as colour. The best label is no label.
   a control ("Paste or drop files", "Read-only" and "Task prompt" are not hints).
   Placeholders end without an ellipsis.
 - Name roles, not vendors, in copy Task Monki writes: "the agent", "the
-  reviewer", or the runtime's name read from data. Never "Comment for Codex".
+  reviewer", or the runtime's name read from data. Never a runtime's name
+  written into the copy itself.
 - Numbers are digits in tabular figures: "2/7", "1 fix, 2 comments".
 - Never "Click", "Please", "successfully", "Note:", "Tip:", an exclamation
   mark, an emoji, or a marketing word.
@@ -541,8 +543,10 @@ hand.
   writes `box-shadow: <its rim>, var(--focus-halo)`, so focus never erases the
   edge. A row inside a scrolling or clipped list, where an outside halo would be
   cut, takes `--focus-halo-inset` (2px, inward). Finding threads and comments
-  keep their 1px `--focus-ring` rim. One mechanism: keyboard modality on
-  `.app-shell`, never a workspace-wide copy.
+  keep their 1px `--focus-ring` rim. One mechanism: the input modality on the
+  document root, which the shared focus and disabled rules key on, so a dialog
+  or drawer portaled outside `.app-shell` looks like the page beneath it; never
+  a workspace-wide copy. A menu draws its own edge and shadow and takes no halo.
 
   **The accent hue is not a focus cue on a resting control.** A coloured rim
   around whatever the caret happens to be in reads as an alert, not as focus: it
@@ -979,7 +983,11 @@ lists use the same container; a settings row is never a card.
 
 **Tooltips.** The `Tooltip` component (Radix) on `--overlay` with the `--edge`
 ring: 500ms before the first, instant between neighbours, the name and an
-optional shortcut, never information the decision needs.
+optional shortcut, never information the decision needs. Focus opens one only
+for someone moving by keyboard; after a click, focus a dialog places on its
+close button shows nothing. A dialog that is mostly read opens with focus on
+what it is read by (its scrolling content, or the switch between its sides),
+never on a close button whose tooltip would take the first Escape.
 
 **Segmented vs menu.** Segmented for 2–4 options whose labels fit on one line at
 the narrowest width the container reaches; a dropdown for anything longer or
@@ -1158,6 +1166,8 @@ actually running. Durations and curves are tokens.
 | Docked side panel | its content fades in; the page makes room at once | `--motion-standard` 180ms | `--ease-out` |
 | Title row in the top bar, as a reading tab's head scrolls away | 6px up while it fades in; leaves at 120ms; still when a tab opens | `--motion-standard` 180ms | `--ease-out` |
 | Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
+| Arrivals: a row that joins an open live list (a recorded step, a replay, an expectation) | opacity, once; the list makes room at once; never on the list's first render, a re-sort or growing text | `--motion-standard` 180ms | `--ease-out` |
+| Live text: the one line that says work is running | a highlight crossing the words; still under reduced motion | `--motion-shimmer` 2.4s | linear |
 | Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
@@ -1290,8 +1300,8 @@ Report what ran, what was seeded or simulated, and what was not verified.
 > words an icon, a state or a tooltip already carries; states a fact twice; moves
 > when something near it changes; uses a middle dot, a bullet or an em-dash in
 > copy; has a radius too round for its height, a doubled edge or a missing edge;
-> sits far from what it changes; or would look out of place in Linear, Claude,
-> Codex or Cursor. Cite the DESIGN.md section for each.
+> sits far from what it changes; or would look out of place in the best
+> professional desktop tools. Cite the DESIGN.md section for each.
 
 ---
 
@@ -1523,7 +1533,8 @@ the pull request leads again. Its anatomy
 is fixed: a factual title, at most one line of facts or of quoted provider text,
 then the actions. The title is the board card's word for the task, unless that
 would only repeat the lifecycle stage. An owner with something more specific to
-say keeps its own words: "Codex wants to run a command", "Codex is working".
+say keeps its own words, with the runtime's name from data: "… wants to run a
+command", "… is working".
 While no pull request exists and finishing holds the panel, opening one is a
 finishing action here; otherwise PR Status offers it as a section, so it appears
 exactly once on the page. Marking done despite open evidence is the owner's
@@ -1565,7 +1576,8 @@ control's icon, state or tooltip already carries.
 - *Toolbar* (40px). The navigator's switch (Files, with viewed progress as
   "2/7", and Feedback) sits over the navigator; then the review in one phrase in
   its tone's ink and its time (Fixing review feedback while the agent takes a
-  turn after the review; the agent's request, such as "Codex asked a question",
+  turn after the review; the agent's request, such as "… asked a question" with the
+  runtime's name,
   with Go to request while it waits on the person; a turn that stopped, such as
   "Recovery required", with Go to agent); then Compare (All changes,
   Committed, Uncommitted, and the round: Since the review once an out-of-date
@@ -1714,37 +1726,70 @@ brief, the model and profile chips, the reason a run cannot start, and Create.
 
 ---
 
-**Recorded bugs.** Record bug is a secondary action in the Preview status row,
-with its reason beside it, in full, when it waits. While a recording lasts it
-takes the Preview's place: one head row with the state (the only live region),
-the elapsed time and the route on the left and Reload page, Discard and the
-primary Mark bug on the right; a step that fails says so in a `.tm-error` line
-under the head, never in a toast the page could cover. Choosing env files,
-approving clean runs and a failure are decision blocks under a neutral "Record
-a bug" head; a stopped recording's head says "Recording stopped" and its block
-gives only the reason. While the copy starts, the head names the step and the
-page's place holds one quiet note. The page is a native view at the recorded
-16:10 ratio, fitted inside the stage's padding, placed again whenever the space
-around it moves, and hidden whenever a modal, a menu or a floating panel covers
-it; the Preview agent's panel steps aside until the recording ends. Marking
-splits the body into the page and a 380px capture panel with its own scroll and
-a fixed foot (Save without a check, then the primary Save and reproduce, the
-reason beneath; a stopped recording's foot holds Record again, then Save without
-a check); below 760px the two alternate. Focus moves to the bug's name when
-marking starts and back to Mark bug on return. Pointing is never a dead end:
-Stop pointing replaces Add check, and Escape works. Labels that turn pending
-keep their width. An element has one name everywhere: on its pick, in its
-checks and in the evidence. On the Overview the bug is a record group after the
-request: its title with the state word, the person's statement, Before and
-After, the counts line, Recorded and Latest run screenshots, then Checks, Clean
-runs and Steps as disclosures; its actions wait in a 24px ⋯ menu, each with its
-reason when it cannot run yet. When the person owes the bug a step, the Now
-panel takes it and the section drops its state word: the state as title and the
-fact that drives the step as its line, never the bug's title. Approving clean
-runs is decline first: Cancel runs, then Approve clean runs. Discard recording,
-Remove bug and Delete evidence are 440px confirms with Keep first. Debug's
-Earlier bugs is a table: Bug, Ended, When, Evidence and a row menu holding
-Delete evidence.
+**Recorded bugs.** Record bug is a secondary action in the Preview status row
+and, while a Ready task has no bug yet, beside Start implementation in the Now
+panel, with its reason in full when it waits. A recording takes the Preview's
+place as one workspace. Its 40px head names one state in neutral ink, the only
+live region: Starting the app, Recording, Point at what's wrong, Mark the bug,
+Recording stopped, or Record a bug over a decision; the elapsed time sits beside
+it, and the state word carries the live shimmer while something counts. Steps
+(when the rail does not fit), Back to recording, Discard and the primary Mark
+bug sit on the right. A step that fails says so in a square `.tm-error` band
+under the head, never in a toast the page could cover. Env files, approving
+replays and a failure are decision blocks in the page's place, Cancel first.
+
+The page is a native view in a framed card, top-anchored, at its recorded 16:10
+size and never enlarged, with its own bar: Reload, the address (a field that
+takes the start page until the first step, plain text after) and the recorded
+size. While the copy starts, the frame holds the startup as a checklist
+(installs, then databases, jobs and processes, each with its time) with a
+failed step marked. The view is placed again whenever the space around it moves
+and hidden whenever a modal, a menu or a floating panel covers it; the Preview
+agent's panel steps aside until the recording ends. From a 1180px workspace the
+steps rail sits beside the page and lists what is recorded as it happens:
+numbered steps with their kind's icon, requests the app answered with a 4xx in
+muted ink, server errors, unanswered requests and page errors in error ink, a
+refused host as a warning. It follows the newest row unless the person scrolled
+up.
+
+Marking puts the 380px capture panel in the rail's place, with its own scroll
+and a fixed foot. Bug comes first; its name follows the first expectation until
+the person writes one, stating what should be true. Then Notes, then Expected:
+one row per expectation, numbered like its outline on the page, added from Add
+expectation (an element, No page error, a request, a value) and removed with
+its ×. A new element's expected value takes focus with its text selected. Stop
+pointing replaces Add expectation while the page waits for a click, and Escape
+works. Steps and Page errors are disclosures. The foot holds Save steps only,
+then the primary Save and reproduce, at their labels' width, with the reason
+beneath and the bug a save replaces named on its own line above; only a change
+to an expectation asks again whether the bug reproduces, and the last answer
+stands meanwhile. A stopped recording's foot holds Record again, then the
+primary Save steps only. Below 760px the page and the panel alternate. Focus
+moves to the bug's name when marking starts and back to Mark bug on return.
+Labels that turn pending keep their width. An element has one name everywhere:
+on its outline, in its expectation and in the results.
+
+On the Overview the bug is a record group after the request: its name with the
+state word, the person's notes and the reason, then Before and After side by
+side at 2:1, each framed on the checked element with its numbered outline and
+captioned with its side and age; either opens the compare view, which holds
+both sides in one place with a switch and the arrow keys between them. Under
+them a table: Expected, Before, After, each side a check or a cross with the
+value seen; After is quiet and labelled "earlier code" when the code changed
+since or could not be checked again. Replays and Steps are disclosures. Each
+replay row opens a 560px drawer under the title bar: the end of the page,
+framed on its outlined elements, what each expectation saw, the steps with the
+failed one marked, and where it ran; focus starts on the drawer and returns to
+the row. The
+actions wait in a 24px ⋯ menu, each with its reason when it cannot run yet.
+When the person owes the bug a step, the Now panel takes it and the section
+drops its state word: the state as title and the fact that drives the step as
+its line, never the bug's title. Approving replays is decline first: Cancel
+replays, then Approve replays, with what runs under Details. The turn that
+hands the bug to the agent carries it as an attachment that opens it. Discard
+recording, Remove bug and Delete evidence are 440px confirms with Keep first.
+Debug's Earlier bugs is a table: Bug, Ended, When, Evidence and a row menu
+holding Delete evidence.
 
 ## Appendix C — where things live
 

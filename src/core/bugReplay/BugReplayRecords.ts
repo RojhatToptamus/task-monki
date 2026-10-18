@@ -3,8 +3,10 @@ import type {
   BugCaseDecisionKind,
   BugCaseRevisionKind,
   BugCaseStatus,
+  BugElementBox,
   BugReplayProtectedInput,
-  BugReplayRunRecord
+  BugReplayRunRecord,
+  BugStepKind
 } from '../../shared/bugReplay';
 
 /** Durable Bug Replay records. Core-only: the renderer reads views built from them. */
@@ -35,6 +37,10 @@ export interface BugCaptureRecord {
   envFiles: BugReplayEnvFileRecord[];
   pageTitle?: string;
   stepSummaries: string[];
+  /** What each step does, beside its summary; absent on captures saved before kinds were kept. */
+  stepKinds?: BugStepKind[];
+  /** Where each picked element sat in the capture's screenshot, by its structural CSS path. */
+  markedBoxes?: Array<{ css: string; box: BugElementBox }>;
   fileIds: { actionLog?: string; network?: string; console?: string; screenshots: string[] };
   createdAt: string;
 }

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BUG_RECORDING_SCHEMA, type BugRecordingLogV1 } from '../../shared/bugRecording';
+import type { BugCaptureDraft } from '../../shared/bugReplay';
 import { resolveDesignBrowserRuntimePaths } from '../design/AgentBrowserRuntimePath';
 import { compileBugCase } from './BugCaseCompiler';
 import { BugReplayRunner } from './BugReplayRunner';
@@ -98,12 +99,13 @@ describe.skipIf(!existsSync(browser))('Replay runner with a real browser', () =>
     if (root) await fs.rm(root, { recursive: true, force: true });
   });
 
-  async function replay(kind: 'BASELINE' | 'CANDIDATE') {
+  async function replay(kind: 'BASELINE' | 'CANDIDATE', extra: Partial<BugCaptureDraft> = {}) {
     const compiled = compileBugCase(couponRecording(), {
       title: 'Coupon total is wrong',
       checks: [{ pickIndex: 0, template: 'equals', expected: '$45.00', alsoAfterReload: false }],
       requestRules: [],
-      valueChecks: []
+      valueChecks: [],
+      ...extra
     });
     const document = compiled.document!;
     const scratchDir = path.join(root, `run-${randomUUID()}`);
@@ -125,6 +127,30 @@ describe.skipIf(!existsSync(browser))('Replay runner with a real browser', () =>
 
     const after = await replay('CANDIDATE');
     expect(after.verdict).toMatchObject({ outcome: 'PASSED', observations: [{ passed: true, observed: 'Cart total showed "$45.00"' }] });
+  }, 120_000);
+
+  it('counts page errors from the marked step on, so an error the page raised while it loaded is never the bug', async () => {
+    const source = path.join(app, 'public', 'app.js');
+    const original = await fs.readFile(source, 'utf8');
+    // The fixed code, so the total holds and only the page errors decide.
+    const fixed = original.replace('state.discount * 2', 'state.discount');
+    const pageErrors = (run: Awaited<ReturnType<typeof replay>>) =>
+      run.result.frames.flatMap((frame) => (frame.type === 'assertion' && frame.observation.kind === 'console' ? frame.observation.errors : []));
+    try {
+      // An outside script that failed while the page loaded, long before Apply coupon.
+      await fs.writeFile(source, `${fixed}\nsetTimeout(() => { throw new Error('outside script failed'); });\n`);
+      const quiet = await replay('CANDIDATE', { noPageError: true });
+      expect(pageErrors(quiet)).toEqual([]);
+      expect(quiet.verdict.outcome).toBe('PASSED');
+
+      // The marked click raising one is the page error the check is about.
+      await fs.writeFile(source, `${fixed}\ndocument.querySelector('#apply').addEventListener('click', () => setTimeout(() => { throw new Error('apply failed'); }));\n`);
+      const raised = await replay('CANDIDATE', { noPageError: true });
+      expect(pageErrors(raised)).toEqual([expect.stringContaining('apply failed')]);
+      expect(raised.verdict.outcome).toBe('FAILED');
+    } finally {
+      await fs.writeFile(source, original);
+    }
   }, 120_000);
 
   it('never lets the page open a WebSocket to a host the run did not declare', async () => {

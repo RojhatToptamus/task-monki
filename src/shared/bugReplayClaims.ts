@@ -17,30 +17,31 @@ export interface BugStateWord {
 
 /** One name per state, each naming its subject, read by every surface including History. */
 const WORDS: Record<BugReplayGateState, BugStateWord> = {
-  CAPTURED: { word: 'Saved without a check', tone: 'neutral', owed: false },
+  CAPTURED: { word: 'Bug recorded', tone: 'neutral', owed: false },
   REPRODUCING: { word: 'Reproducing bug', tone: 'working', owed: false },
   REPRODUCED: { word: 'Bug reproduced', tone: 'neutral', owed: true },
   NOT_REPRODUCED: { word: 'Bug not reproduced', tone: 'action', owed: true },
-  FLAKY: { word: 'Bug reproduced only sometimes', tone: 'action', owed: true },
-  REPRODUCTION_BLOCKED: { word: 'Bug reproduction blocked', tone: 'error', owed: true },
+  FLAKY: { word: 'Bug reproduced sometimes', tone: 'action', owed: true },
+  REPRODUCTION_BLOCKED: { word: 'Replay blocked', tone: 'error', owed: true },
   VERIFYING: { word: 'Verifying fix', tone: 'working', owed: false },
   FIX_VERIFIED: { word: 'Fix verified', tone: 'success', owed: false },
   STILL_FAILING: { word: 'Bug still failing', tone: 'error', owed: true },
   COULDNT_VERIFY: { word: "Couldn't verify the fix", tone: 'action', owed: true },
-  STALE: { word: 'Fix verification out of date', tone: 'action', owed: false }
+  STALE: { word: 'Verification out of date', tone: 'action', owed: false }
 };
 
 /** How stored facts open, by state: "Couldn't verify: .env changed…". Older wording included. */
 const FACT_LEADS: Partial<Record<BugReplayGateState, string[]>> = {
   NOT_REPRODUCED: ['not reproduced'],
-  FLAKY: ['flaky'],
-  REPRODUCTION_BLOCKED: ['reproduction blocked'],
+  FLAKY: ['flaky', 'bug reproduced only sometimes'],
+  REPRODUCTION_BLOCKED: ['reproduction blocked', 'bug reproduction blocked'],
   STILL_FAILING: ['still failing'],
-  COULDNT_VERIFY: ["couldn't verify"]
+  COULDNT_VERIFY: ["couldn't verify"],
+  STALE: ['fix verification out of date']
 };
 
-/** The words for clean runs that wait on the person's approval, on every surface. */
-export const BUG_APPROVAL_WORD = 'Clean runs need approval';
+/** The words for replays that wait on the person's approval, on every surface. */
+export const BUG_APPROVAL_WORD = 'Replays need approval';
 
 /** The word for a bug's state on every surface, with the decisions the person owes first. */
 export function bugStateWord(
@@ -59,16 +60,29 @@ export function bugStateBaseWord(state: BugReplayGateState): string {
   return WORDS[state].word;
 }
 
-/** "Clean runs: failed 2 of 2 before, passed 2 of 2 after". */
+/** "Replays: reproduced 2 of 2 before the fix, passed 2 of 2 after". One polarity per side. */
 export function bugCountsLine(gate: Pick<BugReplayGateProjection, 'baseline' | 'candidate'> & { state?: BugReplayGateState }): string | undefined {
-  const parts: string[] = [];
-  if (gate.baseline && gate.baseline.matched > 0) parts.push(`failed ${gate.baseline.matched} of ${gate.baseline.total} before`);
+  const parts = bugCountParts(gate);
+  const words = [
+    parts.reproduced ? `reproduced ${parts.reproduced.count} of ${parts.reproduced.total} before the fix` : undefined,
+    parts.passed ? `passed ${parts.passed.count} of ${parts.passed.total} after` : undefined
+  ].filter(Boolean);
+  return words.length ? `Replays: ${words.join(', ')}` : undefined;
+}
+
+/** The counts the replays support: how many reproduced the bug, and how many passed on the fix. */
+export function bugCountParts(gate: Pick<BugReplayGateProjection, 'baseline' | 'candidate'> & { state?: BugReplayGateState }): {
+  reproduced?: { count: number; total: number };
+  passed?: { count: number; total: number };
+} {
+  const parts: ReturnType<typeof bugCountParts> = {};
+  if (gate.baseline && gate.baseline.matched > 0) parts.reproduced = { count: gate.baseline.matched, total: gate.baseline.total };
   // While a verification runs, its counts are not a result yet; one that could not run checked nothing.
   const counted = gate.state === 'COULDNT_VERIFY' ? (gate.candidate?.passed ?? 0) > 0 : gate.state !== 'VERIFYING';
   if (gate.candidate && counted && (gate.candidate.passed > 0 || gate.candidate.total > 0)) {
-    parts.push(`passed ${gate.candidate.passed} of ${gate.candidate.total} after`);
+    parts.passed = { count: gate.candidate.passed, total: gate.candidate.total };
   }
-  return parts.length ? `Clean runs: ${parts.join(', ')}` : undefined;
+  return parts;
 }
 
 /**
@@ -104,3 +118,41 @@ export function bugScopeLine(alsoAfterReload: boolean, keepBrowserStorage: boole
 }
 
 export const BUG_BOUNDARY_LINE = "Not controlled: services the app connects to itself, the server's network, the clock.";
+
+/** What a suggested bug title is built from: the first expectation and what its element showed. */
+export interface BugTitleSeed {
+  /** The element's name: "Cart total". */
+  label: string;
+  template: 'equals' | 'contains' | 'visible' | 'hidden' | 'count';
+  expected?: string;
+  count?: number;
+  /** What the element showed when the bug was marked. */
+  shown?: string;
+}
+
+/**
+ * A title that states what should be true, so it still reads right once the fix is verified:
+ * 'Cart total should read "$45.00"'. Until the expectation differs from what the element showed,
+ * it states the observation: 'Cart total shows "$40.00"'. Without an element there is no
+ * suggestion; the person names the bug.
+ */
+export function suggestBugTitle(seed: BugTitleSeed | undefined): string {
+  if (!seed) return '';
+  const flat = (value: string | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+  const quoted = (value: string) => `"${value.length > 40 ? `${value.slice(0, 39)}…` : value}"`;
+  switch (seed.template) {
+    case 'equals':
+    case 'contains': {
+      const expected = flat(seed.expected);
+      const shown = flat(seed.shown);
+      if (!expected || expected === shown) return shown ? `${seed.label} shows ${quoted(shown)}` : `${seed.label} is empty`;
+      return `${seed.label} should ${seed.template === 'equals' ? 'read' : 'contain'} ${quoted(expected)}`;
+    }
+    case 'visible':
+      return `${seed.label} should be visible`;
+    case 'hidden':
+      return `${seed.label} should be hidden`;
+    case 'count':
+      return `${seed.label} should appear ${seed.count === 1 ? 'once' : `${seed.count ?? 0} times`}`;
+  }
+}

@@ -615,9 +615,21 @@ function parseQuery(value: unknown): Array<[string, string]> {
   });
 }
 
+/** A path a case can open: one leading slash, and no query, fragment, spaces or backslashes. */
+export function isCasePath(value: string): boolean {
+  return value.length >= 1 && value.length <= BUG_CASE_LIMITS.pathChars && value.startsWith('/') && !value.startsWith('//')
+    && !/[\s#?\\]/.test(value) && !value.includes('\u0000');
+}
+
+/** A query a case can carry: at most the limit's entries, each key 1 to 128 characters. */
+export function isCaseQuery(entries: Array<[string, string]>): boolean {
+  return entries.length <= BUG_CASE_LIMITS.queryEntries && entries.every(([key, value]) => key.length >= 1 && key.length <= 128
+    && value.length <= BUG_CASE_LIMITS.valueChars && !key.includes('\u0000') && !value.includes('\u0000'));
+}
+
 function requirePath(value: unknown): string {
   const path = requireText(value, 'A path', 1, BUG_CASE_LIMITS.pathChars);
-  if (!path.startsWith('/') || path.startsWith('//') || /[\s#?\\]/.test(path)) {
+  if (!isCasePath(path)) {
     throw new BugCaseValidationError('A path must start with one slash and hold no query, fragment or spaces.');
   }
   return path;
@@ -779,7 +791,7 @@ function describeAssertionOnce(assertion: BugCaseAssertion, document?: BugCaseV1
       if (assertion.count.op === 'exactly' && assertion.count.n === 0) return `${request} should not be sent`;
       if (assertion.count.op === 'exactly') return `${request} should be sent ${assertion.count.n === 1 ? 'once' : `${assertion.count.n} times`}`;
       if (assertion.status === 'success') return `${request} should succeed`;
-      if (assertion.status === 'answered') return `${request} should be answered`;
+      if (assertion.status === 'answered') return `${request} should get no server error`;
       if (typeof assertion.status === 'number') return `${request} should return ${assertion.status}`;
       return `${request} should be sent`;
     }
@@ -790,19 +802,23 @@ function describeAssertionOnce(assertion: BugCaseAssertion, document?: BugCaseV1
       return `${request} should ${assertion.side === 'request' ? 'send' : 'return'} ${field} = ${assertion.equals}`;
     }
     case 'console.noUncaughtError':
-      return 'The page should raise no error';
+      return 'The last step should raise no page error';
   }
 }
 
-/** A short human name for a target, from its most readable candidate. */
+/**
+ * A short human name for a target, from its most readable candidate. A name is written as the
+ * pick, the bug's suggested title and the verdict write it; only an element known by its own
+ * text keeps that text in quotes.
+ */
 export function describeTarget(target: BugCaseTarget): string {
-  if (target.label) return `"${truncate(target.label, 48)}"`;
+  if (target.label) return truncate(target.label, 48);
   for (const candidate of target.candidates) {
-    if (candidate.kind === 'role' && candidate.name) return `"${truncate(candidate.name, 48)}"`;
-    if (candidate.kind === 'label' || candidate.kind === 'placeholder') return `"${truncate(candidate.value, 48)}"`;
+    if (candidate.kind === 'role' && candidate.name) return truncate(candidate.name, 48);
+    if (candidate.kind === 'label' || candidate.kind === 'placeholder') return truncate(candidate.value, 48);
   }
   for (const candidate of target.candidates) {
-    if (candidate.kind === 'testId') return `"${truncate(testIdWords(candidate.value), 48)}"`;
+    if (candidate.kind === 'testId') return truncate(testIdWords(candidate.value), 48);
     if (candidate.kind === 'text') return `"${truncate(candidate.value, 48)}"`;
   }
   return 'The element';

@@ -1,4 +1,5 @@
 import { useId, useRef, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { useDialogFocusBoundary } from '../dialogFocus';
 
 /**
@@ -34,7 +35,7 @@ export function BugConfirmDialog({
   const titleId = useId();
   const bodyId = useId();
   useDialogFocusBoundary({ dialogRef: panelRef, fallbackReturnFocusRef: returnFocusRef, shouldReturnFocus, busy, onClose: onKeep });
-  return (
+  return createPortal(
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={bodyId}>
       <div className="tm-modal__scrim" onClick={busy ? undefined : onKeep} />
       <div ref={panelRef} className="tm-modal__panel tm-bugconfirm" tabIndex={-1}>
@@ -45,6 +46,7 @@ export function BugConfirmDialog({
           <button type="button" className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -108,11 +108,15 @@ import {
   IPC_UPDATE_CHANNEL,
   IPC_SOFTWARE_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
+  ipcErrorMessage,
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
 
 function invokeIpc(channel: IpcInvokeChannel, ...args: unknown[]): Promise<any> {
-  return ipcRenderer.invoke(channel, ...args);
+  return ipcRenderer.invoke(channel, ...args).catch((error: unknown) => {
+    if (error instanceof Error) error.message = ipcErrorMessage(error.message);
+    throw error;
+  });
 }
 
 function getWindowChromePlatform(): WindowChromePlatform {
@@ -384,7 +388,8 @@ if (process.platform === 'darwin') {
 const bugRecordingView: BugRecordingViewApi = {
   show: (input) => invokeIpc('bug:view:show', input),
   hide: (input) => invokeIpc('bug:view:hide', input),
-  reload: (input) => invokeIpc('bug:view:reload', input)
+  reload: (input) => invokeIpc('bug:view:reload', input),
+  open: (input) => invokeIpc('bug:view:open', input)
 };
 if (process.platform === 'darwin') {
   contextBridge.exposeInMainWorld('bugRecordingView', bugRecordingView);

@@ -649,6 +649,7 @@ function installIpcHandlers(): void {
   handleTrustedIpc('bug:view:reload', async (_, input: { taskId: string; sessionId: string }) =>
     service.reloadBugRecording(input.taskId, input.sessionId)
   );
+  handleTrustedIpc('bug:view:open', async (_, input: unknown) => service.openBugRecordingPage(input));
 
   handleTrustedIpc(
     'discourse:conversations:list',

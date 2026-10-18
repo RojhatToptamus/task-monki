@@ -74,6 +74,7 @@ export const IPC_INVOKE_CHANNELS = [
   'bug:send',
   'bug:verify',
   'bug:view:hide',
+  'bug:view:open',
   'bug:view:reload',
   'bug:view:show',
   'design:archive',
@@ -188,3 +189,11 @@ export type IpcInvokeChannel = (typeof IPC_INVOKE_CHANNELS)[number];
 export const IPC_UPDATE_CHANNEL = 'app:update' as const;
 export const IPC_SOFTWARE_UPDATE_CHANNEL = 'softwareUpdate:state' as const;
 export const IPC_WINDOW_CHROME_CHANNEL = 'windowChrome:sync' as const;
+
+/**
+ * The main process's own words from a failed IPC call: Electron puts the channel and the error's
+ * class in front of them, which a person should never read.
+ */
+export function ipcErrorMessage(message: string): string {
+  return message.replace(/^Error invoking remote method '[^']+': (?:\w*Error: )?/u, '');
+}

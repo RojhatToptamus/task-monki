@@ -14,7 +14,7 @@ describe('bug-case/v1 documents', () => {
     const document = checkoutCase();
 
     expect(parseBugCase(stored())).toEqual(document);
-    expect(describeTarget(document.assertions[0].kind === 'dom.text' ? document.assertions[0].target : { candidates: [] })).toBe('"Cart total"');
+    expect(describeTarget(document.assertions[0].kind === 'dom.text' ? document.assertions[0].target : { candidates: [] })).toBe('Cart total');
   });
 
   it('refuses anything the runner would have to interpret as code', () => {
@@ -50,7 +50,7 @@ describe('bug-case/v1 documents', () => {
     const document = checkoutCase(true);
 
     expect(document.assertions.map((assertion) => describeBugCaseAssertion(assertion, document))).toEqual([
-      '"Cart total" should read "$45.00", also after reload'
+      'Cart total should read "$45.00", also after reload'
     ]);
   });
 });

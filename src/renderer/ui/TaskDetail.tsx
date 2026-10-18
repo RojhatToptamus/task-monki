@@ -522,6 +522,21 @@ export function TaskDetail(props: TaskDetailProps) {
     onError: (message) => notify(message, 'error'),
     returnFocusRef: detailRootRef
   }, bug.refresh);
+  // The turns that carried the recorded bug: the start or follow-up that sent it, and any queued
+  // instruction that held it until its turn.
+  const bugTurns = useMemo(() => {
+    const title = bug.snapshot?.activeCase?.title ?? task?.projection.bugReplay?.title;
+    if (!title) return undefined;
+    const runIds = new Set<string>();
+    for (const event of props.events) {
+      if (event.type !== 'BUG_HANDOFF_CHANGED') continue;
+      const payload = event.payload as { handoff?: unknown; gate?: { handoff?: { runId?: unknown } } } | undefined;
+      const runId = payload?.gate?.handoff?.runId;
+      if (payload?.handoff === 'SENT' && typeof runId === 'string') runIds.add(runId);
+    }
+    for (const instruction of props.agentInstructions) if (instruction.bugCase && instruction.runId) runIds.add(instruction.runId);
+    return runIds.size ? { runIds, title, onOpen: () => setTab('overview') } : undefined;
+  }, [bug.snapshot?.activeCase?.title, task?.projection.bugReplay?.title, props.events, props.agentInstructions]);
   const modalOpen = taskDetailModalOpen || bugActions.modalOpen;
   useLayoutEffect(() => {
     props.onModalOpenChange(modalOpen);
@@ -1256,6 +1271,11 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   };
 
+  // Record bug leads only while it can start and the task has no bug or recording yet.
+  const canRecordBugNow = Boolean(
+    bug.snapshot?.availability.canRecord && !bug.snapshot.availability.recordDisabledReason
+    && !bug.snapshot.activeCase && !bug.snapshot.recording
+  );
   const setupDecision = (setup: NonNullable<typeof primaryAction>) => {
     const ready = worktree?.status === 'PRESENT';
     // A Git or delivery problem is the task's state: the slot names it in the
@@ -1278,7 +1298,16 @@ export function TaskDetail(props: TaskDetailProps) {
             reason: blocked,
             onClick: setup.onClick
           }}
-          secondary={ready && !externalWork ? [{ label: 'Edit setup', onClick: () => setTab('agent') }] : []}
+          secondary={ready && !externalWork ? [
+            // Before the first turn, a recorded bug goes to the agent with it: recording comes first.
+            ...(canRecordBugNow ? [{
+              label: bugActions.busy === 'record-again' ? 'Starting…' : 'Record bug',
+              labels: ['Record bug', 'Starting…'],
+              disabled: Boolean(bugActions.busy),
+              onClick: () => bugActions.perform('record-again')
+            }] : []),
+            { label: 'Edit setup', onClick: () => setTab('agent') }
+          ] : []}
         />
       </DecisionSlot>
     );
@@ -1822,6 +1851,7 @@ export function TaskDetail(props: TaskDetailProps) {
           onRespond={props.onRespondToInteraction} onReadArtifact={props.onReadArtifact}
           onShowDebug={() => setTab('debug')} onShowReview={() => setTab('review')}
           attentionRequested={agentAttentionRequest} header={<div className="tm-detail__chrome">{taskNav}</div>}
+          bugTurns={bugTurns}
           preRun={!run ? <PreRunSetup
             prompt={task.prompt}
             promptDraft={task.promptDraft}

@@ -19,6 +19,7 @@ import {
 import {
   isGatewaySignature,
   type BugReplayDomObservation,
+  type BugReplayElementMark,
   type BugReplayFrame,
   type BugReplayRequestFact,
   type BugReplayRunPlan,
@@ -60,14 +61,21 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
   let stepFrames = 0;
   let assertionFrames = 0;
 
-  const screenshot = async (page: Page, purpose: 'failure' | 'final') => {
+  const screenshot = async (page: Page, purpose: 'failure' | 'final', marks?: BugReplayElementMark[]) => {
     if (screenshots >= plan.maxScreenshots || page.isClosed()) return;
     try {
       const bytes = await page.screenshot({ type: 'png', timeout: 5_000 });
       screenshots += 1;
       const name = `${purpose}-${screenshots}.png`;
       await fs.writeFile(path.join(plan.outDir, name), bytes, { mode: 0o600, flag: 'wx' });
-      emit({ type: 'screenshot', name, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, purpose });
+      emit({
+        type: 'screenshot',
+        name,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        bytes: bytes.length,
+        purpose,
+        ...(marks && marks.length ? { marks } : {})
+      });
     } catch {
       // A page that cannot be captured still has its observations.
     }
@@ -82,9 +90,12 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
     crashed = true;
     emit({ type: 'signal', signal: 'renderer-crash', detail: 'The page crashed.', atMs: at() });
   });
+  // Page errors count from the marked step on, the span the recording judged: an error the page
+  // raised before it (an outside script the replay refuses, say) is not the bug's.
+  let countingErrors = false;
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => {
-    if (pageErrors.length < 50) pageErrors.push(String(error?.message ?? error).slice(0, 500));
+    if (countingErrors && pageErrors.length < 50) pageErrors.push(String(error?.message ?? error).slice(0, 500));
   });
   page.on('framenavigated', (frame) => {
     if (frame === page.mainFrame()) tracker.noteDocumentLoad();
@@ -96,7 +107,10 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
   let failed = false;
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index];
-    if (index === markedIndex) tracker.markWindowStart();
+    if (index === markedIndex) {
+      tracker.markWindowStart();
+      countingErrors = true;
+    }
     const result = await runStep(page, step, index, steps, plan, dialogs, tracker, emit, at);
     stepFrames += 1;
     if (crashed && result.status === 'done') {
@@ -130,12 +144,15 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
       emit({ type: 'assertion', assertionId: assertion.id, phase: 'main', observation: observationFor(assertion, window.dom, windowRequests, page, pageErrors, document) });
       assertionFrames += 1;
     }
-    await screenshot(page, 'final');
-
+    // What a reload opens is read before the final screenshot scrolls: an app that keeps its scroll
+    // in the address or in storage would otherwise reload another page.
     const reloadAssertions = domAssertions.filter((assertion) => assertion.alsoAfterReload);
-    if (reloadAssertions.length > 0 && !crashed) {
-      const url = page.url();
-      const state = await context.storageState();
+    const reloadFrom = reloadAssertions.length > 0 && !crashed ? { url: page.url(), state: await context.storageState() } : undefined;
+    // The checks are settled; the final screenshot shows the first checked element and outlines each.
+    await screenshot(page, 'final', crashed ? undefined : await markChecked(page, domAssertions, window.dom));
+
+    if (reloadFrom && !crashed) {
+      const { url, state } = reloadFrom;
       await context.close();
       const reloadContext = await newContext(
         browser,
@@ -182,6 +199,40 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
     await context.close().catch(() => undefined);
   }
   return { steps: stepFrames, assertions: assertionFrames };
+}
+
+/**
+ * Where each element a check found sits, after scrolling the first into view, so the final
+ * screenshot shows it. Only elements found as exactly one visible match are outlined.
+ */
+async function markChecked(page: Page, assertions: DomAssertion[], dom: Map<string, BugReplayDomObservation>): Promise<BugReplayElementMark[]> {
+  const found: Array<{ assertionId: string; locator: Locator }> = [];
+  for (const assertion of assertions) {
+    const observation = dom.get(assertion.id);
+    if (!observation?.found || observation.candidateIndex === undefined || assertion.kind === 'dom.count') continue;
+    const candidate = assertion.target.candidates[observation.candidateIndex];
+    if (!candidate) continue;
+    const visible = await visibleMatches(locatorFor(page, candidate)).catch(() => ({ count: 0 }) as { count: number; only?: Locator });
+    if (visible.only) found.push({ assertionId: assertion.id, locator: visible.only });
+    if (found.length >= 5) break;
+  }
+  if (found.length === 0) return [];
+  await found[0].locator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => undefined);
+  const viewport = page.viewportSize();
+  const marks: BugReplayElementMark[] = [];
+  for (const entry of found) {
+    const box = await entry.locator.boundingBox({ timeout: 1_000 }).catch(() => null);
+    if (!box || box.width <= 0 || box.height <= 0 || !viewport) continue;
+    // Outlined as far as the screenshot shows it; an element wholly outside it has no outline.
+    const left = Math.max(0, box.x);
+    const top = Math.max(0, box.y);
+    const right = Math.min(viewport.width, box.x + box.width);
+    const bottom = Math.min(viewport.height, box.y + box.height);
+    if (right <= left || bottom <= top) continue;
+    const round = (value: number) => Math.round(value * 10) / 10;
+    marks.push({ assertionId: entry.assertionId, box: { x: round(left), y: round(top), width: round(right - left), height: round(bottom - top) } });
+  }
+  return marks;
 }
 
 function lastActionIndex(steps: BugCaseStep[]): number {

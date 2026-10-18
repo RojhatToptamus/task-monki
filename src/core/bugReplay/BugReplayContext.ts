@@ -89,7 +89,7 @@ export function buildBugReviewSection(records: BugContextRecords, input: { revie
   const mask = masker(version?.document);
   const head = ['Recorded bug (Task Monki ran this; the person approved the expectation)'];
   if (!version) {
-    head.push('Saved without a check: Task Monki did not verify a fix. Judge the change against the steps in the task.');
+    head.push('Recorded without expectations: Task Monki did not verify a fix. Judge the change against the steps in the task.');
     return withDataBlock(head, [`Bug: ${mask(bugCase.title, 200)}`], [], BUG_REVIEW_SECTION_LIMIT, bugCase.id);
   }
   const verdictTree = gate.verdictTreeId;
@@ -135,8 +135,8 @@ export function buildBugPullRequestBlock(records: BugContextRecords, headTreeId:
       !headTreeId
         ? "- Couldn't compare the checked code with this pull request's head."
         : headTreeId === gate.verdictTreeId
-          ? "- The clean runs checked this pull request's code."
-          : "- The clean runs checked other code than this pull request's head."
+          ? "- The replays checked this pull request's code."
+          : "- The replays checked other code than this pull request's head."
     );
   }
   lines.push(`- ${bugScopeLine(alsoAfterReload(version.document), bugCase.keepBrowserStorage)}`);

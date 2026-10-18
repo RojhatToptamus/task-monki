@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { bugCountsLine, bugReason, bugScopeLine, bugStateWord, serviceStoppedSentence } from './bugReplayClaims';
+import { bugCountsLine, bugReason, bugScopeLine, bugStateWord, serviceStoppedSentence, suggestBugTitle } from './bugReplayClaims';
 
 describe('What Task Monki says about a bug', () => {
   it('counts only runs that reached a result', () => {
     const baseline = { matched: 2, total: 2 };
-    expect(bugCountsLine({ state: 'FIX_VERIFIED', baseline, candidate: { passed: 2, total: 2 } })).toBe('Clean runs: failed 2 of 2 before, passed 2 of 2 after');
+    expect(bugCountsLine({ state: 'FIX_VERIFIED', baseline, candidate: { passed: 2, total: 2 } })).toBe('Replays: reproduced 2 of 2 before the fix, passed 2 of 2 after');
     // A verification in flight is not a result yet.
-    expect(bugCountsLine({ state: 'VERIFYING', baseline, candidate: { passed: 0, total: 2 } })).toBe('Clean runs: failed 2 of 2 before');
+    expect(bugCountsLine({ state: 'VERIFYING', baseline, candidate: { passed: 0, total: 2 } })).toBe('Replays: reproduced 2 of 2 before the fix');
     // Runs that could not run checked nothing: "passed 0 of 2" would read as a failure.
-    expect(bugCountsLine({ state: 'COULDNT_VERIFY', baseline, candidate: { passed: 0, total: 2 } })).toBe('Clean runs: failed 2 of 2 before');
-    expect(bugCountsLine({ state: 'COULDNT_VERIFY', baseline, candidate: { passed: 1, total: 2 } })).toBe('Clean runs: failed 2 of 2 before, passed 1 of 2 after');
+    expect(bugCountsLine({ state: 'COULDNT_VERIFY', baseline, candidate: { passed: 0, total: 2 } })).toBe('Replays: reproduced 2 of 2 before the fix');
+    expect(bugCountsLine({ state: 'COULDNT_VERIFY', baseline, candidate: { passed: 1, total: 2 } })).toBe('Replays: reproduced 2 of 2 before the fix, passed 1 of 2 after');
   });
 
   it('states the reason beside the state word without repeating it', () => {
@@ -21,7 +21,7 @@ describe('What Task Monki says about a bug', () => {
   });
 
   it('puts the decision the person owes ahead of the state', () => {
-    expect(bugStateWord({ state: 'VERIFYING', activeRun: { waitingFor: 'APPROVAL' } })).toMatchObject({ word: 'Clean runs need approval', owed: true });
+    expect(bugStateWord({ state: 'VERIFYING', activeRun: { waitingFor: 'APPROVAL' } })).toMatchObject({ word: 'Replays need approval', owed: true });
     expect(bugStateWord({ state: 'REPRODUCED', handoff: { status: 'RUNNING' } })).toMatchObject({ word: 'Fixing the bug', owed: false });
     expect(bugStateWord({ state: 'STILL_FAILING' })).toMatchObject({ word: 'Bug still failing', tone: 'error', owed: true });
   });
@@ -35,5 +35,16 @@ describe('What Task Monki says about a bug', () => {
   it('always says what the check did not read', () => {
     expect(bugScopeLine(false, false)).toBe('Checked on the page. Database contents were not read.');
     expect(bugScopeLine(true, true)).toBe("Checked in the app's pages after reload, browser storage kept. Database contents were not read.");
+  });
+  it('names a bug by what should be true once the person says so, and by what it showed until then', () => {
+    // Until the expectation differs from what the element showed, the name states the observation.
+    expect(suggestBugTitle({ label: 'Cart total', template: 'equals', expected: '$40.00', shown: '$40.00' })).toBe('Cart total shows "$40.00"');
+    // Once it does, the name still reads right after the fix is verified.
+    expect(suggestBugTitle({ label: 'Cart total', template: 'equals', expected: ' $45.00\n', shown: '$40.00' })).toBe('Cart total should read "$45.00"');
+    expect(suggestBugTitle({ label: 'Banner', template: 'contains', expected: 'Saved', shown: '' })).toBe('Banner should contain "Saved"');
+    expect(suggestBugTitle({ label: 'Banner', template: 'equals', shown: '' })).toBe('Banner is empty');
+    expect(suggestBugTitle({ label: 'Toast', template: 'count', count: 1 })).toBe('Toast should appear once');
+    expect(suggestBugTitle({ label: 'Note', template: 'equals', expected: 'x'.repeat(60), shown: '' })).toBe(`Note should read "${'x'.repeat(39)}…"`);
+    expect(suggestBugTitle(undefined)).toBe('');
   });
 });

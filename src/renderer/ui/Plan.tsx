@@ -17,6 +17,8 @@ export type PlanStepStatus = AgentPlanStep['status'];
 export interface PlanListStep {
   step: string;
   status: PlanStepStatus;
+  /** A fact at the step's end, such as how long it took; the marker's word replaces it. */
+  meta?: string;
 }
 
 /**
@@ -79,7 +81,10 @@ export function PlanList({
             {stepMarker ? (
               <span className="tm-plan__state">{planStepStatusLabel(step, stepMarker)}</span>
             ) : (
-              <span className="tm-visually-hidden">, {planStepStatusLabel(step)}</span>
+              <>
+                <span className="tm-visually-hidden">, {planStepStatusLabel(step)}</span>
+                {step.meta ? <span className="tm-plan__state tm-plan__meta">{step.meta}</span> : null}
+              </>
             )}
           </li>
         );

@@ -117,6 +117,8 @@ export interface BugRecordingPick {
   visible: boolean;
   /** How many elements matched the picked element's own selector shapes when it was picked. */
   count: number;
+  /** Where it sat in the screenshot taken when the bug was marked, in CSS pixels of the viewport. */
+  box?: { x: number; y: number; width: number; height: number };
 }
 
 export interface BugRecordingMark {
@@ -301,15 +303,28 @@ function parseMark(value: unknown, actionCount: number): BugRecordingMark {
     location: parseLocation(record.location),
     picks: list(record.picks, 'Picks', 0, BUG_RECORDING_LIMITS.picks).map((item) => {
       const pick = asRecord(item, 'A pick');
-      keys(pick, ['target', 'text', 'value', 'visible', 'count'], 'A pick');
+      keys(pick, ['target', 'text', 'value', 'visible', 'count', 'box'], 'A pick');
       return {
         target: parseTarget(pick.target),
         text: text(pick.text, BUG_RECORDING_LIMITS.valueChars),
         ...(pick.value === undefined ? {} : { value: text(pick.value, BUG_RECORDING_LIMITS.valueChars) }),
         visible: bool(pick.visible),
-        count: int(pick.count, 0, 10_000)
+        count: int(pick.count, 0, 10_000),
+        ...(pick.box === undefined ? {} : { box: parseBox(pick.box) })
       };
     })
+  };
+}
+
+/** An element's box in viewport CSS pixels; a box may start above or left of the viewport. */
+function parseBox(value: unknown): NonNullable<BugRecordingPick['box']> {
+  const record = asRecord(value, 'A box');
+  keys(record, ['x', 'y', 'width', 'height'], 'A box');
+  return {
+    x: num(record.x, -100_000, 100_000),
+    y: num(record.y, -100_000, 100_000),
+    width: num(record.width, 0, 100_000),
+    height: num(record.height, 0, 100_000)
   };
 }
 

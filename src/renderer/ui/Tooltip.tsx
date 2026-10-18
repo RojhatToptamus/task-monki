@@ -18,6 +18,11 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   </SharedProvider.Provider>;
 }
 
+/** The app records how the person last moved on the document; without it, focus counts as the keyboard's. */
+function focusFromKeyboard(): boolean {
+  return typeof document === 'undefined' || document.documentElement.dataset.inputModality !== 'pointer';
+}
+
 export function Tooltip({ label, shortcut, side = 'bottom', children }: {
   label: string;
   shortcut?: string;
@@ -26,7 +31,11 @@ export function Tooltip({ label, shortcut, side = 'bottom', children }: {
 }) {
   const shared = useContext(SharedProvider);
   const root = <RadixTooltip.Root>
-    <RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
+    {/* Focus names a control only for someone moving by keyboard: a dialog that places focus
+        on its close button as it opens never shows that button's tooltip under the pointer. */}
+    <RadixTooltip.Trigger asChild onFocus={(event) => {
+      if (!focusFromKeyboard()) event.preventDefault();
+    }}>{children}</RadixTooltip.Trigger>
     <RadixTooltip.Portal>
       <RadixTooltip.Content className="tm-tooltip" side={side} sideOffset={6} collisionPadding={8}>
         {label}

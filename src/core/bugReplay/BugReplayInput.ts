@@ -102,7 +102,9 @@ function captureDraft(value: unknown): BugCaptureDraft {
       const pointer = text(valueCheck.pointer, 300);
       if (pointer !== '' && !pointer.startsWith('/')) throw new BugReplayInputError();
       return { requestKey: text(valueCheck.requestKey, 600), side, pointer, expected: text(valueCheck.expected, 2_000) };
-    })
+    }),
+    ...(input.noPageError !== undefined ? { noPageError: boolean(input.noPageError) } : {}),
+    ...(input.picksSeen !== undefined ? { picksSeen: integer(input.picksSeen, 0, 99) } : {})
   };
 }
 
@@ -118,6 +120,10 @@ export const bugReplayInput = {
     const templateDigest = text(input.templateDigest, 64);
     if (!DIGEST.test(templateDigest)) throw new BugReplayInputError();
     return { ...task(input), templateDigest };
+  },
+  page(value: unknown): { taskId: string; sessionId: string; path: string } {
+    const input = object(value);
+    return { ...session(input), path: text(input.path, 512) };
   },
   optionalDraft(value: unknown): { taskId: string; sessionId: string; draft?: BugCaptureDraft } {
     const input = object(value);

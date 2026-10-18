@@ -147,9 +147,22 @@ export type BugReplayFrame =
     }
   | { type: 'requests'; phase: 'main'; requests: BugReplayRequestFact[] }
   | { type: 'signal'; signal: BugReplaySignalKind; detail: string; atMs: number }
-  | { type: 'screenshot'; name: string; sha256: string; bytes: number; purpose: 'failure' | 'final' }
+  | {
+      type: 'screenshot';
+      name: string;
+      sha256: string;
+      bytes: number;
+      purpose: 'failure' | 'final';
+      /** On the final screenshot: where each found element a check read sat in it, in viewport CSS pixels. */
+      marks?: BugReplayElementMark[];
+    }
   | { type: 'run-finished'; steps: number; assertions: number; frames: number }
   | { type: 'fatal'; detail: string };
+
+export interface BugReplayElementMark {
+  assertionId: string;
+  box: { x: number; y: number; width: number; height: number };
+}
 
 export type BugReplayFrameEnvelope = BugReplayFrame & { nonce: string; seq: number };
 

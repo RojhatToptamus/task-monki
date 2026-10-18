@@ -162,8 +162,9 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  scroll-behavior: smooth;
-  padding: 12px 24px 24px;
+  /* Following and restoring the reading position are instant; only a jump the person asks
+     for scrolls smoothly, and asks for it itself. */
+  padding: 12px calc(24px - var(--scrollbar)) 24px 24px;
   scrollbar-gutter: stable;
 }
 
@@ -1291,10 +1292,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tm-discourse-transcript {
-    scroll-behavior: auto;
-  }
-
   .tm-discourse-message,
   .tm-discourse-message footer,
   .tm-discourse-rail,

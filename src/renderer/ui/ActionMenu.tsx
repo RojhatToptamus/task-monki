@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, type ReactNode, type Ref } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { Check, ChevronRight } from 'lucide-react';
 import { Tooltip } from './Tooltip';
@@ -91,8 +91,8 @@ function MenuNote({ id, note }: { id: string; note: string }) {
   </>;
 }
 
-/** shadcn's Radix menu foundation, styled with Task Monki's shared tokens. */
-export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', disabled, label, tooltip, trigger, items, note, open, closeOnSelect = true, onOpenChange }: {
+/** The shared Radix menu, styled with Task Monki's tokens. */
+export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', disabled, label, tooltip, trigger, triggerRef, items, note, open, closeOnSelect = true, onOpenChange }: {
   className?: string;
   selection?: 'single' | 'multiple';
   align?: 'start' | 'end';
@@ -103,6 +103,8 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
   /** Names an icon-only trigger; a trigger that shows its value needs none. */
   tooltip?: string;
   trigger: ReactNode;
+  /** The trigger, for a surface that moves focus to it when the control in its place goes away. */
+  triggerRef?: Ref<HTMLButtonElement>;
   items: ActionMenuItem[];
   /** One muted line after the items that explains a limit shared by several of them, or an error. */
   note?: string;
@@ -112,7 +114,7 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
 }) {
   const id = useId();
   const button = <DropdownMenu.Trigger asChild>
-    <button type="button" className={`tm-action-menu__trigger ${className.split(' ')[0]}__trigger`} aria-label={label} disabled={disabled}>{trigger}</button>
+    <button ref={triggerRef} type="button" className={`tm-action-menu__trigger ${className.split(' ')[0]}__trigger`} aria-label={label} disabled={disabled}>{trigger}</button>
   </DropdownMenu.Trigger>;
   return <DropdownMenu.Root modal={false} open={open} onOpenChange={onOpenChange}>
     <div className={className}>

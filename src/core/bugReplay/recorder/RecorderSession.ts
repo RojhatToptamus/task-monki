@@ -9,6 +9,8 @@ import {
   type BugRecordingRequest
 } from '../../../shared/bugRecording';
 import type { BugCaseEnvironment } from '../../../shared/bugCase';
+import type { BugRecordingTimeline, BugTimelineEntry } from '../../../shared/bugReplay';
+import { compileSteps, describeStep } from '../BugCaseCompiler';
 import { isGatewaySignature } from '../runner/protocol';
 import { RECORDER_BINDING, RECORDER_SCRIPT, RECORDER_WORLD } from './recorderScript';
 
@@ -29,7 +31,9 @@ export type RecorderNotice =
   | { kind: 'route'; path: string }
   | { kind: 'coverage'; note: string }
   | { kind: 'password' }
-  | { kind: 'ready'; title: string };
+  | { kind: 'ready'; title: string }
+  /** A step, a failed request or a page error joined the live timeline. */
+  | { kind: 'timeline' };
 
 interface PendingRequest {
   entry: BugRecordingRequest;
@@ -38,6 +42,8 @@ interface PendingRequest {
 }
 
 const BODY_RING = 60;
+/** Rows the live timeline sends; the steps count covers the rest. */
+const TIMELINE_ROWS = 80;
 /** UTF-8 bytes of recorded actions; below the stored action log's 2 MiB limit with room for the array. */
 const MAX_LOG_BYTES = 1536 * 1024;
 
@@ -63,6 +69,9 @@ export class RecorderSession {
   private dialogType: 'alert' | 'confirm' | 'prompt' | 'beforeunload' = 'confirm';
   private bytes = 0;
   private closed = false;
+  /** The page's scroll when the capture's screenshot was taken; picks are placed against it. */
+  /** The window's scroll when the capture's screenshot was taken; unknown, picks are not placed. */
+  private shotScroll?: { x: number; y: number };
 
   constructor(
     private readonly cdp: CdpConnection,
@@ -112,13 +121,41 @@ export class RecorderSession {
   }
 
   /** The action that opens the start page: the clean start every case begins with. */
-  noteStart(path: string, query: Array<[string, string]>, role = 'primary'): void {
+  /**
+   * The start page, timed from when its load began (`t`, by default now), so what the page did
+   * while it loaded belongs to the start step, as it does when a replay opens it.
+   */
+  noteStart(path: string, query: Array<[string, string]>, role = 'primary', t = this.elapsed()): void {
     this.location = { role, path, query };
-    this.pushAction({ kind: 'navigate', location: { role, path, query } });
+    this.pushAction({ kind: 'navigate', location: { role, path, query } }, t);
+  }
+
+  /** The recording's clock, for timing a step from before the page work it causes. */
+  now(): number {
+    return this.elapsed();
   }
 
   noteReload(): void {
     this.pushAction({ kind: 'reload' });
+  }
+
+  /** Nothing was recorded after the start page yet. */
+  onlyStart(): boolean {
+    return this.actions.length === 1 && this.actions[0].kind === 'navigate';
+  }
+
+  /**
+   * Moves the start to another page while nothing else was recorded; false once a step exists.
+   * `t` is when that page's load began.
+   */
+  restartAt(path: string, query: Array<[string, string]>, role = 'primary', t = this.elapsed()): boolean {
+    if (!this.onlyStart()) return false;
+    const start = this.actions[0];
+    const location = { role, path, query };
+    this.actions[0] = { ...start, t: Math.max(0, Math.min(t, this.elapsed())), location };
+    this.location = { role, path, query: [...query] };
+    this.notify({ kind: 'timeline' });
+    return true;
   }
 
   noteCoverage(reason: string): void {
@@ -142,6 +179,8 @@ export class RecorderSession {
   /** Seals the marked window now: requests after this instant are not suggested. */
   seal(): BugRecordingLogV1['mark'] {
     const t = this.elapsed();
+    // A new mark takes a new screenshot: the last one's scroll says nothing about it.
+    this.shotScroll = undefined;
     const marked = [...this.actions].reverse().find((action) => action.kind !== 'dialog' && action.kind !== 'unsupported') ?? this.actions[0];
     this.sealedMark = {
       t,
@@ -176,6 +215,83 @@ export class RecorderSession {
     if (contextId !== undefined) await this.cdp.send('Runtime.evaluate', { expression: 'globalThis.__tmStopPick()', contextId }).catch(() => undefined);
     this.pickResolve?.(undefined);
     this.pickResolve = undefined;
+  }
+
+  /** Notes the page's scroll right before the capture's screenshot, so picks can be placed on it. */
+  async noteShot(): Promise<void> {
+    const contextId = this.isolatedContexts.get('top');
+    if (contextId === undefined) return;
+    const result = (await this.cdp.send('Runtime.evaluate', { expression: 'globalThis.__tmNoteShot()', contextId, returnByValue: true }).catch(() => undefined)) as
+      | { result?: { value?: unknown } }
+      | undefined;
+    const value = result?.result?.value;
+    if (Array.isArray(value) && value.every((item) => typeof item === 'number' && Number.isFinite(item))) {
+      this.shotScroll = { x: value[0] as number, y: value[1] as number };
+    }
+  }
+
+  /** Numbered outlines on the elements the expectations read; an empty list clears them. */
+  async showMarks(marks: Array<{ css: string; label: string }>): Promise<void> {
+    const contextId = this.isolatedContexts.get('top');
+    if (contextId === undefined) return;
+    const expression = marks.length
+      ? `globalThis.__tmShowMarks && globalThis.__tmShowMarks(${JSON.stringify(JSON.stringify(marks.slice(0, 5)))})`
+      : 'globalThis.__tmClearMarks && globalThis.__tmClearMarks()';
+    await this.cdp.send('Runtime.evaluate', { expression, contextId }).catch(() => undefined);
+  }
+
+  /**
+   * What was recorded so far, newest last: the steps a replay takes, inputs it can't replay, and
+   * what the page did that a person looks for when a bug shows (failed or refused requests,
+   * uncaught errors and console errors).
+   */
+  timeline(): BugRecordingTimeline {
+    const compiled = compileSteps(this.actions);
+    const rows: Array<BugTimelineEntry & { t: number; order: number }> = compiled.steps.map((step, index) => ({
+      id: `s${index}`,
+      kind: step.kind,
+      text: describeStep(step),
+      step: index + 1,
+      t: compiled.times[index] ?? 0,
+      order: 0
+    }));
+    for (const action of this.actions) {
+      if (action.kind !== 'unsupported') continue;
+      const what = action.unsupported ?? 'This input';
+      rows.push({ id: `u${action.index}`, kind: 'unsupported', text: `${what.charAt(0).toUpperCase()}${what.slice(1)} can't be replayed`, tone: 'warning', t: action.t, order: 1 });
+    }
+    const blockedHosts = new Set<string>();
+    for (const request of this.finished) {
+      if (!request.role) {
+        if (request.outcome !== 'blocked' || !request.host || blockedHosts.has(request.host)) continue;
+        blockedHosts.add(request.host);
+        rows.push({ id: `b${request.id}`, kind: 'request', text: `Blocked requests to ${request.host}`, tone: 'warning', t: request.t, order: 2 });
+        continue;
+      }
+      const failed = request.outcome !== 'response' || request.gateway === true || (request.status !== undefined && request.status >= 400);
+      if (!failed) continue;
+      const answered = request.outcome === 'response' && !request.gateway && request.status !== undefined;
+      const result = answered ? `returned ${request.status}` : 'got no response';
+      // A 4xx is often what the app means to say; a server error or no answer is what a bug looks like.
+      const serverFailed = !answered || (request.status ?? 0) >= 500;
+      const path = request.path.length > 120 ? `${request.path.slice(0, 119)}…` : request.path;
+      rows.push({ id: `r${request.id}`, kind: 'request', text: `${request.method} ${path} ${result}`, ...(serverFailed ? { tone: 'error' as const } : {}), t: request.t, order: 2 });
+    }
+    this.consoleEntries.forEach((entry, index) => {
+      if (entry.level === 'warning') return;
+      const line = entry.text.split('\n')[0].trim() || 'Uncaught error';
+      rows.push({ id: `e${entry.t}-${index}`, kind: 'error', text: line.length > 160 ? `${line.slice(0, 159)}…` : line, tone: 'error', t: entry.t, order: 3 });
+    });
+    rows.sort((left, right) => left.t - right.t || left.order - right.order);
+    // The recording begins at its start step: what a page it no longer starts on did is not shown.
+    const startT = this.actions[0]?.t ?? 0;
+    const recorded = rows.filter((row) => row.step !== undefined || row.t >= startT);
+    const shown = recorded.slice(-TIMELINE_ROWS);
+    return {
+      entries: shown.map(({ t: _t, order: _order, ...entry }) => entry),
+      steps: compiled.steps.length,
+      omitted: recorded.length - shown.length
+    };
   }
 
   async screenshot(): Promise<Buffer> {
@@ -227,8 +343,8 @@ export class RecorderSession {
     return Date.now() - this.started;
   }
 
-  private pushAction(action: Omit<BugRecordingAction, 'index' | 't'>): void {
-    const entry = { index: this.actions.length, t: this.elapsed(), ...action } as BugRecordingAction;
+  private pushAction(action: Omit<BugRecordingAction, 'index' | 't'>, t = this.elapsed()): void {
+    const entry = { index: this.actions.length, t, ...action } as BugRecordingAction;
     const bytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
     if (this.actions.length >= BUG_RECORDING_LIMITS.actions || this.bytes + bytes > MAX_LOG_BYTES) {
       if (this.complete) this.markIncomplete('The recording grew too long to replay');
@@ -236,6 +352,7 @@ export class RecorderSession {
     }
     this.bytes += bytes;
     this.actions.push(entry);
+    this.notify({ kind: 'timeline' });
   }
 
   private onEvent(method: string, params: Record<string, unknown>, sessionId?: string): void {
@@ -272,7 +389,8 @@ export class RecorderSession {
         const role = this.originRoles.get(url.host);
         if (!role) return;
         this.location = { role, path: url.pathname || '/', query: [...url.searchParams.entries()].slice(0, 32) };
-        this.notify({ kind: 'route', path: url.pathname || '/' });
+        // Where the page is, as its bar shows it: the path with its query.
+        this.notify({ kind: 'route', path: `${url.pathname || '/'}${url.search}`.slice(0, 512) });
         return;
       }
       case 'Page.javascriptDialogClosed': {
@@ -350,12 +468,14 @@ export class RecorderSession {
           return;
         }
         try {
+          const box = this.boxInShot(event.box, event.scroll, event.placement);
           resolve({
             target: parseBugRecordingTarget(event.target),
             text: String(event.text ?? '').slice(0, 4000),
             ...(typeof event.value === 'string' ? { value: event.value.slice(0, 4096) } : {}),
             visible: event.visible === true,
-            count: typeof event.count === 'number' && Number.isInteger(event.count) ? Math.max(0, Math.min(10_000, event.count)) : 1
+            count: typeof event.count === 'number' && Number.isInteger(event.count) ? Math.max(0, Math.min(10_000, event.count)) : 1,
+            ...(box ? { box } : {})
           });
         } catch {
           resolve(undefined);
@@ -386,17 +506,55 @@ export class RecorderSession {
           return;
         }
         if (!['click', 'fill', 'select', 'check', 'uncheck'].includes(kind) || !target) return;
+        // A fill reaches the recorder once typing pauses; it is timed from the first keystroke, so
+        // what the page did while the person typed belongs to it, as it does when a replay fills.
+        const typedFor = kind === 'fill' && typeof event.typedForMs === 'number' && Number.isFinite(event.typedForMs)
+          ? Math.min(Math.max(0, event.typedForMs), 60_000)
+          : 0;
+        const previous = this.actions[this.actions.length - 1]?.t ?? 0;
         this.pushAction({
           kind: kind as BugRecordingAction['kind'],
           target,
           ...(kind === 'fill' ? { value: String(event.value ?? '').slice(0, 4096), ...(event.sensitive === true ? { sensitive: true } : {}) } : {}),
           ...(kind === 'select' && Array.isArray(event.values) ? { values: (event.values as unknown[]).map((value) => String(value).slice(0, 4096)).slice(0, 32) } : {})
-        });
+        }, Math.max(previous, this.elapsed() - typedFor));
         return;
       }
       default:
         return;
     }
+  }
+
+  /**
+   * The picked element's box in the capture's screenshot: read at the pick, moved back by how far
+   * the window and the scroll boxes around the element scrolled since the screenshot. A fixed
+   * element ignores the window's scroll; a sticky one that anything scrolled under is not placed.
+   * Absent when it lies outside the screenshot or the screenshot's scroll is unknown.
+   */
+  private boxInShot(value: unknown, scroll: unknown, around: unknown): BugRecordingPick['box'] {
+    const shot = this.shotScroll;
+    if (!shot) return undefined;
+    const box = value as Record<string, unknown> | undefined;
+    const at = scroll as Record<string, unknown> | undefined;
+    const placement = around as { shift?: Record<string, unknown>; fixed?: unknown; sticky?: unknown } | undefined;
+    const number = (item: unknown) => (typeof item === 'number' && Number.isFinite(item) ? item : undefined);
+    const x = number(box?.x);
+    const y = number(box?.y);
+    const width = number(box?.width);
+    const height = number(box?.height);
+    if (x === undefined || y === undefined || width === undefined || height === undefined || width <= 0 || height <= 0) return undefined;
+    const fixed = placement?.fixed === true;
+    const dx = fixed ? 0 : (number(at?.x) ?? shot.x) - shot.x;
+    const dy = fixed ? 0 : (number(at?.y) ?? shot.y) - shot.y;
+    const shiftX = number(placement?.shift?.x) ?? 0;
+    const shiftY = number(placement?.shift?.y) ?? 0;
+    if (placement?.sticky === true && (dx !== 0 || dy !== 0 || shiftX !== 0 || shiftY !== 0)) return undefined;
+    const placed = { x: x + dx + shiftX, y: y + dy + shiftY, width, height };
+    const viewport = this.environment.viewport;
+    const visible = placed.x < viewport.width && placed.y < viewport.height && placed.x + width > 0 && placed.y + height > 0;
+    if (!visible) return undefined;
+    const round = (item: number) => Math.round(item * 10) / 10;
+    return { x: round(placed.x), y: round(placed.y), width: round(width), height: round(height) };
   }
 
   private stepCount(): number {
@@ -455,6 +613,7 @@ export class RecorderSession {
     pending.entry.outcome = 'response';
     pending.entry.durationMs = Date.now() - pending.startedAt;
     this.finished.push(pending.entry);
+    if ((pending.entry.status ?? 0) >= 400) this.notify({ kind: 'timeline' });
     if (pending.json) {
       this.bodyRequests.push(requestId);
       if (this.bodyRequests.length > BODY_RING) {
@@ -483,6 +642,7 @@ export class RecorderSession {
     if (blocked && pending.entry.host) this.noteBlocked(pending.entry.host);
     this.finished.push(pending.entry);
     this.trim();
+    this.notify({ kind: 'timeline' });
   }
 
   private trim(): void {
@@ -492,6 +652,7 @@ export class RecorderSession {
   private pushConsole(level: BugRecordingConsoleEntry['level'], text: string): void {
     if (this.consoleEntries.length >= BUG_RECORDING_LIMITS.console) this.consoleEntries.shift();
     this.consoleEntries.push({ t: this.elapsed(), level, text: text.slice(0, BUG_RECORDING_LIMITS.consoleChars) });
+    if (level !== 'warning') this.notify({ kind: 'timeline' });
   }
 }
 

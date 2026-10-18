@@ -8,6 +8,7 @@ import {
   DEFAULT_BUG_REPLAY_TIMEOUTS,
   MAX_RUNNER_FRAMES,
   MAX_RUNNER_FRAME_BYTES,
+  type BugReplayElementMark,
   type BugReplayFrame,
   type BugReplayFrameEnvelope,
   type BugReplayRunPlan,
@@ -240,5 +241,17 @@ export function validateFrames(
   } else if (assertions.length > 0) {
     return invalid('The replay report holds checks after a failed step.');
   }
-  return { kind: 'valid', frames, browserVersion: started.browserVersion };
+  const domIds = new Set(document.assertions.filter(isDomAssertion).map((assertion) => assertion.id));
+  const sane = (value: unknown, min: number) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= 100_000;
+  const placed = (mark: BugReplayElementMark) =>
+    Boolean(mark.box) && sane(mark.box.x, -100_000) && sane(mark.box.y, -100_000) && sane(mark.box.width, 0) && sane(mark.box.height, 0);
+  for (const frame of frames) {
+    if (frame.type !== 'screenshot' || frame.marks === undefined) continue;
+    if (frame.purpose !== 'final' || !Array.isArray(frame.marks) || frame.marks.length > 5) return invalid('The replay report outlined elements it may not.');
+    if (frame.marks.some((mark) => !domIds.has(mark?.assertionId))) return invalid('The replay report outlined elements it may not.');
+  }
+  // An outline only shows where an element sat: one that cannot be placed is left out, and the
+  // replay's result stands.
+  const shown = frames.map((frame) => (frame.type === 'screenshot' && frame.marks ? { ...frame, marks: frame.marks.filter(placed) } : frame));
+  return { kind: 'valid', frames: shown, browserVersion: started.browserVersion };
 }

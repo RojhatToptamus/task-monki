@@ -1,14 +1,18 @@
-import { useId, useRef, useState, type RefObject } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import { MoreHorizontal } from 'lucide-react';
-import type { BugCaseAction, BugCaseView, BugReplayGateProjection, BugReplaySnapshot } from '../../../shared/bugReplay';
+import type { BugCaseAction, BugCaseView, BugCheckResult, BugReplayGateProjection, BugReplaySnapshot } from '../../../shared/bugReplay';
+import { DEFAULT_BUG_CASE_ENVIRONMENT } from '../../../shared/bugReplay';
 import { bugReason } from '../../../shared/bugReplayClaims';
 import { taskManagerApi } from '../../api/taskManagerClient';
 import {
   bugActionLabel,
   bugActionPendingLabel,
   bugGateOf,
+  bugReplaysSummary,
+  bugResultsTable,
   bugRunRows,
   describeBugStatus,
+  formatDuration,
   layoutBugActions
 } from '../../model/bugReplay';
 import { formatAttachmentBytes } from '../../model/taskAttachmentDraft';
@@ -17,11 +21,13 @@ import { ActionMenu } from '../ActionMenu';
 import { DisclosureChevron } from '../DisclosureChevron';
 import { StatusGlyph, statusGlyphFor } from '../StatusBadge';
 import { DecisionSlot, OverviewSection, SlotActions, SlotContent, type SlotAction } from '../TaskOverview';
-import { useDialogFocusBoundary } from '../dialogFocus';
 import { PreviewSecretDialog } from '../preview/PreviewSecretDialog';
 import { BugConfirmDialog } from './BugConfirmDialog';
-import { BugImage } from './BugImage';
 import { BugLeaseFacts } from './BugLeaseBlock';
+import { BugRunDrawer, ResultMark } from './BugRunDrawer';
+import { BugCompareDialog, BugPicture, shotCaption, type BugShotSide } from './BugShots';
+import { BugStepIcon } from './BugStepIcon';
+import { useArrivals } from '../arrivals';
 
 export interface BugActionHost {
   /** A recording started; show it where it happens. */
@@ -82,7 +88,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
       {confirmRemove && snapshot?.activeCase ? (
         <BugConfirmDialog
           title={`Remove “${snapshot.activeCase.title}”?`}
-          body="Task Monki stops checking it and the review no longer shows it. Its recording stays in Debug, under Earlier bugs."
+          body="Task Monki stops replaying it and the review no longer shows it. Its recording stays in Debug, under Earlier bugs."
           keepLabel="Keep bug"
           confirmLabel="Remove bug"
           busyLabel="Removing…"
@@ -133,8 +139,9 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
 
 /**
  * The Now panel when the bug holds the next step: the state, the one fact that drives the step,
- * and its actions; the Bug section below names the bug. Approving clean runs shows what will run
- * before anything does, with declining first, as every approval does.
+ * and its actions; the Bug section below names the bug. Approving replays states what waits on
+ * it in one line; what will run sits under Details, read before anything runs, and declining
+ * comes first, as every approval does.
  */
 export function BugNowPanel({ view, snapshot, actions }: {
   view: BugCaseView;
@@ -145,27 +152,40 @@ export function BugNowPanel({ view, snapshot, actions }: {
   const layout = layoutBugActions(view.actions, view.gate.state);
   const approval = view.gate.activeRun?.waitingFor === 'APPROVAL';
   const lease = approval ? snapshot.pendingLease : undefined;
-  const evidence = [...(view.before ?? []), ...(view.after ?? [])];
   const reason = bugReason(view.gate);
-  const waiting = snapshot.runs.filter((run) => run.state === 'WAITING' && run.waitingFor === 'APPROVAL').length;
-  const detail = approval
-    ? waiting === 1 ? 'A clean run waits to start.' : waiting > 1 ? `${waiting} clean runs wait to start.` : 'Clean runs wait to start.'
-    : reason && !evidence.includes(reason) ? reason : view.countsLine;
+  const detail = approval ? waitingLine(snapshot) : reason ?? bugReplaysSummary(view.gate).join(', ');
   const decline = approval && view.actions.includes('cancel-run') ? actions.asSlotAction('cancel-run', view) : undefined;
   const secondary = layout.secondary.filter((action) => !(decline && action === 'cancel-run'));
   return (
     <DecisionSlot>
       <SlotContent
         headline={status.word}
-        detail={detail}
+        detail={detail || undefined}
         decline={decline}
         primary={layout.primary ? actions.asSlotAction(layout.primary, view) : undefined}
         secondary={secondary.map((action) => actions.asSlotAction(action, view))}
       >
-        {lease ? <BugLeaseFacts lease={lease} /> : null}
+        {lease ? (
+          <details className="tm-bug__details">
+            <summary>
+              <DisclosureChevron />
+              What runs
+            </summary>
+            <BugLeaseFacts lease={lease} />
+          </details>
+        ) : null}
       </SlotContent>
     </DecisionSlot>
   );
+}
+
+/** What waits on approval, by what the replays will check: "2 replays wait to check the fix". */
+function waitingLine(snapshot: BugReplaySnapshot): string {
+  const waiting = snapshot.runs.filter((run) => run.state === 'WAITING' && run.waitingFor === 'APPROVAL');
+  const count = Math.max(1, waiting.length);
+  const fix = waiting.some((run) => run.kind === 'CANDIDATE');
+  const purpose = fix ? 'check the fix' : 'reproduce the bug';
+  return count === 1 ? `1 replay waits to ${purpose}` : `${count} replays wait to ${purpose}`;
 }
 
 /** The Now panel's bug step while the bug's record loads: the state from the task, no actions yet. */
@@ -180,9 +200,10 @@ export function BugNowPlaceholder({ gate }: { gate: BugReplayGateProjection | un
 }
 
 /**
- * The task's bug on the Overview: what is wrong, what Task Monki observed before and after the
- * agent's change, and the clean runs that observed it. When the Now panel holds the bug's step,
- * the section keeps only the record.
+ * The task's bug on the Overview, verdict first: its name and state, the page before the fix
+ * and after it framed on the checked element, what each expectation showed on either side, then
+ * the replays behind it (each opens) and the steps. When the Now panel holds the bug's step, the
+ * section keeps only the record.
  */
 export function BugSection({
   taskId,
@@ -204,7 +225,10 @@ export function BugSection({
 }) {
   const view = snapshot.activeCase;
   const recording = snapshot.recording;
-  const [lightbox, setLightbox] = useState<{ fileId: string; alt: string }>();
+  const [compare, setCompare] = useState<BugShotSide>();
+  const [openRun, setOpenRun] = useState<string>();
+  const runRowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const arrivedRun = useArrivals(snapshot.runs.map((run) => run.id));
   if (!view) {
     if (!recording) return null;
     return (
@@ -221,10 +245,15 @@ export function BugSection({
   const nowPanelHoldsBug = nowPanel === 'step';
   const runs = bugRunRows(snapshot.runs);
   const lease = view.gate.activeRun?.waitingFor === 'APPROVAL' ? snapshot.pendingLease : undefined;
-  // Approving clean runs puts declining first, as every approval does.
+  // Approving replays puts declining first, as every approval does.
   const approvalDecline = Boolean(lease) && view.actions.includes('cancel-run');
-  const evidence = [...(view.before ?? []), ...(view.after ?? [])];
   const reason = bugReason(view.gate);
+  const results = bugResultsTable(view);
+  const summary = bugReplaysSummary(view.gate);
+  const viewport = DEFAULT_BUG_CASE_ENVIRONMENT.viewport;
+  const shots = view.shots;
+  const run = openRun ? snapshot.runs.find((candidate) => candidate.id === openRun) : undefined;
+  const keptFixed = view.version?.protectedPaths ?? [];
   return (
     <OverviewSection
       title="Bug"
@@ -235,7 +264,7 @@ export function BugSection({
           {recording ? <button type="button" className="tm-osection__link" onClick={onOpenRecording}>Open recording</button> : null}
           {menu.length ? (
             <ActionMenu className="tm-bug__menu" label="More bug actions" tooltip="More actions" side="bottom"
-              trigger={<MoreHorizontal size={16} aria-hidden="true" />} items={menu} />
+              trigger={<MoreHorizontal size={13} aria-hidden="true" />} items={menu} />
           ) : null}
         </>
       }
@@ -250,13 +279,7 @@ export function BugSection({
         )}
       </div>
       {view.statement ? <p className="tm-bug__statement">{view.statement}</p> : null}
-      {!stateAbove && reason && !evidence.includes(reason) ? <p className="tm-bug__fact">{reason}</p> : null}
-      {evidence.length ? (
-        <ul className="tm-bug__evidence">
-          {evidence.map((line) => <li key={line}>{line}</li>)}
-        </ul>
-      ) : null}
-      {view.countsLine ? <p className="tm-bug__meta">{view.countsLine}</p> : null}
+      {!stateAbove && reason ? <p className="tm-bug__fact">{reason}</p> : null}
       {view.partial ? <p className="tm-bug__notice">{view.partial}</p> : null}
       {view.changedProtectedPaths?.length ? (
         <p className="tm-bug__notice">Setup files changed since the recording: {view.changedProtectedPaths.join(', ')}</p>
@@ -266,65 +289,100 @@ export function BugSection({
       ) : null}
       {lease && !nowPanelHoldsBug ? <BugLeaseFacts lease={lease} /> : null}
 
-      {view.screenshotFileIds.length ? (
-        <div className="tm-bug__screens">
-          {view.screenshotFileIds.slice(0, 2).map((fileId, index) => {
-            const alt = index === 0 ? 'The page when the bug was marked' : 'The page in the latest clean run';
-            const caption = index === 0 ? 'Recorded' : 'Latest run';
+      {shots.before || shots.after ? (
+        <div className="tm-bug__pair">
+          {(['before', 'after'] as const).map((side) => {
+            const shot = shots[side];
+            if (!shot) return null;
+            const caption = shotCaption(side, shot);
             return (
-              <button key={fileId} type="button" className="tm-bug__screen" aria-label={`${caption}: open ${alt.toLowerCase()}`}
-                onClick={() => setLightbox({ fileId, alt })}>
-                <BugImage taskId={taskId} fileId={fileId} alt="" />
-                <span aria-hidden="true">{caption}</span>
+              <button key={side} type="button" className="tm-bug__shot" aria-label={`${caption.name}: open the page`} onClick={() => setCompare(side)}>
+                <BugPicture taskId={taskId} shot={shot} viewport={viewport} aspect={2} label="" />
+                <span className="tm-bug__caption" aria-hidden="true">
+                  <span className="tm-bug__captionname">{caption.name}</span>
+                  <time dateTime={caption.at}>{formatShortAge(caption.at)}</time>
+                </span>
               </button>
             );
           })}
         </div>
       ) : null}
 
-      {view.version ? (
-        <details className="tm-bug__more">
-          <summary>
-            <DisclosureChevron />
-            Checks
-            <span className="tm-bug__count">{view.version.checks.length}</span>
-          </summary>
-          <ul className="tm-bug__checks">
-            {view.version.checks.map((check) => (
-              <li key={check.id}>
-                <span>{check.statement}</span>
-                {check.recorded ? <span className="tm-bug__recorded">{check.recorded}</span> : null}
-              </li>
-            ))}
-          </ul>
-          {view.scopeLine ? <p className="tm-bug__scope">{view.scopeLine}</p> : null}
-          {view.boundaryLine ? <p className="tm-bug__scope">{view.boundaryLine}</p> : null}
-        </details>
+      {results ? (
+        <div className="tm-table tm-bugtable">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Expected</th>
+                <th scope="col" className="tm-bugtable__side">Before</th>
+                {results.hasAfter ? (
+                  <th scope="col" className="tm-bugtable__side">
+                    After{results.afterEarlier ? <span className="tm-bugtable__earlier">earlier code</span> : null}
+                  </th>
+                ) : null}
+              </tr>
+            </thead>
+            <tbody>
+              {results.rows.map((row) => (
+                <tr key={row.id}>
+                  <td className="tm-bugtable__statement">{row.statement}</td>
+                  <td className="tm-bugtable__side"><ResultCell result={row.before} quiet /></td>
+                  {results.hasAfter ? <td className="tm-bugtable__side"><ResultCell result={row.after} quiet={results.afterEarlier} /></td> : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : null}
 
       {runs.length ? (
         <details className="tm-bug__more">
           <summary>
             <DisclosureChevron />
-            Clean runs
-            <span className="tm-bug__count">{Math.max(snapshot.runCount, runs.length)}</span>
+            Replays
+            {summary.map((part) => <span key={part} className="tm-bug__summary">{part}</span>)}
           </summary>
-          <ul className="tm-bug__runs">
-            {runs.map((run) => {
-              const runGlyph = statusGlyphFor(run.tone, run.inFlight);
-              return (
-                <li key={run.id} className="tm-bug__run">
-                  <span className="tm-bug__runkind">{run.kind}</span>
-                  <span className={`tm-bug__runword tm-bug__state--${run.tone}`}>
-                    {runGlyph ? <StatusGlyph kind={runGlyph} /> : null}
-                    {run.word}
-                  </span>
-                  <time className="tm-bug__runtime" dateTime={run.at} title={new Date(run.at).toLocaleString()}>{formatShortAge(run.at)}</time>
-                  {run.detail ? <span className="tm-bug__rundetail">{run.detail}</span> : null}
-                </li>
-              );
-            })}
-          </ul>
+          <div className="tm-table tm-bugruns">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Replay</th>
+                  <th scope="col">Result</th>
+                  <th scope="col" className="tm-table__num">Took</th>
+                  <th scope="col" className="tm-table__num">When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((row) => {
+                  const runGlyph = statusGlyphFor(row.tone, row.inFlight);
+                  return (
+                    <tr key={row.id} className="tm-bugruns__row" data-arrived={arrivedRun(row.id) ? '' : undefined}>
+                      <td className="tm-table__primary">
+                        {/* The row opens its replay; the button names it for the keyboard and stretches over the row. */}
+                        <button ref={(element) => {
+                          if (element) runRowRefs.current.set(row.id, element);
+                          else runRowRefs.current.delete(row.id);
+                        }}
+                        type="button" className="tm-bugruns__open" onClick={() => setOpenRun(row.id)}>
+                          {row.kind}
+                        </button>
+                      </td>
+                      <td>
+                        <span className={`tm-bug__runword tm-bug__state--${row.tone}`}>
+                          {runGlyph ? <StatusGlyph kind={runGlyph} /> : null}
+                          {row.word}
+                        </span>
+                      </td>
+                      <td className="tm-table__num tm-table__quiet">{row.durationMs !== undefined ? formatDuration(row.durationMs) : ''}</td>
+                      <td className="tm-table__num tm-table__quiet">
+                        <time dateTime={row.at} title={new Date(row.at).toLocaleString()}>{formatShortAge(row.at)}</time>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           {snapshot.runCount > runs.length ? <p className="tm-bug__scope">Latest {runs.length} of {snapshot.runCount}</p> : null}
         </details>
       ) : null}
@@ -336,43 +394,49 @@ export function BugSection({
             Steps
             <span className="tm-bug__count">{view.steps.length}</span>
           </summary>
-          <ol className="tm-bug__steps">
-            {view.steps.map((step, index) => <li key={`${index}:${step}`}>{step}</li>)}
+          <ol className="tm-bugsteps">
+            {view.steps.map((step, index) => (
+              <li key={`${index}:${step.text}`} className="tm-bugstep" data-kind={step.kind}>
+                <span className="tm-bugstep__number" aria-hidden="true">{index + 1}</span>
+                <BugStepIcon kind={step.kind} />
+                <span className="tm-bugstep__text" title={step.text}>{step.text}</span>
+              </li>
+            ))}
           </ol>
-          {view.version?.protectedPaths.length ? (
-            <p className="tm-bug__scope">Kept fixed: {view.version.protectedPaths.join(', ')}</p>
-          ) : null}
+          {keptFixed.length ? <p className="tm-bug__scope">Setup kept as recorded: {keptFixed.join(', ')}</p> : null}
           {view.version?.envFiles.length ? <p className="tm-bug__scope">Env files: {view.version.envFiles.join(', ')}</p> : null}
         </details>
       ) : null}
 
-      {view.startSendsBug ? <p className="tm-bug__meta">Starting the task sends this bug to the agent with it.</p> : null}
       {!nowPanelHoldsBug && (layout.primary || layout.secondary.length) ? (
         <SlotActions quiet
           decline={approvalDecline ? actions.asSlotAction('cancel-run', view) : undefined}
           primary={layout.primary ? actions.asSlotAction(layout.primary, view) : undefined}
           secondary={layout.secondary.filter((action) => !(approvalDecline && action === 'cancel-run')).map((action) => actions.asSlotAction(action, view))} />
       ) : null}
-      {lightbox ? <BugScreenshotDialog taskId={taskId} fileId={lightbox.fileId} alt={lightbox.alt} onClose={() => setLightbox(undefined)} /> : null}
+      {compare ? <BugCompareDialog taskId={taskId} title={view.title} shots={shots} viewport={viewport} initial={compare} onClose={() => setCompare(undefined)} /> : null}
+      {run ? (
+        <BugRunDrawer taskId={taskId} run={run} view={view} viewport={viewport}
+          onClose={() => {
+            const trigger = runRowRefs.current.get(run.id);
+            setOpenRun(undefined);
+            trigger?.focus({ preventScroll: true });
+          }} />
+      ) : null}
     </OverviewSection>
   );
 }
 
-function BugScreenshotDialog({ taskId, fileId, alt, onClose }: { taskId: string; fileId: string; alt: string; onClose(): void }) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
-  useDialogFocusBoundary({ dialogRef: panelRef, busy: false, onClose });
+/** One side of an expectation: whether it held, by its mark, and what was seen. */
+function ResultCell({ result, quiet }: { result: BugCheckResult | undefined; quiet: boolean }) {
+  if (!result) return <span className="tm-bugtable__none">Not run</span>;
+  const reload = result.afterReload;
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-      <div className="tm-modal__scrim" onClick={onClose} />
-      <div ref={panelRef} className="tm-modal__panel tm-bugshot" tabIndex={-1}>
-        <h3 id={titleId}>{alt}</h3>
-        <BugImage taskId={taskId} fileId={fileId} alt={alt} className="tm-bugshot__image" />
-        <div className="tm-modal__actions">
-          <button type="button" className="outline-button" onClick={onClose}>Close</button>
-        </div>
-      </div>
-    </div>
+    <span className="tm-bugtable__cell">
+      <ResultMark held={result.held && (reload?.held ?? true)} quiet={quiet} />
+      <span className="tm-bugtable__value" title={result.value}>{result.value ?? (result.held ? 'Held' : 'Did not hold')}</span>
+      {reload && !reload.held ? <span className="tm-bugtable__reload">after reload {reload.value ?? 'did not hold'}</span> : null}
+    </span>
   );
 }
 

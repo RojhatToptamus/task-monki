@@ -50,7 +50,7 @@
 .tm-changes__note { overflow: hidden; color: var(--muted); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
 .tm-changes__action { margin-left: auto; }
 .tm-changes__files .tm-change-summary__file { min-height: var(--h-compact); padding: 2px 0 2px 22px; border-top: 0; }
-.tm-changes__more > summary { display: flex; align-items: center; gap: 6px; min-height: var(--h-compact); padding-left: 22px; color: var(--muted); font-size: var(--t-help); }
+.tm-changes__more > summary { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); padding-left: 22px; color: var(--muted); font-size: var(--t-help); }
 .tm-changes__more > summary:hover { color: var(--text); }
 
 /* Composer — the queue, the draft and the delivery controls are one field. */

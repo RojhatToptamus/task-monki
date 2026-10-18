@@ -172,14 +172,19 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     if (now - lastInput > 1000) { lastInput = now; send({ type: 'activity' }); }
   };
   const fillTimers = new WeakMap();
+  const fillStarted = new WeakMap();
   const lastValues = new WeakMap();
 
   function emitFill(element) {
+    const started = fillStarted.get(element);
+    fillStarted.delete(element);
     const value = element.isContentEditable ? (element.innerText || '') : element.value;
     if (lastValues.get(element) === value) return;
     lastValues.set(element, value);
     const sensitive = element.tagName === 'INPUT' && (element.getAttribute('type') || '').toLowerCase() === 'password';
-    send({ type: 'action', kind: 'fill', target: facts(element), value: String(value).slice(0, 4096), sensitive, frame: isTop ? 'top' : 'child' });
+    // How long ago typing began: the fill is timed from its first keystroke.
+    const typedForMs = started === undefined ? 0 : Date.now() - started;
+    send({ type: 'action', kind: 'fill', target: facts(element), value: String(value).slice(0, 4096), sensitive, typedForMs, frame: isTop ? 'top' : 'child' });
   }
 
   document.addEventListener('click', (event) => {
@@ -202,6 +207,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     activity();
     const element = event.target;
     if (!element || !isEditable(element) || element.tagName === 'SELECT') return;
+    if (!fillStarted.has(element)) fillStarted.set(element, Date.now());
     clearTimeout(fillTimers.get(element));
     fillTimers.set(element, setTimeout(() => emitFill(element), 700));
   }, true);
@@ -281,6 +287,35 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     if (!element || element.nodeType !== 1) return element;
     return element;
   }
+  // Where the page's own scroll boxes stood when the capture's screenshot was taken, so a pick
+  // made after more scrolling can still be placed on it. The window's scroll is returned.
+  let shotOffsets = new WeakMap();
+  globalThis.__tmNoteShot = () => {
+    shotOffsets = new WeakMap();
+    for (const element of document.querySelectorAll('*')) {
+      if (element === document.scrollingElement || element === document.body) continue;
+      if (element.scrollTop || element.scrollLeft) shotOffsets.set(element, { x: element.scrollLeft, y: element.scrollTop });
+    }
+    return [window.scrollX, window.scrollY];
+  };
+  // How the boxes around an element scrolled since the screenshot, and whether the window's own
+  // scroll moves it: a fixed box stays where it is, a sticky one cannot be placed once anything moved.
+  function placement(element) {
+    const shift = { x: 0, y: 0 };
+    let fixed = false;
+    let sticky = false;
+    for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
+      const position = getComputedStyle(node).position;
+      if (position === 'sticky') sticky = true;
+      if (position === 'fixed') { fixed = true; break; }
+      const parent = node.parentElement;
+      if (!parent || parent === document.scrollingElement || parent === document.body || parent === document.documentElement) continue;
+      const then = shotOffsets.get(parent) || { x: 0, y: 0 };
+      shift.x += parent.scrollLeft - then.x;
+      shift.y += parent.scrollTop - then.y;
+    }
+    return { shift, fixed, sticky };
+  }
   globalThis.__tmStartPick = () => {
     if (!isTop) return;
     globalThis.__tmPicking = true;
@@ -298,7 +333,8 @@ export const RECORDER_SCRIPT = String.raw`(() => {
       box.style.width = rect.width + 'px';
       box.style.height = rect.height + 'px';
     };
-    const stop = () => {
+    // A pick keeps its box on the element until the numbered outline takes its place.
+    const stop = (keepBox) => {
       globalThis.__tmPicking = false;
       globalThis.__tmStopPicking = undefined;
       window.removeEventListener('mousemove', move, true);
@@ -306,6 +342,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
       window.removeEventListener('mousedown', swallow, true);
       window.removeEventListener('mouseup', swallow, true);
       window.removeEventListener('keydown', key, true);
+      if (keepBox) return;
       box.style.display = 'none';
       host.remove();
     };
@@ -319,8 +356,9 @@ export const RECORDER_SCRIPT = String.raw`(() => {
       event.preventDefault();
       event.stopImmediatePropagation();
       const element = pickTarget(event.target);
-      stop();
-      if (!element || element.nodeType !== 1) { send({ type: 'pick', cancelled: true }); return; }
+      const picked = Boolean(element && element.nodeType === 1);
+      stop(picked);
+      if (!picked) { send({ type: 'pick', cancelled: true }); return; }
       const result = facts(element);
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -331,7 +369,9 @@ export const RECORDER_SCRIPT = String.raw`(() => {
         else count = document.querySelectorAll(result.css).length;
       } catch (_) {}
       const value = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? String(element.value) : undefined;
-      send({ type: 'pick', target: result, text: norm(element.innerText || element.textContent || (value ?? '')).slice(0, 4000), value, visible, count });
+      // Where it sits, with the scroll it was read at: the screenshot may have been taken at another.
+      const box = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      send({ type: 'pick', target: result, text: norm(element.innerText || element.textContent || (value ?? '')).slice(0, 4000), value, visible, count, box, scroll: { x: window.scrollX, y: window.scrollY }, placement: placement(element) });
     };
     const key = (event) => {
       if (event.isTrusted && event.key === 'Escape') {
@@ -355,6 +395,73 @@ export const RECORDER_SCRIPT = String.raw`(() => {
   // Stop pointing without an event the page could also see.
   globalThis.__tmStopPick = () => {
     if (globalThis.__tmPicking && globalThis.__tmStopPicking) globalThis.__tmStopPicking();
+  };
+  // While the bug is marked, each element a check reads keeps a numbered outline, so the page and
+  // the checks beside it name the same thing. Outlines follow scrolling and never take input.
+  let marks;
+  function drawMarks() {
+    if (!marks) return;
+    for (const mark of marks.items) {
+      const rect = mark.element.isConnected ? mark.element.getBoundingClientRect() : undefined;
+      const shown = rect && rect.width > 0 && rect.height > 0;
+      mark.box.style.display = shown ? 'block' : 'none';
+      if (!shown) continue;
+      mark.box.style.left = rect.left + 'px';
+      mark.box.style.top = rect.top + 'px';
+      mark.box.style.width = rect.width + 'px';
+      mark.box.style.height = rect.height + 'px';
+    }
+  }
+  const redraw = () => requestAnimationFrame(drawMarks);
+  // The pick's own box gives way to the numbered outlines, whichever call comes first.
+  const dropPickBox = () => {
+    if (!overlay || globalThis.__tmPicking) return;
+    overlay.box.style.display = 'none';
+    overlay.host.remove();
+  };
+  globalThis.__tmClearMarks = () => {
+    dropPickBox();
+    if (!marks) return;
+    window.removeEventListener('scroll', redraw, true);
+    window.removeEventListener('resize', redraw);
+    marks.host.remove();
+    marks = undefined;
+  };
+  // Outlines are kept by element and number, so editing a value never redraws them.
+  globalThis.__tmShowMarks = (json) => {
+    if (!isTop) return;
+    dropPickBox();
+    let wanted = [];
+    try { wanted = JSON.parse(json); } catch (_) { return; }
+    if (!marks) {
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483646;';
+      marks = { host, root: host.attachShadow({ mode: 'closed' }), items: [] };
+      document.documentElement.appendChild(host);
+      window.addEventListener('scroll', redraw, true);
+      window.addEventListener('resize', redraw);
+    }
+    const next = [];
+    for (const item of wanted.slice(0, 5)) {
+      const label = String(item.label).slice(0, 2);
+      let element;
+      try { element = document.querySelector(item.css); } catch (_) { element = undefined; }
+      if (!element) continue;
+      const kept = marks.items.find((mark) => mark.element === element && mark.label === label);
+      if (kept) { next.push(kept); continue; }
+      const box = document.createElement('div');
+      box.style.cssText = 'position:fixed;border:2px solid #4f7cff;border-radius:3px;pointer-events:none;box-sizing:border-box;display:none;';
+      const badge = document.createElement('div');
+      badge.textContent = label;
+      badge.style.cssText = 'position:absolute;left:-2px;top:-20px;min-width:16px;height:16px;padding:0 4px;border-radius:3px;background:#4f7cff;color:#fff;font:600 11px/16px -apple-system,system-ui,sans-serif;text-align:center;box-sizing:border-box;';
+      box.appendChild(badge);
+      marks.root.appendChild(box);
+      next.push({ element, label, box });
+    }
+    for (const mark of marks.items) if (!next.includes(mark)) mark.box.remove();
+    marks.items = next;
+    if (!next.length) { globalThis.__tmClearMarks(); return; }
+    drawMarks();
   };
   // The recorder starts before the document is parsed, so the title is read once it exists.
   if (isTop) {

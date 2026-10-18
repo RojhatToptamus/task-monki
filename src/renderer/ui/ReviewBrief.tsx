@@ -9,7 +9,7 @@ export interface ReviewBriefContent {
   /** The task as asked. */
   asked?: string;
   /** What Task Monki observed of the task's recorded bug, before and after the change. */
-  behaviour?: { word: string; tone: Tone; lines: string[]; scope?: string };
+  behaviour?: { word: string; tone: Tone; lines: string[] };
   /** What the implementation agent reported: a claim, quoted. */
   report?: { author: string; text: string };
   /** The reviewer's summary, quoted; the author names the runtime and model, one fact each. */
@@ -61,7 +61,6 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
               <ul className="tm-review-brief__behaviour">
                 {behaviour.lines.map((line) => <li key={line}>{line}</li>)}
               </ul>
-              {behaviour.scope ? <p className="tm-review-brief__scope">{behaviour.scope}</p> : null}
             </BriefBlock>
           ) : null}
           {report ? (

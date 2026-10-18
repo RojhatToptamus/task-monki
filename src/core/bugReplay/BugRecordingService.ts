@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git } from '../git/gitCli';
 import { parseConfigurationFile } from '../preview/ApplicationPreviewConfiguration';
-import type { BugCaseEnvironment } from '../../shared/bugCase';
+import { isCasePath, isCaseQuery, type BugCaseEnvironment } from '../../shared/bugCase';
 import type { BugRecordingLogV1, BugRecordingPick } from '../../shared/bugRecording';
 import type {
   BugCaptureDraft,
@@ -13,7 +13,8 @@ import type {
   BugRecordingEnvFileChoice,
   BugRecordingPhase,
   BugRecordingSessionView,
-  BugReplayLeaseRequest
+  BugReplayLeaseRequest,
+  BugStartStep
 } from '../../shared/bugReplay';
 import { DEFAULT_BUG_CASE_ENVIRONMENT } from '../../shared/bugReplay';
 import { serviceStoppedSentence } from '../../shared/bugReplayClaims';
@@ -52,6 +53,8 @@ export interface RecordingViewHandle {
   recorder: RecorderSession;
   chromium: string;
   reload(): Promise<void>;
+  /** Opens a page of the primary origin, by path and query. */
+  open(path: string): Promise<void>;
   close(): Promise<void>;
   /** The page as the person sees it, at the case's size; empty when the view shows nothing. */
   screenshot?(): Promise<Buffer>;
@@ -101,8 +104,25 @@ interface RecordingSession {
   watchTimer?: NodeJS.Timeout;
   partial?: string;
   launching?: Promise<void>;
+  /** Another start page is opening; the start step moves once it has. */
+  opening?: boolean;
   /** Counts picks so a pick replaced by a newer one does not end the newer one's pointing. */
   pickToken?: number;
+  /** The clean copy's start, step by step, while it starts. */
+  start?: StartTracker;
+  /** A timeline update waiting to go out; updates are sent at most four times a second. */
+  timelineTimer?: NodeJS.Timeout;
+}
+
+/** What starting the clean copy has done so far, kept so each step keeps its own times. */
+interface StartTracker {
+  /** The recipe's services in its order, with what each is called. */
+  services: Array<{ id: string; label: string }>;
+  states: Map<string, string>;
+  copied: boolean;
+  opening: boolean;
+  times: Map<string, { startedAt?: string; endedAt?: string }>;
+  steps: BugStartStep[];
 }
 
 const IDLE_LIMIT_MS = 20 * 60_000;
@@ -137,6 +157,11 @@ export class BugRecordingService implements BugRecordingSessions {
       ...(session.routePath ? { routePath: session.routePath } : {}),
       ...(session.passwordTyped ? { passwordTyped: true } : {})
     };
+    if (session.phase === 'STARTING' && session.start) view.progress = session.start.steps.map((step) => ({ ...step }));
+    if (session.phase === 'RECORDING' && session.view) {
+      view.timeline = session.view.recorder.timeline();
+      if (session.view.recorder.onlyStart()) view.startEditable = true;
+    }
     if (session.capture) view.capture = this.captureView(session);
     return view;
   }
@@ -238,18 +263,77 @@ export class BugRecordingService implements BugRecordingSessions {
     await session.view.reload();
   }
 
+  /**
+   * Opens another page of the app before the first step, so the recording starts where the bug
+   * is: the start step becomes that page. After the first step the path is the steps' to set.
+   */
+  async openPage(sessionId: string, path: string): Promise<void> {
+    const session = this.requireSession(sessionId);
+    if (session.phase !== 'RECORDING' || !session.view || !session.environment) throw new Error('Open a page while recording.');
+    const view = session.view;
+    const origin = new URL(session.environment.origins.primary).origin;
+    let url: URL;
+    try {
+      url = new URL(path.trim() || '/', `${origin}/`);
+    } catch {
+      throw new Error('Write a path such as /checkout.');
+    }
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== origin) throw new Error('Open a page of this app.');
+    const query = [...url.searchParams.entries()];
+    const target = `${url.pathname}${url.search}`;
+    if (target.length > 512) throw new Error('The path is too long.');
+    // A start a replay can open: the case's own rules for a path and its query.
+    if (!isCasePath(url.pathname) || !isCaseQuery(query)) throw new Error('Write a path such as /checkout.');
+    if (!view.recorder.onlyStart()) throw new Error('The recording already has steps. Record again to start on another page.');
+    if (session.opening) throw new Error('A page is still opening.');
+    // The start moves once the page opened, timed from when its load began.
+    const startedAt = view.recorder.now();
+    session.opening = true;
+    try {
+      await view.open(target);
+    } finally {
+      session.opening = false;
+    }
+    if (this.session !== session || session.phase !== 'RECORDING' || session.view !== view) return;
+    if (!view.recorder.restartAt(url.pathname, query, 'primary', startedAt)) {
+      // Steps taken while the page opened belong to neither page.
+      view.recorder.markIncomplete('Steps were recorded while another page opened');
+      this.replay.emitUpdate(session.taskId);
+      throw new Error('Steps were recorded while the page opened. Record again to start on that page.');
+    }
+    session.routePath = target;
+    this.replay.emitUpdate(session.taskId);
+  }
+
   /** Seals what happened up to now, takes the screenshot and lets the person point at the wrong value. */
   async mark(sessionId: string): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.phase !== 'RECORDING' || !session.view) throw new Error('Mark the bug while recording.');
-    const recorder = session.view.recorder;
+    const view = session.view;
+    const recorder = view.recorder;
     recorder.seal();
-    const screenshot = await this.screenshot(session.view);
+    // Picks are placed on the screenshot by the page's scroll at this moment.
+    await recorder.noteShot();
+    // The recording can end or stop while the page answers.
+    if (this.session !== session || session.phase !== 'RECORDING' || session.view !== view) return;
+    const screenshot = await this.screenshot(view);
+    if (this.session !== session || session.phase !== 'RECORDING' || session.view !== view) return;
     this.setPhase(session, 'MARKING', 'Point at what is wrong');
     session.capture = { log: recorder.log(), screenshot, pageTitle: recorder.title, draftRevision: 1 };
     this.replay.emitUpdate(session.taskId);
     // Pointing ends with a pick or Stop pointing; until then the person can still act.
     void this.awaitPick(session);
+  }
+
+  /** Outlines the elements the draft's expectations read, numbered as their rows are. */
+  private showMarks(session: RecordingSession, draft: BugCaptureDraft | undefined, extra?: number): void {
+    const view = session.view;
+    const picks = session.capture?.log.mark?.picks ?? [];
+    if (!view) return;
+    const indexes = new Set((draft?.checks ?? []).map((check) => check.pickIndex));
+    if (extra !== undefined) indexes.add(extra);
+    const marks = [...indexes].sort((a, b) => a - b).flatMap((index) => (picks[index] ? [{ css: picks[index].target.css, label: String(index + 1) }] : []));
+    void view.recorder.showMarks(marks);
   }
 
   /** Add check: the person points at another element on the visible page. */
@@ -277,7 +361,11 @@ export class BugRecordingService implements BugRecordingSessions {
     const pick = await view.recorder.pick().catch(() => undefined);
     if (this.session !== session || session.pickToken !== token || session.phase !== 'MARKING' || !session.capture) return;
     session.detail = undefined;
-    if (pick) session.capture = { ...session.capture, log: view.recorder.log(), draftRevision: session.capture.draftRevision + 1 };
+    if (pick) {
+      const log = view.recorder.log();
+      session.capture = { ...session.capture, log, draftRevision: session.capture.draftRevision + 1 };
+      this.showMarks(session, session.capture.draft, (log.mark?.picks.length ?? 1) - 1);
+    }
     this.replay.emitUpdate(session.taskId);
   }
 
@@ -286,16 +374,25 @@ export class BugRecordingService implements BugRecordingSessions {
     const session = this.requireSession(sessionId);
     if (session.phase !== 'MARKING' || !session.view) return;
     void draft;
-    await session.view.recorder.cancelPick();
-    session.view.recorder.unseal();
+    const recorder = session.view.recorder;
+    // Recording again first: a preview that lands while the page clears finds no capture, so no
+    // outline comes back to be recorded or caught in the next mark's screenshot.
+    recorder.unseal();
     session.capture = undefined;
     this.setPhase(session, 'RECORDING');
+    await recorder.cancelPick();
+    await recorder.showMarks([]);
   }
 
   preview(sessionId: string, draft: BugCaptureDraft): BugCapturePreview {
     const session = this.requireSession(sessionId);
     if (!session.capture) throw new Error('Mark the bug first.');
+    // The draft lives here. A change is announced, so the renderer's snapshot holds it and a panel
+    // that mounts again (the Overview and back) starts from the name and notes the person wrote.
+    const changed = JSON.stringify(session.capture.draft) !== JSON.stringify(draft);
     session.capture.draft = draft;
+    if (session.phase === 'MARKING') this.showMarks(session, draft);
+    if (changed) this.replay.emitUpdate(session.taskId);
     const compiled = compileBugCase(session.capture.log, draft);
     return {
       draftRevision: session.capture.draftRevision,
@@ -362,6 +459,8 @@ export class BugRecordingService implements BugRecordingSessions {
         envFiles,
         ...(capture.pageTitle ? { pageTitle: capture.pageTitle } : {}),
         stepSummaries: described.stepSummaries,
+        stepKinds: described.stepKinds,
+        markedBoxes: (capture.log.mark?.picks ?? []).flatMap((pick) => (pick.box ? [{ css: pick.target.css, box: pick.box }] : [])),
         fileIds: {
           actionLog: actionLog.id,
           network: network.id,
@@ -502,6 +601,8 @@ export class BugRecordingService implements BugRecordingSessions {
     const launching = (async () => {
       try {
         const derived = session.derived!;
+        session.start = startTracker(derived);
+        advanceStart(session.start);
         this.setPhase(session, 'STARTING', 'Copying source');
         await this.replay.freezer.export({
           worktreePath: session.worktreePath,
@@ -514,6 +615,8 @@ export class BugRecordingService implements BugRecordingSessions {
         await this.replay.environment.preflight(derived.spec);
         const capacity = await this.replay.environment.capacity(Object.keys((derived.spec as { services?: object }).services ?? {}).length);
         if (!capacity.ok) throw new ReplayEnvironmentError('CAPACITY', capacity.reason ?? 'Waiting for preview capacity');
+        session.start.copied = true;
+        advanceStart(session.start);
         this.setPhase(session, 'STARTING', derived.addedInstallJobs.length ? 'Installing dependencies' : 'Starting the app');
         session.environment = await this.replay.environment.start({
           taskId: session.taskId,
@@ -527,8 +630,27 @@ export class BugRecordingService implements BugRecordingSessions {
               session.detail = phase;
               this.replay.emitUpdate(session.taskId);
             }
+          },
+          onServices: (services) => {
+            const start = session.start;
+            // A report read before the services were ready can land after: the start has moved on.
+            if (!start || start.opening || session.phase !== 'STARTING') return;
+            let changed = false;
+            for (const service of services) {
+              if (start.states.get(service.id) === service.state) continue;
+              start.states.set(service.id, service.state);
+              changed = true;
+            }
+            if (changed && advanceStart(start)) this.replay.emitUpdate(session.taskId);
           }
         });
+        // Ready: every service that did not fail is up, and the page opens next.
+        for (const service of session.start.services) {
+          if (startFailed(session.start.states.get(service.id))) continue;
+          session.start.states.set(service.id, 'ready');
+        }
+        session.start.opening = true;
+        advanceStart(session.start);
         this.setPhase(session, 'STARTING', 'Opening the app');
         await this.replay.environment.warmUp(session.environment.origins, [{ role: 'primary', method: 'GET', path: '/' }], session.controller.signal);
         const host = this.host();
@@ -544,7 +666,8 @@ export class BugRecordingService implements BugRecordingSessions {
           signal: session.controller.signal
         });
         if (session.controller.signal.aborted) throw new ReplayEnvironmentError('CANCELED', 'Canceled');
-        session.view.recorder.noteStart('/', []);
+        // The recorder attached before the start page loaded: the start step is timed from then.
+        session.view.recorder.noteStart('/', [], 'primary', 0);
         session.recordingStartedAt = new Date().toISOString();
         session.lastInputAt = session.recordingStartedAt;
         session.routePath = '/';
@@ -583,6 +706,16 @@ export class BugRecordingService implements BugRecordingSessions {
         session.passwordTyped = true;
         break;
       case 'ready':
+        return;
+      case 'timeline':
+        // Steps arrive as fast as the person acts; the view follows at a steady pace.
+        if (session.phase === 'RECORDING' && !session.timelineTimer) {
+          session.timelineTimer = setTimeout(() => {
+            session.timelineTimer = undefined;
+            if (this.session === session) this.replay.emitUpdate(session.taskId);
+          }, 250);
+          session.timelineTimer.unref?.();
+        }
         return;
       case 'interrupted':
         void this.interrupt(session, notice.reason);
@@ -656,7 +789,8 @@ export class BugRecordingService implements BugRecordingSessions {
 
   /** Stops what the recording runs: its timers, the view, the clean copy and its exported source. */
   private async stopEnvironment(session: RecordingSession): Promise<void> {
-    for (const timer of [session.idleTimer, session.lengthTimer]) if (timer) clearTimeout(timer);
+    for (const timer of [session.idleTimer, session.lengthTimer, session.timelineTimer]) if (timer) clearTimeout(timer);
+    session.timelineTimer = undefined;
     if (session.watchTimer) clearInterval(session.watchTimer);
     const view = session.view;
     session.view = undefined;
@@ -716,8 +850,9 @@ export class BugRecordingService implements BugRecordingSessions {
       valueRows: described.valueRows,
       otherRequests: described.otherRequests,
       pageErrors: described.pageErrors,
+      uncaughtError: described.uncaughtError,
       stepCount: described.stepSummaries.length,
-      stepSummaries: described.stepSummaries,
+      steps: described.stepSummaries.map((text, index) => ({ kind: described.stepKinds[index] ?? 'step', text })),
       suggestedTitle: described.suggestedTitle,
       ...(capture.draft ? { draft: capture.draft } : {}),
       ...(described.partial || session.partial ? { partial: described.partial ?? session.partial } : {})
@@ -738,6 +873,63 @@ export class BugRecordingService implements BugRecordingSessions {
 }
 
 class RecordingEnded extends Error {}
+
+/** The clean copy's start as steps: copying the files, each job and service in the recipe's order, opening the app. */
+function startTracker(derived: DerivedReplaySpec): StartTracker {
+  const spec = derived.spec as { type?: string; services?: Record<string, { type?: string }> };
+  const entries = spec.type === 'environment' && spec.services ? Object.entries(spec.services) : [];
+  const installs = entries.filter(([id, service]) => service.type === 'job' && (derived.addedInstallJobs.includes(id) || /install/i.test(id)));
+  const directoryOf = (id: string) => derived.serviceDirectories.find((entry) => entry.service === id)?.directory;
+  // In the order they run: installs, then databases, then the other jobs, then the app's processes.
+  const rank = ([id, service]: [string, { type?: string }]) =>
+    installs.some(([installId]) => installId === id) ? 0 : service.type === 'postgres' || service.type === 'redis' ? 1 : service.type === 'job' ? 2 : 3;
+  const ordered = [...entries].sort((left, right) => rank(left) - rank(right));
+  const services = ordered.map(([id, service]) => {
+    if (service.type !== 'job') return { id, label: `Start ${id}` };
+    if (!installs.some(([installId]) => installId === id)) return { id, label: `Run ${id}` };
+    const directory = directoryOf(id);
+    return { id, label: installs.length > 1 && directory && directory !== '.' ? `Install dependencies in ${directory}` : 'Install dependencies' };
+  });
+  return {
+    services: services.length ? services : [{ id: 'app', label: 'Start the app' }],
+    states: new Map(),
+    copied: false,
+    opening: false,
+    times: new Map(),
+    steps: []
+  };
+}
+
+function startFailed(state: string | undefined): boolean {
+  return state === 'failed' || state === 'canceled';
+}
+
+/** Recomputes the steps and stamps when each became active and ended. True when a step changed. */
+function advanceStart(start: StartTracker): boolean {
+  const serviceState = (id: string): BugStartStep['state'] => {
+    const state = start.states.get(id);
+    if (state === 'starting') return 'active';
+    if (state === 'ready' || state === 'succeeded' || state === 'skipped') return 'done';
+    if (startFailed(state)) return 'failed';
+    return 'pending';
+  };
+  const raw: Array<{ id: string; label: string; state: BugStartStep['state'] }> = [
+    { id: 'copy', label: "Copy this task's files", state: start.copied ? 'done' : 'active' },
+    ...start.services.map((service) => ({ id: `service:${service.id}`, label: service.label, state: start.copied ? serviceState(service.id) : 'pending' as const })),
+    { id: 'open', label: 'Open the app', state: start.opening ? 'active' : 'pending' }
+  ];
+  const now = new Date().toISOString();
+  const steps = raw.map((step) => {
+    const times = start.times.get(step.id) ?? {};
+    if ((step.state === 'active' || step.state === 'done' || step.state === 'failed') && !times.startedAt) times.startedAt = now;
+    if ((step.state === 'done' || step.state === 'failed') && !times.endedAt) times.endedAt = now;
+    start.times.set(step.id, times);
+    return { ...step, ...(times.startedAt ? { startedAt: times.startedAt } : {}), ...(times.endedAt ? { endedAt: times.endedAt } : {}) };
+  });
+  const changed = JSON.stringify(steps.map((step) => [step.id, step.state])) !== JSON.stringify(start.steps.map((step) => [step.id, step.state]));
+  start.steps = steps;
+  return changed;
+}
 
 function failureFor(error: unknown): NonNullable<BugRecordingSessionView['failure']> {
   if (error instanceof RecordingEnded) return { title: 'Recording ended', detail: error.message, action: 'record-again' };

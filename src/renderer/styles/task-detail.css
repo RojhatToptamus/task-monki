@@ -43,7 +43,9 @@
 .tm-detail__masthead {
   position: relative;
   flex: 0 0 auto;
-  padding: 22px var(--tm-gutter) 4px;
+  /* The scroller reserves the scrollbar's gutter; the end padding gives it back, so the
+     content ends on the same edge as the bars that do not scroll. */
+  padding: 20px calc(var(--tm-gutter) - var(--scrollbar)) 4px var(--tm-gutter);
   background: var(--surface);
 }
 
@@ -54,7 +56,7 @@
   align-items: center;
   gap: 12px;
   flex: 0 0 auto;
-  padding: 0 var(--tm-gutter);
+  padding: 0 calc(var(--tm-gutter) - var(--scrollbar)) 0 var(--tm-gutter);
   background: var(--surface);
   box-shadow: inset 0 -1px 0 var(--hair);
 }
@@ -118,24 +120,23 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 2px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
   font-size: var(--t-help);
-  line-height: 18px;
+  line-height: var(--lh-ui);
 }
 
 .tm-lifecycle__step {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   white-space: nowrap;
 }
 
 .tm-lifecycle__sep {
   flex: 0 0 auto;
-  margin: 0 3px 0 1px;
   color: var(--faint);
 }
 
@@ -150,11 +151,6 @@
 .tm-lifecycle__step--current {
   color: var(--text);
   font-weight: var(--w-medium);
-}
-
-.tm-lifecycle .tm-status-glyph {
-  width: 12px;
-  height: 12px;
 }
 
 .tm-detail__meta {
@@ -219,7 +215,7 @@
 
 .tm-tabs {
   display: flex;
-  gap: 22px;
+  gap: 24px;
 }
 
 .tm-tab {
@@ -236,11 +232,16 @@
   font-size: var(--t-body);
   font-weight: var(--w-regular);
   white-space: nowrap;
-  transition: color var(--motion-fast) var(--ease-out);
+  /* A change of tab lands in one frame with its underline; only hover eases. */
+  transition: none;
 }
 
 .tm-tab:hover {
   color: var(--text-soft);
+}
+
+.tm-tab:not(.tm-tab--active):hover {
+  transition: color var(--motion-fast) var(--ease-out);
 }
 
 .tm-tab:active {
@@ -274,7 +275,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px var(--tm-gutter) 40px;
+  padding: 24px calc(var(--tm-gutter) - var(--scrollbar)) 40px var(--tm-gutter);
   scrollbar-gutter: stable;
   /* The page's own width decides its columns, so a docked side panel counts. */
   container: task-body / inline-size;
@@ -336,7 +337,7 @@
   display: grid;
   gap: 12px;
   min-width: 0;
-  padding: 18px 20px;
+  padding: 16px;
   border: 0;
   border-radius: var(--r-md);
   background: var(--card);
@@ -348,7 +349,7 @@
   color: var(--text);
   font-size: var(--t-heading);
   font-weight: var(--w-medium);
-  line-height: 1.35;
+  line-height: var(--lh-body);
   text-wrap: balance;
 }
 
@@ -358,12 +359,17 @@
   max-width: 72ch;
   color: var(--text-soft);
   font-size: var(--t-body);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   overflow-wrap: anywhere;
 }
 
+/* A title and its fact line sit 4px apart; the panel's 12px gap holds the rest. */
+.tm-slot__headline + :is(.tm-slot__detail, .tm-slot__meta, .tm-facts) {
+  margin-top: -8px;
+}
+
 .tm-slot__meta {
-  margin: -6px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
   font-variant-numeric: tabular-nums;
@@ -437,7 +443,7 @@
   margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.45;
+  line-height: var(--lh-ui);
 }
 
 /* Space, not rules, separates the parts of the Now panel. */
@@ -461,12 +467,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px 20px;
-  margin: -4px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.45;
+  line-height: var(--lh-ui);
 }
 
 .tm-facts__item--info {
@@ -485,7 +491,7 @@
    no rule runs under the label. */
 .tm-osection {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -501,7 +507,7 @@
 
 .tm-osection__head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
@@ -512,6 +518,13 @@
   color: var(--muted);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
+}
+
+/* A 24px control in a section head centres on the label's line and hangs over the inset, so
+   its 13px glyph sits on the group's 16px edge and the head keeps its text height. */
+.tm-osection__aside .tm-action-menu__trigger {
+  margin: -3px -6px -3px 0;
 }
 
 .tm-osection__aside {
@@ -555,7 +568,7 @@
    as a task-level transition above the tabs. */
 .tm-nextaction {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -1028,12 +1041,12 @@
 .tm-ohistory,
 .tm-ohistory__day {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .tm-ohistory {
-  gap: 14px;
+  gap: 16px;
 }
 
 .tm-ohistory__date {
@@ -1041,11 +1054,12 @@
   color: var(--faint);
   font-size: var(--t-meta);
   font-weight: var(--w-regular);
+  line-height: var(--lh-meta);
 }
 
 .tm-ohistory__list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1055,7 +1069,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 1px 12px;
+  gap: 0 12px;
   min-width: 0;
 }
 
@@ -1063,7 +1077,7 @@
   min-width: 0;
   color: var(--text);
   font-size: var(--t-body);
-  line-height: 1.4;
+  line-height: var(--lh-body);
   overflow-wrap: anywhere;
 }
 
@@ -1071,7 +1085,7 @@
 .tm-ohistory__actor {
   color: var(--muted);
   font-size: var(--t-meta);
-  line-height: 1.4;
+  line-height: var(--lh-meta);
 }
 
 .tm-ohistory__time {
@@ -1577,8 +1591,8 @@
 .tm-modal__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 /* A modal's error notice sits under the field it answers. */
@@ -1937,8 +1951,6 @@
 
 .tm-runheader__stop {
   flex: 0 0 auto;
-  height: var(--h-toolbar);
-  padding: 0 12px;
 }
 
 .tm-runheader__trailing {
@@ -1959,13 +1971,13 @@
 .tm-plan__step {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
+  gap: 8px;
   padding: 4px 0;
 }
 
 .tm-plan__mark {
   flex: 0 0 auto;
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--faint);
 }
 
@@ -1974,7 +1986,7 @@
   min-width: 0;
   color: var(--text-soft);
   font-size: var(--t-body);
-  line-height: 18px;
+  line-height: var(--lh-body);
 }
 
 .tm-plan__step[data-state='completed'] .tm-plan__mark,
@@ -2009,12 +2021,19 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-size: var(--t-meta);
-  line-height: 18px;
+  line-height: var(--lh-body);
   text-align: right;
 }
 
 .tm-plan__step[data-state='failed'] .tm-plan__state {
   color: var(--blocked-ink);
+}
+
+/* A step's time sits at its end in tabular figures, so a ticking one never moves its label. */
+.tm-plan__meta {
+  min-width: 4ch;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .tm-plan__step[data-state='stopped'] .tm-plan__state {
@@ -2352,11 +2371,11 @@
   max-width: 1000px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 
 .tm-debug > .card {
-  padding: 12px;
+  padding: 16px;
   border-radius: var(--r-md);
 }
 
@@ -2373,9 +2392,9 @@
 /* Permanent fact → a plain muted caption, not a tinted full-width box
    (DESIGN.md §9 ban on tinted boxes / audit §03 Debug). */
 .tm-debug__notice {
-  padding: 0 2px;
+  padding: 0;
   font-size: var(--t-meta);
-  line-height: 1.5;
+  line-height: var(--lh-meta);
   color: var(--muted);
 }
 

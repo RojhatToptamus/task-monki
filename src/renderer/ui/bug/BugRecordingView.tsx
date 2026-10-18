@@ -32,24 +32,27 @@ export function BugRecordingView({
       viewRequest += 1;
       void bridge.hide({ taskId, sessionId, requestId: viewRequest }).catch(() => undefined);
     };
+    const placeNow = () => {
+      const rect = element.getBoundingClientRect();
+      if (hidden || rect.width < 160 || rect.height < 100) {
+        hide();
+        return;
+      }
+      viewRequest += 1;
+      void bridge.show({
+        taskId,
+        sessionId,
+        requestId: viewRequest,
+        bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+      }).catch(() => undefined);
+    };
+    // Scrolls and resizes arrive many times a frame; the page follows once per frame.
     const place = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const rect = element.getBoundingClientRect();
-        if (hidden || rect.width < 160 || rect.height < 100) {
-          hide();
-          return;
-        }
-        viewRequest += 1;
-        void bridge.show({
-          taskId,
-          sessionId,
-          requestId: viewRequest,
-          bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
-        }).catch(() => undefined);
-      });
+      frame = requestAnimationFrame(placeNow);
     };
-    place();
+    // A new size or place, or a cover coming or going, moves the page in the same frame as its slot.
+    placeNow();
     // The slot can move without changing size (the capture panel opening beside a page already at
     // its full size), so the space around it is watched too.
     const observer = new ResizeObserver(place);
@@ -57,6 +60,9 @@ export function BugRecordingView({
     if (element.parentElement) observer.observe(element.parentElement);
     const workspace = element.closest('.tm-bugrecord');
     if (workspace) observer.observe(workspace);
+    // A notice under the head moves the stage down without resizing the page's frame.
+    const stage = element.closest('.tm-bugrecord__stage');
+    if (stage) observer.observe(stage);
     window.addEventListener('resize', place);
     document.addEventListener('scroll', place, true);
     return () => {

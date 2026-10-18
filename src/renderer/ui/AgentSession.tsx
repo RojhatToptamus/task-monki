@@ -61,6 +61,8 @@ export interface AgentSessionProps {
   capture(run: RunRecord): ReactNode;
   attentionRequested: number;
   header?: ReactNode;
+  /** The runs that carried the task's recorded bug to the agent, shown on their messages. */
+  bugTurns?: { runIds: ReadonlySet<string>; title: string; onOpen(): void };
 }
 
 type SendMode = 'QUEUE' | 'STEER' | 'CONTINUE' | 'RETRY';
@@ -274,7 +276,8 @@ export function AgentSession(props: AgentSessionProps) {
             failure={turn === lastImplementation && turn.state !== 'active' ? props.failure : undefined}
             sourceName={props.runtimeName}
             capture={turn.state === 'completed' ? props.capture(turn.run) : null}
-            onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug} />)}
+            onReadArtifact={props.onReadArtifact} onShowDebug={props.onShowDebug}
+            bug={props.bugTurns?.runIds.has(turn.run.id) ? { title: props.bugTurns.title, onOpen: props.bugTurns.onOpen } : undefined} />)}
         {unattached.map((item) => <UserMessage key={item.id} text={item.text} time={item.createdAt}
           attachments={props.attachments.filter((file) => item.attachmentIds?.includes(file.id))} onReadAttachment={props.onReadAttachment}
           status={item.status === 'SENDING' ? 'Sending…' : item.status === 'UNCERTAIN' ? 'Delivery uncertain' : 'Not sent'} />)}

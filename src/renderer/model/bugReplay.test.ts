@@ -46,7 +46,7 @@ describe('Bug attention', () => {
     expect(describeBugAttention(gate({ state: 'COULDNT_VERIFY', fact: "Couldn't verify: .env changed since the bug was recorded" }), false))
       .toEqual({ label: "Couldn't verify the fix", tone: 'warning', detail: '.env changed since the bug was recorded' });
     expect(describeBugAttention(gate({ state: 'VERIFYING', activeRun: { runId: 'run-1', kind: 'BASELINE', waitingFor: 'APPROVAL' } }), false))
-      .toMatchObject({ label: 'Clean runs need approval', tone: 'warning' });
+      .toMatchObject({ label: 'Replays need approval', tone: 'warning' });
     // The agent is working on it, or nothing is owed: no attention.
     expect(describeBugAttention(gate({ state: 'STILL_FAILING' }), true)).toBeUndefined();
     expect(describeBugAttention(gate({ state: 'FIX_VERIFIED' }), false)).toBeUndefined();
@@ -107,15 +107,17 @@ describe('Recording workspace', () => {
     ...overrides
   });
 
-  it('names one state in the toolbar and leaves decisions and failures to the block below', () => {
-    expect(recordingHead(recording({ phase: 'RECORDING', routePath: '/checkout' }))).toMatchObject({ title: 'Recording', detail: '/checkout', detailMono: true });
-    expect(recordingHead(recording({ phase: 'MARKING', detail: 'Point at what is wrong' }))).toMatchObject({ title: "Point at what's wrong", tone: 'action' });
+  it('names one state in the bar, in neutral ink, and leaves decisions and failures to the card in the page\'s place', () => {
+    // The page's path belongs to the page's own bar, not the workspace's.
+    expect(recordingHead(recording({ phase: 'RECORDING', routePath: '/checkout' }))).toEqual({ title: 'Recording', tone: 'neutral', working: false });
+    expect(recordingHead(recording({ phase: 'MARKING', detail: 'Point at what is wrong' }))).toEqual({ title: "Point at what's wrong", tone: 'neutral', working: false });
     expect(recordingHead(recording({ phase: 'MARKING' }))).toMatchObject({ title: 'Mark the bug' });
+    expect(recordingHead(recording({ phase: 'STARTING' }))).toEqual({ title: 'Starting the app', tone: 'neutral', working: true });
     for (const phase of ['NEEDS_APPROVAL', 'CHOOSING_ENV_FILES', 'FAILED'] as const) {
       expect(recordingHead(recording({ phase, failure: { title: 'The web service stopped', detail: 'x' } }))).toEqual({ title: 'Record a bug', tone: 'neutral', working: false });
     }
-    // A recording that stopped says so; the block below says why.
-    expect(recordingHead(recording({ phase: 'INTERRUPTED', failure: { title: 'The web service stopped', detail: 'x' } }))).toEqual({ title: 'Recording stopped', tone: 'action', working: false });
+    // A recording that stopped says so; the page's place says why.
+    expect(recordingHead(recording({ phase: 'INTERRUPTED', failure: { title: 'The web service stopped', detail: 'x' } }))).toEqual({ title: 'Recording stopped', tone: 'neutral', working: false });
   });
 
   it('fits the recorded viewport into the space without enlarging it', () => {
@@ -128,10 +130,10 @@ describe('Recording workspace', () => {
     const capture = { draftRevision: 3 } as BugCaptureView;
     const preview = { draftRevision: 3, reproducible: true, checks: [], valueRows: [] };
 
-    expect(captureSaveState(totalDraft({ title: ' ' }), preview, capture, false)).toMatchObject({ reproducible: false, reason: 'Name the bug first', canSaveEvidence: false });
-    expect(captureSaveState(totalDraft({}, ''), preview, capture, false)).toMatchObject({ reproducible: false, reason: 'Write what it should read' });
-    expect(captureSaveState(totalDraft(), { ...preview, draftRevision: 2 }, capture, false)).toEqual({ reproducible: false, canSaveEvidence: true });
-    expect(captureSaveState(totalDraft(), preview, capture, true)).toEqual({ reproducible: false, canSaveEvidence: true });
-    expect(captureSaveState(totalDraft(), preview, capture, false)).toEqual({ reproducible: true, canSaveEvidence: true });
+    expect(captureSaveState(totalDraft({ title: ' ' }), preview, capture)).toMatchObject({ reproducible: false, reason: 'Name the bug first', canSaveEvidence: false });
+    expect(captureSaveState(totalDraft({}, ''), preview, capture)).toMatchObject({ reproducible: false, reason: 'Write what it should read' });
+    // A verdict about other picks says nothing about these.
+    expect(captureSaveState(totalDraft(), { ...preview, draftRevision: 2 }, capture)).toEqual({ reproducible: false, canSaveEvidence: true });
+    expect(captureSaveState(totalDraft(), preview, capture)).toEqual({ reproducible: true, canSaveEvidence: true });
   });
 });

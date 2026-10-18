@@ -1,16 +1,21 @@
 import type {
   BugCaseAction,
+  BugCaseCheckView,
   BugCaseView,
+  BugCheckResult,
   BugRecordingSessionView,
+  BugReplayAssertionObservation,
   BugReplayGateProjection,
   BugReplayLeaseRequest,
   BugReplayRunView,
-  BugReplaySnapshot
+  BugReplaySnapshot,
+  BugShotView
 } from '../../shared/bugReplay';
 import { BUG_REPLAY_STORAGE_LIMIT_BYTES } from '../../shared/bugReplay';
-import { isDomAssertion } from '../../shared/bugCase';
+import { isDomAssertion, type BugCaseV1 } from '../../shared/bugCase';
 import { BUG_BOUNDARY_LINE, bugCountsLine, bugScopeLine } from '../../shared/bugReplayClaims';
 import { checkViews } from './BugCaseCompiler';
+import { capturedValue } from './BugReplayVerdict';
 import { effectiveVersion, latestSets, verdictAttempt } from './BugReplayGate';
 import type { BugReplayCore } from './BugReplayPorts';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, StoredBugReplayRun } from './BugReplayRecords';
@@ -150,8 +155,12 @@ async function caseView(
     status: bugCase.status,
     keepBrowserStorage: bugCase.keepBrowserStorage,
     gate,
-    steps: capture.stepSummaries,
+    steps: capture.stepSummaries.map((text, index) => ({
+      kind: capture.stepKinds?.[index] ?? (version?.document.steps.length === capture.stepSummaries.length ? version.document.steps[index].kind : 'step'),
+      text
+    })),
     screenshotFileIds: captureFiles.filter((file) => file.kind === 'SCREENSHOT').map((file) => file.id),
+    shots: {},
     actions: [],
     createdAt: bugCase.createdAt,
     ...(capture.coverage.complete ? {} : { partial: capture.coverage.reasons[0] ?? 'The recording is incomplete' })
@@ -194,6 +203,15 @@ async function caseView(
       }
       for (const file of runFiles.get(decisive.id) ?? []) if (file.kind === 'SCREENSHOT') view.screenshotFileIds.push(file.id);
     }
+    // What each expectation showed before the fix (the run that reproduced it, or the recording
+    // before any run counted) and after it (the verdict's decisive run).
+    view.version.checks = view.version.checks.map((check) => withResults(check, version.document, reproduced, decisive));
+    const recordedShot = captureFiles.find((file) => file.kind === 'SCREENSHOT');
+    const beforeShot = reproduced ? runShot(reproduced, runFiles.get(reproduced.id)) : undefined;
+    if (beforeShot) view.shots.before = beforeShot;
+    else if (recordedShot) view.shots.before = { fileId: recordedShot.id, at: capture.createdAt, boxes: recordedBoxes(version.document, capture.markedBoxes ?? []) };
+    const afterShot = decisive ? runShot(decisive, runFiles.get(decisive.id)) : undefined;
+    if (afterShot) view.shots.after = afterShot;
     const protectedRun = attempt.find((run) => run.outcome === 'PROTECTED_INPUT_CHANGED');
     if (protectedRun?.failure) {
       const match = /\(([^)]*)\)$/.exec(protectedRun.failure.detail);
@@ -204,6 +222,10 @@ async function caseView(
     if (envRun?.failure) view.envFilesChanged = version.envFiles.map((file) => file.relativePath).filter((file) => envRun.failure!.detail.includes(file));
   }
   view.screenshotFileIds = [...new Set(view.screenshotFileIds)].slice(0, 6);
+  if (!view.shots.before) {
+    const recordedShot = captureFiles.find((file) => file.kind === 'SCREENSHOT');
+    if (recordedShot) view.shots.before = { fileId: recordedShot.id, at: capture.createdAt, boxes: [] };
+  }
   view.actions = actionsFor(view, gate, runs);
   return view;
 }
@@ -222,6 +244,59 @@ async function changedSharedSetup(service: BugReplayCore, taskId: string, versio
   } catch {
     return [];
   }
+}
+
+function resultOf(observation: BugReplayAssertionObservation): BugCheckResult {
+  return {
+    held: observation.passed,
+    ...(observation.value !== undefined ? { value: observation.value } : {}),
+    ...(observation.afterReload
+      ? { afterReload: { held: observation.afterReload.passed, ...(observation.afterReload.value !== undefined ? { value: observation.afterReload.value } : {}) } }
+      : {})
+  };
+}
+
+function withResults(
+  check: BugCaseCheckView,
+  document: BugCaseV1,
+  reproduced: StoredBugReplayRun | undefined,
+  decisive: StoredBugReplayRun | undefined
+): BugCaseCheckView {
+  const next: BugCaseCheckView = { ...check };
+  const before = reproduced?.observations.find((observation) => observation.assertionId === check.id);
+  if (before) next.before = resultOf(before);
+  else {
+    // The recording: a check in the signature did not hold, and shows what it showed; any other held.
+    const entry = document.failureSignature.find((candidate) => candidate.assertionId === check.id);
+    next.before = entry ? { held: false, ...(entry.captured ? { value: capturedValue(entry.captured) } : {}) } : { held: true };
+  }
+  const after = decisive?.observations.find((observation) => observation.assertionId === check.id);
+  if (after) next.after = resultOf(after);
+  return next;
+}
+
+/** A run's screenshot with where each checked element sat in it. */
+function runShot(run: StoredBugReplayRun, files: Array<{ id: string; kind: string }> | undefined): BugShotView | undefined {
+  const shot = [...(files ?? [])].reverse().find((file) => file.kind === 'SCREENSHOT');
+  if (!shot) return undefined;
+  return {
+    fileId: shot.id,
+    runId: run.id,
+    at: run.settledAt ?? run.startedAt ?? run.queuedAt,
+    boxes: run.observations.flatMap((observation) => (observation.box ? [{ checkId: observation.assertionId, box: observation.box }] : []))
+  };
+}
+
+/** The recording's outlines, matched to the checks that read each picked element. */
+function recordedBoxes(document: BugCaseV1, marked: Array<{ css: string; box: BugShotView['boxes'][number]['box'] }>): BugShotView['boxes'] {
+  const boxes: BugShotView['boxes'] = [];
+  for (const assertion of document.assertions) {
+    if (!isDomAssertion(assertion)) continue;
+    const css = assertion.target.candidates.flatMap((candidate) => (candidate.kind === 'css' ? [candidate.value] : []));
+    const match = marked.find((entry) => css.includes(entry.css));
+    if (match) boxes.push({ checkId: assertion.id, box: { ...match.box } });
+  }
+  return boxes;
 }
 
 /** The actions the Bug section offers in this state, the primary first. */

@@ -4565,6 +4565,12 @@ export class TaskManagerService {
     await this.requireRecording(taskId, sessionId).reload(sessionId);
   }
 
+  /** Before the first step, the recording can start on another page of the app. */
+  async openBugRecordingPage(input: unknown): Promise<void> {
+    const { taskId, sessionId, path } = bugReplayInput.page(input);
+    await this.requireRecording(taskId, sessionId).openPage(sessionId, path);
+  }
+
   private async requireTaskPreviewContext(taskId: string) {
     await this.requireRepositoryPreviewTask(taskId, 'Preview agent');
     return this.requirePreviewContext(taskId);

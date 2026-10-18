@@ -84,6 +84,8 @@ export class ReplayEnvironment {
     secretIds: string[];
     signal: AbortSignal;
     onPhase?: (phase: string) => void;
+    /** Every second while starting: each service of the attempt and its state, in the recipe's order. */
+    onServices?: (services: Array<{ id: string; type: string; state: string }>) => void;
     onAttempt?: (attemptId: string) => void;
   }): Promise<StartedReplayEnvironment> {
     if (!REPLAY_NAME_PATTERN.test(input.name) || input.spec.name !== input.name) throw new Error('A replay must start under its own br- name.');
@@ -114,7 +116,9 @@ export class ReplayEnvironment {
     // A cancel that arrived while the start was in flight stops the attempt it started.
     if (input.signal.aborted) abort();
     else input.signal.addEventListener('abort', abort, { once: true });
-    const phaseTimer = input.onPhase ? setInterval(() => void this.reportPhase(input.name, input.onPhase!), 1_000) : undefined;
+    const phaseTimer = input.onPhase || input.onServices
+      ? setInterval(() => void this.reportPhase(input.name, input.onPhase, input.onServices), 1_000)
+      : undefined;
     try {
       for (;;) {
         if (input.signal.aborted) throw new ReplayEnvironmentError('CANCELED', 'Canceled');
@@ -155,13 +159,18 @@ export class ReplayEnvironment {
     return { attemptId, origins, readyAt: attempt.readyAt ?? new Date().toISOString(), jobs };
   }
 
-  private async reportPhase(name: string, onPhase: (phase: string) => void): Promise<void> {
+  private async reportPhase(
+    name: string,
+    onPhase: ((phase: string) => void) | undefined,
+    onServices: ((services: Array<{ id: string; type: string; state: string }>) => void) | undefined
+  ): Promise<void> {
     try {
       const status = await this.runtime().get(name);
       const attempt = status.candidate ?? status.active;
       const services = Object.entries(attempt?.services ?? {});
+      onServices?.(services.map(([id, service]) => ({ id, type: service.type, state: service.state })));
       const running = services.find(([, service]) => service.state === 'starting');
-      if (!running) return;
+      if (!running || !onPhase) return;
       const [id, service] = running;
       if (service.type === 'job') onPhase(/install/i.test(id) ? 'Installing dependencies' : `Running ${id}`);
       else if (service.type === 'postgres' || service.type === 'redis') onPhase(`Starting ${id}`);

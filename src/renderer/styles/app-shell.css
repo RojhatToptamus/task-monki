@@ -237,7 +237,9 @@
   align-items: center;
   gap: 4px;
   width: 56px;
-  padding: 2px 0 14px;
+  /* The first item centres on the sheet's 48px first line; the last ends on the line every
+     composer and foot ends on. */
+  padding: 6px 0 24px;
   background: var(--ground);
 }
 
@@ -409,6 +411,7 @@
   gap: 12px;
   padding: 6px var(--tm-gutter) 24px;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .tm-col {
@@ -422,8 +425,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  /* With the card list's 2px, the first card sits 12px below the label. */
-  padding: 6px 4px 10px;
+  /* With the card list's 2px, the first card sits 12px below the label; the label starts on
+     the cards' edge. */
+  padding: 6px 0 10px;
 }
 
 .tm-col__label {
@@ -444,7 +448,10 @@
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  /* 2px for the cards' rings and shadows, taken back with the scrollbar's gutter so the cards
+     end on the lane's edge and lanes stay 12px apart. */
   padding: 2px 2px 16px;
+  margin-inline: -2px calc(-2px - var(--scrollbar));
   flex: 1;
   min-height: 0;
   scrollbar-gutter: stable;
@@ -480,11 +487,10 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px var(--tm-gutter) 24px;
+  padding: 6px calc(var(--tm-gutter) - var(--scrollbar)) 24px var(--tm-gutter);
   scrollbar-gutter: stable;
 }
 
-.tm-board,
 .tm-inbox,
 .tm-setup,
 .tm-agent-console__menu {
@@ -537,7 +543,7 @@
   gap: 6px;
   width: 100%;
   min-height: 100%;
-  padding: 11px 12px 12px;
+  padding: 12px;
   border: 0;
   border-radius: var(--r-md);
   background: transparent;
@@ -705,7 +711,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px var(--tm-gutter) 28px;
+  padding: 4px calc(var(--tm-gutter) - var(--scrollbar)) 28px var(--tm-gutter);
 }
 
 .tm-inbox__inner {
@@ -756,9 +762,9 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) auto auto auto;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   min-height: 60px;
-  padding: 10px 12px 10px 16px;
+  padding: 10px 16px;
   transition: background-color var(--motion-fast) var(--ease-out);
 }
 
@@ -937,7 +943,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px var(--tm-gutter) 32px;
+  padding: 12px calc(var(--tm-gutter) - var(--scrollbar)) 32px var(--tm-gutter);
 }
 
 /* The page's reading column, under its title like every other page. */
@@ -956,7 +962,7 @@
 }
 
 .tm-setup-section__head {
-  margin: 0 0 0 2px;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);
@@ -1187,7 +1193,7 @@
 }
 
 .tm-settings__title {
-  margin: 4px 8px 12px;
+  margin: 0 8px 12px;
   color: var(--text);
   font-size: var(--t-title);
   font-weight: var(--w-title);
@@ -1224,7 +1230,7 @@
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 24px var(--tm-gutter) 48px;
+  padding: 24px calc(var(--tm-gutter) - var(--scrollbar)) 48px var(--tm-gutter);
   scrollbar-gutter: stable;
 }
 
@@ -1284,7 +1290,7 @@
 }
 
 .tm-settings__subsection > h3 {
-  margin: 0 0 0 2px;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-group);
   font-weight: var(--w-medium);

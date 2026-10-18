@@ -214,7 +214,7 @@
 /* Expand and Close sit together at the head's end, 2px apart like every pair of icon buttons. */
 .tm-side-conversation__actions { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 2px; margin-left: auto; }
 .tm-side-conversation__log { flex: 1; min-height: 0; }
-.tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px 16px 20px; }
+.tm-side-conversation__thread { display: flex; flex-direction: column; gap: 16px; padding: 16px calc(16px - var(--scrollbar)) 20px 16px; }
 .tm-side-conversation__thread > .tm-message--user > .tm-message-content { max-width: 88%; }
 .tm-side-conversation__composer { flex: 0 0 auto; min-width: 0; margin: 0 16px 16px; }
 .tm-side-conversation__working { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
