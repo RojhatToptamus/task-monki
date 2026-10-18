@@ -107,7 +107,8 @@ import {
   validateTaskInstructionConversation
 } from './currentStoreValidation';
 import {
-  AppDatabase
+  AppDatabase,
+  type AppDatabaseTransaction
 } from './sqlite/AppDatabase';
 import type { ManagedFileStore } from './sqlite/ManagedFileStore';
 import {
@@ -623,6 +624,7 @@ export class SqliteTaskStore {
   private readonly ownedIoContext = new AsyncLocalStorage<boolean>();
   private readonly activeOwnedIo = new Set<Promise<unknown>>();
   private taskRuntime?: TaskAgentRuntimeAccess;
+  private readonly taskDeletionParticipants: Array<(transaction: AppDatabaseTransaction, taskId: string) => void> = [];
 
   constructor(
     private readonly database: AppDatabase,
@@ -653,6 +655,14 @@ export class SqliteTaskStore {
 
   getStoreIdentity(): string {
     return createHash('sha256').update(this.managedFiles.rootPath).digest('hex');
+  }
+
+  /**
+   * Another store's rows of a task, removed inside the transaction that deletes the task, so a
+   * task and everything recorded about it go together or not at all.
+   */
+  addTaskDeletionParticipant(remove: (transaction: AppDatabaseTransaction, taskId: string) => void): void {
+    this.taskDeletionParticipants.push(remove);
   }
 
   getStorageRoot(): string {
@@ -3458,6 +3468,7 @@ export class SqliteTaskStore {
         )
       };
       await this.database.write(async (transaction) => {
+        for (const remove of this.taskDeletionParticipants) remove(transaction, taskId);
         await this.persistSnapshot();
         const attachmentDraftId = task.agentAttachmentDraftId;
         if (attachmentDraftId) {
@@ -7421,8 +7432,20 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         findingCounts,
         effectiveStatus: effectiveReviewGateStatus(review),
         ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
-      }
+      },
+      ...(task.projection.bugReplay ? { bugReplay: boardBugReplay(task.projection.bugReplay) } : {})
     }
+  };
+}
+
+/** The board's view of a task's bug: its state word and whether a bug follow-up is in flight. */
+function boardBugReplay(gate: NonNullable<Task['projection']['bugReplay']>): NonNullable<BoardTaskSummary['projection']['bugReplay']> {
+  return {
+    state: gate.state,
+    title: gate.title,
+    ...(gate.fact ? { fact: gate.fact } : {}),
+    ...(gate.activeRun?.waitingFor ? { waitingFor: gate.activeRun.waitingFor } : {}),
+    fixing: gate.handoff?.status === 'QUEUED' || gate.handoff?.status === 'RUNNING'
   };
 }
 

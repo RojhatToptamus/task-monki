@@ -1,0 +1,166 @@
+/* Bug Replay: the recording workspace on the Preview tab, the capture panel, and the Bug
+   section on the Overview. Tone lives in one ink per state word (DESIGN.md 6.6). */
+
+/* Tone inks shared by state words and run rows. */
+.tm-bug__state--neutral { color: var(--text-soft); }
+.tm-bug__state--info { color: var(--accent-ink); }
+.tm-bug__state--action { color: var(--waiting-ink); }
+.tm-bug__state--success { color: var(--verified-ink); }
+.tm-bug__state--error { color: var(--blocked-ink); }
+
+/* A screenshot Bug Replay kept: the page at the case's viewport. */
+.tm-bugimage { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: contain; border-radius: var(--r-xs); background: var(--well); }
+.tm-bugimage--loading { display: block; }
+.tm-bugimage--missing { display: grid; place-items: center; color: var(--muted); font-size: var(--t-meta); }
+
+/* What clean runs will run: facts, then the commands in a well. */
+.tm-buglease__facts { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-buglease__commands { display: grid; gap: 2px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--well); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
+.tm-buglease__command { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 10px; min-width: 0; }
+.tm-buglease__service { color: var(--muted); }
+.tm-buglease__command code { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.tm-buglease__directory { color: var(--faint); }
+
+/* The recording workspace: the Preview tab's head line, then the page or the step it waits on. */
+.tm-bugrecord { position: relative; display: grid; flex: 1; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; font-size: var(--t-body); }
+.tm-bugrecord > .tm-bugrecord__body { grid-row: 3; }
+.tm-bugrecord__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: calc(var(--h-head) + 4px); padding: 4px var(--tm-gutter) 0; background: var(--surface); box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-bugrecord__status { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; }
+.tm-bugrecord__status > * { flex: 0 0 auto; }
+.tm-bugrecord__glyph { color: var(--accent-ink); }
+.tm-bugrecord__title { color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-bugrecord__title--action { color: var(--waiting-ink); }
+.tm-bugrecord__title--error { color: var(--blocked-ink); }
+.tm-bugrecord__elapsed { color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; min-width: 4ch; }
+.tm-bugrecord__route,
+.tm-bugrecord__detail,
+.tm-bugrecord__coverage { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugrecord__route { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
+.tm-bugrecord__detail { color: var(--text-soft); font-size: var(--t-help); }
+.tm-bugrecord__coverage { color: var(--waiting-ink); font-size: var(--t-help); }
+.tm-bugrecord__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.tm-bugrecord__actions :is(.primary-button, .outline-button, .ghost-button) { height: var(--h-toolbar); padding: 0 12px; }
+
+.tm-bugrecord__body { container: bug-record / inline-size; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); }
+.tm-bugrecord__body--split { grid-template-columns: minmax(0, 1fr) 380px; }
+.tm-bugrecord__stage { display: grid; place-items: center; min-width: 0; min-height: 0; padding: 16px; }
+.tm-bugview { border-radius: var(--r-sm); background: var(--well); }
+
+/* While the clean copy starts, the page's place holds a quiet note; the head states the step. */
+.tm-bugrecord__placeholder { display: grid; align-content: start; width: 100%; height: 100%; padding: 16px; }
+.tm-bugrecord__note { max-width: 52ch; margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugrecord__error { margin: 8px var(--tm-gutter) 0; }
+.tm-bugrecord__decision { align-self: start; width: min(640px, 100%); padding: 24px var(--tm-gutter); }
+.tm-bugrecord__choices { display: grid; gap: 6px; }
+.tm-bugrecord__choices code { color: var(--text); font: var(--t-help)/var(--lh-ui) var(--font-mono); }
+.tm-bugrecord__command { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--well); color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Narrow: the panel takes the space, and the page returns while the person points at it. */
+@container bug-record (max-width: 760px) {
+  .tm-bugrecord__body--split { grid-template-columns: minmax(0, 1fr); }
+  .tm-bugrecord__body--split:not([data-picking]) > .tm-bugrecord__stage { display: none; }
+  .tm-bugrecord__body--split[data-picking] > .tm-bugcapture { display: none; }
+}
+
+.tm-bugconfirm { width: min(440px, 100%); }
+
+/* The capture panel: a column beside the page with its own scroll and a fixed foot. */
+.tm-bugcapture { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--surface); box-shadow: inset 1px 0 0 var(--hair); }
+.tm-bugcapture__body { display: grid; align-content: start; gap: 16px; min-height: 0; padding: 16px; overflow-y: auto; scrollbar-gutter: stable; }
+.tm-bugcapture__notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugcapture .field textarea.tm-bugcapture__statement { min-height: calc(var(--lh-body) * 3 + 16px); padding: 8px 12px; resize: vertical; }
+.tm-bugcapture__group { display: grid; gap: 10px; min-width: 0; }
+.tm-bugcapture__label { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugcapture__muted { margin: 0; color: var(--muted); font-size: var(--t-help); }
+.tm-bugcapture__add { justify-self: start; }
+.tm-bugcapture__more > summary { display: inline-flex; align-items: center; gap: 6px; height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugcapture__more[open] > summary { margin-bottom: 8px; }
+.tm-bugcapture__count { color: var(--faint); font-weight: var(--w-regular); font-variant-numeric: tabular-nums; }
+.tm-bugcapture__rows { display: grid; gap: 8px; }
+.tm-bugcapture__steps,
+.tm-bug__steps { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugcapture__errors { max-height: 160px; margin: 0; padding: 8px 12px; overflow: auto; border-radius: var(--r-sm); background: var(--well); color: var(--text-soft); font: var(--t-meta)/var(--lh-meta) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tm-bugcapture__checks,
+.tm-bug__checks { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-help); line-height: var(--lh-ui); }
+.tm-bugcapture__checks li,
+.tm-bug__checks li { display: grid; gap: 2px; }
+.tm-bugcapture__recorded,
+.tm-bug__recorded { color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
+.tm-bugcapture__foot { display: grid; gap: 8px; padding: 12px 16px 16px; box-shadow: inset 0 1px 0 var(--hair); }
+.tm-bugcapture__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.tm-bugcapture__reason { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-align: right; }
+.tm-bugcapture__note { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
+
+/* One check on a picked element: its name, what it showed, then what it should do. */
+.tm-bugcheck { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 10px 12px 12px; border: 0; border-radius: var(--r-sm); background: var(--panel); }
+/* Floated, the legend is an ordinary row inside the card, not drawn across its top edge. */
+.tm-bugcheck__head { display: flex; float: left; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 0; }
+.tm-bugcheck__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugcheck__remove { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
+.tm-bugcheck__observed { margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bugcheck__row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; }
+.tm-bugcheck__row > :only-child { grid-column: 1 / -1; justify-self: start; }
+.tm-bugcontrol { height: var(--h-toolbar); min-width: 0; padding: 0 10px; border: 0; border-radius: var(--r-sm); background-color: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--w-regular) var(--t-help)/var(--lh-ui) var(--font-ui); }
+/* The shared chevron sits 10px from the right edge; the text stops before it. */
+select.tm-bugcontrol { padding-right: 30px; }
+.tm-bugcontrol:not(:disabled):not(:focus):hover { background-color: var(--field-hover); }
+.tm-bugcontrol:disabled { background-color: var(--field-disabled); color: var(--text-disabled); }
+.tm-bugcheck__option { display: inline-flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: var(--t-help); }
+
+/* A request of the marked action and its check. */
+.tm-bugreq { display: grid; gap: 6px; min-width: 0; padding-bottom: 8px; box-shadow: inset 0 -1px 0 var(--hair); }
+.tm-bugreq:last-child { padding-bottom: 0; box-shadow: none; }
+.tm-bugreq__line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; }
+.tm-bugreq__line code { min-width: 0; overflow: hidden; color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugreq__observed { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
+.tm-bugreq__observed--failed { color: var(--blocked-ink); }
+.tm-bugreq__controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.tm-bugreq__value { flex: 1 1 120px; font-family: var(--font-mono); }
+
+/* The Bug section: the bug and its state, the evidence, then the record behind disclosures. */
+.tm-bug { gap: 12px; }
+.tm-bug__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
+.tm-bug__title { min-width: 0; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); line-height: var(--lh-body); overflow-wrap: anywhere; }
+.tm-bug__state { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
+.tm-bug__statement { margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bug__fact,
+.tm-bug__line { margin: 0; color: var(--text-soft); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-slot .tm-bug__fact { margin-top: -6px; }
+.tm-bug__evidence { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-body); line-height: var(--lh-body); overflow-wrap: anywhere; }
+.tm-bug__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bug__meta code { color: var(--faint); font: var(--t-meta)/var(--lh-meta) var(--font-mono); }
+.tm-bug__notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bug__menu .tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); color: var(--muted); }
+.tm-bug__screens { display: flex; flex-wrap: wrap; gap: 12px; }
+.tm-bug__screen { display: grid; gap: 4px; width: 168px; padding: 0; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-meta); text-align: left; }
+.app-shell[data-input-modality='keyboard'] .tm-bug__screen:focus-visible { outline: 0; box-shadow: var(--focus-halo); }
+.tm-bug__more > summary { display: inline-flex; align-items: center; gap: 6px; height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bug__more[open] > summary { margin-bottom: 6px; }
+.tm-bug__more[open] { display: grid; gap: 8px; }
+.tm-bug__count { color: var(--faint); font-weight: var(--w-regular); font-variant-numeric: tabular-nums; }
+.tm-bug__scope { margin: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; }
+.tm-bug__runs { display: grid; margin: 0; padding: 0; list-style: none; }
+.tm-bug__run { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: var(--h-row-dense); font-size: var(--t-help); }
+.tm-bug__runkind { color: var(--muted); }
+.tm-bug__runword { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-bug__runtime { color: var(--faint); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+.tm-bug__rundetail { grid-column: 2 / -1; padding-bottom: 6px; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); overflow-wrap: anywhere; }
+
+/* A kept screenshot at the payload modal's size. */
+.tm-modal__panel.tm-bugshot { width: min(720px, 100%); }
+.tm-bugshot__image { max-height: calc(100vh - 220px); }
+
+/* The Review brief's Behaviour block: what Task Monki observed, facts before the agent's claims. */
+.tm-review-brief__behaviour { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: var(--t-body); line-height: var(--lh-body); overflow-wrap: anywhere; }
+.tm-review-brief__scope { margin: 4px 0 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); }
+
+/* Debug's earlier bugs: one row each, Delete evidence at the right. */
+.tm-bugearlier { display: grid; gap: 8px; }
+.tm-bugearlier__title { margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-bugearlier__meta { margin: 0; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-bugearlier__name { max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-bugearlier .tm-table:focus { outline: none; }
+.tm-bugearlier__ended { white-space: nowrap; }
+
+/* Why Record bug waits, beside it on the Preview status row, in full. */
+.tm-preview-record-reason { max-width: 280px; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); text-align: right; }

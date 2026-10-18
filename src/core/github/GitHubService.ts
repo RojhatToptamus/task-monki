@@ -348,6 +348,8 @@ export class GitHubService {
     task: Task;
     gitDiffStat?: string;
     agentSummary?: string;
+    /** Bug Replay's block for the task's recorded bug, already bounded and worded. */
+    behaviour?: string;
   }): string {
     return [
       `## Summary`,
@@ -358,6 +360,7 @@ export class GitHubService {
       '',
       `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
       '',
+      ...(input.behaviour ? [input.behaviour.trim().slice(0, 2000), ''] : []),
       '## Agent summary',
       '',
       input.agentSummary?.trim().slice(0, 8000) || 'No agent final summary captured.',

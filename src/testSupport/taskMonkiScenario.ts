@@ -66,6 +66,8 @@ export interface ScenarioOptions {
   allowCandidateDesignModels?: boolean;
   /** `false` applies the browser development server's agent boundary. */
   allowAgentNetworkAccess?: boolean;
+  /** Bug Replay over the profile's store, without a replay runner or a recording browser. */
+  bugReplay?: boolean;
 }
 
 interface CreateScenarioTaskInput {
@@ -335,8 +337,11 @@ export async function createTaskMonkiScenario(
       ghPath: options.ghPath,
       ...scriptedRuntime.serviceOptions,
       previewRecipeGenerator: options.previewRecipeGenerator,
-      previewEnabled: options.previewEnabled,
+      previewEnabled: options.previewEnabled || options.bugReplay,
       previewRoot,
+      ...(options.bugReplay
+        ? { bugReplay: { store: persistence.bugReplay, runnerPaths: () => undefined, scratchRoot: path.join(rootDir, 'bug-replay-scratch') } }
+        : {}),
       allowCandidateDesignModels: options.allowCandidateDesignModels,
       ...(options.allowAgentNetworkAccess === undefined ? {} : { allowAgentNetworkAccess: options.allowAgentNetworkAccess }),
       ...(options.designMode

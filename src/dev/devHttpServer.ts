@@ -36,6 +36,31 @@ const DEFAULT_MAX_ATTACHMENT_OPERATIONS = 2;
 const DEFAULT_MAX_ATTACHMENT_IN_FLIGHT_BYTES = 20 * 1024 * 1024;
 const ATTACHMENT_BATCH_MAX_JSON_BYTES = Math.ceil(ATTACHMENT_MAX_TOTAL_BYTES * 4 / 3) + 64 * 1024;
 
+
+/** Bug Replay's requests over the development API, by route name; the service validates each. */
+const BUG_REPLAY_ROUTES = new Map<string, keyof import('../shared/bugReplay').BugReplayApi>([
+  ['get', 'getBugReplay'],
+  ['recording/start', 'startBugRecording'],
+  ['recording/envFiles', 'chooseBugEnvFiles'],
+  ['runs/allow', 'allowBugReplayRuns'],
+  ['recording/cancel', 'cancelBugRecording'],
+  ['recording/mark', 'markBug'],
+  ['recording/pick', 'pickBugCheck'],
+  ['recording/stopPick', 'stopBugPick'],
+  ['recording/return', 'returnToBugRecording'],
+  ['capture/preview', 'previewBugCapture'],
+  ['capture/save', 'saveBugCapture'],
+  ['send', 'sendBugToAgent'],
+  ['baseline/run', 'runBugBaseline'],
+  ['verify', 'verifyBugFix'],
+  ['run/cancel', 'cancelBugReplayRun'],
+  ['action', 'applyBugCaseAction'],
+  ['remove', 'removeBug'],
+  ['evidence/delete', 'deleteBugEvidence'],
+  ['image/read', 'readBugReplayImage'],
+  ['currency', 'checkBugVerdictCurrency']
+]);
+
 export interface DevHttpServerOptions {
   service: TaskManagerService;
   security: DevApiSecurityConfig;
@@ -1155,6 +1180,20 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           await options.service.refreshGitHub((await readJson()) as never)
         );
         return;
+      }
+
+      if (request.method === 'POST' && url.pathname.startsWith('/api/bug/')) {
+        const method = BUG_REPLAY_ROUTES.get(url.pathname.slice('/api/bug/'.length));
+        if (method) {
+          const input = await readJson();
+          if (method === 'readBugReplayImage') {
+            const image = await options.service.readBugReplayImage(input as never);
+            sendJson(response, requestId, 200, { mimeType: image.mimeType, dataBase64: Buffer.from(image.data).toString('base64') });
+            return;
+          }
+          sendJson(response, requestId, 200, await (options.service[method] as (value: unknown) => Promise<unknown>)(input));
+          return;
+        }
       }
 
       if (request.method === 'POST' && url.pathname === '/api/application/listApplicationPreviews') {

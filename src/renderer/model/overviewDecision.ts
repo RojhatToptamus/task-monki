@@ -7,8 +7,9 @@ import { isClosedPhase } from './taskPhase';
  * element that says what the task needs now. Owners follow PRODUCT_WORKFLOW's
  * UI priority: a decision the user owes the agent, then the checkout the work
  * lives in (Retry and Continue cannot run without it), then recovery, then work
- * in flight, then delivery while a pull request is unmerged, then finishing,
- * then setup. A closed task shows how it ended.
+ * in flight, then a step the recorded bug owes (verified local evidence), then
+ * delivery while a pull request is unmerged, then finishing, then setup. A
+ * closed task shows how it ended.
  *
  * The panel never invents an action. Each owner brings the controls it already
  * has elsewhere (the interaction's decisions, the composer's recovery
@@ -21,6 +22,7 @@ export type OverviewDecisionOwner =
   | 'checkout'
   | 'recovery'
   | 'running'
+  | 'bug'
   | 'delivery'
   | 'finish'
   | 'setup';
@@ -33,6 +35,8 @@ export interface OverviewDecisionInput {
   recoveryRequired: boolean;
   /** An implementation-side run or the agent review is in flight. */
   runInFlight: boolean;
+  /** The recorded bug owes the person a step: send it, allow runs, record it again. */
+  bugStepOwed?: boolean;
   /** The task's worktree or imported checkout is missing or failed to prepare. */
   checkoutUnavailable: boolean;
   /**
@@ -55,6 +59,7 @@ export function selectOverviewDecisionOwner(
   if (input.checkoutUnavailable) return 'checkout';
   if (input.recoveryRequired) return 'recovery';
   if (input.runInFlight) return 'running';
+  if (input.bugStepOwed) return 'bug';
   if (input.deliveryOpen) return 'delivery';
   if (input.finishRelevant) return 'finish';
   if (input.setupAvailable) return 'setup';
@@ -77,7 +82,7 @@ export interface PullRequestPlacement {
 }
 
 /** Owners whose step comes before shipping anything: an unpublished PR would only wait. */
-const OWNERS_BEFORE_SHIPPING = new Set<OverviewDecisionOwner>(['interaction', 'checkout', 'recovery', 'running', 'closed']);
+const OWNERS_BEFORE_SHIPPING = new Set<OverviewDecisionOwner>(['interaction', 'checkout', 'recovery', 'running', 'bug', 'closed']);
 
 /**
  * Where the pull request appears on the Overview, so Create draft PR is

@@ -1,6 +1,7 @@
 import type { AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
+  Bug,
   CircleCheck,
   CircleQuestionMark,
   CircleX,
@@ -725,6 +726,7 @@ const ATTENTION_ICONS: Record<TaskAttentionKind, LucideIcon> = {
   failure: CircleX,
   checkout: FolderX,
   git: GitBranch,
+  bug: Bug,
   review: ListChecks,
   delivery: GitPullRequest,
   finish: CircleCheck

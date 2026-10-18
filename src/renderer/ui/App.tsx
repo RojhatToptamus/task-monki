@@ -51,6 +51,7 @@ import type {
   ShowDesignCanvasRequest
 } from '../../shared/designCanvas';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
+import { bugStateBaseWord } from '../../shared/bugReplayClaims';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { partitionAgentRecords, type AgentConversationRecords } from '../model/agentRecords';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
@@ -192,7 +193,25 @@ function isPreviewRecipeGenerationSnapshot(
 
 const REVIEW_STARTED_NOTICE = 'Review started';
 
+/**
+ * A bug verdict that settled, said wherever the person is: the clean runs took minutes. One form
+ * for every verdict, the state's own word and the bug: "Fix verified: Cart total shows "$40.00"".
+ */
+function bugVerdictNotice(task: BoardTaskSummary, previous: string | undefined): { message: string; tone: NotificationTone } | undefined {
+  const bug = task.projection.bugReplay;
+  if (!bug || previous === undefined || previous === bug.state) return undefined;
+  const title = bug.title.length > 60 ? `${bug.title.slice(0, 59).trimEnd()}…` : bug.title;
+  const settled: Partial<Record<string, NotificationTone>> = previous === 'VERIFYING'
+    ? { FIX_VERIFIED: 'success', STILL_FAILING: 'error', COULDNT_VERIFY: 'info' }
+    : previous === 'REPRODUCING'
+      ? { REPRODUCED: 'success', NOT_REPRODUCED: 'info', FLAKY: 'info' }
+      : {};
+  const tone = settled[bug.state];
+  return tone ? { message: `${bugStateBaseWord(bug.state)}: ${title}`, tone } : undefined;
+}
+
 /** What a finished review says in a notice; a stopped review was the person's own doing. */
+
 function reviewFinishedNotice(task: BoardTaskSummary): { message: string; tone: NotificationTone } | undefined {
   const title = task.title.length > 60 ? `${task.title.slice(0, 59).trimEnd()}…` : task.title;
   switch (task.projection.agentReview.effectiveStatus) {
@@ -1514,6 +1533,24 @@ export function App() {
     }
   }, [snapshot.tasks, notify]);
 
+  // So does a bug verdict, which clean runs reach minutes after the turn that asked for it.
+  const bugStatesRef = useRef<Map<string, string | undefined> | undefined>(undefined);
+  const shownOverviewTaskRef = useRef<string | undefined>(undefined);
+  const reportDetailTab = useCallback((tab: string | undefined, taskId: string | undefined) => {
+    shownOverviewTaskRef.current = tab === 'overview' ? taskId : undefined;
+  }, []);
+  useEffect(() => {
+    const previous = bugStatesRef.current;
+    bugStatesRef.current = new Map(snapshot.tasks.map((task) => [task.id, task.projection.bugReplay?.state]));
+    if (!previous) return;
+    for (const task of snapshot.tasks) {
+      // The task's Overview on screen already shows the new state; a notice would repeat it.
+      if (task.id === shownOverviewTaskRef.current) continue;
+      const notice = bugVerdictNotice(task, previous.get(task.id));
+      if (notice) notify(notice.message, notice.tone);
+    }
+  }, [snapshot.tasks, notify]);
+
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
   const selectedTask =
     taskDetail && taskDetail.task.id === selectedTaskId
@@ -2133,10 +2170,10 @@ export function App() {
     discard: discardPreviewRecipeDraft
   });
 
-  const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
+  const transitionTask = async (taskId: string, toPhase: WorkflowPhase, bugVerdict?: { caseId: string; treeId: string }) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.transitionTask({ taskId, toPhase }));
+      await withAppAction(() => taskManagerApi.transitionTask({ taskId, toPhase, ...(bugVerdict ? { bugVerdict } : {}) }));
       notify(`Task moved to ${toPhase.toLowerCase().replace(/_/g, ' ')}.`, 'success');
       await refresh();
     } catch (caught) {
@@ -2899,6 +2936,8 @@ export function App() {
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
             onModalOpenChange={setIsTaskDetailModalOpen}
+            occluded={appOwnedModalOpen || isNewTaskOpen}
+            onTabChange={reportDetailTab}
           />
         ) : showDetail ? (
           <main className="tm-main" aria-live="polite">

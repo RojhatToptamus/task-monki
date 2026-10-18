@@ -34,7 +34,8 @@ remote, GitHub, or Preview resources.
 external state in this order:
 
 1. Preview stops resources that carry Task Monki's exact durable ownership
-   identity and records the observed result.
+   identity and records the observed result. Bug Replay then settles the runs
+   an earlier process left (see "Bug Replay" below) before any new run starts.
 2. Current worktrees are checked against the repository's real worktree
    registry. Present worktrees receive fresh local Git observation; unchanged
    observations reuse the latest record instead of appending duplicate evidence.
@@ -142,6 +143,32 @@ unverified listener or container and never deletes a merely similar resource.
 Docker and Compose CLI children share the application owner-death boundary;
 daemon-side resources remain governed by exact labels and stop-only
 reconciliation.
+
+## Bug Replay
+
+Bug Replay's records are its authority; nothing a run or recording held in
+memory survives a restart. At startup, before agents start:
+
+- an open recording is discarded, and its view is gone with the old process;
+- runs that had not started (queued, checking or waiting) wait for the person
+  to approve clean runs again, because the approval lived in memory;
+- runs that were executing become `INTERRUPTED`; a qualification and a
+  verification attempt rerun them (a verification and its control run at most
+  three times), and an attempt with nothing left to run ends as Couldn't verify
+  with the reason;
+- an open recording's frozen tree is released; exported sources and runner
+  scratch of runs that are no longer open are removed; every task with an
+  active bug has its open sets refilled (a version without a qualification gets
+  one) and its gate republished;
+- every `br-` Previewhost environment not owned by an executing run is torn
+  down in the background before the queue starts.
+
+A verdict is never inferred from an interrupted run, and a run never resumes:
+it starts again on a fresh copy. Shutdown stops admitting runs, forgets every
+approval, cancels executing runs (each is recorded `INTERRUPTED`, never as the
+person's cancel, and tears down its own environment) and closes the recording
+view. Shutdown queues no replacements; the next start does. [Bug Replay Architecture](BUG_REPLAY_ARCHITECTURE.md)
+holds the full lifecycle.
 
 ## Git And GitHub Delivery
 

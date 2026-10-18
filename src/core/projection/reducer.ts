@@ -1,3 +1,4 @@
+import type { BugReplayGateProjection } from '../../shared/bugReplay';
 import type {
   DomainEvent,
   AgentReviewFinding,
@@ -113,6 +114,19 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     return next;
   }
 
+  // Bug Replay is a detached gate. Each BUG_ event carries the whole bug projection Bug Replay
+  // computed; it never changes the phase, the current run, or the agent review gate.
+  if (event.type.startsWith('BUG_')) {
+    if (taskIndex >= 0) {
+      const task = next.tasks[taskIndex];
+      const gate = bugReplayGateFrom(event);
+      const { bugReplay: _previous, ...projection } = task.projection;
+      void _previous;
+      next.tasks[taskIndex] = { ...task, projection: gate ? { ...projection, bugReplay: gate } : projection };
+    }
+    return next;
+  }
+
   if (runIndex >= 0) {
     next.runs[runIndex] = reduceRun(next.runs[runIndex], event);
   }
@@ -150,6 +164,11 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
   }
 
   return next;
+}
+
+function bugReplayGateFrom(event: DomainEvent): BugReplayGateProjection | undefined {
+  const payload = event.payload as { gate?: BugReplayGateProjection | null } | undefined;
+  return payload?.gate ?? undefined;
 }
 
 function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {

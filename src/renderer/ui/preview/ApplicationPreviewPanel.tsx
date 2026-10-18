@@ -166,10 +166,13 @@ export function ApplicationPreviewPanel({
   onPrepareWorktree,
   onReconnectCheckout,
   onModalOpenChange,
-  agentHost
+  agentHost,
+  recordBug
 }: {
   taskId: string;
   projectName?: string;
+  /** Record a bug in a clean copy of this app; absent where Bug Replay cannot record. */
+  recordBug?: { disabledReason?: string; onRecord(): void };
   /** The task worktree: the folder commands run in, and the state that decides whether Preview can run at all. */
   worktree?: WorktreeRecord;
   worktreePending?: boolean;
@@ -699,6 +702,15 @@ export function ApplicationPreviewPanel({
               ) : null}
             </div>
             <div className="tm-preview-statusrow__actions">
+              {recordBug?.disabledReason ? (
+                <span id={`${taskId}-record-bug-reason`} className="tm-preview-record-reason">{recordBug.disabledReason}</span>
+              ) : null}
+              {recordBug ? (
+                <button type="button" className="outline-button" disabled={busy || Boolean(recordBug.disabledReason)}
+                  aria-describedby={recordBug.disabledReason ? `${taskId}-record-bug-reason` : undefined} onClick={recordBug.onRecord}>
+                  Record bug
+                </button>
+              ) : null}
               {row.secondary.map((item) => (
                 <button key={item.action} className={item.action === 'discard' || item.action === 'revert' ? 'ghost-button' : 'outline-button'} disabled={busy || (item.action === 'save' && !editable) || (item.action === 'draft' && agentWorking)} onClick={actions[item.action]}>
                   {item.label}

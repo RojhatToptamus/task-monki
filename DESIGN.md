@@ -1714,6 +1714,38 @@ brief, the model and profile chips, the reason a run cannot start, and Create.
 
 ---
 
+**Recorded bugs.** Record bug is a secondary action in the Preview status row,
+with its reason beside it, in full, when it waits. While a recording lasts it
+takes the Preview's place: one head row with the state (the only live region),
+the elapsed time and the route on the left and Reload page, Discard and the
+primary Mark bug on the right; a step that fails says so in a `.tm-error` line
+under the head, never in a toast the page could cover. Choosing env files,
+approving clean runs and a failure are decision blocks under a neutral "Record
+a bug" head; a stopped recording's head says "Recording stopped" and its block
+gives only the reason. While the copy starts, the head names the step and the
+page's place holds one quiet note. The page is a native view at the recorded
+16:10 ratio, fitted inside the stage's padding, placed again whenever the space
+around it moves, and hidden whenever a modal, a menu or a floating panel covers
+it; the Preview agent's panel steps aside until the recording ends. Marking
+splits the body into the page and a 380px capture panel with its own scroll and
+a fixed foot (Save without a check, then the primary Save and reproduce, the
+reason beneath; a stopped recording's foot holds Record again, then Save without
+a check); below 760px the two alternate. Focus moves to the bug's name when
+marking starts and back to Mark bug on return. Pointing is never a dead end:
+Stop pointing replaces Add check, and Escape works. Labels that turn pending
+keep their width. An element has one name everywhere: on its pick, in its
+checks and in the evidence. On the Overview the bug is a record group after the
+request: its title with the state word, the person's statement, Before and
+After, the counts line, Recorded and Latest run screenshots, then Checks, Clean
+runs and Steps as disclosures; its actions wait in a 24px ⋯ menu, each with its
+reason when it cannot run yet. When the person owes the bug a step, the Now
+panel takes it and the section drops its state word: the state as title and the
+fact that drives the step as its line, never the bug's title. Approving clean
+runs is decline first: Cancel runs, then Approve clean runs. Discard recording,
+Remove bug and Delete evidence are 440px confirms with Keep first. Debug's
+Earlier bugs is a table: Bug, Ended, When, Evidence and a row menu holding
+Delete evidence.
+
 ## Appendix C — where things live
 
 - **`tools/build-themes.mjs`** — the seven seeds per theme, emission, and

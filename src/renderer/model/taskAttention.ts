@@ -5,6 +5,7 @@ import {
   type Task
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
+import { bugGateOf, describeBugAttention } from './bugReplay';
 import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
@@ -12,7 +13,7 @@ export type TaskAttentionSource = Task | BoardTaskSummary;
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
 /** What the user is asked for, so a surface can mark it with one glyph. */
-export type TaskAttentionKind = 'approval' | 'question' | 'retry' | 'failure' | 'checkout' | 'git' | 'review' | 'delivery' | 'finish';
+export type TaskAttentionKind = 'approval' | 'question' | 'retry' | 'failure' | 'checkout' | 'git' | 'bug' | 'review' | 'delivery' | 'finish';
 
 export interface TaskAttentionDescriptor {
   label: string;
@@ -87,6 +88,12 @@ export function describeTaskAttention(
   const gitAttention = describeGitAttention(task);
   if (gitAttention) {
     return gitAttention;
+  }
+
+  // A recorded bug is local evidence Task Monki observed; it leads the agent review gate.
+  const bugAttention = describeBugAttention(bugGateOf(task.projection.bugReplay), IN_FLIGHT_RUNS.has(task.projection.agentRun));
+  if (bugAttention) {
+    return { ...bugAttention, kind: 'bug' };
   }
 
   const reviewAttention = describeReviewAttention(task);

@@ -10,6 +10,8 @@ import type {
   Task,
   WorktreeStatus
 } from '../../shared/contracts';
+import type { BugReplayGateState } from '../../shared/bugReplay';
+import { bugStateBaseWord } from '../../shared/bugReplayClaims';
 import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
 import { pluralize, shortSha } from './formatting';
 
@@ -87,6 +89,8 @@ interface TaskActivityCandidate extends TaskActivityItem {
 interface TaskActivityBuildState {
   /** Whether each Git snapshot seen so far had uncommitted changes, so a review names what it read. */
   uncommittedBySnapshotId: Map<string, boolean>;
+  /** The recorded bug's last state, so History states each change once. */
+  lastBugSignature?: string;
   lastGitSnapshotSignature?: string;
   lastGitStatus?: GitStatus;
   lastBranchPublicationSignature?: string;
@@ -242,6 +246,8 @@ function itemForEvent(
     blockedImplementationRunIds
   );
 
+  if (event.type.startsWith('BUG_')) return bugItem(event, payload, state);
+
   switch (event.type) {
     case 'TASK_CREATED':
       return item(event, 'workflow', 'User', 'Task created', undefined, 'info');
@@ -379,6 +385,47 @@ function itemForEvent(
     default:
       return undefined;
   }
+}
+
+/** Settled states History records, in the words every other surface uses. */
+const BUG_STATE_ITEMS: Partial<Record<BugReplayGateState, { title: string; tone: TaskActivityTone }>> = Object.fromEntries(
+  ([
+    ['REPRODUCED', 'neutral'],
+    ['NOT_REPRODUCED', 'action'],
+    ['FLAKY', 'action'],
+    ['REPRODUCTION_BLOCKED', 'error'],
+    ['FIX_VERIFIED', 'success'],
+    ['STILL_FAILING', 'error'],
+    ['COULDNT_VERIFY', 'action'],
+    ['STALE', 'action']
+  ] as const).map(([state, tone]) => [state, { title: bugStateBaseWord(state), tone }])
+);
+
+/**
+ * The recorded bug in History: recorded, sent to the agent, removed, and each settled state once,
+ * as Task Monki observed it in clean runs.
+ */
+function bugItem(event: DomainEvent, payload: Record<string, unknown>, state: TaskActivityBuildState): TaskActivityCandidate | undefined {
+  const gate = objectPayload(payload.gate);
+  const title = stringField(gate, 'title');
+  if (event.type === 'BUG_CAPTURED') {
+    state.lastBugSignature = undefined;
+    return item(event, 'workflow', 'User', payload.withCheck === false ? 'Bug saved without a check' : 'Bug recorded', fact(title), 'info');
+  }
+  if (event.type === 'BUG_HANDOFF_CHANGED' && payload.handoff === 'SENT') {
+    return item(event, 'run', 'User', 'Bug sent to the agent', fact(title), 'info');
+  }
+  if (event.type === 'BUG_CASE_DECIDED' && payload.decision === 'REMOVED') {
+    state.lastBugSignature = undefined;
+    return item(event, 'workflow', 'User', 'Bug removed', undefined, 'neutral');
+  }
+  const bugState = stringField(gate, 'state');
+  const described = bugState ? BUG_STATE_ITEMS[bugState as BugReplayGateState] : undefined;
+  if (!described) return undefined;
+  const signature = `${stringField(gate, 'caseId')}:${bugState}:${stringField(gate, 'verdictTreeId') ?? ''}`;
+  if (state.lastBugSignature === signature) return undefined;
+  state.lastBugSignature = signature;
+  return item(event, 'review', 'Task Monki', described.title, fact(stringField(gate, 'fact') ?? title), described.tone);
 }
 
 function runStartedItem(

@@ -306,6 +306,34 @@ canonical lifecycle, security, storage, ownership, shutdown, and recovery
 source. Keep product copy and action rules consistent with those documents
 rather than adding a second Preview lifecycle here.
 
+## Recorded bugs
+
+Record bug on the Preview tab records a bug in a clean copy of the task's app,
+apart from the person's own preview. The person marks what is wrong and what
+should happen; saving is their approval of the check. Task Monki then runs the
+recorded steps itself: twice on the recorded code to confirm the bug, and twice
+on the code each agent turn leaves to verify the fix. Clean runs execute the
+task's code and need the person's permission per task, which lasts until Task
+Monki quits.
+
+Send to agent gives the bug to the task's agent like a person would: an
+instruction queued behind running work, or a follow-up. Before the agent's
+first turn, Start implementation sends the bug with the task instead, so the
+two never compete. The bug's brief reaches only the prompt of that turn. Agent
+claims about the fix stay provider reports; the bug's state comes only from
+Task Monki's runs.
+
+A task holds one current bug. Its state appears in the Overview's Bug section,
+on the board card and in the Inbox when the person owes a step, in History, in
+the Review brief, in the reviewer's prompt, in the pull request body, and as the
+Bug row of Mark done, always in the same words. A recorded bug never blocks
+finishing: a fix that is not verified, or a verdict about other code than the
+worktree holds, makes Mark done an override. Removing or replacing a bug keeps it under Earlier bugs in
+Debug until its evidence is deleted.
+
+[Bug Replay Architecture](architecture/BUG_REPLAY_ARCHITECTURE.md) is the
+canonical source for states, runs, permission, hand-off, evidence and recovery.
+
 ## Activity Timeline
 
 The Overview shows the latest entries of this timeline as `History`, beside
@@ -621,7 +649,8 @@ history, or provider remote thread data.
     or a running detached review.
 - Mark done anyway
   - Moves the task to Done in Task Monki despite missing or non-passing review,
-    or Git evidence. It should be styled and confirmed as an owner
+    Git evidence, or a recorded bug whose fix is not verified for the current
+    code. It should be styled and confirmed as an owner
     override, not a review action. It must not override a `MERGED` completion
     policy that is still waiting on GitHub merge evidence.
 - Commit

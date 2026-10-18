@@ -280,6 +280,16 @@ import {
   safeDesignClientToolFailure
 } from '../design/DesignClientToolContract';
 import { parseInspectDesignOperation } from '../design/AgentBrowserRuntime';
+import type { BugCaseReference, BugReplayApi } from '../../shared/bugReplay';
+import { BugReplayService } from '../bugReplay/BugReplayService';
+import { BugRecordingService, type RecordingBrowserHost } from '../bugReplay/BugRecordingService';
+import { BugReplayRunner, type BugReplayRunnerPaths } from '../bugReplay/BugReplayRunner';
+import type { BugAgentState, BugReplayTaskAccess } from '../bugReplay/BugReplayPorts';
+import { ReplayAuthorization } from '../bugReplay/ReplayAuthorization';
+import { replayToolchainIdentity } from '../bugReplay/BugReplayToolchain';
+import { bugReplayInput } from '../bugReplay/BugReplayInput';
+import type { SqliteBugReplayStore } from '../storage/sqlite/SqliteBugReplayStore';
+import { readPreviewRecipeFiles } from '../preview/generation/PreviewRecipeFile';
 
 type TaskManagerLifecycleState =
   | 'NEW'
@@ -331,6 +341,9 @@ export class TaskManagerService {
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
   private readonly applications: ApplicationPreviewService;
+  private readonly replayAuthorization?: ReplayAuthorization;
+  private readonly bugReplay?: BugReplayService;
+  private readonly bugRecording?: BugRecordingService;
   private readonly designPreviews: DesignPreviewService;
   private readonly previewRecipeGenerator: PreviewRecipeGenerationService;
   private readonly previewEnabled: boolean;
@@ -395,6 +408,17 @@ export class TaskManagerService {
       clientToolCredentialRoot?: string;
       /** Development qualification only; tests an unqualified model and its image-result path. */
       allowCandidateDesignModels?: boolean;
+      /**
+       * Bug Replay: its evidence store, the replay runner and the in-app recording browser. It needs
+       * Preview; without these, Bug Replay is absent and nothing about it is offered.
+       */
+      bugReplay?: {
+        store: SqliteBugReplayStore;
+        runnerPaths: () => BugReplayRunnerPaths | undefined;
+        recordingHost?: () => RecordingBrowserHost | undefined;
+        /** Marker-owned runner scratch under the profile. */
+        scratchRoot: string;
+      };
     }
   ) {
     agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
@@ -418,8 +442,12 @@ export class TaskManagerService {
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
     this.previewOpenHost = options.previewOpenHost;
+    const previewhostRoot = path.join(options.previewRoot ?? process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(store.getStorageRoot(), 'previews'), 'previewhost');
+    if (options.bugReplay && options.previewEnabled === true) {
+      this.replayAuthorization = new ReplayAuthorization(() => this.applications.owner());
+    }
     this.applications = new ApplicationPreviewService({
-      root: path.join(options.previewRoot ?? process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(store.getStorageRoot(), 'previews'), 'previewhost'),
+      root: previewhostRoot,
       supervisor: {
         executable: process.execPath,
         module: path.join(path.dirname(require.resolve('previewhost')), 'supervisor.js').replace(/\.asar([/\\])/, '.asar.unpacked$1'),
@@ -428,11 +456,13 @@ export class TaskManagerService {
       openHost: options.previewOpenHost,
       repositoryPath: async worktree => (await this.requireRepository(worktree.repositoryId)).path,
       previewTitle: async name => {
+        if (name.startsWith('br-')) return 'a clean copy of a recorded bug';
         const snapshot = await store.snapshot();
         const worktree = snapshot.worktrees.find(item => `tm-${item.id}` === name);
         return snapshot.tasks.find(task => task.id === worktree?.taskId)?.title ?? 'another preview';
       },
       authorizeDesign: spec => this.designPreviews.authorizes(spec),
+      authorizeReplay: async request => this.replayAuthorization?.authorize(request),
       onApproval: async name => {
         const worktree = (await store.snapshot()).worktrees.find(item => `tm-${item.id}` === name);
         if (worktree) this.events.emit({ type: 'preview.updated', taskId: worktree.taskId, worktreeId: worktree.id, payload: {}, at: new Date().toISOString() });
@@ -568,6 +598,32 @@ export class TaskManagerService {
     this.reviewSnapshots = new ReviewSnapshotStore(
       options.reviewSnapshotRoot ?? path.join(this.worktrees.getRootDir(), 'review-snapshots', store.getStoreIdentity().slice(0, 16))
     );
+    if (options.bugReplay && this.replayAuthorization) {
+      const replay = options.bugReplay;
+      const runner = new BugReplayRunner(replay.runnerPaths);
+      let toolchain: string | undefined;
+      this.bugReplay = new BugReplayService({
+        store: replay.store,
+        tasks: store,
+        events,
+        runtime: () => this.applications.owner(),
+        authorization: this.replayAuthorization,
+        snapshots: this.reviewSnapshots,
+        exportRoot: path.join(previewhostRoot, 'sources', 'bug-replay'),
+        scratchRoot: replay.scratchRoot,
+        storeId: store.getStoreIdentity().slice(0, 16),
+        runner,
+        access: this.bugReplayAccess(),
+        toolchain: () => (toolchain ??= replayToolchainIdentity(replay.runnerPaths())),
+        available: () => {
+          if (!runner.available()) return { replay: false, record: false, reason: 'The replay browser is not available in this build.' };
+          if (!replay.recordingHost?.()) return { replay: true, record: false, reason: 'Recording needs the desktop app on macOS.' };
+          return { replay: true, record: true };
+        }
+      });
+      this.bugRecording = new BugRecordingService(this.bugReplay, () => replay.recordingHost?.(), (taskId) => this.runningPreviewRecipe(taskId));
+      this.bugReplay.attachRecording(this.bugRecording);
+    }
     this.sideQuestions = new SideQuestionCoordinator({
       store,
       agents: {
@@ -628,6 +684,7 @@ export class TaskManagerService {
         void this.designUpdates?.handleRunTerminal(event.runId).catch(() => undefined);
         void this.dispatchPreviewAgentQueue(event.runId);
         this.scheduleDeferredCodexRuntimeRestart(event.runId);
+        if (this.bugReplay) void this.bugReplay.refreshHandoff(event.taskId).catch(() => undefined);
       }
     });
   }
@@ -712,7 +769,9 @@ export class TaskManagerService {
     if (this.previewEnabled) {
       await this.applications.init();
       await this.designPreviews.init();
-
+      // Settles runs a crash left behind and tears down their environments before new ones start.
+      await this.bugReplay?.init();
+      this.assertInitializing();
     }
     if (!this.agentProviderStartupDisabledReason) {
       await this.reconcileTaskStateOnStartup();
@@ -2747,60 +2806,77 @@ export class TaskManagerService {
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent run', () =>
       this.withRuntimeOperation(async () => {
-        await this.assertAgentRuntimeAvailable();
-        let task = await this.requireTask(input.taskId);
-        this.assertNormalTask(task, 'Agent work');
-        // IPC input is untrusted even though the TypeScript contract excludes review.
-        const mode = (input.mode ?? 'IMPLEMENTATION') as AgentRunMode;
-        if (mode === 'REVIEW') {
-          throw new Error('Start a code review with the review action.');
-        }
-        if (task.currentRunId) {
-          if (isImplementationRunMode(mode)) {
-            await this.awaitPostRunEvidence(task.currentRunId);
-          } else {
-            await this.ensurePostRunEvidence(task.currentRunId);
-          }
-          task = await this.requireTask(input.taskId);
-        }
-        const retryReason = getImplementationRetryReason(task);
-        if (retryReason && !isImplementationRunMode(mode)) {
-          throw new Error(retryReason);
-        }
-        this.assertRuntimeEnabled(task.runtimeId);
-        const snapshot = await this.store.snapshot();
-        this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-        const existingWorktree = await this.store.getCurrentWorktree(task.id);
-        if (!existingWorktree) {
-          throw new Error('Prepare the worktree and choose its base before starting implementation.');
-        }
-        if (existingWorktree.repositoryId !== task.repositoryId) {
-          throw new Error('The prepared worktree repository does not match its task.');
-        }
-        const repository = await this.requireAvailableRepository(task.repositoryId);
-        const verifiedWorktree = await this.worktrees.verify(
-          existingWorktree,
-          repository.path
-        );
-        const worktree = await this.store.updateWorktree(
-          verifiedWorktree,
-          'WORKTREE_VERIFIED'
-        );
-        if (worktree.status !== 'PRESENT') {
-          throw new Error(
-            worktree.error ??
-              'Prepare or restore the worktree before starting implementation.'
-          );
-        }
-        return this.startPreparedRun({
-          task,
-          worktree,
-          mode,
-          settings: input.settings,
-          instruction: input.instruction
-        });
+        // The task's first implementation turn starts with its recorded bug beside the goal.
+        const bugCase = await this.firstTurnBug(input);
+        const run = await this.startRunUnlocked(input, bugCase);
+        if (bugCase) await this.bugReplay?.recordHandoff(input.taskId, bugCase.caseId, { runId: run.id }).catch(() => undefined);
+        return run;
       })
     );
+  }
+
+  private async firstTurnBug(input: StartRunRequest): Promise<BugCaseReference | undefined> {
+    if (!this.bugReplay || (input.mode && !isImplementationRunMode(input.mode as AgentRunMode))) return undefined;
+    const detail = await this.store.getTaskDetail(input.taskId).catch(() => undefined);
+    if (!detail || detail.task.kind !== 'NORMAL' || detail.runs.some((run) => isImplementationRunMode(run.mode))) return undefined;
+    return this.bugReplay.activeReference(input.taskId);
+  }
+
+  /** The first agent turn of a prepared task; Bug Replay starts it with the bug's reference. */
+  private async startRunUnlocked(input: StartRunRequest, bugCase?: BugCaseReference): Promise<RunRecord> {
+    await this.assertAgentRuntimeAvailable();
+    let task = await this.requireTask(input.taskId);
+    this.assertNormalTask(task, 'Agent work');
+    // IPC input is untrusted even though the TypeScript contract excludes review.
+    const mode = (input.mode ?? 'IMPLEMENTATION') as AgentRunMode;
+    if (mode === 'REVIEW') {
+      throw new Error('Start a code review with the review action.');
+    }
+    if (task.currentRunId) {
+      if (isImplementationRunMode(mode)) {
+        await this.awaitPostRunEvidence(task.currentRunId);
+      } else {
+        await this.ensurePostRunEvidence(task.currentRunId);
+      }
+      task = await this.requireTask(input.taskId);
+    }
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason && !isImplementationRunMode(mode)) {
+      throw new Error(retryReason);
+    }
+    this.assertRuntimeEnabled(task.runtimeId);
+    const snapshot = await this.store.snapshot();
+    this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
+    const existingWorktree = await this.store.getCurrentWorktree(task.id);
+    if (!existingWorktree) {
+      throw new Error('Prepare the worktree and choose its base before starting implementation.');
+    }
+    if (existingWorktree.repositoryId !== task.repositoryId) {
+      throw new Error('The prepared worktree repository does not match its task.');
+    }
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    const verifiedWorktree = await this.worktrees.verify(
+      existingWorktree,
+      repository.path
+    );
+    const worktree = await this.store.updateWorktree(
+      verifiedWorktree,
+      'WORKTREE_VERIFIED'
+    );
+    if (worktree.status !== 'PRESENT') {
+      throw new Error(
+        worktree.error ??
+          'Prepare or restore the worktree before starting implementation.'
+      );
+    }
+    return this.startPreparedRun({
+      task,
+      worktree,
+      mode,
+      settings: input.settings,
+      instruction: input.instruction,
+      ...(bugCase ? { bugCase } : {})
+    });
   }
 
   private async startPreparedRun(input: {
@@ -2809,6 +2885,7 @@ export class TaskManagerService {
     mode?: Exclude<AgentRunMode, 'REVIEW'>;
     settings?: AgentExecutionSettings;
     instruction?: string;
+    bugCase?: BugCaseReference;
   }): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
@@ -2832,7 +2909,8 @@ export class TaskManagerService {
     }
     const prompt = buildInitialRunPrompt({
       task, worktree, settings, readOnlyMode, instruction: input.instruction,
-      userContext: await readTaskUserContext(this.store, task.id)
+      userContext: await readTaskUserContext(this.store, task.id),
+      bugBrief: await this.bugBrief(task.id, input.bugCase)
     });
     assertCompleteRunPrompt(prompt);
 
@@ -2864,17 +2942,19 @@ export class TaskManagerService {
   }
 
   async queueTaskInstruction(input: QueueTaskInstructionRequest): Promise<TaskInstruction> {
-    return this.withTaskAction(input.taskId, 'Queue instruction', async () => {
-      const existing = await this.existingInstruction(input.id, input.taskId, input.instruction, 'QUEUE', input);
-      if (existing) return existing;
-      const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
-      if (run.status !== 'RUNNING') {
-        throw new Error('The run changed. Review the current action before sending.');
-      }
-      const instruction = await this.addInstruction(input.id, task, run, input.instruction, 'QUEUE', 'QUEUED', input);
-      this.emitInstructionUpdate(task.id);
-      return instruction;
-    });
+    return this.withTaskAction(input.taskId, 'Queue instruction', () => this.queueTaskInstructionUnlocked(input));
+  }
+
+  private async queueTaskInstructionUnlocked(input: QueueTaskInstructionRequest, bugCase?: BugCaseReference): Promise<TaskInstruction> {
+    const existing = await this.existingInstruction(input.id, input.taskId, input.instruction, 'QUEUE', input);
+    if (existing) return existing;
+    const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+    if (run.status !== 'RUNNING') {
+      throw new Error('The run changed. Review the current action before sending.');
+    }
+    const instruction = await this.addInstruction(input.id, task, run, input.instruction, 'QUEUE', 'QUEUED', input, undefined, undefined, bugCase);
+    this.emitInstructionUpdate(task.id);
+    return instruction;
   }
 
   async editTaskInstruction(input: EditTaskInstructionRequest): Promise<void> {
@@ -2906,23 +2986,25 @@ export class TaskManagerService {
   }
 
   async sendTaskInstruction(input: SendTaskInstructionRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(async () => {
-      const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
-      if (!record) throw new Error('Instruction not found.');
-      // A Preview message goes to the read-only Preview agent, never to the task's agent.
-      if (record.role === 'PREVIEW') throw new Error('Send this message from the Preview agent.');
-      if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
-      const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
-      assertContinuable(run);
-      if (record.iterationId !== task.currentIterationId || record.worktreeId !== task.currentWorktreeId) {
-        throw new Error('This instruction belongs to an earlier worktree. Remove it and write a new instruction.');
-      }
-      await this.holdTaskQueue(task.id, 'Send each remaining instruction when you are ready.');
-      const claimed = await this.claimInstruction(record, run, false);
-      return this.deliverInstruction(claimed, () => claimed.mode === 'RETRY'
-        ? this.retryRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text, strategy: 'SAME_SESSION' }, claimed.runId)
-        : this.continueRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text }, claimed.runId));
-    }));
+    return this.withTaskAction(input.taskId, 'Send held instruction', () => this.withRuntimeOperation(() => this.sendTaskInstructionUnlocked(input)));
+  }
+
+  private async sendTaskInstructionUnlocked(input: SendTaskInstructionRequest): Promise<RunRecord> {
+    const record = (await this.store.getTaskDetail(input.taskId)).taskInstructions.find((item) => item.id === input.id);
+    if (!record) throw new Error('Instruction not found.');
+    // A Preview message goes to the read-only Preview agent, never to the task's agent.
+    if (record.role === 'PREVIEW') throw new Error('Send this message from the Preview agent.');
+    if (!await this.isPendingInstruction(record)) return this.instructionRun(record);
+    const { task, run } = await this.requireInstructionTarget(input.taskId, input.runId);
+    assertContinuable(run);
+    if (record.iterationId !== task.currentIterationId || record.worktreeId !== task.currentWorktreeId) {
+      throw new Error('This instruction belongs to an earlier worktree. Remove it and write a new instruction.');
+    }
+    await this.holdTaskQueue(task.id, 'Send each remaining instruction when you are ready.');
+    const claimed = await this.claimInstruction(record, run, false);
+    return this.deliverInstruction(claimed, () => claimed.mode === 'RETRY'
+      ? this.retryRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text, strategy: 'SAME_SESSION' }, claimed.runId, claimed.bugCase)
+      : this.continueRunUnlocked({ taskId: task.id, runId: run.id, instruction: claimed.text }, claimed.runId, claimed.bugCase));
   }
 
   private async isPendingInstruction(record: TaskInstruction): Promise<boolean> {
@@ -2981,7 +3063,7 @@ export class TaskManagerService {
 
   private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
     mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
-    reviewRequest?: ReviewRequestRecord): Promise<TaskInstruction> {
+    reviewRequest?: ReviewRequestRecord, bugCase?: BugCaseReference): Promise<TaskInstruction> {
     const trimmed = this.instructionText(text);
     if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
@@ -2998,6 +3080,7 @@ export class TaskManagerService {
         attachmentDraftId: files?.attachmentDraftId, attachmentIds: [...(files?.attachmentIds ?? []), ...addedIds],
         text: trimmed, mode, status, createdAt: now, updatedAt: now,
         ...(reviewRequest ? { reviewRequest } : {}),
+        ...(bugCase ? { bugCase: { ...bugCase } } : {}),
         ...(status === 'SENDING' ? { runId: mode === 'STEER' ? run.id : randomUUID() } : {})
       };
       records.push(record);
@@ -3069,6 +3152,8 @@ export class TaskManagerService {
 
   private emitInstructionUpdate(taskId: string): void {
     this.events.emit({ type: 'task.updated', taskId, payload: { instructionsChanged: true }, at: new Date().toISOString() });
+    // The bug's "Fixing" state follows the instruction or run that carries it.
+    if (this.bugReplay) void this.bugReplay.refreshHandoff(taskId).catch(() => undefined);
   }
 
   private async recoverTaskInstructions(): Promise<void> {
@@ -3117,7 +3202,7 @@ export class TaskManagerService {
           const claimed = await this.claimInstruction(next, current, true);
           await this.deliverInstruction(claimed, () => this.continueRunUnlocked({
             taskId: run.taskId, runId, instruction: claimed.text
-          }, claimed.runId));
+          }, claimed.runId, claimed.bugCase));
         });
       });
     } catch (error) {
@@ -3199,7 +3284,7 @@ export class TaskManagerService {
     }));
   }
 
-  private async continueRunUnlocked(input: ContinueRunRequest, reservedRunId?: string): Promise<RunRecord> {
+  private async continueRunUnlocked(input: ContinueRunRequest, reservedRunId?: string, bugCase?: BugCaseReference): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     await this.awaitPostRunEvidence(input.runId);
     const { task, run, iteration, worktree } = await this.requireContinuationContext(
@@ -3223,7 +3308,8 @@ export class TaskManagerService {
       gitSnapshot,
       instruction: input.instruction,
       previousPrompt: worktree.ownership === 'EXTERNAL'
-        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined,
+      bugBrief: await this.bugBrief(task.id, bugCase)
     });
     assertCompleteRunPrompt(prompt);
     await this.agents.resolveRecoveryRunForReplacement(run.id);
@@ -3253,7 +3339,7 @@ export class TaskManagerService {
     }));
   }
 
-  private async retryRunUnlocked(input: RetryRunRequest, reservedRunId?: string): Promise<RunRecord> {
+  private async retryRunUnlocked(input: RetryRunRequest, reservedRunId?: string, bugCase?: BugCaseReference): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     await this.awaitPostRunEvidence(input.runId);
     const { task, run, iteration, worktree } = await this.requireContinuationContext(
@@ -3288,7 +3374,8 @@ export class TaskManagerService {
       gitSnapshot,
       instruction: input.instruction,
       previousPrompt: worktree.ownership === 'EXTERNAL'
-        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined,
+      bugBrief: await this.bugBrief(task.id, bugCase)
     });
     assertCompleteRunPrompt(prompt);
     await this.agents.resolveRecoveryRunForReplacement(run.id);
@@ -3308,7 +3395,7 @@ export class TaskManagerService {
   }
 
   private async submitAuthoredTurn(input: ContinueRunRequest, mode: 'FOLLOW_UP' | 'RETRY',
-    start: (reservedRunId?: string) => Promise<RunRecord>): Promise<RunRecord> {
+    start: (reservedRunId?: string) => Promise<RunRecord>, bugCase?: BugCaseReference): Promise<RunRecord> {
     const id = input.clientMessageId ?? randomUUID();
     if ((input.attachmentDraftId || input.attachmentIds?.length) && !input.instruction?.trim()) throw new Error('Write a message to send with these files.');
     if (input.reviewRequest !== undefined) {
@@ -3333,7 +3420,7 @@ export class TaskManagerService {
       const current = records.find((item) => item.id === existing.id)!;
       Object.assign(current, { status: 'SENDING', detail: undefined, updatedAt: new Date().toISOString() });
       return current;
-    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings, input.reviewRequest);
+    }) : await this.addInstruction(id, task, run, input.instruction, mode, 'SENDING', input, input.settings, input.reviewRequest, bugCase);
     return this.deliverInstruction(record, () => start(record.runId));
   }
 
@@ -3662,7 +3749,9 @@ export class TaskManagerService {
         await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
         const previousReview = task.projection.agentReview;
         const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
+        const bugSection = this.bugReplay ? await this.bugReplay.reviewSection(task.id, reviewedTree).catch(() => undefined) : undefined;
         const review = await this.agents.startReview({
+          ...(bugSection ? { bugSection } : {}),
           task,
           iteration,
           worktree,
@@ -3814,6 +3903,9 @@ export class TaskManagerService {
     const runtimeDrain = this.runtimeOperations.close();
     const promptRefinementShutdown = this.promptRefiner.beginShutdown();
     this.previewRecipeGenerator.shutdown();
+    // Clean runs stop admitting at once; a recording ends, which also releases a pending pick.
+    this.bugReplay?.beginShutdown();
+    const bugRecordingShutdown = this.bugRecording?.shutdown() ?? Promise.resolve();
     const pendingInitialization = this.initWork;
     const pendingTaskActions = [...this.taskActionLocks.values()].map(
       ({ work }) => work
@@ -3827,7 +3919,8 @@ export class TaskManagerService {
       pendingControlActions,
       pendingRuntimeLifecycle,
       pendingRuntimeOperations,
-      promptRefinementShutdown
+      promptRefinementShutdown,
+      bugRecordingShutdown
     )
       .finally(() => {
         this.lifecycleState = 'STOPPED';
@@ -3843,7 +3936,8 @@ export class TaskManagerService {
     pendingControlActions: Promise<unknown>[],
     pendingRuntimeLifecycle: Promise<void>,
     pendingRuntimeOperations: Promise<void>[],
-    promptRefinementShutdown: Promise<void>
+    promptRefinementShutdown: Promise<void>,
+    bugRecordingShutdown: Promise<void>
   ): Promise<void> {
     const promptRefinementDrain = settleOwnedWork(promptRefinementShutdown);
     await Promise.allSettled([
@@ -3852,7 +3946,8 @@ export class TaskManagerService {
       ...pendingControlActions,
       pendingRuntimeLifecycle,
       ...pendingRuntimeOperations,
-      promptRefinementDrain
+      promptRefinementDrain,
+      bugRecordingShutdown
     ]);
 
     const cleanupResults = [
@@ -3862,6 +3957,8 @@ export class TaskManagerService {
       await settleOwnedWork(this.snapshots.sweep()),
       await settleOwnedWork(this.clientToolBridge.shutdown()),
       await settleOwnedWork(this.drainPostRunEvidence()),
+      // Clean-run environments are torn down while the Preview runtime is still open.
+      await settleOwnedWork(this.bugReplay?.drain()),
       await settleOwnedWork(this.previewEnabled ? this.designPreviews.shutdown() : undefined),
       await settleOwnedWork(this.applications.close())
     ];
@@ -4172,6 +4269,302 @@ export class TaskManagerService {
   }
 
   /** The verified worktree of a task, or of a repository Design, that the Preview conversation reads. */
+  // Bug Replay
+
+  private bugReplayAccess(): BugReplayTaskAccess {
+    return {
+      context: (taskId) => this.bugReplayContext(taskId),
+      detail: (taskId) => this.store.getTaskDetail(taskId),
+      agentRunActive: (taskId) => this.agentTurnActive(taskId),
+      agentState: (taskId) => this.bugAgentState(taskId),
+      handOff: (input) => this.handOffBug(input),
+      sendHeld: (input) => this.sendHeldBugInstruction(input)
+    };
+  }
+
+  private async bugReplayContext(taskId: string): Promise<{ task: Task; worktree: WorktreeRecord }> {
+    const task = await this.requireTask(taskId);
+    if (task.kind !== 'NORMAL') throw new Error('Bugs are recorded on normal tasks.');
+    const worktree = task.currentWorktreeId ? await this.store.getWorktree(task.currentWorktreeId) : undefined;
+    if (!worktree || worktree.status !== 'PRESENT') throw new Error("Prepare the task's worktree first.");
+    return { task, worktree };
+  }
+
+  /** The task's current implementation turn is queued, running or waiting on the person. */
+  /** What the bug's actions depend on: whether a turn ever ran, and what the current one does. */
+  private async bugAgentState(taskId: string): Promise<BugAgentState> {
+    const detail = await this.store.getTaskDetail(taskId);
+    const hasRun = detail.runs.some((run) => isImplementationRunMode(run.mode));
+    const run = detail.task.currentRunId ? detail.runs.find((candidate) => candidate.id === detail.task.currentRunId) : undefined;
+    const waiting = detail.interactionRequests.some((item) => ['PENDING', 'RESPONDING'].includes(item.status));
+    if (!run || !isImplementationRunMode(run.mode) || !ACTIVE_AGENT_RUN_STATUSES.has(run.status)) return { hasRun, turn: waiting ? 'WAITING' : 'IDLE' };
+    if (waiting || run.status === 'AWAITING_APPROVAL' || run.status === 'AWAITING_USER_INPUT') return { hasRun, turn: 'WAITING' };
+    return { hasRun, turn: run.status === 'RUNNING' ? 'RUNNING' : 'MOVING' };
+  }
+
+  private async agentTurnActive(taskId: string): Promise<boolean> {
+    const task = await this.store.getTask(taskId);
+    const run = task?.currentRunId ? await this.store.getRun(task.currentRunId) : undefined;
+    return Boolean(run && isImplementationRunMode(run.mode) && ACTIVE_AGENT_RUN_STATUSES.has(run.status));
+  }
+
+  /**
+   * Hands the bug to the task's agent the way a person would: the first turn, an instruction
+   * queued behind the agent's current work, or a follow-up. Runs inside the caller's task action.
+   */
+  private async handOffBug(input: {
+    taskId: string;
+    text: string;
+    bugCase: BugCaseReference;
+    clientOperationId: string;
+    attachmentDraftId?: string;
+  }): Promise<{ runId?: string; instructionId?: string }> {
+    await this.assertAgentRuntimeAvailable();
+    const task = await this.requireNormalTask(input.taskId, 'Agent work');
+    if (['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)) throw new Error('The task is closed.');
+    const detail = await this.store.getTaskDetail(task.id);
+    if (detail.interactionRequests.some((item) => ['PENDING', 'RESPONDING'].includes(item.status))) {
+      throw new Error('Answer the agent first.');
+    }
+    const files = input.attachmentDraftId ? { attachmentDraftId: input.attachmentDraftId } : {};
+    const run = task.currentRunId ? detail.runs.find((candidate) => candidate.id === task.currentRunId) : undefined;
+    if (!run || !isImplementationRunMode(run.mode)) {
+      const started = await this.startRunUnlocked({ taskId: task.id, mode: 'IMPLEMENTATION', instruction: input.text }, input.bugCase);
+      return { runId: started.id };
+    }
+    if (run.status === 'RUNNING') {
+      const queued = await this.queueTaskInstructionUnlocked(
+        { taskId: task.id, runId: run.id, id: input.clientOperationId, instruction: input.text, ...files },
+        input.bugCase
+      );
+      return { instructionId: queued.id };
+    }
+    if (run.status === 'AWAITING_APPROVAL' || run.status === 'AWAITING_USER_INPUT') throw new Error('Answer the agent first.');
+    if (ACTIVE_AGENT_RUN_STATUSES.has(run.status)) throw new Error('Wait for the agent to start or stop, then send the bug.');
+    const request: ContinueRunRequest = {
+      taskId: task.id,
+      runId: run.id,
+      instruction: input.text,
+      clientMessageId: input.clientOperationId,
+      ...files
+    };
+    const turn = await this.submitAuthoredTurn(request, 'FOLLOW_UP', (runId) => this.continueRunUnlocked(request, runId, input.bugCase), input.bugCase);
+    return { runId: turn.id, instructionId: input.clientOperationId };
+  }
+
+  private async sendHeldBugInstruction(input: { taskId: string; instructionId: string }): Promise<void> {
+    const task = await this.requireNormalTask(input.taskId, 'Agent work');
+    if (!task.currentRunId) throw new Error('Send the bug to the agent again.');
+    await this.sendTaskInstructionUnlocked({ taskId: task.id, runId: task.currentRunId, id: input.instructionId });
+  }
+
+  /** The bug's brief for a turn that carries it, built now so a queued turn gets current content. */
+  private async bugBrief(taskId: string, bugCase: BugCaseReference | undefined): Promise<string | undefined> {
+    if (!bugCase || !this.bugReplay) return undefined;
+    return this.bugReplay.brief(taskId, bugCase).catch(() => undefined);
+  }
+
+  private async bugPullRequestBlock(taskId: string, worktree: WorktreeRecord): Promise<string | undefined> {
+    if (!this.bugReplay) return undefined;
+    const headTree = await git(worktree.worktreePath, ['rev-parse', 'HEAD^{tree}']).then((value) => value.trim(), () => undefined);
+    return this.bugReplay.pullRequestBlock(taskId, headTree).catch(() => undefined);
+  }
+
+  /** The recipe of the task's own running preview, when it runs the worktree's file as it is now. */
+  private async runningPreviewRecipe(taskId: string): Promise<string | undefined> {
+    const { worktree } = await this.bugReplayContext(taskId);
+    const preview = await this.applications.read(worktree);
+    if (!preview.status?.active || preview.configurationChanged) return undefined;
+    return (await readPreviewRecipeFiles(worktree.worktreePath))[0]?.text;
+  }
+
+  private requireBugReplay(): { replay: BugReplayService; recording: BugRecordingService } {
+    if (!this.bugReplay || !this.bugRecording) throw new Error('Bug Replay is not available in this build.');
+    return { replay: this.bugReplay, recording: this.bugRecording };
+  }
+
+  /** A closed task keeps its bug as a record; nothing more runs for it. */
+  private async assertBugTaskOpen(taskId: string): Promise<void> {
+    const task = await this.requireTask(taskId);
+    if (['DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)) throw new Error('The task is closed.');
+  }
+
+  /** The recording a request names must be the task's current one. */
+  private requireRecording(taskId: string, sessionId: string): BugRecordingService {
+    const { recording } = this.requireBugReplay();
+    if (recording.activeSession(taskId) !== sessionId) throw new Error('This recording has ended.');
+    return recording;
+  }
+
+  private bugSnapshot(taskId: string) {
+    return this.requireBugReplay().replay.snapshot(taskId);
+  }
+
+  getBugReplay: BugReplayApi['getBugReplay'] = async (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.bugReplay ? this.bugReplay.snapshot(taskId) : bugReplayInput.unavailable(taskId);
+  };
+
+  startBugRecording: BugReplayApi['startBugRecording'] = (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.withTaskAction(taskId, 'Record bug', async () => {
+      await this.requireBugReplay().recording.start(taskId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  chooseBugEnvFiles: BugReplayApi['chooseBugEnvFiles'] = (input) => {
+    const { taskId, sessionId, include } = bugReplayInput.envFiles(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).chooseEnvFiles(sessionId, include);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  allowBugReplayRuns: BugReplayApi['allowBugReplayRuns'] = (input) => {
+    const { taskId, templateDigest } = bugReplayInput.lease(input);
+    return this.withControlAction(async () => {
+      await this.assertBugTaskOpen(taskId);
+      await this.requireBugReplay().replay.allowRuns(taskId, templateDigest);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  cancelBugRecording: BugReplayApi['cancelBugRecording'] = (input) => {
+    const { taskId, sessionId } = bugReplayInput.session(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).cancel(sessionId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  markBug: BugReplayApi['markBug'] = (input) => {
+    const { taskId, sessionId } = bugReplayInput.session(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).mark(sessionId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  pickBugCheck: BugReplayApi['pickBugCheck'] = (input) => {
+    const { taskId, sessionId, draft } = bugReplayInput.optionalDraft(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).pickCheck(sessionId, draft);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  stopBugPick: BugReplayApi['stopBugPick'] = (input) => {
+    const { taskId, sessionId } = bugReplayInput.session(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).stopPick(sessionId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  returnToBugRecording: BugReplayApi['returnToBugRecording'] = (input) => {
+    const { taskId, sessionId, draft } = bugReplayInput.optionalDraft(input);
+    return this.withControlAction(async () => {
+      await this.requireRecording(taskId, sessionId).returnToRecording(sessionId, draft);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  previewBugCapture: BugReplayApi['previewBugCapture'] = async (input) => {
+    const { taskId, sessionId, draft } = bugReplayInput.draft(input);
+    return this.requireRecording(taskId, sessionId).preview(sessionId, draft);
+  };
+
+  saveBugCapture: BugReplayApi['saveBugCapture'] = (input) => {
+    const { taskId, sessionId, draft, draftRevision, withCheck } = bugReplayInput.save(input);
+    return this.withTaskAction(taskId, 'Save bug', async () => {
+      await this.requireRecording(taskId, sessionId).save(sessionId, draftRevision, draft, withCheck);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  sendBugToAgent: BugReplayApi['sendBugToAgent'] = (input) => {
+    const { taskId, clientOperationId, attachmentDraftId } = bugReplayInput.send(input);
+    return this.withTaskAction(taskId, 'Send bug to agent', () => this.withRuntimeOperation(async () => {
+      await this.requireBugReplay().replay.sendToAgent(taskId, clientOperationId, attachmentDraftId);
+      return this.bugSnapshot(taskId);
+    }));
+  };
+
+  runBugBaseline: BugReplayApi['runBugBaseline'] = (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.withControlAction(async () => {
+      await this.assertBugTaskOpen(taskId);
+      await this.requireBugReplay().replay.runAgain(taskId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  verifyBugFix: BugReplayApi['verifyBugFix'] = (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.withControlAction(async () => {
+      await this.assertBugTaskOpen(taskId);
+      if (await this.agentTurnActive(taskId)) throw new Error("Wait for the agent's turn to finish.");
+      await this.requireBugReplay().replay.verifyAgain(taskId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  cancelBugReplayRun: BugReplayApi['cancelBugReplayRun'] = (input) => {
+    const { taskId, runId } = bugReplayInput.run(input);
+    return this.withControlAction(async () => {
+      await this.requireBugReplay().replay.cancelRun(taskId, runId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  applyBugCaseAction: BugReplayApi['applyBugCaseAction'] = (input) => {
+    const { taskId, action } = bugReplayInput.action(input);
+    return this.withControlAction(async () => {
+      if (action !== 'remove') await this.assertBugTaskOpen(taskId);
+      if (action === 'verify-again' && await this.agentTurnActive(taskId)) throw new Error("Wait for the agent's turn to finish.");
+      await this.requireBugReplay().replay.applyAction(taskId, action);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  removeBug: BugReplayApi['removeBug'] = (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.withControlAction(async () => {
+      await this.requireBugReplay().replay.removeBug(taskId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  deleteBugEvidence: BugReplayApi['deleteBugEvidence'] = (input) => {
+    const { taskId, caseId } = bugReplayInput.evidence(input);
+    return this.withControlAction(async () => {
+      await this.requireBugReplay().replay.deleteEvidence(taskId, caseId);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
+  readBugReplayImage: BugReplayApi['readBugReplayImage'] = async (input) => {
+    const { taskId, fileId } = bugReplayInput.file(input);
+    const bytes = await this.requireBugReplay().replay.readImage(taskId, fileId);
+    return { mimeType: 'image/png', data: new Uint8Array(bytes) };
+  };
+
+  checkBugVerdictCurrency: BugReplayApi['checkBugVerdictCurrency'] = async (input) => {
+    const { taskId } = bugReplayInput.task(input);
+    return this.bugReplay ? this.bugReplay.checkCurrency(taskId) : { state: 'NONE' };
+  };
+
+  /** The in-app recording view asks which recording, if any, it may show for a task. */
+  activeBugRecordingSession(taskId: string): string | undefined {
+    return this.bugRecording?.activeSession(taskId);
+  }
+
+  /** The in-app recording view's reload button. */
+  async reloadBugRecording(taskId: string, sessionId: string): Promise<void> {
+    await this.requireRecording(taskId, sessionId).reload(sessionId);
+  }
+
   private async requireTaskPreviewContext(taskId: string) {
     await this.requireRepositoryPreviewTask(taskId, 'Preview agent');
     return this.requirePreviewContext(taskId);
@@ -4527,7 +4920,8 @@ export class TaskManagerService {
     const prBodyContent = this.github.buildPullRequestBody({
       task,
       gitDiffStat: latestGit.diffStat,
-      agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
+      agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage,
+      behaviour: await this.bugPullRequestBlock(task.id, worktree)
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
 
@@ -4643,8 +5037,22 @@ export class TaskManagerService {
         await this.store.recordBlockedTransition(task, input.toPhase, blockedReason);
         throw new Error(blockedReason);
       }
+      if (input.toPhase === 'DONE' && input.bugVerdict && this.bugReplay) {
+        // Mark done showed a verified fix: refuse it unless that verdict is about the files as they
+        // are now. Files that cannot be compared are not current either.
+        const currency = await this.bugReplay.checkCurrency(task.id, 60_000);
+        const gate = (await this.requireTask(task.id)).projection.bugReplay;
+        const shown = gate?.state === 'FIX_VERIFIED' && gate.caseId === input.bugVerdict.caseId && gate.verdictTreeId === input.bugVerdict.treeId;
+        if (currency.state === 'STALE') throw new Error('Verification out of date. The code changed after the bug was checked.');
+        if (!shown) throw new Error("The bug's result changed. Check it before marking done.");
+        if (currency.state !== 'CURRENT') throw new Error("Couldn't compare the current files with the verified fix. Try again.");
+      }
 
       await this.holdTaskQueue(task.id, 'The task moved to another phase. Review the remaining instructions.');
+      if (this.bugReplay && ['DONE', 'CANCELED', 'ARCHIVED'].includes(input.toPhase)) {
+        // A closed task's bug keeps its records; its recording and clean runs stop.
+        await this.bugReplay.stopTask(task.id, 5_000).catch(() => undefined);
+      }
       const transitioned = await this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
       if (input.toPhase === 'ARCHIVED') {
         // Startup and shutdown sweeps retry a removal that fails here.
@@ -4685,6 +5093,8 @@ export class TaskManagerService {
           for (const worktree of snapshot.worktrees.filter(item => item.taskId === task.id)) await this.applications.retireWorktree(worktree);
         }
         this.previewRecipeGenerator.clearTask(task.id);
+        // Clean runs and a recording of this task stop and tear down before its records go.
+        await this.bugReplay?.stopTask(task.id);
         await this.agents.releaseTask(task.id);
         // Startup and shutdown sweeps retry a removal that fails here.
         await this.sideQuestions.removeTask(task.id).catch(() => undefined);
@@ -4857,6 +5267,14 @@ export class TaskManagerService {
     if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
       await this.reconcileImplementationOutcome(run, snapshot);
       await this.recordReviewRequestAnswer(run);
+      // A finished turn owes the task's recorded bug a check on the code it left. The tree is
+      // captured before the next queued turn can start, so the check is about this turn.
+      if (this.bugReplay) {
+        const reconciled = await this.store.getTask(run.taskId);
+        if (reconciled && !getImplementationRetryReason(reconciled)) {
+          await this.bugReplay.onAgentTurnCompleted(run.taskId, run.id).catch(() => undefined);
+        }
+      }
     }
   }
 

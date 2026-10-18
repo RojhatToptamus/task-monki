@@ -73,6 +73,10 @@ behavior and architecture, not private roadmap sequencing.
 10. `docs/architecture/MODULE_BOUNDARIES.md`
    - Current module ownership, dependency direction, test placement, and
      domain-specific verification commands for maintainers and agents.
+11. `docs/architecture/BUG_REPLAY_ARCHITECTURE.md`
+   - Recorded bugs: recording in a clean copy, the case document, clean runs,
+     the bug gate, permission to run, hand-off to the agent, evidence storage,
+     recovery, and limits.
 
 ### User And Maintainer Docs
 

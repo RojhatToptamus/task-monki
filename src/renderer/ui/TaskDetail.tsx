@@ -20,6 +20,7 @@ import {
   type ReviewRequestRecord,
   type TaskReviewDraft
 } from '../../shared/contracts';
+import { isImplementationRunMode } from '../../shared/agent';
 import { effectiveReviewFindings, effectiveReviewGateStatus, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
 import type {
   ArtifactRecord,
@@ -161,6 +162,13 @@ import {
   MarkDoneModal
 } from './TaskDetailModals';
 import { ReportedQuote } from './ReportedQuote';
+import { taskManagerApi } from '../api/taskManagerClient';
+import { bugOwnsNowPanel, displayedBugVerdict, reviewBehaviour } from '../model/bugReplay';
+import { initialPreviewAgentSelection } from '../model/previewAgentSelection';
+import { useNotify } from './NotifyContext';
+import { useBugReplay } from './bug/useBugReplay';
+import { BugEvidencePanel, BugNowPanel, BugNowPlaceholder, BugSection, useBugActions } from './bug/BugSection';
+import { BugRecordingWorkspace } from './bug/BugRecordingWorkspace';
 
 interface TaskDetailProps {
   attachmentOptions: AgentSessionProps['attachmentOptions'];
@@ -251,10 +259,15 @@ interface TaskDetailProps {
   onCreatePullRequest(taskId: string, title?: string, baseBranch?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onReadArtifact?(artifactId: string): Promise<string>;
-  onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
+  /** Mark done sends the bug verdict it showed, so a verdict about code that changed since is caught. */
+  onTransition(taskId: string, toPhase: WorkflowPhase, bugVerdict?: { caseId: string; treeId: string }): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   onModalOpenChange(open: boolean): void;
+  /** A window-level modal or sheet covers the page, so native views step aside. */
+  occluded?: boolean;
+  /** The task and tab on screen, for notices that would repeat what the page already shows. */
+  onTabChange?(tab: DetailTab | undefined, taskId: string | undefined): void;
   initialTab?: DetailTab;
 }
 
@@ -304,6 +317,14 @@ export function TaskDetail(props: TaskDetailProps) {
   } = props;
   const captureRunIds = useMemo(() => conversationCaptureRunIds(props.runs, gitSnapshots), [props.runs, gitSnapshots]);
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
+  // The window decides whether a bug verdict needs a notice: not while this page shows it.
+  const { onTabChange } = props;
+  const shownTaskId = task?.id;
+  useEffect(() => {
+    onTabChange?.(tab, shownTaskId);
+    return () => onTabChange?.(undefined, shownTaskId);
+  }, [onTabChange, tab, shownTaskId]);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
@@ -406,10 +427,6 @@ export function TaskDetail(props: TaskDetailProps) {
         mergeSnapshot
       })
     : undefined;
-  useLayoutEffect(() => {
-    props.onModalOpenChange(taskDetailModalOpen);
-  }, [props.onModalOpenChange, taskDetailModalOpen]);
-
   useLayoutEffect(
     () => () => {
       props.onModalOpenChange(false);
@@ -496,6 +513,52 @@ export function TaskDetail(props: TaskDetailProps) {
 
     return () => window.clearTimeout(timeout);
   }, [reviewStartPending, task?.id]);
+
+  // The task's recorded bug: one read shared by the Overview, the Now panel and the Preview tab.
+  const notify = useNotify();
+  const bug = useBugReplay(task?.kind === 'NORMAL' ? task.id : undefined);
+  const bugActions = useBugActions(task?.id ?? '', bug.snapshot, {
+    onOpenRecording: () => setTab('preview'),
+    onError: (message) => notify(message, 'error'),
+    returnFocusRef: detailRootRef
+  }, bug.refresh);
+  const modalOpen = taskDetailModalOpen || bugActions.modalOpen;
+  useLayoutEffect(() => {
+    props.onModalOpenChange(modalOpen);
+  }, [props.onModalOpenChange, modalOpen]);
+  // A bug verdict is compared with the worktree whenever the Overview or Mark done shows it, and
+  // when the window regains focus: an editor edit no Git action saw makes it out of date.
+  const bugVerdictTree = task?.projection.bugReplay?.verdictTreeId;
+  const bugCurrencyWanted = Boolean(task?.id && bugVerdictTree && (tab === 'overview' || markDoneModal));
+  const [bugCurrencyPending, setBugCurrencyPending] = useState(false);
+  useEffect(() => {
+    const taskId = task?.id;
+    if (!taskId || !bugCurrencyWanted) {
+      setBugCurrencyPending(false);
+      return;
+    }
+    let disposed = false;
+    let inFlight = false;
+    const check = () => {
+      if (inFlight || disposed) return;
+      inFlight = true;
+      // A quick answer never flashes "Checking current files".
+      const slow = window.setTimeout(() => {
+        if (!disposed) setBugCurrencyPending(true);
+      }, 300);
+      void taskManagerApi.checkBugVerdictCurrency({ taskId }).catch(() => undefined).finally(() => {
+        window.clearTimeout(slow);
+        inFlight = false;
+        if (!disposed) setBugCurrencyPending(false);
+      });
+    };
+    check();
+    window.addEventListener('focus', check);
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', check);
+    };
+  }, [task?.id, bugVerdictTree, bugCurrencyWanted]);
 
   // Every hook runs before the empty state below returns, so a task that
   // disappears while open never changes the hook order.
@@ -767,7 +830,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
     await runReviewAction(async () => {
       try {
-        await props.onTransition(task.id, 'DONE');
+        await props.onTransition(task.id, 'DONE', displayedBugVerdict(task.projection.bugReplay));
         setMarkDoneModal(undefined);
       } catch {
         // The app shell reports the error. Keep the modal open so the user can retry.
@@ -969,7 +1032,8 @@ export function TaskDetail(props: TaskDetailProps) {
     dirtyFileCount,
     finishMergeStatus,
     finishCiStatus,
-    finishVerifiedChecksEvidence
+    finishVerifiedChecksEvidence,
+    bugCurrencyPending
   );
   const runFailure = describeRunFailureBanner(task, run);
 
@@ -1022,6 +1086,10 @@ export function TaskDetail(props: TaskDetailProps) {
     interactionPending: Boolean(pendingInteraction),
     recoveryRequired: Boolean(recoveryRun),
     runInFlight: Boolean(activeImplementationRun) || reviewIsRunning || reviewPending,
+    bugStepOwed: bugOwnsNowPanel(task.projection.bugReplay, {
+      agentWorking: Boolean(activeImplementationRun),
+      implementationStarted: props.runs.some((candidate) => candidate.taskId === task.id && isImplementationRunMode(candidate.mode))
+    }),
     checkoutUnavailable: Boolean(worktree && ['MISSING', 'PRUNABLE', 'ERROR'].includes(worktree.status)),
     deliveryOpen: prStatus.hasPullRequest && prStatus.kind !== 'MERGED' && !reviewLeads,
     finishRelevant:
@@ -1327,6 +1395,10 @@ export function TaskDetail(props: TaskDetailProps) {
         return recoveryRun ? recoveryDecision(recoveryRun) : null;
       case 'running':
         return runningDecision();
+      case 'bug':
+        return bug.snapshot?.activeCase
+          ? <BugNowPanel view={bug.snapshot.activeCase} snapshot={bug.snapshot} actions={bugActions} />
+          : <BugNowPlaceholder gate={task.projection.bugReplay} />;
       case 'checkout':
         return worktree ? checkoutDecision(worktree) : null;
       case 'delivery':
@@ -1404,6 +1476,7 @@ export function TaskDetail(props: TaskDetailProps) {
       onArchive={props.onArchive}
       onRequestDelete={props.onRequestDelete}
       onOpenDebug={() => setTab('debug')}
+      onOpenChange={setTaskMenuOpen}
       className={place === 'head' ? 'tm-detail__taskmenu' : 'tm-titlebar__taskmenu'}
       align={place === 'head' ? 'end' : 'start'}
     />
@@ -1411,8 +1484,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const taskMasthead = (
       <div
         className="tm-detail__masthead"
-        inert={taskDetailModalOpen ? true : undefined}
-        aria-hidden={taskDetailModalOpen ? true : undefined}
+        inert={modalOpen ? true : undefined}
+        aria-hidden={modalOpen ? true : undefined}
       >
         <div className="tm-detail__row">
           <h1 ref={setHeadTitle} className="tm-detail__title" tabIndex={-1}>
@@ -1514,8 +1587,9 @@ export function TaskDetail(props: TaskDetailProps) {
     />
   ) : null;
   // One assistant panel at a time: Ask, or the Preview agent on Preview
-  // (rendered into this slot by the Preview).
-  const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent
+  // (rendered into this slot by the Preview). A bug recording takes the
+  // Preview's place, and the Preview agent returns when it ends.
+  const previewAgentSheet = tab === 'preview' && previewAgentOpen && props.previewAgent && !bug.snapshot?.recording
     ? <div ref={setPreviewAgentSlot} className="tm-side-sheet__slot" />
     : null;
   const sidePanel = askPanel
@@ -1541,7 +1615,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const titleRowRequest = Boolean(pendingInteraction) && !['overview', 'agent', 'review'].includes(tab);
 
   const taskNav = (
-        <div className="tm-detail__nav" inert={taskDetailModalOpen ? true : undefined} aria-hidden={taskDetailModalOpen ? true : undefined}>
+        <div className="tm-detail__nav" inert={modalOpen ? true : undefined} aria-hidden={modalOpen ? true : undefined}>
         <div className="tm-tabs" role="tablist" aria-label="Task sections">
           <AccessibleTab
             id="task-detail-tab-overview"
@@ -1592,7 +1666,7 @@ export function TaskDetail(props: TaskDetailProps) {
             Ask
           </button>
         ) : null}
-        {tab === 'preview' && props.previewAgent ? (
+        {tab === 'preview' && props.previewAgent && !bug.snapshot?.recording ? (
           <button
             ref={previewAgentToggleRef}
             type="button"
@@ -1642,8 +1716,8 @@ export function TaskDetail(props: TaskDetailProps) {
         ref={bodyRef}
         role="tabpanel"
         aria-labelledby={`task-detail-tab-${tab}`}
-        inert={taskDetailModalOpen ? true : undefined}
-        aria-hidden={taskDetailModalOpen ? true : undefined}
+        inert={modalOpen ? true : undefined}
+        aria-hidden={modalOpen ? true : undefined}
       >
         {error ? <div className="tm-error tm-error--page">{error}</div> : null}
 
@@ -1656,6 +1730,16 @@ export function TaskDetail(props: TaskDetailProps) {
                 {requestRepeatsTitle(task) && props.attachments.length === 0 ? null : (
                   <OverviewRequest prompt={task.prompt} attachments={props.attachments} />
                 )}
+                {/* The recorded bug is part of what was asked; its evidence comes before the result. */}
+                {bug.snapshot ? (
+                  <BugSection taskId={task.id} snapshot={bug.snapshot} actions={bugActions}
+                    nowPanel={decisionOwner === 'bug' ? 'step' : decisionOwner === 'setup' && describeTaskAttention(task)?.kind === 'bug' ? 'state' : undefined}
+                    onOpenRecording={() => setTab('preview')} />
+                ) : bug.error && task.projection.bugReplay ? (
+                  <OverviewSection title="Bug" inset aside={<button type="button" className="tm-osection__link" onClick={bug.refresh}>Try again</button>}>
+                    <p className="tm-error">Couldn't load the bug: {bug.error}</p>
+                  </OverviewSection>
+                ) : null}
                 {/* A run's result is what a completed run left behind; a running one has none yet. */}
                 {progressRun?.status === 'COMPLETED' ? (
                   <OverviewSection
@@ -1766,7 +1850,34 @@ export function TaskDetail(props: TaskDetailProps) {
             onViewDiff={(snapshotId) => { setEvidenceGitSnapshotId(snapshotId); setTab('review'); }} /> : null}
         /> : null}
 
-        {tab === 'preview' ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+        {tab === 'preview' && bug.snapshot?.recording ? (
+          <BugRecordingWorkspace
+            key={bug.snapshot.recording.sessionId}
+            taskId={task.id}
+            recording={bug.snapshot.recording}
+            replaces={bug.snapshot.activeCase?.title}
+            covered={modalOpen || taskMenuOpen || Boolean(props.occluded) || Boolean(sidePanel && !sidePanelLayout.docked)}
+            onSaved={() => setTab('overview')}
+            onAskPreviewAgent={props.previewAgent && !props.previewAgent.disabledReason ? (text) => {
+              const agent = props.previewAgent!;
+              void (async () => {
+                try {
+                  await taskManagerApi.cancelBugRecording({ taskId: task.id, sessionId: bug.snapshot!.recording!.sessionId });
+                  changePreviewAgentOpen(true, true);
+                  await agent.send(text, crypto.randomUUID(), initialPreviewAgentSelection(agent.runs, agent.defaults));
+                } catch (cause) {
+                  notify(cause instanceof Error ? cause.message : String(cause), 'error');
+                }
+              })();
+            } : undefined}
+          />
+        ) : null}
+
+        {tab === 'preview' && !bug.snapshot?.recording ? <ApplicationPreviewPanel key={task.id} taskId={task.id} projectName={props.repository?.name}
+          recordBug={bug.snapshot?.availability.canRecord ? {
+            disabledReason: bug.snapshot.availability.recordDisabledReason,
+            onRecord: () => bugActions.perform('record-again')
+          } : undefined}
           worktree={worktree} worktreePending={props.worktreePreparationPending} onModalOpenChange={setPreviewModalOpen}
           onRestoreWorktree={() => props.onRestoreWorktree(task.id)}
           onPrepareWorktree={() => props.onPrepareWorktree(task.id)}
@@ -1811,6 +1922,7 @@ export function TaskDetail(props: TaskDetailProps) {
             } : undefined}
             brief={{
               asked: requestRepeatsTitle(task) ? undefined : task.prompt,
+              behaviour: reviewBehaviour(bug.snapshot?.activeCase),
               report: resultReport ? { author: runtimeName, text: resultReport } : undefined,
               reviewer: reviewGate.status !== 'NOT_RUN' ? {
                 author: [reviewerName, reviewRun?.observedSettings?.model ?? reviewRun?.requestedSettings.model].filter((part): part is string => Boolean(part)),
@@ -1878,6 +1990,7 @@ export function TaskDetail(props: TaskDetailProps) {
               rootRef={debugActivityRef}
             />
             <TaskHealthFindings findings={task.projection.findings} />
+            {bug.snapshot ? <BugEvidencePanel taskId={task.id} snapshot={bug.snapshot} onError={(message) => notify(message, 'error')} refresh={bug.refresh} /> : null}
             <div className="tm-debug__notice">
               Provider diagnostics are for troubleshooting. Verified evidence remains the source of truth.
             </div>
@@ -1955,6 +2068,8 @@ export function TaskDetail(props: TaskDetailProps) {
           fallbackReturnFocusRef={detailRootRef}
         />
       ) : null}
+
+      {bugActions.dialogs}
 
       {sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}
     </main>

@@ -20,6 +20,8 @@ extraResources:
     to: client-tool-mcp-server.mjs
   - from: src/core/process/owned-process-launcher.mjs
     to: owned-process-launcher.mjs
+  - from: dist-electron/bug-replay-runner.cjs
+    to: bug-replay-runner.cjs
   - from: LICENSE
     to: legal/LICENSE
   - from: THIRD_PARTY_NOTICES.md
@@ -44,6 +46,8 @@ artifactName: Task-Monki-${version}-${os}-${arch}.${ext}
 asar: true
 asarUnpack:
   - node_modules/previewhost/**
+  # The Bug Replay runner loads playwright-core from disk with Task Monki's own Node.
+  - node_modules/playwright-core/**
   # The unpacked supervisor must resolve its platform-specific Koffi runtime.
   - node_modules/koffi/**
 compression: maximum

@@ -1038,6 +1038,11 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-tooltip__shortcut { color: var(--muted); font: inherit; }
 @keyframes tm-tooltip-in { from { opacity: 0; transform: scale(0.97); } }
 
+/* A label that changes keeps its control's width: every label in one cell (DESIGN.md 6.3). */
+.tm-stable-label { display: inline-grid; justify-items: center; }
+.tm-stable-label > * { grid-area: 1 / 1; }
+.tm-stable-label__reserve { visibility: hidden; }
+
 /* Table: one container for every comparable list (DESIGN.md A.5) — the object
    edge drawn over the rows, 12px corners, no fill, hair dividers, a 36px
    header in muted ink and 48px rows that fill on hover. */

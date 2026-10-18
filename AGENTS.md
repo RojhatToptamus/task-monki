@@ -37,6 +37,9 @@ state, and local acceptance.
 - `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
   - Required reading before changing Codex protocol handling or generated
     bindings.
+- `docs/architecture/BUG_REPLAY_ARCHITECTURE.md`
+  - Required reading before changing recorded bugs, clean runs, the bug gate,
+    the bug brief in prompts, or any surface that shows a bug.
 
 ## Core Invariants
 

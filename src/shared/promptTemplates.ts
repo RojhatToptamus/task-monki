@@ -260,6 +260,8 @@ export function buildInitialRunPrompt(input: {
   readOnlyMode: boolean;
   instruction?: string;
   userContext?: string;
+  /** A recorded bug this turn fixes, already bounded and labelled by Bug Replay. */
+  bugBrief?: string;
 }): string {
   return [
     TASK_MONKI_CONTEXT_LINE,
@@ -288,7 +290,8 @@ export function buildInitialRunPrompt(input: {
     input.userContext ?? '',
     input.worktree.ownership === 'EXTERNAL' && input.instruction?.trim()
       ? `Task description:\n${input.task.prompt}\n\nCurrent requested work:\n${input.instruction.trim()}`
-      : `Authoritative Task Monki goal:\n${input.task.prompt}`
+      : `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    ...(input.bugBrief ? ['', input.bugBrief] : [])
   ].join('\n');
 }
 
@@ -405,6 +408,7 @@ export function buildContinuationPrompt(input: {
   instruction?: string;
   previousPrompt?: string;
   userContext?: string;
+  bugBrief?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Continue unfinished work after run ${input.run.id}.`,
@@ -424,6 +428,7 @@ export function buildRetryPrompt(input: {
   instruction?: string;
   previousPrompt?: string;
   userContext?: string;
+  bugBrief?: string;
 }): string {
   return buildExistingWorktreePrompt(input, {
     previousRunIntroduction: `Retry the implementation after unsuccessful run ${input.run.id}.`,
@@ -446,6 +451,7 @@ function buildExistingWorktreePrompt(
     instruction?: string;
     previousPrompt?: string;
     userContext?: string;
+    bugBrief?: string;
   },
   intent: {
     previousRunIntroduction: string;
@@ -484,7 +490,9 @@ function buildExistingWorktreePrompt(
     input.userContext,
     input.previousPrompt ? `Previous requested work (historical context; use the current checkout and execution boundary above):\n${input.previousPrompt}` : undefined,
     instruction ? '' : undefined,
-    instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined
+    instruction ? `${intent.instructionLabel}:\n${instruction}` : undefined,
+    input.bugBrief ? '' : undefined,
+    input.bugBrief
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');
@@ -553,6 +561,8 @@ export function buildAgentReviewPrompt(input: {
   target: import('./agent').AgentReviewTarget;
   userContext?: string;
   previousReview?: PreviousReviewContext;
+  /** What Task Monki observed about the task's recorded bug, for the reviewer. */
+  bugSection?: string;
 }): string {
   const target = (() => {
     switch (input.target.type) {
@@ -578,7 +588,8 @@ export function buildAgentReviewPrompt(input: {
     ...(input.worktree.ownership === 'EXTERNAL' ? [EXTERNAL_CHECKOUT_CONTEXT] : []),
     'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.',
-    ...previousReviewSection(input.previousReview)
+    ...previousReviewSection(input.previousReview),
+    ...(input.bugSection ? ['', input.bugSection] : [])
   ].join('\n');
 }
 

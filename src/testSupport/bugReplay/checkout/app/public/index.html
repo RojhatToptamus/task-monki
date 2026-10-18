@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Checkout</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 32px; }
+      section { margin-bottom: 20px; }
+      [hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Checkout</h1>
+    <section aria-label="Products" id="products"></section>
+    <section>
+      <label for="coupon">Coupon code</label>
+      <input id="coupon" name="coupon" autocomplete="off" />
+      <button type="button" id="apply">Apply coupon</button>
+      <p data-testid="coupon-status" id="coupon-status"></p>
+      <p data-testid="coupon-error" id="coupon-error" role="alert" hidden></p>
+    </section>
+    <section>
+      <p>Cart total: <span data-testid="cart-total" id="cart-total">$0.00</span></p>
+      <button type="button" id="checkout">Checkout</button>
+      <p data-testid="order-status" id="order-status"></p>
+      <p data-testid="order-total" id="order-total"></p>
+    </section>
+    <p>Updates: <span id="updates">0</span></p>
+    <script src="/app.js"></script>
+  </body>
+</html>

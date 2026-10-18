@@ -108,7 +108,11 @@ const SUBAGENT_STATUSES = [
 ] as const;
 const DOMAIN_EVENT_SOURCES = [
   'ui', 'provider', 'process', 'storage', 'repository', 'projection', 'git',
-  'github', 'prompt', 'preview'
+  'github', 'prompt', 'preview', 'replay'
+] as const;
+const BUG_REPLAY_GATE_STATES = [
+  'CAPTURED', 'REPRODUCING', 'REPRODUCED', 'NOT_REPRODUCED', 'FLAKY', 'REPRODUCTION_BLOCKED',
+  'VERIFYING', 'FIX_VERIFIED', 'STILL_FAILING', 'COULDNT_VERIFY', 'STALE'
 ] as const;
 const REQUESTED_ACTION_STATUSES = [
   'NONE', 'REQUESTED', 'STARTING', 'RUNNING', 'SUCCEEDED', 'FAILED',
@@ -1239,6 +1243,13 @@ function projection(value: unknown): void {
     uuidField(retry, 'runId', 'tasks.projection');
     stringField(retry, 'reason', 'tasks.projection', true);
   }
+  if (record.bugReplay !== undefined) {
+    const bug = persistedRecord(record.bugReplay, 'tasks.projection');
+    uuidField(bug, 'caseId', 'tasks.projection');
+    stringField(bug, 'title', 'tasks.projection', true);
+    enumField(bug, 'state', BUG_REPLAY_GATE_STATES, 'tasks.projection');
+    timestamp(bug, 'updatedAt', 'tasks.projection');
+  }
   timestamp(record, 'updatedAt', 'tasks.projection');
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
   for (const finding of record.findings) {
@@ -1343,6 +1354,14 @@ export function validateTaskInstructionConversation(instruction: Record<string, 
     instruction.subject !== undefined
   ) {
     invalid('taskInstructions');
+  }
+  // A bug handoff goes to the task's own agent.
+  if (instruction.bugCase !== undefined) {
+    const bugCase = persistedRecord(instruction.bugCase, 'taskInstructions');
+    if (instruction.role !== undefined) invalid('taskInstructions');
+    uuidField(bugCase, 'caseId', 'taskInstructions');
+    uuidField(bugCase, 'captureId', 'taskInstructions');
+    optionalUuidFields(bugCase, 'taskInstructions', ['versionId']);
   }
   // A review request is a follow-up to the task's own agent.
   if (instruction.reviewRequest !== undefined) {

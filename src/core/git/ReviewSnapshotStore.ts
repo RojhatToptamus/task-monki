@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ReviewChangesResult } from '../../shared/contracts';
 import { git, gitResult } from './gitCli';
-import { planUntrackedFiles } from './ReadOnlySnapshotService';
+import { planUntrackedFiles, type ReadOnlySnapshotOmission } from './ReadOnlySnapshotService';
 
 const GIT_TIMEOUT_MS = 120_000;
 /** A diff of changes since a review larger than this is not shown; the full diff still is. */
@@ -66,6 +66,152 @@ export class ReviewSnapshotStore {
     });
   }
 
+  /**
+   * Captures the worktree's exact content and pins it under `ref` in one serialized step, so a
+   * concurrent prune cannot collect the new objects. Untracked files the size limits leave out
+   * are returned instead of being dropped silently.
+   */
+  async captureTree(worktreePath: string, ref: string): Promise<{ treeId: string; omitted: ReadOnlySnapshotOmission[] }> {
+    assertOwnedRef(ref);
+    const store = await this.storeFor(worktreePath);
+    return this.serialize(store.dir, async () => {
+      const plan = await planUntrackedFiles(worktreePath);
+      const treeId = await this.writeTree(worktreePath, store);
+      await git(store.dir, ['update-ref', ref, treeId], GIT_TIMEOUT_MS);
+      return { treeId, omitted: plan.omitted };
+    });
+  }
+
+  /** Pins an existing tree under another owned ref. */
+  async pinTree(worktreePath: string, ref: string, treeId: string): Promise<void> {
+    assertOwnedRef(ref);
+    const store = await this.storeFor(worktreePath);
+    await this.serialize(store.dir, () => git(store.dir, ['update-ref', ref, treeId], GIT_TIMEOUT_MS));
+  }
+
+  /** Lets go of one owned ref; its objects go with the store's next prune. */
+  async releaseRef(worktreePath: string, ref: string): Promise<void> {
+    assertOwnedRef(ref);
+    const store = await this.storeFor(worktreePath);
+    await this.serialize(store.dir, () => git(store.dir, ['update-ref', '-d', ref], GIT_TIMEOUT_MS).catch(() => undefined));
+  }
+
+  /** True when the store can still read every object of the tree. */
+  async hasTree(worktreePath: string, treeId: string): Promise<boolean> {
+    const store = await this.storeFor(worktreePath);
+    return this.serialize(store.dir, async () => {
+      try {
+        await git(worktreePath, ['ls-tree', '-r', '--full-tree', '--name-only', treeId], { timeout: GIT_TIMEOUT_MS, env: store.env });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** The Git environment that reads the store's trees and the source repository's objects. */
+  async gitEnvironment(worktreePath: string): Promise<NodeJS.ProcessEnv> {
+    return { ...(await this.storeFor(worktreePath)).env };
+  }
+
+  /** Blob ids and modes of the given paths in a tree; absent paths are left out. */
+  async entriesAt(worktreePath: string, treeId: string, paths: string[]): Promise<Map<string, { mode: string; blob: string }>> {
+    const entries = new Map<string, { mode: string; blob: string }>();
+    if (paths.length === 0) return entries;
+    const store = await this.storeFor(worktreePath);
+    const output = await git(worktreePath, ['ls-tree', '-z', '--full-tree', treeId, '--', ...paths], { timeout: GIT_TIMEOUT_MS, env: store.env });
+    for (const record of output.split('\0').filter(Boolean)) {
+      const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.+)$/s.exec(record);
+      if (match && match[2] === 'blob') entries.set(match[4], { mode: match[1], blob: match[3] });
+    }
+    return entries;
+  }
+
+  /** Every path in a tree, for rules that look for files by name. */
+  async listTree(worktreePath: string, treeId: string): Promise<string[]> {
+    const store = await this.storeFor(worktreePath);
+    const output = await git(worktreePath, ['ls-tree', '-rz', '--full-tree', '--name-only', treeId], { timeout: GIT_TIMEOUT_MS, env: store.env });
+    return output.split('\0').filter(Boolean);
+  }
+
+  /** The text of one file in a tree, bounded; undefined when it is absent or larger than the bound. */
+  async readText(worktreePath: string, treeId: string, filePath: string, maxBytes = 512 * 1024): Promise<string | undefined> {
+    const entries = await this.entriesAt(worktreePath, treeId, [filePath]);
+    const entry = entries.get(filePath);
+    if (!entry) return undefined;
+    const store = await this.storeFor(worktreePath);
+    const size = Number((await git(worktreePath, ['cat-file', '-s', entry.blob], { timeout: GIT_TIMEOUT_MS, env: store.env })).trim());
+    if (!Number.isFinite(size) || size > maxBytes) return undefined;
+    return git(worktreePath, ['cat-file', 'blob', entry.blob], { timeout: GIT_TIMEOUT_MS, env: store.env });
+  }
+
+  /**
+   * A new tree: `baseTree` with the given paths replaced by their entries in `fromTree` (or
+   * removed where `fromTree` lacks them), pinned under `ref`.
+   */
+  async composeTree(worktreePath: string, baseTree: string, fromTree: string, paths: string[], ref: string): Promise<string> {
+    assertOwnedRef(ref);
+    const store = await this.storeFor(worktreePath);
+    return this.serialize(store.dir, async () => {
+      const index = path.join(store.dir, `index-${randomUUID()}`);
+      const env = { ...store.env, GIT_INDEX_FILE: index };
+      try {
+        await git(worktreePath, ['read-tree', baseTree], { timeout: GIT_TIMEOUT_MS, env });
+        const replacements = await this.entriesAtUnlocked(worktreePath, fromTree, paths, store.env);
+        const lines: string[] = [];
+        for (const file of paths) {
+          const entry = replacements.get(file);
+          lines.push(entry ? `${entry.mode} ${entry.blob}\t${file}` : `0 ${'0'.repeat(40)}\t${file}`);
+        }
+        if (lines.length) {
+          await git(worktreePath, ['update-index', '-z', '--index-info'], { timeout: GIT_TIMEOUT_MS, env, stdin: lines.join('\0') + '\0' });
+        }
+        const tree = (await git(worktreePath, ['write-tree'], { timeout: GIT_TIMEOUT_MS, env })).trim();
+        await git(store.dir, ['update-ref', ref, tree], GIT_TIMEOUT_MS);
+        return tree;
+      } finally {
+        await fs.rm(index, { force: true });
+        await fs.rm(`${index}.lock`, { force: true });
+      }
+    });
+  }
+
+  /**
+   * Lines added between two trees, with their paths, for scanning. Bounded: a diff larger than the
+   * Git output limit fails, and at most `maxLines` lines are returned.
+   */
+  async addedLines(worktreePath: string, fromTree: string, toTree: string, maxLines = 5_000): Promise<Array<{ path: string; text: string }>> {
+    const store = await this.storeFor(worktreePath);
+    const output = await git(
+      worktreePath,
+      ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '-U0', fromTree, toTree],
+      { timeout: GIT_TIMEOUT_MS, env: store.env }
+    );
+    const lines: Array<{ path: string; text: string }> = [];
+    let current = '';
+    for (const line of output.split('\n')) {
+      if (line.startsWith('+++ ')) {
+        current = line.startsWith('+++ b/') ? line.slice(6) : '';
+        continue;
+      }
+      if (!current || !line.startsWith('+')) continue;
+      lines.push({ path: current, text: line.slice(1) });
+      if (lines.length >= maxLines) break;
+    }
+    return lines;
+  }
+
+  private async entriesAtUnlocked(worktreePath: string, treeId: string, paths: string[], env: NodeJS.ProcessEnv): Promise<Map<string, { mode: string; blob: string }>> {
+    const entries = new Map<string, { mode: string; blob: string }>();
+    if (paths.length === 0) return entries;
+    const output = await git(worktreePath, ['ls-tree', '-z', '--full-tree', treeId, '--', ...paths], { timeout: GIT_TIMEOUT_MS, env });
+    for (const record of output.split('\0').filter(Boolean)) {
+      const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.+)$/s.exec(record);
+      if (match && match[2] === 'blob') entries.set(match[4], { mode: match[1], blob: match[3] });
+    }
+    return entries;
+  }
+
   /** Lets go of every review tree of a task; the trees themselves go with the store's next prune. */
   async removeTask(worktreePath: string, taskId: string): Promise<void> {
     const store = await this.storeFor(worktreePath);
@@ -117,6 +263,17 @@ export class ReviewSnapshotStore {
     const next = previous.then(task, task);
     this.queues.set(key, next.catch(() => undefined));
     return next;
+  }
+}
+
+/** Bug Replay keeps its trees under its own namespace beside the review refs. */
+export function bugReplayRef(taskId: string, name: string): string {
+  return `refs/tasks/${taskId}/bug-replay/${name}`;
+}
+
+function assertOwnedRef(ref: string): void {
+  if (!/^refs\/tasks\/[A-Za-z0-9-]+\/(?:reviews|bug-replay)\/[A-Za-z0-9._-]+$/.test(ref)) {
+    throw new Error('The snapshot ref is not owned by Task Monki.');
   }
 }
 

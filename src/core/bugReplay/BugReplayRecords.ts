@@ -1,0 +1,126 @@
+import type { BugCaseEnvironment, BugCaseV1 } from '../../shared/bugCase';
+import type {
+  BugCaseDecisionKind,
+  BugCaseRevisionKind,
+  BugCaseStatus,
+  BugReplayProtectedInput,
+  BugReplayRunRecord
+} from '../../shared/bugReplay';
+
+/** Durable Bug Replay records. Core-only: the renderer reads views built from them. */
+
+export interface BugReplayRecipeRecord {
+  name: 'preview.yaml' | 'preview.yml';
+  text: string;
+  sha256: string;
+}
+
+export interface BugReplayEnvFileRecord {
+  relativePath: string;
+  sha256: string;
+}
+
+export interface BugCaptureRecord {
+  id: string;
+  taskId: string;
+  worktreeId: string;
+  recordingRunId: string;
+  sourceTreeId: string;
+  environment: BugCaseEnvironment;
+  engine: { chromium: string };
+  coverage: { complete: boolean; reasons: string[] };
+  roles: string[];
+  recipe: BugReplayRecipeRecord;
+  templateDigest: string;
+  envFiles: BugReplayEnvFileRecord[];
+  pageTitle?: string;
+  stepSummaries: string[];
+  fileIds: { actionLog?: string; network?: string; console?: string; screenshots: string[] };
+  createdAt: string;
+}
+
+export interface BugCaseRecord {
+  id: string;
+  taskId: string;
+  captureId: string;
+  title: string;
+  statement?: string;
+  status: BugCaseStatus;
+  keepBrowserStorage: boolean;
+  /** The bug follow-up in flight, as Task Monki last observed it. */
+  handoff?: { handoffId: string; runId?: string; instructionId?: string; status: 'QUEUED' | 'RUNNING' | 'HELD'; since: string };
+  lastSentAt?: string;
+  /** The worktree tree last compared with the verdict. */
+  observedTreeId?: string;
+  /** Why the worktree could not be read after the agent's last turn; cleared by the next read. */
+  observedTreeIssue?: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}
+
+export interface BugCaseVersionRecord {
+  id: string;
+  caseId: string;
+  taskId: string;
+  version: number;
+  digest: string;
+  revisionKind: BugCaseRevisionKind;
+  reason?: string;
+  document: BugCaseV1;
+  recipe: BugReplayRecipeRecord;
+  templateDigest: string;
+  protectedInputs: BugReplayProtectedInput[];
+  sharedSetup: string[];
+  envFiles: BugReplayEnvFileRecord[];
+  baselineTreeId: string;
+  /** Runner bundle, browser and playwright-core identity; verdicts compare only within one toolchain. */
+  toolchain: string;
+  createdAt: string;
+}
+
+export interface BugCaseDecisionRecord {
+  id: string;
+  caseId: string;
+  taskId: string;
+  kind: BugCaseDecisionKind;
+  versionId?: string;
+  reason?: string;
+  createdAt: string;
+}
+
+export type BugReplayFileKind = 'ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES' | 'SERVICE_LOG';
+
+export interface BugReplayFileRecord {
+  id: string;
+  taskId: string;
+  ownerKind: 'CAPTURE' | 'RUN';
+  ownerId: string;
+  managedFileId: string;
+  kind: BugReplayFileKind;
+  mediaType: string;
+  storageKey: string;
+  byteCount: number;
+  sha256: string;
+  createdAt: string;
+}
+
+/** Core-only run fields beside the shared view of a run. */
+export interface StoredBugReplayRun extends BugReplayRunRecord {
+  /** Marker-owned scratch directory of the runner, removed at teardown. */
+  scratchDir?: string;
+  /** What each signature check showed, for comparing the two runs of a qualification. */
+  signatureObserved?: Record<string, string>;
+  /** Tracked files of the frozen copy that changed between the export and readiness. */
+  setupChangedPaths?: string[];
+  toolchain?: string;
+  cleanupDebt?: string;
+  /** Set on a verification attempt's candidates when its qualification is old: two passes add a control run. */
+  controlDue?: boolean;
+}
+
+export const TERMINAL_RUN_STATES = new Set(['SETTLED']);
+
+export function isTerminalRun(run: Pick<BugReplayRunRecord, 'state'>): boolean {
+  return run.state === 'SETTLED';
+}

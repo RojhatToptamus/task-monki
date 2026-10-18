@@ -1,3 +1,4 @@
+import type { BugReplayApi } from './bugReplay';
 import type { ApplicationPreviewApi } from './applicationPreview';
 import type {
   AgentReviewFindingSeverity,
@@ -86,7 +87,7 @@ export interface DesignRepositorySetup {
   workspaceSnapshotId?: string;
 }
 
-export const TASK_STORE_SCHEMA_VERSION = 30 as const;
+export const TASK_STORE_SCHEMA_VERSION = 31 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -354,6 +355,12 @@ export const DOMAIN_EVENT_TYPES = [
   'REPOSITORY_PREFLIGHT_COMPLETED',
   'PREVIEW_GENERATION_CREATED',
   'PREVIEW_GENERATION_UPDATED',
+  'BUG_CAPTURED',
+  'BUG_CASE_DECIDED',
+  'BUG_HANDOFF_CHANGED',
+  'BUG_REPLAY_RUN_UPDATED',
+  'BUG_REPLAY_RUN_SETTLED',
+  'BUG_REPLAY_VERDICT_STALE',
 ] as const;
 
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
@@ -410,6 +417,11 @@ export interface StatusProjection {
     runId: string;
     reason: string;
   };
+  /**
+   * The task's active bug, as Bug Replay last computed it. Every BUG_ event carries the whole
+   * projection; the reducer copies it and never decides a bug state itself.
+   */
+  bugReplay?: import('./bugReplay').BugReplayGateProjection;
   findings: Finding[];
   updatedAt: string;
 }
@@ -455,6 +467,11 @@ export interface TaskInstruction extends InstructionAttachments {
   subject?: AskSubject;
   /** A follow-up sent from the Review tab: the request item by item, which the agent answers by number. */
   reviewRequest?: ReviewRequestRecord;
+  /**
+   * A turn that hands the task's recorded bug to the agent; its prompt carries the bug's brief.
+   * Only Bug Replay sets it; requests from the renderer cannot.
+   */
+  bugCase?: import('./bugReplay').BugCaseReference;
   /** Reserved before admission; may be absent from runtime storage after a crash. */
   runId?: string;
   detail?: string;
@@ -775,7 +792,8 @@ export interface DomainEvent {
     | 'git'
     | 'github'
     | 'prompt'
-    | 'preview';
+    | 'preview'
+    | 'replay';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -969,6 +987,7 @@ export type BoardStatusProjection = Pick<
   | 'updatedAt'
 > & {
   agentReview: BoardAgentReviewSummary;
+  bugReplay?: import('./bugReplay').BoardBugReplaySummary;
 };
 
 export interface BoardTaskSummary {
@@ -1273,6 +1292,8 @@ export interface CreateDeliveryCommitRequest {
 export interface TransitionTaskRequest {
   taskId: string;
   toPhase: WorkflowPhase;
+  /** The bug verdict Mark done displayed, so a verdict for code that changed since is caught. */
+  bugVerdict?: { caseId: string; treeId: string };
 }
 
 export interface DeleteTaskRequest {
@@ -1546,7 +1567,8 @@ export interface AppUpdateEvent {
     | 'discourse.message.appended'
     | 'discourse.wave.updated'
     | 'discourse.job.updated'
-    | 'discourse.delta';
+    | 'discourse.delta'
+    | 'bugReplay.updated';
   scope: AppEventScope;
   /** Compatibility routing key; discourse events use `discourse:<conversationId>`. */
   taskId: string;
@@ -1562,7 +1584,7 @@ export type LegacyTaskAppUpdateEvent = Omit<AppUpdateEvent, 'scope' | 'taskId'> 
   taskId: string;
 };
 
-export interface TaskManagerApi extends ApplicationPreviewApi {
+export interface TaskManagerApi extends ApplicationPreviewApi, BugReplayApi {
   chooseRepositoryFolder(): Promise<string | undefined>;
   addRepository(path: string): Promise<Repository>;
   getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact>;

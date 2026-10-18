@@ -11,6 +11,9 @@ import {
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { humanizeEnum, pluralize } from './formatting';
+import type { BugReplayGateProjection } from '../../shared/bugReplay';
+import { bugReason } from '../../shared/bugReplayClaims';
+import { describeBugStatus } from './bugReplay';
 import type { Tone } from './viewTypes';
 
 export interface FinishEvidenceWarning {
@@ -59,7 +62,9 @@ export function getFinishEvidenceState(
 ): FinishEvidenceState {
   const warnings = [
     reviewFinishWarning(reviewStatus),
-    gitFinishWarning(task, dirtyFileCount)
+    gitFinishWarning(task, dirtyFileCount),
+    // A recorded bug never blocks finishing; an unverified one makes done an override.
+    bugFinishWarning(task.projection.bugReplay)
   ].filter((warning): warning is FinishEvidenceWarning => Boolean(warning));
   const blockers = [
     mergeFinishBlocker(task, mergeStatus),
@@ -78,10 +83,13 @@ export function finishRequirementsForTask(
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
-  verifiedChecksEvidence?: VerifiedChecksEvidence
+  verifiedChecksEvidence?: VerifiedChecksEvidence,
+  bugCurrencyPending = false
 ): FinishRequirement[] {
+  const behaviour = bugFinishRequirement(task.projection.bugReplay, bugCurrencyPending);
   const requirements = [
     reviewRequirement(reviewStatus),
+    ...(behaviour ? [behaviour] : []),
     treeRequirement(task.projection.git, dirtyFileCount)
   ];
   if (completionPolicyRequiresMerge(task.completionPolicy)) {
@@ -333,4 +341,35 @@ function checksRequirement(
     tone: 'action',
     unresolved: true
   };
+}
+
+/** Facts that bear on finishing, as the finish checklist's Behaviour row states them. */
+function bugFinishRequirement(
+  gate: BugReplayGateProjection | undefined,
+  currencyPending: boolean
+): FinishRequirement | undefined {
+  if (!gate?.versionId) return undefined;
+  if (currencyPending && gate.state === 'FIX_VERIFIED') {
+    return { label: 'Bug', fact: 'Checking current files', tone: 'info', unresolved: true };
+  }
+  const status = describeBugStatus(gate);
+  if (gate.state === 'FIX_VERIFIED') return { label: 'Bug', fact: status.word, tone: 'success', unresolved: false };
+  return { label: 'Bug', fact: status.word, tone: status.tone === 'neutral' ? 'action' : status.tone, unresolved: true };
+}
+
+/** What Mark done anyway lists for a bug that is not verified fixed. */
+function bugFinishWarning(gate: BugReplayGateProjection | undefined): FinishEvidenceWarning | undefined {
+  if (!gate?.versionId || gate.state === 'FIX_VERIFIED') return undefined;
+  const word = describeBugStatus(gate).word;
+  switch (gate.state) {
+    case 'STILL_FAILING':
+      return { title: 'The recorded bug still fails.', detail: bugReason(gate) ?? `${gate.title} failed on the current code.` };
+    case 'STALE':
+      return { title: 'The fix verification is out of date.', detail: 'The code changed after the bug was checked.' };
+    case 'VERIFYING':
+    case 'REPRODUCING':
+      return { title: `${word}.`, detail: 'The clean runs have not finished.' };
+    default:
+      return { title: 'The fix is not verified.', detail: bugReason(gate) ?? `${gate.title}: ${word.toLowerCase()}.` };
+  }
 }

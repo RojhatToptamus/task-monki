@@ -34,6 +34,9 @@ import { ApplicationPersistence } from '../core/storage/sqlite/ApplicationPersis
 import { SqliteDiscourseStore } from '../core/storage/sqlite/SqliteDiscourseStore';
 import { DesignSourceService } from '../core/design/DesignSourceService';
 import { createDomainEvent } from '../core/storage/domainEvent';
+import { ReviewSnapshotStore } from '../core/git/ReviewSnapshotStore';
+import type { SqliteBugReplayStore } from '../core/storage/sqlite/SqliteBugReplayStore';
+import { seedRecordedBug, type SeedBugState } from './seedBugReplay';
 import { inspectExistingWorktree, WorktreeService } from '../core/worktree/WorktreeService';
 import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
 import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
@@ -142,6 +145,9 @@ interface SeedContext extends SeedPaths {
   agentProfile: import('../shared/agentProfiles').CustomAgentProfile;
   scenarioSet: DevSeedScenarioSet;
   store: SqliteTaskStore;
+  bugReplay: SqliteBugReplayStore;
+  /** The app's own snapshot store, so seeded verdict trees are the ones it compares with. */
+  reviewSnapshots: ReviewSnapshotStore;
   runtimeStore: SqliteAgentRuntimeStore;
   designRepositoryRoot: string;
   designWorktreeRoot: string;
@@ -253,6 +259,8 @@ export async function seedTaskMonkiDevelopmentData(
       ...paths,
       scenarioSet,
       store,
+      bugReplay: persistence.bugReplay,
+      reviewSnapshots: new ReviewSnapshotStore(path.join(paths.profileRoot, 'review-snapshots')),
       runtimeStore,
       designRepositoryRoot: persistence.paths.designRepositoryRoot,
       designWorktreeRoot: persistence.paths.designWorktreeRoot,
@@ -1468,6 +1476,7 @@ function assertValidScenarioSet(value: string): asserts value is DevSeedScenario
     'completion',
     'workflow',
     'preview',
+    'bug',
     'discourse'
   ].includes(value)) {
     throw new Error(`Unknown seed scenario set: ${value}`);
@@ -1584,6 +1593,13 @@ async function seedScenario(
       return { task: (await createAgentScenario(ctx, definition, 'ambiguous')).task };
     case 'interaction-stale':
       return { task: (await createAgentScenario(ctx, definition, 'interaction-stale')).task };
+    case 'bug-reproduced':
+    case 'bug-fix-verified':
+    case 'bug-still-failing':
+    case 'bug-couldnt-verify':
+    case 'bug-stale':
+    case 'bug-evidence-only':
+      return { task: await createBugScenario(ctx, definition) };
     case 'review-not-run':
     case 'review-running':
     case 'review-passed':
@@ -1764,6 +1780,32 @@ async function createWorktreeState(
 
   task = await requireTask(ctx, task.id);
   return { task, iteration, worktree: storedWorktree, gitSnapshot };
+}
+
+const SEED_BUG_STATES: Record<string, SeedBugState> = {
+  'bug-reproduced': 'REPRODUCED',
+  'bug-fix-verified': 'FIX_VERIFIED',
+  'bug-still-failing': 'STILL_FAILING',
+  'bug-couldnt-verify': 'COULDNT_VERIFY',
+  'bug-stale': 'STALE',
+  'bug-evidence-only': 'EVIDENCE_ONLY'
+};
+
+/** A task whose implementation completed, with a recorded bug in the scenario's state. */
+async function createBugScenario(ctx: SeedContext, definition: DevSeedScenarioDefinition): Promise<Task> {
+  const state = await createImplementedTask(ctx, definition);
+  await seedRecordedBug({
+    store: ctx.bugReplay,
+    tasks: ctx.store,
+    snapshots: ctx.reviewSnapshots,
+    taskId: state.task.id,
+    worktreeId: state.worktree.id,
+    worktreePath: state.worktree.worktreePath,
+    baseSha: ctx.baseSha,
+    state: SEED_BUG_STATES[definition.slug],
+    earlierBug: definition.slug === 'bug-fix-verified'
+  });
+  return requireTask(ctx, state.task.id);
 }
 
 async function createImplementedTask(

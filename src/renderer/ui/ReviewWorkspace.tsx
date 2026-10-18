@@ -542,7 +542,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     if (isCollapsed(entry)) expand(entry.file.id);
     scrollToFile(entry.file.id);
   };
-  const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical
+  const briefContent: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.behaviour || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical
     ? { ...props.brief, ...(props.brief.round ? { round: { ...props.brief.round, onShowItem: showRequestItem } } : {}) }
     : undefined;
 

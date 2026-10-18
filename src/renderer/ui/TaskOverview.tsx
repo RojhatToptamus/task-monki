@@ -10,6 +10,7 @@ import type { TaskAttachmentRecord } from '../../shared/attachments';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
+import { StableLabel } from './StableLabel';
 import { ActionMenu } from './ActionMenu';
 import { useClampOverflow } from './useClampOverflow';
 import { ReportedQuote } from './ReportedQuote';
@@ -35,6 +36,8 @@ export interface SlotAction {
   disabled?: boolean;
   /** Why the action is unavailable, shown beside it and tied with aria-describedby. */
   reason?: string;
+  /** Every label the control can show ("Approve" and "Approving…"), so it keeps one width. */
+  labels?: readonly string[];
 }
 
 /** Headline, explanation and actions for an owner that has no surface of its own. */
@@ -45,6 +48,7 @@ export function SlotContent({
   reported,
   primary,
   secondary = [],
+  decline,
   children
 }: {
   headline: string;
@@ -58,6 +62,8 @@ export function SlotContent({
   reported?: { source?: string; text: string };
   primary?: SlotAction;
   secondary?: SlotAction[];
+  /** Declining a request the person approves: shown before the primary, as approvals are. */
+  decline?: SlotAction;
   children?: ReactNode;
 }) {
   return (
@@ -71,7 +77,7 @@ export function SlotContent({
         <blockquote className="tm-slot__quote">{reported.text}</blockquote>
       ) : null}
       {children}
-      <SlotActions primary={primary} secondary={secondary} />
+      <SlotActions primary={primary} secondary={secondary} decline={decline} />
     </>
   );
 }
@@ -79,18 +85,22 @@ export function SlotContent({
 export function SlotActions({
   primary,
   secondary = [],
+  decline,
   quiet = false
 }: {
   primary?: SlotAction;
   secondary?: SlotAction[];
+  /** Declining comes first, then the primary, as in every approval. */
+  decline?: SlotAction;
   /** Outside the decision slot nothing competes with its primary. */
   quiet?: boolean;
 }) {
   const reasonPrefix = useId();
-  if (!primary && secondary.length === 0) {
+  if (!primary && secondary.length === 0 && !decline) {
     return null;
   }
   const all = [
+    ...(decline ? [{ action: decline, primary: false }] : []),
     ...(primary ? [{ action: primary, primary: true }] : []),
     ...secondary.map((action) => ({ action, primary: false }))
   ];
@@ -108,16 +118,17 @@ export function SlotActions({
   return (
     <div className="tm-slot__footer">
       <div className="tm-slot__actions">
-        {actions.map(({ action, primary: isPrimary }) => (
+        {actions.map(({ action, primary: isPrimary }, index) => (
+          // Keyed by place: a label turning pending must not remount the button that has focus.
           <button
-            key={action.label}
+            key={index}
             type="button"
             className={isPrimary && !quiet ? 'primary-button' : 'outline-button'}
             disabled={action.disabled}
             aria-describedby={action.disabled ? reasonId(action.reason) : undefined}
             onClick={action.onClick}
           >
-            {action.label}
+            {action.labels ? <StableLabel label={action.label} reserve={action.labels} /> : action.label}
           </button>
         ))}
         {overflow.length > 0 ? (

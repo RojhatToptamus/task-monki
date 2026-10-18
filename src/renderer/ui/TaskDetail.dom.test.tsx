@@ -1,14 +1,24 @@
 import { useState, type ComponentProps } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
 import { EMPTY_REVIEW_DRAFT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
+import type { BugReplaySnapshot } from '../../shared/bugReplay';
+import { taskManagerApi } from '../api/taskManagerClient';
 import { TaskDetail } from './TaskDetail';
 
 vi.mock('../api/taskManagerClient', () => ({
-  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })) }
+  taskManagerApi: {
+    getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })),
+    readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'),
+    readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })),
+    onUpdate: vi.fn(() => () => undefined),
+    getBugReplay: vi.fn(async ({ taskId }: { taskId: string }) => ({ taskId, availability: { canRecord: false }, runs: [], runCount: 0, earlierCases: [], storage: { usedBytes: 0, limitBytes: 1 } })),
+    checkBugVerdictCurrency: vi.fn(async () => ({ state: 'NONE' })),
+    removeBug: vi.fn(async ({ taskId }: { taskId: string }) => ({ taskId, availability: { canRecord: false }, runs: [], runCount: 0, earlierCases: [], storage: { usedBytes: 0, limitBytes: 1 } }))
+  }
 }));
 
 function detailProps(): ComponentProps<typeof TaskDetail> {
@@ -603,5 +613,61 @@ describe('Task sections keyboard navigation', () => {
 
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Review', selected: true })));
+  });
+});
+
+describe('Recorded bug', () => {
+  const reproduced: BugReplaySnapshot = {
+    taskId: 'task-1',
+    availability: { canRecord: true },
+    runs: [],
+    runCount: 2,
+    earlierCases: [],
+    storage: { usedBytes: 0, limitBytes: 1 },
+    activeCase: {
+      id: 'case-1',
+      captureId: 'capture-1',
+      title: 'Coupon total is wrong',
+      status: 'ACTIVE',
+      keepBrowserStorage: false,
+      gate: { caseId: 'case-1', title: 'Coupon total is wrong', state: 'REPRODUCED', versionId: 'version-1', version: 1, baseline: { matched: 2, total: 2 }, updatedAt: TEST_NOW },
+      steps: ['Open /', 'Click "Apply coupon"'],
+      before: ['Before: Cart total showed "$40.00"'],
+      countsLine: 'Clean runs: failed 2 of 2 before',
+      screenshotFileIds: [],
+      actions: ['send-to-agent', 'verify-again', 'run-again', 'remove'],
+      createdAt: TEST_NOW
+    }
+  };
+
+  it('asks before removing the bug, and the page stays inert while it asks', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.mocked(taskManagerApi.getBugReplay).mockResolvedValueOnce(reproduced).mockResolvedValue(reproduced);
+    onTestFinished(() => {
+      vi.mocked(taskManagerApi.getBugReplay).mockResolvedValue({ ...reproduced, activeCase: undefined, runCount: 0 });
+    });
+    const props = detailProps();
+    render(<TaskDetail {...props} />);
+
+    const openRemove = async () => {
+      const trigger = await screen.findByRole('button', { name: 'More bug actions' });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove bug' }));
+      return screen.findByRole('dialog', { name: 'Remove “Coupon total is wrong”?' });
+    };
+
+    // Keeping the bug changes nothing.
+    let dialog = await openRemove();
+    expect(props.onModalOpenChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep bug' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(taskManagerApi.removeBug).not.toHaveBeenCalled();
+
+    dialog = await openRemove();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove bug' }));
+    await waitFor(() => expect(taskManagerApi.removeBug).toHaveBeenCalledWith({ taskId: 'task-1' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(props.onModalOpenChange).toHaveBeenLastCalledWith(false);
   });
 });

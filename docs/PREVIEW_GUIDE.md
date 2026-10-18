@@ -151,6 +151,51 @@ job logs before retrying. Stop the preview before rerunning a job. **Delete data
 is separate from Stop and requires confirmation of the displayed retained data.
 Do not use production databases for local preview verification.
 
+## Record a bug
+
+**Record bug** in the Preview tab's status row records a bug in a clean copy of
+the task's app: the task's files as they are now, including uncommitted changes,
+started from its configuration on fresh data, apart from your own preview. It
+needs the desktop app on macOS, a configuration file, and an open task; while the
+agent changes the task's files, it waits and says why.
+
+Before anything starts, choose which git-ignored `.env` files the copy gets and
+select **Start clean copy**, then read **Clean runs need your approval** (what
+runs and as whom, when runs happen, the commands, source, data, secrets, env
+files and network) and select **Approve clean runs**. The approval covers 30
+runs of this task's app until Task Monki quits; clean runs also follow agent
+turns automatically.
+
+Use the page as you did when the bug happened. **Reload page** reloads it as a
+step. **Mark bug** stops recording and lets you point at what is wrong; click an
+element in the page, or **Stop pointing** (or Escape) to mark without one. The
+bug's name starts as what you pointed at and what it showed ("Cart total shows
+"$40.00""); change it if you like. Under **Checks**, say what each element should
+read or show, add more checks if you need them, and optionally check the
+requests the page sent. **Also after reload** asks that a check still holds in a
+new browser session. **Save and reproduce** needs at least one check that was
+wrong in the recording; **Save without a check** keeps the recording as evidence
+only. **Back to recording** continues recording; **Discard** asks first. A step
+that fails says why under the recording's head.
+
+Task Monki then runs the recorded steps twice on the recorded code to confirm
+the bug. The task's Overview shows the bug, what was observed, and the next
+step: **Send to agent**, **Verify fix**, **Run again**, **Record again** or
+**Use the new env file**, depending on the result. On a task the agent has not
+started, **Start implementation** sends the bug with the task. An action that
+cannot run yet says why beside it. After each agent turn, two clean runs check
+the fix on the code the turn left. If the files change after a verdict, the
+Overview marks it out of date until it is verified again; files Task Monki
+cannot copy (an untracked file over 5 MB, for example) say so until they are
+ignored or removed.
+
+A recording stops when the copy's app stops, when the page crashes, or after an
+hour: the copy stops, and **Record again** or **Save without a check** keeps
+what was recorded as evidence. After 20 minutes without input it ends and
+nothing is kept. **Remove bug** asks first and keeps the recording under
+**Earlier bugs** in Debug, where **Delete evidence** in a row's menu frees its
+space.
+
 ## Failure and recovery
 
 If the task folder is missing, the Preview tab shows a **Worktree missing** block

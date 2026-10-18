@@ -103,6 +103,7 @@ import {
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 import type { SoftwareUpdateState } from '../shared/softwareUpdate';
 import type { DesignCanvasApi } from '../shared/designCanvas';
+import type { BugRecordingViewApi } from '../shared/bugReplay';
 import {
   IPC_UPDATE_CHANNEL,
   IPC_SOFTWARE_UPDATE_CHANNEL,
@@ -130,6 +131,26 @@ function getWindowChromePlatform(): WindowChromePlatform {
 const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
+  getBugReplay: input => invokeIpc('bug:get', input),
+  startBugRecording: input => invokeIpc('bug:recording:start', input),
+  chooseBugEnvFiles: input => invokeIpc('bug:recording:envFiles', input),
+  allowBugReplayRuns: input => invokeIpc('bug:runs:allow', input),
+  cancelBugRecording: input => invokeIpc('bug:recording:cancel', input),
+  markBug: input => invokeIpc('bug:recording:mark', input),
+  pickBugCheck: input => invokeIpc('bug:recording:pick', input),
+  stopBugPick: input => invokeIpc('bug:recording:stopPick', input),
+  returnToBugRecording: input => invokeIpc('bug:recording:return', input),
+  previewBugCapture: input => invokeIpc('bug:capture:preview', input),
+  saveBugCapture: input => invokeIpc('bug:capture:save', input),
+  sendBugToAgent: input => invokeIpc('bug:send', input),
+  runBugBaseline: input => invokeIpc('bug:baseline:run', input),
+  verifyBugFix: input => invokeIpc('bug:verify', input),
+  cancelBugReplayRun: input => invokeIpc('bug:run:cancel', input),
+  applyBugCaseAction: input => invokeIpc('bug:action', input),
+  removeBug: input => invokeIpc('bug:remove', input),
+  deleteBugEvidence: input => invokeIpc('bug:evidence:delete', input),
+  readBugReplayImage: input => invokeIpc('bug:image:read', input),
+  checkBugVerdictCurrency: input => invokeIpc('bug:currency', input),
   listApplicationPreviews: () => invokeIpc('application:listApplicationPreviews'),
   getApplicationPreview: input => invokeIpc('application:getApplicationPreview', input),
   connectApplicationPreviewSource: input => invokeIpc('application:connectApplicationPreviewSource', input),
@@ -359,6 +380,14 @@ const designCanvas: DesignCanvasApi = {
 };
 if (process.platform === 'darwin') {
   contextBridge.exposeInMainWorld('designCanvas', designCanvas);
+}
+const bugRecordingView: BugRecordingViewApi = {
+  show: (input) => invokeIpc('bug:view:show', input),
+  hide: (input) => invokeIpc('bug:view:hide', input),
+  reload: (input) => invokeIpc('bug:view:reload', input)
+};
+if (process.platform === 'darwin') {
+  contextBridge.exposeInMainWorld('bugRecordingView', bugRecordingView);
 }
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),

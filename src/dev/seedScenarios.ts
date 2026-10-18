@@ -6,6 +6,7 @@ export type DevSeedScenarioGroup =
   | 'completion'
   | 'workflow'
   | 'preview'
+  | 'bug'
   | 'discourse';
 
 export interface DevSeedScenarioDefinition {
@@ -324,6 +325,12 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('task-archived', 'workflow', 'Archived task', 'Task is archived as a terminal workflow state.', [
     'phase:ARCHIVED'
   ]),
+  scenario('bug-reproduced', 'bug', 'Recorded bug reproduced', 'A recorded bug failed 2 of 2 clean runs on the recorded code; the Now panel offers Send to agent.', ['bug:REPRODUCED']),
+  scenario('bug-fix-verified', 'bug', 'Bug fix verified', 'Clean runs passed 2 of 2 on the current code; Debug lists a removed earlier bug with its evidence.', ['bug:FIX_VERIFIED', 'bug:EARLIER']),
+  scenario('bug-still-failing', 'bug', 'Bug still failing', 'The latest change failed the recorded check; the Now panel offers Send to agent.', ['bug:STILL_FAILING']),
+  scenario('bug-couldnt-verify', 'bug', "Bug fix couldn't be verified", 'An ignored env file changed after the recording; the Now panel offers Use the new env file.', ['bug:COULDNT_VERIFY']),
+  scenario('bug-stale', 'bug', 'Bug verdict out of date', 'The verdict is about earlier code than the worktree holds.', ['bug:STALE']),
+  scenario('bug-evidence-only', 'bug', 'Bug kept as evidence', 'A recording interrupted when the app stopped, saved without a check.', ['bug:CAPTURED', 'coverage:PARTIAL']),
   scenario('discourse-empty', 'discourse', 'Empty discourse', 'A new human conversation with no messages.', ['discourse:empty']),
   scenario('discourse-context-picker', 'discourse', 'Context picker draft', 'A durable draft with task and repository context.', ['discourse:draft', 'context:structured']),
   scenario('discourse-human-only', 'discourse', 'Human-only conversation', 'Human notes, reply ancestry, and a correction.', ['discourse:human-only']),
