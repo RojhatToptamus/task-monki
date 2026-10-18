@@ -8,6 +8,10 @@ import type {
   BugCaseAction,
   BugCaseView,
   BugCheckResult,
+  BugExpectationEdit,
+  BugExpectationsDraft,
+  BugExpectationsPreview,
+  BugExpectationView,
   BugRecordingPhase,
   BugRecordingSessionView,
   BugReplayGateProjection,
@@ -114,6 +118,8 @@ export function bugActionLabel(action: BugCaseAction, view?: Pick<BugCaseView, '
       return (view?.envFilesChanged?.length ?? 0) > 1 ? 'Use the new env files' : 'Use the new env file';
     case 'keep-browser-storage':
       return view?.keepBrowserStorage ? 'Clear browser storage on reload' : 'Keep browser storage on reload';
+    case 'edit-expectations':
+      return 'Edit expectations';
     case 'save-without-check':
       return 'Keep steps only';
     case 'remove':
@@ -157,7 +163,7 @@ const STATE_BUTTONS: Record<BugReplayGateState, BugCaseAction[]> = {
   CAPTURED: ['send-to-agent'],
   REPRODUCING: ['send-to-agent', 'cancel-run'],
   REPRODUCED: ['send-to-agent'],
-  NOT_REPRODUCED: ['record-again', 'run-again'],
+  NOT_REPRODUCED: ['record-again', 'run-again', 'edit-expectations'],
   FLAKY: ['record-again', 'send-to-agent'],
   REPRODUCTION_BLOCKED: ['use-new-env-files', 'run-again', 'record-again'],
   VERIFYING: ['cancel-run'],
@@ -225,6 +231,8 @@ export interface BugRunRow {
   id: string;
   /** "Before" (the recorded code) or "After" (the code with the fix). */
   kind: 'Before' | 'After';
+  /** It checked expectations the person has since changed: earlier context, never the current result. */
+  earlier: boolean;
   word: string;
   tone: Tone;
   inFlight: boolean;
@@ -236,26 +244,30 @@ export interface BugRunRow {
   screenshotFileIds: string[];
 }
 
-export function bugRunRows(runs: BugReplayRunView[]): BugRunRow[] {
+/** The replays a bug lists, newest first; one that checked earlier expectations keeps its word but no tone. */
+export function bugRunRows(runs: BugReplayRunView[], currentVersionId?: string): BugRunRow[] {
   return runs
     .filter((run) => run.kind !== 'RECORD')
     .slice(0, 8)
     .map((run) => {
       // A control run replays the recorded code too: it is a before run.
       const kind = run.kind === 'CANDIDATE' ? 'After' : 'Before';
+      const earlier = Boolean(currentVersionId && run.versionId && run.versionId !== currentVersionId);
       const settled = run.state === 'SETTLED' && run.outcome;
       const word = settled ? OUTCOME_WORDS[run.outcome!] : run.waitingFor ? WAIT_WORDS[run.waitingFor] : run.phase ?? (run.state === 'QUEUED' ? 'Queued' : 'Running');
-      const tone: Tone = !settled
-        ? run.waitingFor === 'APPROVAL' || run.waitingFor === 'KEYSTORE' ? 'action' : 'info'
-        : run.outcome === 'PASSED' ? 'success'
-          : run.outcome === 'FAILED' ? 'error'
-            : ['ENVIRONMENT_FAILED', 'BLOCKED', 'PROTECTED_INPUT_CHANGED', 'ENV_FILES_CHANGED'].includes(run.outcome!) ? 'action'
-              : 'neutral';
+      const tone: Tone = earlier && settled ? 'neutral'
+        : !settled
+          ? run.waitingFor === 'APPROVAL' || run.waitingFor === 'KEYSTORE' ? 'action' : 'info'
+          : run.outcome === 'PASSED' ? 'success'
+            : run.outcome === 'FAILED' ? 'error'
+              : ['ENVIRONMENT_FAILED', 'BLOCKED', 'PROTECTED_INPUT_CHANGED', 'ENV_FILES_CHANGED'].includes(run.outcome!) ? 'action'
+                : 'neutral';
       const started = run.startedAt ? Date.parse(run.startedAt) : NaN;
       const ended = run.settledAt ? Date.parse(run.settledAt) : NaN;
       return {
         id: run.id,
         kind,
+        earlier,
         word,
         tone,
         inFlight: !settled && !run.waitingFor,
@@ -298,6 +310,99 @@ export interface BugResultsTable {
   hasAfter: boolean;
   /** The After results are about code that changed since, or could not be checked again. */
   afterEarlier: boolean;
+}
+
+// Changing expectations
+
+/**
+ * The expectations editor: a saved bug's rows as the person left them, and the expectations they
+ * removed. Saving it makes the bug's next version, which reproduces the bug again.
+ */
+export interface ExpectationsEditor {
+  versionId: string;
+  rows: BugExpectationView[];
+  removed: string[];
+}
+
+export function openExpectationsEditor(version: Pick<NonNullable<BugCaseView['version']>, 'id' | 'expectations'>): ExpectationsEditor {
+  return { versionId: version.id, rows: version.expectations, removed: [] };
+}
+
+/** The rows still listed: a request stays while its status or Sent once does. */
+export function shownExpectationRows(editor: ExpectationsEditor): Array<{ row: BugExpectationView; index: number }> {
+  const removed = new Set(editor.removed);
+  return editor.rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => row.kind === 'request'
+      ? Boolean((row.status && !removed.has(row.status.id)) || (row.sentOnceId && !removed.has(row.sentOnceId)))
+      : !removed.has(row.id));
+}
+
+export function updateExpectationRow(editor: ExpectationsEditor, index: number, row: BugExpectationView): ExpectationsEditor {
+  return { ...editor, rows: editor.rows.map((current, position) => (position === index ? row : current)) };
+}
+
+export function keepExpectation(editor: ExpectationsEditor, id: string, kept: boolean): ExpectationsEditor {
+  const others = editor.removed.filter((candidate) => candidate !== id);
+  return { ...editor, removed: kept ? others : [...others, id] };
+}
+
+/** Removes a row's expectations; a request's go with the values that read its answer. */
+export function removeExpectationRow(editor: ExpectationsEditor, row: BugExpectationView): ExpectationsEditor {
+  const ids = row.kind === 'request' ? [row.status?.id, row.sentOnceId, ...row.valueIds].filter((id): id is string => Boolean(id)) : [row.id];
+  return { ...editor, removed: [...new Set([...editor.removed, ...ids])] };
+}
+
+/** What the editor would save: each kept expectation as the person left it. */
+export function expectationsDraft(editor: ExpectationsEditor): BugExpectationsDraft {
+  const removed = new Set(editor.removed);
+  const expectations: BugExpectationEdit[] = [];
+  for (const row of editor.rows) {
+    switch (row.kind) {
+      case 'element':
+        if (removed.has(row.id)) break;
+        expectations.push({
+          kind: 'element',
+          id: row.id,
+          template: row.template,
+          ...(row.expected !== undefined ? { expected: row.expected } : {}),
+          ...(row.count !== undefined ? { count: row.count } : {}),
+          alsoAfterReload: row.alsoAfterReload
+        });
+        break;
+      case 'request':
+        if (row.status && !removed.has(row.status.id)) expectations.push({ kind: 'status', id: row.status.id, check: row.status.check });
+        if (row.sentOnceId && !removed.has(row.sentOnceId)) expectations.push({ kind: 'keep', id: row.sentOnceId });
+        break;
+      case 'value':
+        if (!removed.has(row.id)) expectations.push({ kind: 'value', id: row.id, expected: row.expected });
+        break;
+      default:
+        if (!removed.has(row.id)) expectations.push({ kind: 'keep', id: row.id });
+    }
+  }
+  return { versionId: editor.versionId, expectations };
+}
+
+export interface ExpectationsSaveState {
+  canSave: boolean;
+  /** Why saving is not available, when that is known. */
+  reason?: string;
+}
+
+/**
+ * Whether the editor's draft can be saved: it changes something, and the recording still shows a
+ * bug against it. While a newer preview is on its way the last answer stands; the save is checked
+ * again, so a stale yes can only end in its reason.
+ */
+export function expectationsSaveState(changed: boolean, preview: BugExpectationsPreview | undefined): ExpectationsSaveState {
+  // An untouched form and its disabled Save say it already: there is nothing to save.
+  if (!changed) return { canSave: false };
+  // Typed but the same once read as the case reads it, such as spaces around a value.
+  if (preview?.changed === false) return { canSave: false, reason: 'No changes' };
+  if (!preview) return { canSave: false };
+  if (!preview.reproducible) return { canSave: false, reason: preview.reason ?? 'These expectations cannot be reproduced' };
+  return { canSave: true };
 }
 
 /** The Expected, Before and After table: what each expectation showed before the fix and after it. */

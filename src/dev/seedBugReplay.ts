@@ -142,6 +142,7 @@ export async function seedRecordedBug(input: SeedBugInput): Promise<BugReplayGat
     digest: sha256(JSON.stringify(document)),
     revisionKind: 'INITIAL',
     document,
+    ...(compiled.recorded ? { recorded: compiled.recorded } : {}),
     recipe,
     templateDigest: capture.templateDigest,
     protectedInputs: [],

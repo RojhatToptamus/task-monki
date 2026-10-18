@@ -132,11 +132,10 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 .tm-bugexpect__badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--r-2xs); background: var(--accent); color: var(--on-primary); font-size: var(--t-meta); font-weight: var(--w-medium); font-variant-numeric: tabular-nums; line-height: var(--lh-meta); }
 .tm-bugexpect__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
 .tm-bugexpect__request { min-width: 0; overflow: hidden; color: var(--text); font: var(--t-meta)/var(--lh-meta) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.tm-bugexpect__status { color: var(--muted); font: var(--t-meta)/var(--lh-meta) var(--font-mono); font-variant-numeric: tabular-nums; }
-.tm-bugexpect__status--failed { color: var(--blocked-ink); }
 .tm-bugexpect__line > :last-child { grid-column: -2; }
 .tm-bugexpect__remove { width: var(--h-compact); height: var(--h-compact); margin-right: -6px; border-radius: var(--r-xs); }
-.tm-bugexpect__was { display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.tm-bugexpect__was { display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.tm-bugexpect__was[data-tone='error'] { color: var(--blocked-ink); }
 .tm-bugexpect__controls { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
 .tm-bugexpect__controls > :only-child { grid-column: 1 / -1; justify-self: start; }
 .tm-bugexpect__controls--value { grid-template-columns: auto minmax(0, 1fr); }
@@ -188,7 +187,9 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 .tm-bugtable tbody tr:hover td { background-color: transparent; }
 .tm-bugtable__statement { line-height: var(--lh-body); overflow-wrap: anywhere; }
 .tm-bugtable .tm-bugtable__side { width: 26%; }
-.tm-bugtable__earlier { margin-left: 6px; color: var(--faint); font-weight: var(--w-regular); }
+.tm-bugtable__earlier,
+.tm-bugruns__earlier { margin-left: 8px; color: var(--muted); font-weight: var(--w-regular); }
+.tm-bugruns__earlier { font-size: var(--t-help); }
 .tm-bugtable__cell { display: grid; grid-template-columns: 13px minmax(0, 1fr); align-items: baseline; column-gap: 8px; min-width: 0; }
 .tm-bugtable__value { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--t-help); line-height: var(--lh-body); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .tm-bugtable__reload { grid-column: 2; color: var(--blocked-ink); font-size: var(--t-meta); line-height: var(--lh-meta); }
@@ -237,6 +238,14 @@ input.tm-bugbar__address:focus { background-color: var(--field-focus); box-shado
 .tm-bugdrawer { position: fixed; inset: 0; z-index: var(--layer-overlay); }
 .tm-bugdrawer__scrim { position: absolute; inset: 0; }
 .tm-bugdrawer__panel { position: absolute; top: calc(var(--h-titlebar) + 8px); right: 16px; bottom: 16px; display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(560px, calc(100% - 48px)); border-radius: var(--r-md); background: var(--surface); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); outline: none; overflow: hidden; animation: tm-panel-in var(--motion-slow) var(--ease-drawer); }
+/* The expectations editor: the same drawer with a foot, its reason beside the actions. */
+.tm-bugdrawer__panel--form { grid-template-rows: auto minmax(0, 1fr) auto; }
+.tm-bugdrawer__body > .tm-bugexpect__list > .tm-bugexpect__row:first-child { padding-top: 0; }
+.tm-bugdrawer__foot { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 16px; padding: 16px; box-shadow: inset 0 1px 0 var(--hair); }
+.tm-bugdrawer__reason { align-self: center; margin: 0; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-bugdrawer__reason[data-error] { color: var(--blocked-ink); }
+.tm-bugdrawer__actions { display: flex; align-items: center; gap: 8px; }
+.tm-bugdrawer__actions > button { flex: none; }
 .tm-bugdrawer__head { display: flex; align-items: center; gap: 8px; height: var(--h-head); padding: 0 10px 0 16px; box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-bugdrawer__title { margin: 0; color: var(--text); font-size: var(--t-label); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-bugdrawer__word { display: inline-flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }

@@ -422,6 +422,8 @@ export interface BugCaptureView {
 export interface BugReplayRunView {
   id: string;
   kind: BugReplayRunKind;
+  /** The case version whose expectations the run checked. */
+  versionId?: string;
   control?: boolean;
   state: BugReplayRunState;
   phase?: string;
@@ -481,11 +483,18 @@ export interface BugCaseView {
     version: number;
     revisionKind: BugCaseRevisionKind;
     checks: BugCaseCheckView[];
+    /** The expectations as the editor lists them, one row per element, request, value or page error. */
+    expectations: BugExpectationView[];
     envFiles: string[];
     protectedPaths: string[];
     baselineTreeId: string;
     alsoAfterReload: boolean;
   };
+  /**
+   * Expectations the bug had before the person changed them, for the listed replays that checked
+   * them: an earlier replay is read against its own expectations, never the current ones.
+   */
+  earlierVersions?: BugEarlierVersionView[];
   gate: BugReplayGateProjection;
   /** The recorded steps, in the product's words, with or without a check. */
   steps: BugStepView[];
@@ -522,9 +531,105 @@ export type BugCaseAction =
   | 'unlock-secrets'
   | 'use-new-env-files'
   | 'keep-browser-storage'
+  | 'edit-expectations'
   | 'save-without-check'
   | 'remove'
   | 'cancel-run';
+
+/** An earlier version's expectations, by the statement each one made then. */
+export interface BugEarlierVersionView {
+  id: string;
+  version: number;
+  checks: Array<Pick<BugCaseCheckView, 'id' | 'statement'>>;
+}
+
+/**
+ * One row of a saved bug's expectations as the editor lists them, the way the capture panel
+ * did: an element on the page, a request the marked action sent, a value in its JSON, or the
+ * page error. `recorded` is what the recording showed, which every change is checked against.
+ */
+export type BugExpectationView =
+  | {
+      kind: 'element';
+      id: string;
+      /** The element's name: "Cart total". */
+      name: string;
+      /** 'Showed "$40.00"', 'Held "SAVE5"', 'Not visible'. */
+      recorded?: string;
+      template: BugCaptureCheckTemplate;
+      expected?: string;
+      count?: number;
+      alsoAfterReload: boolean;
+      /** The element is a form field: Should read compares its value. */
+      field: boolean;
+    }
+  | {
+      kind: 'request';
+      /** "POST /api/orders". */
+      name: string;
+      /** What the recording got: "500", "No response", "200 ×2". */
+      recorded?: string;
+      /** The recording got a server error, no answer or another failure. */
+      failed: boolean;
+      /** Whether the method changes data: Sent once applies only to those. */
+      write: boolean;
+      status?: { id: string; check: 'success' | 'answered' };
+      /** Should be sent once, when the bug expects it. */
+      sentOnceId?: string;
+      /** Value expectations that read this request's answer; they keep its status. */
+      valueIds: string[];
+    }
+  | {
+      kind: 'value';
+      id: string;
+      /** "POST /api/orders returns total". */
+      name: string;
+      /** "Was 40", "Had no value". */
+      recorded?: string;
+      /** JSON text of the expected value. */
+      expected: string;
+    }
+  | {
+      kind: 'pageError';
+      id: string;
+      /** "The last step raised an error". */
+      recorded: string;
+    }
+  | {
+      /** A check the editor has no control for: it can only be kept or removed. */
+      kind: 'other';
+      id: string;
+      statement: string;
+    };
+
+/**
+ * A kept expectation as the person left it in the editor; an expectation the draft does not list
+ * is removed. `keep` keeps one unchanged (Sent once, No page error).
+ */
+export type BugExpectationEdit =
+  | { kind: 'element'; id: string; template: BugCaptureCheckTemplate; expected?: string; count?: number; alsoAfterReload: boolean }
+  | { kind: 'status'; id: string; check: 'success' | 'answered' }
+  | { kind: 'value'; id: string; expected: string }
+  | { kind: 'keep'; id: string };
+
+/** The editor's content: saving it is the person's approval of the changed expectations. */
+export interface BugExpectationsDraft {
+  /** The version the editor showed; a save against another version is refused. */
+  versionId: string;
+  expectations: BugExpectationEdit[];
+}
+
+/** What saving the editor's draft would do, computed against the recording without saving. */
+export interface BugExpectationsPreview {
+  versionId: string;
+  /** The draft differs from the version it started from. */
+  changed: boolean;
+  /** The recording still violates an expectation, so the bug can be reproduced with them. */
+  reproducible: boolean;
+  /** Why the draft cannot be saved. */
+  reason?: string;
+  checks: BugCaseCheckView[];
+}
 
 export interface BugReplayEarlierCase {
   id: string;
@@ -590,6 +695,9 @@ export interface BugReplayApi {
   verifyBugFix(input: BugReplayTaskRequest): Promise<BugReplaySnapshot>;
   cancelBugReplayRun(input: BugReplayTaskRequest & { runId: string }): Promise<BugReplaySnapshot>;
   applyBugCaseAction(input: BugReplayTaskRequest & { action: BugCaseAction }): Promise<BugReplaySnapshot>;
+  previewBugExpectations(input: BugReplayTaskRequest & { draft: BugExpectationsDraft }): Promise<BugExpectationsPreview>;
+  /** Saves changed expectations as the bug's next version, which reproduces the bug again. */
+  saveBugExpectations(input: BugReplayTaskRequest & { draft: BugExpectationsDraft }): Promise<BugReplaySnapshot>;
   removeBug(input: BugReplayTaskRequest): Promise<BugReplaySnapshot>;
   deleteBugEvidence(input: BugReplayTaskRequest & { caseId: string }): Promise<BugReplaySnapshot>;
   readBugReplayImage(input: BugReplayTaskRequest & { fileId: string }): Promise<{ mimeType: 'image/png'; data: Uint8Array }>;

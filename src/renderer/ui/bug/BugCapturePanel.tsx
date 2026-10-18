@@ -1,20 +1,14 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { Plus, X } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import type { BugCaptureDraft, BugCapturePreview, BugCaptureView, BugRecordingSessionView } from '../../../shared/bugReplay';
 import { taskManagerApi } from '../../api/taskManagerClient';
-import {
-  CHECK_TEMPLATE_OPTIONS,
-  REQUEST_CHECK_OPTIONS,
-  captureDraft,
-  captureSaveState,
-  suggestedCaptureTitle
-} from '../../model/bugReplay';
+import { captureDraft, captureSaveState, suggestedCaptureTitle } from '../../model/bugReplay';
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { useArrivals } from '../arrivals';
 import { DisclosureChevron } from '../DisclosureChevron';
 import { StableLabel } from '../StableLabel';
-import { Tooltip } from '../Tooltip';
 import { BugStepIcon } from './BugStepIcon';
+import { ElementExpectation, FixedExpectation, RequestExpectation, ValueExpectation } from './BugExpectationRows';
 
 const PREVIEW_DELAY_MS = 250;
 const MAX_PICKS = 5;
@@ -250,110 +244,43 @@ export function BugCapturePanel({
                 {draft.checks.map((check, position) => {
                   const pick = picks.get(check.pickIndex);
                   if (!pick) return null;
-                  const textual = check.template === 'equals' || check.template === 'contains';
                   const shown = pick.value !== undefined ? `Held "${pick.value}"` : pick.text ? `Showed "${pick.text}"` : pick.visible ? 'Visible, no text' : 'Not visible';
                   return (
-                    <li key={check.pickIndex} className="tm-bugexpect__row" data-arrived={arrived(`pick:${check.pickIndex}`) ? '' : undefined}>
-                      <div className="tm-bugexpect__line">
-                        <span className="tm-bugexpect__badge" aria-hidden="true">{check.pickIndex + 1}</span>
-                        <span className="tm-bugexpect__name" title={pick.label}>{pick.label}</span>
-                        <RemoveButton label={`Remove the expectation on ${pick.label}`} disabled={saving}
-                          onRemove={() => update((current) => ({ ...current, checks: current.checks.filter((_, index) => index !== position) }))} />
-                      </div>
-                      <p className="tm-bugexpect__was" title={shown}>{shown}</p>
-                      <div className="tm-bugexpect__controls">
-                        <select className="tm-bugcontrol" aria-label={`Expectation on ${pick.label}`} value={check.template} disabled={saving}
-                          onChange={(event) => update((current) => ({
-                            ...current,
-                            checks: current.checks.map((item, index) => (index === position ? { ...item, template: event.target.value as typeof item.template } : item))
-                          }))}>
-                          {CHECK_TEMPLATE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                        </select>
-                        {textual ? (
-                          <input
-                            ref={(element) => {
-                              if (element) valueRefs.current.set(check.pickIndex, element);
-                              else valueRefs.current.delete(check.pickIndex);
-                            }}
-                            className="tm-bugcontrol"
-                            aria-label={`What ${pick.label} should ${check.template === 'equals' ? 'read' : 'contain'}`}
-                            value={check.expected ?? ''}
-                            maxLength={1000}
-                            disabled={saving}
-                            onChange={(event) => update((current) => ({
-                              ...current,
-                              checks: current.checks.map((item, index) => (index === position ? { ...item, expected: event.target.value } : item))
-                            }))} />
-                        ) : check.template === 'count' ? (
-                          <input className="tm-bugcontrol tm-bugcontrol--count" aria-label={`How many times ${pick.label} should appear`} type="number" min={0} max={1000}
-                            value={check.count ?? 1} disabled={saving}
-                            onChange={(event) => update((current) => ({
-                              ...current,
-                              checks: current.checks.map((item, index) => (index === position ? { ...item, count: Math.max(0, Math.min(1000, Number(event.target.value) || 0)) } : item))
-                            }))} />
-                        ) : null}
-                      </div>
-                      <label className="tm-bugcheck__option">
-                        <input type="checkbox" checked={check.alsoAfterReload} disabled={saving}
-                          onChange={(event) => update((current) => ({
-                            ...current,
-                            checks: current.checks.map((item, index) => (index === position ? { ...item, alsoAfterReload: event.target.checked } : item))
-                          }))} />
-                        <span>Also after reload</span>
-                      </label>
-                    </li>
+                    <ElementExpectation key={check.pickIndex} badge={check.pickIndex + 1} name={pick.label} shown={shown} value={check}
+                      disabled={saving} arrived={arrived(`pick:${check.pickIndex}`)}
+                      valueRef={(element) => {
+                        if (element) valueRefs.current.set(check.pickIndex, element);
+                        else valueRefs.current.delete(check.pickIndex);
+                      }}
+                      onChange={(next) => update((current) => ({
+                        ...current,
+                        checks: current.checks.map((item, index) => (index === position ? { ...item, ...next } : item))
+                      }))}
+                      onRemove={() => update((current) => ({ ...current, checks: current.checks.filter((_, index) => index !== position) }))} />
                   );
                 })}
 
                 {draft.noPageError ? (
-                  <li className="tm-bugexpect__row" data-arrived={arrived('console') ? '' : undefined}>
-                    <div className="tm-bugexpect__line">
-                      <span className="tm-bugexpect__name">No page error</span>
-                      <RemoveButton label="Remove the page error expectation" disabled={saving}
-                        onRemove={() => update((current) => ({ ...current, noPageError: false }))} />
-                    </div>
-                    <p className="tm-bugexpect__was">{capture.uncaughtError ? 'The last step raised an error' : 'The last step raised no error'}</p>
-                  </li>
+                  <FixedExpectation name="No page error" removeLabel="Remove the page error expectation" disabled={saving} arrived={arrived('console')}
+                    was={capture.uncaughtError ? 'The last step raised an error' : 'The last step raised no error'}
+                    onRemove={() => update((current) => ({ ...current, noPageError: false }))} />
                 ) : null}
 
                 {shownRules.map(({ rule, position, row }) => {
                   const request = row!;
                   const write = request.method !== 'GET' && request.method !== 'HEAD';
-                  const name = `${request.method} ${request.pathTemplate}`;
+                  const setRule = (change: Partial<typeof rule>) => update((current) => ({
+                    ...current,
+                    requestRules: current.requestRules.map((item, index) => (index === position ? { ...item, ...change } : item))
+                  }));
+                  const answered = request.observed === 'no response' ? 'Got no response' : `Returned ${request.observed}`;
                   return (
-                    <li key={rule.requestKey} className="tm-bugexpect__row" data-arrived={arrived(`request:${rule.requestKey}`) ? '' : undefined}>
-                      <div className="tm-bugexpect__line">
-                        <code className="tm-bugexpect__request" title={`${request.method} ${request.path}`}>{name}</code>
-                        <span className={`tm-bugexpect__status${request.succeeded ? '' : ' tm-bugexpect__status--failed'}`}>
-                          {request.observed}{request.count > 1 ? ` ×${request.count}` : ''}
-                        </span>
-                        <RemoveButton label={`Remove the expectations on ${name}`} disabled={saving}
-                          onRemove={() => update((current) => ({
-                            ...current,
-                            requestRules: current.requestRules.map((item, index) => (index === position ? { ...item, check: 'none' as const, sentOnce: false } : item))
-                          }))} />
-                      </div>
-                      <div className="tm-bugexpect__controls">
-                        <select className="tm-bugcontrol" aria-label={`Expectation on ${name}`} value={rule.check} disabled={saving}
-                          onChange={(event) => update((current) => ({
-                            ...current,
-                            requestRules: current.requestRules.map((item, index) => (index === position ? { ...item, check: event.target.value as typeof item.check } : item))
-                          }))}>
-                          {REQUEST_CHECK_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                          <option value="none">Any status</option>
-                        </select>
-                        {write ? (
-                          <label className="tm-bugcheck__option">
-                            <input type="checkbox" checked={rule.sentOnce} disabled={saving}
-                              onChange={(event) => update((current) => ({
-                                ...current,
-                                requestRules: current.requestRules.map((item, index) => (index === position ? { ...item, sentOnce: event.target.checked } : item))
-                              }))} />
-                            <span>Sent once</span>
-                          </label>
-                        ) : null}
-                      </div>
-                    </li>
+                    <RequestExpectation key={rule.requestKey} name={`${request.method} ${request.pathTemplate}`} title={`${request.method} ${request.path}`}
+                      observed={`${answered}${request.count > 1 ? ` ×${request.count}` : ''}`} failed={!request.succeeded}
+                      check={rule.check} sentOnce={write ? rule.sentOnce : undefined} disabled={saving} arrived={arrived(`request:${rule.requestKey}`)}
+                      onCheck={(check) => setRule({ check })}
+                      onSentOnce={(sentOnce) => setRule({ sentOnce })}
+                      onRemove={() => setRule({ check: 'none', sentOnce: false })} />
                   );
                 })}
 
@@ -361,23 +288,13 @@ export function BugCapturePanel({
                   const row = valueRows.find((candidate) => candidate.requestKey === chosen.requestKey && candidate.side === chosen.side && candidate.pointer === chosen.pointer);
                   const name = row ? valueName(row, requestRows.get(row.requestKey)) : chosen.pointer;
                   return (
-                    <li key={`${chosen.requestKey} ${chosen.side} ${chosen.pointer}`} className="tm-bugexpect__row"
-                      data-arrived={arrived(`value:${chosen.requestKey} ${chosen.side} ${chosen.pointer}`) ? '' : undefined}>
-                      <div className="tm-bugexpect__line">
-                        <code className="tm-bugexpect__request" title={name}>{name}</code>
-                        <RemoveButton label={`Remove the expectation on ${name}`} disabled={saving}
-                          onRemove={() => update((current) => ({ ...current, valueChecks: current.valueChecks.filter((item) => item !== chosen) }))} />
-                      </div>
-                      {row ? <p className="tm-bugexpect__was">Was {row.observed}</p> : null}
-                      <div className="tm-bugexpect__controls tm-bugexpect__controls--value">
-                        <span className="tm-bugexpect__verb">Should be</span>
-                        <input aria-label={`Expected value of ${name}`} className="tm-bugcontrol tm-bugcontrol--mono" value={chosen.expected} maxLength={2000} disabled={saving}
-                          onChange={(event) => update((current) => ({
-                            ...current,
-                            valueChecks: current.valueChecks.map((item) => (item === chosen ? { ...item, expected: event.target.value } : item))
-                          }))} />
-                      </div>
-                    </li>
+                    <ValueExpectation key={`${chosen.requestKey} ${chosen.side} ${chosen.pointer}`} name={name} was={row ? `Was ${row.observed}` : undefined}
+                      expected={chosen.expected} disabled={saving} arrived={arrived(`value:${chosen.requestKey} ${chosen.side} ${chosen.pointer}`)}
+                      onExpected={(expected) => update((current) => ({
+                        ...current,
+                        valueChecks: current.valueChecks.map((item) => (item === chosen ? { ...item, expected } : item))
+                      }))}
+                      onRemove={() => update((current) => ({ ...current, valueChecks: current.valueChecks.filter((item) => item !== chosen) }))} />
                   );
                 })}
               </ul>
@@ -454,16 +371,6 @@ export function BugCapturePanel({
 function namedByPerson(capture: BugCaptureView): boolean {
   const stored = capture.draft;
   return Boolean(stored?.title.trim() && stored.title !== suggestedCaptureTitle(capture, stored));
-}
-
-function RemoveButton({ label, disabled, onRemove }: { label: string; disabled: boolean; onRemove(): void }) {
-  return (
-    <Tooltip label="Remove">
-      <button type="button" className="tm-iconbtn tm-bugexpect__remove" aria-label={label} disabled={disabled} onClick={onRemove}>
-        <X size={13} aria-hidden="true" />
-      </button>
-    </Tooltip>
-  );
 }
 
 /** A JSON value a request sent or got back, by its request and field: "POST /api/cart returns total". */

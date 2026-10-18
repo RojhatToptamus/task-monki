@@ -65,6 +65,20 @@ export interface BugCaseRecord {
   revision: number;
 }
 
+/**
+ * What the recording showed for one expectation, kept with each version so a changed expectation
+ * is checked against the recording by the compiler's own rules. Lists keep each distinct value in
+ * the order it was first seen, which is all those rules read.
+ */
+export type BugRecordedObservation =
+  /** The picked element: its whitespace-normalised text, a field's value, and its name as the pick showed it. */
+  | { kind: 'element'; label: string; text: string; value?: string; visible: boolean; count: number; field: boolean }
+  /** The requests the check counts: how many, and how each was answered (a status, or no response). */
+  | { kind: 'requests'; count: number; answers: Array<number | 'no-response'> }
+  /** Canonical JSON at the checked pointer; null where a response had no value there. */
+  | { kind: 'json'; values: Array<string | null> }
+  | { kind: 'pageError'; raised: boolean };
+
 export interface BugCaseVersionRecord {
   id: string;
   caseId: string;
@@ -72,8 +86,11 @@ export interface BugCaseVersionRecord {
   version: number;
   digest: string;
   revisionKind: BugCaseRevisionKind;
+  /** For a changed expectation: what changed, in the product's words. */
   reason?: string;
   document: BugCaseV1;
+  /** What the recording showed for each expectation, by its id; absent on versions saved before it was kept. */
+  recorded?: Record<string, BugRecordedObservation>;
   recipe: BugReplayRecipeRecord;
   templateDigest: string;
   protectedInputs: BugReplayProtectedInput[];

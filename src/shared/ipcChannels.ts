@@ -59,6 +59,8 @@ export const IPC_INVOKE_CHANNELS = [
   'bug:capture:save',
   'bug:currency',
   'bug:evidence:delete',
+  'bug:expectations:preview',
+  'bug:expectations:save',
   'bug:get',
   'bug:image:read',
   'bug:recording:cancel',

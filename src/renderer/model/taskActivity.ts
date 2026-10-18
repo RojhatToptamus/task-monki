@@ -419,6 +419,11 @@ function bugItem(event: DomainEvent, payload: Record<string, unknown>, state: Ta
     state.lastBugSignature = undefined;
     return item(event, 'workflow', 'User', 'Bug removed', undefined, 'neutral');
   }
+  if (event.type === 'BUG_CASE_DECIDED' && payload.revision === 'EXPECTATION_CHANGED') {
+    // The changed expectations are reproduced and verified again: their results are new facts.
+    state.lastBugSignature = undefined;
+    return item(event, 'workflow', 'User', 'Expectations changed', fact(stringField(payload, 'change') ?? title), 'info');
+  }
   const bugState = stringField(gate, 'state');
   const described = bugState ? BUG_STATE_ITEMS[bugState as BugReplayGateState] : undefined;
   if (!described) return undefined;

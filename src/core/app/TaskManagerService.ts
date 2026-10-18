@@ -4528,6 +4528,20 @@ export class TaskManagerService {
     });
   };
 
+  previewBugExpectations: BugReplayApi['previewBugExpectations'] = async (input) => {
+    const { taskId, draft } = bugReplayInput.expectations(input);
+    return this.requireBugReplay().replay.previewExpectations(taskId, draft);
+  };
+
+  saveBugExpectations: BugReplayApi['saveBugExpectations'] = (input) => {
+    const { taskId, draft } = bugReplayInput.expectations(input);
+    return this.withControlAction(async () => {
+      await this.assertBugTaskOpen(taskId);
+      await this.requireBugReplay().replay.reviseExpectations(taskId, draft);
+      return this.bugSnapshot(taskId);
+    });
+  };
+
   removeBug: BugReplayApi['removeBug'] = (input) => {
     const { taskId } = bugReplayInput.task(input);
     return this.withControlAction(async () => {

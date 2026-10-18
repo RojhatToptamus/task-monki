@@ -1,4 +1,4 @@
-import type { BugCaptureDraft, BugCaseAction, BugReplaySnapshot } from '../../shared/bugReplay';
+import type { BugCaptureDraft, BugCaseAction, BugExpectationEdit, BugExpectationsDraft, BugReplaySnapshot } from '../../shared/bugReplay';
 import { BUG_REPLAY_STORAGE_LIMIT_BYTES } from '../../shared/bugReplay';
 
 /**
@@ -108,6 +108,44 @@ function captureDraft(value: unknown): BugCaptureDraft {
   };
 }
 
+/** The expectations editor's draft: each kept expectation by its id, with what the person set. */
+function expectationsDraft(value: unknown): BugExpectationsDraft {
+  const input = object(value);
+  return {
+    versionId: id(input.versionId),
+    expectations: list(input.expectations, 20, (entry): BugExpectationEdit => {
+      const edit = object(entry);
+      const editId = id(edit.id);
+      switch (edit.kind) {
+        case 'element': {
+          const template = text(edit.template, 16);
+          if (!TEMPLATES.has(template)) throw new BugReplayInputError();
+          const expected = optionalText(edit.expected, 1_000);
+          return {
+            kind: 'element',
+            id: editId,
+            template: template as Extract<BugExpectationEdit, { kind: 'element' }>['template'],
+            ...(expected !== undefined ? { expected } : {}),
+            ...(edit.count !== undefined ? { count: integer(edit.count, 0, 10_000) } : {}),
+            alsoAfterReload: boolean(edit.alsoAfterReload)
+          };
+        }
+        case 'status': {
+          const check = text(edit.check, 16);
+          if (check !== 'success' && check !== 'answered') throw new BugReplayInputError();
+          return { kind: 'status', id: editId, check };
+        }
+        case 'value':
+          return { kind: 'value', id: editId, expected: text(edit.expected, 2_000) };
+        case 'keep':
+          return { kind: 'keep', id: editId };
+        default:
+          throw new BugReplayInputError();
+      }
+    })
+  };
+}
+
 export const bugReplayInput = {
   task,
   session,
@@ -157,6 +195,10 @@ export const bugReplayInput = {
     const action = text(input.action, 40) as BugCaseAction;
     if (!ACTIONS.has(action)) throw new BugReplayInputError();
     return { ...task(input), action };
+  },
+  expectations(value: unknown): { taskId: string; draft: BugExpectationsDraft } {
+    const input = object(value);
+    return { ...task(input), draft: expectationsDraft(input.draft) };
   },
   evidence(value: unknown): { taskId: string; caseId: string } {
     const input = object(value);

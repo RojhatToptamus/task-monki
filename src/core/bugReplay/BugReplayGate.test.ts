@@ -71,6 +71,44 @@ describe('Bug gate', () => {
     expect(projection.activeRun).toMatchObject({ kind: 'BASELINE', waitingFor: 'APPROVAL' });
   });
 
+  it('starts changed expectations over: the earlier version’s verdict never stands for them', () => {
+    const changed = versionRecord({ id: '9c4f5d6e-7081-4c93-9da4-c5e6f708192a', version: 2, revisionKind: 'EXPECTATION_CHANGED' });
+    const decisions = [
+      ...approved,
+      { id: 'decision-2', caseId: version.caseId, taskId: 'task-1', kind: 'APPROVED' as const, versionId: changed.id, createdAt: at(30) },
+      { id: 'decision-3', caseId: version.caseId, taskId: 'task-1', kind: 'SUPERSEDED' as const, versionId: version.id, createdAt: at(30) }
+    ];
+    const ofChanged = (runs: StoredBugReplayRun[]) => runs.map((run) => ({ ...run, versionId: changed.id }));
+    const gateOf = (runs: StoredBugReplayRun[]) =>
+      computeGate({ bugCase: bugCaseRecord(), state: { observedTreeId: 'tree-fix' }, versions: [version, changed], decisions, runs: newestFirst(runs), toolchain: TOOLCHAIN, now: at(60) });
+    // Version 1 was reproduced and its fix verified on the code the worktree holds.
+    const earlier = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'PASSED'], 10)];
+    const requalifying = ofChanged([
+      runRecord({ kind: 'BASELINE', setId: 'qualification-2', state: 'WAITING', waitingFor: 'APPROVAL', queuedAt: at(30) }),
+      runRecord({ kind: 'BASELINE', setId: 'qualification-2', state: 'WAITING', waitingFor: 'APPROVAL', queuedAt: at(30) }),
+      ...attempt('attempt-2', 'tree-fix', ['OPEN', 'OPEN'], 31)
+    ]);
+
+    const rechecking = gateOf([...earlier, ...requalifying]);
+    expect(rechecking).toMatchObject({ state: 'VERIFYING', fact: 'Rechecking the bug first', versionId: changed.id, version: 2, baseline: { matched: 0 } });
+    expect(rechecking.verdictTreeId).toBeUndefined();
+    // The code version 1 verified still owes a verification of the changed expectations.
+    expect(verificationCovered(newestFirst([...earlier, ...requalifying]), version.id, 'tree-fix', TOOLCHAIN)).toBe(true);
+    expect(verificationCovered(newestFirst(earlier), changed.id, 'tree-fix', TOOLCHAIN)).toBe(false);
+    expect(owedRuns(newestFirst(earlier), changed.id)).toEqual([{ kind: 'BASELINE' }, { kind: 'BASELINE' }]);
+
+    // Changed expectations the recorded code does not violate have nothing to verify against.
+    const notReproduced = ofChanged([0, 1].map((offset) => runRecord({ kind: 'BASELINE', setId: 'qualification-2', outcome: 'NOT_REPRODUCED', queuedAt: at(40 + offset), settledAt: at(40 + offset) })));
+    const refused = gateOf([...earlier, ...notReproduced]);
+    expect(refused).toMatchObject({ state: 'NOT_REPRODUCED', versionId: changed.id });
+    expect(refused.verdictTreeId).toBeUndefined();
+    expect(refused.candidate).toBeUndefined();
+
+    // Reproduced and verified again, the verdict is about the changed expectations.
+    const verified = gateOf([...earlier, ...ofChanged([...reproducedQualification('qualification-2', 40), ...attempt('attempt-2', 'tree-fix', ['PASSED', 'PASSED'], 50)])]);
+    expect(verified).toMatchObject({ state: 'FIX_VERIFIED', versionId: changed.id, verdictTreeId: 'tree-fix', candidate: { passed: 2, total: 2 } });
+  });
+
   it('states no verdict while the worktree a turn left cannot be read', () => {
     const issue = "Untracked files over 5 MB can't be copied: recording.mov. Ignore or remove them";
     const verified = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'PASSED'], 10)];

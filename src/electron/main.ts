@@ -634,6 +634,8 @@ function installIpcHandlers(): void {
   handleTrustedIpc('bug:verify', (_, input: Parameters<TaskManagerService['verifyBugFix']>[0]) => service.verifyBugFix(input));
   handleTrustedIpc('bug:run:cancel', (_, input: Parameters<TaskManagerService['cancelBugReplayRun']>[0]) => service.cancelBugReplayRun(input));
   handleTrustedIpc('bug:action', (_, input: Parameters<TaskManagerService['applyBugCaseAction']>[0]) => service.applyBugCaseAction(input));
+  handleTrustedIpc('bug:expectations:preview', (_, input: Parameters<TaskManagerService['previewBugExpectations']>[0]) => service.previewBugExpectations(input));
+  handleTrustedIpc('bug:expectations:save', (_, input: Parameters<TaskManagerService['saveBugExpectations']>[0]) => service.saveBugExpectations(input));
   handleTrustedIpc('bug:remove', (_, input: Parameters<TaskManagerService['removeBug']>[0]) => service.removeBug(input));
   handleTrustedIpc('bug:evidence:delete', (_, input: Parameters<TaskManagerService['deleteBugEvidence']>[0]) => service.deleteBugEvidence(input));
   handleTrustedIpc('bug:image:read', (_, input: Parameters<TaskManagerService['readBugReplayImage']>[0]) => service.readBugReplayImage(input));

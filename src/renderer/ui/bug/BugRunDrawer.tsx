@@ -34,9 +34,12 @@ export function BugRunDrawer({
   // The replay is read, not filled in: focus starts on what scrolls, so the keys read it and one
   // Escape closes it (the close button's tooltip never opens first).
   useDialogFocusBoundary({ dialogRef: panelRef, initialFocusRef: bodyRef, busy: false, onClose });
-  const row = bugRunRows([run])[0];
+  const row = bugRunRows([run], view.version?.id)[0];
   const glyph = row ? statusGlyphFor(row.tone, row.inFlight) : undefined;
-  const checks = view.version?.checks ?? [];
+  // A replay of expectations the person since changed is read against its own, as earlier context.
+  const checks: Array<{ id: string; statement: string }> = row?.earlier
+    ? view.earlierVersions?.find((version) => version.id === run.versionId)?.checks ?? []
+    : view.version?.checks ?? [];
   const byId = new Map(run.observations.map((observation) => [observation.assertionId, observation]));
   const shotId = run.screenshotFileIds[run.screenshotFileIds.length - 1];
   const shot: BugShotView | undefined = shotId
@@ -80,15 +83,15 @@ export function BugRunDrawer({
           ) : null}
 
           {checks.length && reached ? (
-            <section className="tm-bugdrawer__section" aria-label="Expected">
-              <h4 className="tm-bugdrawer__label">Expected</h4>
+            <section className="tm-bugdrawer__section" aria-label={row.earlier ? 'Earlier expectations' : 'Expected'}>
+              <h4 className="tm-bugdrawer__label">{row.earlier ? 'Earlier expectations' : 'Expected'}</h4>
               <ul className="tm-bugresults">
                 {checks.map((check) => {
                   const observation = byId.get(check.id);
                   if (!observation) return null;
                   return (
                     <li key={check.id} className="tm-bugresult" data-held={observation.passed ? '' : undefined}>
-                      <ResultMark held={observation.passed} />
+                      <ResultMark held={observation.passed} quiet={row.earlier} />
                       <span className="tm-bugresult__statement">{check.statement}</span>
                       <span className="tm-bugresult__value" title={observation.observed}>{observation.value ?? observation.observed ?? ''}</span>
                       {observation.afterReload ? (

@@ -534,6 +534,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     verifyBugFix: input => post(baseUrl, '/api/bug/verify', input),
     cancelBugReplayRun: input => post(baseUrl, '/api/bug/run/cancel', input),
     applyBugCaseAction: input => post(baseUrl, '/api/bug/action', input),
+    previewBugExpectations: input => post(baseUrl, '/api/bug/expectations/preview', input),
+    saveBugExpectations: input => post(baseUrl, '/api/bug/expectations/save', input),
     removeBug: input => post(baseUrl, '/api/bug/remove', input),
     deleteBugEvidence: input => post(baseUrl, '/api/bug/evidence/delete', input),
     readBugReplayImage: async input => {

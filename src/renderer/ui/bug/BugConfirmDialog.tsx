@@ -13,6 +13,7 @@ export function BugConfirmDialog({
   confirmLabel,
   busyLabel,
   busy,
+  returnFocus,
   returnFocusRef,
   shouldReturnFocus,
   onKeep,
@@ -24,6 +25,8 @@ export function BugConfirmDialog({
   confirmLabel: string;
   busyLabel: string;
   busy: boolean;
+  /** The control that opened the dialog, where focus returns. */
+  returnFocus?: HTMLElement | null;
   /** Where focus goes when the dialog closes and the control that opened it is gone. */
   returnFocusRef?: RefObject<HTMLElement | null>;
   /** False when the caller has already placed focus, after the act removed its control. */
@@ -34,7 +37,7 @@ export function BugConfirmDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const bodyId = useId();
-  useDialogFocusBoundary({ dialogRef: panelRef, fallbackReturnFocusRef: returnFocusRef, shouldReturnFocus, busy, onClose: onKeep });
+  useDialogFocusBoundary({ dialogRef: panelRef, returnFocus, fallbackReturnFocusRef: returnFocusRef, shouldReturnFocus, busy, onClose: onKeep });
   return createPortal(
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={bodyId}>
       <div className="tm-modal__scrim" onClick={busy ? undefined : onKeep} />
