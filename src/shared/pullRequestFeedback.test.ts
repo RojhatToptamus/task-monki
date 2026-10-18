@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PULL_REQUEST_FEEDBACK_LIMITS, boundPullRequestFeedback, parsePullRequestFeedback } from './pullRequestFeedback';
+import { PULL_REQUEST_FEEDBACK_LIMITS, boundPullRequestFeedback, feedbackCommentTimes, parsePullRequestFeedback, reviewTurn } from './pullRequestFeedback';
 
 const base = { provider: 'GITHUB' as const, number: 9, capturedAt: '2026-10-10T10:00:00.000Z', reviewers: [], truncated: false };
 const thread = (id: string, bodies: string[], resolved = false) => ({
@@ -55,5 +55,33 @@ describe('parsePullRequestFeedback', () => {
     // Another pull request's reading is not this one's.
     expect(parsePullRequestFeedback(JSON.stringify(document), 10)).toBeUndefined();
     expect(parsePullRequestFeedback('not json', 9)).toBeUndefined();
+  });
+});
+
+describe('reviewTurn', () => {
+  const asked = { reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' as const }], unresolvedCount: 2 };
+
+  it('waits on reviewers once the person wrote last or asked them again, and returns to the person when anyone else writes', () => {
+    // Nobody has answered yet: the person's move.
+    expect(reviewTurn({ ...asked, lastOtherCommentAt: '2026-10-17T10:00:00.000Z' }, true)).toBe('AUTHOR');
+    // The person answered after everyone else.
+    expect(reviewTurn({ ...asked, lastOtherCommentAt: '2026-10-17T10:00:00.000Z', lastViewerCommentAt: '2026-10-17T10:05:00.000Z' }, true)).toBe('REVIEWERS');
+    // The reviewer wrote again after the answer.
+    expect(reviewTurn({ ...asked, lastOtherCommentAt: '2026-10-17T10:09:00.000Z', lastViewerCommentAt: '2026-10-17T10:05:00.000Z' }, true)).toBe('AUTHOR');
+    // Asked again: the platform reads them as requested while their verdict stands.
+    expect(reviewTurn({ reviewers: [{ name: 'alice', state: 'REQUESTED' }], unresolvedCount: 0, lastOtherCommentAt: '2026-10-17T10:00:00.000Z' }, true)).toBe('REVIEWERS');
+    // Nothing asks: no request for changes and no open thread.
+    expect(reviewTurn({ reviewers: [{ name: 'bob', state: 'APPROVED' }], unresolvedCount: 0 }, false)).toBeUndefined();
+  });
+
+  it('reads when the person and everyone else last wrote, in the platform clock', () => {
+    const discussion = (comments: Array<{ author: string; createdAt?: string }>) => ({
+      id: comments[0]!.author, kind: 'THREAD' as const, resolvable: true, resolved: false, outdated: false, commentCount: comments.length,
+      comments: comments.map((comment) => ({ ...comment, body: 'x', truncated: false }))
+    });
+    expect(feedbackCommentTimes({ viewer: 'me', discussions: [
+      discussion([{ author: 'alice', createdAt: '2026-10-17T10:00:00Z' }, { author: 'me', createdAt: '2026-10-17T10:05:00Z' }]),
+      discussion([{ author: 'bob', createdAt: '2026-10-17T09:00:00Z' }, { author: 'carol' }])
+    ] })).toEqual({ lastViewerCommentAt: '2026-10-17T10:05:00.000Z', lastOtherCommentAt: '2026-10-17T10:00:00.000Z' });
   });
 });

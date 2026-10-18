@@ -208,6 +208,20 @@ describe('describeTaskAttention', () => {
       .toMatchObject({ label: 'Push unconfirmed' });
   });
 
+  it('asks for a review that requested changes only while it is the person\'s move, and asks for the push before it', () => {
+    const asked = { githubPullRequest: 'OPEN_READY' as const, githubPullRequestNumber: 9, reviews: 'CHANGES_REQUESTED' as const };
+    const withTurn = (projection: NonNullable<NonNullable<Parameters<typeof makeTaskRecord>[0]>['projection']>, turn: 'AUTHOR' | 'REVIEWERS') =>
+      ({ ...makeTaskRecord({ projection: { ...asked, ...projection } }), delivery: { turn } });
+    expect(describeTaskAttention(withTurn({}, 'AUTHOR'))).toMatchObject({ label: 'Changes requested' });
+    // Answered: the review waits on its reviewers, not on the person.
+    expect(describeTaskAttention(withTurn({}, 'REVIEWERS'))).toBeUndefined();
+    // The agent is working on it: nothing waits on the person until it ends.
+    expect(describeTaskAttention(withTurn({ agentRun: 'RUNNING' }, 'AUTHOR'))).toBeUndefined();
+    // Fixes in the worktree come first: pushing them is the next step.
+    expect(describeTaskAttention(withTurn({ git: 'DIRTY' }, 'AUTHOR'))).toMatchObject({ label: 'Changes not pushed' });
+    expect(describeTaskAttention(withTurn({ git: 'COMMITTED_UNPUSHED', ciChecks: 'FAILING' }, 'AUTHOR'))).toMatchObject({ label: 'Changes not pushed' });
+  });
+
   it('sanitizes generic delivery attention and returns nothing for neutral state', () => {
     const delivery = describeTaskAttention(
       makeTaskRecord({

@@ -31,6 +31,8 @@ export type PullRequestReviewerState = (typeof PULL_REQUEST_REVIEWER_STATES)[num
 export interface PullRequestReviewer {
   name: string;
   state: PullRequestReviewerState;
+  /** An app, not a person: it reviews on its own and cannot be asked to review again. */
+  bot?: boolean;
 }
 
 export const PULL_REQUEST_DISCUSSION_KINDS = ['THREAD', 'REVIEW', 'COMMENT'] as const;
@@ -104,6 +106,50 @@ export interface PullRequestFeedbackSummary {
   unresolvedCount: number;
   discussionCount: number;
   reviewers: PullRequestReviewer[];
+  /** The latest comment by the account that read the feedback, and by anyone else, in the platform's clock. */
+  lastViewerCommentAt?: string;
+  lastOtherCommentAt?: string;
+}
+
+/**
+ * When the person last wrote on the pull request and when anyone else did:
+ * whose move it is turns on which came last.
+ */
+export function feedbackCommentTimes(feedback: Pick<PullRequestFeedback, 'viewer' | 'discussions'>): Pick<PullRequestFeedbackSummary, 'lastViewerCommentAt' | 'lastOtherCommentAt'> {
+  let viewer = 0;
+  let other = 0;
+  for (const discussion of feedback.discussions) {
+    for (const comment of discussion.comments) {
+      const at = comment.createdAt ? Date.parse(comment.createdAt) : Number.NaN;
+      if (!Number.isFinite(at)) continue;
+      if (feedback.viewer && comment.author === feedback.viewer) viewer = Math.max(viewer, at);
+      else other = Math.max(other, at);
+    }
+  }
+  return {
+    ...(viewer ? { lastViewerCommentAt: new Date(viewer).toISOString() } : {}),
+    ...(other ? { lastOtherCommentAt: new Date(other).toISOString() } : {})
+  };
+}
+
+/**
+ * Whose move a pull request under review waits on. It is the person's while a
+ * reviewer's request or thread stands unanswered; it is the reviewers' once the
+ * person wrote after everyone else, or asked again every reviewer who requested
+ * changes. Nothing asks when no review requested changes and no thread is open.
+ */
+export function reviewTurn(
+  summary: Pick<PullRequestFeedbackSummary, 'reviewers' | 'unresolvedCount' | 'lastViewerCommentAt' | 'lastOtherCommentAt'>,
+  changesRequested: boolean
+): 'AUTHOR' | 'REVIEWERS' | undefined {
+  const asking = summary.reviewers.filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED');
+  if (!changesRequested && !asking.length && summary.unresolvedCount === 0) return undefined;
+  const viewer = summary.lastViewerCommentAt ? Date.parse(summary.lastViewerCommentAt) : 0;
+  const other = summary.lastOtherCommentAt ? Date.parse(summary.lastOtherCommentAt) : 0;
+  if (viewer > other) return 'REVIEWERS';
+  // A reviewer asked again reads as requested on the platform, its verdict standing until they review.
+  if (changesRequested && !asking.length && summary.reviewers.some((reviewer) => reviewer.state === 'REQUESTED')) return 'REVIEWERS';
+  return 'AUTHOR';
 }
 
 /** A discussion that still asks for something: an unresolved thread, or a review requesting changes. */
@@ -190,7 +236,8 @@ export function boundPullRequestFeedback(input: {
     ...(input.viewer?.trim() ? { viewer: input.viewer.trim().slice(0, limits.name).trim() } : {}),
     reviewers: input.reviewers.map((reviewer) => ({
       name: reviewer.name.trim().slice(0, limits.name).trim(),
-      state: reviewer.state
+      state: reviewer.state,
+      ...(reviewer.bot ? { bot: true } : {})
     })).filter((reviewer) => reviewer.name).slice(0, limits.reviewers),
     discussions: [...listed.keys()].flatMap((index) => bounded.get(index) ?? []),
     truncated: input.truncated || input.discussions.length > limits.discussions
@@ -250,7 +297,7 @@ export function parsePullRequestFeedback(text: string, number?: number): PullReq
     ...(shortText(value.viewer) ? { viewer: value.viewer } : {}),
     reviewers: value.reviewers.flatMap((reviewer): PullRequestReviewer[] =>
       isRecord(reviewer) && shortText(reviewer.name) && (PULL_REQUEST_REVIEWER_STATES as readonly unknown[]).includes(reviewer.state)
-        ? [{ name: reviewer.name, state: reviewer.state as PullRequestReviewerState }] : []),
+        ? [{ name: reviewer.name, state: reviewer.state as PullRequestReviewerState, ...(reviewer.bot === true ? { bot: true } : {}) }] : []),
     discussions,
     truncated: value.truncated === true
   };

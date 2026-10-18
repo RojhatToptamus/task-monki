@@ -29,6 +29,8 @@ export interface DiscussionView extends PullRequestDiscussion {
   open: boolean;
   /** Sent in a request with nothing new said on it since, except by the person. */
   sent?: DiscussionSent;
+  /** The person wrote its latest comment: it waits on the other side. */
+  replied?: boolean;
 }
 
 /** A request the person sent and the agent's answers to it. */
@@ -69,16 +71,21 @@ export function buildDiscussionViews(
   pullRequestOpen = true
 ): DiscussionView[] {
   if (!feedback) return [];
-  return feedback.discussions.map((discussion) => {
+  // The person's own comments on the conversation, such as replies posted from here, ask nothing of them.
+  const own = (discussion: PullRequestDiscussion) =>
+    discussion.kind === 'COMMENT' && Boolean(feedback.viewer) && discussion.comments[0]?.author === feedback.viewer;
+  return feedback.discussions.filter((discussion) => !own(discussion)).map((discussion) => {
     const request = sent.get(discussion.id);
     // Compared in the platform's clock when the request recorded it, so a skewed local clock misjudges nothing.
     const answeredSince = request && discussion.comments.some((comment) =>
       comment.author !== feedback.viewer && time(comment.createdAt) > time(request.seenAt ?? request.at));
+    const replied = Boolean(feedback.viewer) && discussion.comments.length > 1 && discussion.comments.at(-1)?.author === feedback.viewer;
     return {
       ...discussion,
       provider: feedback.provider,
       open: pullRequestOpen && isOpenDiscussion(discussion),
-      ...(request && !answeredSince ? { sent: request } : {})
+      ...(request && !answeredSince ? { sent: request } : {}),
+      ...(replied ? { replied: true } : {})
     };
   });
 }
@@ -153,9 +160,13 @@ export function buildReplyDrafts(
   });
 }
 
-/** Discussions that still ask for something and were not sent since: what Address comments adds. */
+/**
+ * Discussions that still ask for something and were not sent since: what
+ * Address comments adds. One the person answered last waits on its reviewer,
+ * sent or not.
+ */
 export function unaddressedDiscussions(discussions: readonly DiscussionView[]): DiscussionView[] {
-  return discussions.filter((discussion) => discussion.open && !discussion.sent);
+  return discussions.filter((discussion) => discussion.open && !discussion.sent && !discussion.replied);
 }
 
 /** Who started a discussion. */
@@ -188,6 +199,32 @@ export function displayPlatformText(body: string): string {
 /** A comment as the person reads it in Task Monki, and so as an agent is sent it; never empty. */
 export function discussionCommentText(body: string): string {
   return displayPlatformText(body) || '(No text: an image or other content only.)';
+}
+
+/** A comment's prose, and each change it suggests with the lines around its own that it also replaces. */
+export type CommentPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'suggestion'; lines: string[]; above: number; below: number };
+
+/**
+ * A comment in order: its prose and its suggested changes, the platforms'
+ * ```suggestion blocks. GitLab's `suggestion:-1+2` also replaces one line above
+ * the comment's and two below; an empty suggestion removes the lines.
+ */
+export function commentParts(text: string): CommentPart[] {
+  const parts: CommentPart[] = [];
+  const pattern = /^```suggestion(?::-(\d+)\+(\d+))?[ \t]*\n([\s\S]*?)^```[ \t]*$/gmu;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const before = text.slice(last, match.index).trim();
+    if (before) parts.push({ kind: 'text', text: before });
+    const content = (match[3] ?? '').replace(/\n$/u, '');
+    parts.push({ kind: 'suggestion', lines: content ? content.split('\n') : [], above: Number(match[1] ?? 0), below: Number(match[2] ?? 0) });
+    last = (match.index ?? 0) + match[0].length;
+  }
+  const rest = text.slice(last).trim();
+  if (rest) parts.push({ kind: 'text', text: rest });
+  return parts.length ? parts : [{ kind: 'text', text }];
 }
 
 /** The first line of a discussion's first comment as plain text, for a one-line row. */
@@ -237,6 +274,14 @@ export function pullRequestFeedbackLine(summary: Pick<PullRequestFeedbackSummary
   if (!parts.length) return undefined;
   const line = parts.join(', ');
   return line.startsWith('waiting') ? `W${line.slice(1)}` : line;
+}
+
+/** Who an answered review waits on: whoever asked for changes, and whoever is asked to review. */
+export function reviewWaitingLine(summary: Pick<PullRequestFeedbackSummary, 'reviewers'>): string | undefined {
+  const names = summary.reviewers
+    .filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED' || reviewer.state === 'REQUESTED')
+    .map((reviewer) => reviewer.name);
+  return names.length ? `Waiting on ${listNames(names)}` : undefined;
 }
 
 function joinNames(names: readonly string[], verb: string): string | undefined {

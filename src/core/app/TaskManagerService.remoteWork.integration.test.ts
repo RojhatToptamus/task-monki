@@ -121,6 +121,9 @@ describe('TaskManagerService remote work', () => {
       name: 'test', link: 'https://github.com/acme/widgets/actions/runs/77/job/88',
       text: 'FAIL save.test.js\nExpected undefined, got null', truncated: false
     }]);
+    // A check that failed by chance runs again where it ran: its Actions run re-runs its failed jobs.
+    expect(await scenario.service.rerunPullRequestChecks({ taskId: task.id })).toEqual({ started: 1 });
+    expect((await github.calls()).some((call) => call.args.includes('repos/acme/widgets/actions/runs/77/rerun-failed-jobs'))).toBe(true);
 
     await scenario.service.markPullRequestReady({ taskId: task.id });
     expect((await github.item('acme', 'widgets', 14))?.isDraft).toBe(false);
@@ -144,6 +147,13 @@ describe('TaskManagerService remote work', () => {
     // A review has no thread of its own: its answer is a comment that quotes what it answers.
     expect(replied.comments?.at(-1)?.body).toBe('> @alice: See the thread.\n\nCovered in the thread.');
     expect(replied.reviewRequests).toEqual(['alice']);
+    // A resolved thread reopens and resolves again from where it is read.
+    await scenario.service.resolvePullRequestDiscussion({ taskId: task.id, discussionId: 'PRRT_null', resolved: false });
+    expect((await github.item('acme', 'widgets', 14))!.reviewThreads![0]).toMatchObject({ resolved: false });
+    await scenario.service.resolvePullRequestDiscussion({ taskId: task.id, discussionId: 'PRRT_null', resolved: true });
+    expect((await github.item('acme', 'widgets', 14))!.reviewThreads![0]).toMatchObject({ resolved: true });
+    await expect(scenario.service.resolvePullRequestDiscussion({ taskId: task.id, discussionId: 'PRR_1', resolved: true }))
+      .rejects.toThrow('has not read this thread');
     // Only people who reviewed can be asked again, and only discussions Task Monki read can be answered.
     await expect(scenario.service.replyToPullRequest({ taskId: task.id, replies: [], requestReviewFrom: ['mallory'] }))
       .rejects.toThrow('Ask only people who reviewed');

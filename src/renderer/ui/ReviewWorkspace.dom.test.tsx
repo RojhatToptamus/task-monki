@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
@@ -400,20 +400,20 @@ describe('ReviewWorkspace pull request discussions', () => {
     // On its own line, the thread does not repeat where it is.
     expect(within(thread).queryByText('Line 1')).toBeNull();
     // Other people's words go to the agent only when the person adds them.
-    expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Address comments' })).toBeNull();
     fireEvent.click(within(thread).getByRole('button', { name: 'Add to request' }));
     fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
-    const sheet = screen.getByRole('dialog', { name: 'Request changes' });
+    const sheet = screen.getByRole('dialog', { name: 'Address comments' });
     expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Return seconds here.')).toBeDefined();
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Request changes' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Address comments' }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ includedDiscussionIds: ['open'] }));
     // Sending answers the sheet.
-    expect(screen.queryByRole('dialog', { name: 'Request changes' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Address comments' })).toBeNull();
     // Taking out the last item empties the request, and the sheet goes with it.
     fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Address comments' }))
       .getByRole('button', { name: 'Take the comment by alice out of the request' }));
-    expect(screen.queryByRole('dialog', { name: 'Request changes' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Address comments' })).toBeNull();
 
     // A resolved thread is one line that opens; it cannot be added.
     const folded = screen.getByRole('button', { name: /carol/ });
@@ -421,6 +421,52 @@ describe('ReviewWorkspace pull request discussions', () => {
     fireEvent.click(folded);
     const opened = screen.getByRole('article', { name: 'GitHub comment by carol' });
     expect(within(opened).queryByRole('button', { name: 'Add to request' })).toBeNull();
+  });
+
+  it('answers a thread where it is read: a reply starts from the agent\'s answer and posts with the resolving chosen', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts', 'const window = 60;'));
+    const onReplyToDiscussion = vi.fn(async () => undefined);
+    const onResolveDiscussion = vi.fn(async () => undefined);
+    const suggestion = discussion('suggest', { commentCount: 1, comments: [
+      { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Name it:\n\n```suggestion\nconst windowSeconds = 60;\n```', truncated: false }
+    ] });
+    const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), suggestion]} discussionsOnLines
+      replyDrafts={drafts} onReplyToDiscussion={onReplyToDiscussion} onResolveDiscussion={onResolveDiscussion} />);
+    await screen.findAllByRole('article', { name: 'GitHub comment by alice' });
+    const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
+
+    // A suggested change reads as a diff: the line it replaces, then the line it suggests.
+    const figure = within(thread('suggest')).getByText('Suggested change').closest('figure')!;
+    expect(within(figure).getByText('const window = 60;')).toBeDefined();
+    expect(within(figure).getByText('const windowSeconds = 60;')).toBeDefined();
+
+    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the agent's answer.
+    const input = within(thread('open')).getByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    expect(input.value).toBe('');
+    expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
+    fireEvent.focusIn(thread('open'));
+    fireEvent.keyDown(thread('open'), { key: 'r' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.focusIn(input);
+    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    // Resolving stays the person's call.
+    const resolve = within(thread('open')).getByRole('checkbox', { name: 'Resolve thread' });
+    expect((resolve as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(resolve);
+    fireEvent.change(input, { target: { value: 'Returns seconds now.' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Returns seconds now.', false));
+    // Posted, the row is empty again and folds back to its field.
+    await waitFor(() => expect(input.value).toBe(''));
+    expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
+
+    // Resolving needs no reply: the check on the thread's head.
+    const check = within(thread('suggest')).getByRole('button', { name: 'Resolve thread' });
+    expect(check.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(check);
+    await waitFor(() => expect(onResolveDiscussion).toHaveBeenCalledWith('suggest', true));
   });
 
   it('says which line a thread is about once the code it was written on may have moved, and lists threads by what happens to them', async () => {

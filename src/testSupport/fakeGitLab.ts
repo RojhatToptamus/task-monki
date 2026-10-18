@@ -204,6 +204,7 @@ if (parts[2] === 'jobs' && parts[4] === 'trace') {
   process.stdout.write(trace);
   process.exit(0);
 }
+if (parts[2] === 'jobs' && parts[4] === 'retry' && method === 'POST') out({ id: Number(parts[3]) + 1000, status: 'pending' });
 if (parts[2] === 'repository' && parts[3] === 'branches') { const name = decodeURIComponent(parts[4]); rev(project, 'refs/heads/' + name) ? out({ name }) : notFound(); }
 if (parts[2] === 'pipelines' && parts[4] === 'jobs') {
   const item = state.items.find((candidate) => 900 + candidate.iid === Number(parts[3]));

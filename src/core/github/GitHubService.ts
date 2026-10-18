@@ -27,6 +27,7 @@ import {
 import {
   GITHUB_MERGE_OPTIONS_QUERY,
   GITHUB_RESOLVE_THREAD_MUTATION,
+  GITHUB_UNRESOLVE_THREAD_MUTATION,
   GITHUB_THREAD_REPLY_MUTATION,
   gitHubActionsJob,
   gitHubMergeFailure,
@@ -526,11 +527,11 @@ export class GitHubService implements PullRequestDelivery {
     ], worktree.worktreePath, 60_000, [], body);
   }
 
-  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void> {
+  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved = true): Promise<void> {
     const location = requireGitHubLocation(address);
     await this.exec([
       'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${GITHUB_RESOLVE_THREAD_MUTATION}`, '-f', `threadId=${discussionId}`
+      '-f', `query=${resolved ? GITHUB_RESOLVE_THREAD_MUTATION : GITHUB_UNRESOLVE_THREAD_MUTATION}`, '-f', `threadId=${discussionId}`
     ], worktree.worktreePath, 60_000);
   }
 
@@ -562,6 +563,21 @@ export class GitHubService implements PullRequestDelivery {
       'api', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/jobs/${job.job}/logs`
     ], worktree.worktreePath, 60_000);
     return result.stdout;
+  }
+
+  async rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number> {
+    const location = requireGitHubLocation(address);
+    // One request per run re-runs every failed job in it; a run of another repository is not this one's to start.
+    const runs = new Set(checks.flatMap((check) => {
+      const job = gitHubActionsJob(check.link);
+      return job && job.owner.toLowerCase() === location.owner.toLowerCase() && job.name.toLowerCase() === location.name.toLowerCase() ? [job.run] : [];
+    }));
+    for (const run of runs) {
+      await this.exec([
+        'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
+      ], worktree.worktreePath, 60_000);
+    }
+    return runs.size;
   }
 
   buildPullRequestBody(input: {

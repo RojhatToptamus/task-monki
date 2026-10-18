@@ -19,7 +19,7 @@ Every value here is a token; the cited section owns the details.
 | Faces | Instrument Sans (`--font-ui`) for the interface; Geist Mono (`--font-mono`) only for strings the user copies: paths, hashes, branches, commands, payloads (§8) |
 | Type | 22 page title, 15 heading, 13 body and labels, 12 help and group labels, 11.5 metadata (`--t-*`); weights 400 and 500 only (`--w-*`) |
 | Line boxes | 16, 18, 20 and 28 (`--lh-*`); the 1.55 factor only for multi-line prose |
-| Heights | 32 decision controls, 28 toolbar controls and icon buttons, 24 controls inside a row, 28 dense rows, 36 rows and file heads, 40 a toolbar under a head, 48 heads and two-line rows (`--h-*`, §3) |
+| Heights | 32 decision controls, 28 toolbar controls and icon buttons, 24 controls inside a row, 20 badges and avatars, 28 dense rows, 36 rows and file heads, 40 a toolbar under a head, 48 heads and two-line rows (`--h-*`, §3) |
 | Radii | 4 marks and keys, 6 rows and badges, 8 controls and anything shorter than 40px, 10 menus, 12 cards, sheets and tables, 14 modals (`--r-*`, §9) |
 | Spacing | 2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48 (§9) |
 | Colour | roles, never values (§7): planes `--ground`, `--panel`, `--surface`, `--well`, `--field`, `--sel`, `--card`, `--overlay`; ink `--text`, `--text-soft`, `--muted`, `--faint`; lines `--hair`, `--field-edge`, `--edge-raised`, `--edge`; `--accent` for action, focus and running work; `--waiting`, `--blocked`, `--verified`, `--idle`, each with `-ink` and `-bg` |
@@ -540,9 +540,11 @@ hand.
   rim: a control that rests on a rim (a secondary button, the selected segment)
   writes `box-shadow: <its rim>, var(--focus-halo)`, so focus never erases the
   edge. A row inside a scrolling or clipped list, where an outside halo would be
-  cut, takes `--focus-halo-inset` (2px, inward). Finding threads and comments
-  keep their 1px `--focus-ring` rim. One mechanism: keyboard modality on
-  `.app-shell`, never a workspace-wide copy.
+  cut, takes `--focus-halo-inset` (2px, inward). A thread in the Review diff
+  is a band across its file, so it marks the one jumped to or in focus with a
+  2px `--focus-ring` line down its left edge, along the file's own edge, rather
+  than a rim that would double the file's border. One mechanism: keyboard
+  modality on `.app-shell`, never a workspace-wide copy.
 
   **The accent hue is not a focus cue on a resting control.** A coloured rim
   around whatever the caret happens to be in reads as an alert, not as focus: it
@@ -1376,9 +1378,10 @@ correct answer far more often than a border is).
 | Side panel, floating | `--surface` | `--edge` | `--shadow-pop` |
 | Tooltip, toast | `--overlay` | `--edge` | `--shadow-pop` |
 | Table / comparable list | — | `--edge-raised` ring over the rows; `--hair` between rows | — |
-| Review finding thread | `--card` | `--edge-raised`; the finding jumped to, or keyboard focus: a 1px `--focus-ring` rim | `--shadow-card` |
-| Review finding, earlier review | `--panel` | `--hair` | — |
-| User's line comment | `--field` | `--field-edge` | — |
+| Review thread (finding, discussion, the person's comment, the line composer) | `--card`, a band across the file | `--hair` seams where it meets code; the thread jumped to, or in focus: a 2px `--focus-ring` line down its left edge | — |
+| Review finding, earlier review | `--panel` band | `--hair` seams | — |
+| Folded thread, dismissed finding | `--panel`, a 28px row like a gap | `--hair` seams | — |
+| Suggested change in a comment | `--well`, its lines in the diff's tints | — | — |
 | Code / payload block | `--well` | — | — |
 | Composer surface | `--card` | `--field-edge`; focused: `--field-edge-focus` | — |
 | Empty state container | — | — | — |
@@ -1470,7 +1473,7 @@ inside it reads as a second fact.
 | Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |
 | Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
 | Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§7.7) | label stays `--text` / `--muted` |
-| Avatar fallback | `--field` | `--muted` |
+| Avatar fallback (initials; a person glyph when the account is unknown) | `--field` | `--muted` |
 | Focus rim, text entry | — | `--field-edge-focus` inset 1px (neutral) |
 | Focus halo, keyboard only | — | `--focus-ring` 3px |
 
@@ -1532,13 +1535,22 @@ side; past three, the first two stay and the rest — the overrides — move und
 a More menu, each keeping its disabled reason inline.
 
 An open pull request's step is one blocker and its way through, in this order:
-a worktree out of step with it (Sync branch, Push update, Pull changes), a base
-that moved (Update with main), failed checks (Fix checks, with each failed
-check and the end of its log listed in the panel), comments to address or
-answers to post (Address comments, Reply on GitHub), then Ready for review and
-Merge. The fact line names the blocker: the checks that failed, who asked for
-changes and how many threads are open, what is not pushed, the base it is
-behind. Writes to the platform are the person's: Ready for review is one
+a worktree out of step with it (Sync branch, Push update, Pull changes; fixes
+the agent made and nobody pushed lead as Changes not pushed), a base that moved
+(Update with main), failed checks (Fix checks, with each failed check and the
+end of its log listed in the panel, and Re-run failed for checks the
+repository's own runs or jobs produced), comments to address or answers to post
+(Address comments, Reply on GitHub), then Ready for review and Merge. The fact
+line names the blocker and why its action leads: the checks that failed, who
+asked for changes and how many threads are open, what is not pushed, the base it
+is behind. Address comments lists what it sends, one row per comment (its
+author, its place and its first line), and a row opens that thread in Review.
+The step follows whose turn it is: once the person wrote the latest comment, or
+asked again every reviewer who requested changes, the pull request waits on its
+reviewers (Waiting for review, "Waiting on alice"), the step offers nothing and
+the Inbox and board raise nothing, until a reviewer answers. While an agent
+turn runs, delivery raises nothing either. Writes to the platform are the
+person's: Ready for review is one
 click; Merge and Reply open a dialog that shows what goes out (the method the
 repository allows, the branch to delete, each reply as an editable text with
 its Resolve thread choice) before anything is sent. When another step holds the
@@ -1550,8 +1562,9 @@ and fact as its facts; the section is left out while every action is paused.
 request: the platform's state icon, the number in `--muted` and the title at
 `--t-body`/500 (two lines at most, a link to the platform), the branch and its
 base in mono `--t-help`, then one `tm-props` row per gate — Checks, Reviews (a
-line per reviewer, the state in its tone's ink), Threads (a link to the Review
-tab while any is open), Merge. A gate's word takes its tone's ink, and nothing
+line per reviewer, the state in its tone's ink, and on a person who answered
+and is not asked yet, an icon to ask them to review again; a bot is never
+asked), Threads (a link to the Review tab while any is open), Merge. A gate's word takes its tone's ink, and nothing
 else in the group does. The Checks summary opens into 28px rows: the mark, the
 name, the time it ran, and an icon link to the platform. The refresh control
 and "Updated" time sit in the group's head. The group holds no action.
@@ -1590,7 +1603,8 @@ control's icon, state or tooltip already carries.
 
 - *Toolbar* (40px). The navigator's switch (Files, with viewed progress as
   "2/7", and Feedback) sits over the navigator; then the review in one phrase in
-  its tone's ink and its time (Fixing review feedback while the agent takes a
+  its tone's ink and its time (No agent review, not Not reviewed, once people
+  reviewed the pull request; Fixing review feedback while the agent takes a
   turn after the review; the agent's request, such as "Codex asked a question",
   with Go to request while it waits on the person; a turn that stopped, such as
   "Recovery required", with Go to agent); then Compare (All changes,
@@ -1639,7 +1653,18 @@ control's icon, state or tooltip already carries.
   shows on the row under the pointer and fills when the pointer is on the
   number. Pressing a number, or dragging across several, opens one comment for
   that line or range. Then the marker and code that wraps; the gutter takes the
-  row's tint. Threads and comments start at the code column.
+  row's tint.
+- *Threads.* What is said about the code is part of the file, not a card on
+  it: under the last line of its range, a band across the file on `--card`
+  with a `--hair` seam where it meets code (bands in a row share one), no ring,
+  radius or shadow. Its words keep one reading column from the code column,
+  720px at most, and each author's mark (a 20px avatar: initials on `--field`
+  in `--muted`, or a person glyph when the account is unknown) hangs in the
+  gutter beside their name, so a comment and the code it is about start on one
+  column. Nothing inside a band is a box of its own: a suggested change is a
+  `--well` with the diff's tints on its lines, the label above it; folded, a
+  thread is a 28px row on `--panel` like a gap. Feedback without a place in
+  the files sits above them, framed as a file is.
 - *Gaps.* The unchanged lines between hunks are one 28px row on `--panel`: the
   count in words at the code column ("19 unchanged lines") and the enclosing
   symbol in mono `--faint`. When the checkout still holds the captured file
@@ -1654,8 +1679,8 @@ control's icon, state or tooltip already carries.
   no longer matches, the gaps stay words and that item is disabled with
   "Differs from the checkout". An earlier capture never opens its gaps. The
   review holds only changed files; any other file opens in the editor from ⋯.
-- *Findings.* A thread under the last line of its range, on `--card` with the
-  `--edge-raised` ring (`--r-sm`), its severity as a word (blocker and major in
+- *Findings.* A thread band with no mark in the gutter (the severity says it is
+  the review's), its severity as a word (blocker and major in
   `--blocked-ink`), in a re-review "Still open" or "New" beside it, and its
   actions on the title line: Add to request on a Minor or Nit (Blocker and Major
   are in by default), Ask (opens Ask about this finding), and Dismiss, a menu of
@@ -1663,28 +1688,43 @@ control's icon, state or tooltip already carries.
   never raises an Incorrect finding again, raises an Intentional one only when
   the code around it changed, and leaves a deferred one alone. A dismissed
   finding folds to one line with its reason and Restore.
-- *Pull request discussions* are other people's words on the same card as a
-  finding: the author at 500, a review's verdict and the comment's age muted,
-  its state at the end of the head (Resolved, Sent, the agent's answer, or
-  Outdated), then Add to request and Open on GitHub. Each comment is rendered
-  markdown under its author, HTML the platform renders reads as its words, and
-  a long comment is clamped until Show full comment; past three replies, all
-  but the latest fold behind a count, and replies the platform has beyond those
-  read say so with a link. Once the pull request is merged or closed, none asks
-  for anything. A thread
+- *Pull request discussions* are other people's words in the same band as a
+  finding: the author at 500 beside their mark, a review's verdict and the
+  comment's age muted, its state at the end of the head (Resolved, Replied once
+  the person wrote last, Sent, the agent's answer, or Outdated), then Add to
+  request, a check that resolves the thread (pressed, in `--verified-ink`, once
+  resolved, and pressing it reopens it), and Open on GitHub. Each comment is
+  rendered markdown under its author, replies under a `--hair` from the code
+  column, HTML the platform renders reads as its words, and a long comment is
+  clamped until Show full comment; past three replies, all but the latest fold
+  behind a count, and replies the platform has beyond those read say so with a
+  link. A suggested change reads as a diff: the lines it replaces, when the
+  diff shows the thread's own lines, then the lines it suggests. The last row of
+  an open thread is the reply row: the person's mark and a 28px Reply field
+  that grows into the composer when they write, with Resolve thread and
+  Cancel and Reply under it (⌘↵ posts, Escape leaves it). R puts the caret
+  there; an agent's answer to the thread is where the reply starts, and Resolve
+  thread starts checked when the answer is Fixed. Nothing posts until the
+  person posts it, and posting keeps the place in the diff. Once the pull
+  request is merged or closed, none asks for anything and none can be answered
+  here. A thread
   sits under the last line of its range while the diff shown is the head the
   platform read it on; otherwise, or once its lines changed, it sits at its
   file's top and says its line, and one about the whole change sits above the
   files. A resolved thread, or a remark that asks for nothing, folds to one line
   that opens it. None goes to the agent unless added; N and P step through open
   discussions after the findings.
-- *Comments* sit on `--field` (`--r-sm`, as does the composer in the diff) with icon-only Edit and Delete; they can be written
-  any time the current diff is shown and are saved with the task as written.
-  The line composer's Ask, at its left, hands the lines and the text to Ask
-  instead of the request.
+- *Comments* are the person's own, in the same band: their mark and You, the
+  lines they are about when the row does not say it, and icon-only Edit and
+  Delete on the head while the pointer or the keys are on it. They can be
+  written any time the current diff is shown and are saved with the task as
+  written. The line composer is the reply row's: the field on the code column,
+  then Ask at its left, which hands the lines and the text to Ask instead of
+  the request, and Cancel and Comment.
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   GitHub comments, 1 comment"), which opens the request sheet; a note that grows
-  to four lines; and one primary: Request changes when something is queued,
+  to four lines; and one primary: Request changes when something is queued
+  (Address comments when what is queued is only the pull request's comments),
   otherwise the step that finishes the task. The sheet lists what goes out in
   send order (To fix, From GitHub, Your comments), what is left out (with Add on
   a suggestion or an open discussion), and the instruction, one disclosure away.
@@ -1702,8 +1742,9 @@ control's icon, state or tooltip already carries.
   out-of-date review keeps its threads as earlier context, without Ask or
   Dismiss; its findings are never sent, the person's comments still are.
 - *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
-  file, D dismiss, A ask, F add or take out a suggestion, C comment on the
-  chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being read
+  file, D dismiss, A ask, F add or take out a suggestion or discussion, R reply
+  to the discussion, C comment on the chosen lines, ⌘↵ the request sheet and
+  then send, ⌘⇧F the file being read
   full screen and back (Escape returns).
 
 **Side panels.** An assistant panel (Ask on Overview, Agent and Review, the

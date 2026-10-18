@@ -240,6 +240,12 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     save();
     out({ data: { addPullRequestReviewThreadReply: { comment: { id: 'PRRC_' + thread.comments.length } } } });
   }
+  if (query.includes('unresolveReviewThread')) {
+    const thread = threadOf(fields.threadId);
+    thread.resolved = false;
+    save();
+    out({ data: { unresolveReviewThread: { thread: { id: thread.id, isResolved: false } } } });
+  }
   if (query.includes('resolveReviewThread')) {
     const thread = threadOf(fields.threadId);
     thread.resolved = true;
@@ -348,6 +354,8 @@ if (args[0] === 'api') {
     execFileSync('git', ['--git-dir', gitDir, 'update-ref', '-d', 'refs/heads/' + decodeURIComponent(ref[1])]);
     process.exit(0);
   }
+  // As on GitHub: re-running a run's failed jobs answers 201 with no body.
+  if (/^actions\\/runs\\/\\d+\\/rerun-failed-jobs$/.test(route) && method === 'POST') process.exit(0);
   const job = /^actions\\/jobs\\/(\\d+)\\/logs$/.exec(route);
   if (job) {
     const log = state.items.map((candidate) => candidate.jobLogs?.[job[1]]).find((value) => value !== undefined);

@@ -72,6 +72,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   const queued = plan.queued;
   const discussions = plan.discussions;
   const platform = discussions[0] ? remoteProviderName(discussions[0].provider) : '';
+  const verb = requestVerb(plan, comments);
   const summary = findings.length || discussions.length || comments.length
     ? [
       findings.length ? count(findings.length, 'fix', 'fixes') : '',
@@ -82,7 +83,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
   const primary = queued && request ? (
     <>
       {request.disabledReason ? <span id={reasonId} className="tm-review__request-reason">{request.disabledReason}</span> : null}
-      <Tooltip label="Request changes" shortcut={SUBMIT_SHORTCUT} side="top">
+      <Tooltip label={verb} shortcut={SUBMIT_SHORTCUT} side="top">
         <button
           type="button"
           className="primary-button"
@@ -90,7 +91,7 @@ export function ReviewOutcome(props: ReviewOutcomeProps) {
           aria-describedby={request.disabledReason ? reasonId : undefined}
           onClick={request.onSubmit}
         >
-          Request changes
+          {verb}
         </button>
       </Tooltip>
     </>
@@ -163,6 +164,7 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: 
   const platform = [...discussions, ...plan.discussionsLeftOut][0];
   const platformName = platform ? remoteProviderName(platform.provider) : '';
   const instruction = request?.instruction() ?? '';
+  const verb = requestVerb(plan, comments);
 
   // Escape and a click outside close the sheet; the summary toggles it itself.
   useEffect(() => {
@@ -184,9 +186,9 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: 
 
   let position = 0;
   return (
-    <div ref={sheetRef} id={props.id} className="tm-review-sheet" role="dialog" aria-label="Request changes">
+    <div ref={sheetRef} id={props.id} className="tm-review-sheet" role="dialog" aria-label={verb}>
       <div className="tm-review-sheet__head">
-        <h2>Request changes</h2>
+        <h2>{verb}</h2>
         <button type="button" className="tm-iconbtn" aria-label="Close" onClick={() => onSheetOpenChange(false)}><X size={13} aria-hidden="true" /></button>
       </div>
       <div className="tm-review-sheet__body">
@@ -298,10 +300,19 @@ function ReviewRequestSheet(props: ReviewOutcomeProps & { id: string; reasonId: 
             aria-describedby={request.disabledReason && plan.queued ? props.reasonId : undefined}
             onClick={request.onSubmit}
           >
-            Request changes
+            {verb}
           </button>
         ) : null}
       </div>
     </div>
   );
+}
+
+/**
+ * The request's verb. Only the pull request's comments queued is the Overview's
+ * Address comments; on the platform, Request changes is a reviewer's verdict,
+ * not the follow-up the agent is sent.
+ */
+function requestVerb(plan: ReviewOutcomeProps['plan'], comments: ReviewOutcomeProps['comments']): string {
+  return plan.discussions.length > 0 && plan.send.length === 0 && comments.length === 0 ? 'Address comments' : 'Request changes';
 }

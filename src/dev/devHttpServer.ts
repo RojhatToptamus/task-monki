@@ -697,6 +697,15 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.markPullRequestReady((await readJson()) as never));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/rerun-checks') {
+        sendJson(response, requestId, 200, await options.service.rerunPullRequestChecks((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/resolve') {
+        await options.service.resolvePullRequestDiscussion((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/merge-options') {
         sendJson(response, requestId, 200, await options.service.readPullRequestMergeOptions((await readJson()) as never));
         return;

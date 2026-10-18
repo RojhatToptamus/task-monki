@@ -23,6 +23,7 @@ import {
   type ReviewResponseAnswer,
   type TaskReviewDraft
 } from '../../shared/contracts';
+import { reviewTurn } from '../../shared/pullRequestFeedback';
 import { effectiveReviewFindings, effectiveReviewGateStatus, reviewAcceptsDecisions } from '../../shared/agentReviewFindings';
 import type {
   ArtifactRecord,
@@ -87,9 +88,9 @@ import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { DisclosureChevron } from './DisclosureChevron';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
-import { buildDiscussionViews, buildReplyDrafts, repliedDiscussions, sentDiscussions, unaddressedDiscussions } from '../model/pullRequestFeedback';
-import { buildPullRequestRecord } from '../model/pullRequestRecord';
-import { FailingChecks, PullRequestRecord } from './PullRequestRecord';
+import { buildDiscussionViews, buildReplyDrafts, repliedDiscussions, sentDiscussions, unaddressedDiscussions, type DiscussionView } from '../model/pullRequestFeedback';
+import { buildPullRequestRecord, rerunnableCheck } from '../model/pullRequestRecord';
+import { AskedComments, FailingChecks, PullRequestRecord } from './PullRequestRecord';
 import { MergePullRequestModal, ReplyToReviewersModal } from './PullRequestDialogs';
 import { answeredReviewRound, reviewRequestRounds } from '../model/reviewRounds';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
@@ -278,6 +279,10 @@ interface TaskDetailProps {
   onReadPullRequestMergeOptions?(taskId: string): Promise<PullRequestMergeOptions>;
   onMergePullRequest?(taskId: string, method: PullRequestMergeMethod, expectedHeadSha: string, deleteBranch: boolean): Promise<void>;
   onReplyToPullRequest?(taskId: string, replies: PullRequestReply[], reviewers: string[]): Promise<ReplyToPullRequestResult>;
+  /** Resolves a thread on the task's pull request, or reopens one. */
+  onResolvePullRequestDiscussion?(taskId: string, discussionId: string, resolved: boolean): Promise<void>;
+  /** Runs the current head's failed checks again where the platform ran them. */
+  onRerunPullRequestChecks?(taskId: string): Promise<void>;
   onReadPullRequestCheckLogs?(taskId: string): Promise<PullRequestCheckLog[]>;
   onFetchPullRequestUpdate?(taskId: string, from: 'PULL_REQUEST' | 'BASE'): Promise<PullRequestUpdate>;
   onReadArtifact?(artifactId: string): Promise<string>;
@@ -354,11 +359,16 @@ export function TaskDetail(props: TaskDetailProps) {
     () => buildReplyDrafts(discussionViews, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt),
     [discussionViews, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt]
   );
+  const replyDraftsById = useMemo(() => new Map(replyDrafts.map((draft) => [draft.discussionId, draft])), [replyDrafts]);
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
   // Set by the Overview's Request changes and by Add to request in Ask; the Review tab opens its sheet once.
   const [requestSheetPending, setRequestSheetPending] = useState(false);
+  // Set by a comment the Overview lists; the Review tab shows that discussion once.
+  const [revealDiscussionId, setRevealDiscussionId] = useState<string>();
+  // Replies typed and not posted, by discussion: kept while the task is open, without a render per keystroke.
+  const replyTexts = useRef(new Map<string, string>());
   // A Review file shown full screen takes the page, tab bar included.
   const [reviewFullScreen, setReviewFullScreen] = useState(false);
   // Ask: one thread per open panel. Closing the panel or leaving the task ends it,
@@ -465,10 +475,14 @@ export function TaskDetail(props: TaskDetailProps) {
         checksMayNotHaveStarted: props.checksMayNotHaveStarted
       })
     : undefined;
-  // The status word reads what PR Status read from the records, as the board summary does.
-  const statusTask = task && prStatus?.kind === 'BRANCH_DIVERGED' && prStatus.canSyncBranch
-    ? { ...task, pullRequestRewritten: true }
-    : task;
+  // The status word reads what PR Status read from the records, as the board summary does,
+  // including whose move a review that requested changes waits on.
+  const turn = reviewRollup?.status === 'CHANGES_REQUESTED' && reviewRollup.feedback ? reviewTurn(reviewRollup.feedback, true) : undefined;
+  const statusTask = task ? {
+    ...task,
+    ...(prStatus?.kind === 'BRANCH_DIVERGED' && prStatus.canSyncBranch ? { pullRequestRewritten: true } : {}),
+    ...(turn ? { delivery: { turn } } : {})
+  } : task;
   const headerState = statusTask ? describeTaskStatus(statusTask) : undefined;
   const prRecord = task ? buildPullRequestRecord({ pullRequest, ciRollup, reviewRollup, mergeSnapshot, provider }) : undefined;
   useLayoutEffect(() => {
@@ -788,9 +802,15 @@ export function TaskDetail(props: TaskDetailProps) {
     ? `${requestItemCount} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`
     : undefined;
   // Address comments adds what still asks for something and was not sent, then shows the request to send.
-  const unaddressed = unaddressedDiscussions(discussionViews);
+  // Once the person answered after everyone else, the pull request waits on its reviewers and asks nothing of them.
+  const unaddressed = turn === 'REVIEWERS' ? [] : unaddressedDiscussions(discussionViews);
   const canAddressComments = unaddressed.length > 0 && hasActionableReviewSource &&
     (prStatus.kind !== 'MERGED' && prStatus.kind !== 'CLOSED_UNMERGED');
+  // A listed comment opens where it is answered: its discussion in Review.
+  const revealDiscussion = (discussionId: string) => {
+    setRevealDiscussionId(discussionId);
+    setTab('review');
+  };
   const addressComments = () => {
     const ids = props.reviewDraft.includedDiscussionIds ?? [];
     props.onReviewDraftChange({ ...props.reviewDraft, includedDiscussionIds: [...new Set([...ids, ...unaddressed.map((discussion) => discussion.id)])] });
@@ -1188,6 +1208,19 @@ export function TaskDetail(props: TaskDetailProps) {
     decisionOwner !== 'closed' &&
     (Boolean(nextAction.primary) || nextAction.secondaries.length > 0);
   const runtimeName = props.runtimeState?.preflight.runtime.displayName ?? task.runtimeId;
+  // What the agent did with the comments it was last sent, while its fixes are not on the pull request yet.
+  const unpushedAnswersLine = (() => {
+    const round = requestRounds.at(-1);
+    if (!round || (branchPublication?.updatedAt && branchPublication.updatedAt > round.at)) return undefined;
+    const asked = new Set(round.request.items.filter((item) => item.kind === 'DISCUSSION').map((item) => item.number));
+    const answers = round.answers.filter((answer) => asked.has(answer.item));
+    if (!answers.length) return undefined;
+    const fixed = answers.filter((answer) => answer.outcome === 'FIXED').length;
+    const noun = (count: number) => (count === 1 ? 'comment' : 'comments');
+    return fixed === answers.length ? `${runtimeName} fixed ${fixed} ${noun(fixed)}`
+      : fixed > 0 ? `${runtimeName} fixed ${fixed} of ${answers.length} ${noun(answers.length)}`
+        : `${runtimeName} answered ${answers.length} ${noun(answers.length)}`;
+  })();
   const repositoryBlockedReason =
     props.repository?.status !== 'AVAILABLE'
       ? 'Reconnect this repository before running repository actions.'
@@ -1466,38 +1499,50 @@ export function TaskDetail(props: TaskDetailProps) {
     const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(prStatus.kind);
     const createOrPushReason = prActionState.createOrPushDisabled ? prActionState.createOrPushReason : undefined;
     const delivery = (action: () => Promise<void> | undefined) => () => void runDeliveryAction(async () => { await action(); });
-    const actions = ([
-      prStatus.canSyncBranch ? { label: 'Sync branch', disabled: prActionState.syncDisabled, reason: prActionState.syncReason,
-        onClick: delivery(() => props.onSyncPullRequest?.(task.id)) } : undefined,
-      prStatus.canPushUpdate ? { label: 'Push update', disabled: prActionState.createOrPushDisabled, reason: createOrPushReason,
-        onClick: delivery(() => props.onCreatePullRequest(task.id)) } : undefined,
+    // Each step with the one fact it turns on: the lead step's fact stands above the actions.
+    const steps = ([
+      prStatus.canSyncBranch ? { action: { label: 'Sync branch', disabled: prActionState.syncDisabled, reason: prActionState.syncReason,
+        onClick: delivery(() => props.onSyncPullRequest?.(task.id)) } } : undefined,
+      prStatus.canPushUpdate ? { action: { label: 'Push update', disabled: prActionState.createOrPushDisabled, reason: createOrPushReason,
+        onClick: delivery(() => props.onCreatePullRequest(task.id)) }, fact: unpushedAnswersLine } : undefined,
       // The agent merges what moved; a conflict is its to resolve, the push is the person's.
       prStatus.canPullChanges && props.onFetchPullRequestUpdate
-        ? { label: 'Pull changes', disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('PULL_REQUEST') } : undefined,
+        ? { action: { label: 'Pull changes', disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('PULL_REQUEST') } } : undefined,
       prStatus.baseUpdate && props.onFetchPullRequestUpdate
-        ? { label: `Update with ${prStatus.baseUpdate.base}`, disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('BASE') } : undefined,
-      prStatus.canInvestigateFailure ? { label: 'Fix checks', disabled: prActionState.investigateDisabled, reason: prActionState.investigateReason,
-        onClick: () => void investigateFailingChecks() } : undefined,
-      canAddressComments ? { label: 'Address comments', onClick: addressComments } : undefined,
+        ? { action: { label: `Update with ${prStatus.baseUpdate.base}`, disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('BASE') } } : undefined,
+      prStatus.canInvestigateFailure ? { action: { label: 'Fix checks', disabled: prActionState.investigateDisabled, reason: prActionState.investigateReason,
+        onClick: () => void investigateFailingChecks() } } : undefined,
+      // A check that failed by chance runs again where it ran, without the agent.
+      prStatus.canInvestigateFailure && props.onRerunPullRequestChecks &&
+        (prRecord?.checks?.rows ?? []).some((check) => check.status === 'failed' && rerunnableCheck(check.link))
+        ? { action: { label: 'Re-run failed', disabled: Boolean(pause), reason: pause,
+          onClick: delivery(() => props.onRerunPullRequestChecks!(task.id)) } } : undefined,
+      // What reviewers asked is listed under the step, so it is read before it is sent.
+      canAddressComments ? { action: { label: 'Address comments', onClick: addressComments }, comments: unaddressed } : undefined,
       // Replies wait until the fixes they name are on the pull request.
       replyDrafts.length > 0 && !freshnessProblem && props.onReplyToPullRequest
-        ? { label: `Reply on ${gitLab ? 'GitLab' : 'GitHub'}`, disabled: Boolean(pause), reason: pause, onClick: () => setReplyModalOpen(true) } : undefined,
+        ? { action: { label: `Reply on ${gitLab ? 'GitLab' : 'GitHub'}`, disabled: Boolean(pause), reason: pause, onClick: () => setReplyModalOpen(true) },
+          fact: `${replyDrafts.length} ${replyDrafts.length === 1 ? 'answer' : 'answers'} ready to post` } : undefined,
       prStatus.canMarkReady && props.onMarkPullRequestReady
-        ? { label: gitLab ? 'Mark as ready' : 'Ready for review', disabled: Boolean(pause), reason: pause, onClick: markPullRequestReady } : undefined,
+        ? { action: { label: gitLab ? 'Mark as ready' : 'Ready for review', disabled: Boolean(pause), reason: pause, onClick: markPullRequestReady } } : undefined,
       prStatus.canMerge && props.onMergePullRequest
-        ? { label: 'Merge', disabled: Boolean(pause), reason: pause, onClick: () => setMergeModalOpen(true) } : undefined,
-      prStatus.canCreateDraftPr ? { label: `Create draft ${prNoun}`, disabled: prActionState.createOrPushDisabled, reason: createOrPushReason,
-        onClick: openDraftPrModal } : undefined
-    ] as Array<SlotAction | undefined>).filter((action): action is SlotAction => Boolean(action));
+        ? { action: { label: 'Merge', disabled: Boolean(pause), reason: pause, onClick: () => setMergeModalOpen(true) } } : undefined,
+      prStatus.canCreateDraftPr ? { action: { label: `Create draft ${prNoun}`, disabled: prActionState.createOrPushDisabled, reason: createOrPushReason,
+        onClick: openDraftPrModal } } : undefined
+    ] as Array<{ action: SlotAction; fact?: string; comments?: DiscussionView[] } | undefined>)
+      .filter((step): step is { action: SlotAction; fact?: string; comments?: DiscussionView[] } => Boolean(step));
+    const actions = steps.map((step) => step.action);
+    const lead = steps[0];
     const failing = prStatus.kind === 'CHECKS_FAILED' ? (prRecord?.checks?.rows ?? []).filter((check) => check.status === 'failed') : [];
+    const leadFact = lead?.fact ?? prStatus.fact;
     // A reason the actions state beside themselves, or checks listed below, are not also the fact above them.
-    const fact = failing.length > 0 || actions.some((action) => action.disabled && action.reason === prStatus.fact) ? undefined : prStatus.fact;
-    return { actions, failing, fact };
+    const fact = failing.length > 0 || actions.some((action) => action.disabled && action.reason === leadFact) ? undefined : leadFact;
+    return { actions, failing, fact, comments: lead?.comments ?? [] };
   };
 
   // PR Status holds the Now panel when the pull request's step is the task's next one.
   const deliveryStep = (title: string) => {
-    const { actions, failing, fact } = deliveryChoices();
+    const { actions, failing, fact, comments } = deliveryChoices();
     return (
       <DecisionSlot>
         <SlotContent headline={title} detail={fact} primary={actions[0]} secondary={actions.slice(1)}>
@@ -1505,6 +1550,7 @@ export function TaskDetail(props: TaskDetailProps) {
             <FailingChecks rows={failing} logs={checkLogs?.head === prStatus.prHeadSha ? checkLogs : undefined}
               onLoadLogs={props.onReadPullRequestCheckLogs ? () => void loadCheckLogs() : undefined} />
           ) : null}
+          {comments.length > 0 ? <AskedComments discussions={comments} onShow={revealDiscussion} /> : null}
         </SlotContent>
       </DecisionSlot>
     );
@@ -1930,7 +1976,16 @@ export function TaskDetail(props: TaskDetailProps) {
                     reason: prActionState.refreshReason,
                     onRefresh: () => void runDeliveryAction(async () => { await props.onRefreshGitHub(task.id); })
                   } : undefined}
-                  onOpenThreads={() => setTab('review')}
+                  onAskAgain={provider === 'GITHUB' && pullRequestOpen && props.onReplyToPullRequest ? async (reviewer) => {
+                    const result = await props.onReplyToPullRequest!(task.id, [], [reviewer]);
+                    if (result.failed[0]) throw new Error(result.failed[0].error);
+                  } : undefined}
+                  onOpenThreads={() => {
+                    // The first unresolved thread, where reading them starts.
+                    const first = discussionViews.find((discussion) => discussion.open && discussion.resolvable);
+                    if (first) revealDiscussion(first.id);
+                    else setTab('review');
+                  }}
                 />
               ) : null}
               <OverviewSection
@@ -2080,7 +2135,25 @@ export function TaskDetail(props: TaskDetailProps) {
             } : undefined}
             requestSheetPending={requestSheetPending}
             onRequestSheetOpened={() => setRequestSheetPending(false)}
+            revealDiscussionId={revealDiscussionId}
+            onDiscussionRevealed={() => setRevealDiscussionId(undefined)}
+            replyDrafts={replyDraftsById}
+            onReplyToDiscussion={pullRequestOpen && props.onReplyToPullRequest ? async (discussionId, body, resolve) => {
+              const result = await props.onReplyToPullRequest!(task.id, [{ discussionId, body, resolve }], []);
+              const failure = result.failed.find((candidate) => candidate.discussionId === discussionId);
+              // A reply that landed stays posted; only what followed it, such as resolving, failed.
+              if (failure && !failure.replied) throw new Error(failure.error);
+              return failure?.error;
+            } : undefined}
+            onResolveDiscussion={pullRequestOpen && props.onResolvePullRequestDiscussion
+              ? (discussionId, resolved) => props.onResolvePullRequestDiscussion!(task.id, discussionId, resolved) : undefined}
+            replyTexts={replyTexts.current}
+            onReplyTextChange={(discussionId, text) => {
+              if (text === undefined) replyTexts.current.delete(discussionId);
+              else replyTexts.current.set(discussionId, text);
+            }}
             discussions={discussionViews}
+            viewer={pullRequestFeedback?.viewer}
             moreDiscussionsUrl={pullRequestFeedback?.truncated ? pullRequest?.url : undefined}
             discussionsOnLines={Boolean(pullRequestFeedback?.headSha && gitSnapshot?.headSha === pullRequestFeedback.headSha &&
               !gitSnapshot.stagedCount && !gitSnapshot.unstagedCount && !gitSnapshot.untrackedCount)}
@@ -2223,8 +2296,9 @@ export function TaskDetail(props: TaskDetailProps) {
         <ReplyToReviewersModal
           platform={provider === 'GITLAB' ? 'GitLab' : 'GitHub'}
           drafts={replyDrafts}
+          // An app reviews on its own: GitHub takes no review request for one.
           reviewers={provider === 'GITHUB'
-            ? (pullRequestFeedback?.reviewers ?? []).filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED').map((reviewer) => reviewer.name)
+            ? (pullRequestFeedback?.reviewers ?? []).filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED' && !reviewer.bot).map((reviewer) => reviewer.name)
             : []}
           onSubmit={(replies, reviewers) => props.onReplyToPullRequest!(task.id, replies, reviewers)}
           onCancel={() => setReplyModalOpen(false)}

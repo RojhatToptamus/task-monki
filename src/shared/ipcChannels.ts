@@ -128,6 +128,8 @@ export const IPC_INVOKE_CHANNELS = [
   'remote:readPullRequestCheckLogs',
   'remote:readPullRequestMergeOptions',
   'remote:replyToPullRequest',
+  'remote:rerunPullRequestChecks',
+  'remote:resolvePullRequestDiscussion',
   'remote:syncPullRequest',
   'repository:add',
   'repository:chooseFolder',

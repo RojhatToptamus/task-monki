@@ -6,6 +6,7 @@ import {
   buildReviewIndex,
   filesChangedSinceReview,
   lineAnchorKey,
+  sideLines,
   type ReviewFindingView
 } from './reviewWorkspace';
 
@@ -89,5 +90,19 @@ describe('filesChangedSinceReview', () => {
 
     expect([...filesChangedSinceReview([unchanged, edited, removed], [unchanged, editedAfter, added])].sort())
       .toEqual(['src/a.ts', 'src/gone.ts', 'src/new.ts']);
+  });
+});
+
+describe('sideLines', () => {
+  it('reads the code a suggestion replaces without the diff marks, and nothing when a line is not in the diff', () => {
+    const greet = file('src/greet.js', [{ id: 'committed', label: 'Committed', source: 'committed', lines: [
+      { kind: 'hunk', content: '@@ -9,2 +9,2 @@' },
+      { kind: 'deletion', oldLine: 9, content: '-  return prefix;' },
+      { kind: 'addition', newLine: 9, content: '+  const prefix = pick(locale);' },
+      { kind: 'context', oldLine: 10, newLine: 10, content: '   return prefix;' }
+    ] }]);
+    expect(sideLines(greet, 'NEW', 9, 10)).toEqual(['  const prefix = pick(locale);', '  return prefix;']);
+    expect(sideLines(greet, 'OLD', 9, 9)).toEqual(['  return prefix;']);
+    expect(sideLines(greet, 'NEW', 9, 11)).toBeUndefined();
   });
 });

@@ -211,6 +211,31 @@ export function assertMergePullRequestRequest(value: unknown): asserts value is 
 }
 
 /** Checks replies as the renderer sends them; throws on anything else. */
+/** Runs the current head's failed checks again where the platform ran them. */
+export interface RerunPullRequestChecksRequest {
+  taskId: string;
+}
+
+/** How many runs (GitHub Actions) or jobs (GitLab) started again. */
+export interface RerunPullRequestChecksResult {
+  started: number;
+}
+
+/** Resolves one thread Task Monki read on the task's pull request, or reopens it. */
+export interface ResolvePullRequestDiscussionRequest {
+  taskId: string;
+  discussionId: string;
+  resolved: boolean;
+}
+
+export function assertResolvePullRequestDiscussionRequest(value: unknown): asserts value is ResolvePullRequestDiscussionRequest {
+  const record = isRecord(value) ? value : fail('The thread is not valid.');
+  if (typeof record.taskId !== 'string' || typeof record.discussionId !== 'string' || !record.discussionId || record.discussionId.length > 200 ||
+    typeof record.resolved !== 'boolean') {
+    fail('The thread is not valid.');
+  }
+}
+
 export function assertReplyToPullRequestRequest(value: unknown): asserts value is ReplyToPullRequestRequest {
   const record = isRecord(value) ? value : fail('The replies are not valid.');
   if (typeof record.taskId !== 'string') fail('The replies are not valid.');

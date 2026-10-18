@@ -77,11 +77,18 @@ export interface PullRequestDelivery {
   }): Promise<void>;
   /** Replies on a discussion's own thread; a discussion that has none takes a comment on the pull request. */
   replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussion: Pick<PullRequestDiscussion, 'id' | 'kind'>, body: string): Promise<void>;
-  resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void>;
+  /** Resolves a thread, or reopens it when `resolved` is false. */
+  resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved?: boolean): Promise<void>;
   commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;
   /** Asks people for another review; false when the platform cannot be asked from here. */
   readonly canRequestReviewers: boolean;
   requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
   /** The raw log of a failing check, when its link names a job this platform serves. */
   readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined>;
+  /**
+   * Runs the failed checks again where the platform ran them: GitHub Actions
+   * re-runs each run's failed jobs, GitLab retries each failed job. Only checks
+   * of the pull request's own repository; returns how many runs or jobs started.
+   */
+  rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number>;
 }

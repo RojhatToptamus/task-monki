@@ -37,6 +37,8 @@ import type {
   OpenPullRequestRequest,
   SyncPullRequestRequest,
   MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
   ReadPullRequestMergeOptionsRequest,
   MergePullRequestRequest,
   ReplyToPullRequestRequest,
@@ -763,6 +765,8 @@ function installIpcHandlers(): void {
   handleTrustedIpc('remote:openPullRequest', (_, input: OpenPullRequestRequest) => service.openPullRequest(input));
   handleTrustedIpc('remote:syncPullRequest', (_, input: SyncPullRequestRequest) => service.syncPullRequest(input));
   handleTrustedIpc('remote:markPullRequestReady', (_, input: MarkPullRequestReadyRequest) => service.markPullRequestReady(input));
+  handleTrustedIpc('remote:resolvePullRequestDiscussion', (_, input: ResolvePullRequestDiscussionRequest) => service.resolvePullRequestDiscussion(input));
+  handleTrustedIpc('remote:rerunPullRequestChecks', (_, input: RerunPullRequestChecksRequest) => service.rerunPullRequestChecks(input));
   handleTrustedIpc('remote:readPullRequestMergeOptions', (_, input: ReadPullRequestMergeOptionsRequest) => service.readPullRequestMergeOptions(input));
   handleTrustedIpc('remote:mergePullRequest', (_, input: MergePullRequestRequest) => service.mergePullRequest(input));
   handleTrustedIpc('remote:replyToPullRequest', (_, input: ReplyToPullRequestRequest) => service.replyToPullRequest(input));

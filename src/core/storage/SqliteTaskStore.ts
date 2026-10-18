@@ -68,6 +68,8 @@ import type {
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
   PULL_REQUEST_FEEDBACK_LIMITS,
+  feedbackCommentTimes,
+  reviewTurn,
   unresolvedDiscussionCount,
   type PullRequestFeedback,
   type PullRequestFeedbackSummary
@@ -5022,14 +5024,16 @@ export class SqliteTaskStore {
     const content = JSON.stringify(feedback);
     if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
     const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
-    if (previous?.digest === digest) return { summary: previous };
+    // Unchanged feedback keeps its artifact; what the summary derives from it is read again, so a newer derivation reaches it.
+    if (previous?.digest === digest) return { summary: { ...previous, ...feedbackCommentTimes(feedback) } };
     const candidate: PullRequestFeedbackSummary = {
       artifactId: randomUUID(),
       digest,
       capturedAt: feedback.capturedAt,
       unresolvedCount: unresolvedDiscussionCount(feedback.discussions),
       discussionCount: feedback.discussions.length,
-      reviewers: feedback.reviewers
+      reviewers: feedback.reviewers,
+      ...feedbackCommentTimes(feedback)
     };
     try {
       validatePullRequestFeedbackSummary(candidate);
@@ -7674,9 +7678,11 @@ function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts |
   const reason = merge ? baseMovedReason(merge.raw) : undefined;
   const pushError = pushFailed ? state.branchPublications.find(own)?.error?.split('\n')[0]?.slice(0, 200) : undefined;
   const failed = ci?.checkDetails?.filter((check) => check.status === 'failed') ?? [];
+  const turn = feedback ? reviewTurn(feedback, true) : undefined;
   const facts: BoardDeliveryFacts = {
     ...(failed.length ? { failingChecks: { names: failed.slice(0, 3).map((check) => check.name), count: failed.length } } : {}),
     ...(feedback ? { feedback: { unresolvedCount: feedback.unresolvedCount, reviewers: feedback.reviewers } } : {}),
+    ...(turn ? { turn } : {}),
     ...(reason && pullRequest?.baseRefName ? { baseMoved: { base: pullRequest.baseRefName, reason } } : {}),
     ...(pushError ? { pushError } : {})
   };

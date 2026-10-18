@@ -137,6 +137,33 @@ export function anchorReviewDiscussions<T extends { path?: string; side?: 'NEW' 
   return { byLine, byFile, general };
 }
 
+/** A diff line's code, without the marker its kind already says. */
+export function diffLineCode(content: string, kind: string): string {
+  if ((kind === 'addition' && content.startsWith('+')) || (kind === 'deletion' && content.startsWith('-')) || (kind === 'context' && content.startsWith(' '))) {
+    return content.slice(1);
+  }
+  return content;
+}
+
+/** The code of lines start to end on one side of a file, when the diff holds every one of them. */
+export function sideLines(file: DiffFile, side: 'NEW' | 'OLD', start: number, end: number): string[] | undefined {
+  if (start < 1 || end < start) return undefined;
+  const byNumber = new Map<number, string>();
+  for (const block of file.blocks) {
+    for (const line of block.lines) {
+      const number = side === 'NEW' ? (line.kind === 'deletion' ? undefined : line.newLine) : (line.kind === 'addition' ? undefined : line.oldLine);
+      if (number !== undefined && number >= start && number <= end) byNumber.set(number, diffLineCode(line.content, line.kind));
+    }
+  }
+  const lines: string[] = [];
+  for (let number = start; number <= end; number += 1) {
+    const content = byNumber.get(number);
+    if (content === undefined) return undefined;
+    lines.push(content);
+  }
+  return lines;
+}
+
 /**
  * The last displayed row of a line range on one side, preferring the latest
  * block. Hidden unchanged lines are not displayed. A comment's old side is its

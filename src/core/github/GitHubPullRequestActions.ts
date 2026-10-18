@@ -17,6 +17,10 @@ export const GITHUB_RESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
   resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
 }`;
 
+export const GITHUB_UNRESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
+}`;
+
 interface GitHubMergeOptionsData {
   repository?: {
     mergeCommitAllowed?: boolean;
@@ -55,9 +59,9 @@ export function parseGitHubMergeOptions(data: GitHubMergeOptionsData | undefined
 }
 
 /** A job of GitHub Actions named by a check's link, the only check log GitHub serves. */
-export function gitHubActionsJob(link: string | undefined): { owner: string; name: string; job: number } | undefined {
-  const match = /^https:\/\/[^/]+\/([^/]+)\/([^/]+)\/actions\/runs\/\d+\/job\/(\d+)(?:[/?#].*)?$/u.exec(link ?? '');
-  return match ? { owner: match[1]!, name: match[2]!, job: Number(match[3]) } : undefined;
+export function gitHubActionsJob(link: string | undefined): { owner: string; name: string; run: number; job: number } | undefined {
+  const match = /^https:\/\/[^/]+\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:[/?#].*)?$/u.exec(link ?? '');
+  return match ? { owner: match[1]!, name: match[2]!, run: Number(match[3]), job: Number(match[4]) } : undefined;
 }
 
 /** A merge GitHub refused, in words that say what to do about it. */

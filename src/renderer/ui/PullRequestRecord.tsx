@@ -1,6 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { CircleMinus, ExternalLink, RefreshCw } from 'lucide-react';
+import { CircleMinus, ExternalLink, MessageSquare, RefreshCw, RotateCw } from 'lucide-react';
 import type { PullRequestCheckLog } from '../../shared/contracts';
+import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
 import type { PullRequestRecordCheckRow, PullRequestRecordView, RecordTone } from '../model/pullRequestRecord';
 import { DisclosureChevron } from './DisclosureChevron';
 import { PullRequestStateIcon } from './PullRequestIcon';
@@ -16,15 +17,32 @@ import { Tooltip } from './Tooltip';
 export function PullRequestRecord({
   view,
   refresh,
-  onOpenThreads
+  onOpenThreads,
+  onAskAgain
 }: {
   view: PullRequestRecordView;
   refresh?: { updated?: string; disabled: boolean; reason?: string; onRefresh(): void };
   /** Opens the discussions where they are read and answered. */
   onOpenThreads?(): void;
+  /** Asks a reviewer to review again, as beside their name on the platform; rejects with its reason. */
+  onAskAgain?(reviewer: string): Promise<void>;
 }) {
   const [checksOpen, setChecksOpen] = useState(false);
+  const [asking, setAsking] = useState<string>();
+  const [askError, setAskError] = useState<string>();
   const checksId = useId();
+  const askAgain = async (reviewer: string) => {
+    if (!onAskAgain || asking) return;
+    setAsking(reviewer);
+    setAskError(undefined);
+    try {
+      await onAskAgain(reviewer);
+    } catch (caught) {
+      setAskError(caught instanceof Error ? caught.message : `Could not ask ${reviewer} to review again.`);
+    } finally {
+      setAsking(undefined);
+    }
+  };
   const noun = view.platform === 'GitLab' ? 'merge request' : 'pull request';
   const rows = view.checks?.rows ?? [];
   return (
@@ -80,9 +98,19 @@ export function PullRequestRecord({
                 <li key={reviewer.name}>
                   <span className="tm-prrecord__person">{reviewer.name}</span>
                   <span className="tm-prrecord__word" data-tone={reviewer.tone}>{reviewer.word}</span>
+                  {/* A person who reviewed can be asked again; one already asked, or an app, cannot. */}
+                  {onAskAgain && !reviewer.waiting && !reviewer.bot ? (
+                    <Tooltip label={`Ask ${reviewer.name} to review again`}>
+                      <button type="button" className="tm-prrecord__ask" aria-label={`Ask ${reviewer.name} to review again`}
+                        disabled={Boolean(asking)} onClick={() => void askAgain(reviewer.name)}>
+                        <RotateCw aria-hidden="true" size={13} />
+                      </button>
+                    </Tooltip>
+                  ) : null}
                 </li>
               ))}
             </ul>
+            {askError ? <p className="form-error" role="alert">{askError}</p> : null}
           </Row>
         ) : view.review ? (
           <Row label="Review"><span className="tm-prrecord__word" data-tone={view.review.tone}>{view.review.word}</span></Row>
@@ -229,6 +257,42 @@ export function FailingChecks({
               ) : <p className="tm-prstep__lognote">No log for this check here; its page has it.</p>}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Comments listed under a step before the rest wait in Review. */
+const ASKED_COMMENTS_SHOWN = 4;
+
+/**
+ * The comments a step asks about, each by who wrote it and where: read before
+ * they go to the agent. A row opens its discussion in Review, where it is
+ * answered.
+ */
+export function AskedComments({ discussions, onShow }: {
+  discussions: readonly DiscussionView[];
+  onShow(discussionId: string): void;
+}) {
+  const shown = discussions.slice(0, ASKED_COMMENTS_SHOWN);
+  return (
+    <div className="tm-prstep__comments">
+      <ul className="tm-prstep__commentlist" aria-label="Comments">
+        {shown.map((discussion) => {
+          const file = discussion.path?.split('/').at(-1);
+          const where = file ? `${file}${discussion.line ? `:${discussion.line}` : ''}` : discussion.kind === 'REVIEW' ? 'Review' : undefined;
+          return (
+            <li key={discussion.id}>
+              <button type="button" className="tm-prstep__comment" onClick={() => onShow(discussion.id)}>
+                <MessageSquare aria-hidden="true" size={13} />
+                <span className="tm-prstep__commentauthor">{discussionAuthor(discussion) ?? 'Unknown'}</span>
+                <span className="tm-prstep__commenttext">{discussionSummary(discussion)}</span>
+                {where ? <span className="tm-prstep__commentwhere" title={discussion.path}>{where}</span> : null}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {discussions.length > shown.length ? <p className="tm-slot__meta">{discussions.length - shown.length} more</p> : null}
     </div>
   );
 }

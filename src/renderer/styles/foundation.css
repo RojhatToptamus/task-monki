@@ -33,6 +33,8 @@
   --h-toolbar: 28px;
   --h-compact: 24px;
   --h-icon: 28px;
+  /* A mark that sits on a line of text: a badge, an avatar. */
+  --h-mark: 20px;
 
   /* Rows, bars and heads (DESIGN.md §3): a dense row (rail, index, menu), a
      content row or file head, a two-line or table row, a toolbar under a head,

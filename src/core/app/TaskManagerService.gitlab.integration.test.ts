@@ -138,6 +138,10 @@ describe('TaskManagerService GitLab work', () => {
       name: 'test: unit', link: 'https://gitlab.com/group/sub/widgets/-/jobs/41', text: 'Running tests\n1 failed', truncated: false
     }]);
 
+    // A failed job is retried where it ran.
+    expect(await scenario.service.rerunPullRequestChecks({ taskId: task.id })).toEqual({ started: 1 });
+    expect((await gitlab.calls()).some((call) => call.args.some((arg) => arg.endsWith('/jobs/41/retry')))).toBe(true);
+
     // GitLab marks a draft by its title, so ready is the title without the marker.
     await scenario.service.markPullRequestReady({ taskId: task.id });
     expect(await mergeRequest()).toMatchObject({ title: 'Guard an empty layout', draft: false });

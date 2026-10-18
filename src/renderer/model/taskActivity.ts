@@ -366,6 +366,8 @@ function itemForEvent(
       return githubFailureItem(event, payload, state);
     case 'PR_REPLIES_POSTED':
       return repliesPostedItem(event, payload);
+    case 'PR_CHECKS_RERUN_REQUESTED':
+      return item(event, 'delivery', 'User', 'Re-ran failed checks on GitHub', undefined, 'info');
     case 'TRANSITION_COMPLETED':
       return transitionCompletedItem(event, payload);
     case 'TRANSITION_BLOCKED':
@@ -968,13 +970,19 @@ function mergeItem(
 function repliesPostedItem(event: DomainEvent, payload: Record<string, unknown>): TaskActivityCandidate {
   const posted = numberField(payload, 'posted') ?? 0;
   const resolved = numberField(payload, 'resolved') ?? 0;
+  const reopened = numberField(payload, 'reopened') ?? 0;
   const requested = Array.isArray(payload.requested) ? payload.requested.filter((name): name is string => typeof name === 'string') : [];
-  const summary = [
-    posted ? `${posted} ${posted === 1 ? 'reply' : 'replies'}` : '',
+  const summary = posted ? [
+    `${posted} ${posted === 1 ? 'reply' : 'replies'}`,
     resolved ? `${resolved} ${resolved === 1 ? 'thread' : 'threads'} resolved` : '',
     requested.length ? `asked ${requested.map((name) => `@${name}`).join(' and ')} again` : ''
-  ].filter(Boolean).join(', ');
-  return item(event, 'delivery', 'User', posted ? 'Replied on GitHub' : 'Asked for review on GitHub', fact(summary || undefined), 'info');
+  ].filter(Boolean).join(', ') : undefined;
+  // One write, named by what it did: a reply, a thread resolved or reopened, or a reviewer asked again.
+  const title = posted ? 'Replied on GitHub'
+    : resolved ? 'Resolved a thread on GitHub'
+      : reopened ? 'Reopened a thread on GitHub'
+        : 'Asked for review on GitHub';
+  return item(event, 'delivery', 'User', title, fact(summary), 'info');
 }
 
 function githubFailureItem(

@@ -618,7 +618,9 @@ In Review:
   blocker, one fact, the actions that take it); the record column holds the
   pull request itself, with a row per gate (checks, reviews, threads, merge).
 - For failed checks, list the failed checks with the end of each log on request
-  and offer `Fix checks`, which sends the agent the logs as quoted data.
+  and offer `Fix checks`, which sends the agent the logs as quoted data, and
+  `Re-run failed` for a check that may have failed by chance, which runs the
+  pull request's own failed runs or jobs again without the agent.
 - Allow GitHub refresh actions from the pull request's record.
 - Offer failing-CI repair only when the selected PR Status state is
   `Checks failed`; stale, diverged, or locally unpublished work should surface
@@ -627,8 +629,10 @@ In Review:
 - The person's writes to the platform are explicit steps: `Ready for review`,
   `Merge` (the head they saw, through a dialog with the repository's methods
   and Delete branch), and `Reply on GitHub` (the agent's answers as editable
-  replies, Resolve thread, and asking reviewers again). Nothing posts on its
-  own or on an agent's behalf.
+  replies, Resolve thread, and asking reviewers again). In the Review tab each
+  open thread can be answered in place, and resolved or reopened from its
+  head, and a reviewer can be asked again from the pull request's record.
+  Nothing posts on its own or on an agent's behalf.
 - A branch that moved beside the worktree (`Pull changes`) or a base that moved
   ahead (`Update with <base>`) is merged by the agent from commits Task Monki
   fetched; the person reviews and pushes.
@@ -722,7 +726,12 @@ PR Status says who requested changes, who it waits on and how many threads are
 unresolved, and Address comments adds the unresolved ones the agent was not
 sent to the review request and opens it on the Review tab, where the threads
 sit on their lines. People's words reach the agent only when the person sends
-them, quoted and attributed; replying and resolving stay on the platform.
+them, quoted and attributed. The person answers, resolves or reopens a thread
+themselves, from the Review tab or Reply on GitHub; nothing posts on its own.
+Whose turn it is decides what is asked of the person: once they wrote the
+latest comment, or asked again every reviewer who requested changes, the pull
+request waits on its reviewers (Waiting for review), and neither the Now panel,
+the board nor the Inbox asks anything of them until a reviewer answers.
 
 Push update is shown only here, and so is Create draft PR once a PR exists.
 Before then, Create draft PR sits with the finishing actions when finishing

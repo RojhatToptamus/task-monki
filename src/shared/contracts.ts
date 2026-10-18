@@ -319,6 +319,7 @@ export const DOMAIN_EVENT_TYPES = [
   'PR_CREATE_REQUESTED',
   'PR_MERGE_REQUESTED',
   'PR_REPLIES_POSTED',
+  'PR_CHECKS_RERUN_REQUESTED',
   'PR_BODY_ARTIFACT_CREATED',
   'PR_SNAPSHOT_CAPTURED',
   'CI_ROLLUP_CAPTURED',
@@ -999,6 +1000,8 @@ export interface BoardDeliveryFacts {
   baseMoved?: { base: string; reason: 'BEHIND' | 'CONFLICTS' };
   /** Why the last push failed, as recorded. */
   pushError?: string;
+  /** Whose move a pull request with requested changes waits on (`reviewTurn`). */
+  turn?: 'AUTHOR' | 'REVIEWERS';
 }
 
 export interface BoardTaskSummary {
@@ -1649,6 +1652,10 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   mergePullRequest(input: import('./pullRequestActions').MergePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   /** Posts the person's replies on the task's pull request, resolves the threads they chose and asks reviewers again. */
   replyToPullRequest(input: import('./pullRequestActions').ReplyToPullRequestRequest): Promise<import('./pullRequestActions').ReplyToPullRequestResult>;
+  /** Resolves a thread on the task's pull request, or reopens one. */
+  resolvePullRequestDiscussion(input: import('./pullRequestActions').ResolvePullRequestDiscussionRequest): Promise<void>;
+  /** Runs the current head's failed checks again where the platform ran them. */
+  rerunPullRequestChecks(input: import('./pullRequestActions').RerunPullRequestChecksRequest): Promise<import('./pullRequestActions').RerunPullRequestChecksResult>;
   /** Fetches the commits the worktree lacks, for the agent to merge. */
   fetchPullRequestUpdate(input: import('./pullRequestActions').FetchPullRequestUpdateRequest): Promise<import('./pullRequestActions').PullRequestUpdate>;
   /** The end of each failing check's log for the pull request's current head. */

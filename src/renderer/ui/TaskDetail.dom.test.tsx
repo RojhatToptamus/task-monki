@@ -294,7 +294,7 @@ describe('Overview decision slot', () => {
 });
 
 describe('Pull request feedback', () => {
-  function feedbackDetail(threads: number) {
+  function feedbackDetail(threads: number, configure?: (props: ReturnType<typeof detailProps>) => void) {
     HTMLElement.prototype.scrollTo = vi.fn();
     HTMLElement.prototype.scrollIntoView = vi.fn();
     const props = detailProps();
@@ -325,6 +325,7 @@ describe('Pull request feedback', () => {
       const [draft, setDraft] = useState(EMPTY_REVIEW_DRAFT);
       return <TaskDetail {...props} reviewDraft={draft} onReviewDraftChange={setDraft} />;
     }
+    configure?.(props);
     render(<Stateful />);
     return props;
   }
@@ -333,16 +334,19 @@ describe('Pull request feedback', () => {
     const props = feedbackDetail(1);
     const slot = screen.getByRole('region', { name: 'Current step' });
     expect(within(slot).getByText('alice requested changes, 1 unresolved thread')).toBeDefined();
+    // What was asked is read before it is sent: each comment by who wrote it and where.
+    const asked = await within(slot).findByRole('list', { name: 'Comments' });
+    expect(within(asked).getByRole('button', { name: /alice Handle a null layout\. output\.txt:1/u })).toBeDefined();
     const address = await within(slot).findByRole('button', { name: 'Address comments' });
     expect(address.className).toContain('primary-button');
     fireEvent.click(address);
 
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
-    const sheet = await screen.findByRole('dialog', { name: 'Request changes' });
+    const sheet = await screen.findByRole('dialog', { name: 'Address comments' });
     expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Handle a null layout.')).toBeDefined();
     // Nothing went to the agent: sending is the sheet's own step.
     expect(props.onSendReviewRequest).not.toHaveBeenCalled();
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Request changes' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Address comments' }));
     await waitFor(() => expect(props.onSendReviewRequest).toHaveBeenCalledWith(
       'run-1',
       expect.stringContaining('----- BEGIN GITHUB REVIEW 00000000 -----'),
@@ -350,10 +354,36 @@ describe('Pull request feedback', () => {
     ));
   });
 
+  it('waits on the reviewers once the person answered after them, and asks nothing of the person', async () => {
+    feedbackDetail(1, (configured) => {
+      configured.reviewRollup = { ...configured.reviewRollup!, feedback: { ...configured.reviewRollup!.feedback!,
+        lastOtherCommentAt: '2026-07-07T10:00:00.000Z', lastViewerCommentAt: '2026-07-07T11:00:00.000Z' } };
+    });
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByText('Waiting for review')).toBeDefined();
+    expect(within(slot).getByText('Waiting on alice')).toBeDefined();
+    // The thread was never sent, but the person answered after alice: it is hers to read now.
+    await screen.findByRole('tab', { name: 'Overview', selected: true });
+    expect(within(slot).queryByRole('button', { name: 'Address comments' })).toBeNull();
+    expect(within(slot).queryByRole('list', { name: 'Comments' })).toBeNull();
+  });
+
+  it('asks a person to review again from beside their name, and never an app', async () => {
+    const props = feedbackDetail(1, (configured) => {
+      configured.reviewRollup = { ...configured.reviewRollup!, feedback: { ...configured.reviewRollup!.feedback!,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'ci-review', state: 'CHANGES_REQUESTED', bot: true }] } };
+      configured.onReplyToPullRequest = vi.fn(async () => ({ posted: 0, resolved: 0, requested: ['alice'], failed: [] }));
+    });
+    const record = screen.getByText('Pull request', { selector: 'h3' }).closest('section')!;
+    expect(within(record).queryByRole('button', { name: 'Ask ci-review to review again' })).toBeNull();
+    fireEvent.click(within(record).getByRole('button', { name: 'Ask alice to review again' }));
+    await waitFor(() => expect(props.onReplyToPullRequest).toHaveBeenCalledWith('task-1', [], ['alice']));
+  });
+
   it('holds a request with more items than one can carry, and says why before anything is sent', async () => {
     const props = feedbackDetail(REVIEW_REQUEST_ITEM_LIMIT + 1);
     fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByRole('button', { name: 'Address comments' }));
-    const send = within(await screen.findByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' });
+    const send = within(await screen.findByRole('dialog', { name: 'Address comments' })).getByRole('button', { name: 'Address comments' });
     expect((send as HTMLButtonElement).disabled).toBe(true);
     expect(document.getElementById(send.getAttribute('aria-describedby')!)?.textContent).toBe(`${REVIEW_REQUEST_ITEM_LIMIT + 1} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`);
     fireEvent.click(send);

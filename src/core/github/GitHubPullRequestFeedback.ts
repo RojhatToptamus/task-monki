@@ -10,7 +10,7 @@ import {
 /** How many conversation comments are read, most recent first. */
 const CONVERSATION_COMMENTS = 30;
 const COMMENT_FIELDS = 'id body createdAt url isMinimized author { login }';
-const REVIEW_FIELDS = 'id state body submittedAt url author { login }';
+const REVIEW_FIELDS = 'id state body submittedAt url author { __typename login }';
 
 /**
  * One read of everything people said on a pull request. A thread keeps its
@@ -71,7 +71,7 @@ interface GitHubFeedbackReview {
   body?: string;
   submittedAt?: string | null;
   url?: string;
-  author?: { login?: string } | null;
+  author?: { __typename?: string; login?: string } | null;
 }
 
 interface GitHubReviewThread {
@@ -159,12 +159,15 @@ export function parseGitHubPullRequestFeedback(data: GitHubFeedbackData, number:
 
   // A reviewer's verdict outlives their later comments; a fresh request supersedes both.
   const reviewers = new Map<string, PullRequestReviewerState>();
+  // Apps review too, such as Copilot or a CI bot; GitHub never takes a review request for one.
+  const bots = new Set<string>();
   const reviewDiscussions = new Map<string, RawPullRequestDiscussion>();
   for (const review of [...(pullRequest.latestReviews?.nodes ?? []), ...(pullRequest.latestOpinionatedReviews?.nodes ?? [])]) {
     const login = review?.author?.login;
     if (!review || !REVIEW_STATES.has(review.state ?? '')) continue;
     const state = review.state as 'CHANGES_REQUESTED' | 'APPROVED' | 'COMMENTED';
     if (login && (state !== 'COMMENTED' || !reviewers.has(login))) reviewers.set(login, state);
+    if (login && review.author?.__typename === 'Bot') bots.add(login);
     if (review.id && review.body?.trim() && !reviewDiscussions.has(review.id)) {
       reviewDiscussions.set(review.id, {
         id: review.id,
@@ -182,6 +185,7 @@ export function parseGitHubPullRequestFeedback(data: GitHubFeedbackData, number:
     const reviewer = request?.requestedReviewer;
     const name = reviewer?.__typename === 'Team' ? reviewer.name : reviewer?.login;
     if (name) reviewers.set(name, 'REQUESTED');
+    if (name && reviewer?.__typename === 'Bot') bots.add(name);
   }
 
   const conversation = pullRequest.comments;
@@ -202,7 +206,7 @@ export function parseGitHubPullRequestFeedback(data: GitHubFeedbackData, number:
     ...(pullRequest.headRefOid ? { headSha: pullRequest.headRefOid } : {}),
     capturedAt,
     ...(data.viewer?.login ? { viewer: data.viewer.login } : {}),
-    reviewers: [...reviewers].map(([name, state]): PullRequestReviewer => ({ name, state })),
+    reviewers: [...reviewers].map(([name, state]): PullRequestReviewer => ({ name, state, ...(bots.has(name) ? { bot: true } : {}) })),
     discussions: [...threads, ...reviewDiscussions.values(), ...comments],
     truncated: (threadConnection?.totalCount ?? 0) > threads.length ||
       (conversation?.totalCount ?? 0) > (conversation?.nodes?.length ?? 0)

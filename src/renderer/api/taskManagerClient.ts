@@ -26,6 +26,9 @@ import type {
   RemoteWorkListing,
   SyncPullRequestRequest,
   MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  RerunPullRequestChecksResult,
   ReadPullRequestMergeOptionsRequest,
   PullRequestMergeOptions,
   MergePullRequestRequest,
@@ -380,6 +383,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     openPullRequest: (input: OpenPullRequestRequest) => post<Task>(baseUrl, '/api/remote/pull-request/open', input),
     syncPullRequest: (input: SyncPullRequestRequest) => post<Task>(baseUrl, '/api/remote/pull-request/sync', input),
     markPullRequestReady: (input: MarkPullRequestReadyRequest) => post<PullRequestSnapshotRecord>(baseUrl, '/api/remote/pull-request/ready', input),
+    rerunPullRequestChecks: (input: RerunPullRequestChecksRequest) =>
+      post<RerunPullRequestChecksResult>(baseUrl, '/api/remote/pull-request/rerun-checks', input),
+    resolvePullRequestDiscussion: async (input: ResolvePullRequestDiscussionRequest) => {
+      await post<Record<string, never>>(baseUrl, '/api/remote/pull-request/resolve', input);
+    },
     readPullRequestMergeOptions: (input: ReadPullRequestMergeOptionsRequest) =>
       post<PullRequestMergeOptions>(baseUrl, '/api/remote/pull-request/merge-options', input),
     mergePullRequest: (input: MergePullRequestRequest) => post<PullRequestSnapshotRecord>(baseUrl, '/api/remote/pull-request/merge', input),

@@ -2691,15 +2691,18 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   list-style: none;
 }
 
+/* A reviewer's state wraps under their name before the name is cut short. */
 .tm-prrecord__people li {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
+  gap: 0 8px;
   min-width: 0;
 }
 
 .tm-prrecord__person {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -2712,6 +2715,28 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   flex: 0 0 auto;
   color: var(--text-soft);
   font-size: var(--t-help);
+}
+
+/* Ask again sits after the reviewer's state, as the platform's re-request does. */
+.tm-prrecord__ask {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: var(--h-compact);
+  height: var(--h-compact);
+  margin: -4px -6px -4px -4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--muted);
+}
+
+.tm-prrecord__ask:hover:not(:disabled) {
+  background-color: var(--hover);
+  color: var(--text);
 }
 
 .tm-prrecord__word[data-tone='success'] { color: var(--verified-ink); }
@@ -2773,6 +2798,76 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 .tm-prrecord__open:hover {
   background-color: var(--hover);
   color: var(--text);
+}
+
+/* In the Now panel, the comments the step asks about; each opens its discussion in Review. */
+.tm-prstep__comments {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  max-width: 72ch;
+}
+
+/* A row's text gives way before the column does. */
+.tm-prstep__commentlist {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tm-prstep__comment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 12px);
+  min-width: 0;
+  min-height: var(--h-row-dense);
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--text-soft);
+  font-size: var(--t-help);
+  text-align: left;
+}
+
+.tm-prstep__comment:hover {
+  background-color: var(--hover);
+  color: var(--text);
+}
+
+.tm-prstep__comment > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.tm-prstep__commentauthor {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: var(--w-medium);
+}
+
+.tm-prstep__commenttext {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-prstep__commentwhere {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* In the Now panel, the failed checks the step names, each with its log. */

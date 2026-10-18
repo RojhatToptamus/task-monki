@@ -1234,7 +1234,10 @@ export function validatePullRequestFeedbackSummary(value: unknown): void {
     const entry = persistedRecord(reviewer, 'reviewRollups');
     strings(entry, 'reviewRollups', ['name']);
     enumField(entry, 'state', PULL_REQUEST_REVIEWER_STATES, 'reviewRollups');
+    optionalBoolean(entry, 'bot', 'reviewRollups');
   }
+  optionalTimestamp(summary, 'lastViewerCommentAt', 'reviewRollups');
+  optionalTimestamp(summary, 'lastOtherCommentAt', 'reviewRollups');
 }
 
 function mergeSnapshotRecord(record: object): void {

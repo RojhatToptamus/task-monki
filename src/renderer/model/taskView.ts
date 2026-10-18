@@ -220,7 +220,7 @@ export interface TaskCardRepositoryIdentity {
  * A task as the status function reads it. A full task can carry the facts a
  * board summary derives from its records, so both read the same word.
  */
-export type TaskCardSource = Task | BoardTaskSummary | (Task & Pick<BoardTaskSummary, 'pullRequestRewritten'>);
+export type TaskCardSource = Task | BoardTaskSummary | (Task & Partial<Pick<BoardTaskSummary, 'pullRequestRewritten' | 'delivery'>>);
 
 /**
  * The one status word for a task. The board card, the task header and Active

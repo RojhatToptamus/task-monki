@@ -11,7 +11,8 @@ import type {
 } from '../../shared/contracts';
 import { baseMovedReason, getImplementationRetryReason, pullRequestRewrittenUnder, type RemoteProvider } from '../../shared/contracts';
 import { deliveryNoun, deliveryWords } from './deliveryWords';
-import { pullRequestFeedbackLine } from './pullRequestFeedback';
+import { pullRequestFeedbackLine, reviewWaitingLine } from './pullRequestFeedback';
+import { reviewTurn } from '../../shared/pullRequestFeedback';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
@@ -521,7 +522,9 @@ function buildPrStatusCore(input: {
     // Feedback read with this pull request; a merged or closed one asks nothing more.
     const feedback = reviewRollup?.feedback && reviewRollup.pullRequestNumber === pr.number &&
       (pr.status === 'OPEN_DRAFT' || pr.status === 'OPEN_READY') ? reviewRollup.feedback : undefined;
-    const feedbackLine = feedback ? pullRequestFeedbackLine(feedback) : undefined;
+    const feedbackLine = feedback
+      ? reviewRollup && answeredReview(reviewRollup) ? reviewWaitingLine(feedback) : pullRequestFeedbackLine(feedback)
+      : undefined;
     return {
       kind: 'UNKNOWN',
       headline: 'Unknown',
@@ -968,12 +971,21 @@ function reviewToStatus(
   reviewRollup?: ReviewRollupRecord
 ): Pick<PrStatusViewModel, 'kind' | 'headline' | 'tone'> | undefined {
   if (reviewRollup?.status === 'CHANGES_REQUESTED') {
-    return { kind: 'GITHUB_CHANGES_REQUESTED', headline: 'Changes requested', tone: 'error' };
+    // Answered after everyone else, or asked again: the verdict stands until its reviewers look.
+    return answeredReview(reviewRollup)
+      ? { kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', tone: 'action' }
+      : { kind: 'GITHUB_CHANGES_REQUESTED', headline: 'Changes requested', tone: 'error' };
   }
   if (reviewRollup?.status === 'REQUESTED' || reviewRollup?.status === 'PENDING') {
     return { kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', tone: 'action' };
   }
   return undefined;
+}
+
+/** A review that requested changes the person has since answered: it waits on its reviewers. */
+function answeredReview(reviewRollup: ReviewRollupRecord): boolean {
+  return reviewRollup.status === 'CHANGES_REQUESTED' && Boolean(reviewRollup.feedback) &&
+    reviewTurn(reviewRollup.feedback!, true) === 'REVIEWERS';
 }
 
 function isReadyToMerge(

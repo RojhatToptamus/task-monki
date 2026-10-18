@@ -355,6 +355,20 @@ describe('buildPrStatusViewModel', () => {
     expect(unknown.evidenceLine).toBe('Checks unknown');
   });
 
+  it('waits on reviewers once the person answered a review that requested changes', () => {
+    const feedback = (lastViewerCommentAt?: string) => ({
+      artifactId: '00000000-0000-4000-8000-000000000001', digest: 'a'.repeat(64), capturedAt: now, unresolvedCount: 1, discussionCount: 2,
+      reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' as const }], lastOtherCommentAt: '2026-10-17T10:00:00.000Z',
+      ...(lastViewerCommentAt ? { lastViewerCommentAt } : {})
+    });
+    const view = (lastViewerCommentAt?: string) => buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), ciRollup: ciFixture({ status: 'PASSING', totalCount: 1, passingCount: 1 }),
+      reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED', feedback: feedback(lastViewerCommentAt) }), mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
+    });
+    expect(view()).toMatchObject({ kind: 'GITHUB_CHANGES_REQUESTED', headline: 'Changes requested', fact: 'alice requested changes, 1 unresolved thread' });
+    expect(view('2026-10-17T10:05:00.000Z')).toMatchObject({ kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', fact: 'Waiting on alice', canMerge: false });
+  });
+
   it('does not call a pushed head ready to merge before its checks had a minute to start', () => {
     const pullRequest = prFixture();
     const earlier = ciFixture({ id: 'ci-0', headSha: 'old111', status: 'PASSING', totalCount: 2, passingCount: 2, observedAt: '2026-10-17T10:00:00.000Z' });

@@ -10,6 +10,7 @@ import {
   type RemoteWorkSummary
 } from '../../shared/contracts';
 import { ActionMenu } from './ActionMenu';
+import { StatusGlyph } from './StatusBadge';
 import { Tooltip } from './Tooltip';
 import { formatStatusValue } from './display';
 import { formatRemoteWorkDate, remoteWorkLabel } from '../model/remoteWork';
@@ -133,11 +134,19 @@ export function RemoteWorkFields({
               <small className="remote-work__meta">
                 {/* A fork's head reads as the platform writes it, owner:branch; that names the fork. */}
                 {kind === 'PULL_REQUEST' && item.headRefName ? <code>{forkOwner ? `${forkOwner}:` : ''}{item.headRefName}</code> : null}
-                {kind === 'ISSUE' && item.author ? <span>{item.author}</span> : null}
+                {item.author ? <span>{item.author}</span> : null}
                 {item.updatedAt ? <span>{formatRemoteWorkDate(item.updatedAt)}</span> : null}
+                {/* How its head's checks ended, as a mark among its facts: the word at the row's end is for its reviews. */}
+                {item.checks ? <span className="remote-work__checks" title={CHECK_WORDS[item.checks]}>
+                  <StatusGlyph kind={item.checks === 'FAILING' ? 'blocked' : item.checks === 'PENDING' ? 'working' : 'verified'} />
+                  <span className="tm-visually-hidden">{CHECK_WORDS[item.checks]}</span>
+                </span> : null}
               </small>
             </span>
-            <span className="import-work__kind">{item.existingTaskId ? 'Has task' : item.crossRepository && !forkOwner ? 'Fork' : item.draft ? 'Draft' : ''}</span>
+            <span className="import-work__kind" data-tone={!item.existingTaskId && !item.draft ? REVIEW_TONES[item.review ?? ''] : undefined}>
+              {item.existingTaskId ? 'Has task' : item.draft ? 'Draft' : item.review && item.review !== 'REVIEW_REQUIRED' ? REVIEW_WORDS[item.review]
+                : item.crossRepository && !forkOwner ? 'Fork' : ''}
+            </span>
           </button>;
         })}
         {problem ? <div className="tm-error remote-work__problem" role="alert">
@@ -151,3 +160,15 @@ export function RemoteWorkFields({
     </div>
   </div>;
 }
+
+const CHECK_WORDS: Record<NonNullable<RemoteWorkSummary['checks']>, string> = {
+  FAILING: 'Checks failed',
+  PENDING: 'Checks running',
+  PASSING: 'Checks passed'
+};
+const REVIEW_WORDS: Record<NonNullable<RemoteWorkSummary['review']>, string> = {
+  CHANGES_REQUESTED: 'Changes requested',
+  APPROVED: 'Approved',
+  REVIEW_REQUIRED: 'Review required'
+};
+const REVIEW_TONES: Record<string, string | undefined> = { CHANGES_REQUESTED: 'error', APPROVED: 'success' };

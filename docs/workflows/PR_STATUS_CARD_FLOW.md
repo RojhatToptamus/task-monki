@@ -59,6 +59,7 @@ Push update          the worktree holds commits or changes the PR does not
 Pull changes         the PR's branch moved beside the worktree's own commits
 Update with <base>   the platform holds the merge on a base that moved
 Fix checks           a check failed for the current head
+Re-run failed        beside Fix checks, when a failed check ran in the PR's own repository
 Address comments     an unresolved thread or a review asking for changes was not sent
 Reply on GitHub      the agent answered sent discussions and nobody replied since
 Ready for review     a current draft whose checks did not fail
@@ -74,7 +75,14 @@ reviews and pushes. Fix checks reads the end of each failing log first
 codes and timestamps removed) and quotes it in the follow-up as data. Only the
 last megabyte of a log is read for that, and a log that marks its error ends at
 its last error; "Earlier lines left out" says only that lines before the shown
-end were dropped.
+end were dropped. Re-run failed asks the platform to run the failed checks
+again without sending the agent anything, for a flaky check: on GitHub it posts
+`repos/<owner>/<repo>/actions/runs/<run>/rerun-failed-jobs` for each failed
+Actions run of the pull request's own repository, and on GitLab
+`projects/:id/jobs/:job/retry` for each failed job of the merge request's own
+project. A check from a fork's run or another system is left to its platform.
+`PR_CHECKS_RERUN_REQUESTED` records what was asked, and PR Status reads the
+pull request again.
 
 A head just pushed reports no checks until its CI registers them. When an
 earlier head of the same pull request had checks, no checks for this head reads
@@ -115,6 +123,16 @@ platform, each an explicit click:
   `PR_REPLIES_POSTED` records which discussions were answered: a review's answer
   is a comment of its own, so this record is what keeps Reply from offering it
   again until a later request sends that discussion to the agent anew.
+- In the Review tab, each open thread ends in a reply row, so a reply is
+  written where the thread is read and can be checked against its code first.
+  An agent's answer to the thread is where the reply starts and Resolve thread
+  starts checked for Fixed, as in the dialog; the reply goes through the same
+  path and the same record. The check on a thread's head resolves it, or reopens
+  a resolved one, with no reply (GitHub's `resolveReviewThread` and
+  `unresolveReviewThread`, GitLab's `resolved` on the discussion), and
+  `PR_REPLIES_POSTED` records it as resolved or reopened. Each write reads the
+  pull request again afterwards, and the worktree's evidence is recorded only
+  when it changed, so the diff being read keeps its place.
 
 Finish remains local acceptance. It owns `Commit`, `Mark done`, and
 `Mark done anyway`, the owner override that is never the recommended step and
@@ -256,7 +274,9 @@ state (requested changes, approved, commented, or asked and waiting). It is a
 read; nothing is written back. `PullRequestFeedback` is stored as the task's
 immutable `pull-request-feedback` artifact, and `ReviewRollupRecord.feedback`
 keeps a summary the card reads without the artifact: the artifact id, a
-digest, the unresolved thread count, the discussion count and the reviewers.
+digest, the unresolved thread count, the discussion count, the reviewers, and
+the platform's time of the person's latest comment and of anyone else's
+(`lastViewerCommentAt`, `lastOtherCommentAt`), which decide whose turn it is.
 An unchanged reading keeps its artifact; a read that fails keeps the last
 reading of the same PR, and the PR status still records.
 
@@ -269,7 +289,9 @@ and invisible characters (zero-width, bidirectional controls and tag
 characters), which both platforms hide, and comments a maintainer minimized are
 left out, and a bot's conversation comment (a deployment or coverage report) is
 not feedback; a bot's review threads are. An agent is sent the text the Review
-tab shows, never markup or attributes it hides. A thread keeps its first
+tab shows, never markup or attributes it hides. A reviewer that is a bot is
+marked as one, and is never asked to review again: the platform ignores such a
+request. A thread keeps its first
 comment and its nine most recent replies. Every body is bounded, and past a
 shared budget, open discussions keep their bodies at the bound while resolved
 ones keep only their start. Past 100 discussions, open ones are kept first,
@@ -979,7 +1001,16 @@ unresolved thread, or a review requesting changes, was not sent to the agent
 since anyone else last wrote on it: it adds those to the review request and
 opens the Review tab's request sheet. Nothing is sent until the person sends
 it there. It leads the panel after Fix checks, Sync branch and Push
-update.
+update, and the panel lists what it would send, one row per comment that opens
+its thread in Review.
+
+The state follows whose turn it is (`reviewTurn`). It is the author's while a
+reviewer's request or an unresolved thread stands unanswered. It is the
+reviewers' once the person wrote after everyone else on the platform's clock,
+or asked again every reviewer who requested changes (GitHub shows that reviewer
+as requested while the verdict stands): the card reads Waiting for review with
+"Waiting on alice", offers nothing, and the Inbox and board raise nothing. A
+reviewer's next comment or review hands the turn back.
 
 ### GITHUB_REVIEW_WAITING (Waiting for review)
 
@@ -987,10 +1018,12 @@ update.
 PR Status                         Jul 2, 10:56
 o Waiting for review
 #82 Refresh auth token
+Waiting on alice
 [refresh]
 ```
 
-Tone: `action`.
+Tone: `action`. Also the state of a pull request whose requested changes the
+person answered: the fact names who it waits on.
 
 ### READY_TO_MERGE
 
@@ -1158,7 +1191,10 @@ failed checks' names, who asked for changes and how many threads are
 unresolved, the base a blocked merge waits on, and why the last push failed.
 The Inbox states that fact beneath the word ("unit and lint failed", "unit,
 lint and 3 more failed", "alice requested changes, 2 unresolved threads",
-"Conflicts with main"). A push the remote refused reads "Push failed", and one
+"Conflicts with main"). Delivery raises nothing while an agent turn runs, since
+the turn may be the fix, nor while the pull request waits on its reviewers; and
+fixes the agent made that are not pushed read "Changes not pushed" ahead of the
+reviewer's request they answer. A push the remote refused reads "Push failed", and one
 that may have landed reads "Push unconfirmed", not "Delivery needs attention";
 and Push update keeps an open pull request open in the projection while it
 runs, so the task never reads as having none.

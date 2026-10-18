@@ -57,6 +57,9 @@ export interface RemoteWorkSummary {
   /** The pull request's branch lives in another repository, usually a fork. */
   crossRepository?: boolean;
   headRepositoryPath?: string;
+  /** Where its reviews stand and how its head's checks ended, as the platform's list says: what to open first. */
+  review?: 'CHANGES_REQUESTED' | 'APPROVED' | 'REVIEW_REQUIRED';
+  checks?: 'FAILING' | 'PENDING' | 'PASSING';
   /** The task already opened from this item, or that delivered this pull request. */
   existingTaskId?: string;
   existingTaskTitle?: string;

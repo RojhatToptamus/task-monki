@@ -148,6 +148,7 @@ import {
   CHECK_LOG_LIMITS,
   assertMergePullRequestRequest,
   assertReplyToPullRequestRequest,
+  assertResolvePullRequestDiscussionRequest,
   boundCheckLog,
   UNSHIPPED_GIT_STATUSES,
   type FetchPullRequestUpdateRequest,
@@ -159,6 +160,9 @@ import {
   type ReadPullRequestCheckLogsRequest,
   type ReadPullRequestMergeOptionsRequest,
   type ReplyToPullRequestRequest,
+  type ResolvePullRequestDiscussionRequest,
+  type RerunPullRequestChecksRequest,
+  type RerunPullRequestChecksResult,
   type ReplyToPullRequestResult
 } from '../../shared/pullRequestActions';
 import { parsePullRequestFeedback, type PullRequestDiscussion, type PullRequestFeedback } from '../../shared/pullRequestFeedback';
@@ -2006,7 +2010,8 @@ export class TaskManagerService {
       const stored = await this.recordLinkedPullRequestStatus(task);
       const currentTask = await this.requireTask(task.id);
       if (currentTask.currentRunId) await this.ensurePostRunEvidence(currentTask.currentRunId);
-      await this.refreshEvidenceInternal({ taskId: task.id });
+      // An unchanged worktree keeps its snapshot: a refresh is not new work to capture.
+      await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
       return stored;
     } catch (error) {
       await this.recordGitHubSyncFailure(task, worktree, 'pull-request-refresh', error);
@@ -5184,6 +5189,77 @@ export class TaskManagerService {
     });
   }
 
+  /**
+   * Resolves one thread Task Monki read on the task's pull request, or reopens
+   * it: the person's call, made where the thread is read.
+   */
+  async resolvePullRequestDiscussion(input: ResolvePullRequestDiscussionRequest): Promise<void> {
+    assertResolvePullRequestDiscussionRequest(input);
+    return this.withTaskAction(input.taskId, 'Replies', async () => {
+      const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Replies');
+      const action = await this.pullRequestAction(task);
+      const { latest, noun, worktree, address, delivery } = action;
+      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      const feedback = await this.latestPullRequestFeedback(task.id, latest.number);
+      const discussion = feedback?.discussions.find((candidate) => candidate.id === input.discussionId);
+      if (!discussion?.resolvable) throw new Error('Task Monki has not read this thread. Refresh, then try again.');
+      try {
+        await delivery.resolveDiscussion(worktree, address, discussion.id, input.resolved);
+      } catch (error) {
+        throw new Error(error instanceof RemoteWorkError ? error.message : safeCliMessage(error));
+      }
+      await this.store.appendEvent(createDomainEvent({
+        type: 'PR_REPLIES_POSTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'github',
+        payload: { number: latest.number, posted: 0, resolved: input.resolved ? 1 : 0, reopened: input.resolved ? 0 : 1, requested: [], replied: [] }
+      }));
+      // The thread's new state is the platform's now; reading it again shows it.
+      await this.recordPullRequestAfterAction(task, action).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Runs the current head's failed checks again where the platform ran them,
+   * for a check that failed by chance: the person's click, recorded first.
+   */
+  async rerunPullRequestChecks(input: RerunPullRequestChecksRequest): Promise<RerunPullRequestChecksResult> {
+    if (!input || typeof input.taskId !== 'string') throw new Error('The checks are not valid.');
+    return this.withTaskAction(input.taskId, 'Re-run checks', async () => {
+      const task = await this.requireTask(input.taskId);
+      this.assertNormalTask(task, 'Re-run checks');
+      const action = await this.pullRequestAction(task);
+      const { latest, noun, worktree, address, delivery } = action;
+      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      const ci = (await this.store.snapshot()).ciRollups.find((record) =>
+        record.taskId === task.id && record.pullRequestNumber === latest.number && record.headSha === latest.headRefOid);
+      const failed = (ci?.checkDetails ?? []).filter((check) => check.status === 'failed');
+      if (failed.length === 0) throw new Error('No check failed for the current head. Refresh, then try again.');
+      let started: number;
+      try {
+        started = await delivery.rerunFailedChecks(worktree, address, failed);
+      } catch (error) {
+        throw new Error(error instanceof RemoteWorkError ? error.message : safeCliMessage(error));
+      }
+      if (started === 0) throw new Error('These checks run outside the platform. Re-run them from their pages.');
+      await this.store.appendEvent(createDomainEvent({
+        type: 'PR_CHECKS_RERUN_REQUESTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'github',
+        payload: { number: latest.number, headSha: latest.headRefOid, started }
+      }));
+      // The platform queues them a moment later; the reading after waits for it briefly.
+      await this.recordPullRequestAfterAction(task, action, (sync) => sync.ci.status !== 'FAILING' && sync.ci.status !== 'BLOCKED')
+        .catch(() => undefined);
+      return { started };
+    });
+  }
+
   /** The end of each failing check's log for the pull request's current head, read-only and bounded. */
   async readPullRequestCheckLogs(input: ReadPullRequestCheckLogsRequest): Promise<PullRequestCheckLog[]> {
     const task = await this.requireTask(input.taskId);
@@ -5281,7 +5357,9 @@ export class TaskManagerService {
     }
     const stored = await this.store.recordPullRequestSync(sync);
     this.emitGitHubUpdate(task.id, action.worktree, stored);
-    if (task.remoteSource?.kind === 'PULL_REQUEST') await this.refreshEvidenceInternal({ taskId: task.id }).catch(() => undefined);
+    if (task.remoteSource?.kind === 'PULL_REQUEST') {
+      await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true }).catch(() => undefined);
+    }
     return stored;
   }
 

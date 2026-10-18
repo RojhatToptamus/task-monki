@@ -66,3 +66,16 @@ export function looksLikeInternalEnum(value: string): boolean {
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+
+/**
+ * A person's initials for their avatar, from a name or an account: "Rojhat
+ * Toptamus" and "RojhatToptamus" read RT, "github-actions[bot]" GA, "octocat" O.
+ */
+export function personInitials(name: string | undefined): string {
+  const words = (name ?? '')
+    .replace(/\[bot\]$/iu, '')
+    .replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2')
+    .split(/[\s._-]+/u)
+    .filter(Boolean);
+  return words.slice(0, 2).map((word) => [...word][0]!.toUpperCase()).join('') || '?';
+}

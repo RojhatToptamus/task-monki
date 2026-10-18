@@ -3,6 +3,7 @@ import type { DomainEvent, PullRequestDiscussion, PullRequestFeedback } from '..
 import {
   buildDiscussionViews,
   buildReplyDrafts,
+  commentParts,
   discussionSummary,
   displayPlatformText,
   pullRequestFeedbackLine,
@@ -36,6 +37,7 @@ describe('discussion views', () => {
       discussion('replied-by-me', { comments: [...discussion('x').comments, { author: 'me', createdAt: '2026-10-10T13:00:00Z', body: 'Pushed a fix.', truncated: false }] }),
       discussion('replied-by-them', { comments: [...discussion('x').comments, { author: 'alice', createdAt: '2026-10-10T13:00:00Z', body: 'Still broken.', truncated: false }] }),
       discussion('never-sent'),
+      discussion('answered-here', { comments: [...discussion('x').comments, { author: 'me', createdAt: '2026-10-10T13:00:00Z', body: 'Will do.', truncated: false }] }),
       discussion('resolved', { resolved: true }),
       discussion('remark', { kind: 'COMMENT', resolvable: false, path: undefined, side: undefined, line: undefined })
     ]), sentDiscussions([round(['answered', 'replied-by-me', 'replied-by-them'], [{ item: 1, outcome: 'FIXED' }])]));
@@ -44,7 +46,9 @@ describe('discussion views', () => {
     // The person's own reply on the platform does not ask again.
     expect(views.find((view) => view.id === 'replied-by-me')?.sent).toEqual({ at: sentAt });
     expect(views.find((view) => view.id === 'replied-by-them')?.sent).toBeUndefined();
-    // Address comments adds what still asks for something and was not sent: never a resolved thread or a remark.
+    // Address comments adds what still asks for something and was not sent: never a resolved thread, a
+    // remark, or a thread the person answered last, which waits on its reviewer.
+    expect(views.find((view) => view.id === 'answered-here')?.replied).toBe(true);
     expect(unaddressedDiscussions(views).map((view) => view.id)).toEqual(['replied-by-them', 'never-sent']);
   });
 });
@@ -73,6 +77,21 @@ describe('replies to post', () => {
     const later = { ...round(['review'], [{ item: 1, outcome: 'FIXED' }]), at: '2026-10-10T15:00:00.000Z' };
     const again = buildDiscussionViews(all, sentDiscussions([first, later]));
     expect(buildReplyDrafts(again, 'me', 'abcdef1234567', posted).map((draft) => draft.discussionId)).toEqual(['thread', 'review']);
+  });
+});
+
+describe('suggested changes', () => {
+  it('splits a comment into its prose and the changes it suggests, with how far each reaches past its lines', () => {
+    expect(commentParts('Freeze it:\n\n```suggestion\n  return Object.freeze(keys);\n```\n\nThen the test.')).toEqual([
+      { kind: 'text', text: 'Freeze it:' },
+      { kind: 'suggestion', lines: ['  return Object.freeze(keys);'], above: 0, below: 0 },
+      { kind: 'text', text: 'Then the test.' }
+    ]);
+    // GitLab's offsets reach lines above and below; an empty suggestion removes the lines.
+    expect(commentParts('```suggestion:-1+2\nconst a = 1;\n```')).toEqual([{ kind: 'suggestion', lines: ['const a = 1;'], above: 1, below: 2 }]);
+    expect(commentParts('```suggestion\n```')).toEqual([{ kind: 'suggestion', lines: [], above: 0, below: 0 }]);
+    // Other code is prose.
+    expect(commentParts('```js\nconst a = 1;\n```')).toEqual([{ kind: 'text', text: '```js\nconst a = 1;\n```' }]);
   });
 });
 

@@ -218,7 +218,9 @@ hide from readers, are left out of captured text. A task source, pull request,
 check, review or merge observation is validated as it is written, so a value the
 store could not load fails that action instead of startup. Schema 31 also
 carries pull request feedback: each review observation may keep a `feedback`
-summary (artifact id, digest, unresolved and discussion counts, reviewers) whose
+summary (artifact id, digest, unresolved and discussion counts, reviewers with
+an optional `bot` mark, and the platform times of the person's latest comment
+and anyone else's, `lastViewerCommentAt` and `lastOtherCommentAt`) whose
 `pull-request-feedback` artifact belongs to the same task and holds the bounded
 threads, reviews and comments; unchanged feedback reuses its artifact, and a
 failed read keeps the last one. Startup refuses a summary whose artifact is
@@ -226,9 +228,11 @@ missing or another task's. A review request may hold `DISCUSSION` items, a
 review draft `includedDiscussionIds`, and a request sent before the task's first
 turn is stored as that turn's `FOLLOW_UP` instruction. Schema 31 also records the
 person's writes to a pull request: `PR_MERGE_REQUESTED` (number, head, method,
-whether the branch is deleted) before a merge, and `PR_REPLIES_POSTED` (number,
-counts posted and resolved, reviewers asked again, and the ids of the
-discussions answered) after replies land. Migration 15
+whether the branch is deleted) before a merge, `PR_REPLIES_POSTED` (number,
+counts posted, resolved and reopened, reviewers asked again, and the ids of the
+discussions answered) after replies, a resolve or a reopen land, and
+`PR_CHECKS_RERUN_REQUESTED` after the platform accepts running failed checks
+again. Migration 15
 (`gitlab-cli-setting`) adds `externalExecutables.glabExecutablePath` and
 advances settings to schema 16.
 

@@ -204,14 +204,21 @@ function describeDeliveryAttention(
   ) {
     return { label: deliveryWords('PR closed without merge', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'error' };
   }
+  // While the agent works on the pull request's asks, what they ask waits on it, not the person.
+  if (IN_FLIGHT_RUNS.has(projection.agentRun)) {
+    return undefined;
+  }
   // A board summary carries the facts behind the word, which the Inbox states beneath it.
   const facts = 'delivery' in task ? task.delivery : undefined;
   const detail = (value: string | undefined) => value ? { detail: deliveryWords(value, deliveryProvider(attentionDeliverySource(task))) } : {};
+  // Fixes waiting in the worktree come before what they answer: pushing them is the next step.
+  const unpushed = hasPullRequest(projection) && (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED');
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
-    return { label: 'Checks failed', kind: 'delivery', tone: 'error', ...detail(failedChecksLine(facts?.failingChecks)) };
+    return { label: unpushed ? 'Changes not pushed' : 'Checks failed', kind: 'delivery', tone: unpushed ? 'warning' : 'error', ...detail(failedChecksLine(facts?.failingChecks)) };
   }
-  if (projection.reviews === 'CHANGES_REQUESTED') {
-    return { label: 'Changes requested', kind: 'delivery', tone: 'warning', ...detail(facts?.feedback ? pullRequestFeedbackLine(facts.feedback) : undefined) };
+  // Once the person answered, the review waits on its reviewers: nothing asks here until one of them writes.
+  if (projection.reviews === 'CHANGES_REQUESTED' && facts?.turn !== 'REVIEWERS') {
+    return { label: unpushed ? 'Changes not pushed' : 'Changes requested', kind: 'delivery', tone: 'warning', ...detail(facts?.feedback ? pullRequestFeedbackLine(facts.feedback) : undefined) };
   }
   if (projection.merge === 'BLOCKED') {
     const moved = facts?.baseMoved;

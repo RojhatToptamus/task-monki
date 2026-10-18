@@ -19,7 +19,8 @@ import {
 import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
 
 const LIST_ISSUE_FIELDS = 'number title url state updatedAt author { login }';
-const LIST_PULL_FIELDS = `${LIST_ISSUE_FIELDS} isDraft headRefName isCrossRepository headRepository { nameWithOwner }`;
+const LIST_PULL_FIELDS = `${LIST_ISSUE_FIELDS} isDraft headRefName isCrossRepository headRepository { nameWithOwner }
+  reviewDecision commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`;
 const COMMENTS = `comments(last: ${REMOTE_WORK_LIMITS.comments}) { totalCount nodes { author { login } body createdAt } }`;
 const LABELS = `labels(first: ${REMOTE_WORK_LIMITS.labels}) { nodes { name } }`;
 const ISSUE_FIELDS = `number title url state body updatedAt author { login } ${LABELS} ${COMMENTS}`;
@@ -45,7 +46,22 @@ interface GitHubNode {
   isCrossRepository?: boolean;
   headRepository?: { nameWithOwner?: string } | null;
   repository?: { nameWithOwner?: string };
+  reviewDecision?: string | null;
+  commits?: { nodes?: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } | null } | null> };
 }
+
+const LIST_REVIEWS: Record<string, NonNullable<RemoteWorkSummary['review']>> = {
+  CHANGES_REQUESTED: 'CHANGES_REQUESTED',
+  APPROVED: 'APPROVED',
+  REVIEW_REQUIRED: 'REVIEW_REQUIRED'
+};
+const LIST_CHECKS: Record<string, NonNullable<RemoteWorkSummary['checks']>> = {
+  FAILURE: 'FAILING',
+  ERROR: 'FAILING',
+  PENDING: 'PENDING',
+  EXPECTED: 'PENDING',
+  SUCCESS: 'PASSING'
+};
 
 /** GitHub issues and pull requests through the signed-in GitHub CLI. */
 export class GitHubRemoteWork implements RemoteWorkReader {
@@ -218,6 +234,9 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, node: Gi
     throw new RemoteWorkError('FAILED', 'GitHub did not report the item’s identity.');
   }
   const headRepositoryPath = node.headRepository?.nameWithOwner;
+  const review = node.reviewDecision ? LIST_REVIEWS[node.reviewDecision] : undefined;
+  const checkState = node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state;
+  const checks = checkState ? LIST_CHECKS[checkState] : undefined;
   return {
     ref: { repository, kind, number: node.number },
     url: node.url,
@@ -229,7 +248,9 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, node: Gi
       draft: Boolean(node.isDraft),
       ...(node.headRefName ? { headRefName: node.headRefName } : {}),
       crossRepository: Boolean(node.isCrossRepository),
-      ...(headRepositoryPath ? { headRepositoryPath } : {})
+      ...(headRepositoryPath ? { headRepositoryPath } : {}),
+      ...(review ? { review } : {}),
+      ...(checks ? { checks } : {})
     } : {})
   };
 }

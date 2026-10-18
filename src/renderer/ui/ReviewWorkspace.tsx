@@ -15,7 +15,7 @@ import type {
 import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
-import { discussionAuthor, discussionSummary, formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
+import { discussionAuthor, discussionSummary, formatDiscussionLocation, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
 import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
 import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
@@ -26,13 +26,16 @@ import {
   buildReviewDiffRows,
   buildReviewIndex,
   diffFileSignature,
+  diffLineCode,
   filesChangedSinceReview,
   diffLineId,
   lineAnchorKey,
   normalizeReviewPath,
+  sideLines,
   type ReviewFindingView
 } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
+import { Avatar } from './Avatar';
 import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
 import { MessageTime } from './Message';
@@ -103,6 +106,23 @@ export interface ReviewWorkspaceProps {
   /** Another surface asked to see the request, such as the Overview's Request changes; cleared once it opens. */
   requestSheetPending?: boolean;
   onRequestSheetOpened?(): void;
+  /** Another surface asked to see a discussion, such as a comment the Overview lists; cleared once shown. */
+  revealDiscussionId?: string;
+  onDiscussionRevealed?(): void;
+  /** The agent's answers no one posted yet, drafted as replies, by discussion. */
+  replyDrafts?: ReadonlyMap<string, ReplyDraft>;
+  /**
+   * Posts a reply where the discussion lives, resolving its thread when asked;
+   * absent once the pull request closed. Returns what failed after a reply that landed.
+   */
+  onReplyToDiscussion?(discussionId: string, body: string, resolve: boolean): Promise<string | undefined>;
+  /** Resolves a thread, or reopens one. */
+  onResolveDiscussion?(discussionId: string, resolved: boolean): Promise<void>;
+  /** What the person typed in each reply and has not posted, kept while the task is open. */
+  replyTexts?: ReadonlyMap<string, string>;
+  onReplyTextChange?(discussionId: string, text: string | undefined): void;
+  /** The person's account on the pull request's platform: their mark on what they write. */
+  viewer?: string;
   /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
   agentRequest?: { label: string; action: string; onOpen(): void };
   /** What people said on the pull request, with what the person did about each. */
@@ -125,7 +145,11 @@ const SCOPE_LABELS: Record<ReviewScope, string> = {
   'since-review': 'Since the review'
 };
 
-function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number, working?: boolean): { label: string; tone?: 'blocked' | 'waiting' | 'verified' } {
+/**
+ * The agent review's state in the Review bar. Where people already reviewed
+ * the pull request, no agent review is not "not reviewed".
+ */
+function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: number, working?: boolean, peopleReviewed?: boolean): { label: string; tone?: 'blocked' | 'waiting' | 'verified' } {
   if (working && status !== 'RUNNING') return { label: 'Fixing review feedback' };
   switch (status) {
     case 'RUNNING': return { label: 'Reviewing' };
@@ -136,7 +160,7 @@ function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: nu
     case 'INCONCLUSIVE': return { label: 'Review inconclusive', tone: 'waiting' };
     case 'FAILED': return { label: 'Review failed', tone: 'waiting' };
     case 'CANCELED': return { label: 'Review stopped', tone: 'waiting' };
-    default: return { label: 'Not reviewed' };
+    default: return { label: peopleReviewed ? 'No agent review' : 'Not reviewed' };
   }
 }
 
@@ -366,6 +390,13 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     if (entry && isCollapsed(entry)) expand(entry.file.id);
     setPendingScroll({ attribute: 'data-discussion-id', value: discussionId, focus: true });
   };
+  // A discussion another surface asked to see is shown once the diff it sits in is on the page, as a click in the navigator would.
+  useEffect(() => {
+    const discussionId = props.revealDiscussionId;
+    if (!discussionId || ordered.length === 0 || !discussions.some((discussion) => discussion.id === discussionId)) return;
+    scrollToDiscussion(discussionId);
+    props.onDiscussionRevealed?.();
+  }, [props.revealDiscussionId, ordered, discussions]);
   const scrollToComment = (commentId: string) => {
     const comment = draft.comments.find((candidate) => candidate.id === commentId);
     const entry = comment ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(comment.path)) : undefined;
@@ -525,6 +556,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     } else if (key === 'a' && focusedFinding && findingsActionable && props.onAskAboutFinding) {
       event.preventDefault();
       props.onAskAboutFinding(focusedFinding.id);
+    } else if (key === 'r' && focusedDiscussion && !focusedDiscussion.resolved && props.onReplyToDiscussion) {
+      // The reply row is under every open discussion; R puts the caret in it.
+      const field = elementBy('data-discussion-id', focusedDiscussion.id)?.querySelector<HTMLTextAreaElement>('.tm-review-thread__reply-input');
+      if (field) { event.preventDefault(); field.focus(); }
     } else if (key === 'f' && focusedDiscussion && !focusedDiscussion.resolved && canComment) {
       event.preventDefault();
       toggleDiscussion(focusedDiscussion.id);
@@ -587,7 +622,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       : effectiveScope === 'since-review' ? 'Nothing changed since the review.' : 'No changes in this scope.'
     : undefined;
 
-  const headline = reviewHeadline(review?.status, openFindings.length, review?.working);
+  const headline = reviewHeadline(review?.status, openFindings.length, review?.working, discussions.length > 0);
   // A review that finished and still matches the code needs no call to run again.
   const rerunSettled = Boolean(review && !review.working && (review.status === 'PASSED' || review.status === 'NEEDS_CHANGES' || review.status === 'INCONCLUSIVE'));
   // An answered item shows where it is: its finding when the review still has it, else its file.
@@ -623,6 +658,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     />
   ));
 
+  // The file a discussion is about, for the code a suggestion in it replaces.
+  const discussionFile = (discussion: DiscussionView) => discussion.path
+    ? ordered.find((candidate) => normalizeReviewPath(candidate.file.path) === normalizeReviewPath(discussion.path!))?.file
+    : undefined;
   // A discussion on its line says nothing more of its place; at its file's top or above the files, it says where it points.
   const renderDiscussions = (items: DiscussionView[] | undefined, place: 'line' | 'file' | 'general') => items?.map((discussion) => (
     <ReviewDiscussionThread
@@ -637,80 +676,101 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       inRequest={includedDiscussions.has(discussion.id)}
       onFocus={() => { setFocusedDiscussionId(discussion.id); setFocusedFindingId(undefined); }}
       onToggleInclude={canComment ? toggleDiscussion : undefined}
+      reply={props.onReplyToDiscussion ? {
+        text: props.replyTexts?.get(discussion.id),
+        draft: props.replyDrafts?.get(discussion.id),
+        viewer: props.viewer,
+        onTextChange: (text) => props.onReplyTextChange?.(discussion.id, text),
+        onPost: (body, resolve) => props.onReplyToDiscussion!(discussion.id, body, resolve)
+      } : undefined}
+      onResolve={props.onResolveDiscussion && discussion.resolvable ? (resolved) => props.onResolveDiscussion!(discussion.id, resolved) : undefined}
+      // Only on its own lines is the diff shown the code the comment was written on.
+      codeLines={place === 'line' && discussionFile(discussion)
+        ? (start, end) => sideLines(discussionFile(discussion)!, discussion.side ?? 'NEW', start, end) : undefined}
     />
   ));
 
-  // A comment is written in the app's composer, under the line or range it is about.
+  // A comment is written as a reply is: a field on the code column under the line or range it is about, its choices under it.
   const composerForm = (draftComment: CommentDraft) => (
-    <form key="composer" className="tm-composer tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
-      {commentNeedsAbout(draftComment) ? <span className="tm-review-comment__about">{commentAbout(draftComment)}</span> : null}
-      <label className="tm-visually-hidden" htmlFor={`${composerId}-comment`}>Comment</label>
-      <textarea
-        id={`${composerId}-comment`}
-        className="tm-composer__input"
-        autoFocus
-        rows={2}
-        value={draftComment.text}
-        placeholder="Add a comment"
-        onChange={(event) => setCommentDraft({ ...draftComment, text: event.target.value })}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') { event.preventDefault(); closeComposer(); }
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); saveComment(); }
-        }}
-      />
-      <div className="tm-composer__toolbar">
-        {/* A question about the lines goes to Ask; a comment goes in the request. */}
-        {props.onAskAboutLines && !draftComment.editingId && draftComment.line ? (
-          <button type="button" className="ghost-button" onClick={() => {
-            props.onAskAboutLines!({
-              path: draftComment.path,
-              side: draftComment.side,
-              line: draftComment.line!,
-              ...(draftComment.endLine && draftComment.endLine > draftComment.line! ? { endLine: draftComment.endLine } : {})
-            }, draftComment.text);
-            closeComposer();
-          }}>
-            <AgentMark />
-            Ask
-          </button>
-        ) : null}
-        <span className="tm-review-comment-composer__spacer" />
-        <button type="button" className="ghost-button" onClick={closeComposer}>Cancel</button>
-        <Tooltip label={draftComment.editingId ? 'Save' : 'Comment'} shortcut={SUBMIT_SHORTCUT}>
-          <button type="submit" className="primary-button button--sm" disabled={!draftComment.text.trim()}>
-            {draftComment.editingId ? 'Save' : 'Comment'}
-          </button>
-        </Tooltip>
+    <form key="composer" className="tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); saveComment(); }}>
+      <div className="tm-review-thread__reply-row tm-review-thread__reply-row--open">
+        <Avatar name={props.viewer} className="tm-review-thread__avatar" />
+        {commentNeedsAbout(draftComment) ? <span className="tm-review-comment__about">{commentAbout(draftComment)}</span> : null}
+        <label className="tm-visually-hidden" htmlFor={`${composerId}-comment`}>Comment</label>
+        <textarea
+          id={`${composerId}-comment`}
+          className="tm-review-thread__reply-input"
+          autoFocus
+          rows={2}
+          value={draftComment.text}
+          placeholder="Add a comment"
+          onChange={(event) => setCommentDraft({ ...draftComment, text: event.target.value })}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') { event.preventDefault(); closeComposer(); }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); saveComment(); }
+          }}
+        />
+        <div className="tm-review-thread__reply-tools">
+          {/* A question about the lines goes to Ask; a comment goes in the request. */}
+          {props.onAskAboutLines && !draftComment.editingId && draftComment.line ? (
+            <button type="button" className="ghost-button button--sm" onClick={() => {
+              props.onAskAboutLines!({
+                path: draftComment.path,
+                side: draftComment.side,
+                line: draftComment.line!,
+                ...(draftComment.endLine && draftComment.endLine > draftComment.line! ? { endLine: draftComment.endLine } : {})
+              }, draftComment.text);
+              closeComposer();
+            }}>
+              <AgentMark />
+              Ask
+            </button>
+          ) : null}
+          <span className="tm-review-comment-composer__spacer" />
+          <button type="button" className="ghost-button button--sm" onClick={closeComposer}>Cancel</button>
+          <Tooltip label={draftComment.editingId ? 'Save' : 'Comment'} shortcut={SUBMIT_SHORTCUT}>
+            <button type="submit" className="primary-button button--sm" disabled={!draftComment.text.trim()}>
+              {draftComment.editingId ? 'Save' : 'Comment'}
+            </button>
+          </Tooltip>
+        </div>
       </div>
     </form>
   );
   const renderComposer = (key: string) =>
     commentDraft && !commentDraft.editingId && commentDraft.key === key ? composerForm(commentDraft) : null;
 
-  // A comment being edited gives its place to the composer.
+  // A comment being edited gives its place to the composer. The person's own read as theirs: their mark and You.
   const renderComments = (items: ReviewComment[] | undefined) => items?.map((comment) => (
     commentDraft?.editingId === comment.id ? <Fragment key={comment.id}>{composerForm(commentDraft)}</Fragment> : (
       <div key={comment.id} className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
-        <div className="tm-review-comment__body">
-          {commentNeedsAbout(comment) ? <span className="tm-review-comment__about">{commentAbout(comment)}</span> : null}
-          <p>{comment.text}</p>
-        </div>
-        {canComment ? (
-          <div className="tm-review-comment__actions">
-            <Tooltip label="Edit">
-              <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Edit comment" onClick={() => setCommentDraft({
-                key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, text: comment.text, editingId: comment.id
-              })}>
-                <Pencil size={13} aria-hidden="true" />
-              </button>
-            </Tooltip>
-            <Tooltip label="Delete">
-              <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Delete comment" onClick={() => deleteComment(comment.id)}>
-                <Trash2 size={13} aria-hidden="true" />
-              </button>
-            </Tooltip>
+        <div className="tm-review-thread__comment">
+          <Avatar name={props.viewer} className="tm-review-thread__avatar" />
+          <header className="tm-review-thread__head">
+            <span className="tm-review-thread__author">You</span>
+            {commentNeedsAbout(comment) ? <span className="tm-review-comment__about">{commentAbout(comment)}</span> : null}
+            <span className="tm-review-thread__spacer" />
+            {canComment ? (
+              <span className="tm-review-thread__actions tm-review-comment__actions">
+                <Tooltip label="Edit">
+                  <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Edit comment" onClick={() => setCommentDraft({
+                    key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, text: comment.text, editingId: comment.id
+                  })}>
+                    <Pencil size={13} aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip label="Delete">
+                  <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Delete comment" onClick={() => deleteComment(comment.id)}>
+                    <Trash2 size={13} aria-hidden="true" />
+                  </button>
+                </Tooltip>
+              </span>
+            ) : null}
+          </header>
+          <div className="tm-review-comment__body">
+            <p>{comment.text}</p>
           </div>
-        ) : null}
+        </div>
       </div>
     )
   ));
@@ -1006,7 +1066,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                   {line.kind === 'addition' || line.kind === 'deletion' ? (
                                     <span className="tm-visually-hidden">{line.kind === 'addition' ? 'Added: ' : 'Removed: '}</span>
                                   ) : null}
-                                  {lineCode(line.content, line.kind) || ' '}
+                                  {diffLineCode(line.content, line.kind) || ' '}
                                 </code>
                               </div>
                               {renderThreads(anchored.byLine.get(anchor))}
@@ -1074,13 +1134,6 @@ function commentAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>)
   return comment.side === 'OLD' ? `Removed ${lines.toLowerCase()}` : lines;
 }
 
-
-function lineCode(content: string, kind: string): string {
-  if ((kind === 'addition' && content.startsWith('+')) || (kind === 'deletion' && content.startsWith('-')) || (kind === 'context' && content.startsWith(' '))) {
-    return content.slice(1);
-  }
-  return content;
-}
 
 /** A file's "…" menu: comment on the whole file, read it whole, then where it opens. */
 function FileMenu({ path, target, onComment, wholeFile, onError }: {

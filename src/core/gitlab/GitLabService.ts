@@ -265,11 +265,11 @@ export class GitLabService implements PullRequestDelivery {
     });
   }
 
-  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string): Promise<void> {
+  async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved = true): Promise<void> {
     const { project, base } = await this.address(worktree, address);
     await this.cli.request({
       host: project.host, endpoint: `${base}/discussions/${encodeURIComponent(discussionId)}`, method: 'PUT',
-      fields: { resolved: 'true' }, cwd: worktree.worktreePath, timeout: 60_000
+      fields: { resolved: String(resolved) }, cwd: worktree.worktreePath, timeout: 60_000
     });
   }
 
@@ -299,6 +299,22 @@ export class GitLabService implements PullRequestDelivery {
       host: project.host, endpoint: `projects/${gitLabProject(project.path)}/jobs/${match[3]}/trace`,
       cwd: worktree.worktreePath, timeout: 60_000
     });
+  }
+
+  async rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number> {
+    const { project } = await this.address(worktree, address);
+    let retried = 0;
+    for (const check of checks) {
+      const match = /^https:\/\/([^/]+)\/(.+)\/-\/jobs\/(\d+)(?:[/?#].*)?$/u.exec(check.link ?? '');
+      // Only a job of this merge request's own project; a link elsewhere is not this one's to retry.
+      if (!match || match[1]!.toLowerCase() !== project.host.toLowerCase() || match[2]!.toLowerCase() !== project.path.toLowerCase()) continue;
+      await this.cli.request({
+        host: project.host, endpoint: `projects/${gitLabProject(project.path)}/jobs/${match[3]}/retry`, method: 'POST',
+        cwd: worktree.worktreePath, timeout: 60_000
+      });
+      retried += 1;
+    }
+    return retried;
   }
 
   private async address(worktree: WorktreeRecord, address: PullRequestAddress): Promise<{ project: RemoteRepositoryRef; base: string }> {

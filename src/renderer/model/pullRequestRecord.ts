@@ -35,7 +35,8 @@ export interface PullRequestRecordView {
   /** Checks for the current head, failures first. */
   checks?: { summary: string; tone: RecordTone; rows: PullRequestRecordCheckRow[] };
   /** Each reviewer's own state, when the platform's reviews were read. */
-  reviewers: Array<{ name: string; word: string; tone: RecordTone }>;
+  /** Each reviewer's own state; an app is one that cannot be asked to review again. */
+  reviewers: Array<{ name: string; word: string; tone: RecordTone; waiting: boolean; bot?: boolean }>;
   /** The review decision alone, when no reviewer was read. */
   review?: { word: string; tone: RecordTone };
   threads?: { unresolved: number; word: string };
@@ -69,9 +70,9 @@ export function buildPullRequestRecord(input: {
   const open = state === 'draft' || state === 'open';
   const feedback = input.reviewRollup?.pullRequestNumber === pullRequest.number ? input.reviewRollup?.feedback : undefined;
   const reviewers = (feedback?.reviewers ?? [])
-    .map((reviewer) => ({ name: reviewer.name, ...REVIEWER_WORDS[reviewer.state] }))
+    .map((reviewer) => ({ name: reviewer.name, bot: reviewer.bot, waiting: reviewer.state === 'REQUESTED', ...REVIEWER_WORDS[reviewer.state] }))
     .sort((left, right) => left.order - right.order)
-    .map(({ name, word, tone }) => ({ name, word, tone }));
+    .map(({ name, word, tone, waiting, bot }) => ({ name, word, tone, waiting, ...(bot ? { bot } : {}) }));
   return {
     label: pullRequest.number ? `${gitLab ? '!' : '#'}${pullRequest.number}` : gitLab ? 'Merge request' : 'Pull request',
     ...(pullRequest.title?.trim() ? { title: pullRequest.title.trim() } : {}),
@@ -211,4 +212,9 @@ function formatDay(value: string | undefined): string | undefined {
   return Number.isFinite(timestamp)
     ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(timestamp))
     : undefined;
+}
+
+/** A check the platform can run again from here: a GitHub Actions job, or a GitLab job. */
+export function rerunnableCheck(link: string | undefined): boolean {
+  return /\/actions\/runs\/\d+\/job\/\d+(?:[/?#]|$)|\/-\/jobs\/\d+(?:[/?#]|$)/u.test(link ?? '');
 }

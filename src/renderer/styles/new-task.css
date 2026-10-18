@@ -942,6 +942,9 @@
 .import-work__identity small { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--t-meta); }
 .import-work__identity > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-work__kind { color: var(--muted); font-size: var(--t-meta); }
+.import-work__kind[data-tone='error'] { color: var(--blocked-ink); }
+.import-work__kind[data-tone='success'] { color: var(--verified-ink); }
+.remote-work__meta > .remote-work__checks { display: inline-flex; align-items: center; align-self: center; overflow: visible; }
 .import-work__unavailable { grid-column: 2 / -1; font-size: var(--t-meta); }
 .import-work__empty { margin: 0; padding: 12px; font-size: var(--t-help); color: var(--muted); }
 .import-work__comparison { display: flex; }

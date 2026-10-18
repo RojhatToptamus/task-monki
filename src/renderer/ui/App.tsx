@@ -2106,6 +2106,28 @@ export function App() {
     }
   };
 
+  // The checks run again on the platform, out of view, so a toast says they started.
+  const rerunPullRequestChecks = async (taskId: string) => {
+    setError(undefined);
+    try {
+      const result = await withAppAction(() => taskManagerApi.rerunPullRequestChecks({ taskId }));
+      notify(`Running ${result.started === 1 ? 'the failed check' : 'the failed checks'} again.`, 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not run the checks again.');
+    }
+  };
+
+  // The thread shows its own failure where it was clicked; the change reads back with the pull request.
+  const resolvePullRequestDiscussion = async (taskId: string, discussionId: string, resolved: boolean) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.resolvePullRequestDiscussion({ taskId, discussionId, resolved }));
+    } finally {
+      await refresh();
+    }
+  };
+
   const syncPullRequest = async (taskId: string) => {
     setError(undefined);
     try {
@@ -2977,6 +2999,8 @@ export function App() {
             onReadPullRequestMergeOptions={(taskId) => taskManagerApi.readPullRequestMergeOptions({ taskId })}
             onMergePullRequest={mergePullRequest}
             onReplyToPullRequest={replyToPullRequest}
+            onResolvePullRequestDiscussion={resolvePullRequestDiscussion}
+            onRerunPullRequestChecks={rerunPullRequestChecks}
             onReadPullRequestCheckLogs={(taskId) => taskManagerApi.readPullRequestCheckLogs({ taskId })}
             onFetchPullRequestUpdate={(taskId, from) => taskManagerApi.fetchPullRequestUpdate({ taskId, from })}
             onReadArtifact={readArtifact}
