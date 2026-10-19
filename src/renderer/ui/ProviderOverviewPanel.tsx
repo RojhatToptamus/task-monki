@@ -21,6 +21,7 @@ import {
 import { RawProviderMessage } from './RawProviderMessage';
 import { DisclosureChevron } from './DisclosureChevron';
 import { humanizeEnum } from './display';
+import { PendingLabel } from './StableLabel';
 
 interface ProviderOverviewPanelProps {
   task: Task;
@@ -243,9 +244,10 @@ export function ProviderOverviewPanel({
                 type="button"
                 className="outline-button button--sm"
                 disabled={syncing || !session.materialized}
+                data-pending={syncing || undefined}
                 onClick={() => void sync()}
               >
-                {syncing ? 'Syncing…' : 'Resync provider goal'}
+                <PendingLabel label="Resync provider goal" pendingLabel="Syncing…" pending={syncing} />
               </button>
             ) : null}
           </div>

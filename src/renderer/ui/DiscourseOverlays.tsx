@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import type { DiscourseContextPreview } from '../../shared/discourse';
 import {
   DiscourseCloseIcon,
@@ -6,6 +6,8 @@ import {
   DiscourseTaskIcon
 } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { useLayerProps, useLeaving } from './presence';
 import { DisclosureChevron } from './DisclosureChevron';
 import { FactLine } from './FactLine';
 import { Tooltip } from './Tooltip';
@@ -46,6 +48,8 @@ export function ContextPreview({
 }) {
   const dialogRef = useRef<HTMLElement>(null);
   const returnFocusOnCloseRef = useRef(true);
+  const layer = useLayerProps();
+  const leaving = useLeaving();
   useDialogFocusBoundary({
     dialogRef,
     busy: false,
@@ -55,6 +59,7 @@ export function ContextPreview({
     shouldReturnFocus: () => returnFocusOnCloseRef.current
   });
   useEffect(() => {
+    if (leaving) return undefined;
     const closeOutside = (event: PointerEvent) => {
       if (!dialogRef.current?.contains(event.target as Node)) {
         returnFocusOnCloseRef.current = false;
@@ -63,10 +68,16 @@ export function ContextPreview({
     };
     window.addEventListener('pointerdown', closeOutside);
     return () => window.removeEventListener('pointerdown', closeOutside);
-  }, [onClose]);
+  }, [leaving, onClose]);
+  const layerRef = layer.ref;
+  const ref = useCallback((element: HTMLElement | null) => {
+    dialogRef.current = element;
+    layerRef(element);
+  }, [layerRef]);
   return (
     <aside
-      ref={dialogRef}
+      {...layer}
+      ref={ref}
       tabIndex={-1}
       className="tm-discourse-context-popover"
       role="dialog"
@@ -153,9 +164,8 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogFocusBoundary({ dialogRef, busy: false, onClose: onCancel });
   return (
-    <div ref={dialogRef} tabIndex={-1} className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="discourse-confirm-title">
-      <div className="tm-modal__scrim" onClick={onCancel} />
-      <div className="tm-modal__panel tm-discourse-confirm">
+    <ModalFrame labelledBy="discourse-confirm-title" onDismiss={onCancel}>
+      <div ref={dialogRef} tabIndex={-1} className="tm-modal__panel tm-discourse-confirm">
         <h2 id="discourse-confirm-title">{title}</h2>
         <p>{body}</p>
         <div className="tm-modal__actions">
@@ -163,7 +173,7 @@ export function ConfirmDialog({
           <button type="button" className="danger-button" onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }
 

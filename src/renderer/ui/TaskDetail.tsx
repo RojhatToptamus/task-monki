@@ -146,6 +146,8 @@ import {
   SlotContent,
   type SlotAction
 } from './TaskOverview';
+import { PendingLabel } from './StableLabel';
+import { Presence } from './presence';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { conversationAnswer, conversationPreview, isActiveRunStatus, sessionTurn } from '../model/agentSession';
 import { conversationCaptureRunIds } from '../model/completedChangeSummary';
@@ -273,6 +275,9 @@ interface TaskDetailProps {
 
 interface HeadAction {
   label: string;
+  /** The label while the step runs; the button keeps one width and its key. */
+  pendingLabel?: string;
+  pending?: boolean;
   disabled?: boolean;
   title?: string;
   onClick(): void;
@@ -999,7 +1004,9 @@ export function TaskDetail(props: TaskDetailProps) {
   const directImportReview = importedBeforeFirstRun && task.workflowPhase === 'IN_PROGRESS';
   if (directImportReview) {
     headActions.push({
-      label: reviewPending ? 'Starting review…' : 'Run agent review',
+      label: 'Run agent review',
+      pendingLabel: 'Starting review…',
+      pending: reviewPending,
       ...nextActionState('run-review'),
       onClick: () => void runReview()
     });
@@ -1261,7 +1268,9 @@ export function TaskDetail(props: TaskDetailProps) {
           headline={failed ? 'Worktree setup failed' : 'Checkout missing'}
           detail={checkout.error}
           primary={{
-            label: props.worktreePreparationPending ? 'Inspecting base…' : failed ? 'Retry worktree setup' : 'Restore worktree',
+            label: failed ? 'Retry worktree setup' : 'Restore worktree',
+            pendingLabel: 'Inspecting base…',
+            pending: props.worktreePreparationPending,
             disabled: props.worktreePreparationPending || Boolean(blocked),
             reason: blocked,
             onClick: () => void props.onPrepareWorktree(task.id)
@@ -1294,6 +1303,8 @@ export function TaskDetail(props: TaskDetailProps) {
           detail={attentionDetail}
           primary={{
             label: setup.label,
+            pendingLabel: setup.pendingLabel,
+            pending: setup.pending,
             disabled: setup.disabled || Boolean(blocked),
             reason: blocked,
             onClick: setup.onClick
@@ -1301,8 +1312,9 @@ export function TaskDetail(props: TaskDetailProps) {
           secondary={ready && !externalWork ? [
             // Before the first turn, a recorded bug goes to the agent with it: recording comes first.
             ...(canRecordBugNow ? [{
-              label: bugActions.busy === 'record-again' ? 'Starting…' : 'Record bug',
-              labels: ['Record bug', 'Starting…'],
+              label: 'Record bug',
+              pendingLabel: 'Starting…',
+              pending: bugActions.busy === 'record-again',
               disabled: Boolean(bugActions.busy),
               onClick: () => bugActions.perform('record-again')
             }] : []),
@@ -1374,6 +1386,8 @@ export function TaskDetail(props: TaskDetailProps) {
     importedBeforeFirstRun && primaryAction
       ? {
           label: primaryAction.label,
+          pendingLabel: primaryAction.pendingLabel,
+          pending: primaryAction.pending,
           disabled: primaryAction.disabled || Boolean(runtimeBlockedReason),
           reason: runtimeBlockedReason,
           onClick: primaryAction.onClick
@@ -1487,9 +1501,10 @@ export function TaskDetail(props: TaskDetailProps) {
       disabled={action.disabled}
       title={action.title}
       aria-describedby={place === 'head' && repositoryUnavailable ? repositoryContextId : undefined}
+      data-pending={action.pending || undefined}
       onClick={action.onClick}
     >
-      {action.label}
+      {action.pendingLabel ? <PendingLabel label={action.label} pendingLabel={action.pendingLabel} pending={Boolean(action.pending)} /> : action.label}
     </button>
   );
   const taskMenu = (place: 'head' | 'titlebar') => (
@@ -1748,7 +1763,7 @@ export function TaskDetail(props: TaskDetailProps) {
         inert={modalOpen ? true : undefined}
         aria-hidden={modalOpen ? true : undefined}
       >
-        {error ? <div className="tm-error tm-error--page">{error}</div> : null}
+        {error ? <div className="tm-notice tm-notice--page">{error}</div> : null}
 
         {tab === 'overview' ? (
           <div className="tm-overview">
@@ -1766,7 +1781,7 @@ export function TaskDetail(props: TaskDetailProps) {
                     onOpenRecording={() => setTab('preview')} />
                 ) : bug.error && task.projection.bugReplay ? (
                   <OverviewSection title="Bug" inset aside={<button type="button" className="tm-osection__link" onClick={bug.refresh}>Try again</button>}>
-                    <p className="tm-error">Couldn't load the bug: {bug.error}</p>
+                    <p className="tm-notice">Couldn't load the bug: {bug.error}</p>
                   </OverviewSection>
                 ) : null}
                 {/* A run's result is what a completed run left behind; a running one has none yet. */}
@@ -1866,6 +1881,8 @@ export function TaskDetail(props: TaskDetailProps) {
             disabled={Boolean(primaryAction?.disabled)}
             action={primaryAction ? {
               label: primaryAction.label,
+              pendingLabel: primaryAction.pendingLabel,
+              pending: primaryAction.pending,
               disabled: primaryAction.disabled || reviewActionsPaused || props.repository?.status !== 'AVAILABLE',
               title: props.repository?.status !== 'AVAILABLE'
                 ? 'Reconnect this repository before running repository actions.'
@@ -2057,7 +2074,7 @@ export function TaskDetail(props: TaskDetailProps) {
       </div>
 
 
-      {existingWorkModal && worktree && props.onListExistingWorktrees ? (
+      <Presence>{existingWorkModal && worktree && props.onListExistingWorktrees ? (
         <ExistingWorkModal key={`${task.id}:${existingWorkModal}`} mode={existingWorkModal} worktree={worktree}
           onListCheckouts={props.onListExistingWorktrees}
           onCancel={() => setExistingWorkModal(undefined)} fallbackReturnFocusRef={detailRootRef}
@@ -2066,9 +2083,9 @@ export function TaskDetail(props: TaskDetailProps) {
             else if (existingWorkModal === 'comparison') await props.onUpdateWorktreeComparison?.(task.id, value);
             else await props.onReconnectWorktree?.(task.id, value);
           }} />
-      ) : null}
+      ) : null}</Presence>
 
-      {markDoneModal ? (
+      <Presence>{markDoneModal ? (
         <MarkDoneModal
           withIssues={markDoneModal === 'issues'}
           warnings={markDoneModal === 'issues' ? finishEvidence.warnings : []}
@@ -2083,9 +2100,9 @@ export function TaskDetail(props: TaskDetailProps) {
           onConfirm={() => void markDone()}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {draftPrModalOpen ? (
+      <Presence>{draftPrModalOpen ? (
         <CreateDraftPrModal
           title={draftPrTitle}
           worktree={worktree}
@@ -2097,11 +2114,12 @@ export function TaskDetail(props: TaskDetailProps) {
           onSubmit={submitDraftPr}
           fallbackReturnFocusRef={detailRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
       {bugActions.dialogs}
 
-      {sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}
+      {/* Closing it lets it leave; docking it as the window widens moves it at once. */}
+      <Presence exit={!sidePanel}>{sidePanel && !sidePanelLayout.docked ? <FloatingSidePanel>{sidePanel.element}</FloatingSidePanel> : null}</Presence>
     </main>
     {sidePanel && sidePanelLayout.docked ? (
       <DockedSidePanel width={sidePanelLayout.width} maxWidth={sidePanelLayout.maxWidth} onWidthChange={sidePanelLayout.setWidth} label={sidePanel.label}>{sidePanel.element}</DockedSidePanel>
@@ -2594,7 +2612,7 @@ function getPrimaryAction(input: {
   worktreePreparationPending?: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
-}): { label: string; disabled?: boolean; onClick(): void } | undefined {
+}): { label: string; pendingLabel?: string; pending?: boolean; disabled?: boolean; onClick(): void } | undefined {
   if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
     return undefined;
   }
@@ -2602,10 +2620,11 @@ function getPrimaryAction(input: {
   if (!input.worktree || ['REMOVED', 'MISSING', 'ERROR'].includes(input.worktree.status)) {
     if (input.worktree?.ownership === 'EXTERNAL') return undefined;
     return {
-      label: input.worktreePreparationPending ? 'Inspecting base…'
-        : input.worktree?.status === 'MISSING' ? 'Restore worktree'
+      label: input.worktree?.status === 'MISSING' ? 'Restore worktree'
         : input.worktree?.status === 'ERROR' ? 'Retry worktree setup'
         : 'Prepare worktree',
+      pendingLabel: 'Inspecting base…',
+      pending: input.worktreePreparationPending,
       disabled: input.worktreePreparationPending,
       onClick: () => void input.onPrepareWorktree(input.task.id)
     };

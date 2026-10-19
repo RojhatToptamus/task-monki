@@ -75,7 +75,7 @@ export function SubagentHierarchyPanel({
         </span>
       </div>
       {unresolvedCount > 0 ? (
-        <p className="subagent-hierarchy__warning">
+        <p className="tm-notice subagent-hierarchy__warning" data-tone="waiting">
           {unresolvedCount} relationship{unresolvedCount === 1 ? '' : 's'} need
           review because provider identifiers were missing or contradictory.
         </p>

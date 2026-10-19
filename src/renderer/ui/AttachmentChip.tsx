@@ -5,6 +5,8 @@ import type { AttachmentComposerItem } from '../model/taskAttachmentComposer';
 import type { AttachmentContent, AttachmentDescriptor } from '../../shared/attachments';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { Presence, useLeaving } from './presence';
 
 export function AttachmentChip({
   item,
@@ -133,12 +135,12 @@ function AttachmentPreview({ name, read, disabled, onOpenChange }: {
       if (event.detail && selection?.toString() && event.currentTarget.contains(selection.anchorNode)) return;
       void open();
     }}>{name}</button>
-    {preview ? <AttachmentPreviewDialog name={name} onClose={close} onOpenChange={onOpenChange}>
+    <Presence>{preview ? <AttachmentPreviewDialog name={name} onClose={close} onOpenChange={onOpenChange}>
       {preview.loading ? <p role="status">Loading preview…</p> : null}
-      {preview.error ? <p role="alert" className="tm-error">{preview.error}</p> : null}
+      {preview.error ? <p role="alert" className="tm-notice">{preview.error}</p> : null}
       {preview.image ? <img className="task-attachment-preview__image" src={preview.image} alt={name} /> : null}
       {preview.text !== undefined ? <pre className="task-attachment-preview__text">{preview.text}</pre> : null}
-    </AttachmentPreviewDialog> : null}
+    </AttachmentPreviewDialog> : null}</Presence>
   </>;
 }
 
@@ -150,18 +152,20 @@ function AttachmentPreviewDialog({ name, onClose, onOpenChange, children }: {
 }) {
   const ref = useRef<HTMLElement>(null);
   const titleId = useId();
+  // Closed as soon as it starts to leave, so what opened it takes its keys back at once.
+  const leaving = useLeaving();
   useLayoutEffect(() => {
+    if (leaving) return undefined;
     onOpenChange?.(true);
     return () => onOpenChange?.(false);
-  }, [onOpenChange]);
+  }, [leaving, onOpenChange]);
   useDialogFocusBoundary({ dialogRef: ref, busy: false, onClose });
-  return createPortal(<div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-    <div className="tm-modal__scrim" onClick={onClose} />
+  return createPortal(<ModalFrame labelledBy={titleId} onDismiss={onClose}>
     <section ref={ref} tabIndex={-1} className="tm-modal__panel task-attachment-preview">
       <header className="task-attachment-preview__header"><h3 id={titleId}>{name}</h3><button type="button" className="ghost-button" aria-label="Close preview" onClick={onClose}><CloseIcon /></button></header>
       <div className="task-attachment-preview__content">{children}</div>
     </section>
-  </div>, document.body);
+  </ModalFrame>, document.body);
 }
 
 function CloseIcon() {

@@ -28,6 +28,7 @@ import { BugRunDrawer, ResultMark } from './BugRunDrawer';
 import { BugCompareDialog, BugPicture, shotCaption, type BugShotSide } from './BugShots';
 import { BugStepIcon } from './BugStepIcon';
 import { useArrivals } from '../arrivals';
+import { Presence } from '../presence';
 
 export interface BugActionHost {
   /** A recording started; show it where it happens. */
@@ -85,7 +86,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
   };
   const dialogs = (
     <>
-      {confirmRemove && snapshot?.activeCase ? (
+      <Presence>{confirmRemove && snapshot?.activeCase ? (
         <BugConfirmDialog
           title={`Remove “${snapshot.activeCase.title}”?`}
           body="Task Monki stops replaying it and the review no longer shows it. Its recording stays in Debug, under Earlier bugs."
@@ -99,7 +100,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
             await taskManagerApi.removeBug({ taskId });
             setConfirmRemove(false);
           })} />
-      ) : null}
+      ) : null}</Presence>
       {unlocking ? (
         <PreviewSecretDialog references={[]} inPreview={false} onClose={() => setUnlocking(false)}
           onSaved={() => {
@@ -114,10 +115,10 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
     (action === 'send-to-agent' ? host.blockedReason : undefined) ?? view.unavailable?.[action];
   const asSlotAction = (action: BugCaseAction, view: BugCaseView): SlotAction => {
     const reason = reasonFor(action, view);
-    const idle = bugActionLabel(action, view);
     return {
-      label: busy === action ? bugActionPendingLabel(action) : idle,
-      labels: [idle, bugActionPendingLabel(action)],
+      label: bugActionLabel(action, view),
+      pendingLabel: bugActionPendingLabel(action),
+      pending: busy === action,
       disabled: Boolean(busy) || Boolean(reason),
       reason,
       onClick: () => perform(action)
@@ -280,9 +281,9 @@ export function BugSection({
       </div>
       {view.statement ? <p className="tm-bug__statement">{view.statement}</p> : null}
       {!stateAbove && reason ? <p className="tm-bug__fact">{reason}</p> : null}
-      {view.partial ? <p className="tm-bug__notice">{view.partial}</p> : null}
+      {view.partial ? <p className="tm-notice" data-tone="waiting">{view.partial}</p> : null}
       {view.changedProtectedPaths?.length ? (
-        <p className="tm-bug__notice">Setup files changed since the recording: {view.changedProtectedPaths.join(', ')}</p>
+        <p className="tm-notice" data-tone="waiting">Setup files changed since the recording: {view.changedProtectedPaths.join(', ')}</p>
       ) : null}
       {view.changedSharedSetup?.length ? (
         <p className="tm-bug__fact">Also changed setup code the app shares: {view.changedSharedSetup.join(', ')}</p>
@@ -414,15 +415,15 @@ export function BugSection({
           primary={layout.primary ? actions.asSlotAction(layout.primary, view) : undefined}
           secondary={layout.secondary.filter((action) => !(approvalDecline && action === 'cancel-run')).map((action) => actions.asSlotAction(action, view))} />
       ) : null}
-      {compare ? <BugCompareDialog taskId={taskId} title={view.title} shots={shots} viewport={viewport} initial={compare} onClose={() => setCompare(undefined)} /> : null}
-      {run ? (
+      <Presence>{compare ? <BugCompareDialog taskId={taskId} title={view.title} shots={shots} viewport={viewport} initial={compare} onClose={() => setCompare(undefined)} /> : null}</Presence>
+      <Presence>{run ? (
         <BugRunDrawer taskId={taskId} run={run} view={view} viewport={viewport}
           onClose={() => {
             const trigger = runRowRefs.current.get(run.id);
             setOpenRun(undefined);
             trigger?.focus({ preventScroll: true });
           }} />
-      ) : null}
+      ) : null}</Presence>
     </OverviewSection>
   );
 }
@@ -521,7 +522,7 @@ export function BugEvidencePanel({ taskId, snapshot, onError, refresh }: {
           </tbody>
         </table>
       </div>
-      {confirming ? (
+      <Presence>{confirming ? (
         <BugConfirmDialog
           title={`Delete the evidence of “${confirming.title}”?`}
           body={`Its recording, screenshots and run logs are deleted (${formatAttachmentBytes(confirming.evidenceBytes)}). The bug stays listed here.`}
@@ -533,7 +534,7 @@ export function BugEvidencePanel({ taskId, snapshot, onError, refresh }: {
           shouldReturnFocus={() => !deletedRef.current}
           onKeep={() => setConfirming(undefined)}
           onConfirm={() => void remove(confirming.id)} />
-      ) : null}
+      ) : null}</Presence>
     </section>
   );
 }

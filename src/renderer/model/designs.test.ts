@@ -480,6 +480,9 @@ describe('Design workspace view model', () => {
     expect(designWorkspaceLayout(780, true).splitAvailable).toBe(true);
     expect(designWorkspaceLayout(1_100, false, 320).mainWidth).toBe(775);
     expect(designWorkspaceIsCompact(1_052)).toBe(true);
+    // A wider list leaves less room: the drawer follows the person's list width.
+    expect(designWorkspaceIsCompact(1_100)).toBe(false);
+    expect(designWorkspaceIsCompact(1_100, 320)).toBe(true);
     expect(designWorkspaceIsCompact(1_053)).toBe(false);
     expect(designWorkspaceIsCompact(Number.NaN)).toBe(false);
   });

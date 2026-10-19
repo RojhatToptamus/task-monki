@@ -30,6 +30,7 @@ import {
   designProjectStatus,
   designRuntimeUnavailableReason,
   designStatusView,
+  designWorkspaceIsCompact,
   designWorkspaceLayout,
   formatDesignUpdatedAt,
   supportedDesignModels,
@@ -55,6 +56,9 @@ import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { RepositorySelect } from './RepositoryPicker';
 import { buildRepositoryOptions } from '../model/repositories';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { Presence } from './presence';
+import { PendingLabel } from './StableLabel';
 import { AgentModelSelector } from './AgentModelSelector';
 import {
   resolveReasoningEffort,
@@ -264,11 +268,13 @@ export function DesignsWorkspace({
   const projectModelDiscoveryRef = useRef<string | undefined>(undefined);
   const visibleDesigns = visibleDesignProjects(designs, historyQuery, historyFilter);
   const activeDesignId = project?.design.id ?? selectedDesignId;
-  const layoutView = designWorkspaceLayout(workspaceWidth, historyCollapsed, historyWidth);
+  // The list is a drawer at this width whether or not it is open, so it can slide both ways; a
+  // drawer floats over the work, so the work keeps its whole width and nothing behind it moves.
+  const compact = workspaceWidth > 0 && designWorkspaceIsCompact(workspaceWidth, historyWidth);
+  const layoutView = designWorkspaceLayout(workspaceWidth, historyCollapsed || compact, historyWidth);
   const filesWidth = filesOpen ? 300 : 0;
   const contentLayout = designWorkspaceLayout(layoutView.mainWidth - filesWidth, true);
   const renderedLayout = contentLayout.availableModes.includes(layout) ? layout : filesOpen ? 'canvas' : 'chat';
-  const compact = workspaceWidth > 0 && !layoutView.splitAvailable;
   const maxConversationWidth = Math.max(320, contentLayout.mainWidth - 485);
   const renderedConversationWidth = Math.min(conversationWidth, maxConversationWidth);
   const historyModalOpen = compact && !historyCollapsed;
@@ -376,18 +382,19 @@ export function DesignsWorkspace({
       }`}
       aria-label="Designs workspace"
     >
-      {historyModalOpen ? (
+      <Presence>{historyModalOpen ? (
         <button
           type="button"
           className="tm-designs-rail__scrim"
           aria-label="Dismiss Design history"
           onClick={() => onHistoryCollapsedChange?.(true)}
         />
-      ) : null}
-      {!historyCollapsed ? <aside
+      ) : null}</Presence>
+      {/* In a narrow window the list is a drawer, kept while closed so it slides in and out; beside the Design it folds away at once. */}
+      {!historyCollapsed || compact ? <aside
         id="design-history-panel"
         ref={historyRailRef}
-        className={`tm-designs-rail ${historyModalOpen ? 'tm-designs-rail--open' : ''}`}
+        className={`tm-designs-rail${compact ? ' tm-designs-rail--drawer' : ''}${historyModalOpen ? ' tm-designs-rail--open' : ''}`}
         aria-label="Designs"
         aria-modal={historyModalOpen ? true : undefined}
         role={historyModalOpen ? 'dialog' : undefined}
@@ -545,7 +552,10 @@ export function DesignsWorkspace({
             onHistoryCollapsedChange={onHistoryCollapsedChange}
           />
         ) : (
-          <>
+          // The References panel stands beside the head and the work, so its head shares the
+          // workspace head's line (DESIGN.md Appendix B).
+          <div className="tm-designs-content">
+            <div className="tm-designs-column">
             <DesignHeader
               project={project}
               historyCollapsed={historyCollapsed}
@@ -579,7 +589,6 @@ export function DesignsWorkspace({
               }
               onDelete={() => setDeleteOpen(true)}
             />
-            <div className="tm-designs-content">
             <div
               className={`tm-designs-split tm-designs-split--${renderedLayout}`}
             >
@@ -694,6 +703,7 @@ export function DesignsWorkspace({
                 </div>
               ) : null}
             </div>
+            </div>
             {filesOpen ? (
               <DesignFilesDrawer
                 project={project}
@@ -720,12 +730,11 @@ export function DesignsWorkspace({
                 }
               />
             ) : null}
-            </div>
-          </>
+          </div>
         )}
       </section>
 
-      {deleteOpen && project ? (
+      <Presence>{deleteOpen && project ? (
         <DeleteDesignDialog
           designTitle={project.design.title}
           retainedWorkspace={project.repository.kind === 'USER_REGISTERED' ? project.currentWorktree?.worktreePath : undefined}
@@ -735,8 +744,8 @@ export function DesignsWorkspace({
             setDeleteOpen(false);
           }}
         />
-      ) : null}
-      {renameOpen && project ? (
+      ) : null}</Presence>
+      <Presence>{renameOpen && project ? (
         <RenameDesignDialog
           designTitle={project.design.title}
           onCancel={() => setRenameOpen(false)}
@@ -745,7 +754,7 @@ export function DesignsWorkspace({
             setRenameOpen(false);
           }}
         />
-      ) : null}
+      ) : null}</Presence>
     </main>
   );
 }
@@ -803,7 +812,7 @@ function DesignHeader({
         </div>
       </div>
       <div className="tm-designs-header__actions">
-        <div className="segmented tm-design-layout" role="group" aria-label="Design layout">
+        <div className="segmented segmented--compact tm-design-layout" role="group" aria-label="Design layout">
           {availableLayouts.map((option) => (
             <Tooltip key={option} label={layoutLabel(option)}><button
               type="button"
@@ -1044,6 +1053,7 @@ function NewDesignForm({
     <div className="tm-design-create">
       <form
         className="tm-design-create__form"
+        data-pending={submitting || undefined}
         onSubmit={(event) => void submit(event)}
       >
         <header className="tm-design-create__intro">
@@ -1187,11 +1197,11 @@ function NewDesignForm({
                     Boolean(attachments.modelError)
                   }
                 >
-                  {submitting
-                    ? 'Creating…'
-                    : creationOutcomeUnknown
-                      ? 'Retry creation'
-                      : 'Create Design'}
+                  <PendingLabel
+                    label={creationOutcomeUnknown ? 'Retry creation' : 'Create Design'}
+                    pendingLabel="Creating…"
+                    pending={submitting}
+                  />
                 </button>
               }
             >
@@ -1215,11 +1225,11 @@ function NewDesignForm({
             </AttachmentComposerShell>
 
             {attachments.overflowError || attachments.modelError ? (
-              <p className="task-attachment-message task-attachment-message--error" role="alert">
+              <p className="form-error" role="alert">
                 {attachments.overflowError ?? attachments.modelError}
               </p>
             ) : null}
-            {error ? <p className="tm-design-create__error" role="alert">{error}</p> : null}
+            {error ? <p className="tm-notice tm-design-create__error" role="alert">{error}</p> : null}
           </div>
         </div>
       </form>
@@ -1236,7 +1246,7 @@ function RenameDesignDialog({
   onCancel(): void;
   onRename(title: string): Promise<void>;
 }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLFormElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState(designTitle);
   const [saving, setSaving] = useState(false);
@@ -1260,24 +1270,10 @@ function RenameDesignDialog({
     }
   };
   return (
-    <div
-      ref={dialogRef}
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="rename-design-title"
-      tabIndex={-1}
-    >
-      <button
-        type="button"
-        className="tm-modal__scrim"
-        aria-label="Cancel Design rename"
-        disabled={saving}
-        onClick={onCancel}
-      />
-      <form className="tm-modal__panel tm-design-delete tm-design-rename" onSubmit={(event) => void submit(event)}>
+    <ModalFrame labelledBy="rename-design-title" pending={saving} onDismiss={saving ? undefined : onCancel}>
+      <form ref={dialogRef} className="tm-modal__panel tm-design-delete tm-design-rename" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <h3 id="rename-design-title">Rename Design</h3>
-        <label className="tm-modal__field" htmlFor="rename-design-input">
+        <label className="field" htmlFor="rename-design-input">
           <span>Name</span>
           <input
             ref={inputRef}
@@ -1288,17 +1284,17 @@ function RenameDesignDialog({
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
-        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={saving} onClick={onCancel}>
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={saving || !title.trim()}>
-            {saving ? 'Saving…' : 'Rename'}
+            <PendingLabel label="Rename" pendingLabel="Saving…" pending={saving} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -1342,28 +1338,14 @@ function DeleteDesignDialog({
   };
 
   return (
-    <div
-      ref={dialogRef}
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="delete-design-title"
-      tabIndex={-1}
-    >
-      <button
-        type="button"
-        className="tm-modal__scrim"
-        aria-label="Cancel Design deletion"
-        disabled={deleting}
-        onClick={onCancel}
-      />
-      <div className="tm-modal__panel tm-design-delete">
+    <ModalFrame labelledBy="delete-design-title" pending={deleting} onDismiss={deleting ? undefined : onCancel}>
+      <div ref={dialogRef} className="tm-modal__panel tm-design-delete" tabIndex={-1}>
         <h3 id="delete-design-title">Delete “{designTitle}”?</h3>
         {retainedWorkspace ? <>
           <p>The repository and Design branch are kept. The workspace stays at <code>{retainedWorkspace}</code>.</p>
           <label><input type="checkbox" checked={removeWorktree} disabled={deleting} onChange={(event) => setRemoveWorktree(event.target.checked)} /> Also remove the workspace if it has no unsaved, untracked, or ignored files.</label>
         </> : <p>Task Monki removes the Design. It removes the managed workspace when that action is safe.</p>}
-        {error ? <p className="tm-error tm-modal__error" role="alert">{error}</p> : null}
+        {error ? <p className="tm-notice tm-modal__notice" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button
             ref={cancelRef}
@@ -1375,11 +1357,11 @@ function DeleteDesignDialog({
             Cancel
           </button>
           <button type="button" className="danger-button" disabled={deleting} onClick={() => void remove()}>
-            {deleting ? 'Deleting…' : 'Delete Design'}
+            <PendingLabel label="Delete Design" pendingLabel="Deleting…" pending={deleting} />
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }
 

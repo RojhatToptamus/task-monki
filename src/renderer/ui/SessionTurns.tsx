@@ -126,9 +126,9 @@ export function Turn({ turn, clip = 0, failure, sourceName, capture, onReadArtif
       if (entry.kind === 'steps') return <ActivitySteps key={entry.key} steps={entry.steps} live={live && index === entries.length - 1} />;
       return <PlanCard key={entry.key} steps={entry.plan.steps} marker={planMarker(turn.run, entry.plan)} live={live} />;
     })}
-    {failure ? <div className="tm-turn__notice" data-status={failure.status}>
+    {failure ? <div className="tm-notice tm-turn__notice" data-tone={failure.status === 'LOST' || failure.status === 'RECOVERY_REQUIRED' ? 'waiting' : undefined}>
       <CircleAlert size={16} aria-hidden="true" />
-      <div><strong>{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
+      <div><strong className="tm-notice__title">{failure.title}</strong>{failure.detail ? <p>{failure.detail}</p> : null}
         {failure.reportedReason ? <ReportedQuote className="tm-turn__reported" source={sourceName ?? 'Agent'}>{failure.reportedReason}</ReportedQuote> : null}</div>
     </div> : null}
     {capture ? <div className="tm-turn__changes">{capture}</div> : null}

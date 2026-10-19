@@ -50,6 +50,8 @@ import {
 import { StatusGlyph } from './StatusBadge';
 import { DisclosureChevron } from './DisclosureChevron';
 import { FactLine } from './FactLine';
+import { Presence } from './presence';
+import { PendingLabel } from './StableLabel';
 import { UiCheckIcon, UiChevronDownIcon } from './UiIcons';
 import type { SoftwareUpdateState } from '../../shared/softwareUpdate';
 
@@ -189,9 +191,10 @@ function AgentSettings({
           className="outline-button button--sm"
           disabled={refreshing}
           aria-busy={refreshing}
+          data-pending={refreshing || undefined}
           onClick={() => void refresh()}
         >
-          {refreshing ? 'Checking…' : 'Recheck'}
+          <PendingLabel label="Recheck" pendingLabel="Checking…" pending={refreshing} />
         </button>
       }
     >
@@ -694,9 +697,10 @@ function ToolSettings({
           className="outline-button button--sm"
           disabled={refreshing}
           aria-busy={refreshing}
+          data-pending={refreshing || undefined}
           onClick={() => void refresh()}
         >
-          {refreshing ? 'Checking…' : 'Recheck'}
+          <PendingLabel label="Recheck" pendingLabel="Checking…" pending={refreshing} />
         </button>
       }
     >
@@ -729,7 +733,7 @@ function ToolSettings({
 
       <SettingsSubsection title="Codex integrations">
         {pendingSettings ? (
-          <p className="form-warning" role="status">{pendingSettings.message}</p>
+          <p className="tm-notice" data-tone="waiting" role="status">{pendingSettings.message}</p>
         ) : null}
         <div className="tm-settings__list">
           <ChoiceSettingRow
@@ -802,9 +806,10 @@ function UpdateSettings({
           className="outline-button button--sm"
           disabled={busy}
           aria-busy={softwareUpdateState.status === 'checking'}
+          data-pending={softwareUpdateState.status === 'checking' || undefined}
           onClick={() => void onCheckForSoftwareUpdates()}
         >
-          {softwareUpdateState.status === 'checking' ? 'Checking…' : 'Check now'}
+          <PendingLabel label="Check now" pendingLabel="Checking…" pending={softwareUpdateState.status === 'checking'} />
         </button>
       ) : undefined}
     >
@@ -1045,7 +1050,7 @@ function ThemePresetPicker({
         <span>{selected.label}</span>
         <UiChevronDownIcon open={open} size={13} />
       </button>
-      {open ? (
+      <Presence>{open ? (
         <div className="tm-theme-picker__menu" role="listbox" aria-label="Theme preset">
           {groups.map((group) => (
             <div key={group} className="tm-theme-picker__group" role="group" aria-label={group}>
@@ -1076,7 +1081,7 @@ function ThemePresetPicker({
             </div>
           ))}
         </div>
-      ) : null}
+      ) : null}</Presence>
     </div>
   );
 }

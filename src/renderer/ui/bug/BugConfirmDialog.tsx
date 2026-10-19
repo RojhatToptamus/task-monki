@@ -1,6 +1,8 @@
 import { useId, useRef, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialogFocusBoundary } from '../dialogFocus';
+import { ModalFrame } from '../ModalFrame';
+import { PendingLabel } from '../StableLabel';
 
 /**
  * Confirms a bug action that cannot be undone. Keep comes first and takes focus; the confirm
@@ -36,17 +38,18 @@ export function BugConfirmDialog({
   const bodyId = useId();
   useDialogFocusBoundary({ dialogRef: panelRef, fallbackReturnFocusRef: returnFocusRef, shouldReturnFocus, busy, onClose: onKeep });
   return createPortal(
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={bodyId}>
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onKeep} />
+    <ModalFrame labelledBy={titleId} describedBy={bodyId} pending={busy} onDismiss={busy ? undefined : onKeep}>
       <div ref={panelRef} className="tm-modal__panel tm-bugconfirm" tabIndex={-1}>
         <h3 id={titleId}>{title}</h3>
         <p id={bodyId}>{body}</p>
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onKeep}>{keepLabel}</button>
-          <button type="button" className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
+          <button type="button" className="danger-button" disabled={busy} onClick={onConfirm}>
+            <PendingLabel label={confirmLabel} pendingLabel={busyLabel} pending={busy} />
+          </button>
         </div>
       </div>
-    </div>,
+    </ModalFrame>,
     document.body
   );
 }

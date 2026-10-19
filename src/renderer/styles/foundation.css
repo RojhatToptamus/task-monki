@@ -69,6 +69,8 @@
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  /* How long an action runs before its control shows pending (DESIGN.md 6.1). */
+  --pending-delay: 300ms;
 
   /* Layers. */
   --layer-base: 0;
@@ -213,13 +215,6 @@ body {
   }
 }
 
-@keyframes tm-menu-out {
-  to {
-    opacity: 0;
-    transform: scale(0.98);
-  }
-}
-
 @keyframes tm-dialog-in {
   from {
     opacity: 0;
@@ -233,9 +228,47 @@ body {
   }
 }
 
+/* A drawer or floating side sheet slides in from its edge. */
+@keyframes tm-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(8%);
+  }
+}
+
+/* Exits (DESIGN.md 12): a layer leaves over --motion-fast, going back half the way it came
+   while it fades, and presence.tsx removes it once the exit ends. */
+@keyframes tm-shrink-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+@keyframes tm-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes tm-slide-out {
+  to {
+    opacity: 0;
+    transform: translateX(4%);
+  }
+}
+
 /* Something that arrives while its surface is open fades in once; the list makes room at once. */
 [data-arrived] {
   animation: tm-scrim-in var(--motion-standard) var(--ease-out);
+}
+
+/* A floating control (New responses) rises into place. */
+@keyframes tm-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 @keyframes tm-toast-in {
@@ -346,6 +379,20 @@ summary,
   background: var(--primary-disabled);
   box-shadow: inset 0 0 0 1px var(--field-edge);
   color: var(--text-disabled);
+}
+
+/* A pending action shows pending only once it has run for --pending-delay (DESIGN.md 6.1), so
+   an action that ends almost at once changes nothing on screen. Until then the controls it
+   disables keep their look (the disabled attribute already refuses a second press), and the
+   pending label waits too (.tm-pending-label). The mark is data-pending on the control or on
+   the surface whose controls the action holds. */
+:root [data-pending] :where(button, [role='button'], input, textarea, select):is(:disabled, [aria-disabled='true']),
+:root :where(button, [role='button'])[data-pending]:is(:disabled, [aria-disabled='true']) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out) var(--pending-delay),
+    color var(--motion-fast) var(--ease-out) var(--pending-delay),
+    box-shadow var(--motion-fast) var(--ease-out) var(--pending-delay),
+    transform var(--motion-fast) var(--ease-out);
 }
 
 /* Press darkens a fill that is already there (DESIGN.md A.4, A.5): --press over
@@ -505,6 +552,17 @@ summary,
 
   /* The shimmer's still fallback lives beside .tm-shimmer in
      base-components.css, which loads after this file. */
+
+  /* Waiting before showing pending is not motion: it keeps its delay, so a quick action
+     never flashes a pending state here either. */
+  :root [data-pending] :where(button, [role='button'], input, textarea, select):is(:disabled, [aria-disabled='true']),
+  :root :where(button, [role='button'])[data-pending]:is(:disabled, [aria-disabled='true']) {
+    transition-delay: var(--pending-delay), var(--pending-delay), var(--pending-delay), 0s !important;
+  }
+
+  :root .tm-pending-label[data-pending] > * {
+    transition-delay: var(--pending-delay) !important;
+  }
 }
 
 @media (prefers-contrast: more) {

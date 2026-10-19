@@ -4,6 +4,7 @@ import type { BugShotView } from '../../../shared/bugReplay';
 import { boxUnion, containRegion, focusRegion, outlineStyle, regionStyle } from '../../model/bugShot';
 import { formatShortAge } from '../../model/timeAgo';
 import { useDialogFocusBoundary } from '../dialogFocus';
+import { ModalFrame } from '../ModalFrame';
 import { useBugImage } from './BugImage';
 
 /**
@@ -99,8 +100,7 @@ export function BugCompareDialog({
   if (!shot) return null;
   const caption = shotCaption(side, shot);
   return createPortal(
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-      <div className="tm-modal__scrim" onClick={onClose} />
+    <ModalFrame labelledBy={titleId} onDismiss={onClose}>
       <div ref={panelRef} className="tm-modal__panel tm-bugcompare" tabIndex={-1}>
         <div className="tm-bugcompare__head">
           <h3 id={titleId} title={title}>{title}</h3>
@@ -134,7 +134,7 @@ export function BugCompareDialog({
           <button type="button" className="outline-button" onClick={onClose}>Close</button>
         </div>
       </div>
-    </div>,
+    </ModalFrame>,
     document.body
   );
 }

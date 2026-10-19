@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 import type { BugCaseView, BugReplayRunView, BugShotView } from '../../../shared/bugReplay';
 import { bugRunRows, formatDuration, runStepList } from '../../model/bugReplay';
 import { useDialogFocusBoundary } from '../dialogFocus';
+import { useLayerProps } from '../presence';
 import { PlanList } from '../Plan';
 import { StatusGlyph, statusGlyphFor } from '../StatusBadge';
 import { formatTaskActivityTimestamp } from '../TaskActivityPanel';
@@ -34,6 +35,7 @@ export function BugRunDrawer({
   // The replay is read, not filled in: focus starts on what scrolls, so the keys read it and one
   // Escape closes it (the close button's tooltip never opens first).
   useDialogFocusBoundary({ dialogRef: panelRef, initialFocusRef: bodyRef, busy: false, onClose });
+  const layer = useLayerProps();
   const row = bugRunRows([run])[0];
   const glyph = row ? statusGlyphFor(row.tone, row.inFlight) : undefined;
   const checks = view.version?.checks ?? [];
@@ -49,7 +51,7 @@ export function BugRunDrawer({
   if (!row) return null;
   // Fixed layers render at the document, so no size container on the page becomes their frame.
   return createPortal(
-    <div className="tm-bugdrawer">
+    <div {...layer} className="tm-bugdrawer">
       <div className="tm-bugdrawer__scrim" onClick={onClose} />
       <aside ref={panelRef} className="tm-bugdrawer__panel" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <header className="tm-bugdrawer__head">
@@ -70,7 +72,12 @@ export function BugRunDrawer({
             {row.durationMs !== undefined ? <span>{formatDuration(row.durationMs)}</span> : null}
             {run.treeId ? <code title={run.treeId}>{run.treeId.slice(0, 8)}</code> : null}
           </p>
-          {row.detail && !quietOutcome ? <p className={`tm-bugdrawer__notice tm-bugdrawer__notice--${row.tone}`}>{row.detail}</p> : null}
+          {/* A failure or a step owed is a notice in its tone; anything else is the run's own line. */}
+          {row.detail && !quietOutcome ? (
+            row.tone === 'error' || row.tone === 'action'
+              ? <p className="tm-notice" data-tone={row.tone === 'action' ? 'waiting' : undefined}>{row.detail}</p>
+              : <p className="tm-bugdrawer__detail">{row.detail}</p>
+          ) : null}
 
           {shot ? (
             // In block flow, so the drawer's grid row takes the picture's full height.

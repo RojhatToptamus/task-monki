@@ -12,7 +12,7 @@ import {
 import { ActionMenu, type ActionMenuItem } from '../ActionMenu';
 import { useArrivals } from '../arrivals';
 import { DisclosureChevron } from '../DisclosureChevron';
-import { StableLabel } from '../StableLabel';
+import { PendingLabel, StableLabel } from '../StableLabel';
 import { Tooltip } from '../Tooltip';
 import { BugStepIcon } from './BugStepIcon';
 
@@ -211,7 +211,7 @@ export function BugCapturePanel({
     <aside className="tm-bugcapture" aria-label="Mark the bug">
       <div className="tm-bugcapture__body">
         {/* An interrupted recording says why in the page's place; a partial one says it here. */}
-        {capture.partial && !interrupted ? <p className="tm-bugcapture__notice" role="note">{capture.partial}</p> : null}
+        {capture.partial && !interrupted ? <p className="tm-notice" data-tone="waiting" role="note">{capture.partial}</p> : null}
         <label className="field">
           <span id={titleId}>Bug</span>
           <input ref={titleRef} aria-labelledby={titleId} value={draft.title} maxLength={200} disabled={saving} placeholder="Name the bug"
@@ -417,7 +417,7 @@ export function BugCapturePanel({
 
         {recording.passwordTyped ? <p className="tm-bugcapture__note">Replays type the password you entered. It is never shown.</p> : null}
       </div>
-      <footer className="tm-bugcapture__foot">
+      <footer className="tm-bugcapture__foot" data-pending={saving || restarting || undefined}>
         {/* Its own line: beside the buttons the panel's width would leave it a few letters. */}
         {replaces ? <p className="tm-bugcapture__replaces" title={replaces}>Replaces “{replaces}”</p> : null}
         <div className="tm-bugcapture__actions">
@@ -425,21 +425,21 @@ export function BugCapturePanel({
             <>
               {onRecordAgain ? (
                 <button type="button" className="outline-button" disabled={saving || restarting} onClick={onRecordAgain}>
-                  <StableLabel label={restarting ? 'Starting…' : 'Record again'} reserve={['Record again', 'Starting…']} />
+                  <PendingLabel label="Record again" pendingLabel="Starting…" pending={Boolean(restarting)} />
                 </button>
               ) : null}
               <button type="button" className="primary-button" disabled={saving || restarting || !save.canSaveEvidence} onClick={() => submit(false)}>
-                <StableLabel label={busy === 'evidence' ? 'Saving…' : 'Save steps only'} reserve={['Save steps only', 'Saving…']} />
+                <PendingLabel label="Save steps only" pendingLabel="Saving…" pending={busy === 'evidence'} />
               </button>
             </>
           ) : (
             <>
               <button type="button" className="outline-button" disabled={saving || picking || !save.canSaveEvidence} onClick={() => submit(false)}>
-                <StableLabel label={busy === 'evidence' ? 'Saving…' : 'Save steps only'} reserve={['Save steps only', 'Saving…']} />
+                <PendingLabel label="Save steps only" pendingLabel="Saving…" pending={busy === 'evidence'} />
               </button>
               <button type="button" className="primary-button" disabled={saving || picking || !save.reproducible}
                 aria-describedby={save.reason ? reasonId : undefined} onClick={() => submit(true)}>
-                <StableLabel label={busy === 'save' ? 'Saving…' : 'Save and reproduce'} reserve={['Save and reproduce', 'Saving…']} />
+                <PendingLabel label="Save and reproduce" pendingLabel="Saving…" pending={busy === 'save'} />
               </button>
             </>
           )}
