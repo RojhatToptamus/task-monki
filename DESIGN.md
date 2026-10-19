@@ -1759,7 +1759,9 @@ one row per expectation, numbered like its outline on the page, added from Add
 expectation (an element, No page error, a request, a value) and removed with
 its ×. A new element's expected value takes focus with its text selected. Stop
 pointing replaces Add expectation while the page waits for a click, and Escape
-works. Steps and Page errors are disclosures. The foot holds Save steps only,
+works. A click in an embedded frame picks nothing; one muted line ends Expected
+and says why until pointing starts again. Steps and Page errors are disclosures.
+The foot holds Save steps only,
 then the primary Save and reproduce, at their labels' width, with the reason
 beneath and the bug a save replaces named on its own line above; only a change
 to an expectation asks again whether the bug reproduces, and the last answer

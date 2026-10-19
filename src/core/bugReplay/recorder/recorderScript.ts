@@ -2,11 +2,14 @@
  * The recorder that runs in an isolated world of the page under test. Page scripts cannot see
  * it: it lives in its own JavaScript world and reports through a binding that exists only there.
  * It records what a person does (clicks, final field values, choices, the supported keys) with
- * facts to find the same element again, and runs pick mode when the person marks the bug.
+ * facts to find the same element again. When the person marks the bug, Chrome's inspect mode
+ * takes the pick and Task Monki reads the picked element's facts here, with `PICK_FACTS_CALL`.
  */
 
 export const RECORDER_WORLD = 'tm-bug-recorder';
 export const RECORDER_BINDING = '__tmRec';
+/** Run with `Runtime.callFunctionOn` on a node resolved in the top frame's recorder world. */
+export const PICK_FACTS_CALL = 'function () { return globalThis.__tmPickFacts(this); }';
 
 export const RECORDER_SCRIPT = String.raw`(() => {
   if (globalThis.__tmRecorderInstalled) return;
@@ -188,7 +191,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
   }
 
   document.addEventListener('click', (event) => {
-    if (!event.isTrusted || globalThis.__tmPicking) return;
+    if (!event.isTrusted) return;
     activity();
     const element = actionable(event.target);
     if (!element || element.nodeType !== 1) return;
@@ -249,7 +252,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
   }, true);
 
   document.addEventListener('keydown', (event) => {
-    if (!event.isTrusted || globalThis.__tmPicking) return;
+    if (!event.isTrusted) return;
     activity();
     const focused = document.activeElement;
     const editable = isEditable(focused);
@@ -270,23 +273,6 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     if (event.isTrusted) send({ type: 'unsupported', what: 'drag and drop' });
   }, true);
 
-  // Pick mode: the person points at the wrong value; the click never reaches the page.
-  let overlay;
-  function ensureOverlay() {
-    if (overlay) return overlay;
-    const host = document.createElement('div');
-    host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
-    const root = host.attachShadow({ mode: 'closed' });
-    const box = document.createElement('div');
-    box.style.cssText = 'position:fixed;border:2px solid #4f7cff;background:rgba(79,124,255,0.12);border-radius:3px;pointer-events:none;display:none;box-sizing:border-box;';
-    root.appendChild(box);
-    overlay = { host, box };
-    return overlay;
-  }
-  function pickTarget(element) {
-    if (!element || element.nodeType !== 1) return element;
-    return element;
-  }
   // Where the page's own scroll boxes stood when the capture's screenshot was taken, so a pick
   // made after more scrolling can still be placed on it. The window's scroll is returned.
   let shotOffsets = new WeakMap();
@@ -316,85 +302,29 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     }
     return { shift, fixed, sticky };
   }
-  globalThis.__tmStartPick = () => {
-    if (!isTop) return;
-    globalThis.__tmPicking = true;
-    const { host, box } = ensureOverlay();
-    document.documentElement.appendChild(host);
-    // Only the person's own input points: events the page dispatches are not trusted.
-    const move = (event) => {
-      if (!event.isTrusted) return;
-      const element = pickTarget(event.target);
-      if (!element || element === host) return;
-      const rect = element.getBoundingClientRect();
-      box.style.display = 'block';
-      box.style.left = rect.left + 'px';
-      box.style.top = rect.top + 'px';
-      box.style.width = rect.width + 'px';
-      box.style.height = rect.height + 'px';
-    };
-    // A pick keeps its box on the element until the numbered outline takes its place.
-    const stop = (keepBox) => {
-      globalThis.__tmPicking = false;
-      globalThis.__tmStopPicking = undefined;
-      window.removeEventListener('mousemove', move, true);
-      window.removeEventListener('click', click, true);
-      window.removeEventListener('mousedown', swallow, true);
-      window.removeEventListener('mouseup', swallow, true);
-      window.removeEventListener('keydown', key, true);
-      if (keepBox) return;
-      box.style.display = 'none';
-      host.remove();
-    };
-    const swallow = (event) => {
-      if (!event.isTrusted) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-    const click = (event) => {
-      if (!event.isTrusted) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const element = pickTarget(event.target);
-      const picked = Boolean(element && element.nodeType === 1);
-      stop(picked);
-      if (!picked) { send({ type: 'pick', cancelled: true }); return; }
-      const result = facts(element);
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      let count = 1;
-      try {
-        if (result.testIds[0]) count = document.querySelectorAll('[' + result.testIds[0].attribute + '="' + CSS.escape(result.testIds[0].value) + '"]').length;
-        else count = document.querySelectorAll(result.css).length;
-      } catch (_) {}
-      const value = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? String(element.value) : undefined;
-      // Where it sits, with the scroll it was read at: the screenshot may have been taken at another.
-      const box = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
-      send({ type: 'pick', target: result, text: norm(element.innerText || element.textContent || (value ?? '')).slice(0, 4000), value, visible, count, box, scroll: { x: window.scrollX, y: window.scrollY }, placement: placement(element) });
-    };
-    const key = (event) => {
-      if (event.isTrusted && event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        stop();
-        send({ type: 'pick', cancelled: true });
-      }
-    };
-    globalThis.__tmStopPicking = () => {
-      stop();
-      send({ type: 'pick', cancelled: true });
-    };
-    // On the window in the capture phase: ahead of every listener on the document.
-    window.addEventListener('mousemove', move, true);
-    window.addEventListener('mousedown', swallow, true);
-    window.addEventListener('mouseup', swallow, true);
-    window.addEventListener('click', click, true);
-    window.addEventListener('keydown', key, true);
-  };
-  // Stop pointing without an event the page could also see.
-  globalThis.__tmStopPick = () => {
-    if (globalThis.__tmPicking && globalThis.__tmStopPicking) globalThis.__tmStopPicking();
+  // The element the person picked. Chrome's inspect mode takes the click before the page's input
+  // handling and Task Monki calls this in this world with the node Chrome hit, so nothing the page
+  // listens for, dispatches or draws takes part in a pick.
+  globalThis.__tmPickFacts = (node) => {
+    let element = node && node.nodeType === 1 ? node : node && node.parentElement;
+    if (!element) return { gone: true };
+    if (element.ownerDocument !== document) return { frame: 'child' };
+    // Inside a shadow tree the pick is its host, the element the page's own events name.
+    for (let root = element.getRootNode(); root !== document && root.host; root = element.getRootNode()) element = root.host;
+    if (!element.isConnected) return { gone: true };
+    const result = facts(element);
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    let count = 1;
+    try {
+      if (result.testIds[0]) count = document.querySelectorAll('[' + result.testIds[0].attribute + '="' + CSS.escape(result.testIds[0].value) + '"]').length;
+      else count = document.querySelectorAll(result.css).length;
+    } catch (_) {}
+    const value = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) ? String(element.value) : undefined;
+    // Where it sits, with the scroll it was read at: the screenshot may have been taken at another.
+    const box = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+    return { target: result, text: norm(element.innerText || element.textContent || (value ?? '')).slice(0, 4000), value, visible, count, box, scroll: { x: window.scrollX, y: window.scrollY }, placement: placement(element) };
   };
   // While the bug is marked, each element a check reads keeps a numbered outline, so the page and
   // the checks beside it name the same thing. Outlines follow scrolling and never take input.
@@ -413,14 +343,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     }
   }
   const redraw = () => requestAnimationFrame(drawMarks);
-  // The pick's own box gives way to the numbered outlines, whichever call comes first.
-  const dropPickBox = () => {
-    if (!overlay || globalThis.__tmPicking) return;
-    overlay.box.style.display = 'none';
-    overlay.host.remove();
-  };
   globalThis.__tmClearMarks = () => {
-    dropPickBox();
     if (!marks) return;
     window.removeEventListener('scroll', redraw, true);
     window.removeEventListener('resize', redraw);
@@ -430,7 +353,6 @@ export const RECORDER_SCRIPT = String.raw`(() => {
   // Outlines are kept by element and number, so editing a value never redraws them.
   globalThis.__tmShowMarks = (json) => {
     if (!isTop) return;
-    dropPickBox();
     let wanted = [];
     try { wanted = JSON.parse(json); } catch (_) { return; }
     if (!marks) {

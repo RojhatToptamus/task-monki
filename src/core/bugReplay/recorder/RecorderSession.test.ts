@@ -9,6 +9,8 @@ const ORIGIN = 'http://127.0.0.1:5100';
 function harness(scroll: [number, number] = [0, 0]) {
   const listeners: Array<(method: string, params: Record<string, unknown>, sessionId?: string) => void> = [];
   const evaluated: string[] = [];
+  // What the recorder world reads off the element Chrome's inspect mode reports.
+  let picked: Record<string, unknown> | undefined;
   const cdp: CdpConnection = {
     send: async (method, params) => {
       if (method === 'Runtime.evaluate') {
@@ -16,6 +18,8 @@ function harness(scroll: [number, number] = [0, 0]) {
         evaluated.push(expression);
         if (expression === 'globalThis.__tmNoteShot()') return { result: { value: scroll } };
       }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'picked-node' } };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: picked } };
       return {};
     },
     onEvent: (listener) => {
@@ -38,7 +42,12 @@ function harness(scroll: [number, number] = [0, 0]) {
     emit('Network.responseReceived', { requestId: id, response: { status, mimeType: 'text/html', headers: {} } });
     emit('Network.loadingFinished', { requestId: id });
   };
-  return { session, emit, recorder, request, notices, evaluated };
+  /** The person clicks an element while pointing; Chrome reports it and the recorder world reads it. */
+  const inspect = (facts: Record<string, unknown>) => {
+    picked = facts;
+    emit('Overlay.inspectNodeRequested', { backendNodeId: 42 });
+  };
+  return { session, emit, recorder, inspect, request, notices, evaluated };
 }
 
 const APPLY = { tag: 'button', testIds: [], role: 'button', name: 'Apply coupon', text: 'Apply coupon', css: '#apply' };
@@ -98,7 +107,7 @@ describe('Recorder session', () => {
   });
 
   it('places a pick on the marked screenshot by the scroll the screenshot was taken at', async () => {
-    const { session, recorder, emit } = harness([0, 300]);
+    const { session, recorder, inspect, emit } = harness([0, 300]);
     await session.attach();
     emit('Runtime.executionContextCreated', { context: { id: 7, name: RECORDER_WORLD, auxData: { frameId: 'main', isDefault: false } } });
     session.noteStart('/', []);
@@ -109,8 +118,7 @@ describe('Recorder session', () => {
     // The person scrolled 200px further down before pointing.
     const picked = session.pick();
     await Promise.resolve();
-    recorder({
-      type: 'pick',
+    inspect({
       target: { tag: 'span', testIds: [{ attribute: 'data-testid', value: 'cart-total' }], text: '$40.00', css: '#cart-total' },
       text: '$40.00',
       visible: true,
@@ -120,13 +128,12 @@ describe('Recorder session', () => {
     });
     const pick = await picked;
 
-    expect(pick?.box).toEqual({ x: 100, y: 320, width: 60, height: 18 });
+    expect(pick.kind === 'picked' && pick.pick.box).toEqual({ x: 100, y: 320, width: 60, height: 18 });
 
     const placeAt = async (box: { x: number; y: number }, scrollY: number, placement?: Record<string, unknown>) => {
       const picked = session.pick();
       await Promise.resolve();
-      recorder({
-        type: 'pick',
+      inspect({
         target: { tag: 'span', testIds: [], text: 'Total', css: '#total' },
         text: 'Total',
         visible: true,
@@ -135,7 +142,10 @@ describe('Recorder session', () => {
         scroll: { x: 0, y: scrollY },
         ...(placement ? { placement } : {})
       });
-      return (await picked)?.box;
+      const outcome = await picked;
+      // The pick lands either way; only its place on the screenshot is in question.
+      expect(outcome.kind).toBe('picked');
+      return outcome.kind === 'picked' ? outcome.pick.box : undefined;
     };
     // An element outside what the screenshot shows has no place on it.
     expect(await placeAt({ x: 100, y: 700 }, 900)).toBeUndefined();

@@ -382,6 +382,8 @@ export function BugCapturePanel({
                 })}
               </ul>
             )}
+            {/* Last in the section, so the note coming and going moves nothing above it. */}
+            {capture.pickNote ? <p className="tm-bugcapture__note">{capture.pickNote}</p> : null}
           </section>
         ) : null}
 

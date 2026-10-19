@@ -8,7 +8,6 @@ import path from 'node:path';
 import { PreviewError, type PreviewRuntime, type PreviewSpec, type PreviewStatus } from 'previewhost';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { WorktreeRecord } from '../../shared/contracts';
-import type { BugRecordingPick } from '../../shared/bugRecording';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { TOTAL_PICK, bugCaseRecord, captureRecord, checkoutCase, checkoutRecording, runFrames, totalDraft, versionRecord } from '../../testSupport/bugReplay/bugReplayFixtures';
@@ -19,7 +18,7 @@ import { BugRecordingService, type RecordingBrowserHost } from './BugRecordingSe
 import { BugReplayRunner, type BugReplayRunnerRequest, type BugReplayRunnerResult } from './BugReplayRunner';
 import { BugReplayService } from './BugReplayService';
 import { ReplayAuthorization } from './ReplayAuthorization';
-import type { RecorderSession } from './recorder/RecorderSession';
+import type { RecorderPickOutcome, RecorderSession } from './recorder/RecorderSession';
 
 /**
  * Bug Replay's queue end to end over real storage and real Git trees: clean runs are admitted,
@@ -417,7 +416,7 @@ describe('Saving a recording', () => {
       markIncomplete() {},
       dispose() {},
       log: () => checkoutRecording(),
-      pick: async (): Promise<BugRecordingPick> => TOTAL_PICK,
+      pick: async (): Promise<RecorderPickOutcome> => ({ kind: 'picked', pick: TOTAL_PICK }),
       cancelPick: async () => undefined,
       noteShot: async () => undefined,
       showMarks: async () => undefined,

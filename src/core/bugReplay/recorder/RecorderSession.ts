@@ -12,7 +12,7 @@ import type { BugCaseEnvironment } from '../../../shared/bugCase';
 import type { BugRecordingTimeline, BugTimelineEntry } from '../../../shared/bugReplay';
 import { compileSteps, describeStep } from '../BugCaseCompiler';
 import { isGatewaySignature } from '../runner/protocol';
-import { RECORDER_BINDING, RECORDER_SCRIPT, RECORDER_WORLD } from './recorderScript';
+import { PICK_FACTS_CALL, RECORDER_BINDING, RECORDER_SCRIPT, RECORDER_WORLD } from './recorderScript';
 
 /**
  * Turns one browser's DevTools protocol into a `bug-recording/v1` log: the isolated-world
@@ -35,10 +35,22 @@ export type RecorderNotice =
   /** A step, a failed request or a page error joined the live timeline. */
   | { kind: 'timeline' };
 
+/** How pointing ended: the element the person picked, or none, with the reason when they need one. */
+export type RecorderPickOutcome = { kind: 'picked'; pick: BugRecordingPick } | { kind: 'stopped'; reason?: string };
+
+/** Expectations read the top page; an element inside an embedded frame is never picked. */
+export const EMBEDDED_FRAME_PICK_REASON = "Elements in an embedded frame can't be picked";
+
 interface PendingRequest {
   entry: BugRecordingRequest;
   startedAt: number;
   json: boolean;
+}
+
+interface Pointing {
+  resolve(outcome: RecorderPickOutcome): void;
+  /** Chrome reported the click; the element is being read. */
+  picked: boolean;
 }
 
 const BODY_RING = 60;
@@ -46,6 +58,21 @@ const BODY_RING = 60;
 const TIMELINE_ROWS = 80;
 /** UTF-8 bytes of recorded actions; below the stored action log's 2 MiB limit with room for the array. */
 const MAX_LOG_BYTES = 1536 * 1024;
+/**
+ * What Chrome draws over the element under the pointer: the default theme's light `--accent-soft`
+ * across its border box. The main process cannot read theme tokens, so the value is mirrored here.
+ */
+const POINTING_TINT = { r: 59, g: 91, b: 219, a: 0.12 };
+const POINTING_HIGHLIGHT = {
+  showInfo: false,
+  showAccessibilityInfo: false,
+  contentColor: POINTING_TINT,
+  paddingColor: POINTING_TINT,
+  borderColor: POINTING_TINT
+};
+const PICK_OBJECT_GROUP = 'tm-bug-pick';
+/** The top target's key among the targets in inspect mode; a frame is keyed by its session. */
+const TOP_TARGET = '';
 
 export class RecorderSession {
   private readonly started = Date.now();
@@ -60,8 +87,19 @@ export class RecorderSession {
   private readonly isolatedContexts = new Map<string, number>();
   /** The top frame; a same-origin iframe's recorder world must never stand in for it. */
   private mainFrameId?: string;
+  /** Embedded frames from other sites: each is its own target, and pointing covers them too. */
+  private readonly frameSessions = new Set<string>();
+  /**
+   * Targets whose DOM and Overlay domains are on. They stay on: turning Overlay off would hand
+   * the page the mouseup of the click that picked.
+   */
+  private readonly overlayTargets = new Set<string>();
   private unsubscribe?: () => void;
-  private pickResolve?: (pick: BugRecordingPick | undefined) => void;
+  private pointing?: Pointing;
+  /** The picked node Chrome keeps highlighted until its numbered outline takes its place. */
+  private heldNode?: number;
+  /** Inspect mode changes run one at a time, each to the state pointing has when it runs. */
+  private inspectSync: Promise<void> = Promise.resolve();
   private sealedMark?: BugRecordingLogV1['mark'];
   private pageTitle = '';
   private location = { role: 'primary', path: '/', query: [] as Array<[string, string]> };
@@ -196,25 +234,37 @@ export class RecorderSession {
     this.sealedMark = undefined;
   }
 
-  /** Lets the person point at an element; the click never reaches the page. */
-  async pick(): Promise<BugRecordingPick | undefined> {
-    const contextId = this.isolatedContexts.get('top');
-    if (contextId === undefined) return undefined;
-    this.pickResolve?.(undefined);
-    const picked = new Promise<BugRecordingPick | undefined>((resolve) => {
-      this.pickResolve = resolve;
-    });
-    await this.cdp.send('Runtime.evaluate', { expression: 'globalThis.__tmStartPick()', contextId });
-    const pick = await picked;
-    if (pick && this.sealedMark && this.sealedMark.picks.length < BUG_RECORDING_LIMITS.picks) this.sealedMark.picks.push(pick);
-    return pick;
+  /** Chrome's inspect mode takes the person's next click on the page. */
+  get isPointing(): boolean {
+    return Boolean(this.pointing);
   }
 
+  /**
+   * Lets the person point at an element with Chrome's own inspect mode. The browser draws the
+   * highlight and takes the pointer before the page's input handling, so the page never sees,
+   * blocks or forges a pick. A newer pick or `cancelPick` ends this one without an element.
+   */
+  async pick(): Promise<RecorderPickOutcome> {
+    if (this.closed) return { kind: 'stopped' };
+    if (this.pointing) this.endPointing(this.pointing, { kind: 'stopped' });
+    this.heldNode = undefined;
+    const outcome = new Promise<RecorderPickOutcome>((resolve) => {
+      this.pointing = { resolve, picked: false };
+    });
+    void this.syncInspectMode();
+    const result = await outcome;
+    if (result.kind === 'picked' && this.sealedMark && this.sealedMark.picks.length < BUG_RECORDING_LIMITS.picks) this.sealedMark.picks.push(result.pick);
+    return result;
+  }
+
+  /** Stop pointing without an element; returns once the page takes clicks again. */
   async cancelPick(): Promise<void> {
-    const contextId = this.isolatedContexts.get('top');
-    if (contextId !== undefined) await this.cdp.send('Runtime.evaluate', { expression: 'globalThis.__tmStopPick()', contextId }).catch(() => undefined);
-    this.pickResolve?.(undefined);
-    this.pickResolve = undefined;
+    if (this.pointing) this.endPointing(this.pointing, { kind: 'stopped' });
+    if (this.heldNode !== undefined) {
+      this.heldNode = undefined;
+      void this.syncInspectMode();
+    }
+    await this.inspectSync;
   }
 
   /** Notes the page's scroll right before the capture's screenshot, so picks can be placed on it. */
@@ -233,11 +283,17 @@ export class RecorderSession {
   /** Numbered outlines on the elements the expectations read; an empty list clears them. */
   async showMarks(marks: Array<{ css: string; label: string }>): Promise<void> {
     const contextId = this.isolatedContexts.get('top');
-    if (contextId === undefined) return;
-    const expression = marks.length
-      ? `globalThis.__tmShowMarks && globalThis.__tmShowMarks(${JSON.stringify(JSON.stringify(marks.slice(0, 5)))})`
-      : 'globalThis.__tmClearMarks && globalThis.__tmClearMarks()';
-    await this.cdp.send('Runtime.evaluate', { expression, contextId }).catch(() => undefined);
+    if (contextId !== undefined) {
+      const expression = marks.length
+        ? `globalThis.__tmShowMarks && globalThis.__tmShowMarks(${JSON.stringify(JSON.stringify(marks.slice(0, 5)))})`
+        : 'globalThis.__tmClearMarks && globalThis.__tmClearMarks()';
+      await this.cdp.send('Runtime.evaluate', { expression, contextId }).catch(() => undefined);
+    }
+    // The pick's highlight gives way once its outline is drawn, or when there is none to draw.
+    if (this.heldNode !== undefined) {
+      this.heldNode = undefined;
+      await this.syncInspectMode();
+    }
   }
 
   /**
@@ -336,11 +392,99 @@ export class RecorderSession {
   dispose(): void {
     this.closed = true;
     this.unsubscribe?.();
-    this.pickResolve?.(undefined);
+    const pointing = this.pointing;
+    this.pointing = undefined;
+    pointing?.resolve({ kind: 'stopped' });
   }
 
   private elapsed(): number {
     return Date.now() - this.started;
+  }
+
+  private endPointing(pointing: Pointing, outcome: RecorderPickOutcome): void {
+    if (this.pointing !== pointing) return;
+    this.pointing = undefined;
+    pointing.resolve(outcome);
+    void this.syncInspectMode();
+  }
+
+  private syncInspectMode(): Promise<void> {
+    this.inspectSync = this.inspectSync.then(() => this.applyInspectMode());
+    return this.inspectSync;
+  }
+
+  private async applyInspectMode(): Promise<void> {
+    if (this.closed) return;
+    const pointing = this.pointing;
+    const on = Boolean(pointing && !pointing.picked);
+    const held = on ? undefined : this.heldNode;
+    const [top] = await Promise.allSettled(
+      [undefined, ...this.frameSessions].map((sessionId) => this.setInspectMode(sessionId, on, sessionId ? undefined : held))
+    );
+    // Without the top page in inspect mode no pick can arrive: pointing ends instead of waiting.
+    if (on && pointing && top.status === 'rejected') this.endPointing(pointing, { kind: 'stopped' });
+  }
+
+  private async setInspectMode(sessionId: string | undefined, on: boolean, held?: number): Promise<void> {
+    const key = sessionId ?? TOP_TARGET;
+    if (!on && held === undefined && !this.overlayTargets.has(key)) return;
+    const send = (method: string, params?: Record<string, unknown>) => this.cdp.send(method, params, sessionId);
+    if (!this.overlayTargets.has(key)) {
+      await send('DOM.enable');
+      await send('Overlay.enable');
+      this.overlayTargets.add(key);
+    }
+    await send('Overlay.setInspectMode', { mode: on ? 'searchForNode' : 'none', highlightConfig: on ? POINTING_HIGHLIGHT : {} });
+    // After inspect mode, which would clear it: the pick stays highlighted until its outline shows.
+    if (held !== undefined) await send('Overlay.highlightNode', { backendNodeId: held, highlightConfig: POINTING_HIGHLIGHT });
+  }
+
+  /** Reads the picked node's facts in the top frame's recorder world, which the page cannot reach. */
+  private async readPick(backendNodeId: number, sessionId: string | undefined): Promise<RecorderPickOutcome> {
+    // An embedded frame from another site is its own target.
+    if (sessionId) return { kind: 'stopped', reason: EMBEDDED_FRAME_PICK_REASON };
+    const contextId = this.isolatedContexts.get('top');
+    if (contextId === undefined || !Number.isSafeInteger(backendNodeId)) return { kind: 'stopped' };
+    try {
+      const resolved = (await this.cdp.send('DOM.resolveNode', { backendNodeId, executionContextId: contextId, objectGroup: PICK_OBJECT_GROUP })) as {
+        object?: { objectId?: string };
+      };
+      // A frame of another origin in the page's own process: the top page's world gets no handle.
+      if (!resolved.object?.objectId) return { kind: 'stopped', reason: EMBEDDED_FRAME_PICK_REASON };
+      const read = (await this.cdp.send('Runtime.callFunctionOn', {
+        objectId: resolved.object.objectId,
+        functionDeclaration: PICK_FACTS_CALL,
+        returnByValue: true
+      })) as { result?: { value?: unknown } };
+      return this.pickFrom(read.result?.value);
+    } catch {
+      return { kind: 'stopped' };
+    } finally {
+      void this.cdp.send('Runtime.releaseObjectGroup', { objectGroup: PICK_OBJECT_GROUP }).catch(() => undefined);
+    }
+  }
+
+  /** The facts the recorder world read off the picked element, checked like any recorder event. */
+  private pickFrom(value: unknown): RecorderPickOutcome {
+    if (!value || typeof value !== 'object') return { kind: 'stopped' };
+    const facts = value as Record<string, unknown>;
+    if (facts.frame === 'child') return { kind: 'stopped', reason: EMBEDDED_FRAME_PICK_REASON };
+    try {
+      const box = this.boxInShot(facts.box, facts.scroll, facts.placement);
+      return {
+        kind: 'picked',
+        pick: {
+          target: parseBugRecordingTarget(facts.target),
+          text: String(facts.text ?? '').slice(0, 4000),
+          ...(typeof facts.value === 'string' ? { value: facts.value.slice(0, 4096) } : {}),
+          visible: facts.visible === true,
+          count: typeof facts.count === 'number' && Number.isInteger(facts.count) ? Math.max(0, Math.min(10_000, facts.count)) : 1,
+          ...(box ? { box } : {})
+        }
+      };
+    } catch {
+      return { kind: 'stopped' };
+    }
   }
 
   private pushAction(action: Omit<BugRecordingAction, 'index' | 't'>, t = this.elapsed()): void {
@@ -362,9 +506,39 @@ export class RecorderSession {
       case 'Target.attachedToTarget': {
         const info = params.targetInfo as { type?: string } | undefined;
         const child = typeof params.sessionId === 'string' ? params.sessionId : undefined;
-        if (child && info?.type === 'iframe') void this.setupTarget(child).catch(() => undefined);
+        if (!child || info?.type !== 'iframe') return;
+        this.frameSessions.add(child);
+        void this.setupTarget(child).catch(() => undefined);
+        // A frame that appears while the person points takes no click either.
+        if (this.pointing) void this.syncInspectMode();
         return;
       }
+      case 'Target.detachedFromTarget': {
+        const child = typeof params.sessionId === 'string' ? params.sessionId : undefined;
+        if (!child) return;
+        this.frameSessions.delete(child);
+        this.overlayTargets.delete(child);
+        return;
+      }
+      case 'Overlay.inspectNodeRequested': {
+        const pointing = this.pointing;
+        if (!pointing || pointing.picked) return;
+        // The first click is the pick; leaving inspect mode at once gives the page its clicks back,
+        // while the element under it stays highlighted.
+        const backendNodeId = Number(params.backendNodeId);
+        pointing.picked = true;
+        if (!sessionId && Number.isSafeInteger(backendNodeId)) this.heldNode = backendNodeId;
+        void this.syncInspectMode();
+        void this.readPick(backendNodeId, sessionId).then((outcome) => {
+          if (outcome.kind === 'stopped' && this.heldNode === backendNodeId) this.heldNode = undefined;
+          this.endPointing(pointing, outcome);
+        });
+        return;
+      }
+      case 'Overlay.inspectModeCanceled':
+        // Escape inside the page.
+        if (this.pointing) this.endPointing(this.pointing, { kind: 'stopped' });
+        return;
       case 'Page.javascriptDialogOpening':
         if (!sessionId) this.dialogType = (['alert', 'confirm', 'prompt', 'beforeunload'] as const).find((type) => type === params.type) ?? 'confirm';
         return;
@@ -457,29 +631,6 @@ export class RecorderSession {
         const what = String(event.what ?? 'unsupported input').slice(0, 60);
         this.pushAction({ kind: 'unsupported', unsupported: what });
         this.noteCoverage(`Step ${this.stepCount()} can't be replayed (${what})`);
-        return;
-      }
-      case 'pick': {
-        const resolve = this.pickResolve;
-        this.pickResolve = undefined;
-        if (!resolve) return;
-        if (event.cancelled) {
-          resolve(undefined);
-          return;
-        }
-        try {
-          const box = this.boxInShot(event.box, event.scroll, event.placement);
-          resolve({
-            target: parseBugRecordingTarget(event.target),
-            text: String(event.text ?? '').slice(0, 4000),
-            ...(typeof event.value === 'string' ? { value: event.value.slice(0, 4096) } : {}),
-            visible: event.visible === true,
-            count: typeof event.count === 'number' && Number.isInteger(event.count) ? Math.max(0, Math.min(10_000, event.count)) : 1,
-            ...(box ? { box } : {})
-          });
-        } catch {
-          resolve(undefined);
-        }
         return;
       }
       case 'action': {

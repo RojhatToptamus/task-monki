@@ -35,7 +35,7 @@ prompts, or any surface that shows a bug.
 |---|---|
 | `BugRecordingService` | One recording session at a time: freezing the worktree, choosing ignored env files, approval, starting a `br-` environment, the native view, marking, saving. |
 | `BugRecordingViewHost` (Electron, macOS) | The native `WebContentsView` the page is recorded in, its private session, request filter and CDP recorder. |
-| `recorder/*` | The recorder injected into an isolated world: actions, requests, console, picks. |
+| `recorder/*` | The recorder injected into an isolated world (actions, requests, console), and pointing through Chrome's inspect mode. |
 | `BugCaseCompiler` | A sealed recording plus the person's checks → a strict `bug-case/v1` document and its failure signature. |
 | `BugReplayService` | Cases, versions, runs, scheduling, qualification, verification, refills, hand-off tracking, pruning, startup recovery. |
 | `ReplayDerivation`, `ReplayEnvironment`, `ReplaySourceFreezer` | The `br-` Previewhost spec derived from the task's recipe, its start and teardown, and frozen source exports. |
@@ -86,13 +86,21 @@ stated beside it.
 6. **Mark.** Mark bug seals the window since the last action, notes the page's
    scroll, takes the screenshot and starts pointing. Pointing never blocks the
    person: Stop pointing, Escape, Back to recording and Discard stay available,
-   and marking returns at once while the pick arrives in the background. Only
-   the person's own input points: events the page dispatches are ignored, the
-   recorder listens ahead of the page's document listeners, stopping never sends
-   the page an event, and only the top frame's recorder world can point. A pick
-   keeps where its element sat, placed on the screenshot by the scroll the
-   screenshot was taken at, and each element an expectation reads keeps a
-   numbered outline on the page while the bug is marked.
+   and marking returns at once while the pick arrives in the background.
+   Pointing is Chrome's own inspect mode, set through the view's debugger on the
+   page and on each embedded frame that is a target of its own. Chrome draws the
+   highlight outside the page and takes the pointer before the page's input
+   handling, so the page gets no pointer input while the person points, and
+   nothing it listens for, dispatches or draws takes part in a pick. The click
+   that picks, its release included, never reaches the page. The picked node is
+   read in the top frame's recorder world; inside a shadow tree its host is the
+   pick. An element inside an embedded frame is not picked: pointing ends and
+   the composer says why. Stop pointing, Escape and Back to recording leave
+   inspect mode, and Escape pressed while the page has focus never reaches it.
+   A pick keeps where its element sat, placed on the screenshot by the scroll
+   the screenshot was taken at. Chrome keeps the picked element highlighted
+   until its numbered outline is drawn, and each element an expectation reads
+   keeps a numbered outline on the page while the bug is marked.
 7. **Name.** One rule names an element on its pick, in its expectations and in
    their evidence: its label or accessible name, its test id read as words
    ("noteCount" is "Note count"), the words beside it on its own line, or its
@@ -342,7 +350,8 @@ bug becomes a record with no actions.
 
 - Recording needs the desktop app on macOS; clean runs also work in the
   development server.
-- Checks read the app's pages and requests. Database contents are not read;
+- Checks read the app's pages and requests; an element inside an embedded
+  frame cannot be checked. Database contents are not read;
   Preview-managed databases start fresh, connections the app opens itself are
   not checked, the server's network is not restricted, and clocks are real.
 - One recording at a time; up to 20 checks and 120 steps per case.
@@ -362,6 +371,12 @@ bug becomes a record with no actions.
 - The engine with a real browser, including WebSockets to undeclared hosts:
   `BugReplayRunner.integration.test.ts` (skipped without
   `.local/design-browser-runtime`).
+- Pointing with a real browser on a page that swallows, forges and watches
+  input, with picks in a shadow tree and in same-origin, same-site and
+  cross-site frames, the pick's highlight until its outline, Stop pointing and
+  Escape: `recorder/RecorderSession.integration.test.ts` (skipped without
+  `.local/design-browser-runtime`); placing a pick on the screenshot and the
+  live steps: `recorder/RecorderSession.test.ts`.
 - Mounted UI: `TaskDetail.dom.test.tsx` (Remove bug),
   `bug/BugRecordingWorkspace.dom.test.tsx`, `bug/BugCapturePanel.dom.test.tsx`
   (expectations, focus and naming), `bug/BugSection.dom.test.tsx` (the

@@ -168,7 +168,8 @@ turns automatically.
 
 Use the page as you did when the bug happened. **Reload page** reloads it as a
 step. **Mark bug** stops recording and lets you point at what is wrong; click an
-element in the page, or **Stop pointing** (or Escape) to mark without one. The
+element in the page, or **Stop pointing** (or Escape) to mark without one. An
+element inside an embedded frame can't be checked. The
 bug's name starts as what you pointed at and what it showed ("Cart total shows
 "$40.00""); change it if you like. Under **Checks**, say what each element should
 read or show, add more checks if you need them, and optionally check the
