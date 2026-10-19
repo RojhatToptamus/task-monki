@@ -82,7 +82,7 @@ describe('mounted NewTaskPanel prompt refinement', () => {
         new Promise<RefinePromptResponse>((resolve, reject) => {
           settleRefinement = () => {
             if (outcome === 'rejected') {
-              reject(new Error("Error invoking remote method 'prompt:refine': PromptRefinementCanceledError: Prompt refinement was canceled."));
+              reject(new Error('Prompt refinement was canceled.'));
             } else {
               resolve({ titleSuggestion: 'Late title', prompt: 'Late proposal', source: 'model', evidence: emptyEvidence() });
             }
@@ -103,7 +103,7 @@ describe('mounted NewTaskPanel prompt refinement', () => {
     expect(onCancelPromptRefinement).toHaveBeenCalledWith(requestId);
     expect(onClose).not.toHaveBeenCalled();
     await act(async () => settleRefinement());
-    expect(screen.queryByText(/PromptRefinementCanceledError/)).toBeNull();
+    expect(screen.queryByText('Prompt refinement was canceled.')).toBeNull();
     expect(screen.queryByRole('group', { name: 'Refined description proposal' })).toBeNull();
     expect((screen.getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement).value).toBe('add a sync badge');
     await act(async () => finishCancellation());

@@ -121,8 +121,16 @@ import {
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
 
+// Electron rejects an invoke with "Error invoking remote method '<channel>': "
+// and the handler error's toString(); the renderer receives only its message.
+const REMOTE_ERROR_NAME = /^\w*Error(?: \[\w+\])?: /u;
+
 function invokeIpc(channel: IpcInvokeChannel, ...args: unknown[]): Promise<any> {
-  return ipcRenderer.invoke(channel, ...args);
+  return ipcRenderer.invoke(channel, ...args).catch((error: unknown) => {
+    const prefix = `Error invoking remote method '${channel}': `;
+    if (!(error instanceof Error) || !error.message.startsWith(prefix)) throw error;
+    throw new Error(error.message.slice(prefix.length).replace(REMOTE_ERROR_NAME, ''));
+  });
 }
 
 function getWindowChromePlatform(): WindowChromePlatform {
