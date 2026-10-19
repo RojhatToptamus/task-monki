@@ -418,6 +418,8 @@ export interface BugCaptureView {
   /** Why Save and reproduce is not available, when it is not. */
   reproduceBlockedReason?: string;
   partial?: string;
+  /** Why the last pointing picked nothing, e.g. it landed in an embedded frame; cleared when pointing starts again. */
+  pickNote?: string;
 }
 
 export interface BugReplayRunView {

@@ -53,6 +53,11 @@ interface RecordingNavigationEvent {
   isMainFrame: boolean;
 }
 
+interface RecordingKeyInput {
+  type: string;
+  key: string;
+}
+
 interface RecordingWebContents {
   readonly id: number;
   readonly debugger: RecordingDebugger;
@@ -66,6 +71,7 @@ interface RecordingWebContents {
   setWebRTCIPHandlingPolicy(policy: 'disable_non_proxied_udp'): void;
   on(event: 'will-navigate' | 'will-frame-navigate' | 'will-redirect', listener: (event: RecordingNavigationEvent) => void): void;
   on(event: 'render-process-gone', listener: () => void): void;
+  on(event: 'before-input-event', listener: (event: { preventDefault(): void }, input: RecordingKeyInput) => void): void;
 }
 
 interface RecordingImage {
@@ -254,6 +260,19 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
     });
     contents.on('render-process-gone', () => {
       if (!active.closing) input.notify({ kind: 'interrupted', reason: 'The page stopped responding' });
+    });
+    // Escape while pointing stops pointing, and the page receives neither its keydown nor its keyup.
+    let heldEscape = false;
+    contents.on('before-input-event', (event, key) => {
+      if (key.key !== 'Escape') return;
+      if (key.type === 'keyDown' && (recorder.isPointing || heldEscape)) {
+        event.preventDefault();
+        heldEscape = true;
+        void recorder.cancelPick();
+      } else if (key.type === 'keyUp' && heldEscape) {
+        event.preventDefault();
+        heldEscape = false;
+      }
     });
     const abort = () => void this.close(active);
     input.signal.addEventListener('abort', abort, { once: true });

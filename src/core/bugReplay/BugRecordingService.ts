@@ -4,7 +4,7 @@ import path from 'node:path';
 import { git } from '../git/gitCli';
 import { parseConfigurationFile } from '../preview/ApplicationPreviewConfiguration';
 import { isCasePath, isCaseQuery, type BugCaseEnvironment } from '../../shared/bugCase';
-import type { BugRecordingLogV1, BugRecordingPick } from '../../shared/bugRecording';
+import type { BugRecordingLogV1 } from '../../shared/bugRecording';
 import type {
   BugCaptureDraft,
   BugCapturePreview,
@@ -28,7 +28,7 @@ import { ReplaySourceError } from './ReplaySourceFreezer';
 import { isEnvFileName, planProtectedInputs, type RecipeJob } from './ProtectedInputs';
 import { leaseRequestFor } from './BugReplayLease';
 import { oneLine, redactEvidence } from './BugReplayContext';
-import { persistableLog, type RecorderNotice, type RecorderSession } from './recorder/RecorderSession';
+import { persistableLog, type RecorderNotice, type RecorderPickOutcome, type RecorderSession } from './recorder/RecorderSession';
 import { BUG_REPLAY_FILE_LIMITS } from '../storage/sqlite/SqliteBugReplayStore';
 
 /**
@@ -98,6 +98,8 @@ interface RecordingSession {
     pageTitle: string;
     draftRevision: number;
     draft?: BugCaptureDraft;
+    /** Why the last pointing ended without a pick, until the person points again. */
+    pickNote?: string;
   };
   idleTimer?: NodeJS.Timeout;
   lengthTimer?: NodeJS.Timeout;
@@ -347,6 +349,7 @@ export class BugRecordingService implements BugRecordingSessions {
     const session = this.requireSession(sessionId);
     if (session.phase !== 'MARKING' || !session.view || !session.capture) throw new Error('Mark the bug first.');
     if (draft) session.capture.draft = draft;
+    session.capture.pickNote = undefined;
     session.detail = 'Point at what is wrong';
     this.replay.emitUpdate(session.taskId);
     void this.awaitPick(session);
@@ -364,13 +367,15 @@ export class BugRecordingService implements BugRecordingSessions {
     if (!view) return;
     const token = (session.pickToken ?? 0) + 1;
     session.pickToken = token;
-    const pick = await view.recorder.pick().catch(() => undefined);
+    const outcome = await view.recorder.pick().catch((): RecorderPickOutcome => ({ kind: 'stopped' }));
     if (this.session !== session || session.pickToken !== token || session.phase !== 'MARKING' || !session.capture) return;
     session.detail = undefined;
-    if (pick) {
+    if (outcome.kind === 'picked') {
       const log = view.recorder.log();
-      session.capture = { ...session.capture, log, draftRevision: session.capture.draftRevision + 1 };
+      session.capture = { ...session.capture, log, draftRevision: session.capture.draftRevision + 1, pickNote: undefined };
       this.showMarks(session, session.capture.draft, (log.mark?.picks.length ?? 1) - 1);
+    } else {
+      session.capture = { ...session.capture, pickNote: outcome.reason };
     }
     this.replay.emitUpdate(session.taskId);
   }
@@ -864,7 +869,8 @@ export class BugRecordingService implements BugRecordingSessions {
       steps: described.stepSummaries.map((text, index) => ({ kind: described.stepKinds[index] ?? 'step', text })),
       suggestedTitle: described.suggestedTitle,
       ...(capture.draft ? { draft: capture.draft } : {}),
-      ...(described.partial || session.partial ? { partial: described.partial ?? session.partial } : {})
+      ...(described.partial || session.partial ? { partial: described.partial ?? session.partial } : {}),
+      ...(capture.pickNote ? { pickNote: capture.pickNote } : {})
     };
     if (capture.draft) {
       const compiled = compileBugCase(capture.log, capture.draft);

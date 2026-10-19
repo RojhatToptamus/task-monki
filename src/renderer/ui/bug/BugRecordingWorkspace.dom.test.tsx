@@ -76,7 +76,7 @@ describe('Recording a bug', () => {
   });
 
   it('never leaves the person stuck while the page waits for a click', async () => {
-    render(workspace(recording({ phase: 'MARKING', detail: 'Point at what is wrong', capture })));
+    const view = render(workspace(recording({ phase: 'MARKING', detail: 'Point at what is wrong', capture })));
 
     expect(screen.getByText("Point at what's wrong")).toBeDefined();
     expect((screen.getByRole('button', { name: 'Back to recording' }) as HTMLButtonElement).disabled).toBe(false);
@@ -89,6 +89,11 @@ describe('Recording a bug', () => {
     vi.mocked(taskManagerApi.stopBugPick).mockClear();
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(taskManagerApi.stopBugPick).toHaveBeenCalledTimes(1));
+
+    // A click that picks nothing says why, so the person points somewhere else.
+    view.rerender(workspace(recording({ phase: 'MARKING', detail: undefined, capture: { ...capture, pickNote: "Elements in an embedded frame can't be picked" } })));
+    expect(screen.getByText("Elements in an embedded frame can't be picked")).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Add expectation' })).toBeDefined();
   });
 
   it('says a failed step under its head, where the page cannot cover it, and forgets it on the next step', async () => {
