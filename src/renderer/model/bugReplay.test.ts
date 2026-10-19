@@ -7,9 +7,15 @@ import {
   bugOwnsNowPanel,
   captureSaveState,
   describeBugAttention,
+  expectationsDraft,
+  expectationsSaveState,
   fitRecordingViewport,
+  keepExpectation,
   layoutBugActions,
-  recordingHead
+  openExpectationsEditor,
+  recordingHead,
+  removeExpectationRow,
+  shownExpectationRows
 } from './bugReplay';
 import { describeTaskAttention } from './taskAttention';
 import { finishRequirementsForTask, getFinishEvidenceState } from './taskFinish';
@@ -137,5 +143,44 @@ describe('Recording workspace', () => {
     // A verdict about other picks says nothing about these.
     expect(captureSaveState(totalDraft(), { ...preview, draftRevision: 2 }, capture)).toEqual({ reproducible: false, canSaveEvidence: true });
     expect(captureSaveState(totalDraft(), preview, capture)).toEqual({ reproducible: true, canSaveEvidence: true });
+  });
+});
+
+describe('Changing a saved bug’s expectations', () => {
+  const editor = () => openExpectationsEditor({
+    id: 'version-1',
+    expectations: [
+      { kind: 'element', id: 'a1', name: 'Cart total', recorded: 'Showed "$40.00"', template: 'equals', expected: '$45.00', alsoAfterReload: false, field: false },
+      { kind: 'request', name: 'POST /api/orders', recorded: '200', failed: false, write: true, status: { id: 'r2', check: 'answered' }, sentOnceId: 'r3', valueIds: ['v4'] },
+      { kind: 'value', id: 'v4', name: 'POST /api/orders returns total', recorded: 'Was 40', expected: '45' }
+    ]
+  });
+
+  it('removes a request with the values that read its answer, and lists a request while any of its expectations stays', () => {
+    const opened = editor();
+    const request = opened.rows[1];
+
+    const withoutRequest = removeExpectationRow(opened, request);
+    expect(expectationsDraft(withoutRequest).expectations).toEqual([
+      { kind: 'element', id: 'a1', template: 'equals', expected: '$45.00', alsoAfterReload: false }
+    ]);
+    expect(shownExpectationRows(withoutRequest).map(({ row }) => row.kind)).toEqual(['element']);
+
+    // Without Sent once the request still expects a status, so it stays listed.
+    const withoutSentOnce = keepExpectation(opened, 'r3', false);
+    expect(shownExpectationRows(withoutSentOnce).map(({ row }) => row.kind)).toEqual(['element', 'request', 'value']);
+    expect(expectationsDraft(withoutSentOnce).expectations.map((edit) => [edit.kind, edit.id])).toEqual([['element', 'a1'], ['status', 'r2'], ['value', 'v4']]);
+  });
+
+  it('saves only a change the recording still shows a bug against, and explains only a change it refuses', () => {
+    // An untouched form and its disabled Save need no words.
+    expect(expectationsSaveState(false, undefined)).toEqual({ canSave: false });
+    // While the first answer is on its way nothing is claimed either way.
+    expect(expectationsSaveState(true, undefined)).toEqual({ canSave: false });
+    // Typed, but the same as the case reads it.
+    expect(expectationsSaveState(true, { versionId: 'version-1', changed: false, reproducible: true, checks: [] })).toEqual({ canSave: false, reason: 'No changes' });
+    expect(expectationsSaveState(true, { versionId: 'version-1', changed: true, reproducible: false, reason: 'No expectation failed in the recording', checks: [] }))
+      .toEqual({ canSave: false, reason: 'No expectation failed in the recording' });
+    expect(expectationsSaveState(true, { versionId: 'version-1', changed: true, reproducible: true, checks: [] })).toEqual({ canSave: true });
   });
 });

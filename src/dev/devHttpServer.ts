@@ -57,6 +57,8 @@ const BUG_REPLAY_ROUTES = new Map<string, keyof import('../shared/bugReplay').Bu
   ['verify', 'verifyBugFix'],
   ['run/cancel', 'cancelBugReplayRun'],
   ['action', 'applyBugCaseAction'],
+  ['expectations/preview', 'previewBugExpectations'],
+  ['expectations/save', 'saveBugExpectations'],
   ['remove', 'removeBug'],
   ['evidence/delete', 'deleteBugEvidence'],
   ['image/read', 'readBugReplayImage'],

@@ -323,6 +323,13 @@ two never compete. The bug's brief reaches only the prompt of that turn. Agent
 claims about the fix stay provider reports; the bug's state comes only from
 Task Monki's runs.
 
+When an expectation turns out wrong or irrelevant, the person changes or
+removes it from the Overview's Bug section instead of recording the bug again.
+The change becomes the bug's next version, which Task Monki reproduces on the
+recorded code again before any fix is verified against it; a change the
+recording would not show as a bug is refused with the reason. Results about the
+earlier expectations stay as earlier context, never as the current verdict.
+
 A task holds one current bug. Its state appears in the Overview's Bug section,
 on the board card and in the Inbox when the person owes a step, in History, in
 the Review brief, in the reviewer's prompt, in the pull request body, and as the

@@ -19,6 +19,21 @@ describe('task activity model', () => {
     sequence = 0;
   });
 
+  it('records changed expectations and states the bug’s next result again, even when it repeats an earlier one', () => {
+    const gate = (state: string) => ({ caseId: 'case-1', title: 'Cart total should read "$45.00"', state, updatedAt: baseAt });
+    const events = [
+      event('BUG_CAPTURED', { gate: gate('REPRODUCING'), withCheck: true }),
+      event('BUG_REPLAY_RUN_SETTLED', { gate: gate('REPRODUCED') }),
+      event('BUG_CASE_DECIDED', { gate: gate('REPRODUCING'), decision: 'APPROVED', revision: 'EXPECTATION_CHANGED', change: 'Cart total should read "$46.00"' }),
+      event('BUG_REPLAY_RUN_SETTLED', { gate: gate('REPRODUCED') })
+    ];
+
+    const ledger = buildTaskActivityLedger({ task: taskFixture(), events });
+
+    expect(ledger.map((item) => item.title)).toEqual(['Bug recorded', 'Bug reproduced', 'Expectations changed', 'Bug reproduced']);
+    expect(ledger[2].evidence?.summary).toBe('Cart total should read "$46.00"');
+  });
+
   it('hides brand-new tasks that only have creation activity', () => {
     const view = buildOverviewTaskActivityViewModel({
       task: taskFixture(),

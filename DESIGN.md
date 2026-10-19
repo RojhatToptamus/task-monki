@@ -1782,7 +1782,15 @@ since or could not be checked again. Replays and Steps are disclosures. Each
 replay row opens a 560px drawer under the title bar: the end of the page,
 framed on its outlined elements, what each expectation saw, the steps with the
 failed one marked, and where it ran; focus starts on the drawer and returns to
-the row. The
+the row. A replay of expectations the person has since changed reads "earlier
+expectations" beside its side with its word in neutral ink, and its drawer lists
+them as Earlier expectations with quiet marks. Edit expectations opens the same
+drawer as a form: the capture panel's rows (28px controls) without outline
+numbers, each with what the recording showed, focus on the first value, and a
+foot whose reason sits beside Cancel and the primary Save and reproduce. Save
+stays disabled until something changes, and an untouched form explains nothing;
+a reason appears only for a change that cannot be saved. Removing a row moves focus to the row that takes its place, and closing
+returns it to what opened the drawer. The
 actions wait in a 24px ⋯ menu, each with its reason when it cannot run yet.
 When the person owes the bug a step, the Now panel takes it and the section
 drops its state word: the state as title and the fact that drives the step as

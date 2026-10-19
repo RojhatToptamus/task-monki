@@ -11,7 +11,7 @@ import type { WorktreeRecord } from '../../shared/contracts';
 import type { BugRecordingPick } from '../../shared/bugRecording';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
-import { TOTAL_PICK, bugCaseRecord, captureRecord, checkoutCase, checkoutRecording, runFrames, totalDraft, versionRecord } from '../../testSupport/bugReplay/bugReplayFixtures';
+import { CAPTURE_ID, TOTAL_PICK, bugCaseRecord, captureRecord, checkoutCase, checkoutRecording, runFrames, totalDraft, versionRecord } from '../../testSupport/bugReplay/bugReplayFixtures';
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { AppEventBus } from '../runner/AppEventBus';
 import type { BugReplayFileRecord, StoredBugReplayRun } from './BugReplayRecords';
@@ -636,4 +636,101 @@ describe('Replay approvals kept for a repository', () => {
     expect(forked.sessionView(forkTask.id)?.phase).toBe('NEEDS_APPROVAL');
     await forked.cancel(forked.sessionView(forkTask.id)!.sessionId);
   }, 60_000);
+});
+
+describe('Changing a saved bug’s expectations', () => {
+  /** Replays the recorded code as the recording saw it and the worktree's code as the fix left it. */
+  function replayByKind(w: Workspace, fix: (request: BugReplayRunnerRequest) => Promise<BugReplayRunnerResult>): void {
+    w.runner.fallback = async (request) => {
+      const run = await w.store.read((reader) => w.store.getRun(reader, request.runId));
+      return run?.kind === 'CANDIDATE' ? fix(request) : completed(request, '$40.00');
+    };
+  }
+
+  it('saves the next version, stops replays of the old one, and verifies the fix only after the bug reproduces again', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    const taskId = w.task.id;
+    const total = version.document.assertions[0].id;
+    replayByKind(w, untilStopped);
+    await w.service.queueQualification(taskId, version.caseId, version.id);
+    await allowRuns(w);
+    await until(async () => (await gate(w))?.state === 'REPRODUCED', 'the bug to reproduce');
+    // The agent's fix shows $45.00 and is being verified when the person changes the expectation.
+    await fs.writeFile(path.join(w.repo, 'server.js'), "require('http').createServer((q, s) => s.end('total $45.00')).listen(process.env.PORT);\n");
+    await w.service.verifyAgain(taskId);
+    await until(async () => (await runs(w)).filter((run) => run.kind === 'CANDIDATE' && run.state === 'EXECUTING').length === 2, 'the fix to replay');
+
+    // An expectation the recording already shows describes no bug, and changes nothing.
+    await expect(w.service.reviseExpectations(taskId, { versionId: version.id, expectations: [{ kind: 'element', id: total, template: 'equals', expected: '$40.00', alsoAfterReload: false }] }))
+      .rejects.toThrow('Cart total matches the recording.');
+    expect(await w.store.read((reader) => w.store.listVersions(reader, version.caseId))).toHaveLength(1);
+
+    replayByKind(w, (request) => completed(request, '$45.00'));
+    await w.service.reviseExpectations(taskId, { versionId: version.id, expectations: [{ kind: 'element', id: total, template: 'equals', expected: '$46.00', alsoAfterReload: false }] });
+
+    const versions = await w.store.read((reader) => w.store.listVersions(reader, version.caseId));
+    expect(versions.map((item) => [item.version, item.revisionKind, item.reason])).toEqual([
+      [1, 'INITIAL', undefined],
+      [2, 'EXPECTATION_CHANGED', 'Cart total should read "$46.00"']
+    ]);
+    const changed = versions[1];
+    expect(changed.document.failureSignature).toEqual([{ assertionId: total, mode: 'CAPTURED', captured: { kind: 'text', token: '$40.00' } }]);
+    // Replays of the old expectations stop: their result would be about other expectations.
+    await until(async () => (await runs(w)).filter((run) => run.versionId === version.id).every((run) => run.state === 'SETTLED'), 'the old replays to stop');
+    const stopped = (await runs(w)).filter((run) => run.versionId === version.id && run.kind === 'CANDIDATE');
+    expect(stopped.map((run) => [run.outcome, run.failure?.detail])).toEqual([['SUPERSEDED', 'The expectations changed'], ['SUPERSEDED', 'The expectations changed']]);
+    // A save against the version the editor showed before is refused.
+    await expect(w.service.reviseExpectations(taskId, { versionId: version.id, expectations: [{ kind: 'keep', id: total }] })).rejects.toThrow('The expectations changed after they were shown');
+
+    await until(async () => (await gate(w))?.state === 'STILL_FAILING', 'the fix to be verified against the changed expectation');
+    const final = await runs(w);
+    const qualification = final.filter((run) => run.versionId === changed.id && run.kind === 'BASELINE');
+    const candidates = final.filter((run) => run.versionId === changed.id && run.kind === 'CANDIDATE');
+    expect(qualification.map((run) => run.outcome)).toEqual(['REPRODUCED', 'REPRODUCED']);
+    // The fix was replayed only once the changed expectation reproduced on the recorded code.
+    const reproducedAt = qualification.map((run) => run.settledAt!).sort().at(-1)!;
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) expect(candidate.startedAt! >= reproducedAt).toBe(true);
+    expect(await gate(w)).toMatchObject({ versionId: changed.id, version: 2, state: 'STILL_FAILING' });
+
+    // The agent's next brief states the changed expectation, never the replaced one.
+    const brief = await w.service.brief(taskId, { caseId: version.caseId, captureId: CAPTURE_ID, versionId: version.id });
+    expect(brief).toContain('Cart total should read "$46.00"');
+    expect(brief).not.toContain('should read "$45.00"');
+  }, 90_000);
+
+  it('shows the replaced version’s results as earlier context, never as the current verdict', async () => {
+    const w = await openWorkspace();
+    const { version } = await savedBug(w);
+    const taskId = w.task.id;
+    const total = version.document.assertions[0].id;
+    replayByKind(w, (request) => completed(request, '$45.00'));
+    await w.service.queueQualification(taskId, version.caseId, version.id);
+    await allowRuns(w);
+    await until(async () => (await gate(w))?.state === 'REPRODUCED', 'the bug to reproduce');
+    await fs.writeFile(path.join(w.repo, 'server.js'), "require('http').createServer((q, s) => s.end('total $45.00')).listen(process.env.PORT);\n");
+    await w.service.verifyAgain(taskId);
+    await until(async () => (await gate(w))?.state === 'FIX_VERIFIED', 'the fix to verify');
+
+    // The changed expectation's replays wait for the person, so the snapshot holds both versions.
+    w.service.authorization.clear();
+    await w.service.reviseExpectations(taskId, { versionId: version.id, expectations: [{ kind: 'element', id: total, template: 'equals', expected: '$46.00', alsoAfterReload: false }] });
+    await until(async () => (await gate(w))?.activeRun?.waitingFor === 'APPROVAL', 'the changed version to wait for approval');
+    const snapshot = await w.service.snapshot(taskId);
+    const view = snapshot.activeCase!;
+
+    expect(view.gate).toMatchObject({ state: 'VERIFYING', fact: 'Rechecking the bug first', version: 2 });
+    expect(view.gate.verdictTreeId).toBeUndefined();
+    // The table's After column and picture are the current version's, and it has none yet.
+    expect(view.version?.checks).toEqual([expect.objectContaining({ statement: 'Cart total should read "$46.00"', before: { held: false, value: '"$40.00"' } })]);
+    expect(view.version?.checks[0].after).toBeUndefined();
+    expect(view.shots.after).toBeUndefined();
+    // The fix verified against the old expectation is listed, tied to the expectation it checked.
+    const passed = snapshot.runs.filter((run) => run.outcome === 'PASSED');
+    expect(passed).toHaveLength(2);
+    expect(passed.every((run) => run.versionId === version.id)).toBe(true);
+    expect(view.earlierVersions).toEqual([{ id: version.id, version: 1, checks: [{ id: total, statement: 'Cart total should read "$45.00"' }] }]);
+    expect(view.actions).toContain('edit-expectations');
+  }, 90_000);
 });

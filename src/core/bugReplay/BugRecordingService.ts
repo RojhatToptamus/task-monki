@@ -501,6 +501,8 @@ export class BugRecordingService implements BugRecordingSessions {
           version: 1,
           revisionKind: 'INITIAL',
           document: compiled.document,
+          // What the recording showed, so a later change to an expectation is judged against it.
+          ...(compiled.recorded ? { recorded: compiled.recorded } : {}),
           recipe: session.recipe,
           templateDigest: session.derived.templateDigest,
           protectedInputs: protectedPlan.pins,

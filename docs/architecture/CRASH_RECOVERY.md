@@ -161,7 +161,9 @@ memory survives a restart. At startup, before agents start:
   active bug has its open sets refilled (a version without a qualification gets
   one) and its gate republished;
 - every `br-` Previewhost environment not owned by an executing run is torn
-  down in the background before the queue starts.
+  down in the background before the queue starts;
+- a run of a version the person replaced by changing its expectations settles
+  as superseded when the queue reaches it, before it asks for anything.
 
 A verdict is never inferred from an interrupted run, and a run never resumes:
 it starts again on a fresh copy. Shutdown stops admitting runs, forgets every

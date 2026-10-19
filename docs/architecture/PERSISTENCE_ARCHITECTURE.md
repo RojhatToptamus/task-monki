@@ -228,6 +228,10 @@ payload carries the whole bug gate the reducer copies to
 `StatusProjection.bugReplay`, and `TaskInstruction.bugCase`, the bug reference
 only Bug Replay's hand-off writes; validation requires its ids to be UUIDs.
 Cases and runs carry a revision, and a write from a stale read is refused.
+Versions are insert-only; a version's payload keeps what the recording showed
+for each check (`recorded`), which a changed expectation is judged against.
+Versions saved before it was kept have none, and their expectations cannot be
+changed.
 Evidence bytes are managed files with per-kind limits and 256 MB in all; their
 rows and managed-file records are deleted in one transaction and the bytes are
 collected after commit. Deleting a task removes its Bug Replay rows inside the

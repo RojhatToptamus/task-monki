@@ -18,8 +18,9 @@ prompts, or any surface that shows a bug.
 - **Task Monki owns the verdict.** A bug's state comes only from runs Task
   Monki executed with its own runner and evaluated with `BugReplayVerdict`. The
   agent's claims ("fixed and tested") are provider telemetry, never evidence.
-- **The person owns the expectation.** Only saving a capture creates a case
-  version. Agents, recipes and renderer requests cannot write one. The bug
+- **The person owns the expectation.** Only the person creates a case
+  version: by saving a capture, or by changing a saved bug's expectations.
+  Agents, recipes and renderer requests cannot write one. The bug
   reference on a task instruction (`TaskInstruction.bugCase`) is set only by
   Bug Replay's hand-off; queue and continue requests from the renderer cannot
   carry it (`BugReplayInput` keeps only known fields).
@@ -36,7 +37,8 @@ prompts, or any surface that shows a bug.
 | `BugRecordingService` | One recording session at a time: freezing the worktree, choosing ignored env files, approval, starting a `br-` environment, the native view, marking, saving. |
 | `BugRecordingViewHost` (Electron, macOS) | The native `WebContentsView` the page is recorded in, its private session, request filter and CDP recorder. |
 | `recorder/*` | The recorder injected into an isolated world: actions, requests, console, picks. |
-| `BugCaseCompiler` | A sealed recording plus the person's checks → a strict `bug-case/v1` document and its failure signature. |
+| `BugCaseCompiler` | A sealed recording plus the person's checks → a strict `bug-case/v1` document, its failure signature and what the recording showed for each check. |
+| `BugCaseRevision` | A saved version plus the person's changes → the next version's document and failure signature, by the compiler's rules; the editor's rows. |
 | `BugReplayService` | Cases, versions, runs, scheduling, qualification, verification, refills, hand-off tracking, pruning, startup recovery. |
 | `ReplayDerivation`, `ReplayEnvironment`, `ReplaySourceFreezer` | The `br-` Previewhost spec derived from the task's recipe, its start and teardown, and frozen source exports. |
 | `ReplayAuthorization` | The leases that let a task run clean copies, given for now or from an approval kept for its repository, and Previewhost's per-start approval. |
@@ -116,8 +118,9 @@ stated beside it.
    itself violated (the failure signature); otherwise the capture can only be
    saved as steps, without expectations. Saving pins the recorded tree, then
    commits the capture (with each step's kind and the picked elements' places),
-   the case, its approved version and the version's two qualification runs
-   together, so saved expectations are always reproduced. Saving replaces the
+   the case, its approved version (with what the recording showed for each
+   check) and the version's two qualification runs together, so saved
+   expectations are always reproduced. Saving replaces the
    task's current bug, which moves to Earlier bugs. A save that fails deletes
    the evidence it wrote and returns the person to the composer.
 
@@ -140,6 +143,50 @@ that keeps cookies and, when the person chooses, browser storage.
 The failure signature is exactly what the recording violated. A baseline run
 reproduces the bug only when it fails the same way: the same captured token,
 status or count, and the reload guard holds for the wrong value too.
+
+## Changing expectations
+
+Edit expectations, in the Bug section's menu and beside Record again when the
+bug did not reproduce, opens the saved expectations as the capture panel listed
+them, each with what the recording showed. The person changes what an element
+should read, contain or do, Also after reload, a request's status or a JSON
+value, or removes an expectation; removing a request removes the values that
+read its answer. Nothing is added: a new expectation needs a new recording.
+
+Each version keeps what the recording showed for every check (`recorded`: the
+picked element's text, value, visibility, count and name; the count and
+answers of the requests a check counts; the JSON values at a checked pointer;
+whether the marked action raised a page error). `reviseBugCase` works the
+failure signature out again from it by the compiler's own rules, so a changed
+version describes the bug the recording shows. Check ids stay through every
+version, so an earlier run's result stays tied to the check it read. A change
+the recording would no longer show as a bug is refused with the reason ("Cart
+total matches the recording", "No expectation failed in the recording"), and so
+is a value left without its request's status. The editor asks the same rules as
+the person types and keeps Save and reproduce disabled, with the reason beside
+it, while a change cannot be saved. A bug saved before
+versions kept the recording's observations cannot be edited; it says to record
+it again.
+
+Saving commits together: version N+1 with `EXPECTATION_CHANGED` and the change
+in words as its reason, its `APPROVED` decision, the replaced version's
+`SUPERSEDED` decision, and the new version's two qualification runs. A save
+against another version than the editor showed is refused. Open runs of the
+replaced version stop as `SUPERSEDED`, and admission settles any left behind
+the same way before it checks anything else. The code the worktree holds is then
+verified again by an attempt that waits for the qualification, so the changed
+expectations reproduce on the recorded code before a fix can be verified
+against them, and a turn that ends meanwhile owes its own verification. A name
+Task Monki suggested follows the first element expectation; a name the person
+wrote stays. `SIGNATURE_RELAXED` is kept for accepting a different recorded
+failure as the bug, which nothing offers yet.
+
+Results about a replaced version are earlier context, never the current
+verdict: the gate, the Before and After table, the pictures, the agent's brief,
+the reviewer's section and the pull request block read the version in force
+only. Replays lists earlier runs as "earlier expectations" with their word in
+neutral ink, and each opens against the expectations it checked. History
+records "Expectations changed" with the change.
 
 ## Runs
 
@@ -319,7 +366,9 @@ text as Markdown code, so it never renders as a link, an image or a mention.
   one place, switched by the segment or the arrow keys. Replays lists the runs;
   each opens a drawer with its page, what each expectation saw, how far its
   steps got, and where it ran (environment facts and what replays do not
-  control). Steps lists the recorded steps by kind.
+  control); a run of replaced expectations reads as earlier. Steps lists the
+  recorded steps by kind. Edit expectations opens the editor in the same
+  drawer.
 - **Review.** The brief's Bug block states the word and the Before and After
   lines.
 - **Board, Inbox, History.** The state words above.
@@ -328,7 +377,10 @@ text as Markdown code, so it never renders as a link, an image or a mention.
 
 Schema 31, migration 14, adds `bug_captures`, `bug_cases`, `bug_case_versions`,
 `bug_case_decisions`, `bug_replay_runs` and `bug_replay_files`. Cases and runs
-use optimistic revisions; a stale write is refused. Migration 15 adds
+use optimistic revisions; a stale write is refused. Versions are insert-only;
+each keeps what the recording showed for its checks in its payload, bounded
+to 16 distinct answers or values per check. Like the case document, it can
+hold a typed password, which every surface masks. Migration 15 adds
 `bug_replay_approvals`, one row per repository and approval digest, which goes
 with its repository and is deleted when revoked. Evidence (screenshots,
 action, network and console logs, run frames, service logs) is stored as managed
@@ -369,7 +421,8 @@ bug becomes a record with no actions.
 
 ## Verification
 
-- Pure rules: `BugCaseCompiler.test.ts`, `BugReplayVerdict.test.ts`,
+- Pure rules: `BugCaseCompiler.test.ts`, `BugCaseRevision.test.ts` (changed
+  expectations against the recording), `BugReplayVerdict.test.ts`,
   `BugReplayGate.test.ts`, `BugReplayContext.test.ts`, `BugReplayInput.test.ts`,
   `ProtectedInputs.test.ts`, `src/shared/bugCase.test.ts`,
   `src/shared/bugReplayClaims.test.ts`, `src/renderer/model/bugReplay.test.ts`.
@@ -379,8 +432,9 @@ bug becomes a record with no actions.
   `DatabaseMigrations.test.ts`.
 - The queue over real storage and Git with a stand-in Previewhost and a
   scripted runner (admission, approval, shutdown, cancel, replacements,
-  unreadable worktrees, pruning, saving a recording, approvals kept across a
-  restart, a changed recipe, another repository and revocation):
+  unreadable worktrees, pruning, saving a recording, changing expectations,
+  approvals kept across a restart, a changed recipe, another repository and
+  revocation):
   `BugReplayService.integration.test.ts`.
 - Hand-off through the service: `TaskManagerService.bugReplay.integration.test.ts`.
 - The engine with a real browser, including WebSockets to undeclared hosts:
@@ -390,6 +444,7 @@ bug becomes a record with no actions.
   `bug/BugRecordingWorkspace.dom.test.tsx` (including the approval's order),
   `bug/BugCapturePanel.dom.test.tsx` (expectations, focus and naming),
   `bug/BugSection.dom.test.tsx` (the verdict, the results table, the replay
-  drawer and the Now panel's approval), `bug/ReplayApprovalSettings.dom.test.tsx`
-  (listing and revoking kept approvals).
+  drawer, the Now panel's approval, editing expectations and earlier replays),
+  `bug/ReplayApprovalSettings.dom.test.tsx` (listing and revoking kept
+  approvals).
 - Seeded states: the `bug` scenario set in `docs/DEV_SEEDING.md`.

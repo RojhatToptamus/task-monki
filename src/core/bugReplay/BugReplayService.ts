@@ -12,6 +12,8 @@ import type { DomainEventType, Task, TaskDetailSnapshot, WorktreeRecord } from '
 import type {
   BugCaseAction,
   BugCaseReference,
+  BugExpectationsDraft,
+  BugExpectationsPreview,
   BugReplayGateProjection,
   BugReplayKeptApproval,
   BugReplayLeaseRequest,
@@ -49,6 +51,8 @@ import {
 } from './BugReplayContext';
 import type { BugRecordingSessions, BugReplayCore, BugReplayTaskAccess, PendingReplayApproval } from './BugReplayPorts';
 import { ceilingFor, versionDigest } from './BugReplayIdentity';
+import { BUG_CASE_COMPILER_VERSION } from './BugCaseCompiler';
+import { describeRevision, EXPECTATIONS_MOVED, followedTitle, reviseBugCase } from './BugCaseRevision';
 
 /**
  * Bug Replay's orchestration: a persisted queue of clean runs, each executed from checks to
@@ -508,6 +512,72 @@ export class BugReplayService implements BugReplayCore {
     }
   }
 
+  /** What saving the editor's draft would do, judged against the recording and nothing saved. */
+  async previewExpectations(taskId: string, draft: BugExpectationsDraft): Promise<BugExpectationsPreview> {
+    const { version } = await this.requireActiveVersion(taskId);
+    if (version.id !== draft.versionId) return { versionId: version.id, changed: true, reproducible: false, reason: EXPECTATIONS_MOVED, checks: [] };
+    const revised = reviseBugCase(version, draft.expectations);
+    return {
+      versionId: version.id,
+      changed: revised.changed,
+      reproducible: revised.reproducible,
+      ...(revised.reason ? { reason: revised.reason } : {}),
+      checks: revised.checks
+    };
+  }
+
+  /**
+   * The person changed what "fixed" means. The next version holds the changed expectations and
+   * reproduces the bug on the recorded code before any fix counts against them, and the code the
+   * worktree holds is verified again after that. Results about the version it replaces stay as
+   * earlier context; its open runs stop.
+   */
+  async reviseExpectations(taskId: string, draft: BugExpectationsDraft): Promise<void> {
+    const { bugCase, version } = await this.requireActiveVersion(taskId);
+    if (version.id !== draft.versionId) throw new Error(`${EXPECTATIONS_MOVED}.`);
+    const revised = reviseBugCase(version, draft.expectations);
+    if (!revised.changed) return;
+    if (!revised.reproducible) throw new Error(`${revised.reason ?? 'These expectations cannot be reproduced'}.`);
+    const next: BugCaseVersionRecord = {
+      ...version,
+      id: randomUUID(),
+      version: version.version + 1,
+      revisionKind: 'EXPECTATION_CHANGED',
+      reason: describeRevision(version.document, revised.document),
+      document: revised.document,
+      recorded: revised.recorded,
+      toolchain: `${this.toolchain()} ${BUG_CASE_COMPILER_VERSION}`,
+      createdAt: now()
+    };
+    next.digest = versionDigest(next);
+    const title = followedTitle(bugCase.title, version, next);
+    await this.commit(taskId, 'BUG_CASE_DECIDED', (tx) => {
+      // Saving approves the expectations the editor showed; a version saved meanwhile refuses it.
+      const current = effectiveVersion(this.options.store.listVersions(tx, bugCase.id), this.options.store.listDecisions(tx, bugCase.id));
+      if (current?.id !== version.id) throw new Error(`${EXPECTATIONS_MOVED}.`);
+      this.options.store.insertVersion(tx, next);
+      this.options.store.insertDecision(tx, { id: randomUUID(), caseId: bugCase.id, taskId, kind: 'APPROVED', versionId: next.id, ...(next.reason ? { reason: next.reason } : {}), createdAt: now() });
+      this.options.store.insertDecision(tx, { id: randomUUID(), caseId: bugCase.id, taskId, kind: 'SUPERSEDED', versionId: version.id, createdAt: now() });
+      // The changed expectations are reproduced again before a fix can be verified against them.
+      this.insertQualification(tx, taskId, bugCase.id, next.id);
+      const latest = title ? this.options.store.getCase(tx, bugCase.id) : undefined;
+      if (latest && title) this.options.store.updateCase(tx, { ...latest, title, updatedAt: now() }, latest.revision);
+    }, { decision: 'APPROVED', revision: 'EXPECTATION_CHANGED', ...(next.reason ? { change: next.reason } : {}) });
+    await this.supersedeRuns(bugCase.id, version.id);
+    this.schedule();
+    await this.reverifyCurrentCode(taskId, bugCase, next);
+  }
+
+  /** Stops the open runs of a version that no longer decides anything: they checked other expectations. */
+  private async supersedeRuns(caseId: string, versionId: string): Promise<void> {
+    const open = await this.options.store.read((reader) => this.options.store.listRuns(reader, { caseId, open: true }));
+    for (const run of open.filter((candidate) => candidate.versionId === versionId)) {
+      const controller = this.executing.get(run.id);
+      if (controller) controller.abort(new ExpectationsChanged());
+      else await this.settleRun(run, 'SUPERSEDED', EXPECTATIONS_CHANGED);
+    }
+  }
+
   async removeBug(taskId: string): Promise<void> {
     const active = await this.requireActiveCase(taskId);
     await this.cancelCaseRuns(taskId, active.id, 'Bug removed');
@@ -716,6 +786,8 @@ export class BugReplayService implements BugReplayCore {
     const records = await this.loadRunRecords(run);
     if (!records) throw new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'The bug was removed.' });
     const { version, bugCase } = records;
+    // A run of a version the person replaced checks expectations that no longer decide anything.
+    if (records.superseded) throw new RunSettled('SUPERSEDED', { reason: 'CANCELED_BY_PERSON', detail: 'A newer version of the bug replaced it' });
     const context = await this.options.access.context(run.taskId).catch((error: unknown) => {
       throw new RunSettled('BLOCKED', { reason: 'INELIGIBLE', detail: errorMessage(error) });
     });
@@ -1211,13 +1283,15 @@ export class BugReplayService implements BugReplayCore {
     }));
   }
 
-  private async loadRunRecords(run: StoredBugReplayRun): Promise<{ bugCase: BugCaseRecord; version: BugCaseVersionRecord } | undefined> {
+  private async loadRunRecords(run: StoredBugReplayRun): Promise<{ bugCase: BugCaseRecord; version: BugCaseVersionRecord; superseded: boolean } | undefined> {
     if (!run.caseId || !run.versionId) return undefined;
     return this.options.store.read((reader) => {
       const bugCase = this.options.store.getCase(reader, run.caseId!);
       if (!bugCase || bugCase.status !== 'ACTIVE') return undefined;
       const version = this.options.store.listVersions(reader, bugCase.id).find((candidate) => candidate.id === run.versionId);
-      return version ? { bugCase, version } : undefined;
+      if (!version) return undefined;
+      const superseded = this.options.store.listDecisions(reader, bugCase.id).some((decision) => decision.kind === 'SUPERSEDED' && decision.versionId === version.id);
+      return { bugCase, version, superseded };
     });
   }
 
@@ -1418,12 +1492,23 @@ class Superseded extends Error {
   }
 }
 
+/** The person changed the expectations a run checks: its result would be about the old ones. */
+class ExpectationsChanged extends Error {
+  constructor() {
+    super('The expectations changed');
+  }
+}
+
+const EXPECTATIONS_CHANGED: BugReplayRunFailure = { reason: 'CANCELED_BY_PERSON', detail: 'The expectations changed' };
+
 function classify(error: unknown, signal: AbortSignal): RunSettled | RunWaits {
   // Whatever the run was doing when it was aborted, the abort says why it ended: a newer turn,
-  // the person, or Task Monki closing. A shutdown is never recorded as the person's cancel.
+  // changed expectations, the person, or Task Monki closing. A shutdown is never recorded as the
+  // person's cancel.
   if (signal.aborted) {
     const reason = signal.reason;
     if (reason instanceof Superseded) return new RunSettled('SUPERSEDED', { reason: 'CANCELED_BY_PERSON', detail: 'A newer turn replaced this check.' });
+    if (reason instanceof ExpectationsChanged) return new RunSettled('SUPERSEDED', EXPECTATIONS_CHANGED);
     if (reason instanceof CancelledByPerson) return new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'Canceled' });
     return new RunSettled('INTERRUPTED', { reason: 'SHUTDOWN', detail: 'Task Monki closed during this run.' });
   }

@@ -62,4 +62,30 @@ describe('Bug Replay request validation', () => {
       expect(() => bugReplayInput.save({ ...valid, draft })).toThrow(refused);
     }
   });
+
+  it('keeps an expectations draft to the edits a person can make', () => {
+    const draft = {
+      versionId: '8b3e4c5d-6f70-4b82-8c93-b4d5e6f70819',
+      expectations: [
+        { kind: 'element', id: 'a1', template: 'equals', expected: '$45.00', alsoAfterReload: true },
+        { kind: 'status', id: 'r2', check: 'success' },
+        { kind: 'value', id: 'v3', expected: '45' },
+        { kind: 'keep', id: 'c4' }
+      ]
+    };
+    // Fields beyond the edit itself, such as a replacement document, never reach the service.
+    const smuggled = { ...draft, document: { assertions: [] }, expectations: draft.expectations.map((edit) => ({ ...edit, failureSignature: [] })) };
+    expect(bugReplayInput.expectations({ taskId: 'task-1', draft: smuggled })).toEqual({ taskId: 'task-1', draft });
+
+    const refusedEdits = [
+      { kind: 'element', id: 'a1', template: 'matchesRegex', expected: '.*', alsoAfterReload: false },
+      { kind: 'status', id: 'r2', check: 404 },
+      { kind: 'signature', id: 'a1' },
+      { kind: 'keep', id: '../a1' }
+    ];
+    for (const edit of refusedEdits) {
+      expect(() => bugReplayInput.expectations({ taskId: 'task-1', draft: { ...draft, expectations: [edit] } })).toThrow(refused);
+    }
+    expect(() => bugReplayInput.expectations({ taskId: 'task-1', draft: { ...draft, expectations: Array.from({ length: 21 }, () => draft.expectations[3]) } })).toThrow(refused);
+  });
 });

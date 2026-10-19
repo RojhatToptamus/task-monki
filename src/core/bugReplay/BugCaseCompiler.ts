@@ -29,6 +29,7 @@ import type {
   BugRecordingTargetFacts
 } from '../../shared/bugRecording';
 import type {
+  BugCaptureCheckDraft,
   BugCaptureDraft,
   BugCapturePickView,
   BugCaptureRequestRow,
@@ -37,6 +38,7 @@ import type {
   BugStepKind
 } from '../../shared/bugReplay';
 import { suggestBugTitle, type BugTitleSeed } from '../../shared/bugReplayClaims';
+import type { BugRecordedObservation } from './BugReplayRecords';
 
 /**
  * Pure compiler from a sealed recording and the person's checks to a `bug-case/v1` document.
@@ -67,10 +69,17 @@ export interface CompiledCapture {
 
 export interface CompiledCase {
   document?: BugCaseV1;
+  /** What the recording showed for each of the document's checks, by its id. */
+  recorded?: Record<string, BugRecordedObservation>;
   checks: BugCaseCheckView[];
   reproducible: boolean;
   reason?: string;
 }
+
+export type BugElementFacts = Extract<BugRecordedObservation, { kind: 'element' }>;
+
+/** Distinct values a recorded list keeps for one check, enough for any edit to be judged. */
+const RECORDED_VALUES = 16;
 
 interface MarkedWindow {
   actions: BugRecordingAction[];
@@ -131,6 +140,7 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
   const { steps, sensitiveInputs } = compileSteps(window.actions);
   const assertions: BugCaseAssertion[] = [];
   const signature: BugCaseSignatureEntry[] = [];
+  const recorded: Record<string, BugRecordedObservation> = {};
   let next = 1;
   const nextId = (prefix: string) => `${prefix}${next++}`;
 
@@ -139,24 +149,24 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
   for (const check of draft.checks) {
     const pick = log.mark.picks[check.pickIndex];
     if (!pick) continue;
-    const assertion = domAssertion(check, pick, nextId('a'));
+    const facts = elementFacts(pick);
+    const assertion = elementAssertion(check, facts.field, checkTarget(pick.target, pick.text), nextId('a'));
     if (!assertion) continue;
     assertions.push(assertion);
-    const entry = domSignature(assertion, pick);
+    recorded[assertion.id] = facts;
+    const entry = elementSignature(assertion, facts);
     if (entry) signature.push(entry);
-    else if (!alreadyHolds && (assertion.kind === 'dom.text' || assertion.kind === 'dom.value')) {
-      const shown = assertion.kind === 'dom.value' ? pick.value ?? '' : normalizeVisibleText(pick.text);
-      const subject = describeTarget(assertion.target);
-      alreadyHolds = `Write what ${subject === 'The element' ? 'it' : subject} should read; it shows "${shown.slice(0, 60)}" now`;
-    }
+    else alreadyHolds ??= heldReason(assertion, facts);
   }
 
   // Page errors count from the marked action on, in the recording as in a replay: an error that
   // action raised is the failure; with none, the check guards the fix.
   if (draft.noPageError) {
     const assertion: BugCaseAssertion = { id: nextId('c'), kind: 'console.noUncaughtError' };
+    const raised = uncaughtIn(log, window);
     assertions.push(assertion);
-    if (uncaughtIn(log, window)) signature.push({ assertionId: assertion.id, mode: 'ANY_MISMATCH' });
+    recorded[assertion.id] = { kind: 'pageError', raised };
+    if (raised) signature.push({ assertionId: assertion.id, mode: 'ANY_MISMATCH' });
   }
 
   const rows = requestRows(window.requests);
@@ -179,8 +189,9 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
     };
     assertions.push(assertion);
     requestAssertionByKey.set(key, assertion.id);
-    const matching = window.requests.filter((request) => requestKey(request) === key);
-    const statusEntry = requestStatusSignature(assertion, matching);
+    const observed = requestsObserved(window.requests.filter((request) => requestKey(request) === key));
+    recorded[assertion.id] = kept(observed);
+    const statusEntry = statusSignature(assertion, observed);
     if (statusEntry) signature.push(statusEntry);
     return assertion.id;
   };
@@ -200,6 +211,8 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
         count: { op: 'exactly', n: 1 }
       };
       assertions.push(assertion);
+      // What the row counted, which is what Sent once compares.
+      recorded[assertion.id] = kept({ ...requestsObserved(window.requests.filter((request) => requestKey(request) === rule.requestKey)), count: row.count });
       if (row.count !== 1) {
         signature.push({ assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'requestCount', value: row.count } });
       }
@@ -229,10 +242,10 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
     };
     assertions.push(assertion);
     const matching = window.requests.filter((request) => requestKey(request) === valueCheck.requestKey);
-    const observed = firstDifferingJson(matching, assertion.side, assertion.pointer, assertion.equals);
-    if (observed !== undefined) {
-      signature.push({ assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'json', value: observed } });
-    }
+    const values = jsonValuesAt(matching, assertion.side, assertion.pointer);
+    recorded[assertion.id] = kept({ kind: 'json', values });
+    const entry = valueSignature(assertion, values);
+    if (entry) signature.push(entry);
   }
 
   const document: BugCaseV1 = {
@@ -256,7 +269,7 @@ export function compileBugCase(log: BugRecordingLogV1, draft: BugCaptureDraft): 
     const reason = error instanceof BugCaseValidationError ? error.reason : 'These expectations cannot be reproduced.';
     return { checks, reproducible: false, reason: reason.replace(/\.$/, '') };
   }
-  return { document, checks, reproducible: true };
+  return { document, recorded, checks, reproducible: true };
 }
 
 /** The checks as the modal and the Bug section state them. */
@@ -492,19 +505,32 @@ function dedupeCandidates(candidates: BugCaseTargetCandidate[]): BugCaseTargetCa
   });
 }
 
-function domAssertion(
-  check: BugCaptureDraft['checks'][number],
-  pick: BugRecordingPick,
+/** What a picked element showed, as its checks read it, and its name as the pick showed it. */
+export function elementFacts(pick: BugRecordingPick): BugElementFacts {
+  return {
+    kind: 'element',
+    label: pickLabel(pick),
+    text: normalizeVisibleText(pick.text),
+    ...(pick.value === undefined ? {} : { value: pick.value }),
+    visible: pick.visible,
+    count: pick.count,
+    field: pick.value !== undefined && ['input', 'textarea', 'select'].includes(pick.target.tag)
+  };
+}
+
+/** The check an element expectation compiles to; undefined while it says nothing to check. */
+export function elementAssertion(
+  check: Pick<BugCaptureCheckDraft, 'template' | 'expected' | 'count' | 'alsoAfterReload'>,
+  field: boolean,
+  target: BugCaseTarget,
   id: string
 ): BugCaseAssertion | undefined {
-  const target = checkTarget(pick.target, pick.text);
-  const isField = pick.value !== undefined && ['input', 'textarea', 'select'].includes(pick.target.tag);
   switch (check.template) {
     case 'equals':
     case 'contains': {
       const expected = normalizeVisibleText(check.expected ?? '');
-      if (!expected && !isField) return undefined;
-      if (isField && check.template === 'equals') {
+      if (!expected && !field) return undefined;
+      if (field && check.template === 'equals') {
         return { id, kind: 'dom.value', target, value: check.expected ?? '', alsoAfterReload: check.alsoAfterReload };
       }
       if (!expected) return undefined;
@@ -522,31 +548,42 @@ function domAssertion(
   }
 }
 
-/** The signature entry for a DOM check, when the recording violated it. */
-function domSignature(assertion: BugCaseAssertion, pick: BugRecordingPick): BugCaseSignatureEntry | undefined {
+/** The signature entry for an element check, when the recording violated it. */
+export function elementSignature(
+  assertion: BugCaseAssertion,
+  facts: Pick<BugElementFacts, 'text' | 'value' | 'visible' | 'count'>
+): BugCaseSignatureEntry | undefined {
   switch (assertion.kind) {
     case 'dom.text': {
-      const observed = normalizeVisibleText(pick.text);
+      const observed = facts.text;
       const holds = assertion.op === 'equals' ? observed === assertion.value : observed.includes(assertion.value);
-      if (holds && pick.visible) return undefined;
-      if (!pick.visible) return { assertionId: assertion.id, mode: 'ANY_MISMATCH' };
+      if (holds && facts.visible) return undefined;
+      if (!facts.visible) return { assertionId: assertion.id, mode: 'ANY_MISMATCH' };
       const token = differingToken(observed, assertion.value);
       if (!token || isVolatileToken(token)) return { assertionId: assertion.id, mode: 'ANY_MISMATCH' };
       return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'text', token } };
     }
     case 'dom.value': {
-      if ((pick.value ?? '') === assertion.value) return undefined;
-      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'value', value: pick.value ?? '' } };
+      if ((facts.value ?? '') === assertion.value) return undefined;
+      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'value', value: facts.value ?? '' } };
     }
     case 'dom.visible':
-      if (pick.visible === assertion.expected) return undefined;
-      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'visible', value: pick.visible } };
+      if (facts.visible === assertion.expected) return undefined;
+      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'visible', value: facts.visible } };
     case 'dom.count':
-      if (pick.count === assertion.value) return undefined;
-      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'count', value: pick.count } };
+      if (facts.count === assertion.value) return undefined;
+      return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'count', value: facts.count } };
     default:
       return undefined;
   }
+}
+
+/** For a text or field check the recording satisfied: what to write instead, beside what it showed. */
+export function heldReason(assertion: BugCaseAssertion, facts: Pick<BugElementFacts, 'text' | 'value'>): string | undefined {
+  if (assertion.kind !== 'dom.text' && assertion.kind !== 'dom.value') return undefined;
+  const shown = assertion.kind === 'dom.value' ? facts.value ?? '' : facts.text;
+  const subject = describeTarget(assertion.target);
+  return `Write what ${subject === 'The element' ? 'it' : subject} should read; it shows "${shown.slice(0, 60)}" now`;
 }
 
 /**
@@ -608,9 +645,14 @@ function pickView(pick: BugRecordingPick, index: number): BugCapturePickView {
     visible: pick.visible,
     count: pick.count,
     volatileTokens: volatileTokens(pick.text),
-    label: elementName(pick.target, pick.value ?? pick.text) ?? tagWord(pick.target.tag),
+    label: pickLabel(pick),
     ...(pick.box ? { box: pick.box } : {})
   };
+}
+
+/** A picked element's name, as its pick, its expectations and the bug's suggested name write it. */
+function pickLabel(pick: BugRecordingPick): string {
+  return elementName(pick.target, pick.value ?? pick.text) ?? tagWord(pick.target.tag);
 }
 
 /** An element with no name, by what it is. */
@@ -692,19 +734,41 @@ export function requestRows(requests: BugRecordingRequest[]): BugCaptureRequestR
   });
 }
 
-/** The status signature of a required request, when the recording violated it. */
-function requestStatusSignature(
+/** How a request was answered: its status, or no response when the app never answered it. */
+function answerOf(request: Pick<BugRecordingRequest, 'outcome' | 'gateway' | 'status'>): number | 'no-response' {
+  return request.outcome === 'response' && !request.gateway && request.status !== undefined ? request.status : 'no-response';
+}
+
+/** How many requests a check counted, and each distinct answer in the order first seen. */
+function requestsObserved(requests: BugRecordingRequest[]): Extract<BugRecordedObservation, { kind: 'requests' }> {
+  return { kind: 'requests', count: requests.length, answers: [...new Set(requests.map(answerOf))] };
+}
+
+/** An observation as a version keeps it: lists bounded, as no edit needs more. */
+function kept<T extends BugRecordedObservation>(observed: T): T {
+  if (observed.kind === 'requests') return { ...observed, answers: observed.answers.slice(0, RECORDED_VALUES) };
+  if (observed.kind === 'json') return { ...observed, values: observed.values.slice(0, RECORDED_VALUES) };
+  return observed;
+}
+
+/**
+ * The status signature of a required request, when the recording violated it: not sent at all,
+ * or the first answer its rule refuses.
+ */
+export function statusSignature(
   assertion: Extract<BugCaseAssertion, { kind: 'request' }>,
-  matching: BugRecordingRequest[]
+  observed: Pick<Extract<BugRecordedObservation, { kind: 'requests' }>, 'count' | 'answers'>
 ): BugCaseSignatureEntry | undefined {
-  if (matching.length === 0) {
+  if (observed.count === 0) {
     return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'requestCount', value: 0 } };
   }
-  const violating = matching.find((request) => !statusHolds(assertion.status, request));
-  if (!violating) return undefined;
-  const value: number | 'no-response' =
-    violating.outcome === 'response' && !violating.gateway && violating.status !== undefined ? violating.status : 'no-response';
-  return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'status', value } };
+  const violating = observed.answers.find((answer) => !answerHolds(assertion.status, answer));
+  if (violating === undefined) return undefined;
+  return { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'status', value: violating } };
+}
+
+export function answerHolds(rule: 'success' | 'answered' | number | undefined, answer: number | 'no-response'): boolean {
+  return statusHolds(rule, answer === 'no-response' ? { outcome: 'failed' } : { outcome: 'response', status: answer });
 }
 
 export function statusHolds(
@@ -719,24 +783,32 @@ export function statusHolds(
   return request.status === rule;
 }
 
-function firstDifferingJson(
-  matching: BugRecordingRequest[],
-  side: 'request' | 'response',
-  pointer: string,
-  expected: string
-): string | null | undefined {
+/**
+ * Each distinct value at a pointer of the matching bodies, in the order first seen, as canonical
+ * JSON: null where a response had no value there; a request without one is not counted.
+ */
+function jsonValuesAt(matching: BugRecordingRequest[], side: 'request' | 'response', pointer: string): Array<string | null> {
+  const values = new Set<string | null>();
   for (const request of matching) {
     const body = side === 'request' ? request.requestJson : request.responseJson;
     if (body === undefined) continue;
     const value = readJsonPointer(body, pointer);
     if (value === undefined) {
-      if (side === 'response') return null;
+      if (side === 'response') values.add(null);
       continue;
     }
-    const canonical = canonicalJson(value);
-    if (canonical !== expected) return canonical;
+    values.add(canonicalJson(value));
   }
-  return undefined;
+  return [...values];
+}
+
+/** The signature entry for a value check: the first value the recording showed that differs. */
+export function valueSignature(
+  assertion: Extract<BugCaseAssertion, { kind: 'request.json' }>,
+  values: Array<string | null>
+): BugCaseSignatureEntry | undefined {
+  const observed = values.find((value) => value === null || value !== assertion.equals);
+  return observed === undefined ? undefined : { assertionId: assertion.id, mode: 'CAPTURED', captured: { kind: 'json', value: observed } };
 }
 
 /** Scalars in the marked action's JSON bodies that equal a number in a picked element's text. */

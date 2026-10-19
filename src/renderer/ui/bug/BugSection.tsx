@@ -23,6 +23,7 @@ import { StatusGlyph, statusGlyphFor } from '../StatusBadge';
 import { DecisionSlot, OverviewSection, SlotActions, SlotContent, type SlotAction } from '../TaskOverview';
 import { PreviewSecretDialog } from '../preview/PreviewSecretDialog';
 import { BugConfirmDialog } from './BugConfirmDialog';
+import { BugExpectationsDrawer } from './BugExpectationsDrawer';
 import { BugLeaseFacts } from './BugLeaseBlock';
 import { BugRunDrawer, ResultMark } from './BugRunDrawer';
 import { BugCompareDialog, BugPicture, shotCaption, type BugShotSide } from './BugShots';
@@ -44,6 +45,11 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
   const [busy, setBusy] = useState<BugCaseAction>();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
+  const [editing, setEditing] = useState(false);
+  // A dialog gives focus back to what opened it: the menu's trigger for a menu item (the item is
+  // gone once the menu closes), else the button itself.
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [opener, setOpener] = useState<HTMLElement | null>(null);
   const run = async (action: BugCaseAction, work: () => Promise<unknown>) => {
     setBusy(action);
     try {
@@ -55,8 +61,9 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
       setBusy(undefined);
     }
   };
-  const perform = (action: BugCaseAction) => {
+  const perform = (action: BugCaseAction, from: 'menu' | 'button' = 'button') => {
     const gate = snapshot?.activeCase?.gate;
+    setOpener(from === 'menu' ? menuTriggerRef.current : document.activeElement instanceof HTMLElement ? document.activeElement : null);
     switch (action) {
       case 'send-to-agent':
         return void run(action, () => taskManagerApi.sendBugToAgent({ taskId, clientOperationId: crypto.randomUUID() }));
@@ -83,6 +90,8 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
         return gate?.activeRun ? void run(action, () => taskManagerApi.cancelBugReplayRun({ taskId, runId: gate.activeRun!.runId })) : undefined;
       case 'remove':
         return setConfirmRemove(true);
+      case 'edit-expectations':
+        return setEditing(true);
       default:
         return void run(action, () => taskManagerApi.applyBugCaseAction({ taskId, action }));
     }
@@ -97,6 +106,7 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
           confirmLabel="Remove bug"
           busyLabel="Removing…"
           busy={busy === 'remove'}
+          returnFocus={opener}
           returnFocusRef={host.returnFocusRef}
           onKeep={() => setConfirmRemove(false)}
           onConfirm={() => void run('remove', async () => {
@@ -108,6 +118,17 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
         <PreviewSecretDialog references={[]} inPreview={false} onClose={() => setUnlocking(false)}
           onSaved={() => {
             setUnlocking(false);
+            refresh();
+          }} />
+      ) : null}
+      {editing && snapshot?.activeCase?.version ? (
+        // Keyed by the version it edits: a version saved elsewhere opens a fresh editor.
+        <BugExpectationsDrawer key={snapshot.activeCase.version.id} taskId={taskId} version={snapshot.activeCase.version}
+          returnFocus={opener}
+          returnFocusRef={host.returnFocusRef}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
             refresh();
           }} />
       ) : null}
@@ -135,10 +156,10 @@ export function useBugActions(taskId: string, snapshot: BugReplaySnapshot | unde
       separated: action === 'remove',
       disabled: Boolean(busy) || Boolean(reason),
       ...(reason ? { disabledReason: reason } : {}),
-      onSelect: () => perform(action)
+      onSelect: () => perform(action, 'menu')
     };
   };
-  return { busy, perform, dialogs, asSlotAction, asMenuItem, modalOpen: confirmRemove || unlocking };
+  return { busy, perform, dialogs, asSlotAction, asMenuItem, menuTriggerRef, modalOpen: confirmRemove || unlocking || editing };
 }
 
 /**
@@ -248,7 +269,7 @@ export function BugSection({
   const menu = layout.menu.map((action) => actions.asMenuItem(action, view));
   const stateAbove = Boolean(nowPanel);
   const nowPanelHoldsBug = nowPanel === 'step';
-  const runs = bugRunRows(snapshot.runs);
+  const runs = bugRunRows(snapshot.runs, view.version?.id);
   const lease = view.gate.activeRun?.waitingFor === 'APPROVAL' ? snapshot.pendingLease : undefined;
   // Approving replays puts declining first, as every approval does.
   const approvalDecline = Boolean(lease) && view.actions.includes('cancel-run');
@@ -268,7 +289,7 @@ export function BugSection({
         <>
           {recording ? <button type="button" className="tm-osection__link" onClick={onOpenRecording}>Open recording</button> : null}
           {menu.length ? (
-            <ActionMenu className="tm-bug__menu" label="More bug actions" tooltip="More actions" side="bottom"
+            <ActionMenu className="tm-bug__menu" label="More bug actions" tooltip="More actions" side="bottom" triggerRef={actions.menuTriggerRef}
               trigger={<MoreHorizontal size={13} aria-hidden="true" />} items={menu} />
           ) : null}
         </>
@@ -371,6 +392,7 @@ export function BugSection({
                         type="button" className="tm-bugruns__open" onClick={() => setOpenRun(row.id)}>
                           {row.kind}
                         </button>
+                        {row.earlier ? <span className="tm-bugruns__earlier">earlier expectations</span> : null}
                       </td>
                       <td>
                         <span className={`tm-bug__runword tm-bug__state--${row.tone}`}>

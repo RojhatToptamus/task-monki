@@ -15,12 +15,17 @@ import { BUG_REPLAY_STORAGE_LIMIT_BYTES } from '../../shared/bugReplay';
 import { isDomAssertion, type BugCaseV1 } from '../../shared/bugCase';
 import { BUG_BOUNDARY_LINE, bugCountsLine, bugScopeLine } from '../../shared/bugReplayClaims';
 import { checkViews } from './BugCaseCompiler';
+import { expectationViews } from './BugCaseRevision';
 import { capturedValue } from './BugReplayVerdict';
 import { effectiveVersion, latestSets, verdictAttempt } from './BugReplayGate';
 import type { BugReplayCore } from './BugReplayPorts';
 import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, StoredBugReplayRun } from './BugReplayRecords';
 import { staticEligibility, ReplayEligibilityError } from './ReplayDerivation';
 import { readPreviewRecipeFiles } from '../preview/generation/PreviewRecipeFile';
+import { redactProcessDiagnostic } from '../process/ProcessSupervisor';
+
+/** The newest runs a snapshot lists; earlier versions' expectations come with the ones among them. */
+const LISTED_RUNS = 20;
 
 /** Builds what the renderer reads about a task's bug: words, lines and actions already decided. */
 export async function buildBugReplaySnapshot(
@@ -57,7 +62,7 @@ export async function buildBugReplaySnapshot(
   const snapshot: BugReplaySnapshot = {
     taskId,
     availability,
-    runs: data.runs.slice(0, 20).map((run) => runView(run, data.runFiles.get(run.id) ?? [])),
+    runs: data.runs.slice(0, LISTED_RUNS).map((run) => runView(run, data.runFiles.get(run.id) ?? [])),
     runCount: data.runs.filter((run) => run.kind !== 'RECORD').length,
     earlierCases: data.earlier,
     storage: { usedBytes: data.used, limitBytes: BUG_REPLAY_STORAGE_LIMIT_BYTES }
@@ -66,8 +71,10 @@ export async function buildBugReplaySnapshot(
   if (data.active && data.gate && data.capture) {
     const view = await caseView(service, data.active, data.capture, data.versions, data.decisions, data.runs, data.gate, data.captureFiles, data.runFiles);
     // A closed task keeps its bug as a record: nothing more runs or goes to the agent.
-    if (await taskClosed(service, taskId)) view.actions = [];
-    else await explainUnavailable(service, view, data.active, availability.recordDisabledReason);
+    if (await taskClosed(service, taskId)) {
+      view.actions = [];
+      delete view.unavailable;
+    } else await explainUnavailable(service, view, data.active, availability.recordDisabledReason);
     snapshot.activeCase = view;
   }
   return snapshot;
@@ -88,7 +95,7 @@ async function taskClosed(service: BugReplayCore, taskId: string): Promise<boole
  */
 async function explainUnavailable(service: BugReplayCore, view: BugCaseView, bugCase: BugCaseRecord, recordReason: string | undefined): Promise<void> {
   const agent = await service.access.agentState(bugCase.taskId).catch(() => ({ hasRun: true, turn: 'IDLE' as const }));
-  const unavailable: NonNullable<BugCaseView['unavailable']> = {};
+  const unavailable: NonNullable<BugCaseView['unavailable']> = { ...view.unavailable };
   if (!agent.hasRun) {
     view.startSendsBug = true;
     view.actions = view.actions.filter((action) => action !== 'send-to-agent');
@@ -100,6 +107,7 @@ async function explainUnavailable(service: BugReplayCore, view: BugCaseView, bug
   if (recordReason) unavailable['record-again'] = recordReason;
   for (const action of Object.keys(unavailable) as BugCaseAction[]) if (!view.actions.includes(action)) delete unavailable[action];
   if (Object.keys(unavailable).length) view.unavailable = unavailable;
+  else delete view.unavailable;
 }
 
 async function recordAvailability(
@@ -165,11 +173,13 @@ async function caseView(
   };
   if (version) {
     const alsoAfterReload = version.document.assertions.some((assertion) => isDomAssertion(assertion) && assertion.alsoAfterReload);
+    const sensitive = version.document.sensitiveInputs.map((input) => input.value);
     view.version = {
       id: version.id,
       version: version.version,
       revisionKind: version.revisionKind,
       checks: checkViews(version.document),
+      expectations: expectationViews(version.document, version.recorded, (text) => redactProcessDiagnostic(text, sensitive)),
       envFiles: version.envFiles.map((file) => file.relativePath),
       protectedPaths: version.protectedInputs.flatMap((pin) => (pin.kind === 'file' ? [pin.path] : pin.kind === 'jsonMember' ? [`${pin.path} (${pin.pointer.slice(1).replace(/\//g, '.')})`] : [])).slice(0, 40),
       baselineTreeId: version.baselineTreeId,
@@ -218,7 +228,15 @@ async function caseView(
     if (version.sharedSetup.length > 0 && attempt.length > 0) view.changedSharedSetup = await changedSharedSetup(service, bugCase.taskId, version, attempt[0].inputTreeId);
     const envRun = runs.find((run) => run.outcome === 'ENV_FILES_CHANGED' && run.versionId === version.id);
     if (envRun?.failure) view.envFilesChanged = version.envFiles.map((file) => file.relativePath).filter((file) => envRun.failure!.detail.includes(file));
+    // A bug saved before its recording's observations were kept cannot judge a changed value.
+    if (!version.recorded) view.unavailable = { 'edit-expectations': 'Record the bug again to edit them' };
   }
+  // Listed replays of expectations the person since changed are read against their own.
+  const earlier = new Set(runs.slice(0, LISTED_RUNS).flatMap((run) => (run.versionId && run.versionId !== version?.id ? [run.versionId] : [])));
+  const earlierVersions = versions
+    .filter((candidate) => earlier.has(candidate.id))
+    .map((candidate) => ({ id: candidate.id, version: candidate.version, checks: checkViews(candidate.document).map(({ id, statement }) => ({ id, statement })) }));
+  if (earlierVersions.length) view.earlierVersions = earlierVersions;
   view.screenshotFileIds = [...new Set(view.screenshotFileIds)].slice(0, 6);
   if (!view.shots.before) {
     const recordedShot = captureFiles.find((file) => file.kind === 'SCREENSHOT');
@@ -350,6 +368,8 @@ function actionsFor(view: BugCaseView, gate: BugReplayGateProjection, runs: Stor
       if (sendable) actions.push('send-to-agent');
       break;
   }
+  // What "fixed" means can change in any state: the changed version is reproduced again first.
+  if (view.version) actions.push('edit-expectations');
   if (view.version?.alsoAfterReload) actions.push('keep-browser-storage');
   actions.push('remove');
   return [...new Set(actions)];
@@ -359,6 +379,7 @@ function runView(run: StoredBugReplayRun, files: Array<{ id: string; kind: strin
   return {
     id: run.id,
     kind: run.kind,
+    ...(run.versionId ? { versionId: run.versionId } : {}),
     ...(run.control ? { control: true } : {}),
     state: run.state,
     ...(run.phase ? { phase: run.phase } : {}),

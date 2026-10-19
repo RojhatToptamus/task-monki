@@ -1,5 +1,5 @@
 import { compileBugCase } from '../../core/bugReplay/BugCaseCompiler';
-import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayKeptApprovalRecord, StoredBugReplayRun } from '../../core/bugReplay/BugReplayRecords';
+import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugRecordedObservation, BugReplayKeptApprovalRecord, StoredBugReplayRun } from '../../core/bugReplay/BugReplayRecords';
 import type { BugReplayDomObservation, BugReplayFrame, BugReplayRequestFact } from '../../core/bugReplay/runner/protocol';
 import type { BugCaseV1 } from '../../shared/bugCase';
 import { BUG_RECORDING_SCHEMA, type BugRecordingLogV1, type BugRecordingPick } from '../../shared/bugRecording';
@@ -86,11 +86,16 @@ export function totalDraft(overrides: Partial<BugCaptureDraft> = {}, expected = 
   };
 }
 
+/** The compiled case of the checkout recording and what the recording showed, as saving stores them. */
+export function checkoutCompiled(alsoAfterReload = false): { document: BugCaseV1; recorded: Record<string, BugRecordedObservation> } {
+  const compiled = compileBugCase(checkoutRecording(), totalDraft({}, '$45.00', alsoAfterReload));
+  if (!compiled.document || !compiled.recorded) throw new Error(`The checkout fixture did not compile: ${compiled.reason}`);
+  return { document: compiled.document, recorded: compiled.recorded };
+}
+
 /** The compiled case of the checkout recording, as saving it would store it. */
 export function checkoutCase(alsoAfterReload = false): BugCaseV1 {
-  const compiled = compileBugCase(checkoutRecording(), totalDraft({}, '$45.00', alsoAfterReload));
-  if (!compiled.document) throw new Error(`The checkout fixture did not compile: ${compiled.reason}`);
-  return compiled.document;
+  return checkoutCompiled(alsoAfterReload).document;
 }
 
 // Runner frames
@@ -115,20 +120,24 @@ export function requestFact(overrides: Partial<BugReplayRequestFact> = {}): BugR
   };
 }
 
-/** A run that completed every step and observed the total as `text`, then after reload as `afterReload`. */
+/**
+ * A run that completed every step and observed the total as `text`, then after reload as
+ * `afterReload`, held against what the document expects of it.
+ */
 export function runFrames(document: BugCaseV1, text: string, afterReload?: string): BugReplayFrame[] {
   const assertion = document.assertions[0];
+  const expected = assertion.kind === 'dom.text' ? assertion.value : undefined;
   const frames: BugReplayFrame[] = [
     { type: 'run-started', planSha256: 'a'.repeat(64), browserVersion: '152.0.0.0' },
     ...document.steps.map((step, index): BugReplayFrame => ({ type: 'step', stepId: step.id, index, status: 'done', candidateIndex: 0, atMs: 10 * (index + 1) })),
     { type: 'window', phase: 'main', startedAtMs: 30, endedAtMs: 1200, quiet: true },
     { type: 'requests', phase: 'main', requests: [requestFact()] },
-    { type: 'assertion', assertionId: assertion.id, phase: 'main', observation: totalObservation(text) }
+    { type: 'assertion', assertionId: assertion.id, phase: 'main', observation: totalObservation(text, expected) }
   ];
   if (afterReload !== undefined) {
     frames.push(
       { type: 'window', phase: 'afterReload', startedAtMs: 1300, endedAtMs: 2200, quiet: true },
-      { type: 'assertion', assertionId: assertion.id, phase: 'afterReload', observation: totalObservation(afterReload) }
+      { type: 'assertion', assertionId: assertion.id, phase: 'afterReload', observation: totalObservation(afterReload, expected) }
     );
   }
   frames.push({ type: 'run-finished', steps: document.steps.length, assertions: 1, frames: frames.length + 1 });
@@ -194,7 +203,7 @@ export function versionRecord(overrides: Partial<BugCaseVersionRecord> = {}): Bu
     version: 1,
     digest: 'd'.repeat(64),
     revisionKind: 'INITIAL',
-    document: checkoutCase(),
+    ...checkoutCompiled(),
     recipe: { name: 'preview.yaml', text: 'name: checkout\n', sha256: 'e'.repeat(64) },
     templateDigest: 'f'.repeat(64),
     protectedInputs: [],
