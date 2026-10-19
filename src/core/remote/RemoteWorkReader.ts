@@ -78,10 +78,10 @@ export function buildRemoteWorkSnapshot(input: {
     number: input.ref.number,
     url: input.url,
     // Display text is trimmed here: the store keeps no surrounding whitespace.
-    title: boundRemoteText(input.title, REMOTE_WORK_LIMITS.title).text.trim() || 'Untitled',
+    title: boundRemoteText(visibleRemoteText(input.title), REMOTE_WORK_LIMITS.title).text.trim() || 'Untitled',
     state: input.state,
     ...(input.author ? { author: input.author } : {}),
-    labels: input.labels.slice(0, REMOTE_WORK_LIMITS.labels).map((label) => boundRemoteText(label, 100).text.trim()).filter(Boolean),
+    labels: input.labels.slice(0, REMOTE_WORK_LIMITS.labels).map((label) => boundRemoteText(visibleRemoteText(label), 100).text.trim()).filter(Boolean),
     body: body.text,
     bodyTruncated: body.truncated,
     comments,

@@ -1,8 +1,8 @@
 import type { AgentItemRecord, ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer, ReviewResponseOutcome, RunRecord, TaskInstruction } from '../../shared/contracts';
 import { sessionTurn, type SessionTurn } from './agentSession';
 import type { ReviewRequestRound } from './pullRequestFeedback';
+import { formatCommentLocation } from './formatting';
 import { discussionSummary, formatDiscussionLocation } from './pullRequestFeedback';
-import { formatCommentLocation } from './reviewFollowUp';
 
 export const REVIEW_OUTCOME_LABELS: Record<ReviewResponseOutcome, string> = {
   FIXED: 'Fixed',

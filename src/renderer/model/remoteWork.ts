@@ -1,11 +1,9 @@
 import {
-  REMOTE_WORK_SNAPSHOT_SCHEMA,
   formatRemoteWorkNumber,
   remoteProviderName,
   selectRemoteRepositories,
   type RemoteProvider,
   type RemoteWorkKind,
-  type RemoteWorkSnapshot,
   type Repository,
   type Task
 } from '../../shared/contracts';
@@ -51,15 +49,4 @@ export function remoteSourceView(task: Pick<Task, 'remoteSource'>): RemoteSource
 export function issueOpener(task: Pick<Task, 'remoteSource'>): string | undefined {
   const source = task.remoteSource;
   return source?.kind === 'ISSUE' ? `Started from issue ${formatRemoteWorkNumber(source.provider, 'ISSUE', source.number)}` : undefined;
-}
-
-/** The captured text of a remote source, or undefined when it is unreadable. */
-export function parseRemoteWorkSnapshot(text: string, number: number): RemoteWorkSnapshot | undefined {
-  try {
-    const parsed = JSON.parse(text) as RemoteWorkSnapshot;
-    return parsed?.schema === REMOTE_WORK_SNAPSHOT_SCHEMA && parsed.number === number && typeof parsed.body === 'string'
-      ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
 }

@@ -49,6 +49,8 @@ export function RemoteWorkFields({
   // A query names another item or repository: searching again is the way out.
   const queryProblem = code === 'OTHER_REPOSITORY' || code === 'WRONG_KIND' || code === 'NOT_FOUND';
   const retryable = Boolean(problem) && !queryProblem && code !== 'NO_REMOTE' && code !== 'UNSUPPORTED_REMOTE';
+  // A problem no search can fix holds the field; a failed request may be the query's own, so the field stays open.
+  const searchCannotHelp = code === 'NO_REMOTE' || code === 'UNSUPPORTED_REMOTE' || code === 'CLI_MISSING' || code === 'SIGNED_OUT';
   const signIn = code === 'SIGNED_OUT' ? `${provider === 'GITLAB' ? 'glab' : 'gh'} auth login` : undefined;
   useEffect(() => {
     if (selected?.existingTaskId) existingButtonRef.current?.focus();
@@ -93,7 +95,7 @@ export function RemoteWorkFields({
       <div className="import-work__search">
         <Search size={16} aria-hidden="true" />
         <input ref={searchRef} value={query} aria-label={`Search ${label.toLowerCase()}s`} placeholder="Search or paste a link"
-          disabled={locked || (Boolean(problem) && !queryProblem)} autoFocus onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
+          disabled={locked || searchCannotHelp} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
             if (event.key === 'ArrowDown') {
               event.preventDefault();
               listRef.current?.querySelector<HTMLButtonElement>('[role="option"]')?.focus();
@@ -125,7 +127,7 @@ export function RemoteWorkFields({
           const isSelected = Boolean(selected && sameRemoteRepository(selected.ref.repository, item.ref.repository) && selected.ref.number === item.ref.number);
           return <button key={`${item.ref.repository.path}${number}`} type="button" role="option"
             className="import-work__checkout remote-work__item" aria-selected={isSelected}
-            aria-label={`${number} ${item.title}`} disabled={locked}
+            aria-label={`${number} ${item.title}${item.checks ? `, ${CHECK_WORDS[item.checks].toLowerCase()}` : ''}`} disabled={locked}
             tabIndex={selected ? (isSelected ? 0 : -1) : index === 0 ? 0 : -1}
             onClick={() => onSelect(item)}>
             <span className="import-work__radio" aria-hidden="true" />
@@ -137,9 +139,8 @@ export function RemoteWorkFields({
                 {item.author ? <span>{item.author}</span> : null}
                 {item.updatedAt ? <span>{formatRemoteWorkDate(item.updatedAt)}</span> : null}
                 {/* How its head's checks ended, as a mark among its facts: the word at the row's end is for its reviews. */}
-                {item.checks ? <span className="remote-work__checks" title={CHECK_WORDS[item.checks]}>
+                {item.checks ? <span className="remote-work__checks">
                   <StatusGlyph kind={item.checks === 'FAILING' ? 'blocked' : item.checks === 'PENDING' ? 'working' : 'verified'} />
-                  <span className="tm-visually-hidden">{CHECK_WORDS[item.checks]}</span>
                 </span> : null}
               </small>
             </span>

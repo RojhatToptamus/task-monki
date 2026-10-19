@@ -150,7 +150,7 @@ import {
   assertReplyToPullRequestRequest,
   assertResolvePullRequestDiscussionRequest,
   boundCheckLog,
-  UNSHIPPED_GIT_STATUSES,
+  holdsUnshippedWork,
   type FetchPullRequestUpdateRequest,
   type MarkPullRequestReadyRequest,
   type MergePullRequestRequest,
@@ -204,10 +204,10 @@ import { realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
-import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
+import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint, type PullRequestHead } from '../git/GitSnapshotService';
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
-import { GitHubService, parseGitHubRemoteUrl } from '../github/GitHubService';
-import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
+import { GitHubService } from '../github/GitHubService';
+import { deliveryRemote, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
 import { GitHubRemoteWork } from '../github/GitHubRemoteWork';
 import { GitLabCli } from '../gitlab/GitLabCli';
 import { GitLabRemoteWork } from '../gitlab/GitLabRemoteWork';
@@ -223,7 +223,7 @@ import {
   remoteFetchUrl,
   requireCheckoutRemote
 } from '../remote/RemoteCheckout';
-import { RemoteWorkError, safeCliMessage } from '../remote/RemoteWorkError';
+import { remoteWorkMessage } from '../remote/RemoteWorkError';
 import {
   formatRemoteWorkNumber,
   leavablePullRequestHeads,
@@ -231,12 +231,10 @@ import {
   remoteProviderForHost,
   remoteWorkNoun,
   sameRemoteRepository,
-  taskRemoteSourceRef,
   visibleRemoteText,
   type ListRemoteWorkRequest,
   type OpenPullRequestRequest,
   type RemoteProvider,
-  type RemoteRepositoryOption,
   type RemoteRepositoryRef,
   type RemoteWorkListing,
   type SyncPullRequestRequest
@@ -256,6 +254,7 @@ import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { SqliteTaskStore, TaskCreationRequestError } from '../storage/SqliteTaskStore';
+import { redactCredentialText } from '../agent/AgentCredentialRedaction';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import { AgentMutationAmbiguousError, type AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
@@ -1766,7 +1765,7 @@ export class TaskManagerService {
       if (input?.kind !== 'ISSUE' && input?.kind !== 'PULL_REQUEST') throw new Error('Choose issues or pull requests.');
       const repository = await this.requireAvailableRepository(input.repositoryId);
       if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
-      return this.remoteWork.list(repository, input, (ref) => this.store.findTaskForRemoteWork(ref));
+      return this.remoteWork.list(repository, input, (refs) => this.store.findTasksForRemoteWork(refs));
     });
   }
 
@@ -1927,7 +1926,7 @@ export class TaskManagerService {
   private async linkedPushRemote(
     task: Task,
     worktree: WorktreeRecord
-  ): Promise<{ remote: RemoteRepositoryOption; github: DeliveryRemote; headRepository?: RemoteRepositoryRef } | undefined> {
+  ): Promise<{ github: DeliveryRemote; headRepository?: RemoteRepositoryRef } | undefined> {
     const source = task.remoteSource;
     if (source?.kind !== 'ISSUE') return undefined;
     const base = { provider: source.provider, host: source.host, path: source.repositoryPath };
@@ -1937,7 +1936,6 @@ export class TaskManagerService {
       remotes.find((candidate) => sameRemoteRepository(candidate, base));
     if (!remote) throw new Error(`No remote of this checkout can publish to ${base.path}.`);
     return {
-      remote,
       github: deliveryRemote(remote),
       ...(sameRemoteRepository(remote, base) ? {} : { headRepository: { provider: remote.provider, host: remote.host, path: remote.path } })
     };
@@ -2006,10 +2004,12 @@ export class TaskManagerService {
   private async refreshOpenedPullRequest(task: Task, worktree: WorktreeRecord): Promise<PullRequestSnapshotRecord> {
     try {
       const repository = await this.requireAvailableRepository(task.repositoryId);
-      await this.remoteWork.refetchPullRequest(repository, task.remoteSource!);
-      const stored = await this.recordLinkedPullRequestStatus(task);
+      // A finished turn's evidence is recorded first: a merge the reading reports completes
+      // the task only when the worktree holds nothing the pull request lacks.
       const currentTask = await this.requireTask(task.id);
       if (currentTask.currentRunId) await this.ensurePostRunEvidence(currentTask.currentRunId);
+      await this.remoteWork.refetchPullRequest(repository, task.remoteSource!);
+      const stored = await this.recordLinkedPullRequestStatus(task);
       // An unchanged worktree keeps its snapshot: a refresh is not new work to capture.
       await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
       return stored;
@@ -2028,11 +2028,27 @@ export class TaskManagerService {
     const source = task.remoteSource;
     if (source?.kind !== 'PULL_REQUEST') throw new Error('The task was not opened from a pull request.');
     const worktree = await this.requireWorktree(task);
-    const delivery = await this.deliveryFor(task, worktree);
-    let sync = await delivery.viewPullRequest(worktree, source.number, linkedDeliveryTarget(task)!);
-    for (let attempt = 1; expectedHeadSha && sync.pullRequest.headRefOid !== expectedHeadSha && attempt <= 3; attempt += 1) {
+    return this.observePullRequest(task, worktree, await this.deliveryFor(task, worktree), source.number, linkedDeliveryTarget(task),
+      expectedHeadSha ? (sync) => sync.pullRequest.headRefOid === expectedHeadSha : undefined);
+  }
+
+  /**
+   * Reads a pull request and records the reading. After a step on it the
+   * platform reports the change a moment later, so the read waits briefly, up
+   * to three more reads, for `landed`; then it records what it last read.
+   */
+  private async observePullRequest(
+    task: Task,
+    worktree: WorktreeRecord,
+    delivery: PullRequestDelivery,
+    number: number,
+    target: DeliveryTarget | undefined,
+    landed?: (sync: PullRequestSync) => boolean
+  ): Promise<PullRequestSnapshotRecord> {
+    let sync = await delivery.viewPullRequest(worktree, number, target);
+    for (let attempt = 1; landed && !landed(sync) && attempt <= 3; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
-      sync = await delivery.viewPullRequest(worktree, source.number, linkedDeliveryTarget(task)!);
+      sync = await delivery.viewPullRequest(worktree, number, target);
     }
     const stored = await this.store.recordPullRequestSync(sync);
     this.emitGitHubUpdate(task.id, worktree, stored);
@@ -2046,18 +2062,19 @@ export class TaskManagerService {
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
       source: 'github',
-      payload: { operation, error: error instanceof RemoteWorkError ? error.message : safeCliMessage(error) }
+      payload: { operation, error: remoteWorkMessage(error) }
     })).catch(() => undefined);
   }
 
-  /** The head of the pull request a task was opened from, as last observed. */
-  private async pullRequestHead(task: Task): Promise<{ ref: string; sha: string } | undefined> {
+  /** The head of the pull request a task was opened from, as last observed, and the head it was opened at. */
+  private async pullRequestHead(task: Task): Promise<PullRequestHead | undefined> {
     const source = task.remoteSource;
     if (source?.kind !== 'PULL_REQUEST' || !source.pullRequest) return undefined;
     const latest = await this.store.getLatestPullRequest(task.id);
     return {
       ref: pullRequestHeadRef(source.provider, source.number),
-      sha: latest?.headRefOid ?? source.pullRequest.headSha
+      sha: latest?.headRefOid ?? source.pullRequest.headSha,
+      knownSha: source.pullRequest.headSha
     };
   }
 
@@ -4880,15 +4897,17 @@ export class TaskManagerService {
     let remoteUrl: string | undefined;
     if (worktree.ownership === 'EXTERNAL') {
       const destinations = (await git(worktree.worktreePath, [
-        'remote', 'get-url', '--push', '--all', githubReady.remoteName ?? 'origin'
+        'remote', 'get-url', '--push', '--all', '--', githubReady.remoteName ?? 'origin'
       ])).trim().split('\n').filter(Boolean);
       if (destinations.length !== 1) throw new Error('Select one push destination for this external checkout.');
       remoteUrl = destinations[0]!;
-      const destination = parseGitHubRemoteUrl(remoteUrl);
-      if (!destination || destination.host !== githubReady.host ||
-          destination.owner.toLowerCase() !== githubReady.owner?.toLowerCase() ||
-          destination.repo.toLowerCase() !== githubReady.repo?.toLowerCase()) {
-        throw new Error('The push destination differs from the selected GitHub repository. Inspect the remote settings before publishing.');
+      // Either platform's URL forms: the repository the push reaches must be the one preflight selected.
+      const destination = parseRemoteRepositoryUrl(remoteUrl);
+      const selected = githubReady.host && githubReady.owner && githubReady.repo
+        ? { provider: (await this.deliveryFor(task, worktree)).provider, host: githubReady.host, path: `${githubReady.owner}/${githubReady.repo}` }
+        : undefined;
+      if (!destination || !selected || !sameRemoteRepository(destination, selected)) {
+        throw new Error('The push destination differs from the selected repository. Inspect the remote settings before publishing.');
       }
     }
 
@@ -5076,7 +5095,7 @@ export class TaskManagerService {
       this.assertNoActiveTaskRun(await this.store.snapshot(), task.id, `merging the ${noun}`);
       // The worktree as it is now, not as last read: an edit since then is work the merge would leave behind.
       const observed = await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
-      if (UNSHIPPED_GIT_STATUSES.has(observed.status)) {
+      if (holdsUnshippedWork(observed, latest.headRefOid)) {
         throw new Error(`The worktree has changes the ${noun} does not. Push or discard them first.`);
       }
       const options = await action.delivery.readMergeOptions(worktree, action.address);
@@ -5112,10 +5131,9 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Replies', async () => {
       const task = await this.requireTask(input.taskId);
       this.assertNormalTask(task, 'Replies');
-      const action = await this.pullRequestAction(task);
+      const action = await this.openPullRequestAction(task);
       const { latest, noun, worktree, address, delivery } = action;
-      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
-      const feedback = await this.latestPullRequestFeedback(task.id, latest.number!);
+      const feedback = await this.latestPullRequestFeedback(task.id, latest.number);
       if (!feedback) throw new Error(`Refresh the ${noun} first.`);
       const discussions = new Map(feedback.discussions.map((discussion) => [discussion.id, discussion]));
       if (input.replies.some((reply) => !discussions.has(reply.discussionId))) {
@@ -5130,14 +5148,13 @@ export class TaskManagerService {
       }
       const result: ReplyToPullRequestResult = { posted: 0, resolved: 0, requested: [], failed: [] };
       const replied: string[] = [];
-      const failure = (error: unknown) => error instanceof RemoteWorkError ? error.message : safeCliMessage(error);
       for (const reply of input.replies.filter((candidate) => discussions.get(candidate.discussionId)!.kind === 'THREAD')) {
         const discussion = discussions.get(reply.discussionId)!;
         try {
-          await delivery.replyToDiscussion(worktree, address, discussion, reply.body.trim());
+          await delivery.replyToDiscussion(worktree, address, discussion.id, reply.body.trim());
           result.posted += 1;
         } catch (error) {
-          result.failed.push({ discussionId: discussion.id, error: failure(error) });
+          result.failed.push({ discussionId: discussion.id, error: remoteWorkMessage(error) });
           continue;
         }
         replied.push(discussion.id);
@@ -5146,7 +5163,7 @@ export class TaskManagerService {
             await delivery.resolveDiscussion(worktree, address, discussion.id);
             result.resolved += 1;
           } catch (error) {
-            result.failed.push({ discussionId: discussion.id, replied: true, error: `Replied, but the thread was not resolved: ${failure(error)}` });
+            result.failed.push({ discussionId: discussion.id, replied: true, error: `Replied, but the thread was not resolved: ${remoteWorkMessage(error)}` });
           }
         }
       }
@@ -5161,7 +5178,7 @@ export class TaskManagerService {
           result.posted += remarks.length;
           replied.push(...remarks.map((reply) => reply.discussionId));
         } catch (error) {
-          for (const reply of remarks) result.failed.push({ discussionId: reply.discussionId, error: failure(error) });
+          for (const reply of remarks) result.failed.push({ discussionId: reply.discussionId, error: remoteWorkMessage(error) });
         }
       }
       if (input.requestReviewFrom.length > 0) {
@@ -5169,7 +5186,7 @@ export class TaskManagerService {
           await delivery.requestReviewers(worktree, address, input.requestReviewFrom);
           result.requested = [...input.requestReviewFrom];
         } catch (error) {
-          result.failed.push({ reviewer: input.requestReviewFrom.join(', '), error: failure(error) });
+          result.failed.push({ reviewer: input.requestReviewFrom.join(', '), error: remoteWorkMessage(error) });
         }
       }
       if (result.posted > 0 || result.requested.length > 0) {
@@ -5198,16 +5215,15 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Replies', async () => {
       const task = await this.requireTask(input.taskId);
       this.assertNormalTask(task, 'Replies');
-      const action = await this.pullRequestAction(task);
-      const { latest, noun, worktree, address, delivery } = action;
-      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
+      const action = await this.openPullRequestAction(task);
+      const { latest, worktree, address, delivery } = action;
       const feedback = await this.latestPullRequestFeedback(task.id, latest.number);
       const discussion = feedback?.discussions.find((candidate) => candidate.id === input.discussionId);
       if (!discussion?.resolvable) throw new Error('Task Monki has not read this thread. Refresh, then try again.');
       try {
         await delivery.resolveDiscussion(worktree, address, discussion.id, input.resolved);
       } catch (error) {
-        throw new Error(error instanceof RemoteWorkError ? error.message : safeCliMessage(error));
+        throw new Error(remoteWorkMessage(error));
       }
       await this.store.appendEvent(createDomainEvent({
         type: 'PR_REPLIES_POSTED',
@@ -5231,18 +5247,16 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Re-run checks', async () => {
       const task = await this.requireTask(input.taskId);
       this.assertNormalTask(task, 'Re-run checks');
-      const action = await this.pullRequestAction(task);
-      const { latest, noun, worktree, address, delivery } = action;
-      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
-      const ci = (await this.store.snapshot()).ciRollups.find((record) =>
-        record.taskId === task.id && record.pullRequestNumber === latest.number && record.headSha === latest.headRefOid);
+      const action = await this.openPullRequestAction(task);
+      const { latest, worktree, address, delivery } = action;
+      const ci = await this.store.findCiRollup(task.id, latest.number, latest.headRefOid);
       const failed = (ci?.checkDetails ?? []).filter((check) => check.status === 'failed');
       if (failed.length === 0) throw new Error('No check failed for the current head. Refresh, then try again.');
       let started: number;
       try {
         started = await delivery.rerunFailedChecks(worktree, address, failed);
       } catch (error) {
-        throw new Error(error instanceof RemoteWorkError ? error.message : safeCliMessage(error));
+        throw new Error(remoteWorkMessage(error));
       }
       if (started === 0) throw new Error('These checks run outside the platform. Re-run them from their pages.');
       await this.store.appendEvent(createDomainEvent({
@@ -5253,8 +5267,9 @@ export class TaskManagerService {
         source: 'github',
         payload: { number: latest.number, headSha: latest.headRefOid, started }
       }));
-      // The platform queues them a moment later; the reading after waits for it briefly.
-      await this.recordPullRequestAfterAction(task, action, (sync) => sync.ci.status !== 'FAILING' && sync.ci.status !== 'BLOCKED')
+      // The platform lists none for a moment, then queues them; the reading after waits briefly for one
+      // to leave the failed list. A failed check of another system stays failed, so this cannot wait on all.
+      await this.recordPullRequestAfterAction(task, action, (sync) => sync.ci.totalCount > 0 && sync.ci.failingCount < failed.length)
         .catch(() => undefined);
       return { started };
     });
@@ -5264,17 +5279,15 @@ export class TaskManagerService {
   async readPullRequestCheckLogs(input: ReadPullRequestCheckLogsRequest): Promise<PullRequestCheckLog[]> {
     const task = await this.requireTask(input.taskId);
     const action = await this.pullRequestAction(task);
-    const snapshot = await this.store.snapshot();
-    const ci = snapshot.ciRollups.find((record) =>
-      record.taskId === task.id && record.pullRequestNumber === action.latest.number && record.headSha === action.latest.headRefOid);
+    const ci = await this.store.findCiRollup(task.id, action.latest.number, action.latest.headRefOid);
     const failing = (ci?.checkDetails ?? []).filter((check) => check.status === 'failed').slice(0, CHECK_LOG_LIMITS.checks);
-    const logs: PullRequestCheckLog[] = [];
-    for (const check of failing) {
+    // A few reads at most, side by side. A log goes to the agent, so a token it printed is redacted first.
+    const logs = await Promise.all(failing.map(async (check): Promise<PullRequestCheckLog | undefined> => {
       const raw = await action.delivery.readCheckLog(action.worktree, action.address, check).catch(() => undefined);
-      const bounded = raw === undefined ? undefined : boundCheckLog(raw);
-      if (bounded?.text) logs.push({ name: check.name, ...(check.link ? { link: check.link } : {}), ...bounded });
-    }
-    return logs;
+      const bounded = raw === undefined ? undefined : boundCheckLog(redactCredentialText(raw));
+      return bounded?.text ? { name: check.name, ...(check.link ? { link: check.link } : {}), ...bounded } : undefined;
+    }));
+    return logs.filter((log): log is PullRequestCheckLog => Boolean(log));
   }
 
   /**
@@ -5286,9 +5299,8 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Branch update', async () => {
       const task = await this.requireTask(input.taskId);
       this.assertNormalTask(task, 'Branch update');
-      const action = await this.pullRequestAction(task);
+      const action = await this.openPullRequestAction(task);
       const { latest, noun, worktree } = action;
-      if (latest.status !== 'OPEN_DRAFT' && latest.status !== 'OPEN_READY') throw new Error(`The ${noun} is not open.`);
       const repository = await this.requireAvailableRepository(task.repositoryId);
       const location = parseRemoteRepositoryUrl(latest.url.replace(/\/(?:pull|-\/merge_requests)\/\d+.*$/u, ''));
       if (!location) throw new Error(`The ${noun} is not recorded.`);
@@ -5326,7 +5338,7 @@ export class TaskManagerService {
   }> {
     const worktree = await this.requireWorktree(task);
     const delivery = await this.deliveryFor(task, worktree);
-    const noun = delivery.provider === 'GITLAB' ? 'merge request' : 'pull request';
+    const noun = remoteWorkNoun(delivery.provider, 'PULL_REQUEST');
     const latest = await this.store.getLatestPullRequest(task.id);
     if (!latest?.number || !latest.url) throw new Error(`The task has no ${noun}.`);
     const target = task.remoteSource?.kind === 'PULL_REQUEST'
@@ -5341,6 +5353,13 @@ export class TaskManagerService {
     };
   }
 
+  /** The task's pull request for a step that needs it open. */
+  private async openPullRequestAction(task: Task): ReturnType<TaskManagerService['pullRequestAction']> {
+    const action = await this.pullRequestAction(task);
+    if (action.latest.status !== 'OPEN_DRAFT' && action.latest.status !== 'OPEN_READY') throw new Error(`The ${action.noun} is not open.`);
+    return action;
+  }
+
   /**
    * Reads the pull request again after a step on it and records what the
    * platform reports; the platform may take a moment to show the step's result.
@@ -5350,13 +5369,7 @@ export class TaskManagerService {
     action: Awaited<ReturnType<TaskManagerService['pullRequestAction']>>,
     landed?: (sync: PullRequestSync) => boolean
   ): Promise<PullRequestSnapshotRecord> {
-    let sync = await action.delivery.viewPullRequest(action.worktree, action.latest.number, action.address.target);
-    for (let attempt = 1; landed && !landed(sync) && attempt <= 3; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
-      sync = await action.delivery.viewPullRequest(action.worktree, action.latest.number, action.address.target);
-    }
-    const stored = await this.store.recordPullRequestSync(sync);
-    this.emitGitHubUpdate(task.id, action.worktree, stored);
+    const stored = await this.observePullRequest(task, action.worktree, action.delivery, action.latest.number, action.address.target, landed);
     if (task.remoteSource?.kind === 'PULL_REQUEST') {
       await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true }).catch(() => undefined);
     }
@@ -5365,8 +5378,7 @@ export class TaskManagerService {
 
   /** The last reading of what people said on the task's pull request. */
   private async latestPullRequestFeedback(taskId: string, number: number): Promise<PullRequestFeedback | undefined> {
-    const summary = (await this.store.snapshot()).reviewRollups.find((record) =>
-      record.taskId === taskId && record.pullRequestNumber === number && record.feedback)?.feedback;
+    const summary = await this.store.findPullRequestFeedback(taskId, number);
     return summary ? parsePullRequestFeedback(await this.store.readArtifact(summary.artifactId), number) : undefined;
   }
 
@@ -6463,23 +6475,6 @@ export class TaskManagerService {
   }
 }
 
-/**
- * How a new pull request names the issue its task was opened from. A closing
- * keyword closes the issue when the pull request merges into the default
- * branch; the platform decides that, not the agent finishing.
- */
-/** A remote as a delivery reports it: the namespace, the project, and a URL without credentials. */
-function deliveryRemote(remote: RemoteRepositoryOption): DeliveryRemote {
-  const split = remote.path.lastIndexOf('/');
-  return {
-    remoteName: remote.remoteName,
-    remoteUrl: `https://${remote.host}/${remote.path}.git`,
-    host: remote.host,
-    owner: remote.path.slice(0, split),
-    repo: remote.path.slice(split + 1)
-  };
-}
-
 function remoteProviderForUrl(url: string): RemoteProvider | undefined {
   try {
     return remoteProviderForHost(new URL(url).host);
@@ -6488,6 +6483,11 @@ function remoteProviderForUrl(url: string): RemoteProvider | undefined {
   }
 }
 
+/**
+ * How a new pull request names the issue its task was opened from. A closing
+ * keyword closes the issue when the pull request merges into the default
+ * branch; the platform decides that, not the agent finishing.
+ */
 function issueReferenceLine(task: Task, closeIssue: boolean): string | undefined {
   const source = task.remoteSource;
   if (source?.kind !== 'ISSUE') return undefined;

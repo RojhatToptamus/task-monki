@@ -172,6 +172,25 @@ export interface RemoteWorkSnapshot {
   capturedAt: string;
 }
 
+/**
+ * The captured text of a remote source, or undefined when it is unreadable:
+ * every field the Overview and an agent's prompt read is checked, so a damaged
+ * artifact reads as unavailable rather than failing the task's runs.
+ */
+export function parseRemoteWorkSnapshot(text: string, number: number): RemoteWorkSnapshot | undefined {
+  try {
+    const parsed = JSON.parse(text) as RemoteWorkSnapshot;
+    return parsed?.schema === REMOTE_WORK_SNAPSHOT_SCHEMA && parsed.number === number &&
+      typeof parsed.title === 'string' && typeof parsed.state === 'string' && typeof parsed.body === 'string' &&
+      Array.isArray(parsed.labels) && parsed.labels.every((label) => typeof label === 'string') &&
+      Array.isArray(parsed.comments) && parsed.comments.every((comment) => typeof comment?.body === 'string') &&
+      Number.isSafeInteger(parsed.commentCount)
+      ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface RemoteWorkComment {
   author?: string;
   createdAt?: string;
@@ -183,7 +202,7 @@ export function remoteProviderForHost(host: string): RemoteProvider | undefined 
   return PROVIDER_HOSTS[host.toLowerCase()];
 }
 
-export function remoteProviderName(provider: RemoteProvider): string {
+export function remoteProviderName(provider: RemoteProvider): 'GitHub' | 'GitLab' {
   return provider === 'GITHUB' ? 'GitHub' : 'GitLab';
 }
 
@@ -195,16 +214,6 @@ export function remoteWorkNoun(provider: RemoteProvider, kind: RemoteWorkKind): 
 /** `#12`, or `!12` for a GitLab merge request. */
 export function formatRemoteWorkNumber(provider: RemoteProvider, kind: RemoteWorkKind, number: number): string {
   return `${provider === 'GITLAB' && kind === 'PULL_REQUEST' ? '!' : '#'}${number}`;
-}
-
-/** `owner/repo#12`, or `#12` when it is in `relativeTo`. */
-export function formatRemoteWorkReference(ref: RemoteWorkRef, relativeTo?: RemoteRepositoryRef): string {
-  const number = formatRemoteWorkNumber(ref.repository.provider, ref.kind, ref.number);
-  return relativeTo && sameRemoteRepository(ref.repository, relativeTo) ? number : `${ref.repository.path}${number}`;
-}
-
-export function remoteRepositoryWebUrl(repository: RemoteRepositoryRef): string {
-  return `https://${repository.host}/${repository.path}`;
 }
 
 export function sameRemoteRepository(left: RemoteRepositoryRef, right: RemoteRepositoryRef): boolean {
@@ -364,10 +373,37 @@ const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u20
  */
 export function visibleRemoteText(value: string | undefined): string {
   return (value ?? '').replace(/\r\n?/gu, '\n').replace(INVISIBLE_CHARACTERS, '')
-    .split(/(```[\s\S]*?```)/u)
-    .map((part, fence) => fence % 2 === 1 ? part
-      : part.split(/(`[^`\n]+`)/u).map((piece, code) => code % 2 === 1 ? piece : piece.replace(/<!--[\s\S]*?-->/gu, '')).join(''))
-    .join('');
+    .replace(CODE_OR_COMMENT, (_match, code: string | undefined) => code ?? '');
+}
+
+/**
+ * Code, fenced or inline, and HTML comments, read left to right: whichever
+ * starts first wins, as the platforms render them. A comment holding backticks
+ * is still a comment, and `<!--` inside code is code.
+ */
+const CODE_OR_COMMENT = /(```[\s\S]*?```|`[^`\n]+`)|<!--[\s\S]*?-->/gu;
+
+/** HTML GitHub and GitLab render; a tag outside this set, such as `List<String>` in prose, stays text. */
+const PLATFORM_TAG = /<\/?(details|summary|blockquote|p|div|span|br|hr|sub|sup|b|i|u|strong|em|ins|del|s|kbd|a|img|picture|source|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|h[1-6]|dl|dt|dd|center|code|pre)\b[^>]*>/giu;
+const BLOCK_TAG = /^(details|summary|blockquote|p|div|br|hr|table|thead|tbody|tfoot|tr|ul|ol|li|h[1-6]|dl|dt|dd|center|pre)$/iu;
+const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&nbsp;': ' ' };
+
+/**
+ * Platform text as Task Monki shows it, and so as an agent is sent it. The
+ * platforms render HTML, which the app's markdown would show as tags, so the
+ * tags give way to their text: a collapsed `<details>` reads as its summary and
+ * its contents, and an attribute no reader sees, such as an image's alt text,
+ * is gone. Code, fenced or inline, keeps every character.
+ */
+export function displayPlatformText(body: string): string {
+  return body.split(/(```[\s\S]*?```)/u).map((part, fence) => fence % 2 === 1 ? part
+    : part.split(/(`[^`\n]+`)/u).map((piece, code) => code % 2 === 1 ? piece
+      : piece
+        .replace(PLATFORM_TAG, (_tag, name: string) => (BLOCK_TAG.test(name) ? '\n' : ''))
+        .replace(/&(?:amp|lt|gt|quot|#39|nbsp);/gu, (entity) => ENTITIES[entity] ?? entity)).join('')).join('')
+    .replace(/[ \t]+\n/gu, '\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
 }
 
 /**

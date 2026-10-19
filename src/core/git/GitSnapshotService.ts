@@ -34,6 +34,8 @@ const GIT_STATUS_ARGS = [
 export interface PullRequestHead {
   ref: string;
   sha: string;
+  /** A head the checkout is known to hold, such as the one it was opened at, for when it lacks `sha`. */
+  knownSha?: string;
 }
 
 export async function inspectGitSnapshot(
@@ -416,18 +418,22 @@ export async function detectOperationInProgress(worktreePath: string): Promise<s
 
 /**
  * Commits on each side of the pull request head. A head that is not present
- * locally has at least one commit this checkout lacks.
+ * locally has at least one commit this checkout lacks, and the checkout's own
+ * commits are counted against the head it is known to hold: without the head to
+ * prove it, no local commit is taken as pushed.
  */
 async function relateToPullRequestHead(
   worktreePath: string,
   head: PullRequestHead
 ): Promise<Pick<ParsedStatus, 'upstreamRef' | 'aheadCount' | 'behindCount'>> {
-  const counts = await git(worktreePath, ['rev-list', '--left-right', '--count', `HEAD...${head.sha}`])
+  const sides = (sha: string) => git(worktreePath, ['rev-list', '--left-right', '--count', `HEAD...${sha}`])
     .then((value) => value.trim().split(/\s+/u).map(Number))
+    .then((counts) => (counts.length === 2 && counts.every(Number.isSafeInteger) ? counts : undefined))
     .catch(() => undefined);
-  return counts && counts.length === 2 && counts.every(Number.isSafeInteger)
-    ? { upstreamRef: head.ref, aheadCount: counts[0]!, behindCount: counts[1]! }
-    : { upstreamRef: head.ref, aheadCount: 0, behindCount: 1 };
+  const counts = await sides(head.sha);
+  if (counts) return { upstreamRef: head.ref, aheadCount: counts[0]!, behindCount: counts[1]! };
+  const known = head.knownSha && head.knownSha !== head.sha ? await sides(head.knownSha) : undefined;
+  return { upstreamRef: head.ref, aheadCount: known ? known[0]! : 1, behindCount: Math.max(known?.[1] ?? 0, 1) };
 }
 
 function deriveGitStatus(input: ParsedStatus & { committedDiffFileCount: number; commitsAheadOfBase: number }): GitStatus {

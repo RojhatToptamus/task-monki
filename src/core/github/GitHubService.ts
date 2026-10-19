@@ -161,7 +161,7 @@ export class GitHubService implements PullRequestDelivery {
         return { ...base, status: 'PUSHED' };
       } catch (error) {
         if (isRejectedPushError(error)) {
-          return { ...base, status: 'FAILED', error: 'The pull request branch moved since Task Monki last read it. Refresh to see its new commits.' };
+          return { ...base, status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.' };
         }
         return this.reconcileBranchPublication({
           task: input.task,
@@ -241,7 +241,9 @@ export class GitHubService implements PullRequestDelivery {
       ...(input.remoteUrl ? { remoteUrl: input.remoteUrl } : {}),
       branchName,
       remoteRef: `${input.remoteName}/${branchName}`,
-      headSha: input.expectedHeadSha
+      headSha: input.expectedHeadSha,
+      // Kept on an unconfirmed record, so a later check can still prove the push did not land.
+      ...(input.previousRemoteSha ? { previousRemoteSha: input.previousRemoteSha } : {})
     };
     let remoteHeadSha: string | undefined;
     if (input.worktree.ownership === 'EXTERNAL' && !input.remoteUrl) {
@@ -510,20 +512,11 @@ export class GitHubService implements PullRequestDelivery {
     }
   }
 
-  async replyToDiscussion(
-    worktree: WorktreeRecord,
-    address: PullRequestAddress,
-    discussion: { id: string; kind: 'THREAD' | 'REVIEW' | 'COMMENT' },
-    body: string
-  ): Promise<void> {
+  async replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, body: string): Promise<void> {
     const location = requireGitHubLocation(address);
-    if (discussion.kind !== 'THREAD') {
-      await this.commentOnPullRequest(worktree, address, body);
-      return;
-    }
     await this.exec([
       'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${GITHUB_THREAD_REPLY_MUTATION}`, '-f', `threadId=${discussion.id}`, '-F', 'body=@-'
+      '-f', `query=${GITHUB_THREAD_REPLY_MUTATION}`, '-f', `threadId=${discussionId}`, '-F', 'body=@-'
     ], worktree.worktreePath, 60_000, [], body);
   }
 
@@ -572,12 +565,21 @@ export class GitHubService implements PullRequestDelivery {
       const job = gitHubActionsJob(check.link);
       return job && job.owner.toLowerCase() === location.owner.toLowerCase() && job.name.toLowerCase() === location.name.toLowerCase() ? [job.run] : [];
     }));
+    let started = 0;
+    let refused: unknown;
     for (const run of runs) {
-      await this.exec([
-        'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
-      ], worktree.worktreePath, 60_000);
+      try {
+        await this.exec([
+          'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
+        ], worktree.worktreePath, 60_000);
+        started += 1;
+      } catch (error) {
+        refused ??= error;
+      }
     }
-    return runs.size;
+    // A run the platform refuses does not stop the rest; only when none started is the refusal the answer.
+    if (started === 0 && refused !== undefined) throw refused;
+    return started;
   }
 
   buildPullRequestBody(input: {
@@ -771,8 +773,12 @@ export function parseCiRollup(
   headSha?: string,
   rawCheckDetails?: unknown
 ): Omit<CiRollupRecord, 'id' | 'observedAt'> {
-  const checkDetails = parseCheckDetails(rawCheckDetails);
-  const rows = checkDetails.length > 0 ? checkDetails : Array.isArray(rawRollup) ? rawRollup : [];
+  // Every check counts toward the rollup; the record keeps a bounded list, failures first.
+  const allDetails = parseCheckDetails(rawCheckDetails);
+  const checkDetails = allDetails.length > MAX_CHECK_DETAILS
+    ? [...allDetails.filter((check) => check.status === 'failed'), ...allDetails.filter((check) => check.status !== 'failed')].slice(0, MAX_CHECK_DETAILS)
+    : allDetails;
+  const rows = allDetails.length > 0 ? allDetails : Array.isArray(rawRollup) ? rawRollup : [];
   let passingCount = 0;
   let pendingCount = 0;
   let failingCount = 0;
@@ -953,7 +959,7 @@ const MAX_CHECK_DETAILS = 80;
 
 function parseCheckDetails(rawCheckDetails: unknown): GitHubCheckDetailRecord[] {
   const rows = Array.isArray(rawCheckDetails) ? rawCheckDetails : [];
-  return rows.slice(0, MAX_CHECK_DETAILS).map((row) => {
+  return rows.map((row) => {
     const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
     // Platform text is stored trimmed, and an empty value is no value: the store loads neither.
     const text = (key: string) => stringField(item, key)?.trim() || undefined;

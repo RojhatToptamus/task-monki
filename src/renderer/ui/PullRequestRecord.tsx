@@ -1,8 +1,9 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { CircleMinus, ExternalLink, MessageSquare, RefreshCw, RotateCw } from 'lucide-react';
-import type { PullRequestCheckLog } from '../../shared/contracts';
+import { remoteProviderName, remoteWorkNoun, type PullRequestCheckLog } from '../../shared/contracts';
 import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
 import type { PullRequestRecordCheckRow, PullRequestRecordView, RecordTone } from '../model/pullRequestRecord';
+import { remoteWorkLabel } from '../model/remoteWork';
 import { DisclosureChevron } from './DisclosureChevron';
 import { PullRequestStateIcon } from './PullRequestIcon';
 import { StatusGlyph } from './StatusBadge';
@@ -43,11 +44,11 @@ export function PullRequestRecord({
       setAsking(undefined);
     }
   };
-  const noun = view.platform === 'GitLab' ? 'merge request' : 'pull request';
+  const noun = remoteWorkNoun(view.provider, 'PULL_REQUEST');
   const rows = view.checks?.rows ?? [];
   return (
     <OverviewSection
-      title={view.platform === 'GitLab' ? 'Merge request' : 'Pull request'}
+      title={remoteWorkLabel(view.provider, 'PULL_REQUEST')}
       inset
       className="tm-prrecord"
       aside={refresh ? (
@@ -101,7 +102,7 @@ export function PullRequestRecord({
                   {/* A person who reviewed can be asked again; one already asked, or an app, cannot. */}
                   {onAskAgain && !reviewer.waiting && !reviewer.bot ? (
                     <Tooltip label={`Ask ${reviewer.name} to review again`}>
-                      <button type="button" className="tm-prrecord__ask" aria-label={`Ask ${reviewer.name} to review again`}
+                      <button type="button" className="tm-iconbtn tm-prrecord__iconbtn tm-prrecord__ask" aria-label={`Ask ${reviewer.name} to review again`}
                         disabled={Boolean(asking)} onClick={() => void askAgain(reviewer.name)}>
                         <RotateCw aria-hidden="true" size={13} />
                       </button>
@@ -143,7 +144,7 @@ function Identity({ view }: { view: PullRequestRecordView }) {
       <PullRequestStateIcon state={view.state} />
       <span className="tm-prrecord__number">{view.label}</span>
       {view.title ? <span className="tm-prrecord__title">{view.title}</span> : null}
-      <span className="tm-visually-hidden">, {view.state}, opens on {view.platform}</span>
+      <span className="tm-visually-hidden">, {view.state}, opens on {remoteProviderName(view.provider)}</span>
     </>
   );
 }
@@ -180,18 +181,18 @@ const CHECK_WORDS: Record<PullRequestRecordCheckRow['status'], string> = {
   skipped: 'Skipped'
 };
 
-/** One check: its mark, its name, how long it ran, and the platform's page for it. */
+/** One check: its mark, its name, its state in words, how long it ran, and the platform's page for it. */
 export function CheckRow({ check, children }: { check: PullRequestRecordCheckRow; children?: ReactNode }) {
   return (
     <li className="tm-prrecord__check" data-status={check.status}>
       <ToneGlyph tone={CHECK_TONES[check.status]} />
-      <span className="tm-visually-hidden">{CHECK_WORDS[check.status]}:</span>
       <span className="tm-prrecord__checkname" title={check.workflow ? `${check.workflow}: ${check.name}` : check.name}>{check.name}</span>
+      <span className="tm-prrecord__word" data-tone={check.status === 'failed' ? 'error' : undefined}>{CHECK_WORDS[check.status]}</span>
       {check.duration ? <span className="tm-prrecord__duration">{check.duration}</span> : null}
       {children}
       {check.link ? (
         <Tooltip label={`Open ${check.name}`}>
-          <a className="tm-prrecord__open" href={check.link} target="_blank" rel="noreferrer" aria-label={`Open ${check.name}`}>
+          <a className="tm-iconbtn tm-prrecord__iconbtn" href={check.link} target="_blank" rel="noreferrer" aria-label={`Open ${check.name}`}>
             <ExternalLink aria-hidden="true" size={13} />
           </a>
         </Tooltip>

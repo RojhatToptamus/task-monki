@@ -106,6 +106,8 @@ export interface PullRequestFeedbackSummary {
   unresolvedCount: number;
   discussionCount: number;
   reviewers: PullRequestReviewer[];
+  /** The account that read the feedback: the person, whose own request for changes is theirs to answer. */
+  viewer?: string;
   /** The latest comment by the account that read the feedback, and by anyone else, in the platform's clock. */
   lastViewerCommentAt?: string;
   lastOtherCommentAt?: string;
@@ -115,7 +117,7 @@ export interface PullRequestFeedbackSummary {
  * When the person last wrote on the pull request and when anyone else did:
  * whose move it is turns on which came last.
  */
-export function feedbackCommentTimes(feedback: Pick<PullRequestFeedback, 'viewer' | 'discussions'>): Pick<PullRequestFeedbackSummary, 'lastViewerCommentAt' | 'lastOtherCommentAt'> {
+export function feedbackTurnFacts(feedback: Pick<PullRequestFeedback, 'viewer' | 'discussions'>): Pick<PullRequestFeedbackSummary, 'viewer' | 'lastViewerCommentAt' | 'lastOtherCommentAt'> {
   let viewer = 0;
   let other = 0;
   for (const discussion of feedback.discussions) {
@@ -127,28 +129,29 @@ export function feedbackCommentTimes(feedback: Pick<PullRequestFeedback, 'viewer
     }
   }
   return {
+    ...(feedback.viewer ? { viewer: feedback.viewer } : {}),
     ...(viewer ? { lastViewerCommentAt: new Date(viewer).toISOString() } : {}),
     ...(other ? { lastOtherCommentAt: new Date(other).toISOString() } : {})
   };
 }
 
 /**
- * Whose move a pull request under review waits on. It is the person's while a
- * reviewer's request or thread stands unanswered; it is the reviewers' once the
- * person wrote after everyone else, or asked again every reviewer who requested
- * changes. Nothing asks when no review requested changes and no thread is open.
+ * Whose move a pull request whose review requested changes waits on. It is the
+ * person's while a reviewer's request or thread stands unanswered; it is the
+ * reviewers' once the person wrote after everyone else, or asked again every
+ * reviewer who requested changes.
  */
 export function reviewTurn(
-  summary: Pick<PullRequestFeedbackSummary, 'reviewers' | 'unresolvedCount' | 'lastViewerCommentAt' | 'lastOtherCommentAt'>,
-  changesRequested: boolean
-): 'AUTHOR' | 'REVIEWERS' | undefined {
+  summary: Pick<PullRequestFeedbackSummary, 'reviewers' | 'viewer' | 'lastViewerCommentAt' | 'lastOtherCommentAt'>
+): 'AUTHOR' | 'REVIEWERS' {
   const asking = summary.reviewers.filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED');
-  if (!changesRequested && !asking.length && summary.unresolvedCount === 0) return undefined;
+  // The person's own request for changes, on a pull request they took on, stands until they make them.
+  if (summary.viewer && asking.some((reviewer) => reviewer.name === summary.viewer)) return 'AUTHOR';
   const viewer = summary.lastViewerCommentAt ? Date.parse(summary.lastViewerCommentAt) : 0;
   const other = summary.lastOtherCommentAt ? Date.parse(summary.lastOtherCommentAt) : 0;
   if (viewer > other) return 'REVIEWERS';
   // A reviewer asked again reads as requested on the platform, its verdict standing until they review.
-  if (changesRequested && !asking.length && summary.reviewers.some((reviewer) => reviewer.state === 'REQUESTED')) return 'REVIEWERS';
+  if (!asking.length && summary.reviewers.some((reviewer) => reviewer.state === 'REQUESTED')) return 'REVIEWERS';
   return 'AUTHOR';
 }
 

@@ -1,5 +1,5 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
-import { deliveryNumber, deliveryProvider, deliveryWords } from './deliveryWords';
+import { deliveryProvider, deliveryWords } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -12,6 +12,7 @@ import type {
 } from '../../shared/contracts';
 import {
   completionPolicyRequiresMerge,
+  formatRemoteWorkNumber,
   getImplementationRetryReason
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
@@ -434,7 +435,7 @@ export function cardPullRequestForTask(
   const provider = deliveryProvider({ remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection });
   return {
     number: projection.githubPullRequestNumber,
-    ...(projection.githubPullRequestNumber ? { label: deliveryNumber(provider, projection.githubPullRequestNumber) } : {}),
+    ...(projection.githubPullRequestNumber ? { label: formatRemoteWorkNumber(provider, 'PULL_REQUEST', projection.githubPullRequestNumber) } : {}),
     state,
     ...(note && !CARD_NOTE_STATED_BY[note]?.includes(stateLabel) ? { note } : {})
   };

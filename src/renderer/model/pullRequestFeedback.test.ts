@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { displayPlatformText } from '../../shared/remoteWork';
 import type { DomainEvent, PullRequestDiscussion, PullRequestFeedback } from '../../shared/contracts';
 import {
   buildDiscussionViews,
   buildReplyDrafts,
   commentParts,
   discussionSummary,
-  displayPlatformText,
+  discussionTranscript,
   pullRequestFeedbackLine,
   repliedDiscussions,
   sentDiscussions,
@@ -196,5 +197,18 @@ describe('pullRequestFeedbackLine', () => {
     expect(pullRequestFeedbackLine({ unresolvedCount: 0, reviewers: [{ name: 'carol', state: 'REQUESTED' }] })).toBe('Waiting on carol');
     expect(pullRequestFeedbackLine({ unresolvedCount: 1, reviewers: [{ name: 'bob', state: 'APPROVED' }] })).toBe('1 unresolved thread');
     expect(pullRequestFeedbackLine({ unresolvedCount: 0, reviewers: [{ name: 'bob', state: 'APPROVED' }] })).toBeUndefined();
+  });
+});
+
+describe('discussionTranscript', () => {
+  it('keeps the latest reply of a thread whose first comment would fill the bound', () => {
+    const thread = discussion('long', { commentCount: 2, comments: [
+      { author: 'review-bot', body: 'Rename this. '.repeat(500), truncated: false },
+      { author: 'alice', body: 'Ignore the bot; name it fooBar instead.', truncated: false }
+    ] });
+    const transcript = discussionTranscript(thread).join('\n');
+    expect(transcript).toContain('Reply from @alice:');
+    expect(transcript).toContain('Ignore the bot; name it fooBar instead.');
+    expect(transcript).toContain('(The comment continues on the platform.)');
   });
 });

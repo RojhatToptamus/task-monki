@@ -2,12 +2,12 @@ import {
   REMOTE_WORK_LIMITS,
   formatRemoteWorkNumber,
   parseRemoteWorkReference,
+  remoteWorkKey,
   remoteWorkNoun,
   remoteProviderName,
   type ListRemoteWorkRequest,
   type RemoteProvider,
   type RemoteRepositoryOption,
-  type RemoteWorkKind,
   type RemoteWorkListing,
   type RemoteWorkRef,
   type RemoteWorkSummary,
@@ -63,7 +63,7 @@ export class RemoteWorkService {
   async list(
     repository: Repository,
     input: ListRemoteWorkRequest,
-    findTask: (ref: RemoteWorkRef) => Promise<Task | undefined>
+    findTasks: (refs: readonly RemoteWorkRef[]) => Promise<ReadonlyMap<string, Task>>
   ): Promise<RemoteWorkListing> {
     const repositories = await this.remoteRepositories(repository);
     if (repositories.length === 0) {
@@ -86,16 +86,16 @@ export class RemoteWorkService {
         const ref: RemoteWorkRef = { repository: remote, kind: input.kind, number: reference.number };
         if (kind !== input.kind) {
           throw new RemoteWorkError('WRONG_KIND',
-            `${formatRemoteWorkNumber(remote.provider, kind, reference.number)} is a ${remoteWorkNoun(remote.provider, kind)}.`);
+            `${formatRemoteWorkNumber(remote.provider, kind, reference.number)} is ${kind === 'ISSUE' ? 'an' : 'a'} ${remoteWorkNoun(remote.provider, kind)}.`);
         }
         const reader = this.reader(remote.provider);
         const item = input.kind === 'ISSUE'
           ? (await reader.readIssue(ref, repository.path)).summary
           : (await reader.readPullRequest(ref, repository.path)).summary;
-        return { repositories, remote, items: await annotate([item], findTask), exact: true };
+        return { repositories, remote, items: await annotate([item], findTasks), exact: true };
       }
       const items = await this.reader(remote.provider).list(remote, input.kind, query || undefined, repository.path);
-      return { repositories, remote, items: await annotate(items, findTask), exact: false };
+      return { repositories, remote, items: await annotate(items, findTasks), exact: false };
     } catch (error) {
       return { repositories, remote, items: [], exact: false, unavailable: remoteWorkUnavailable(error) };
     }
@@ -201,14 +201,15 @@ export class RemoteWorkService {
 
 async function annotate(
   items: readonly RemoteWorkSummary[],
-  findTask: (ref: RemoteWorkRef) => Promise<Task | undefined>
+  findTasks: (refs: readonly RemoteWorkRef[]) => Promise<ReadonlyMap<string, Task>>
 ): Promise<RemoteWorkSummary[]> {
-  return Promise.all(items.map(async (item) => {
-    const task = await findTask(item.ref);
+  const tasks = await findTasks(items.map((item) => item.ref));
+  return items.map((item) => {
+    const task = tasks.get(remoteWorkKey(item.ref));
     return task
       ? { ...item, existingTaskId: task.id, existingTaskTitle: task.title, existingTaskPhase: task.workflowPhase }
       : item;
-  }));
+  });
 }
 
 export function pullRequestHeadRef(provider: RemoteProvider, number: number): string {

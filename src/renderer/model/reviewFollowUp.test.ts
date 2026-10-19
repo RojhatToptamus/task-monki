@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentReviewFinding } from '../../shared/contracts';
-import { buildReviewRequestInstruction, buildReviewRequestRecord, formatCommentLocation, planReviewRequest } from './reviewFollowUp';
+import { formatCommentLocation } from './formatting';
+import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest } from './reviewFollowUp';
 import type { ReviewFindingView } from './reviewWorkspace';
 
 const finding = (id: string, severity: AgentReviewFinding['severity'], extra: Partial<AgentReviewFinding> = {}): AgentReviewFinding => ({

@@ -298,9 +298,10 @@ const CHECKS_REGISTER_WITHIN_MS = 60_000;
 
 /**
  * Whether "no checks" for the pull request's head may only mean they have not
- * started. A head reports none until its CI registers them, moments after the
- * push. When an earlier head of the same pull request had checks, only a
- * reading of this head taken a minute after it first appeared says it has none.
+ * started. A head reports none until its CI registers them: moments after the
+ * push, and again for a moment after its failed checks are run again. When the
+ * pull request had checks before, only a reading taken a minute after this
+ * head's checks went missing says it has none.
  */
 export function checksMayNotHaveStarted(
   pullRequest: Pick<PullRequestSnapshotRecord, 'number' | 'headRefOid'> | undefined,
@@ -309,9 +310,12 @@ export function checksMayNotHaveStarted(
   const head = pullRequest?.headRefOid;
   if (!pullRequest?.number || !head) return false;
   const own = ciRollups.filter((record) => record.pullRequestNumber === pullRequest.number);
-  if (!own.some((record) => record.headSha && record.headSha !== head && record.totalCount > 0)) return false;
-  const seen = own.filter((record) => record.headSha === head).map((record) => Date.parse(record.observedAt)).filter(Number.isFinite);
-  return seen.length > 0 && Math.max(...seen) - Math.min(...seen) < CHECKS_REGISTER_WITHIN_MS;
+  if (!own.some((record) => record.totalCount > 0)) return false;
+  const time = (record: CiRollupRecord) => Date.parse(record.observedAt);
+  const ofHead = own.filter((record) => record.headSha === head && Number.isFinite(time(record)));
+  const lastWithChecks = Math.max(-Infinity, ...ofHead.filter((record) => record.totalCount > 0).map(time));
+  const missing = ofHead.filter((record) => !record.totalCount && time(record) > lastWithChecks).map(time);
+  return missing.length > 0 && Math.max(...missing) - Math.min(...missing) < CHECKS_REGISTER_WITHIN_MS;
 }
 
 function buildPrStatusCore(input: {
@@ -397,7 +401,8 @@ function buildPrStatusCore(input: {
   const terminal = terminalPrStatus(pullRequest, mergeSnapshot);
 
   if (terminal) {
-    if (terminal.kind === 'CLOSED_UNMERGED') {
+    // A replacement draft is the task's own; a task opened from a pull request never creates one.
+    if (terminal.kind === 'CLOSED_UNMERGED' && !openedPullRequest) {
       const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication, externalPublishReason, input.worktree?.ownership);
       return {
         ...baseStatus(pullRequest),
@@ -817,6 +822,17 @@ function deriveFreshness(input: {
         'The prior push could not be confirmed. Retry to recheck the remote safely.'
     };
   }
+  // What Git observed outranks a push that failed before it: once the branch is seen to
+  // diverge, bringing in the other side is the step, not pushing again.
+  if (
+    gitSnapshot?.status === 'DIVERGED' ||
+    ((gitSnapshot?.aheadCount ?? 0) > 0 && (gitSnapshot?.behindCount ?? 0) > 0)
+  ) {
+    return {
+      kind: 'BRANCH_DIVERGED',
+      line: 'Local branch and PR branch both changed.'
+    };
+  }
   if (branchPublication?.status === 'FAILED' && branchPublication.error) {
     if (isRemoteNewerPublicationError(branchPublication.error)) {
       return {
@@ -827,15 +843,6 @@ function deriveFreshness(input: {
     return {
       kind: 'LOCAL_NOT_PUSHED',
       line: `Last push failed: ${branchPublication.error}`
-    };
-  }
-  if (
-    gitSnapshot?.status === 'DIVERGED' ||
-    ((gitSnapshot?.aheadCount ?? 0) > 0 && (gitSnapshot?.behindCount ?? 0) > 0)
-  ) {
-    return {
-      kind: 'BRANCH_DIVERGED',
-      line: 'Local branch and PR branch both changed.'
     };
   }
   if (staleEvidence) {
@@ -985,7 +992,7 @@ function reviewToStatus(
 /** A review that requested changes the person has since answered: it waits on its reviewers. */
 function answeredReview(reviewRollup: ReviewRollupRecord): boolean {
   return reviewRollup.status === 'CHANGES_REQUESTED' && Boolean(reviewRollup.feedback) &&
-    reviewTurn(reviewRollup.feedback!, true) === 'REVIEWERS';
+    reviewTurn(reviewRollup.feedback!) === 'REVIEWERS';
 }
 
 function isReadyToMerge(

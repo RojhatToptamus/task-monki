@@ -1,5 +1,6 @@
 import {
   baseMovedReason,
+  formatRemoteWorkNumber,
   type CiRollupRecord,
   type GitHubCheckDetailRecord,
   type MergeSnapshotRecord,
@@ -8,7 +9,9 @@ import {
   type RemoteProvider,
   type ReviewRollupRecord
 } from '../../shared/contracts';
+import { formatElapsed } from './agentSession';
 import { deliveryEvidenceIdentity } from './prStatus';
+import { remoteWorkLabel } from './remoteWork';
 
 export type RecordTone = 'success' | 'error' | 'action' | 'neutral';
 
@@ -29,7 +32,7 @@ export interface PullRequestRecordView {
   title?: string;
   url?: string;
   state: 'draft' | 'open' | 'merged' | 'closed';
-  platform: 'GitHub' | 'GitLab';
+  provider: RemoteProvider;
   head?: string;
   base?: string;
   /** Checks for the current head, failures first. */
@@ -61,7 +64,7 @@ export function buildPullRequestRecord(input: {
 }): PullRequestRecordView | undefined {
   const { pullRequest } = input;
   if (!pullRequest || (!pullRequest.number && !pullRequest.url)) return undefined;
-  const gitLab = input.provider === 'GITLAB';
+  const provider = input.provider ?? 'GITHUB';
   const state = pullRequest.status === 'MERGED' ? 'merged'
     : pullRequest.status === 'CLOSED_UNMERGED' ? 'closed'
       : pullRequest.status === 'OPEN_DRAFT' || pullRequest.isDraft ? 'draft' : 'open';
@@ -74,11 +77,11 @@ export function buildPullRequestRecord(input: {
     .sort((left, right) => left.order - right.order)
     .map(({ name, word, tone, waiting, bot }) => ({ name, word, tone, waiting, ...(bot ? { bot } : {}) }));
   return {
-    label: pullRequest.number ? `${gitLab ? '!' : '#'}${pullRequest.number}` : gitLab ? 'Merge request' : 'Pull request',
+    label: pullRequest.number ? formatRemoteWorkNumber(provider, 'PULL_REQUEST', pullRequest.number) : remoteWorkLabel(provider, 'PULL_REQUEST'),
     ...(pullRequest.title?.trim() ? { title: pullRequest.title.trim() } : {}),
     ...(pullRequest.url ? { url: pullRequest.url } : {}),
     state,
-    platform: gitLab ? 'GitLab' : 'GitHub',
+    provider,
     ...(pullRequest.headRefName ? { head: pullRequest.headRefName } : {}),
     ...(pullRequest.baseRefName ? { base: pullRequest.baseRefName } : {}),
     // A merged or closed pull request's checks and threads no longer ask anything.
@@ -91,7 +94,7 @@ export function buildPullRequestRecord(input: {
         word: feedback.unresolvedCount > 0 ? `${feedback.unresolvedCount} unresolved` : 'All resolved'
       }
     } : {}),
-    ...mergeOf(pullRequest, current(input.mergeSnapshot), gitLab)
+    ...mergeOf(pullRequest, current(input.mergeSnapshot), provider === 'GITLAB')
   };
 }
 
@@ -201,10 +204,9 @@ function mergeOf(
 function checkDuration(startedAt?: string, completedAt?: string): string | undefined {
   const started = startedAt ? Date.parse(startedAt) : NaN;
   const completed = completedAt ? Date.parse(completedAt) : NaN;
-  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return undefined;
-  const seconds = Math.round((completed - started) / 1000);
-  const minutes = Math.floor(seconds / 60);
-  return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  // GitHub reports a time it does not have as year one; that is no time at all.
+  if (!(started > 0) || !(completed > 0) || completed < started) return undefined;
+  return formatElapsed(completed - started);
 }
 
 function formatDay(value: string | undefined): string | undefined {
@@ -215,6 +217,9 @@ function formatDay(value: string | undefined): string | undefined {
 }
 
 /** A check the platform can run again from here: a GitHub Actions job, or a GitLab job. */
-export function rerunnableCheck(link: string | undefined): boolean {
-  return /\/actions\/runs\/\d+\/job\/\d+(?:[/?#]|$)|\/-\/jobs\/\d+(?:[/?#]|$)/u.test(link ?? '');
+export function rerunnableCheck(link: string | undefined, pullRequestUrl: string | undefined): boolean {
+  const job = /^(https:\/\/[^/]+\/.+?)\/(?:actions\/runs\/\d+\/job\/\d+|-\/jobs\/\d+)(?:[/?#]|$)/u.exec(link ?? '');
+  const repository = /^(https:\/\/[^/]+\/.+?)\/(?:pull\/\d+|-\/merge_requests\/\d+)(?:[/?#]|$)/u.exec(pullRequestUrl ?? '');
+  // Only a job of the pull request's own repository: one elsewhere is not its to re-run.
+  return Boolean(job && repository && job[1]!.toLowerCase() === repository[1]!.toLowerCase());
 }

@@ -90,6 +90,27 @@ describe('a task opened from a pull request', () => {
     });
   });
 
+  it('offers no replacement draft when the pull request it was opened from closes', () => {
+    const view = buildPrStatusViewModel({
+      task: opened(),
+      gitSnapshot: gitFixture({ headSha: 'eee555', upstreamSha: 'aaa111', aheadCount: 1, status: 'COMMITTED_UNPUSHED' }),
+      pullRequest: prFixture({ headRefOid: 'aaa111', status: 'CLOSED_UNMERGED', state: 'CLOSED' })
+    });
+    expect(view).toMatchObject({ kind: 'CLOSED_UNMERGED', canCreateDraftPr: false });
+  });
+
+  it('brings in the commits a refused push could not overwrite, once the branch is seen to diverge', () => {
+    const view = buildPrStatusViewModel({
+      task: opened(),
+      gitSnapshot: gitFixture({ headSha: 'ddd444', upstreamSha: 'ccc333', aheadCount: 1, behindCount: 1, status: 'DIVERGED' }),
+      pullRequest: prFixture({ headRefOid: 'ccc333' }),
+      branchPublication: branchPublicationFixture({
+        status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.'
+      })
+    });
+    expect(view).toMatchObject({ kind: 'BRANCH_DIVERGED', canPullChanges: true, canPushUpdate: false });
+  });
+
   it('states that Task Monki does not push to a fork instead of offering an update that cannot run', () => {
     const view = buildPrStatusViewModel({
       task: opened(true),
@@ -369,7 +390,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view('2026-10-17T10:05:00.000Z')).toMatchObject({ kind: 'GITHUB_REVIEW_WAITING', headline: 'Waiting for review', fact: 'Waiting on alice', canMerge: false });
   });
 
-  it('does not call a pushed head ready to merge before its checks had a minute to start', () => {
+  it('does not call a pushed or re-run head ready to merge before its checks had a minute to start', () => {
     const pullRequest = prFixture();
     const earlier = ciFixture({ id: 'ci-0', headSha: 'old111', status: 'PASSING', totalCount: 2, passingCount: 2, observedAt: '2026-10-17T10:00:00.000Z' });
     const pushed = ciFixture({ headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:05:00.000Z' });
@@ -385,6 +406,12 @@ describe('buildPrStatusViewModel', () => {
     expect(checksMayNotHaveStarted(pullRequest, [later, pushed, earlier])).toBe(false);
     // A pull request that never had checks is a repository without CI.
     expect(checksMayNotHaveStarted(pullRequest, [pushed])).toBe(false);
+    // Failed checks run again: the platform lists none for this same head for a moment.
+    const failed = ciFixture({ id: 'ci-3', headSha: 'abc123', status: 'FAILING', totalCount: 2, failingCount: 1, observedAt: '2026-10-17T10:08:00.000Z' });
+    const rerun = ciFixture({ id: 'ci-4', headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:09:00.000Z' });
+    expect(checksMayNotHaveStarted(pullRequest, [rerun, failed])).toBe(true);
+    const stillNone = ciFixture({ id: 'ci-5', headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:10:05.000Z' });
+    expect(checksMayNotHaveStarted(pullRequest, [stillNone, rerun, failed])).toBe(false);
   });
 
   it('keeps GitHub review and draft state visible in a repository without CI', () => {

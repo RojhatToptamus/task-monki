@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHECK_LOG_LIMITS, boundCheckLog } from './pullRequestActions';
+import { CHECK_LOG_LIMITS, boundCheckLog, holdsUnshippedWork } from './pullRequestActions';
 
 describe('boundCheckLog', () => {
   it('keeps what a terminal shows at the end: a redrawn line at its last draw, and the latest lines past the bound', () => {
@@ -33,5 +33,18 @@ describe('boundCheckLog', () => {
     const huge = boundCheckLog(`${'noise\n'.repeat(400_000)}##[error]The end failed.\nPost job cleanup.`);
     expect(huge.text.split('\n').slice(-1)).toEqual(['Error: The end failed.']);
     expect(huge.truncated).toBe(true);
+  });
+});
+
+describe('holdsUnshippedWork', () => {
+  it('keeps a worktree with work the pull request lacks from merging, and lets a URL push of the pull request head through', () => {
+    const head = 'a'.repeat(40);
+    expect(holdsUnshippedWork({ status: 'DIRTY', headSha: head }, head)).toBe(true);
+    expect(holdsUnshippedWork({ status: 'DIVERGED', headSha: head }, head)).toBe(true);
+    expect(holdsUnshippedWork({ status: 'COMMITTED_UNPUSHED', headSha: 'b'.repeat(40) }, head)).toBe(true);
+    // Imported work is pushed by URL and has no upstream, so Git calls it unpushed: its head is the pull request's.
+    expect(holdsUnshippedWork({ status: 'COMMITTED_UNPUSHED', headSha: head }, head)).toBe(false);
+    expect(holdsUnshippedWork({ status: 'COMMITTED_UNPUSHED', headSha: head }, undefined)).toBe(true);
+    expect(holdsUnshippedWork({ status: 'PUSHED', headSha: head }, head)).toBe(false);
   });
 });

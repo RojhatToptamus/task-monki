@@ -15,8 +15,9 @@ import type {
 import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
+import { formatCommentLocation } from '../model/formatting';
 import { discussionAuthor, discussionSummary, formatDiscussionLocation, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
-import { formatCommentLocation, type ReviewRequestPlan } from '../model/reviewFollowUp';
+import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
 import {
@@ -650,7 +651,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       inRequest={included.has(finding.id)}
       dismissing={dismissingId === finding.id}
       onDismissingChange={(open) => setDismissingId(open ? finding.id : undefined)}
-      onFocus={() => setFocusedFindingId(finding.id)}
+      onFocus={() => { setFocusedFindingId(finding.id); setFocusedDiscussionId(undefined); }}
       onDismiss={props.onDismissFinding}
       onRestore={props.onRestoreFinding}
       onAsk={props.onAskAboutFinding}

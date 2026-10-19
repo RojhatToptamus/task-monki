@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RemoteWorkSnapshot, TaskRemoteSource } from '../../shared/contracts';
-import { parseRemoteWorkSnapshot } from '../model/remoteWork';
+import { parseRemoteWorkSnapshot } from '../../shared/remoteWork';
 
 /**
  * The text a task captured from its issue or pull request. It is immutable, so

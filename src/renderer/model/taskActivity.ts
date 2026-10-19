@@ -11,7 +11,7 @@ import type {
   WorktreeStatus
 } from '../../shared/contracts';
 import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
-import { pluralize, shortSha } from './formatting';
+import { listNames, pluralize, shortSha } from './formatting';
 import { deliveryProvider, deliveryWords } from './deliveryWords';
 
 export type TaskActivityActor =
@@ -902,7 +902,7 @@ function changesRequestedTitle(payload: Record<string, unknown>): string {
       typeof reviewer?.name === 'string' && reviewer.state === 'CHANGES_REQUESTED')
     .map((reviewer) => reviewer.name);
   if (names.length === 0) return 'Changes requested';
-  return `${names.length <= 2 ? names.join(' and ') : `${names[0]} and ${names.length - 1} others`} requested changes`;
+  return `${listNames(names)} requested changes`;
 }
 
 function mergeItem(

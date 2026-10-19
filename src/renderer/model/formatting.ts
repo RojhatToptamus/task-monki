@@ -67,6 +67,21 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** Names as a sentence lists them: "alice", "alice and bob", "alice, bob and 2 more". */
+export function listNames(names: readonly string[]): string {
+  if (names.length <= 2) return names.join(' and ');
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
+}
+
+/** Where a comment points in the diff, as the agent and the person read it. */
+export function formatCommentLocation(comment: { path: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number }): string {
+  if (!comment.line) return `${comment.path} (whole file)`;
+  const lines = comment.endLine && comment.endLine > comment.line ? `${comment.line}-${comment.endLine}` : `${comment.line}`;
+  return comment.side === 'OLD'
+    ? `${comment.path} (removed line${comment.endLine && comment.endLine > comment.line ? 's' : ''} ${lines})`
+    : `${comment.path}:${lines}`;
+}
+
 /**
  * A person's initials for their avatar, from a name or an account: "Rojhat
  * Toptamus" and "RojhatToptamus" read RT, "github-actions[bot]" GA, "octocat" O.

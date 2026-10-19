@@ -8,14 +8,14 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import type { PullRequestMergeMethod, PullRequestMergeOptions } from '../../shared/pullRequestActions';
-import type { PullRequestDiscussion, PullRequestReviewer } from '../../shared/pullRequestFeedback';
-import type { RemoteRepositoryRef } from '../../shared/remoteWork';
+import type { PullRequestReviewer } from '../../shared/pullRequestFeedback';
+import { parseRemoteWorkReference, type RemoteRepositoryOption, type RemoteRepositoryRef } from '../../shared/remoteWork';
 import { git } from '../git/gitCli';
 import { parseCiRollup } from '../github/GitHubService';
 import { listCheckoutRemoteRepositories } from '../remote/RemoteCheckout';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
 import { canonicalPlatformTime } from '../remote/platformTime';
-import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
+import { deliveryRemote, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
 import { GitLabCli, gitLabProject } from './GitLabCli';
 import {
   GITLAB_DISCUSSION_PAGE,
@@ -41,7 +41,7 @@ interface GitLabMergeRequest {
   sha?: string;
   merged_at?: string | null;
   detailed_merge_status?: string;
-  head_pipeline?: { id?: number; project_id?: number; sha?: string; status?: string } | null;
+  head_pipeline?: { id?: number; project_id?: number; sha?: string; ref?: string; status?: string; web_url?: string } | null;
 }
 
 interface GitLabApprovals {
@@ -248,19 +248,10 @@ export class GitLabService implements PullRequestDelivery {
     }
   }
 
-  async replyToDiscussion(
-    worktree: WorktreeRecord,
-    address: PullRequestAddress,
-    discussion: Pick<PullRequestDiscussion, 'id' | 'kind'>,
-    body: string
-  ): Promise<void> {
-    if (discussion.kind !== 'THREAD') {
-      await this.commentOnPullRequest(worktree, address, body);
-      return;
-    }
+  async replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, body: string): Promise<void> {
     const { project, base } = await this.address(worktree, address);
     await this.cli.request({
-      host: project.host, endpoint: `${base}/discussions/${encodeURIComponent(discussion.id)}/notes`, method: 'POST',
+      host: project.host, endpoint: `${base}/discussions/${encodeURIComponent(discussionId)}/notes`, method: 'POST',
       stdinField: { name: 'body', value: body }, cwd: worktree.worktreePath, timeout: 60_000
     });
   }
@@ -304,22 +295,33 @@ export class GitLabService implements PullRequestDelivery {
   async rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number> {
     const { project } = await this.address(worktree, address);
     let retried = 0;
+    let refused: unknown;
     for (const check of checks) {
       const match = /^https:\/\/([^/]+)\/(.+)\/-\/jobs\/(\d+)(?:[/?#].*)?$/u.exec(check.link ?? '');
       // Only a job of this merge request's own project; a link elsewhere is not this one's to retry.
       if (!match || match[1]!.toLowerCase() !== project.host.toLowerCase() || match[2]!.toLowerCase() !== project.path.toLowerCase()) continue;
-      await this.cli.request({
-        host: project.host, endpoint: `projects/${gitLabProject(project.path)}/jobs/${match[3]}/retry`, method: 'POST',
-        cwd: worktree.worktreePath, timeout: 60_000
-      });
-      retried += 1;
+      try {
+        await this.cli.request({
+          host: project.host, endpoint: `projects/${gitLabProject(project.path)}/jobs/${match[3]}/retry`, method: 'POST',
+          cwd: worktree.worktreePath, timeout: 60_000
+        });
+        retried += 1;
+      } catch (error) {
+        refused ??= error;
+      }
     }
+    // A job the platform refuses does not stop the rest; only when none started is the refusal the answer.
+    if (retried === 0 && refused !== undefined) throw refused;
     return retried;
   }
 
   private async address(worktree: WorktreeRecord, address: PullRequestAddress): Promise<{ project: RemoteRepositoryRef; base: string }> {
-    const project = address.target?.repository ?? await this.requireProject(worktree);
     if (!Number.isSafeInteger(address.number) || address.number < 1) throw new Error('The merge request is not recorded.');
+    // The recorded merge request names its project, as on GitHub: a remote added since does not move it.
+    const recorded = parseRemoteWorkReference(address.url);
+    const project = recorded?.repository && recorded.kind === 'PULL_REQUEST' && recorded.number === address.number
+      ? recorded.repository
+      : address.target?.repository ?? await this.requireProject(worktree);
     return { project, base: `projects/${gitLabProject(project.path)}/merge_requests/${address.number}` };
   }
 
@@ -338,25 +340,28 @@ export class GitLabService implements PullRequestDelivery {
   }
 }
 
+/**
+ * The checkout's GitLab remote a task pushes to and opens its merge request
+ * from: `origin` when it is on GitLab, a contributor's fork or the project
+ * itself, as on GitHub; otherwise the first GitLab remote.
+ */
+async function gitLabRemote(worktreePath: string): Promise<RemoteRepositoryOption | undefined> {
+  const remotes = (await listCheckoutRemoteRepositories(worktreePath)).filter((candidate) => candidate.provider === 'GITLAB');
+  return remotes.find((candidate) => candidate.remoteName === 'origin') ?? remotes[0];
+}
+
 async function detectGitLabProject(worktreePath: string): Promise<RemoteRepositoryRef | undefined> {
-  const remote = (await listCheckoutRemoteRepositories(worktreePath)).find((candidate) => candidate.provider === 'GITLAB');
+  const remote = await gitLabRemote(worktreePath);
   return remote ? { provider: remote.provider, host: remote.host, path: remote.path } : undefined;
 }
 
 async function detectGitLabRemote(worktreePath: string): Promise<DeliveryRemote | undefined> {
-  const remote = (await listCheckoutRemoteRepositories(worktreePath)).find((candidate) => candidate.provider === 'GITLAB');
-  if (!remote) return undefined;
-  const split = remote.path.lastIndexOf('/');
-  return {
-    remoteName: remote.remoteName,
-    remoteUrl: `https://${remote.host}/${remote.path}.git`,
-    host: remote.host,
-    owner: remote.path.slice(0, split),
-    repo: remote.path.slice(split + 1)
-  };
+  const remote = await gitLabRemote(worktreePath);
+  return remote ? deliveryRemote(remote) : undefined;
 }
 
 const DRAFT_PREFIX = /^\s*(?:draft:|\[draft\]|\(draft\))\s*/iu;
+const MERGE_REF_PIPELINE = /^refs\/merge-requests\/\d+\/(?:merge|train)$/u;
 
 /** GitLab marks a draft by its title. */
 export function draftTitle(title: string): string {
@@ -426,12 +431,18 @@ export function parseMergeRequest(
   const owner = { taskId: worktree.taskId, iterationId: worktree.iterationId, worktreeId: worktree.id };
   const number = raw.iid;
   const headSha = raw.sha;
-  const state = raw.state === 'merged' ? 'MERGED' : raw.state === 'opened' ? 'OPEN' : 'CLOSED';
+  // `locked` is a merge in progress: still open until GitLab reports it merged.
+  const state = raw.state === 'merged' ? 'MERGED' : raw.state === 'opened' || raw.state === 'locked' ? 'OPEN' : 'CLOSED';
   const status: PullRequestSnapshotRecord['status'] = state === 'MERGED' ? 'MERGED'
     : state === 'CLOSED' ? 'CLOSED_UNMERGED' : raw.draft ? 'OPEN_DRAFT' : 'OPEN_READY';
   const pipeline = raw.head_pipeline ?? undefined;
+  // Without its jobs, a read that failed or a pipeline of trigger jobs only, the pipeline's own
+  // status is the evidence: a pipeline that exists never reads as no checks.
+  const rows: readonly GitLabJob[] = jobs?.length ? jobs
+    : pipeline?.status ? [{ name: 'Pipeline', status: pipeline.status, ...(pipeline.web_url ? { web_url: pipeline.web_url } : {}) }]
+      : [];
   // Pipeline jobs in the shape the check list reads; a job allowed to fail cannot block.
-  const checks = (jobs ?? []).map((job) => ({
+  const checks = rows.map((job) => ({
     name: [job.stage?.trim(), job.name?.trim()].filter(Boolean).join(': ') || 'Unnamed job',
     bucket: job.status === 'success' ? 'pass'
       : job.status === 'failed' ? (job.allow_failure ? 'skipping' : 'fail')
@@ -471,10 +482,13 @@ export function parseMergeRequest(
       baseRefName: raw.target_branch,
       mergedAt: canonicalPlatformTime(raw.merged_at) ?? null,
       title: raw.title,
-      raw
+      // What the reading turned on, not the whole response: a description can be a megabyte.
+      raw: { state: raw.state, draft: raw.draft, sha: raw.sha, detailed_merge_status: raw.detailed_merge_status, head_pipeline: pipeline }
     },
-    // A pipeline for an older commit is evidence for that commit, which PR Status marks stale.
-    ci: parseCiRollup(undefined, worktree, number, pipeline ? pipeline.sha : headSha, checks.length ? checks : undefined),
+    // A pipeline for an older commit is evidence for that commit, which PR Status marks stale. A
+    // merged-results or merge-train pipeline runs on a merge commit GitLab makes for the current head.
+    ci: parseCiRollup(undefined, worktree, number,
+      pipeline?.sha && !MERGE_REF_PIPELINE.test(pipeline.ref ?? '') ? pipeline.sha : headSha, checks.length ? checks : undefined),
     reviews: { ...owner, pullRequestNumber: number, headSha, status: reviewStatus, ...(raw.detailed_merge_status ? { reviewDecision: raw.detailed_merge_status } : {}), raw: approvals },
     merge: { ...owner, pullRequestNumber: number, headSha, status: mergeStatus, mergedAt: canonicalPlatformTime(raw.merged_at) ?? null, raw: { detailed_merge_status: raw.detailed_merge_status } }
   };

@@ -213,14 +213,15 @@ pull request text as immutable JSON (title, body, labels, ten most recent
 comments, each bounded), owned by the task and deleted with it. A pull request
 source also records the opened head, merge base and branches. A push to an
 opened pull request's branch records `previousRemoteSha`, the head its lease
-names. Platform text is stored trimmed, and HTML comments, which the platforms
-hide from readers, are left out of captured text. A task source, pull request,
+names. Platform text is stored trimmed, and HTML comments outside code, which
+the platforms hide from readers, are left out of captured text. A task source, pull request,
 check, review or merge observation is validated as it is written, so a value the
 store could not load fails that action instead of startup. Schema 31 also
 carries pull request feedback: each review observation may keep a `feedback`
 summary (artifact id, digest, unresolved and discussion counts, reviewers with
-an optional `bot` mark, and the platform times of the person's latest comment
-and anyone else's, `lastViewerCommentAt` and `lastOtherCommentAt`) whose
+an optional `bot` mark, the reading account as `viewer`, and the platform times
+of the person's latest comment and anyone else's, `lastViewerCommentAt` and
+`lastOtherCommentAt`) whose
 `pull-request-feedback` artifact belongs to the same task and holds the bounded
 threads, reviews and comments; unchanged feedback reuses its artifact, and a
 failed read keeps the last one. Startup refuses a summary whose artifact is

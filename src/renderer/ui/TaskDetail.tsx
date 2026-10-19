@@ -16,6 +16,8 @@ import {
   formatRemoteWorkNumber,
   getImplementationRetryReason,
   normalizePullRequestTitle,
+  remoteProviderName,
+  remoteWorkNoun,
   REVIEW_REQUEST_ITEM_LIMIT,
   type AskSubject,
   type DecideReviewFindingRequest,
@@ -86,7 +88,6 @@ import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
-import { DisclosureChevron } from './DisclosureChevron';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
 import { buildDiscussionViews, buildReplyDrafts, repliedDiscussions, sentDiscussions, unaddressedDiscussions, type DiscussionView } from '../model/pullRequestFeedback';
 import { buildPullRequestRecord, rerunnableCheck } from '../model/pullRequestRecord';
@@ -128,7 +129,6 @@ import {
   buildPrStatusCreateOrPushTitle,
   buildPrStatusViewModel,
   shouldShowPrStatusOnOverview,
-  type PrCheckGroup,
   type PrStatusViewModel
 } from '../model/prStatus';
 import {
@@ -475,9 +475,12 @@ export function TaskDetail(props: TaskDetailProps) {
         checksMayNotHaveStarted: props.checksMayNotHaveStarted
       })
     : undefined;
+  // The agent's answers wait until the fixes they name are on the pull request: a reply says
+  // "Fixed in <head>", so it is offered only while the pull request holds the worktree's work.
+  const pullRequestHoldsWork = Boolean(prStatus && !['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(prStatus.kind));
   // The status word reads what PR Status read from the records, as the board summary does,
   // including whose move a review that requested changes waits on.
-  const turn = reviewRollup?.status === 'CHANGES_REQUESTED' && reviewRollup.feedback ? reviewTurn(reviewRollup.feedback, true) : undefined;
+  const turn = reviewRollup?.status === 'CHANGES_REQUESTED' && reviewRollup.feedback ? reviewTurn(reviewRollup.feedback) : undefined;
   const statusTask = task ? {
     ...task,
     ...(prStatus?.kind === 'BRANCH_DIVERGED' && prStatus.canSyncBranch ? { pullRequestRewritten: true } : {}),
@@ -931,7 +934,7 @@ export function TaskDetail(props: TaskDetailProps) {
       });
       if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
       else await startWithSettings(task.id, instruction);
-    });
+    }).catch(() => undefined); // The shell reported why; nothing went to the agent.
   };
 
   const markPullRequestReady = () =>
@@ -1406,30 +1409,16 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   };
 
-  const prStatusCard = (prominent: boolean, title?: string) => (
+  const prStatusCard = () => (
     <PrStatusCard
       view={prStatus}
       actionState={prActionState}
-      prominent={prominent}
-      title={title}
-      addressComments={canAddressComments ? { onRun: addressComments } : undefined}
       onCreateDraftPr={() => openDraftPrModal()}
-      onPushUpdate={() =>
-        void runDeliveryAction(async () => {
-          await props.onCreatePullRequest(task.id);
-        })
-      }
-      onSyncBranch={() =>
-        void runDeliveryAction(async () => {
-          await props.onSyncPullRequest?.(task.id);
-        })
-      }
       onRefresh={() =>
         void runDeliveryAction(async () => {
           await props.onRefreshGitHub(task.id);
         })
       }
-      onInvestigate={() => void investigateFailingChecks()}
     />
   );
 
@@ -1496,7 +1485,6 @@ export function TaskDetail(props: TaskDetailProps) {
     const pause = prActionState.pauseReason;
     const agentStepReason = pause ?? (!deliverySourceRun && !importedBeforeFirstRun ? 'No completed run is available.' : undefined);
     const gitLab = provider === 'GITLAB';
-    const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(prStatus.kind);
     const createOrPushReason = prActionState.createOrPushDisabled ? prActionState.createOrPushReason : undefined;
     const delivery = (action: () => Promise<void> | undefined) => () => void runDeliveryAction(async () => { await action(); });
     // Each step with the one fact it turns on: the lead step's fact stands above the actions.
@@ -1514,14 +1502,14 @@ export function TaskDetail(props: TaskDetailProps) {
         onClick: () => void investigateFailingChecks() } } : undefined,
       // A check that failed by chance runs again where it ran, without the agent.
       prStatus.canInvestigateFailure && props.onRerunPullRequestChecks &&
-        (prRecord?.checks?.rows ?? []).some((check) => check.status === 'failed' && rerunnableCheck(check.link))
+        (prRecord?.checks?.rows ?? []).some((check) => check.status === 'failed' && rerunnableCheck(check.link, pullRequest?.url))
         ? { action: { label: 'Re-run failed', disabled: Boolean(pause), reason: pause,
           onClick: delivery(() => props.onRerunPullRequestChecks!(task.id)) } } : undefined,
       // What reviewers asked is listed under the step, so it is read before it is sent.
       canAddressComments ? { action: { label: 'Address comments', onClick: addressComments }, comments: unaddressed } : undefined,
       // Replies wait until the fixes they name are on the pull request.
-      replyDrafts.length > 0 && !freshnessProblem && props.onReplyToPullRequest
-        ? { action: { label: `Reply on ${gitLab ? 'GitLab' : 'GitHub'}`, disabled: Boolean(pause), reason: pause, onClick: () => setReplyModalOpen(true) },
+      replyDrafts.length > 0 && pullRequestHoldsWork && props.onReplyToPullRequest
+        ? { action: { label: `Reply on ${remoteProviderName(provider)}`, disabled: Boolean(pause), reason: pause, onClick: () => setReplyModalOpen(true) },
           fact: `${replyDrafts.length} ${replyDrafts.length === 1 ? 'answer' : 'answers'} ready to post` } : undefined,
       prStatus.canMarkReady && props.onMarkPullRequestReady
         ? { action: { label: gitLab ? 'Mark as ready' : 'Ready for review', disabled: Boolean(pause), reason: pause, onClick: markPullRequestReady } } : undefined,
@@ -1951,7 +1939,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 {hasHistoricalReviewContext && !reviewInSlot ? reviewPanel : null}
                 {/* Before a pull request exists, opening one is a section here; once one exists, the record holds
                     its facts and this section its steps, while another step holds the Now panel. */}
-                {prSectionVisible ? (prStatus.hasPullRequest ? deliverySection() : prStatusCard(false)) : null}
+                {prSectionVisible ? (prStatus.hasPullRequest ? deliverySection() : prStatusCard()) : null}
                 {finishSectionVisible ? (
                   <NextActionPanel
                     placement="section"
@@ -2051,6 +2039,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 : undefined,
               onClick: primaryAction.onClick
             } : undefined}
+            promptOptional={task.remoteSource?.kind === 'ISSUE'}
             onSettingsChange={(settings) => setDraftSettings({ taskId: task.id, settings })}
             onDiscoverModels={props.onDiscoverAgentRuntimeModels}
           /> : null}
@@ -2137,7 +2126,7 @@ export function TaskDetail(props: TaskDetailProps) {
             onRequestSheetOpened={() => setRequestSheetPending(false)}
             revealDiscussionId={revealDiscussionId}
             onDiscussionRevealed={() => setRevealDiscussionId(undefined)}
-            replyDrafts={replyDraftsById}
+            replyDrafts={pullRequestHoldsWork ? replyDraftsById : undefined}
             onReplyToDiscussion={pullRequestOpen && props.onReplyToPullRequest ? async (discussionId, body, resolve) => {
               const result = await props.onReplyToPullRequest!(task.id, [{ discussionId, body, resolve }], []);
               const failure = result.failed.find((candidate) => candidate.discussionId === discussionId);
@@ -2278,8 +2267,8 @@ export function TaskDetail(props: TaskDetailProps) {
 
       {mergeModalOpen && prStatus.prHeadSha && props.onReadPullRequestMergeOptions && props.onMergePullRequest ? (
         <MergePullRequestModal
-          platform={provider === 'GITLAB' ? 'GitLab' : 'GitHub'}
-          noun={provider === 'GITLAB' ? 'merge request' : 'pull request'}
+          platform={remoteProviderName(provider)}
+          noun={remoteWorkNoun(provider, 'PULL_REQUEST')}
           headSha={prStatus.prHeadSha}
           ownBranch={task.remoteSource?.kind !== 'PULL_REQUEST' && worktree?.ownership !== 'EXTERNAL'}
           loadOptions={() => props.onReadPullRequestMergeOptions!(task.id)}
@@ -2294,7 +2283,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
       {replyModalOpen && props.onReplyToPullRequest ? (
         <ReplyToReviewersModal
-          platform={provider === 'GITLAB' ? 'GitLab' : 'GitHub'}
+          platform={remoteProviderName(provider)}
           drafts={replyDrafts}
           // An app reviews on its own: GitHub takes no review request for one.
           reviewers={provider === 'GITHUB'
@@ -2435,12 +2424,6 @@ export function NextActionPanel({
   );
 }
 
-/** "Changes not pushed" and "Local changes not pushed" name one state. */
-function sameStateWords(a: string, b: string): boolean {
-  const words = (value: string) => value.toLocaleLowerCase().replace(/^(pr|local|github)\s+/u, '').trim();
-  return words(a) === words(b);
-}
-
 function isMarkDone(id: NextActionId): boolean {
   return id === 'mark-done' || id === 'mark-done-anyway';
 }
@@ -2486,308 +2469,74 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
   );
 }
 
+/**
+ * PR Status before a pull request exists: its state when there is one to tell,
+ * the facts that decide Create draft, and that action with its reason beside it,
+ * where the keyboard reaches it too.
+ */
 function PrStatusCard({
   view,
   actionState,
-  prominent = false,
-  title,
-  addressComments,
   onCreateDraftPr,
-  onPushUpdate,
-  onSyncBranch,
-  onRefresh,
-  onInvestigate
+  onRefresh
 }: {
   view: PrStatusViewModel;
   actionState: ReturnType<typeof buildPrStatusActionState>;
-  /** PR Status holds the Overview's Now panel, so its lead action is the primary. */
-  prominent?: boolean;
-  /** In the Now panel, the board card's word for the task; the PR's own headline follows it only when it adds something. */
-  title?: string;
-  /** Unresolved discussions not yet sent: adds them to the request and opens it on the Review tab. */
-  addressComments?: { onRun(): void };
   onCreateDraftPr(): void;
-  onPushUpdate(): void;
-  onSyncBranch(): void;
   onRefresh(): void;
-  onInvestigate(): void;
 }) {
-  const createOrPushTitle = buildPrStatusCreateOrPushTitle(
-    view,
-    actionState.createOrPushReason
-  );
-  const leadAction = !prominent ? undefined
-    : view.canInvestigateFailure ? 'investigate'
-      : view.canSyncBranch ? 'sync'
-        : view.canPushUpdate ? 'push'
-          : addressComments ? 'address'
-            : view.canCreateDraftPr ? 'create'
-              : undefined;
-  const actionClass = (action: 'investigate' | 'push' | 'create' | 'sync' | 'address') =>
-    leadAction === action ? 'primary-button' : 'outline-button';
-  // A disabled action's reason is stated beside it and tied to it, so it is not
-  // also listed among the facts.
-  const createOrPushReason =
-    (view.canCreateDraftPr || view.canPushUpdate) && actionState.createOrPushDisabled
-      ? actionState.createOrPushReason ?? createOrPushTitle
-      : undefined;
-  // A disabled action's reason is stated beside it, not only in a hover title
-  // a disabled button can never show to the keyboard.
-  const reasonPrefix = useId();
-  const slotReasons = view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch
-    ? [
-        ...new Set(
-          [
-            createOrPushReason,
-            view.canSyncBranch && actionState.syncDisabled ? actionState.syncReason : undefined,
-            view.canInvestigateFailure && actionState.investigateDisabled
-              ? actionState.investigateReason
-              : undefined
-          ].filter((reason): reason is string => Boolean(reason))
-        )
-      ]
-    : [];
-  const reasonId = (reason: string | undefined) =>
-    reason && slotReasons.includes(reason) ? `${reasonPrefix}-${slotReasons.indexOf(reason)}` : undefined;
-  const freshnessProblem = ['STALE', 'LOCAL_NOT_PUSHED', 'PR_NEWER_COMMITS', 'BRANCH_DIVERGED'].includes(view.kind);
-  const gitLab = view.deliveryNoun === 'MR';
-  const noun = gitLab ? 'merge request' : 'pull request';
-  const refresh = view.canRefresh ? (
-    <span className="tm-prstatus__refreshline">
-      {view.refreshedLine ? <span>Updated {view.refreshedLine}</span> : null}
-      <ActionButtonTitle
-        disabled={actionState.refreshDisabled}
-        title={actionState.refreshReason ?? `Refresh ${noun}`}
-      >
-        <button
-          type="button"
-          className="tm-prstatus__refresh"
-          disabled={actionState.refreshDisabled}
-          onClick={onRefresh}
-          aria-label={`Refresh ${noun}`}
-        >
-          <RefreshIcon />
-        </button>
-      </ActionButtonTitle>
-    </span>
-  ) : null;
-  const identity = view.hasPullRequest ? (
-    view.prUrl ? (
-      <a href={view.prUrl} target="_blank" rel="noreferrer">{view.prIdentityLine ?? (gitLab ? 'Merge request' : 'Pull request')}</a>
-    ) : (
-      <span>{view.prIdentityLine ?? (gitLab ? 'Merge request' : 'Pull request')}</span>
-    )
-  ) : null;
-  // The PR's headline is stated once: as the panel's title, or beside its identity.
-  const showHeadline = prominent
-    ? title !== undefined && !sameStateWords(title, view.headline)
-    : view.kind !== 'NO_PR';
-  const facts = [
-    !freshnessProblem ? view.freshnessLine : undefined,
-    view.leadLine,
-    view.guidanceLine,
-    view.feedbackLine,
-    view.evidenceLine
-  ].filter((line): line is string => Boolean(line) && line !== createOrPushReason);
+  const createTitle = buildPrStatusCreateOrPushTitle(view, actionState.createOrPushReason);
+  const createReason = view.canCreateDraftPr && actionState.createOrPushDisabled
+    ? actionState.createOrPushReason ?? createTitle
+    : undefined;
+  const reasonId = useId();
+  const name = view.deliveryNoun === 'MR' ? 'Merge request' : 'Pull request';
+  const facts = [view.freshnessLine, view.leadLine, view.guidanceLine, view.evidenceLine]
+    .filter((line): line is string => Boolean(line) && line !== createReason);
 
   return (
-    <section className={`tm-prstatus${prominent ? ' tm-prstatus--now' : ''}`} aria-label={gitLab ? 'Merge request' : 'Pull request'}>
+    <section className="tm-prstatus" aria-label={name}>
       <div className="tm-prstatus__head">
-        {/* In the Now panel the PR's own state is the step; as a section it is one more fact. */}
-        <h3 className={prominent ? 'tm-slot__headline' : 'tm-osection__title'}>
-          {prominent ? title ?? view.headline : gitLab ? 'Merge request' : 'Pull request'}
-        </h3>
-        {refresh}
+        <h3 className="tm-osection__title">{name}</h3>
+        {view.canRefresh ? (
+          <span className="tm-prstatus__refreshline">
+            {view.refreshedLine ? <span>Updated {view.refreshedLine}</span> : null}
+            <ActionButtonTitle disabled={actionState.refreshDisabled} title={actionState.refreshReason ?? `Refresh ${name.toLowerCase()}`}>
+              <button
+                type="button"
+                className="tm-prstatus__refresh"
+                disabled={actionState.refreshDisabled}
+                onClick={onRefresh}
+                aria-label={`Refresh ${name.toLowerCase()}`}
+              >
+                <RefreshIcon />
+              </button>
+            </ActionButtonTitle>
+          </span>
+        ) : null}
       </div>
-
-      {identity || showHeadline ? (
-        <p className="tm-prstatus__identity">
-          {identity}
-          {showHeadline ? <span className="tm-prstatus__state">{view.headline}</span> : null}
-        </p>
-      ) : null}
-
-      {freshnessProblem && view.freshnessLine ? (
-        <p className="tm-prstatus__freshness">{view.freshnessLine}</p>
-      ) : null}
-
+      {view.kind !== 'NO_PR' ? <p className="tm-prstatus__identity"><span className="tm-prstatus__state">{view.headline}</span></p> : null}
       {facts.map((line) => (
         <p key={line} className="tm-prstatus__fact">{line}</p>
       ))}
-
-      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure || view.canSyncBranch || addressComments ? (
+      {view.canCreateDraftPr ? (
         <div className="tm-prstatus__actions">
-          {view.canSyncBranch ? (
-            <ActionButtonTitle disabled={actionState.syncDisabled} title={actionState.syncReason}>
-              <button
-                type="button"
-                className={actionClass('sync')}
-                disabled={actionState.syncDisabled}
-                aria-describedby={actionState.syncDisabled ? reasonId(actionState.syncReason) : undefined}
-                onClick={onSyncBranch}
-              >
-                Sync branch
-              </button>
-            </ActionButtonTitle>
-          ) : null}
-          {view.canCreateDraftPr ? (
-            <ActionButtonTitle
+          <ActionButtonTitle disabled={actionState.createOrPushDisabled} title={createTitle}>
+            <button
+              type="button"
+              className="outline-button"
               disabled={actionState.createOrPushDisabled}
-              title={createOrPushTitle}
+              aria-describedby={createReason ? reasonId : undefined}
+              onClick={onCreateDraftPr}
             >
-              {/* Outside the decision slot delivery is a parallel path, so no
-                  action here competes with the slot's primary. */}
-              <button
-                type="button"
-                className={actionClass('create')}
-                disabled={actionState.createOrPushDisabled}
-                aria-describedby={actionState.createOrPushDisabled ? reasonId(createOrPushTitle) : undefined}
-                onClick={onCreateDraftPr}
-              >
-                Create draft {view.deliveryNoun ?? 'PR'}
-              </button>
-            </ActionButtonTitle>
-          ) : null}
-          {view.canPushUpdate ? (
-            <ActionButtonTitle
-              disabled={actionState.createOrPushDisabled}
-              title={createOrPushTitle}
-            >
-              <button
-                type="button"
-                className={actionClass('push')}
-                disabled={actionState.createOrPushDisabled}
-                aria-describedby={actionState.createOrPushDisabled ? reasonId(createOrPushTitle) : undefined}
-                onClick={onPushUpdate}
-              >
-                Push update
-              </button>
-            </ActionButtonTitle>
-          ) : null}
-          {addressComments ? (
-            <button type="button" className={actionClass('address')} onClick={addressComments.onRun}>
-              Address comments
+              Create draft {view.deliveryNoun ?? 'PR'}
             </button>
-          ) : null}
-          {view.canInvestigateFailure ? (
-            <ActionButtonTitle
-              disabled={actionState.investigateDisabled}
-              title={actionState.investigateReason}
-            >
-              <button
-                type="button"
-                className={`${actionClass('investigate')} tm-prstatus__investigate`}
-                disabled={actionState.investigateDisabled}
-                aria-describedby={actionState.investigateDisabled ? reasonId(actionState.investigateReason) : undefined}
-                onClick={onInvestigate}
-              >
-                Investigate failure
-              </button>
-            </ActionButtonTitle>
-          ) : null}
+          </ActionButtonTitle>
         </div>
       ) : null}
-
-      {slotReasons.map((reason) => (
-        <p key={reason} id={reasonId(reason)} className="tm-slot__reason">
-          {reason}
-        </p>
-      ))}
-
-      {view.checkGroups.length > 0 ? <PrCheckDetails groups={view.checkGroups} platform={gitLab ? 'GitLab' : 'GitHub'} /> : null}
+      {createReason ? <p id={reasonId} className="tm-slot__reason">{createReason}</p> : null}
     </section>
   );
-}
-
-function PrCheckDetails({ groups, platform }: { groups: PrCheckGroup[]; platform: 'GitHub' | 'GitLab' }) {
-  const checks = groups.flatMap((group) => group.checks);
-  return (
-    <details className="tm-prchecks" aria-label={`${platform} check details`}>
-      <summary className="tm-prchecks__head">
-        <span className="tm-disclosure__label"><DisclosureChevron />Checks</span>
-        <span>{checks.length}</span>
-      </summary>
-      <div className="tm-prchecks__rows">
-        {checks.map((check) => (
-          <details
-            key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`}
-            className={`tm-prcheck tm-prcheck--${check.status}`}
-          >
-            <summary>
-              <span className="tm-prcheck__name">
-                <DisclosureChevron className="tm-prcheck__chevron" />
-                <span>{check.name}</span>
-              </span>
-              <span className="tm-prcheck__status">
-                <span className={`tm-prcheck__label tm-prcheck__label--${check.status}`}>
-                  {checkStatusLabel(check.status)}
-                </span>
-                <span>{checkMetaLine(check)}</span>
-              </span>
-            </summary>
-            <pre>{checkEvidenceText(check)}</pre>
-          </details>
-        ))}
-      </div>
-    </details>
-  );
-}
-
-function checkStatusLabel(status: PrCheckGroup['status']): string {
-  switch (status) {
-    case 'passed':
-      return 'Passed';
-    case 'failed':
-      return 'Failed';
-    case 'canceled':
-      return 'Canceled';
-    case 'pending':
-      return 'Pending';
-    case 'skipped':
-      return 'Skipped';
-  }
-}
-
-function checkMetaLine(check: PrCheckGroup['checks'][number]): string {
-  const duration = formatCheckDuration(check.startedAt, check.completedAt);
-  if (duration) {
-    return duration;
-  }
-  if (check.status === 'pending') {
-    return 'running';
-  }
-  if (check.status === 'skipped') {
-    return 'optional';
-  }
-  return check.event ?? '';
-}
-
-function checkEvidenceText(check: PrCheckGroup['checks'][number]): string {
-  const lines = [
-    check.workflow ? `Workflow: ${check.workflow}` : undefined,
-    `Status: ${check.state ?? checkStatusLabel(check.status)}`,
-    check.event ? `Event: ${check.event}` : undefined,
-    check.description ? `Description: ${check.description}` : undefined,
-    check.startedAt ? `Started: ${check.startedAt}` : undefined,
-    check.completedAt ? `Completed: ${check.completedAt}` : undefined,
-    check.link ? `URL: ${check.link}` : undefined
-  ].filter((line): line is string => Boolean(line));
-  return lines.length > 0 ? lines.join('\n') : 'No additional check detail was reported.';
-}
-
-function formatCheckDuration(startedAt?: string, completedAt?: string): string | undefined {
-  if (!startedAt || !completedAt) {
-    return undefined;
-  }
-  const started = Date.parse(startedAt);
-  const completed = Date.parse(completedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) {
-    return undefined;
-  }
-  const seconds = Math.round((completed - started) / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
 }
 
 function RefreshIcon() {

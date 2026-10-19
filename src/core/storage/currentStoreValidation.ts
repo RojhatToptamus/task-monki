@@ -1236,6 +1236,7 @@ export function validatePullRequestFeedbackSummary(value: unknown): void {
     enumField(entry, 'state', PULL_REQUEST_REVIEWER_STATES, 'reviewRollups');
     optionalBoolean(entry, 'bot', 'reviewRollups');
   }
+  optionalStrings(summary, 'reviewRollups', ['viewer']);
   optionalTimestamp(summary, 'lastViewerCommentAt', 'reviewRollups');
   optionalTimestamp(summary, 'lastOtherCommentAt', 'reviewRollups');
 }

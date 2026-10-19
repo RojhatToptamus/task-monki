@@ -80,16 +80,21 @@ again without sending the agent anything, for a flaky check: on GitHub it posts
 `repos/<owner>/<repo>/actions/runs/<run>/rerun-failed-jobs` for each failed
 Actions run of the pull request's own repository, and on GitLab
 `projects/:id/jobs/:job/retry` for each failed job of the merge request's own
-project. A check from a fork's run or another system is left to its platform.
+project. Each run or job is asked on its own: one the platform refuses does not
+stop the rest, and the step fails only when none started. A check from a fork's
+run or another system is left to its platform.
 `PR_CHECKS_RERUN_REQUESTED` records what was asked, and PR Status reads the
 pull request again.
 
-A head just pushed reports no checks until its CI registers them. When an
-earlier head of the same pull request had checks, no checks for this head reads
-"Checks pending" ("No checks reported yet"), never Ready to merge, until a
-reading taken a minute after the head first appeared still finds none
+A head just pushed reports no checks until its CI registers them, and so does
+a head for a moment after its failed checks are run again. When the pull
+request had checks before, no checks for its head reads "Checks pending" ("No
+checks reported yet"), never Ready to merge, until a reading taken a minute
+after the head's checks went missing still finds none
 (`checksMayNotHaveStarted`). PR Status refreshes only on request and after
-Task Monki's own steps, so that later reading is the person's Refresh.
+Task Monki's own steps, so that later reading is the person's Refresh; the
+reading after Re-run failed waits a few seconds for the checks to be listed
+again.
 
 Ready for review, Merge and the replies are the person's writes to the
 platform, each an explicit click:
@@ -105,7 +110,9 @@ platform, each an explicit click:
   the platform refuses a pull request that moved; `gh pr merge` is not used,
   since it also deletes and switches local branches. Task Monki observes the
   worktree first and refuses while it holds changes the pull request does not
-  (uncommitted, unpushed, diverged or conflicted). On GitLab the dialog follows
+  (uncommitted, unpushed, diverged or conflicted); a commit that already is the
+  pull request's head is not unpushed work, whatever the local branch tracks.
+  On GitLab the dialog follows
   the merge request's own Delete source branch choice, and the merge sends
   `should_remove_source_branch` only to delete, since an explicit false would
   override that choice. A merge that landed is not reported as failed when the
@@ -182,33 +189,37 @@ GitHub responses. It reads the current Task Monki snapshot.
 
 ## Real Render Surface
 
-In the Now panel the headline is the title; as a section, a quiet "Pull
-request" label leads and the headline follows the PR identity:
+Before a pull request exists, PR Status is an Overview section that offers
+opening one:
 
 ```text
-<headline>                           Updated Jul 2, 10:05  ↻
-#82 <PR title>
+Pull request                         Updated Jul 2, 10:05  ↻
+<headline, once there is one>
 <freshness / lead / guidance / evidence>
-[primary action] [secondary action]
-> Checks                                                 3
-    > build        Failed       12s
+[Create draft PR]
+<reason the action is disabled>
 ```
+
+Once one exists, the pull request's record holds its facts (identity, state,
+branches, checks, reviewers and threads), and a Delivery section holds the
+steps above with the headline and the fact behind the first step. Delivery is
+left out while every step is paused, as while the agent works.
 
 Real classes:
 
-- root: `tm-prstatus` (`tm-prstatus--now` inside the Now panel)
+- PR Status root and head: `tm-prstatus`, `tm-prstatus__head`
 - refresh line and button: `tm-prstatus__refreshline`, `tm-prstatus__refresh`
-- PR identity and section headline: `tm-prstatus__identity`, `tm-prstatus__state`
-- freshness problem: `tm-prstatus__freshness`
-- lead, guidance and evidence lines: `tm-prstatus__fact`
+- headline: `tm-prstatus__identity`, `tm-prstatus__state`
+- freshness, lead, guidance and evidence lines: `tm-prstatus__fact`
 - actions: `tm-prstatus__actions`
 - disabled action title wrapper: `tm-actiontitle`
-- check list: `tm-prchecks`, `tm-prcheck`
+- record root and check list: `tm-prrecord`, `tm-prrecord__checks`,
+  `tm-prrecord__check`
 
 Disabled buttons keep their normal button position. PR Status buttons expose
-the reason through the `tm-actiontitle` wrapper's HTML `title` attribute.
-Finish actions in the Overview's Now panel state the reason once beside the
-actions, tied with `aria-describedby`.
+the reason through the `tm-actiontitle` wrapper's HTML `title` attribute and
+state it once below the action, tied with `aria-describedby`. Finish actions in
+the Overview's Now panel state the reason the same way.
 
 Tones map to semantic CSS variables:
 
@@ -274,9 +285,10 @@ state (requested changes, approved, commented, or asked and waiting). It is a
 read; nothing is written back. `PullRequestFeedback` is stored as the task's
 immutable `pull-request-feedback` artifact, and `ReviewRollupRecord.feedback`
 keeps a summary the card reads without the artifact: the artifact id, a
-digest, the unresolved thread count, the discussion count, the reviewers, and
-the platform's time of the person's latest comment and of anyone else's
-(`lastViewerCommentAt`, `lastOtherCommentAt`), which decide whose turn it is.
+digest, the unresolved thread count, the discussion count, the reviewers, the
+account that read it (`viewer`), and the platform's time of the person's latest
+comment and of anyone else's (`lastViewerCommentAt`, `lastOtherCommentAt`),
+which decide whose turn it is.
 An unchanged reading keeps its artifact; a read that fails keeps the last
 reading of the same PR, and the PR status still records.
 
@@ -421,8 +433,8 @@ no upstream change, hooks off. A fork pull request offers no Push update; while
 the worktree holds work the pull request does not, the card states "Task Monki
 does not push to forks." After a push, PR Status waits up to about six seconds
 for the platform to report the pushed head before it records the pull request.
-A push the lease refuses records "The pull request branch moved since Task
-Monki last read it. Refresh to see its new commits."
+A push the lease refuses records "The pull request branch has newer commits
+than Task Monki last read. Refresh to see them."
 
 `PR_NEWER_COMMITS` and a rewritten pull request the worktree has no commits of
 its own against (headline "PR rewritten") offer Sync branch, the lead action;
@@ -440,7 +452,8 @@ its target branch. If the local HEAD is newer, the same action publishes the
 update; discovery alone does not complete that action.
 
 External publication requires clean, current Git evidence and one verified push
-destination in the selected GitHub repository. It pushes the verified commit to
+destination in the selected repository: the remote has one push URL, and it
+names the same platform, host and path. It pushes the verified commit to
 the exact branch ref without changing upstream configuration or publishing tags.
 The publication record retains the destination URL for uncertain-push reconciliation.
 A new imported-work PR requires an explicit target branch. Task Monki verifies
@@ -597,9 +610,15 @@ states, or that a person settles on GitLab (`draft_status`, `not_approved`,
 `discussions_not_resolved`, and the policy checks) are NOT_MERGED; a conflict,
 a needed rebase or a lock is BLOCKED; a reason GitLab adds later is UNKNOWN.
 Because GitLab names the draft first, a reviewer's own `requested_changes`
-state also makes the review CHANGES_REQUESTED.
+state also makes the review CHANGES_REQUESTED. A `locked` merge request, which
+GitLab is merging, reads open. A head pipeline whose jobs could not be read, or
+that lists none (trigger jobs only), reads its own status as one Pipeline check,
+so it never reads as no checks; a merged-results pipeline
+(`refs/merge-requests/<iid>/merge` or `/train`) is evidence for the merge
+request's head.
 
-Only the first 80 check detail rows are stored.
+The check counts cover every check; at most 80 check detail rows are stored,
+failures first, so a failure past that limit is still counted and listed.
 
 ## Completion Policy Coupling
 
@@ -1010,7 +1029,8 @@ reviewers' once the person wrote after everyone else on the platform's clock,
 or asked again every reviewer who requested changes (GitHub shows that reviewer
 as requested while the verdict stands): the card reads Waiting for review with
 "Waiting on alice", offers nothing, and the Inbox and board raise nothing. A
-reviewer's next comment or review hands the turn back.
+reviewer's next comment or review hands the turn back. A request for changes the
+person made themselves, on a pull request they took on as a task, stays theirs.
 
 ### GITHUB_REVIEW_WAITING (Waiting for review)
 

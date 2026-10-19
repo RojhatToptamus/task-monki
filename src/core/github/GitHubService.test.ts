@@ -161,6 +161,15 @@ describe('GitHub PR rollups', () => {
     expect(rollup.checkDetails).toEqual([]);
   });
 
+  it('counts a failing check past the stored list, and keeps the failures in the list it stores', () => {
+    const passed = Array.from({ length: 90 }, (_, index) => ({ name: `job ${index}`, bucket: 'pass', state: 'SUCCESS' }));
+    const rollup = parseCiRollup([], worktreeFixture('/tmp/repo'), 1, 'abc', [...passed, { name: 'lint', bucket: 'fail', state: 'FAILURE' }]);
+    expect(rollup.status).toBe('FAILING');
+    expect(rollup.totalCount).toBe(91);
+    expect(rollup.checkDetails).toHaveLength(80);
+    expect(rollup.checkDetails[0]).toMatchObject({ name: 'lint', status: 'failed' });
+  });
+
   it('normalizes canceled gh check buckets separately from failures', () => {
     const rollup = parseCiRollup(
       [],

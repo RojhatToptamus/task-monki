@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CiRollupRecord, MergeSnapshotRecord, PullRequestSnapshotRecord, ReviewRollupRecord } from '../../shared/contracts';
-import { buildPullRequestRecord } from './pullRequestRecord';
+import { buildPullRequestRecord, rerunnableCheck } from './pullRequestRecord';
 
 const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', observedAt: '2026-10-17T10:00:00.000Z' };
 const pullRequest = (overrides: Partial<PullRequestSnapshotRecord> = {}): PullRequestSnapshotRecord => ({
@@ -66,5 +66,17 @@ describe('buildPullRequestRecord', () => {
     expect(merged.threads).toBeUndefined();
     expect(merged.merge?.word).toMatch(/^Merged /u);
     expect(buildPullRequestRecord({ pullRequest: pullRequest({ number: 7, url: 'https://gitlab.com/g/p/-/merge_requests/7' }), provider: 'GITLAB' })!.label).toBe('!7');
+  });
+});
+
+describe('rerunnableCheck', () => {
+  it('offers a re-run only for a job of the pull request\'s own repository', () => {
+    const pullRequest = 'https://github.com/acme/widgets/pull/9';
+    expect(rerunnableCheck('https://github.com/acme/widgets/actions/runs/1/job/2', pullRequest)).toBe(true);
+    // A fork's run, or a status from another system, is not this pull request's to start.
+    expect(rerunnableCheck('https://github.com/someone/widgets/actions/runs/1/job/2', pullRequest)).toBe(false);
+    expect(rerunnableCheck('https://ci.example.com/build/7', pullRequest)).toBe(false);
+    expect(rerunnableCheck('https://gitlab.com/group/sub/app/-/jobs/5', 'https://gitlab.com/group/sub/app/-/merge_requests/3')).toBe(true);
+    expect(rerunnableCheck('https://gitlab.com/group/other/-/jobs/5', 'https://gitlab.com/group/sub/app/-/merge_requests/3')).toBe(false);
   });
 });

@@ -372,6 +372,10 @@ export function NewTaskPanel({
   const remoteRequestKey = remoteKind && selectedRepositoryId
     ? JSON.stringify([selectedRepositoryId, remoteKind, remoteRepository ?? null, remoteQuery.trim()]) : undefined;
   const currentRemoteListing = remoteListing?.key === remoteRequestKey ? remoteListing : undefined;
+  // While the next query loads, the last results for the same repository and kind stay in place.
+  const scopeOf = (key: string | undefined) => (key ? JSON.stringify((JSON.parse(key) as unknown[]).slice(0, 3)) : undefined);
+  const shownRemoteListing = currentRemoteListing ??
+    (remoteListing?.data && scopeOf(remoteListing.key) === scopeOf(remoteRequestKey) ? remoteListing : undefined);
   useEffect(() => {
     if (!remoteKind || !selectedRepositoryId || !onListRemoteWork || !remoteRequestKey) return;
     let canceled = false;
@@ -387,7 +391,7 @@ export function NewTaskPanel({
           if (canceled) return;
           setRemoteListing({ key: remoteRequestKey, data });
           // A pasted link or number names one item: choose it.
-          if (data.exact && data.items.length === 1) setRemoteSelected(data.items[0]);
+          if (data.exact && data.items.length === 1) chooseRemote(data.items[0]);
         },
         (caught: unknown) => {
           if (!canceled) setRemoteListing({ key: remoteRequestKey, error: caught instanceof Error ? caught.message : 'Could not reach the platform.' });
@@ -396,7 +400,7 @@ export function NewTaskPanel({
     }, remoteQuery.trim() ? 300 : 0);
     return () => { canceled = true; window.clearTimeout(timer); };
   }, [remoteKind, selectedRepositoryId, remoteRepository, remoteQuery, remoteRequestKey, onListRemoteWork, remoteRefresh]);
-  const remoteProvider = currentRemoteListing?.data?.remote?.provider ?? defaultRemoteProvider(selectedRepository) ?? 'GITHUB';
+  const remoteProvider = shownRemoteListing?.data?.remote?.provider ?? defaultRemoteProvider(selectedRepository) ?? 'GITHUB';
   const effectiveIssueTitle = issueTitle ?? remoteSelected?.title ?? '';
   const effectivePullTitle = pullTitle ?? remoteSelected?.title ?? '';
   // A list that could not be read says why in place; the footer adds nothing to it.
@@ -908,7 +912,7 @@ export function NewTaskPanel({
             </fieldset> : null}
             {remoteKind ? (
               <RemoteWorkFields key={`${selectedRepositoryId}:${remoteKind}`} kind={remoteKind} provider={remoteProvider}
-                listing={currentRemoteListing?.data} loading={!currentRemoteListing} error={currentRemoteListing?.error}
+                listing={shownRemoteListing?.data} loading={!currentRemoteListing} error={currentRemoteListing?.error}
                 selected={remoteSelected} locked={composerLocked} query={remoteQuery} onQuery={setRemoteQuery}
                 onSelect={chooseRemote} repositoryName={selectedRepository?.name}
                 onRemote={(remote) => { setRemoteRepository(remote); chooseRemote(undefined); }}

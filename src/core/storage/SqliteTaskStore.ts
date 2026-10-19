@@ -68,7 +68,7 @@ import type {
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
 import {
   PULL_REQUEST_FEEDBACK_LIMITS,
-  feedbackCommentTimes,
+  feedbackTurnFacts,
   reviewTurn,
   unresolvedDiscussionCount,
   type PullRequestFeedback,
@@ -102,7 +102,7 @@ import {
   isTaskCreationToken,
   openReviewFindings,
   reviewDraftProblem,
-  UNSHIPPED_GIT_STATUSES,
+  holdsUnshippedWork,
   verifiedChecksMatchMergeHead,
   type ReviewFindingDecision,
   type TaskReviewDraft
@@ -294,7 +294,7 @@ function shouldCompleteFromPullRequestSync(
   merge: MergeSnapshotRecord,
   git: GitSnapshotRecord | undefined
 ): boolean {
-  if (!taskAllowsMergeCompletion(task, git)) {
+  if (!taskAllowsMergeCompletion(task, git, pullRequest.headRefOid)) {
     return false;
   }
   if (merge.status !== 'MERGED' || !completionPolicyRequiresMerge(task.completionPolicy)) {
@@ -326,11 +326,11 @@ const MERGE_COMPLETION_SETTLED_RUNS = new Set<Task['projection']['agentRun']>(['
 
 // Work the worktree held when last observed, such as fixes never pushed, keeps
 // the task open: a merge someone else made does not ship it.
-function taskAllowsMergeCompletion(task: Task, git: GitSnapshotRecord | undefined): boolean {
+function taskAllowsMergeCompletion(task: Task, git: GitSnapshotRecord | undefined, pullRequestHeadSha: string | undefined): boolean {
   return (
     (['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) ||
       (task.workflowPhase === 'IN_PROGRESS' && MERGE_COMPLETION_SETTLED_RUNS.has(task.projection.agentRun))) &&
-    !(git && UNSHIPPED_GIT_STATUSES.has(git.status)) &&
+    !(git && holdsUnshippedWork(git, pullRequestHeadSha)) &&
     task.projection.agentReview?.status !== 'RUNNING' &&
     !getImplementationRetryReason(task)
   );
@@ -2008,6 +2008,20 @@ export class SqliteTaskStore {
       .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
   }
 
+  /** The newest check rollup recorded for a pull request's head. */
+  async findCiRollup(taskId: string, pullRequestNumber: number, headSha: string | undefined): Promise<CiRollupRecord | undefined> {
+    await this.init();
+    return clone(this.state.ciRollups.find((record) =>
+      record.taskId === taskId && record.pullRequestNumber === pullRequestNumber && record.headSha === headSha));
+  }
+
+  /** The newest reading of what people said on a pull request. */
+  async findPullRequestFeedback(taskId: string, pullRequestNumber: number): Promise<PullRequestFeedbackSummary | undefined> {
+    await this.init();
+    return clone(this.state.reviewRollups.find((record) =>
+      record.taskId === taskId && record.pullRequestNumber === pullRequestNumber && record.feedback)?.feedback);
+  }
+
   async getLatestPullRequest(taskId: string): Promise<PullRequestSnapshotRecord | undefined> {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
@@ -3293,17 +3307,42 @@ export class SqliteTaskStore {
     return clone(this.findTaskForRemoteWorkFromState(ref));
   }
 
+  /** The task of each of these issues and pull requests that has one, by `remoteWorkKey`. */
+  async findTasksForRemoteWork(refs: readonly RemoteWorkRef[]): Promise<Map<string, Task>> {
+    await this.init();
+    return new Map([...this.tasksForRemoteWorkFromState(refs)].map(([key, task]) => [key, clone(task)]));
+  }
+
   private findTaskForRemoteWorkFromState(ref: RemoteWorkRef): Task | undefined {
-    const key = remoteWorkKey(ref);
-    const opened = this.state.tasks.find((task) =>
-      task.remoteSource && remoteWorkKey(taskRemoteSourceRef(task.remoteSource)) === key);
-    if (opened || ref.kind !== 'PULL_REQUEST') return opened;
-    const delivered = this.state.pullRequests.find((pullRequest) => {
-      const linked = pullRequest.url ? parseRemoteWorkReference(pullRequest.url) : undefined;
-      return linked?.repository && linked.kind === 'PULL_REQUEST' &&
-        remoteWorkKey({ repository: linked.repository, kind: linked.kind, number: linked.number }) === key;
-    });
-    return delivered ? this.state.tasks.find((task) => task.id === delivered.taskId) : undefined;
+    return this.tasksForRemoteWorkFromState([ref]).get(remoteWorkKey(ref));
+  }
+
+  /**
+   * One pass over the tasks, then, for a pull request no task was opened from,
+   * one over the recorded pull requests, newest first: every sync adds one, so
+   * each distinct URL is read once.
+   */
+  private tasksForRemoteWorkFromState(refs: readonly RemoteWorkRef[]): Map<string, Task> {
+    const wanted = new Set(refs.map(remoteWorkKey));
+    const found = new Map<string, Task>();
+    for (const task of this.state.tasks) {
+      const key = task.remoteSource ? remoteWorkKey(taskRemoteSourceRef(task.remoteSource)) : undefined;
+      if (key && wanted.has(key) && !found.has(key)) found.set(key, task);
+    }
+    const delivered = new Set(refs.filter((ref) => ref.kind === 'PULL_REQUEST').map(remoteWorkKey).filter((key) => !found.has(key)));
+    const read = new Set<string>();
+    for (const pullRequest of this.state.pullRequests) {
+      if (delivered.size === 0) break;
+      if (!pullRequest.url || read.has(pullRequest.url)) continue;
+      read.add(pullRequest.url);
+      const linked = parseRemoteWorkReference(pullRequest.url);
+      if (!linked?.repository || linked.kind !== 'PULL_REQUEST') continue;
+      const key = remoteWorkKey({ repository: linked.repository, kind: linked.kind, number: linked.number });
+      if (!delivered.delete(key)) continue;
+      const task = this.state.tasks.find((candidate) => candidate.id === pullRequest.taskId);
+      if (task) found.set(key, task);
+    }
+    return found;
   }
 
   /**
@@ -5025,7 +5064,7 @@ export class SqliteTaskStore {
     if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
     const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
     // Unchanged feedback keeps its artifact; what the summary derives from it is read again, so a newer derivation reaches it.
-    if (previous?.digest === digest) return { summary: { ...previous, ...feedbackCommentTimes(feedback) } };
+    if (previous?.digest === digest) return { summary: { ...previous, ...feedbackTurnFacts(feedback) } };
     const candidate: PullRequestFeedbackSummary = {
       artifactId: randomUUID(),
       digest,
@@ -5033,7 +5072,7 @@ export class SqliteTaskStore {
       unresolvedCount: unresolvedDiscussionCount(feedback.discussions),
       discussionCount: feedback.discussions.length,
       reviewers: feedback.reviewers,
-      ...feedbackCommentTimes(feedback)
+      ...feedbackTurnFacts(feedback)
     };
     try {
       validatePullRequestFeedbackSummary(candidate);
@@ -7678,7 +7717,7 @@ function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts |
   const reason = merge ? baseMovedReason(merge.raw) : undefined;
   const pushError = pushFailed ? state.branchPublications.find(own)?.error?.split('\n')[0]?.slice(0, 200) : undefined;
   const failed = ci?.checkDetails?.filter((check) => check.status === 'failed') ?? [];
-  const turn = feedback ? reviewTurn(feedback, true) : undefined;
+  const turn = feedback ? reviewTurn(feedback) : undefined;
   const facts: BoardDeliveryFacts = {
     ...(failed.length ? { failingChecks: { names: failed.slice(0, 3).map((check) => check.name), count: failed.length } } : {}),
     ...(feedback ? { feedback: { unresolvedCount: feedback.unresolvedCount, reviewers: feedback.reviewers } } : {}),

@@ -6,7 +6,6 @@ import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/co
 import { EMPTY_REVIEW_DRAFT, REVIEW_REQUEST_ITEM_LIMIT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import { TaskDetail } from './TaskDetail';
-import { ReplyToReviewersModal } from './PullRequestDialogs';
 
 vi.mock('../api/taskManagerClient', () => ({
   taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })) }
@@ -338,7 +337,6 @@ describe('Pull request feedback', () => {
     const asked = await within(slot).findByRole('list', { name: 'Comments' });
     expect(within(asked).getByRole('button', { name: /alice Handle a null layout\. output\.txt:1/u })).toBeDefined();
     const address = await within(slot).findByRole('button', { name: 'Address comments' });
-    expect(address.className).toContain('primary-button');
     fireEvent.click(address);
 
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
@@ -471,54 +469,6 @@ describe('Pull request steps', () => {
     expect(props.onMergePullRequest).not.toHaveBeenCalled();
   });
 
-  it('keeps a reply that landed in view when only resolving its thread failed, and never posts it again', async () => {
-    const drafts = [{ discussionId: 'PRRT_1', kind: 'THREAD' as const, author: 'alice', summary: 'Handle a null layout.', location: 'save.js:2',
-      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4.', resolvable: true }];
-    const onSubmit = vi.fn(async () => ({ posted: 1, resolved: 0, requested: [],
-      failed: [{ discussionId: 'PRRT_1', replied: true, error: 'Replied, but the thread was not resolved: GitHub refused.' }] }));
-    const modal = (current: typeof drafts) => (
-      <ReplyToReviewersModal platform="GitHub" drafts={current} reviewers={[]} onSubmit={onSubmit} onCancel={vi.fn()} fallbackReturnFocusRef={{ current: null }} />
-    );
-    const mounted = render(modal(drafts));
-    const dialog = screen.getByRole('dialog', { name: 'Reply on GitHub' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Post 1 reply' }));
-    expect(await within(dialog).findByText('Replied, but the thread was not resolved: GitHub refused.')).toBeDefined();
-    // The refresh that follows answers the discussion, so its draft leaves; what became of the reply stays in view.
-    mounted.rerender(modal([]));
-    expect(within(dialog).getByText('Replied, but the thread was not resolved: GitHub refused.')).toBeDefined();
-    expect(within(dialog).queryByRole('textbox', { name: 'Reply to @alice' })).toBeNull();
-    expect((within(dialog).getByRole('button', { name: 'Post replies' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-  });
-
-  it('posts only the replies the person kept, as they edited them, with the resolving they chose', async () => {
-    const drafts = [
-      { discussionId: 'PRRT_1', kind: 'THREAD' as const, author: 'alice', summary: 'Handle a null layout.', location: 'save.js:2',
-        outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Null returns undefined.', resolvable: true },
-      { discussionId: 'PRR_1', kind: 'REVIEW' as const, author: 'bob', summary: 'Keep the export name.',
-        outcome: 'NOT_CHANGED' as const, body: 'Not changed. Other packages import it.', resolvable: false }
-    ];
-    const onSubmit = vi.fn(async () => ({ posted: 1, resolved: 0, requested: [], failed: [{ discussionId: 'PRR_1', error: 'GitHub refused the comment.' }] }));
-    const onCancel = vi.fn();
-    render(<ReplyToReviewersModal platform="GitHub" drafts={drafts} reviewers={['alice']} onSubmit={onSubmit} onCancel={onCancel}
-      fallbackReturnFocusRef={{ current: null }} />);
-    const dialog = screen.getByRole('dialog', { name: 'Reply on GitHub' });
-    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Reply to @alice' }), { target: { value: 'Fixed: null now returns undefined.' } });
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Resolve thread' }));
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Ask @alice to review again' }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Post 2 replies' }));
-
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith([
-      { discussionId: 'PRRT_1', body: 'Fixed: null now returns undefined.', resolve: false },
-      { discussionId: 'PRR_1', body: 'Not changed. Other packages import it.', resolve: false }
-    ], []));
-    // What landed leaves the list; what was refused stays with its reason, for another try.
-    expect(await within(dialog).findByText('GitHub refused the comment.')).toBeDefined();
-    expect(within(dialog).queryByRole('textbox', { name: 'Reply to @alice' })).toBeNull();
-    expect(within(dialog).getByRole('textbox', { name: 'Reply to @bob' })).toBeDefined();
-    expect(onCancel).not.toHaveBeenCalled();
-  });
 });
 
 describe('Agent pre-run setup', () => {
@@ -686,6 +636,25 @@ describe('Agent pre-run setup', () => {
     expect(screen.getByRole('button', { name: 'Access: Custom' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings));
+  });
+
+  it('starts a task opened from an issue from the Agent tab with no request of the person\'s own', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    props.task = makeTaskRecord({ ...props.task, prompt: '', remoteSource: {
+      provider: 'GITHUB', host: 'github.com', repositoryPath: 'acme/widgets', kind: 'ISSUE', number: 12,
+      url: 'https://github.com/acme/widgets/issues/12', title: 'Crash on save',
+      snapshotArtifactId: '00000000-0000-4000-8000-000000000012', capturedAt: '2026-10-17T00:00:00.000Z'
+    } });
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    const start = screen.getByRole('button', { name: 'Start implementation' }) as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    fireEvent.click(start);
+    await waitFor(() => expect(props.onStart).toHaveBeenCalled());
   });
 
   it('starts implementation with the execution settings reviewed on the Agent tab', async () => {

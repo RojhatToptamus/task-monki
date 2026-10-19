@@ -440,21 +440,6 @@
   line-height: 1.45;
 }
 
-/* Space, not rules, separates the parts of the Now panel. */
-.tm-slot .tm-prchecks {
-  border-top: 0;
-}
-
-/* PR Status has a surface of its own; inside the slot it takes no second frame. */
-.tm-slot > .tm-prstatus {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  overflow: visible;
-}
-
 /* The facts that bear on finishing, as plain words. Only an unresolved one
    takes a tone. */
 .tm-facts {
@@ -891,13 +876,6 @@
   font-weight: var(--w-regular);
 }
 
-.tm-prstatus__freshness {
-  margin: 0;
-  color: var(--waiting-ink);
-  font-size: var(--t-help);
-  font-weight: var(--w-medium);
-  line-height: 1.45;
-}
 
 .tm-prstatus__fact {
   max-width: 72ch;
@@ -914,146 +892,6 @@
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 4px;
-}
-
-.tm-prchecks {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 1px solid var(--hair);
-}
-
-.tm-prchecks__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 26px;
-  padding: 0 4px;
-  list-style: none;
-  color: var(--muted);
-  font-size: var(--t-help);
-  font-weight: var(--w-medium);
-}
-
-.tm-prchecks__head::-webkit-details-marker {
-  display: none;
-}
-
-.tm-prchecks__head:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.tm-prchecks__head svg {
-  width: 12px;
-  height: 12px;
-  transition: transform var(--motion-fast) var(--ease-out);
-}
-
-.tm-prchecks[open] > .tm-prchecks__head svg {
-  transform: rotate(90deg);
-}
-
-.tm-prchecks__head span:last-child {
-  color: var(--muted);
-  font-size: var(--t-meta);
-  font-variant-numeric: tabular-nums;
-}
-
-.tm-prchecks__rows {
-  display: grid;
-  border-top: 1px solid var(--hair);
-}
-
-.tm-prcheck {
-  border-top: 1px solid var(--hair);
-}
-
-/* The list's own line is the first check's top; a second would stack 2px. */
-.tm-prcheck:first-child {
-  border-top: 0;
-}
-
-.tm-prcheck > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 8px 0;
-  list-style: none;
-  color: inherit;
-}
-
-.tm-prcheck > summary::-webkit-details-marker {
-  display: none;
-}
-
-.tm-prcheck__chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 10px;
-  flex: 0 0 auto;
-  color: var(--muted);
-  transition: transform var(--motion-fast) var(--ease-out);
-}
-
-.tm-prcheck[open] .tm-prcheck__chevron {
-  transform: rotate(90deg);
-}
-
-.tm-prcheck__name {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.tm-prcheck__name span:last-child {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: var(--t-help);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tm-prcheck__status {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: 12px;
-}
-
-.tm-prcheck__status > span:last-child {
-  min-width: 46px;
-  color: var(--muted);
-  font: var(--t-meta)/var(--lh-meta) var(--font-ui);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.tm-prcheck__label {
-  color: var(--muted);
-  font-size: var(--t-meta);
-}
-
-.tm-prcheck__label--failed {
-  color: var(--blocked-ink);
-}
-
-.tm-prcheck > pre {
-  max-height: 190px;
-  margin: 0 0 8px 26px;
-  overflow: auto;
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--well);
-  color: var(--text-soft);
-  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
-  white-space: pre-wrap;
 }
 
 /* The Overview's History: the date once per day, then each entry with its
@@ -2717,26 +2555,18 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   font-size: var(--t-help);
 }
 
-/* Ask again sits after the reviewer's state, as the platform's re-request does. */
-.tm-prrecord__ask {
-  display: inline-flex;
+/* The record's icon buttons are the shared ones at row scale. */
+.tm-prrecord__iconbtn {
   flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
   width: var(--h-compact);
   height: var(--h-compact);
-  margin: -4px -6px -4px -4px;
-  padding: 0;
-  border: 0;
   border-radius: var(--r-xs);
-  background: none;
-  color: var(--muted);
 }
 
-.tm-prrecord__ask:hover:not(:disabled) {
-  background-color: var(--hover);
-  color: var(--text);
+/* Ask again sits after the reviewer's state, as the platform's re-request does. */
+.tm-prrecord__ask {
+  align-self: center;
+  margin: -4px -6px -4px -4px;
 }
 
 .tm-prrecord__word[data-tone='success'] { color: var(--verified-ink); }
@@ -2747,7 +2577,7 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   font-size: var(--t-body);
 }
 
-/* Checks as dense rows: the mark, the name, how long it ran, its page. */
+/* Checks as dense rows: the mark, the name, its state, how long it ran, its page. */
 .tm-prrecord__checks {
   display: grid;
   margin: -2px 0 0;
@@ -2782,22 +2612,6 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   color: var(--muted);
   font-size: var(--t-meta);
   font-variant-numeric: tabular-nums;
-}
-
-.tm-prrecord__open {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: var(--h-compact);
-  height: var(--h-compact);
-  border-radius: var(--r-xs);
-  color: var(--muted);
-}
-
-.tm-prrecord__open:hover {
-  background-color: var(--hover);
-  color: var(--text);
 }
 
 /* In the Now panel, the comments the step asks about; each opens its discussion in Review. */
@@ -2894,12 +2708,12 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 .tm-prstep__log pre {
   max-height: 280px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 8px 12px;
   overflow: auto;
   border-radius: var(--r-sm);
   background: var(--well);
   color: var(--text-soft);
-  font: var(--t-help)/var(--lh-ui) var(--font-mono);
+  font: var(--t-meta)/var(--lh-meta) var(--font-mono);
   white-space: pre;
 }
 
@@ -2910,10 +2724,6 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 }
 
 /* Merge: the branches, the method the repository allows, the branch to delete. */
-.tm-merge-modal {
-  width: min(480px, 100%);
-}
-
 .tm-merge-modal__branches {
   display: flex;
   flex-wrap: wrap;
@@ -2966,7 +2776,6 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 
 .tm-reply-modal__list {
   display: grid;
-  gap: 8px;
   max-height: min(56vh, 560px);
   margin-top: 4px;
   overflow: auto;
@@ -2976,9 +2785,12 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   display: grid;
   gap: 6px;
   min-width: 0;
-  padding: 10px 12px;
-  border-radius: var(--r-sm);
-  background: var(--well);
+  padding: 12px 0;
+}
+
+/* Replies are rows of one list: a hairline between them, the dialog's own plane under them. */
+.tm-reply + .tm-reply {
+  border-top: 1px solid var(--hair);
 }
 
 .tm-reply[data-included='false'] .tm-reply__summary {

@@ -16,7 +16,7 @@ import { ActionMenu } from './ActionMenu';
 import { useClampOverflow } from './useClampOverflow';
 import { ReportedQuote } from './ReportedQuote';
 import { MessageMarkdown } from './MessageMarkdown';
-import { displayPlatformText } from '../model/pullRequestFeedback';
+import { displayPlatformText } from '../../shared/remoteWork';
 
 /**
  * The Overview's one raised element: what the task needs now. Every owner —

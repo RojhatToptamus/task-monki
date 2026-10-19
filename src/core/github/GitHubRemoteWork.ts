@@ -19,12 +19,14 @@ import {
 import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
 
 const LIST_ISSUE_FIELDS = 'number title url state updatedAt author { login }';
-const LIST_PULL_FIELDS = `${LIST_ISSUE_FIELDS} isDraft headRefName isCrossRepository headRepository { nameWithOwner }
-  reviewDecision commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`;
+// The review and checks a pull request row shows, read the same way for a listing and for one item.
+const PULL_STATE_FIELDS = 'reviewDecision commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }';
+const LIST_PULL_FIELDS = `${LIST_ISSUE_FIELDS} isDraft headRefName isCrossRepository headRepository { nameWithOwner } ${PULL_STATE_FIELDS}`;
 const COMMENTS = `comments(last: ${REMOTE_WORK_LIMITS.comments}) { totalCount nodes { author { login } body createdAt } }`;
 const LABELS = `labels(first: ${REMOTE_WORK_LIMITS.labels}) { nodes { name } }`;
 const ISSUE_FIELDS = `number title url state body updatedAt author { login } ${LABELS} ${COMMENTS}`;
-const PULL_FIELDS = `${ISSUE_FIELDS} isDraft merged headRefName headRefOid baseRefName baseRefOid isCrossRepository headRepository { nameWithOwner }`;
+const PULL_FIELDS = `${ISSUE_FIELDS} isDraft merged headRefName headRefOid baseRefName baseRefOid isCrossRepository headRepository { nameWithOwner }
+  ${PULL_STATE_FIELDS}`;
 
 interface GitHubNode {
   __typename?: string;

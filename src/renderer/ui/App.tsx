@@ -2107,6 +2107,17 @@ export function App() {
   };
 
   // The checks run again on the platform, out of view, so a toast says they started.
+  // The update feeds the agent's instruction, so a failure is reported here and still stops that step.
+  const fetchPullRequestUpdate = async (taskId: string, from: 'PULL_REQUEST' | 'BASE') => {
+    setError(undefined);
+    try {
+      return await withAppAction(() => taskManagerApi.fetchPullRequestUpdate({ taskId, from }));
+    } catch (caught) {
+      reportActionError(caught, 'Could not fetch the update.');
+      throw caught;
+    }
+  };
+
   const rerunPullRequestChecks = async (taskId: string) => {
     setError(undefined);
     try {
@@ -3002,7 +3013,7 @@ export function App() {
             onResolvePullRequestDiscussion={resolvePullRequestDiscussion}
             onRerunPullRequestChecks={rerunPullRequestChecks}
             onReadPullRequestCheckLogs={(taskId) => taskManagerApi.readPullRequestCheckLogs({ taskId })}
-            onFetchPullRequestUpdate={(taskId, from) => taskManagerApi.fetchPullRequestUpdate({ taskId, from })}
+            onFetchPullRequestUpdate={fetchPullRequestUpdate}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}

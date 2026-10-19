@@ -469,6 +469,18 @@ describe('ReviewWorkspace pull request discussions', () => {
     await waitFor(() => expect(onResolveDiscussion).toHaveBeenCalledWith('suggest', true));
   });
 
+  it('acts with F on the thread in focus, never on a discussion focused before it', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[suggestion]} discussions={[discussion('open')]} discussionsOnLines />);
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    const minor = screen.getByRole('article', { name: 'Minor finding: Name the limit' });
+    fireEvent.focusIn(thread);
+    fireEvent.focusIn(minor);
+    fireEvent.keyDown(minor, { key: 'f' });
+    expect(within(minor).getByRole('button', { name: /In request/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(thread).getByRole('button', { name: 'Add to request' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
   it('says which line a thread is about once the code it was written on may have moved, and lists threads by what happens to them', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     const sent = discussion('sent', { comments: [{ author: 'dave', body: 'Cap the burst.', truncated: false }], commentCount: 1,

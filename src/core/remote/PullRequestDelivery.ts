@@ -9,8 +9,8 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import type { PullRequestMergeMethod, PullRequestMergeOptions } from '../../shared/pullRequestActions';
-import type { PullRequestDiscussion, PullRequestFeedback } from '../../shared/pullRequestFeedback';
-import type { RemoteProvider, RemoteRepositoryRef } from '../../shared/remoteWork';
+import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import type { RemoteProvider, RemoteRepositoryOption, RemoteRepositoryRef } from '../../shared/remoteWork';
 
 /**
  * Where a linked task's pull or merge request lives. Without a target, the
@@ -29,6 +29,18 @@ export interface DeliveryRemote {
   host: string;
   owner: string;
   repo: string;
+}
+
+/** A remote as a delivery reports it: the namespace, the project, and a URL without credentials. */
+export function deliveryRemote(remote: RemoteRepositoryOption): DeliveryRemote {
+  const split = remote.path.lastIndexOf('/');
+  return {
+    remoteName: remote.remoteName,
+    remoteUrl: `https://${remote.host}/${remote.path}.git`,
+    host: remote.host,
+    owner: remote.path.slice(0, split),
+    repo: remote.path.slice(split + 1)
+  };
 }
 
 /** One observation of a pull or merge request, split into Task Monki's evidence records. */
@@ -75,8 +87,8 @@ export interface PullRequestDelivery {
     /** The branch to delete after the merge, when the person asked and it can be deleted. */
     deleteBranch?: string;
   }): Promise<void>;
-  /** Replies on a discussion's own thread; a discussion that has none takes a comment on the pull request. */
-  replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussion: Pick<PullRequestDiscussion, 'id' | 'kind'>, body: string): Promise<void>;
+  /** Replies on a thread; a review or a comment has none, so its answer is a comment on the pull request. */
+  replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, body: string): Promise<void>;
   /** Resolves a thread, or reopens it when `resolved` is false. */
   resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved?: boolean): Promise<void>;
   commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;

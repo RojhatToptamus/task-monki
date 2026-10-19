@@ -256,11 +256,12 @@ with Retry where retrying can help. Task Monki stores no platform token.
 An issue starts new work. Task Monki reads the issue again when the task is
 created and keeps its title, body, labels and ten most recent comments as an
 immutable snapshot. The title defaults to the issue's; instructions are
-optional. Agents receive the snapshot quoted with its author and capture time,
-between boundary lines named by the snapshot, as data that grants no permission
-and cannot change the execution boundary or the person's instructions. Later
-edits on the platform do not change what agents read. The Overview's Request
-shows the issue's link and its captured text.
+optional. Agents receive the snapshot's text as readers see it, without markup
+or hidden comments, quoted with its author and capture time, between boundary
+lines named by the snapshot, as data that grants no permission and cannot
+change the execution boundary or the person's instructions. Later edits on the
+platform do not change what agents read. The Overview's Request shows the
+issue's link and its captured text.
 
 A pull request opens existing work. Task Monki reads it, fetches its exact
 head (`refs/pull/N/head`, or `refs/merge-requests/N/head` on GitLab) and its
@@ -731,7 +732,8 @@ themselves, from the Review tab or Reply on GitHub; nothing posts on its own.
 Whose turn it is decides what is asked of the person: once they wrote the
 latest comment, or asked again every reviewer who requested changes, the pull
 request waits on its reviewers (Waiting for review), and neither the Now panel,
-the board nor the Inbox asks anything of them until a reviewer answers.
+the board nor the Inbox asks anything of them until a reviewer answers. A
+request for changes the person made themselves stays theirs to answer.
 
 Push update is shown only here, and so is Create draft PR once a PR exists.
 Before then, Create draft PR sits with the finishing actions when finishing

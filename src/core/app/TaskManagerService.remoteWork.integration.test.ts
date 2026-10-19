@@ -274,7 +274,7 @@ describe('TaskManagerService remote work', () => {
     await expect(scenario.service.createPullRequest({ taskId: task.id })).rejects.toThrow();
     expect(await github.refSha('acme', 'widgets', 'refs/heads/feature')).toBe(theirs);
     expect((await scenario.service.getTaskDetail(task.id)).branchPublications[0]).toMatchObject({
-      status: 'FAILED', error: 'The pull request branch moved since Task Monki last read it. Refresh to see its new commits.'
+      status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.'
     });
 
     // A branch deleted after its merge is not created again.

@@ -2,7 +2,7 @@ import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { AgentUserInputRequest } from '../../shared/agent';
 import type { Task } from '../../shared/contracts';
 import { buildRemoteWorkContext } from '../../shared/promptTemplates';
-import { REMOTE_WORK_SNAPSHOT_SCHEMA, type RemoteWorkSnapshot } from '../../shared/remoteWork';
+import { parseRemoteWorkSnapshot } from '../../shared/remoteWork';
 
 // Bound prompt growth without silently forgetting a user decision.
 const MAX_USER_CONTEXT_LENGTH = 131_072;
@@ -79,12 +79,8 @@ export async function readTaskUserContext(
 export async function readTaskRemoteContext(store: SqliteTaskStore, task: Task): Promise<string> {
   const source = task.remoteSource;
   if (!source) return '';
-  let snapshot: RemoteWorkSnapshot | undefined;
-  try {
-    const parsed = JSON.parse(await store.readArtifact(source.snapshotArtifactId)) as RemoteWorkSnapshot;
-    if (parsed?.schema === REMOTE_WORK_SNAPSHOT_SCHEMA && parsed.number === source.number) snapshot = parsed;
-  } catch {
-    // The identity still names the item; the captured text is reported as unavailable.
-  }
+  // The identity still names the item when the captured text is unreadable; it is reported as unavailable.
+  const snapshot = await store.readArtifact(source.snapshotArtifactId)
+    .then((text) => parseRemoteWorkSnapshot(text, source.number), () => undefined);
   return buildRemoteWorkContext(source, snapshot);
 }

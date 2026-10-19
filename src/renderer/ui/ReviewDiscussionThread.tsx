@@ -68,6 +68,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
 }) {
   const [opened, setOpened] = useState(false);
   const [repliesOpen, setRepliesOpen] = useState(false);
+  // Folded or open, the thread is one element, so keyboard focus survives it folding when resolved.
+  const rootRef = useRef<HTMLElement>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string>();
   const resolve = async (resolved: boolean) => {
@@ -76,6 +78,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
     setResolveError(undefined);
     try {
       await onResolve(resolved);
+      // The check folds away with the thread; the thread keeps the keys, where N and R work.
+      rootRef.current?.focus({ preventScroll: true });
     } catch (caught) {
       setResolveError(caught instanceof Error ? caught.message : `Could not ${resolved ? 'resolve' : 'reopen'} the thread.`);
     } finally {
@@ -96,14 +100,15 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
 
   if (foldedByDefault && !opened && !inRequest) {
     return (
-      <div className="tm-review-thread tm-review-thread--folded tm-review-thread--discussion" data-discussion-id={discussion.id} tabIndex={-1} onFocus={onFocus}>
+      <article ref={rootRef} className="tm-review-thread tm-review-thread--folded tm-review-thread--discussion" data-discussion-id={discussion.id}
+        tabIndex={-1} onFocus={onFocus} aria-label={`${platform} comment by ${author}`}>
         <button type="button" className="tm-review-thread__fold" aria-expanded={false} onClick={() => setOpened(true)}>
           <span className="tm-review-thread__author">{author}</span>
           <span className="tm-review-thread__summary">{discussionSummary(discussion)}</span>
         </button>
         {state ?? verdict ? <span>{state ?? verdict}</span> : null}
         {openLink}
-      </div>
+      </article>
     );
   }
 
@@ -115,6 +120,7 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   const replaced = suggestionTarget(discussion, codeLines);
   return (
     <article
+      ref={rootRef}
       className={`tm-review-thread tm-review-thread--discussion${focused ? ' tm-review-thread--focused' : ''}`}
       data-discussion-id={discussion.id}
       tabIndex={-1}

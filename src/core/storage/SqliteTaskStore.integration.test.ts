@@ -17,6 +17,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { boundPullRequestFeedback, parsePullRequestFeedback } from '../../shared/pullRequestFeedback';
+import { remoteWorkKey } from '../../shared/remoteWork';
 import { SqliteTaskStore } from './SqliteTaskStore';
 import { SqliteAgentRuntimeStore } from './SqliteAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
@@ -772,6 +773,38 @@ describe('SqliteTaskStore', () => {
       .toBe('Also add a test.');
     expect((await reopened.snapshot()).artifacts.filter((artifact) => artifact.kind === 'pull-request-feedback')).toHaveLength(2);
     await closeStore(reopened);
+  });
+
+  it('finds the task that delivered a pull request, so the pull request is never opened as a second task', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delivered-pr-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Deliver', prompt: 'Open a pull request.', repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/deliver', worktreePath: path.join(dir, 'deliver'), baseSha: 'base'
+    });
+    const owner = { taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id };
+    const sync = () => store.recordPullRequestSync({
+      pullRequest: { ...owner, number: 82, url: 'https://github.com/Example/Repo/pull/82', status: 'OPEN_READY', headRefOid: 'head' },
+      ci: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NO_CHECKS', requiredStatus: 'UNKNOWN', totalCount: 0,
+        pendingCount: 0, passingCount: 0, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [] },
+      reviews: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_REQUESTED' },
+      merge: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_MERGED' }
+    });
+    await sync();
+    await sync();
+    const repository = { provider: 'GITHUB' as const, host: 'github.com', path: 'example/repo' };
+    const delivered = { repository, kind: 'PULL_REQUEST' as const, number: 82 };
+    const found = await store.findTasksForRemoteWork([
+      delivered,
+      { repository, kind: 'PULL_REQUEST', number: 83 },
+      // An issue shares the number, not the pull request.
+      { repository, kind: 'ISSUE', number: 82 }
+    ]);
+    expect([...found].map(([key, entry]) => [key, entry.id])).toEqual([[remoteWorkKey(delivered), task.id]]);
+    expect((await store.findTaskForRemoteWork(delivered))?.id).toBe(task.id);
+    await closeStore(store);
   });
 
   it('records in-progress branch publication as a request, not a failure', async () => {

@@ -11,6 +11,8 @@ import {
   type ReviewResponseAnswer,
   type ReviewResponseOutcome
 } from '../../shared/contracts';
+import { displayPlatformText } from '../../shared/remoteWork';
+import { formatCommentLocation, listNames } from './formatting';
 
 /** What became of a discussion the person sent to the agent. */
 export interface DiscussionSent {
@@ -174,28 +176,6 @@ export function discussionAuthor(discussion: Pick<PullRequestDiscussion, 'commen
   return discussion.comments[0]?.author;
 }
 
-/** HTML GitHub and GitLab render; a tag outside this set, such as `List<String>` in prose, stays text. */
-const PLATFORM_TAG = /<\/?(details|summary|blockquote|p|div|span|br|hr|sub|sup|b|i|u|strong|em|ins|del|s|kbd|a|img|picture|source|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|h[1-6]|dl|dt|dd|center|code|pre)\b[^>]*>/giu;
-const BLOCK_TAG = /^(details|summary|blockquote|p|div|br|hr|table|thead|tbody|tfoot|tr|ul|ol|li|h[1-6]|dl|dt|dd|center|pre)$/iu;
-const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&nbsp;': ' ' };
-
-/**
- * A comment as the Review tab renders it. The platforms render HTML, which the
- * app's markdown would show as tags, so the tags give way to their text: a
- * collapsed `<details>` reads as its summary and its contents. Code, fenced or
- * inline, keeps every character.
- */
-export function displayPlatformText(body: string): string {
-  return body.split(/(```[\s\S]*?```)/u).map((part, fence) => fence % 2 === 1 ? part
-    : part.split(/(`[^`\n]+`)/u).map((piece, code) => code % 2 === 1 ? piece
-      : piece
-        .replace(PLATFORM_TAG, (_tag, name: string) => (BLOCK_TAG.test(name) ? '\n' : ''))
-        .replace(/&(?:amp|lt|gt|quot|#39|nbsp);/gu, (entity) => ENTITIES[entity] ?? entity)).join('')).join('')
-    .replace(/[ \t]+\n/gu, '\n')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trim();
-}
-
 /** A comment as the person reads it in Task Monki, and so as an agent is sent it; never empty. */
 export function discussionCommentText(body: string): string {
   return displayPlatformText(body) || '(No text: an image or other content only.)';
@@ -242,12 +222,9 @@ export function discussionSummary(discussion: Pick<PullRequestDiscussion, 'comme
   return plain.length > 160 ? `${plain.slice(0, 159)}…` : plain;
 }
 
-/** Where a discussion points, as the rail and the request read it. */
+/** Where a discussion points; a review or a comment on the whole pull request points at no file. */
 export function formatDiscussionLocation(discussion: Pick<PullRequestDiscussion, 'path' | 'side' | 'line' | 'endLine'>): string | undefined {
-  if (!discussion.path) return undefined;
-  if (!discussion.line) return discussion.path;
-  const lines = discussion.endLine && discussion.endLine > discussion.line ? `${discussion.line}-${discussion.endLine}` : `${discussion.line}`;
-  return discussion.side === 'OLD' ? `${discussion.path} (removed line${discussion.endLine ? 's' : ''} ${lines})` : `${discussion.path}:${lines}`;
+  return discussion.path ? formatCommentLocation({ ...discussion, path: discussion.path }) : undefined;
 }
 
 /** A review's verdict as a reviewer's action. */
@@ -288,11 +265,6 @@ function joinNames(names: readonly string[], verb: string): string | undefined {
   return names.length ? `${listNames(names)} ${verb}` : undefined;
 }
 
-function listNames(names: readonly string[]): string {
-  if (names.length <= 2) return names.join(' and ');
-  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
-}
-
 const INSTRUCTION_DISCUSSION_LIMIT = 4_000;
 
 /**
@@ -305,13 +277,11 @@ export function discussionTranscript(
   viewer?: string
 ): string[] {
   const lines: string[] = [];
-  let budget = INSTRUCTION_DISCUSSION_LIMIT;
+  const shown = discussion.comments.map((comment) => discussionCommentText(comment.body));
+  const allowed = fairShares(shown.map((text) => text.length), INSTRUCTION_DISCUSSION_LIMIT);
   discussion.comments.forEach((comment: PullRequestComment, index) => {
-    if (budget <= 0) return;
-    const shown = discussionCommentText(comment.body);
-    const body = shown.slice(0, budget);
-    budget -= body.length;
-    const cut = body.length < shown.length || comment.truncated;
+    const body = shown[index]!.slice(0, allowed[index]);
+    const cut = body.length < shown[index]!.length || comment.truncated;
     const who = `@${comment.author ?? 'unknown'}${viewer && comment.author === viewer ? ', the person sending this request' : ''}`;
     lines.push(`   ${index === 0 ? '' : 'Reply from '}${who}:`);
     for (const line of body.split('\n')) lines.push(`   ${line}`);
@@ -322,6 +292,27 @@ export function discussionTranscript(
     }
   });
   return lines;
+}
+
+/**
+ * A bound shared by several texts: a short one keeps all of it and the long ones
+ * split the rest, so every text keeps at least an even share. The latest reply of
+ * a long thread, where it ended, is never crowded out by its first comment.
+ */
+function fairShares(lengths: readonly number[], limit: number): number[] {
+  const shares = lengths.map(() => 0);
+  let remaining = limit;
+  let open = lengths.map((_, index) => index).filter((index) => lengths[index]! > 0);
+  while (open.length > 0 && remaining >= open.length) {
+    const share = Math.floor(remaining / open.length);
+    for (const index of open) {
+      const take = Math.min(lengths[index]! - shares[index]!, share);
+      shares[index]! += take;
+      remaining -= take;
+    }
+    open = open.filter((index) => shares[index]! < lengths[index]!);
+  }
+  return shares;
 }
 
 function time(value: string | undefined): number {

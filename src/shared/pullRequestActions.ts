@@ -107,11 +107,21 @@ export interface PullRequestCheckLog {
 }
 
 /**
- * Git states in which a worktree holds work its pull request does not:
- * uncommitted, committed but not pushed, diverged, or mid-conflict. A merge
- * would leave that work behind, so it neither merges nor completes a task.
+ * Git states in which a worktree may hold work its pull request does not:
+ * uncommitted, committed but not pushed, diverged, or mid-conflict.
  */
-export const UNSHIPPED_GIT_STATUSES: ReadonlySet<string> = new Set(['DIRTY', 'COMMITTED_UNPUSHED', 'DIVERGED', 'CONFLICTED']);
+const UNSHIPPED_GIT_STATUSES: ReadonlySet<string> = new Set(['DIRTY', 'COMMITTED_UNPUSHED', 'DIVERGED', 'CONFLICTED']);
+
+/**
+ * The worktree holds work the pull request at `headSha` lacks, so a merge would
+ * leave it behind: it neither merges nor completes a task. A push by URL, as
+ * imported work is published, sets no upstream; a head that is the pull
+ * request's own is shipped all the same.
+ */
+export function holdsUnshippedWork(git: { status: string; headSha?: string }, pullRequestHeadSha: string | undefined): boolean {
+  return UNSHIPPED_GIT_STATUSES.has(git.status) &&
+    !(git.status === 'COMMITTED_UNPUSHED' && Boolean(pullRequestHeadSha) && git.headSha === pullRequestHeadSha);
+}
 
 export const CHECK_LOG_LIMITS = {
   /** Failing checks read per request. */

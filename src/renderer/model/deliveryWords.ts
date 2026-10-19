@@ -49,8 +49,3 @@ export function deliveryWords<T extends string | undefined>(text: T, provider: R
     .replace(/\bPull requests\b/gu, 'Merge requests')
     .replace(/\bPull request\b/gu, 'Merge request') as T;
 }
-
-/** A pull or merge request's number as its platform writes it: `#82` or `!82`. */
-export function deliveryNumber(provider: RemoteProvider, number: number): string {
-  return `${provider === 'GITLAB' ? '!' : '#'}${number}`;
-}

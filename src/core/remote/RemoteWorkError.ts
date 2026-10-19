@@ -16,6 +16,11 @@ export class RemoteWorkError extends Error {
   }
 }
 
+/** What a failed remote read or write tells the person, without credentials. */
+export function remoteWorkMessage(error: unknown): string {
+  return error instanceof RemoteWorkError ? error.message : safeCliMessage(error);
+}
+
 export function remoteWorkUnavailable(error: unknown): RemoteWorkUnavailable {
   return error instanceof RemoteWorkError
     ? error.toUnavailable()
