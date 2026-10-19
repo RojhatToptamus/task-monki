@@ -12,7 +12,6 @@
    compared, the view, and the review action. */
 .tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 0; box-shadow: inset 0 -1px 0 var(--hair); }
 .tm-review__rail-switch { flex: 0 0 auto; width: calc(var(--review-index-width) - 16px); margin: 0 8px; }
-.tm-review__rail-switch .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review__rail-count { margin-left: 5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .tm-review__headline { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-review__headline[data-tone='blocked'] { color: var(--blocked-ink); }
@@ -23,7 +22,8 @@
 .tm-review__bar-end { margin-left: auto; }
 .tm-review__scope .tm-action-menu__trigger { gap: 4px; padding: 0 6px 0 8px; color: var(--text-soft); font-size: var(--t-body); }
 .tm-review__view__trigger.tm-action-menu__trigger { width: var(--h-icon); padding: 0; }
-.tm-review__notice { margin: 0; padding: 8px 16px; background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); }
+/* A band under the bar (.tm-notice--band), its words on the tab's 16px inset. */
+.tm-review__notice { padding-inline: 16px; }
 
 .tm-review__work { display: grid; flex: 1; grid-template-columns: var(--review-index-width) minmax(0, 1fr); min-height: 0; }
 
@@ -176,7 +176,6 @@
 .tm-review-thread__earlier { margin: 0; color: var(--muted); font-size: var(--t-help); }
 .tm-review-thread--earlier { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
 .tm-review-thread__dismiss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }
-.tm-review-thread__dismiss .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review-thread__dismiss input { flex: 1 1 160px; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
 .tm-review-thread--folded { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 6px 6px 6px 12px; background: var(--panel); box-shadow: none; color: var(--faint); font-size: var(--t-help); }
 .tm-review-thread--folded .tm-review__severity { color: var(--faint); }
@@ -214,8 +213,8 @@
 .tm-review__request-reason { align-self: center; max-width: 280px; color: var(--muted); font-size: var(--t-help); }
 
 /* The request sheet rises over the diff from the summary that opens it, without blocking it. */
-.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-review-sheet-in var(--motion-standard) var(--ease-out); }
-@keyframes tm-review-sheet-in { from { opacity: 0; transform: scale(0.96); } }
+.tm-review-sheet { position: absolute; bottom: calc(100% + 8px); right: 16px; z-index: var(--layer-menu); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(600px, calc(100% - var(--review-index-width) - 32px)); max-height: min(520px, 54vh); border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: bottom right; animation: tm-menu-in var(--motion-standard) var(--ease-out); }
+.tm-review-sheet[data-state='closed'] { animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards; }
 .tm-review-sheet__head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 4px 12px; }
 .tm-review-sheet__head h2 { flex: 1; margin: 0; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); }
 .tm-review-sheet__head .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }

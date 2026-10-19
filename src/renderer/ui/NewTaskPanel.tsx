@@ -50,6 +50,8 @@ import {
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { PendingLabel } from './StableLabel';
 import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { ExpandToggle, isExpandShortcut } from './ExpandToggle';
 import { readNewTaskExpanded, writeNewTaskExpanded } from '../model/newTaskLayout';
@@ -682,15 +684,12 @@ export function NewTaskPanel({
     /> : null}
   </>;
   return (
-    <div className={`tm-modal tm-modal--top newtask-modal${isClosing ? ' newtask-modal--closing' : ''}`} role="presentation">
-      <button
-        type="button"
-        className="tm-modal__scrim"
-        aria-label="Close new task"
-        tabIndex={-1}
-        disabled={isSubmitting}
-        onClick={closePanel}
-      />
+    <ModalFrame
+      className={`tm-modal--top newtask-modal${isClosing ? ' newtask-modal--closing' : ''}`}
+      role="presentation"
+      pending={isSubmitting}
+      onDismiss={isSubmitting ? undefined : closePanel}
+    >
       <form
         id="new-task-panel-content"
         ref={panelRef}
@@ -732,7 +731,7 @@ export function NewTaskPanel({
       >
         <header className="newtask-modal__header">
           {onImport ? (
-            <div className="segmented" role="group" aria-label="Task source" onKeyDown={(event) => {
+            <div className="segmented segmented--compact" role="group" aria-label="Task source" onKeyDown={(event) => {
               if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
               event.preventDefault();
               const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
@@ -893,7 +892,7 @@ export function NewTaskPanel({
               </AttachmentComposerShell>
               {attachmentOverflowError ? (
                 <p
-                  className="task-attachment-message task-attachment-message--error"
+                  className="form-error"
                   role="alert"
                 >
                   {attachmentOverflowError}
@@ -901,7 +900,7 @@ export function NewTaskPanel({
               ) : null}
               {selectedModelRejectsImages ? (
                 <p
-                  className="task-attachment-message task-attachment-message--error"
+                  className="form-error"
                   role="alert"
                 >
                   {attachmentModelError}
@@ -909,7 +908,7 @@ export function NewTaskPanel({
               ) : null}
               {selectedRuntimeRejectsAttachments ? (
                 <p
-                  className="task-attachment-message task-attachment-message--error"
+                  className="form-error"
                   role="alert"
                 >
                   Remove the attachments or choose a runtime that supports them.
@@ -934,22 +933,22 @@ export function NewTaskPanel({
           ) : null}
 
           {error ? (
-            <p className="form-error" role="alert">
+            <p className="tm-notice" role="alert">
               {error}
             </p>
           ) : null}
           {currentRefinementWarning ? (
-            <p className="form-warning">{currentRefinementWarning}</p>
+            <p className="tm-notice" data-tone="waiting">{currentRefinementWarning}</p>
           ) : null}
           {/* Creating still works; only starting waits for the runtime, so this is a warning. */}
           {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
-            <p className="form-warning">
+            <p className="tm-notice" data-tone="waiting">
               {selectedRuntimeReadiness.detail}
               {selectedRuntimeReadiness.nextAction ? ` ${selectedRuntimeReadiness.nextAction}.` : ''}
             </p>
           ) : null}
           {!importing && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
-            <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
+            <p className="tm-notice" data-tone="waiting">{selectedRuntimeReadiness.detail}</p>
           ) : null}
         </div>
 
@@ -980,16 +979,16 @@ export function NewTaskPanel({
                   : 'Create task'
               }
             >
-              {importing ? (isSubmitting ? 'Importing…' : 'Import') : isSubmitting
-                ? 'Creating…'
-                : creationOutcomeUnknown
-                  ? 'Retry creation'
-                  : 'Create task'}
+              <PendingLabel
+                label={importing ? 'Import' : creationOutcomeUnknown ? 'Retry creation' : 'Create task'}
+                pendingLabel={importing ? 'Importing…' : 'Creating…'}
+                pending={isSubmitting}
+              />
             </button> : null}
           </div>
         </footer>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 

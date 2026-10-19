@@ -40,6 +40,8 @@ export interface MarkDoneModalCopy {
   fallbackWarningTitle: string;
   fallbackWarningDetail: string;
   confirmLabel: string;
+  /** The confirm button's label while marking runs. */
+  pendingLabel: string;
 }
 
 export interface MarkDoneModalContext {
@@ -103,7 +105,6 @@ export function finishRequirementsForTask(
 
 export function markDoneModalCopy(
   withIssues: boolean,
-  busy: boolean,
   context: MarkDoneModalContext = {}
 ): MarkDoneModalCopy {
   const hasPullRequest = Boolean(context.hasPullRequest);
@@ -112,7 +113,8 @@ export function markDoneModalCopy(
     body: markDoneModalBody(withIssues, hasPullRequest),
     fallbackWarningTitle: 'Evidence is not fully passing.',
     fallbackWarningDetail: 'You are explicitly marking the current local result done.',
-    confirmLabel: busy ? 'Marking done…' : withIssues ? 'Mark done anyway' : 'Mark done'
+    confirmLabel: withIssues ? 'Mark done anyway' : 'Mark done',
+    pendingLabel: 'Marking done…'
   };
 }
 

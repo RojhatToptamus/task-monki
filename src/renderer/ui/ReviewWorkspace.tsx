@@ -647,7 +647,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   return (
     <section className="tm-review" aria-label="Review" data-file-full-screen={focusedFile ? '' : undefined} onKeyDown={onKeyDown}>
       <div className="tm-review__bar">
-        <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
+        <div className="segmented segmented--fill segmented--compact tm-review__rail-switch" role="group" aria-label="Show">
           <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => setRail('files')}>
             Files<span className="tm-review__rail-count" aria-label={viewedCount ? `${viewedCount} of ${files.length} viewed` : undefined}>{viewedLabel}</span>
           </button>
@@ -724,7 +724,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
       </div>
 
       {diff.inspection.completeness === 'INCOMPLETE' && !diff.loading ? (
-        <p className="tm-review__notice" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
+        <p className="tm-notice tm-notice--band tm-review__notice" data-tone="waiting" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
       ) : null}
 
       <div className="tm-review__work">

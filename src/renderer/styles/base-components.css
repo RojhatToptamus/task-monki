@@ -271,6 +271,13 @@ svg.lucide :is(path, line, polyline, polygon, circle, ellipse, rect) {
 }
 
 /* A list filter spans its column; each option takes an equal share. */
+/* In a head or a bar the track is as tall as the controls beside it (DESIGN.md 3): 24px
+   segments with 12px labels in a 28px track. */
+.segmented--compact .segmented__btn {
+  height: var(--h-compact);
+  font-size: var(--t-help);
+}
+
 .segmented--fill {
   display: flex;
 }
@@ -587,17 +594,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .interaction-answer__status { margin: 10px 0 0; color: var(--muted); font-size: var(--t-label); }
 
 .interaction-card__warning {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
   margin: 12px 0 0;
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--waiting-bg);
-  color: var(--waiting-ink);
-  font-size: var(--t-help);
-  line-height: var(--lh-ui);
 }
 
 .interaction-command {
@@ -994,9 +991,9 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
    trigger and leave faster than they arrive. */
 .tm-action-menu__popover { z-index: var(--layer-menu); width: 240px; max-width: calc(100vw - 16px); max-height: var(--radix-dropdown-menu-content-available-height); overflow-y: auto; padding: 4px; border: 0; border-radius: var(--r); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); transform-origin: var(--radix-dropdown-menu-content-transform-origin); }
 .tm-action-menu__popover[data-state='open'] { animation: tm-menu-in var(--motion-standard) var(--ease-out); }
-.tm-action-menu__popover[data-state='closed'] { animation: tm-menu-out var(--motion-fast) var(--ease-out); }
-/* Opened or closed from the keyboard, a menu is there at once: key repeat drives it. */
-:root[data-input-modality='keyboard'] .tm-action-menu__popover { animation: none; }
+.tm-action-menu__popover[data-state='closed'] { animation: tm-shrink-out var(--motion-fast) var(--ease-out); }
+/* Opened or closed from the keyboard, a menu or a picker is there at once: key repeat drives it. */
+:root[data-input-modality='keyboard'] :is(.tm-action-menu__popover, .tm-theme-picker__menu, .tm-agent-console__menu, .tm-repository-select__popover) { animation: none; }
 /* A submenu follows the pointer between rows, many times a minute: it fades in
    quickly without growing, and leaves at once so two never overlap. */
 .tm-action-menu__popover--sub[data-state='open'] { animation: tm-scrim-in var(--motion-fast) var(--ease-out); }
@@ -1035,8 +1032,7 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .interaction-details--permissions dd + dt { margin-top: 8px; }
 .interaction-permission + .interaction-permission dt { margin-top: 8px; }
 .interaction-card__reason { margin: 0 0 12px; color: var(--text-soft); font-size: var(--t-body); line-height: 1.5; }
-.interaction-card__error { margin-top: 12px; }
-.interaction-card__error .form-error { margin: 0 0 4px; }
+.interaction-card__error { display: grid; gap: 4px; margin-top: 12px; }
 .interaction-card__error pre,
 .interaction-technical > pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-meta); }
 
@@ -1047,7 +1043,8 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 
 /* Tooltip: the one surface on the overlay plane besides toasts (DESIGN.md
    A.3). It scales in from the trigger after the delay and appears instantly
-   while the pointer moves between neighbours. */
+   while the pointer moves between neighbours. It leaves at once, so the
+   neighbour's never overlaps it (DESIGN.md 12). */
 .tm-tooltip { z-index: var(--layer-tooltip); display: inline-flex; align-items: center; gap: 8px; max-width: 280px; padding: 4px 8px; border-radius: var(--r-xs); background: var(--overlay); color: var(--text); box-shadow: inset 0 0 0 1px var(--edge), var(--shadow-pop); font-size: var(--t-help); font-weight: var(--w-medium); line-height: var(--lh-meta); transform-origin: var(--radix-tooltip-content-transform-origin); user-select: none; }
 .tm-tooltip[data-state='delayed-open'] { animation: tm-tooltip-in var(--motion-fast) var(--ease-out); }
 .tm-tooltip__shortcut { color: var(--muted); font: inherit; }
@@ -1057,6 +1054,36 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-stable-label { display: inline-grid; justify-items: center; }
 .tm-stable-label > * { grid-area: 1 / 1; }
 .tm-stable-label__reserve { visibility: hidden; }
+/* A pending label replaces the resting one only once the action has run for
+   --pending-delay (DESIGN.md 6.1); an action that ends sooner never shows it. */
+.tm-pending-label > :last-child { visibility: hidden; }
+.tm-pending-label[data-pending] > :first-child { visibility: hidden; transition: visibility 0s linear var(--pending-delay); }
+.tm-pending-label[data-pending] > :last-child { visibility: visible; transition: visibility 0s linear var(--pending-delay); }
+
+/* The inline notice (DESIGN.md 10): the one way a surface states a warning or an error about
+   itself or its action. The tone's tint and ink carry the whole unit, its glyph, title and a
+   quoted reason included (--muted and --text-soft are not solved against tints). The blocked
+   tone is the default; data-tone='waiting' is a warning. A message about one field is that
+   field's error text instead (.form-error). */
+.tm-notice { margin: 0; padding: 8px 12px; border-radius: var(--r-sm); background: var(--blocked-bg); color: var(--blocked-ink); font-size: var(--t-help); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.tm-notice[data-tone='waiting'] { background: var(--waiting-bg); color: var(--waiting-ink); }
+.tm-notice p { margin: 0; }
+.tm-notice__title { display: block; font-weight: var(--w-medium); }
+/* Led by its 16px glyph or ended by its actions, a notice is a row: the glyph sits on the first
+   line, the actions in the middle of the notice. (:where keeps the row rule light, so the
+   actions rule below decides their alignment.) */
+.tm-notice:has(> :where(svg:first-child, .tm-notice__actions)) { display: flex; align-items: flex-start; gap: 8px; }
+.tm-notice:has(> .tm-notice__actions) { align-items: center; justify-content: space-between; gap: 12px; }
+.tm-notice > svg:first-child { flex: 0 0 auto; margin-top: 1px; }
+.tm-notice:has(> :where(svg:first-child, .tm-notice__actions)) > :not(svg, .tm-notice__actions) { flex: 1 1 auto; min-width: 0; }
+/* Its actions are ghost buttons in the notice's own ink. */
+.tm-notice__actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.tm-notice__actions button { height: var(--h-toolbar); padding: 0 8px; border-radius: var(--r-sm); color: inherit; font-size: var(--t-help); font-weight: var(--w-medium); }
+.tm-notice__actions button:not(:disabled):hover { background-color: var(--hover); }
+/* Across a pane, under its bar, the notice is a square band; the pane sets its inset. */
+.tm-notice--band { border-radius: 0; }
+/* On a page it takes the page's gutter. */
+.tm-notice--page { margin: 0 var(--tm-gutter) 8px; }
 
 /* Table: one container for every comparable list (DESIGN.md A.5) — the object
    edge drawn over the rows, 12px corners, no fill, hair dividers, a 36px
@@ -1088,14 +1115,15 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-table__menu .tm-action-menu__trigger[data-state='open'] { opacity: 1; }
 
 /* List rail: the Designs and Discourse history. A heading with New, search, a
-   status filter, then rows that overhang the fields by 4px on each side; the
-   list's 9px scrollbar gutter makes up its right padding. */
+   status filter, then rows on the fields' edges, every word on the head's 16px
+   line; the list's 9px scrollbar gutter makes up its right padding. */
 /* In a narrow window the list rail becomes a drawer over the content. */
-:is(.tm-designs--compact .tm-designs-rail, .tm-discourse--compact .tm-discourse-rail) { position: absolute; inset: 0 auto 0 0; z-index: var(--layer-overlay); width: min(300px, calc(100% - 42px)); box-shadow: inset -1px 0 0 var(--edge), var(--shadow-pop); transform: translateX(-104%); visibility: hidden; transition: transform var(--motion-slow) var(--ease-drawer), visibility 0s linear var(--motion-slow); }
-:is(.tm-designs--compact .tm-designs-rail--open, .tm-discourse--compact .tm-discourse-rail--open) { transform: translateX(0); visibility: visible; transition-delay: 0s; }
+:is(.tm-designs-rail--drawer, .tm-discourse--compact .tm-discourse-rail) { position: absolute; inset: 0 auto 0 0; z-index: var(--layer-overlay); width: min(300px, calc(100% - 42px)); box-shadow: inset -1px 0 0 var(--edge), var(--shadow-pop); transform: translateX(-104%); visibility: hidden; transition: transform var(--motion-fast) var(--ease-out), visibility 0s linear var(--motion-fast); }
+/* It stays mounted while closed, slides in over --motion-slow and leaves over --motion-fast (DESIGN.md 12). */
+:is(.tm-designs-rail--drawer.tm-designs-rail--open, .tm-discourse--compact .tm-discourse-rail--open) { transform: translateX(0); visibility: visible; transition: transform var(--motion-slow) var(--ease-drawer), visibility 0s; }
 /* The head shares the 48px line of the workspace head beside it. */
 /* Boxes in the rail sit 8px in; their words start 16px in, on the head's line. */
-.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--h-head); padding: 6px 16px; margin-bottom: 4px; }
+.tm-listrail__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: var(--h-head); padding: 0 16px; margin-bottom: 4px; }
 .tm-listrail__head h2 { margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: var(--w-medium); letter-spacing: -0.01em; }
 .tm-listrail__head-actions { display: flex; align-items: center; gap: 4px; }
 .tm-listrail__new { display: inline-flex; align-items: center; gap: 6px; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); font-weight: var(--w-medium); }
@@ -1107,12 +1135,13 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .app-shell .tm-listrail__search input:focus { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font: var(--t-help) var(--font-ui); }
 .tm-listrail__filter { margin: 0 8px 12px; }
 .tm-listrail__list { min-height: 0; flex: 1; overflow-y: auto; padding: 0 0 12px 8px; scrollbar-gutter: stable; }
-.tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: var(--h-row-tall); margin: 1px 0; padding: 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
+/* A two-line row: the title and its meta line on 16px line boxes, so the row is exactly 48. */
+.tm-listrail__item { display: grid; align-content: center; gap: 0; width: 100%; min-height: var(--h-row-tall); margin: 1px 0; padding: 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
 .tm-listrail__item:hover { background-color: var(--hover); }
 .tm-listrail__item--active,
 .tm-listrail__item--active:hover { background: var(--sel); color: var(--text); }
 .tm-listrail__item-title { min-width: 0; overflow: hidden; font-size: var(--t-help); font-weight: var(--w-medium); line-height: var(--lh-meta); text-overflow: ellipsis; white-space: nowrap; }
-.tm-listrail__item-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--t-meta); }
+.tm-listrail__item-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 .tm-listrail__item-meta time { margin-left: auto; font-variant-numeric: tabular-nums; }
 .tm-listrail__item-meta [data-tone='working'] { color: var(--accent-ink); }
 .tm-listrail__item-meta [data-tone='waiting'] { color: var(--waiting-ink); }

@@ -78,7 +78,7 @@ export function ReplayApprovalSettings() {
           )}
         </div>
       ) : null}
-      {error ? <p className="tm-error" role="alert">{error}</p> : null}
+      {error ? <p className="tm-notice" role="alert">{error}</p> : null}
     </SettingsSubsection>
   );
 }

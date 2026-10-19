@@ -919,27 +919,27 @@ describe('task finish policy', () => {
   });
 
   it('uses Mark done language in the confirmation modal copy', () => {
-    expect(markDoneModalCopy(false, false)).toMatchObject({
+    expect(markDoneModalCopy(false)).toMatchObject({
       title: 'Mark done',
       body: 'Records the current local result as done without creating a commit or PR.',
       confirmLabel: 'Mark done'
     });
-    expect(markDoneModalCopy(false, false, { hasPullRequest: true })).toMatchObject({
+    expect(markDoneModalCopy(false, { hasPullRequest: true })).toMatchObject({
       title: 'Mark done',
       body: 'Records this task as done in Task Monki. The existing PR is left unchanged; no new commit or PR is created.',
       confirmLabel: 'Mark done'
     });
-    expect(markDoneModalCopy(true, false)).toMatchObject({
+    expect(markDoneModalCopy(true)).toMatchObject({
       title: 'Mark done anyway',
       body: 'Records the current local result as done. No commit or PR is created, and these checks stay unresolved:',
       confirmLabel: 'Mark done anyway'
     });
-    expect(markDoneModalCopy(true, false, { hasPullRequest: true })).toMatchObject({
+    expect(markDoneModalCopy(true, { hasPullRequest: true })).toMatchObject({
       title: 'Mark done anyway',
       body: 'Records this task as done in Task Monki. The existing PR is left unchanged, and these checks stay unresolved:',
       confirmLabel: 'Mark done anyway'
     });
-    expect(markDoneModalCopy(true, true).confirmLabel).toBe('Marking done…');
+    expect(markDoneModalCopy(true).pendingLabel).toBe('Marking done…');
   });
 });
 

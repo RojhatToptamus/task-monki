@@ -1537,6 +1537,16 @@
   animation: tm-dialog-in var(--motion-modal) var(--ease-out);
 }
 
+/* It leaves faster than it came (DESIGN.md 12): the panel settles back a little as it fades
+   with its scrim, both over --motion-fast. */
+.tm-modal[data-state='closed'] .tm-modal__scrim {
+  animation: tm-fade-out var(--motion-fast) var(--ease-out) forwards;
+}
+
+.tm-modal[data-state='closed'] .tm-modal__panel {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
+}
+
 .tm-modal__panel h3 {
   margin: 0 0 8px;
   color: var(--text);
@@ -1544,28 +1554,17 @@
   font-weight: var(--w-medium);
 }
 
+/* The title and its one paragraph are the head, 8 apart; the form starts 16 below the head,
+   as its fields sit 16 apart. */
+.tm-modal__panel > h3:not(:has(+ p)) {
+  margin-bottom: 16px;
+}
+
 :where(.tm-modal__panel p) {
   margin: 0 0 16px;
   color: var(--text-soft);
   font-size: var(--t-body);
   line-height: 1.5;
-}
-
-.tm-modal__warning {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 8px 12px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--waiting-bg);
-  color: var(--text-soft);
-  font-size: var(--t-body);
-  line-height: 1.45;
-}
-
-.tm-modal__warning strong {
-  color: var(--text);
 }
 
 .tm-modal__requirements {
@@ -1595,9 +1594,9 @@
   margin-top: 16px;
 }
 
-/* A modal's error notice sits under the field it answers. */
-.tm-modal__error {
-  margin-top: 8px;
+/* A modal's notice is one more row of its form, 16px below the last. */
+.tm-modal__notice {
+  margin-top: 16px;
 }
 
 .tm-board-editor {
@@ -1641,14 +1640,14 @@
 .tm-board-editor__color legend {
   padding: 0;
   color: var(--text);
-  font-size: var(--t-help);
+  font-size: var(--t-label);
   font-weight: var(--w-medium);
 }
 
 .tm-board-editor__swatches {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: 8px;
   margin-top: 8px;
 }
 
@@ -1695,36 +1694,51 @@
 
 .tm-board-editor__filter {
   min-width: 0;
-  margin: 18px 0 0;
+  margin: 16px 0 0;
   padding: 0;
   border: 0;
 }
 
+/* A filter group reads as one field: its label, with what it holds and Use all on the same
+   line at the right, then its control 8px below, as every field's is. */
 .tm-board-editor__filter legend {
+  float: left;
   padding: 0;
   color: var(--text);
-  font-size: var(--t-help);
+  font-size: var(--t-label);
   font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
 }
 
 .tm-board-editor__filter-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 28px;
+  justify-content: flex-end;
+  gap: 12px;
+  height: var(--lh-ui);
+  margin-bottom: 8px;
   color: var(--muted);
+  font-size: var(--t-help);
+}
+
+.tm-board-editor__filter-head small {
+  font-size: inherit;
 }
 
 .tm-board-editor__filter-head button {
   color: var(--accent-ink);
-  font-size: var(--t-meta);
+  font-size: var(--t-help);
   font-weight: var(--w-medium);
+}
+
+.tm-board-editor__filter-head ~ * {
+  clear: both;
 }
 
 .tm-board-editor__options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px 10px;
+  gap: 8px 12px;
 }
 
 .tm-board-editor__options--phases {
@@ -1765,10 +1779,6 @@
   text-transform: capitalize;
 }
 
-.tm-board-editor__error {
-  margin: 16px 0 0;
-}
-
 .tm-board-editor__actions-spacer {
   flex: 1;
 }
@@ -1785,8 +1795,7 @@
 .tm-prepare-worktree__commit { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: baseline; padding-top: 8px; }
 .tm-prepare-worktree__commit span { color: var(--muted); font-size: var(--t-help); }
 .tm-prepare-worktree__commit code { min-width: 0; overflow-wrap: anywhere; font-size: var(--t-meta); }
-.tm-prepare-worktree__trust { color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
-.tm-prepare-worktree__error { margin: 0; }
+.tm-prepare-worktree__trust { color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 .tm-prepare-worktree .tm-modal__actions { margin: 0; padding-top: 16px; border-top: 1px solid var(--hair); gap: 8px; }
 
 @media (max-width: 620px) {
@@ -1807,7 +1816,7 @@
 .tm-draftpr-modal__context {
   display: grid;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 16px;
   padding: 12px;
   border: 0;
   border-radius: var(--r-sm);

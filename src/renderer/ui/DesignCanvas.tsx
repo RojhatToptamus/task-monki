@@ -12,6 +12,7 @@ import {
   type DesignProjectDetail
 } from '../model/designs';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
+import { PendingLabel } from './StableLabel';
 import { StatusGlyph } from './StatusBadge';
 import { Tooltip } from './Tooltip';
 import {
@@ -244,9 +245,10 @@ export function DesignCanvas({
             type="button"
             className="primary-button"
             disabled={operation !== undefined}
+            data-pending={operation === 'refresh' || undefined}
             onClick={() => void refreshPreview()}
           >
-            {operation === 'refresh' ? 'Reloading…' : 'Retry preview'}
+            <PendingLabel label="Retry preview" pendingLabel="Reloading…" pending={operation === 'refresh'} />
           </button>
         </div>
       ) : null}
@@ -260,22 +262,24 @@ export function DesignCanvas({
           type="button"
           className="primary-button"
           disabled={operation !== undefined}
+          data-pending={operation === 'restart' || undefined}
           onClick={() => void runOperation(
             'restart',
             () => onRestart(project.design.id),
             'Could not restart the preview.'
           )}
         >
-          {operation === 'restart' ? 'Restarting…' : 'Restart preview'}
+          <PendingLabel label="Restart preview" pendingLabel="Restarting…" pending={operation === 'restart'} />
         </button>
       ) : presentation.kind === 'PLACEHOLDER' && onRetryUpdate ? (
         <button
           type="button"
           className="primary-button"
           disabled={operation !== undefined}
+          data-pending={operation === 'retry' || undefined}
           onClick={() => void runOperation('retry', onRetryUpdate, 'Could not retry the update.')}
         >
-          {operation === 'retry' ? 'Retrying…' : 'Retry update'}
+          <PendingLabel label="Retry update" pendingLabel="Retrying…" pending={operation === 'retry'} />
         </button>
       ) : null}
     </div>
@@ -335,7 +339,7 @@ export function DesignCanvas({
             {setupVisible ? 'Back to preview' : 'Preview setup'}
           </button> : null}
           {!setupVisible ? <>
-          <div className="segmented tm-design-canvas__devices" role="group" aria-label="Canvas device">
+          <div className="segmented segmented--compact tm-design-canvas__devices" role="group" aria-label="Canvas device">
             {DEVICE_OPTIONS.map((option) => (
               <Tooltip key={option.id} label={option.label}><button
                 type="button"
@@ -406,13 +410,14 @@ export function DesignCanvas({
               className="primary-button button--sm"
               aria-label={`Restore version ${selectedRevision.ordinal} as a new version`}
               disabled={operation !== undefined}
+              data-pending={operation === 'restore' || undefined}
               onClick={() => void runOperation(
                 'restore',
                 () => onRestore(selectedRevision.id),
                 'Could not restore this version.'
               )}
             >
-              {operation === 'restore' ? 'Restoring…' : 'Restore as new'}
+              <PendingLabel label="Restore as new" pendingLabel="Restoring…" pending={operation === 'restore'} />
             </button> : null}
           </div>
         </div>
@@ -433,7 +438,7 @@ export function DesignCanvas({
         <span className="tm-design-canvas__footer-spacer" />
         {selectedRevision ? <time dateTime={selectedRevision.createdAt}>{formatDesignUpdatedAt(selectedRevision.createdAt)}</time> : null}
       </footer> : null}
-      {error ? <p className="tm-design-canvas__error" role="alert">{error}</p> : null}
+      {error ? <p className="tm-notice tm-notice--band tm-design-canvas__error" role="alert">{error}</p> : null}
     </section>
   );
 }

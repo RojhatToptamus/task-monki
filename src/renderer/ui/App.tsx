@@ -141,6 +141,7 @@ import {
 } from './AppNavigation';
 import { Tooltip, TooltipProvider } from './Tooltip';
 import { NotifyProvider } from './NotifyContext';
+import { Presence } from './presence';
 import { appendToDraft } from '../model/sideQuestions';
 
 const AUTHORITATIVE_REFRESH_DELAY_MS = 50;
@@ -2955,7 +2956,7 @@ export function App() {
                 </span>
               </div>
             </div>
-            {error ? <div className="tm-error tm-error--page">{error}</div> : null}
+            {error ? <div className="tm-notice tm-notice--page">{error}</div> : null}
           </main>
         ) : view === 'previews' ? (
           <PreviewsPage
@@ -3121,7 +3122,7 @@ export function App() {
         </div>
       </div>
 
-      {isNewTaskOpen ? (
+      <Presence>{isNewTaskOpen ? (
         <NewTaskPanel
           agentProfiles={appSettings.agentProfiles}
           repositoryId={activeRepositoryId}
@@ -3148,9 +3149,9 @@ export function App() {
           fallbackReturnFocusRef={appRootRef}
           onClose={closeNewTask}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {deleteCandidate ? (
+      <Presence>{deleteCandidate ? (
         <DeleteTaskModal
           task={deleteCandidate}
           worktree={deleteCandidateWorktree}
@@ -3163,9 +3164,9 @@ export function App() {
           onConfirm={(removeWorktree) => deleteTask(deleteCandidate.id, removeWorktree)}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {repositoryDisconnect ? (
+      <Presence>{repositoryDisconnect ? (
         <RepositoryDisconnectModal
           repository={repositoryDisconnect.repository}
           impact={repositoryDisconnect.impact}
@@ -3173,9 +3174,9 @@ export function App() {
           onConfirm={confirmRepositoryDisconnect}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {boardEditor ? (
+      <Presence>{boardEditor ? (
         <BoardEditorModal
           key={boardEditor === 'new' ? 'new' : boardEditor.id}
           board={boardEditor === 'new' ? undefined : boardEditor}
@@ -3185,9 +3186,9 @@ export function App() {
           onDelete={deleteBoard}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {designExternalLinkRequest ? (
+      <Presence>{designExternalLinkRequest ? (
         <DesignExternalLinkModal
           key={designExternalLinkRequest.pendingId}
           destinationHost={designExternalLinkRequest.destinationHost}
@@ -3195,9 +3196,9 @@ export function App() {
           onConfirm={() => approveDesignExternalLink(designExternalLinkRequest)}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {worktreePreparation?.inspection.mode === 'CREATE' ? (
+      <Presence>{worktreePreparation?.inspection.mode === 'CREATE' ? (
         <PrepareWorktreeModal
           inspection={worktreePreparation.inspection}
           returnFocus={worktreePreparation.returnFocus}
@@ -3223,9 +3224,9 @@ export function App() {
           onConfirm={() => void confirmWorktreePreparation()}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
-      {worktreePreparation?.inspection.mode === 'RECOVER' ? (
+      <Presence>{worktreePreparation?.inspection.mode === 'RECOVER' ? (
         <RecoverWorktreeModal
           inspection={worktreePreparation.inspection}
           returnFocus={worktreePreparation.returnFocus}
@@ -3242,7 +3243,7 @@ export function App() {
           onConfirm={() => void confirmWorktreePreparation()}
           fallbackReturnFocusRef={appRootRef}
         />
-      ) : null}
+      ) : null}</Presence>
 
       <GlobalNotifier notifications={notifications} />
     </div>

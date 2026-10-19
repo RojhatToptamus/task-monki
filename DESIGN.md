@@ -25,7 +25,9 @@ Every value here is a token; the cited section owns the details.
 | Colour | roles, never values (§7): planes `--ground`, `--panel`, `--surface`, `--well`, `--field`, `--sel`, `--card`, `--overlay`; ink `--text`, `--text-soft`, `--muted`, `--faint`; lines `--hair`, `--field-edge`, `--edge-raised`, `--edge`; `--accent` for action, focus and running work; `--waiting`, `--blocked`, `--verified`, `--idle`, each with `-ink` and `-bg` |
 | Buttons | primary (one per surface), secondary, ghost, danger; 32 tall, or 28 with `button--sm`; icon buttons 28, or 24 inside a row (§10) |
 | Icons | Lucide at 13, 16 or 18, 12 only inside a 16px mark; `AgentMark` for every agent (§8) |
-| Motion | 120ms feedback, 180ms menus, 220ms modals, 280ms drawers, 200ms something moving; ease out; nothing animates when a tab opens; keyboard actions are instant (§12) |
+| Motion | 120ms feedback, 180ms menus, 220ms modals, 280ms drawers, 200ms something moving; every floating layer leaves over 120ms; ease out; nothing animates when a tab opens; keyboard actions are instant (§12) |
+| Pending | a control shows pending only after its action has run 300ms (`--pending-delay`, §6.1) |
+| Forms | label, control and help 8 apart; fields 16 apart (§9) |
 | Cursor | the arrow, everywhere |
 
 ---
@@ -275,7 +277,13 @@ Copy is held to the same budget as colour. The best label is no label.
   click, not after. If a run cannot start, Start is disabled with its reason; it
   never fails into a toast.
 - A pending control shows pending on itself and stays disabled until it
-  resolves.
+  resolves. It shows pending only once the action has run for
+  `--pending-delay` (300ms), so an action that ends almost at once changes
+  nothing on screen: until then the control, and every control the action
+  holds, keeps its look, while the disabled attribute already refuses a second
+  press. The label is a `PendingLabel` ("Save", then "Saving…" in the same
+  width); mark the control, or the surface whose controls the action holds,
+  with `data-pending`. Assistive technology hears the pending label at once.
 
 ### 6.2 Defaults are never empty
 
@@ -352,7 +360,8 @@ a state on its own. When two surfaces disagree, fix the selector, not the copy.
   never paints over it; reduced motion leaves the words still in that ink.
   Loading copy ("Loading conversation…") is a still, muted line: loading is not
   live work. A pending button keeps its own icon and is disabled;
-  its label changes only when it has one ("Checking…").
+  its label changes only when it has one ("Checking…"), and only after the
+  pending delay (§6.1).
 - **A checklist is read by its marks.** An agent's plan is the one collection
   whose state is a mark, because every checklist reads that way: shapes, not
   colours — a check for done, a dot for the current step, a ring for what is
@@ -734,10 +743,15 @@ which keeps the visual distance on the scale, and a value derived for alignment
 |---|---|
 | Card | 12 pad, 6–8 internal gap |
 | Panel / settings block | 16 pad, 16 row rhythm |
+| Form (Settings, New task, dialogs) | a field is its label, its control and its help or error, 8 apart (`.field`); fields 16 apart; a notice is one more row, 16 below; groups 24 apart |
 | List row | 8 horizontal |
 | Sheet | 16 pad |
 | Between cards | 12 |
 | Section separation | 24–32 |
+
+A field's label is its control's label: 13/500 `--text`, a fieldset's legend
+included. Help sits under the control, outside the label element, so it never
+becomes part of the control's name; tie it with `aria-describedby`.
 
 Radii are tokens, not literals, and each step has one job:
 
@@ -797,8 +811,8 @@ These are settled. Use the value, don't re-derive it.
 | Rail | 56 wide, icon-only, permanent; 36px items |
 | Content sheet | inset 8px from the window's right and bottom edges, `--r-md` |
 | Secondary list column | 268 default, resizable 220–360 |
-| Workspace / panel head | 48 tall |
-| Toolbar under a head | 40 tall (the Review bar) |
+| Workspace / panel head | exactly 48 (`height: var(--h-head)`), no vertical padding, its hairline an inset `--hair` shadow in its last row, so its 28px controls sit on whole pixels and every head's hairline meets its neighbour's |
+| Toolbar under a head | exactly 40 (the Review bar), built the same way; a segmented track in a head or toolbar is `.segmented--compact`, 28 with 24px segments |
 | Page gutter | 24 at minimum width · 32 wide |
 | Reading column (settings, prose) | 880 max; tables and lists go full width |
 | Row | 28 in rails, indexes and menus · 36 in content lists and table heads · 48 two-line and table rows · 60 Inbox items (title, detail and inline approvals) |
@@ -830,8 +844,12 @@ copy.
 - Buttons: `primary-button`, `outline-button`, `ghost-button`, `danger-button`,
   `tm-iconbtn`, sized with `button--sm`; icon-only controls wrap in `Tooltip`.
 - Menus: `ActionMenu` (`ActionContextMenu` at the pointer). Badges: `Chip`.
-  Comparable lists: the `tm-table` container. Modals: `tm-modal` with
-  `useDialogFocusBoundary`.
+  Comparable lists: the `tm-table` container. Modals: `ModalFrame` (the
+  `tm-modal` layer and its scrim) around the panel, with
+  `useDialogFocusBoundary` on the panel.
+- Leaving: every floating layer its owner renders conditionally sits in a
+  `Presence`, which keeps it on screen while it leaves (§12); a layer that
+  stays mounted and hides takes `useExit`.
 - Choices: `.segmented` (`.segmented--fill` in a list column); native selects
   take the shared chevron, so colour them with `background-color`.
 - Settings: `SettingsPane` and `SettingsRow` inside `tm-settings__list`.
@@ -841,7 +859,10 @@ copy.
   (`AgentModelSelector` compact, `AccessMenu`, `AgentProfileSelect`).
 - Activity: `StatusGlyph` "working" is still; live text takes `.tm-shimmer`.
   Never a spinner.
-- Notices: `.tm-error` in its container, `.tm-error--page` on a page.
+- Notices: `.tm-notice` in its container (`data-tone="waiting"` for a
+  warning), `.tm-notice--page` on a page, `.tm-notice--band` across a pane.
+- Pending labels: `PendingLabel`, with `data-pending` on what the action holds
+  (§6.1).
 - Agents: `AgentMark`, the only icon for any agent.
 - Expand: `ExpandToggle`, at the end of a surface's head and before Close
   (Maximize2/Minimize2, named Expand and Collapse, or what it shows when the
@@ -946,11 +967,20 @@ treatment, easing at `--motion-fast`. It is the one place hue marks a control's
 boundary for something other than its value, because the drop is about to set
 the value.
 
-**Notices.** One inline notice for a warning or an error inside a surface:
-`--r-sm`, 8×12 padding, `--t-help` on `--lh-ui`, the tone's `-bg` and `-ink`, and
-an optional 16px glyph. Everything inside it, a quoted reason or a caption
-included, takes the tone's ink: `--muted` and `--text-soft` are not solved
-against tints. A full-bleed notice across a pane (Stale) is square.
+**Notices.** One inline notice for a warning or an error about a surface or its
+action, and one class for it everywhere: `.tm-notice`. `--r-sm`, 8×12
+padding, `--t-help` on `--lh-ui`, the blocked tone's `-bg` and `-ink` by
+default and the waiting tone's with `data-tone="waiting"`, and an optional
+16px glyph that leads it. A title is `.tm-notice__title` on its own line;
+actions are `.tm-notice__actions`, ghost buttons in the notice's ink at its
+end. Everything inside it, a quoted reason or a caption included, takes the
+tone's ink: `--muted` and `--text-soft` are not solved against tints. A
+full-bleed notice across a pane, under its bar (Stale, a failed recording
+step), is `.tm-notice--band`: square, its words on the pane's inset; on a page
+it is `.tm-notice--page`, on the gutter. A surface never styles a notice of its
+own; it only places one. A message about one field is not a notice: it is that
+field's error or warning text (`.form-error`, `.form-warning`) in place of its
+help.
 
 **Wells.** A code or payload block is `--well`, `--r-sm`, mono `--t-meta` on
 `--lh-meta` at 400, padded 8×12; inline code is `--r-2xs`. A well that is itself
@@ -983,7 +1013,8 @@ lists use the same container; a settings row is never a card.
 
 **Tooltips.** The `Tooltip` component (Radix) on `--overlay` with the `--edge`
 ring: 500ms before the first, instant between neighbours, the name and an
-optional shortcut, never information the decision needs. Focus opens one only
+optional shortcut, never information the decision needs. It leaves at once, so
+a neighbour's tooltip never overlaps it. Focus opens one only
 for someone moving by keyboard; after a click, focus a dialog places on its
 close button shows nothing. A dialog that is mostly read opens with focus on
 what it is read by (its scrolling content, or the switch between its sides),
@@ -993,7 +1024,9 @@ never on a close button whose tooltip would take the first Escape.
 the narrowest width the container reaches; a dropdown for anything longer or
 open-ended. A wrapping segmented control is a bug. There is one segmented
 control (`.segmented`); a list column's status filter (Designs, Discourse) adds
-`.segmented--fill` so its options share the column's width.
+`.segmented--fill` so its options share the column's width, and one in a head, a
+bar or a row adds `.segmented--compact` (24px segments with 12px labels in a 28px
+track), so it is as tall as the controls beside it.
 
 **Selects.** A native `<select>` draws the same chevron as the custom pickers —
 two 1.5px `--muted` strokes, 10px from the right edge — from one rule in
@@ -1025,8 +1058,8 @@ never moves its header, dismissed by Escape, its close button or a click
 outside, with the draft text kept. A page for anything a user might link to,
 bookmark, or spend minutes in. Never stack two
 modals; never open a drawer from a modal. A modal is the surface plane with the
-`--edge` ring and `--shadow-modal` over the scrim, `--r-lg`, and enters with
-the modal motion (§12). Its anatomy is a title, at most one paragraph, the
+`--edge` ring and `--shadow-modal` over the scrim, `--r-lg`, enters with
+the modal motion and leaves faster (§12). Its anatomy is a title, at most one paragraph, the
 content, and the actions; no icon tile beside the title, because the title
 already names the act. A character count appears only near the limit.
 
@@ -1040,7 +1073,8 @@ the header of the section they belong to.
 
 **List rails** (the Designs and Discourse history) share the `.tm-listrail__*`
 elements: the heading centred on a 28px New, a 32px search field, the status filter, then
-48px rows, 2px apart, that overhang the fields by 4px on each side. A row is the title and
+48px rows, 2px apart, on the fields' edges, so every word in the rail starts on the head's
+16px line. A row is the title and
 one meta line — a status word in its tone, a neutral unread count, the time at
 the right. An empty rail is one line.
 
@@ -1158,21 +1192,29 @@ actually running. Durations and curves are tokens.
 |---|---|---|---|
 | Hover and state feedback, a field's focus rim | — | `--motion-fast` 120ms | `--ease-out` |
 | Button press | scale 0.97 | 120ms | `--ease-out` |
-| Tooltip | scale 0.97, after 500ms; instant between neighbours | `--motion-fast` 120ms | `--ease-out` |
+| Tooltip | scale 0.97, after 500ms; instant between neighbours; leaves at once | `--motion-fast` 120ms | `--ease-out` |
 | Menu, popover, picker | scale 0.96 from its trigger; leaves at 120ms | `--motion-standard` 180ms | `--ease-out` |
 | Submenu | opacity only; leaves at once | `--motion-fast` 120ms | `--ease-out` |
-| Modal | scale 0.97; the scrim (every scrim) fades over `--motion-standard` | `--motion-modal` 220ms | `--ease-out` |
-| Floating side panel | 8% from its edge | `--motion-slow` 280ms | `--ease-drawer` |
+| Modal | scale 0.97; the scrim (every scrim) fades over `--motion-standard`; leaves at 120ms, settling to 0.98 as it fades with its scrim | `--motion-modal` 220ms | `--ease-out` |
+| Floating side panel, the replay drawer | 8% from its edge; leaves at 120ms, back 4% as it fades | `--motion-slow` 280ms | `--ease-drawer` |
+| A list column that is a drawer in a narrow window (Designs, Discourse) | slides in from its edge over its scrim; leaves the same way at 120ms | `--motion-slow` 280ms | `--ease-drawer` |
 | Docked side panel | its content fades in; the page makes room at once | `--motion-standard` 180ms | `--ease-out` |
 | Title row in the top bar, as a reading tab's head scrolls away | 6px up while it fades in; leaves at 120ms; still when a tab opens | `--motion-standard` 180ms | `--ease-out` |
 | Disclosure content | opacity; the height changes at once; not when it mounts open | `--motion-fast` 120ms | `--ease-out` |
 | Arrivals: a row that joins an open live list (a recorded step, a replay, an expectation) | opacity, once; the list makes room at once; never on the list's first render, a re-sort or growing text | `--motion-standard` 180ms | `--ease-out` |
 | Live text: the one line that says work is running | a highlight crossing the words; still under reduced motion | `--motion-shimmer` 2.4s | linear |
-| Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
+| Jump to latest (stays mounted), New responses | 4px up; leaves at 120ms | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
 | Expanding or collapsing a surface (a side panel, New task) | its old box, its children held at their size | `--motion-slow` 280ms | `--ease-drawer` |
 | A Review file shown full screen, and back | its place in the list | `--motion-move` 200ms | `--ease-in-out` |
+
+**Leaving.** A layer that closes stays on screen while it leaves (`Presence`,
+or `useExit` for one that stays mounted): it is inert at once, its dialog
+boundary hands focus back to what opened it as it starts to go, and it unmounts
+when its exit ends. Every exit takes `--motion-fast` and `--ease-out`; a menu or
+picker opened or closed from the keyboard comes and goes at once. A native view
+a layer covered (the recorded page) returns only once the layer has left.
 
 Nothing animates because a tab or page was opened: a surface that is already
 there when its tab mounts (a request bar, a disclosure mounted open, the task
@@ -1186,7 +1228,8 @@ animate width or height.
 
 `--ease-out` is `cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out`
 `cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer` `cubic-bezier(0.32, 0.72, 0, 1)`.
-Under `prefers-reduced-motion` every transition and animation collapses to an instant change.
+Under `prefers-reduced-motion` every transition and animation collapses to an instant change. The
+pending delay (§6.1) is not motion and stays, so a quick action flashes nothing there either.
 
 ---
 
@@ -1721,8 +1764,12 @@ away.
 
 A list-detail workspace (Designs, New Design, Discourse) has a 48px head: the
 panel toggle, a 15/500 title with its state beside it on the same line, then the
-actions. Side panels and the Discourse settings share that 48px line, so every
-hairline under a head lines up. New Design is one centred column at the Agent
+actions, every control 28 tall (a layout switch is a 28px track of 24px
+segments). Side panels stand beside the head, not under it: a Design's
+References and the Discourse settings start at the sheet's top, so their heads
+share that 48px line and every hairline under a head lines up. A head holds one
+line; it never explains itself in a second. A Design's canvas toolbar under the
+head is the 40px bar. New Design is one centred column at the Agent
 conversation's width: the source switch, then a single composer holding the
 brief, the model and profile chips, the reason a run cannot start, and Create.
 
@@ -1736,8 +1783,8 @@ live region: Starting the app, Recording, Point at what's wrong, Mark the bug,
 Recording stopped, or Record a bug over a decision; the elapsed time sits beside
 it, and the state word carries the live shimmer while something counts. Steps
 (when the rail does not fit), Back to recording, Discard and the primary Mark
-bug sit on the right. A step that fails says so in a square `.tm-error` band
-under the head, never in a toast the page could cover. Env files, approving
+bug sit on the right. A step that fails says so in a `.tm-notice--band` under
+the head, never in a toast the page could cover. Env files, approving
 replays and a failure are decision blocks in the page's place, Cancel first.
 
 The page is a native view in a framed card, top-anchored, at its recorded 16:10

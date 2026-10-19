@@ -21,6 +21,8 @@ import { ImpactList } from './ImpactList';
 import { RepositoryPicker } from './RepositoryPicker';
 import { StatusGlyph } from './StatusBadge';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { ModalFrame } from './ModalFrame';
+import { PendingLabel } from './StableLabel';
 import { DisclosureChevron } from './DisclosureChevron';
 
 export type NotificationTone = 'info' | 'success' | 'error';
@@ -75,7 +77,9 @@ export function BoardEditorModal({
   const [workflowPhases, setWorkflowPhases] = useState<WorkflowPhase[]>(
     board?.workflowPhases ?? []
   );
-  const [busy, setBusy] = useState(false);
+  // Which of the view's actions is running: the button that started it turns pending.
+  const [running, setRunning] = useState<'save' | 'delete'>();
+  const busy = running !== undefined;
   const [error, setError] = useState<string>();
   const panelRef = useRef<HTMLFormElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -101,30 +105,29 @@ export function BoardEditorModal({
       setError('Enter a name for this saved view.');
       return;
     }
-    setBusy(true);
+    setRunning('save');
     setError(undefined);
     try {
       await onSave({ name, color, repositoryIds, workflowPhases });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not save this view.');
-      setBusy(false);
+      setRunning(undefined);
     }
   };
   const remove = async () => {
     if (!board) return;
-    setBusy(true);
+    setRunning('delete');
     setError(undefined);
     try {
       await onDelete(board.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not delete this view.');
-      setBusy(false);
+      setRunning(undefined);
     }
   };
 
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="board-editor-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="board-editor-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-board-editor"
@@ -221,7 +224,7 @@ export function BoardEditorModal({
           </div>
         </fieldset>
 
-        {error ? <div className="tm-error tm-board-editor__error">{error}</div> : null}
+        {error ? <div className="tm-notice tm-modal__notice" role="alert">{error}</div> : null}
         <div className="tm-modal__actions tm-board-editor__actions">
           {board ? (
             <button
@@ -230,7 +233,7 @@ export function BoardEditorModal({
               disabled={busy}
               onClick={() => void remove()}
             >
-              Delete view
+              <PendingLabel label="Delete view" pendingLabel="Deleting…" pending={running === 'delete'} />
             </button>
           ) : null}
           <span className="tm-board-editor__actions-spacer" />
@@ -238,11 +241,11 @@ export function BoardEditorModal({
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={busy}>
-            {busy ? 'Saving…' : 'Save view'}
+            <PendingLabel label="Save view" pendingLabel="Saving…" pending={running === 'save'} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -320,14 +323,7 @@ export function DesignExternalLinkModal({
   };
 
   return (
-    <div
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="design-external-link-title"
-      aria-describedby="design-external-link-detail"
-    >
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="design-external-link-title" describedBy="design-external-link-detail" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <div
         ref={panelRef}
         className="tm-modal__panel tm-design-external"
@@ -343,7 +339,7 @@ export function DesignExternalLinkModal({
         </div>
         <p>Only open destinations that you trust.</p>
         {error ? (
-          <p className="tm-error tm-modal__error" role="alert">
+          <p className="tm-notice tm-modal__notice" role="alert">
             {error}
           </p>
         ) : null}
@@ -363,11 +359,11 @@ export function DesignExternalLinkModal({
             disabled={busy || expired}
             onClick={() => void confirm()}
           >
-            {busy ? 'Opening…' : 'Open site'}
+            <PendingLabel label="Open site" pendingLabel="Opening…" pending={busy} />
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -415,13 +411,7 @@ export function PrepareWorktreeModal({
   };
 
   return (
-    <div
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="prepare-worktree-title"
-    >
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="prepare-worktree-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-prepare-worktree"
@@ -460,7 +450,7 @@ export function PrepareWorktreeModal({
         </details>
 
         {error ? (
-          <div className="tm-error tm-prepare-worktree__error" role="alert">
+          <div className="tm-notice" role="alert">
             {error}
           </div>
         ) : null}
@@ -474,11 +464,11 @@ export function PrepareWorktreeModal({
             Cancel
           </button>
           <button type="submit" className="primary-button" disabled={busy || !selectedBase}>
-            {busy ? 'Preparing…' : 'Prepare worktree'}
+            <PendingLabel label="Prepare worktree" pendingLabel="Preparing…" pending={busy} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -528,8 +518,7 @@ export function RecoverWorktreeModal({
   });
 
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="recover-worktree-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="recover-worktree-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <form
         ref={panelRef}
         className="tm-modal__panel tm-prepare-worktree"
@@ -571,7 +560,7 @@ export function RecoverWorktreeModal({
         </small>
 
         {error ? (
-          <div className="tm-error tm-prepare-worktree__error" role="alert">
+          <div className="tm-notice" role="alert">
             {error}
           </div>
         ) : null}
@@ -581,11 +570,11 @@ export function RecoverWorktreeModal({
             Cancel
           </button>
           <button ref={confirmRef} type="submit" className="primary-button" disabled={busy}>
-            {busy ? (retry ? 'Retrying…' : 'Restoring…') : title}
+            <PendingLabel label={title} pendingLabel={retry ? 'Retrying…' : 'Restoring…'} pending={busy} />
           </button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -622,13 +611,7 @@ export function RepositoryDisconnectModal({
     }
   };
   return (
-    <div
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="disconnect-repository-title"
-    >
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="disconnect-repository-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <div
         ref={panelRef}
         className="tm-modal__panel tm-delete-modal"
@@ -653,7 +636,7 @@ export function RepositoryDisconnectModal({
             }
           ]}
         />
-        {impact.blockingReason ? <div className="tm-error">{impact.blockingReason}</div> : null}
+        {impact.blockingReason ? <div className="tm-notice">{impact.blockingReason}</div> : null}
         <div className="tm-modal__actions">
           <button
             ref={cancelRef}
@@ -670,11 +653,11 @@ export function RepositoryDisconnectModal({
             disabled={busy || Boolean(impact.blockingReason)}
             onClick={() => void submit()}
           >
-            {busy ? 'Disconnecting…' : 'Disconnect repository'}
+            <PendingLabel label="Disconnect repository" pendingLabel="Disconnecting…" pending={busy} />
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -727,8 +710,7 @@ export function DeleteTaskModal({
   };
 
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+    <ModalFrame labelledBy="delete-task-title" pending={busy} onDismiss={busy ? undefined : onCancel}>
       <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
         <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
         <p>
@@ -787,11 +769,11 @@ export function DeleteTaskModal({
             Cancel
           </button>
           <button type="button" className="danger-button" disabled={busy} onClick={submit}>
-            {busy ? 'Deleting…' : 'Delete task'}
+            <PendingLabel label="Delete task" pendingLabel="Deleting…" pending={busy} />
           </button>
         </div>
       </div>
-    </div>
+    </ModalFrame>
   );
 }
 

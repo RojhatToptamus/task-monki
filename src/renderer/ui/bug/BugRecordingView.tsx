@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
+import { afterLeavingLayers } from '../presence';
 
 /** One counter for every show and hide, so a remounted view never sends an older request. */
 let viewRequest = 0;
@@ -46,13 +47,21 @@ export function BugRecordingView({
         bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
       }).catch(() => undefined);
     };
+    // A new size or place, or a cover coming, moves the page in the same frame as its slot; a
+    // cover going is still drawn while it leaves, so the page returns once it has gone, and
+    // nothing places it before then (the observers below report once as they start).
+    let settled = hidden;
     // Scrolls and resizes arrive many times a frame; the page follows once per frame.
     const place = () => {
+      if (!settled) return;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(placeNow);
     };
-    // A new size or place, or a cover coming or going, moves the page in the same frame as its slot.
-    placeNow();
+    const settle = hidden ? undefined : afterLeavingLayers(() => {
+      settled = true;
+      placeNow();
+    });
+    if (hidden) placeNow();
     // The slot can move without changing size (the capture panel opening beside a page already at
     // its full size), so the space around it is watched too.
     const observer = new ResizeObserver(place);
@@ -66,6 +75,7 @@ export function BugRecordingView({
     window.addEventListener('resize', place);
     document.addEventListener('scroll', place, true);
     return () => {
+      settle?.();
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', place);

@@ -13,7 +13,8 @@ import {
   type ExpectationsEditor
 } from '../../model/bugReplay';
 import { useDialogFocusBoundary } from '../dialogFocus';
-import { StableLabel } from '../StableLabel';
+import { useLayerProps } from '../presence';
+import { PendingLabel } from '../StableLabel';
 import { ElementExpectation, FixedExpectation, RequestExpectation, ValueExpectation } from './BugExpectationRows';
 
 const PREVIEW_DELAY_MS = 250;
@@ -42,6 +43,7 @@ export function BugExpectationsDrawer({
   onClose(): void;
   onSaved(): void;
 }) {
+  const layer = useLayerProps();
   const panelRef = useRef<HTMLElement>(null);
   const firstFieldRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
@@ -101,7 +103,7 @@ export function BugExpectationsDrawer({
 
   // Fixed layers render at the document, so no size container on the page becomes their frame.
   return createPortal(
-    <div className="tm-bugdrawer">
+    <div {...layer} className="tm-bugdrawer">
       <div className="tm-bugdrawer__scrim" onClick={saving ? undefined : onClose} />
       <aside ref={panelRef} className="tm-bugdrawer__panel tm-bugdrawer__panel--form" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <header className="tm-bugdrawer__head">
@@ -171,7 +173,7 @@ export function BugExpectationsDrawer({
             <button type="button" className="outline-button" disabled={saving} onClick={onClose}>Cancel</button>
             <button type="button" className="primary-button" disabled={saving || !state.canSave}
               aria-describedby={reason ? reasonId : undefined} onClick={() => void save()}>
-              <StableLabel label={saving ? 'Saving…' : 'Save and reproduce'} reserve={['Save and reproduce', 'Saving…']} />
+              <PendingLabel label="Save and reproduce" pendingLabel="Saving…" pending={saving} />
             </button>
           </div>
         </footer>

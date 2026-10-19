@@ -139,7 +139,7 @@ export function ImportWorkFields({
             {item.unavailableReason ? <small className="import-work__unavailable">{item.unavailableReason}</small> : null}
           </button>)}
           {!checkouts ? <p className="import-work__empty" role="status">Loading checkouts…</p> : checkouts.error ?
-            <p className="import-work__empty form-error" role="alert">{checkouts.error}</p> : !filtered.length ?
+            <p className="tm-notice import-work__error" role="alert">{checkouts.error}</p> : !filtered.length ?
               <p className="import-work__empty">{checkouts.items.length ? 'No checkout matches. Registered worktrees only.' : 'No registered checkouts are available.'}</p> : null}
         </div>
       </div>

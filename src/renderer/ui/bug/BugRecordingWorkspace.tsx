@@ -12,6 +12,7 @@ import {
 } from '../../model/bugReplay';
 import { DecisionBlock } from '../DecisionBlock';
 import { PlanList } from '../Plan';
+import { Presence } from '../presence';
 import { StableLabel } from '../StableLabel';
 import { BugCapturePanel } from './BugCapturePanel';
 import { BugConfirmDialog } from './BugConfirmDialog';
@@ -210,7 +211,7 @@ export function BugRecordingWorkspace({
           ) : null}
         </div>
       </header>
-      {error ? <p className="tm-error tm-bugrecord__error" role="alert">{error}</p> : null}
+      {error ? <p className="tm-notice tm-notice--band tm-bugrecord__error" role="alert">{error}</p> : null}
 
       <div className="tm-bugrecord__body" data-side={composer ? 'composer' : railShown ? 'rail' : undefined} data-picking={picking ? '' : undefined}>
         {decision ? (
@@ -350,7 +351,7 @@ export function BugRecordingWorkspace({
         ) : null}
       </div>
 
-      {confirmDiscard ? (
+      <Presence>{confirmDiscard ? (
         <BugConfirmDialog
           title="Discard this recording?"
           body="The steps recorded so far are not kept."
@@ -360,7 +361,7 @@ export function BugRecordingWorkspace({
           busy={busy === 'discard'}
           onKeep={() => setConfirmDiscard(false)}
           onConfirm={() => void discard()} />
-      ) : null}
+      ) : null}</Presence>
     </section>
   );
 }

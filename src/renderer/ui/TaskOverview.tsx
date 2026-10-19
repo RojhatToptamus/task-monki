@@ -10,7 +10,7 @@ import type { TaskAttachmentRecord } from '../../shared/attachments';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
-import { StableLabel } from './StableLabel';
+import { PendingLabel } from './StableLabel';
 import { ActionMenu } from './ActionMenu';
 import { useClampOverflow } from './useClampOverflow';
 import { ReportedQuote } from './ReportedQuote';
@@ -36,8 +36,10 @@ export interface SlotAction {
   disabled?: boolean;
   /** Why the action is unavailable, shown beside it and tied with aria-describedby. */
   reason?: string;
-  /** Every label the control can show ("Approve" and "Approving…"), so it keeps one width. */
-  labels?: readonly string[];
+  /** The label while the action runs ("Approving…"); the control keeps one width. */
+  pendingLabel?: string;
+  /** The action is running: its label turns pending once it has run a moment (DESIGN.md 6.1). */
+  pending?: boolean;
 }
 
 /** Headline, explanation and actions for an owner that has no surface of its own. */
@@ -120,8 +122,10 @@ export function SlotActions({
   ];
   const reasonId = (reason: string | undefined) =>
     reason && reasons.includes(reason) ? `${reasonPrefix}-${reasons.indexOf(reason)}` : undefined;
+  // While one action runs, the others it holds keep their look through the pending delay too.
+  const pending = all.some(({ action }) => action.pending);
   return (
-    <div className="tm-slot__footer">
+    <div className="tm-slot__footer" data-pending={pending || undefined}>
       <div className="tm-slot__actions">
         {actions.map(({ action, primary: isPrimary }, index) => (
           // Keyed by place: a label turning pending must not remount the button that has focus.
@@ -133,7 +137,9 @@ export function SlotActions({
             aria-describedby={action.disabled ? reasonId(action.reason) : undefined}
             onClick={action.onClick}
           >
-            {action.labels ? <StableLabel label={action.label} reserve={action.labels} /> : action.label}
+            {action.pendingLabel ? (
+              <PendingLabel label={action.label} pendingLabel={action.pendingLabel} pending={Boolean(action.pending)} />
+            ) : action.label}
           </button>
         ))}
         {overflow.length > 0 ? (

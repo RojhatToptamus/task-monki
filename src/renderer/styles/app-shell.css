@@ -384,22 +384,6 @@
   padding-top: 16px;
 }
 
-/* The inline notice (DESIGN.md 10), in the blocked tone. Inside a composer, card
-   or dialog it sits in its container's flow; on a page it takes the gutter. */
-.tm-error {
-  margin: 0;
-  padding: 8px 12px;
-  border-radius: var(--r-sm);
-  background: var(--blocked-bg);
-  color: var(--blocked-ink);
-  font-size: var(--t-help);
-  line-height: var(--lh-ui);
-}
-
-.tm-error.tm-error--page {
-  margin: 0 var(--tm-gutter) 8px;
-}
-
 /* ---- Kanban board ---- */
 
 .tm-board {
@@ -1253,6 +1237,8 @@
   color: var(--text);
   font-size: var(--t-heading);
   font-weight: var(--w-medium);
+  /* A whole-pixel line box (DESIGN.md 8.2), so the pane under it starts on a whole pixel. */
+  line-height: var(--lh-body);
 }
 
 .tm-settings__pane-head p {
@@ -1389,6 +1375,10 @@
   /* It grows from its trigger, as a menu does (DESIGN.md 12). */
   transform-origin: top right;
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
+}
+
+.tm-theme-picker__menu[data-state='closed'] {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
 }
 
 .tm-theme-picker__group + .tm-theme-picker__group {
@@ -1907,6 +1897,10 @@
   animation: tm-menu-in var(--motion-standard) var(--ease-out);
 }
 
+.tm-agent-console__menu[data-state='closed'] {
+  animation: tm-shrink-out var(--motion-fast) var(--ease-out) forwards;
+}
+
 .tm-agent-console__menu--top {
   top: auto;
   bottom: 38px;
@@ -2394,7 +2388,7 @@
 /* Reusable profile instructions share the settings and form controls. */
 .tm-profile-editor {
   display: grid;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 

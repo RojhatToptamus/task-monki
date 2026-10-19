@@ -66,7 +66,7 @@ export function DesignRepositorySetup({ project, agent, proposals, onUpdate, onO
         <button className="outline-button" disabled={busy || active}>Select application</button>
       </form>
     </section> : null}
-    {error ? <p className="form-error" role="alert">{error}</p> : null}
+    {error ? <p className="tm-notice" role="alert">{error}</p> : null}
     {project.turns.some(turn => !turn.runId && !turn.outcome) ? <div>
       {setup?.blocker && !setup.workspaceChanged ? <p className="tm-application-preview__notice">{setup.blocker}</p> : null}
       <button className="primary-button" disabled={busy || active || Boolean(setup?.blocker)} title={setup?.blocker} onClick={() => void run(() => taskManagerApi.startDesign({ designId: project.task.id }))}>Start Design</button>

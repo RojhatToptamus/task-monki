@@ -11,6 +11,7 @@ import type { AgentModel, AgentRuntimeState } from '../../shared/contracts';
 import { formatReasoningEffort } from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { ActionMenu } from './ActionMenu';
+import { useExit } from './presence';
 import { Tooltip } from './Tooltip';
 
 export type ModelDiscoveryStatus = 'idle' | 'loading' | 'failed';
@@ -97,6 +98,7 @@ export function AgentModelSelector({
   onReasoningEffortChange
 }: AgentModelSelectorProps) {
   const [open, setOpen] = useState(false);
+  const menu = useExit(open);
   const [query, setQuery] = useState('');
   const [activeOptionId, setActiveOptionId] = useState<string>();
   const [discovery, setDiscovery] = useState<DiscoveryState>();
@@ -186,16 +188,12 @@ export function AgentModelSelector({
     }
     if (disabled) {
       setOpen(false);
-      setQuery('');
-      setActiveOptionId(undefined);
       return undefined;
     }
 
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) {
         setOpen(false);
-        setQuery('');
-        setActiveOptionId(undefined);
       }
     };
     document.addEventListener('pointerdown', closeOnOutsidePointer);
@@ -262,8 +260,6 @@ export function AgentModelSelector({
         (target === document || (target instanceof Node && target.contains(trigger)))
       ) {
         setOpen(false);
-        setQuery('');
-        setActiveOptionId(undefined);
       }
     };
 
@@ -306,10 +302,9 @@ export function AgentModelSelector({
     }
   };
 
+  // The menu keeps what it showed while it leaves (DESIGN.md §12); opening it starts afresh.
   const closeMenu = (returnFocus: boolean) => {
     setOpen(false);
-    setQuery('');
-    setActiveOptionId(undefined);
     if (returnFocus) queueMicrotask(() => triggerRef.current?.focus());
   };
 
@@ -448,7 +443,8 @@ export function AgentModelSelector({
           className={`tm-agent-console__menu ${
             menuGeometry?.placement === 'top' ? 'tm-agent-console__menu--top' : ''
           } ${menuGeometry?.alignRight ? 'tm-agent-console__menu--right' : ''}`}
-          hidden={!open}
+          {...menu.layer}
+          hidden={!menu.shown}
           style={
             menuGeometry
               ? {
