@@ -43,6 +43,8 @@ const BUG_REPLAY_ROUTES = new Map<string, keyof import('../shared/bugReplay').Bu
   ['recording/start', 'startBugRecording'],
   ['recording/envFiles', 'chooseBugEnvFiles'],
   ['runs/allow', 'allowBugReplayRuns'],
+  ['approvals/list', 'listBugReplayApprovals'],
+  ['approvals/revoke', 'revokeBugReplayApproval'],
   ['recording/cancel', 'cancelBugRecording'],
   ['recording/mark', 'markBug'],
   ['recording/pick', 'pickBugCheck'],

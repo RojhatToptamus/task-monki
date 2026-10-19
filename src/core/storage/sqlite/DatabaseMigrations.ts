@@ -1635,6 +1635,23 @@ CREATE TABLE IF NOT EXISTS bug_replay_files (
 CREATE INDEX IF NOT EXISTS bug_replay_files_owner_idx ON bug_replay_files(owner_kind, owner_id, id);
 CREATE INDEX IF NOT EXISTS bug_replay_files_task_idx ON bug_replay_files(task_id, id);
 `
+  },
+  {
+    version: 15,
+    name: 'bug-replay-kept-approvals',
+    // Replay approvals the person kept for a repository, one row per recipe they read and
+    // approved. They go with their repository; revoking one deletes its row. Like the tables
+    // before it, it may already exist where a later schema was rewound.
+    sql: `
+CREATE TABLE IF NOT EXISTS bug_replay_approvals (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  approval_digest TEXT NOT NULL CHECK (length(approval_digest) = 64),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE (repository_id, approval_digest)
+) STRICT;
+`
   }
 ] as const;
 

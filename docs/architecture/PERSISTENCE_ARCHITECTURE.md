@@ -24,7 +24,7 @@ profile.
 | Application previews and secrets | Previewhost owns runtime records, retained data, and encrypted secret storage. | Profile-local `preview-runtime` directory, outside Task Monki's SQLite backup |
 | Managed Design source | The managed Git repository owns commits, trees, and refs. SQLite owns Task Monki's repository and Design records. | Git repositories below `storage/design-repositories` |
 | Code each review read | A private bare Git repository per source repository owns the trees and the refs that keep them. The review gate records each tree's id. | Profile-local `review-snapshots` directory, outside Task Monki's SQLite backup |
-| Recorded bugs: captures, cases, versions, decisions and clean runs | Task Monki Bug Replay store. Trees the bug was recorded on and verified against are pinned in `review-snapshots` under `refs/tasks/<task>/bug-replay/*`. | Normalized SQLite tables with JSON payloads; evidence bytes as managed files under `replay/<task>/<owner>/` |
+| Recorded bugs: captures, cases, versions, decisions and clean runs; replay approvals kept for a repository | Task Monki Bug Replay store. Trees the bug was recorded on and verified against are pinned in `review-snapshots` under `refs/tasks/<task>/bug-replay/*`. | Normalized SQLite tables with JSON payloads; evidence bytes as managed files under `replay/<task>/<owner>/` |
 | Redacted provider protocol diagnostics | The runtime server record owns retention. The journal owns bounded byte segments. | NDJSON below `storage/protocol-journals` |
 | User repositories, ordinary task worktrees, Git remotes, GitHub, provider processes, and Preview runtime objects | Their external systems | Task Monki observes and reconciles them. It does not copy them into application persistence. |
 
@@ -233,6 +233,15 @@ rows and managed-file records are deleted in one transaction and the bytes are
 collected after commit. Deleting a task removes its Bug Replay rows inside the
 task deletion transaction through a deletion participant. Bytes published for a
 write that rolls back are deleted again.
+
+SQLite migration 15 (`bug-replay-kept-approvals`) adds `bug_replay_approvals`:
+replay approvals the person kept for a repository, one row per repository and
+approval digest, with the commands, env files and outside hosts the person read.
+A row references its repository with a cascade, so it goes with the repository
+record, and revoking one deletes its row; a repository keeps its newest ten. A
+payload whose id, repository or digest disagrees with its row approves nothing:
+the read fails. Previous profiles upgrade through the verified pre-upgrade
+backup and start with no kept approvals.
 
 `WorktreeRecord.ownership` distinguishes Task Monki-managed worktrees from
 external checkouts. SQLite migration 2 assigns `MANAGED` to existing records;

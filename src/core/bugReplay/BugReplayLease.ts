@@ -25,7 +25,7 @@ export function leaseRequestFor(
   facts.push({ label: 'Network', value: 'Not restricted' });
   if (derived.outsideHosts.length > 0) facts.push({ label: 'Calls', value: derived.outsideHosts.slice(0, 5).join(', ') });
   return {
-    templateDigest: derived.templateDigest,
+    approvalDigest: derived.approvalDigest,
     title: BUG_APPROVAL_WORD,
     facts,
     // An install step Task Monki adds is named for what it does, not by its internal id.

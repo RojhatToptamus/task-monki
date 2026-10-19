@@ -1,5 +1,5 @@
 import { Columns3, Inbox, Monitor, Palette } from 'lucide-react';
-import { SettingsPane, SettingsRow } from './SettingsPane';
+import { SettingsPane, SettingsRow, SettingsSubsection } from './SettingsPane';
 import { PreviewSecretsSettings } from './preview/PreviewSecretsSettings';
 import { AgentProfilesSettings, type AgentProfilesSettingsActions } from './AgentProfilesSettings';
 import {
@@ -9,8 +9,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type FocusEvent,
-  type ReactNode
+  type FocusEvent
 } from 'react';
 import {
   type AgentModel,
@@ -36,6 +35,7 @@ import {
   runtimeReadinessView
 } from '../model/runtimeReadiness';
 import { RepositorySettings, type RepositorySettingsActions } from './RepositorySettings';
+import { ReplayApprovalSettings } from './bug/ReplayApprovalSettings';
 import type { RepositoryOption } from '../model/repositories';
 import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
@@ -120,7 +120,9 @@ export function SettingsView(props: SettingsViewProps) {
             onReconnectRepository={props.onReconnectRepository}
             onDisconnectRepository={props.onDisconnectRepository}
             onRevealRepository={props.onRevealRepository}
-          />
+          >
+            <ReplayApprovalSettings />
+          </RepositorySettings>
         ) : null}
         {section === 'profiles' ? (
           <AgentProfilesSettings
@@ -1115,15 +1117,6 @@ function ThemePreview({ preset, mode }: { preset: string; mode: 'light' | 'dark'
   );
 }
 
-
-function SettingsSubsection({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="tm-settings__subsection">
-      <h3>{title}</h3>
-      {children}
-    </section>
-  );
-}
 
 function SettingsSwitchRow({
   label,

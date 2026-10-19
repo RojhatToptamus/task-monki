@@ -5,12 +5,15 @@ import { describe, expect, it, onTestFinished } from 'vitest';
 import { openTestPersistence } from '../../../testSupport/persistenceFixture';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import {
+  at,
   attempt,
   bugCaseRecord,
   captureRecord,
+  keptApprovalRecord,
   reproducedQualification,
   versionRecord
 } from '../../../testSupport/bugReplay/bugReplayFixtures';
+import { KEPT_APPROVALS_PER_REPOSITORY } from './SqliteBugReplayStore';
 
 async function openProfile() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bug-replay-store-'));
@@ -101,6 +104,54 @@ describe('Bug Replay store', () => {
     })).rejects.toThrow('The capture failed to save');
 
     await expect.poll(() => exists(onDisk)).toBe(false);
+  });
+
+  it('keeps a replay approval for its repository across restarts, once per recipe, until it is revoked', async () => {
+    const profile = await openProfile();
+    const profileRoot = path.join(profile.dir, 'profile');
+    const repositoryId = profile.task.repositoryId;
+    const approval = keptApprovalRecord({ repositoryId });
+    expect(await profile.store.write((tx) => profile.store.keepApproval(tx, approval))).toEqual({ approval, released: [] });
+    // Keeping the same recipe again keeps the first approval, not a second row.
+    const again = await profile.store.write((tx) => profile.store.keepApproval(tx, keptApprovalRecord({ repositoryId, id: '0b9e8d7c-6f5a-4e3d-8c2b-1a0f9e8d7c6b', keptAt: at(5) })));
+    expect(again.approval).toEqual(approval);
+
+    // Task Monki quits and starts again: the approval is read back for its repository and recipe.
+    await profile.persistence.close();
+    const restarted = await openTestPersistence(profileRoot);
+    expect(await restarted.bugReplay.read((reader) => ({
+      kept: restarted.bugReplay.keptApproval(reader, repositoryId, approval.approvalDigest),
+      otherRecipe: restarted.bugReplay.keptApproval(reader, repositoryId, 'b'.repeat(64)),
+      otherRepository: restarted.bugReplay.keptApproval(reader, 'repository-2', approval.approvalDigest),
+      all: restarted.bugReplay.listKeptApprovals(reader)
+    }))).toEqual({ kept: approval, otherRecipe: undefined, otherRepository: undefined, all: [approval] });
+
+    // Revoked, it stays gone after the next start too.
+    expect(await restarted.bugReplay.write((tx) => restarted.bugReplay.revokeApproval(tx, approval.id))).toBe(true);
+    await restarted.close();
+    const later = await openTestPersistence(profileRoot);
+    expect(await later.bugReplay.read((reader) => ({
+      kept: later.bugReplay.keptApproval(reader, repositoryId, approval.approvalDigest),
+      any: later.bugReplay.hasKeptApprovals(reader, repositoryId)
+    }))).toEqual({ kept: undefined, any: false });
+  });
+
+  it('lets a repository’s oldest approvals go, never the one just kept', async () => {
+    const profile = await openProfile();
+    const { store } = profile;
+    const repositoryId = profile.task.repositoryId;
+    const kept = Array.from({ length: KEPT_APPROVALS_PER_REPOSITORY + 1 }, (_, index) => keptApprovalRecord({
+      repositoryId,
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      approvalDigest: index.toString(16).padStart(64, '0'),
+      keptAt: at(index)
+    }));
+    const released: string[] = [];
+    for (const approval of kept) released.push(...(await store.write((tx) => store.keepApproval(tx, approval))).released);
+
+    expect(released).toEqual([kept[0].id]);
+    const left = await store.read((reader) => store.listKeptApprovals(reader));
+    expect(left.map((approval) => approval.id)).toEqual(kept.slice(1).reverse().map((approval) => approval.id));
   });
 
   it('leaves nothing of a bug behind when its task is deleted', async () => {

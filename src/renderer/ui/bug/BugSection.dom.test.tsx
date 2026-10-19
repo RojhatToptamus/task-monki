@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { BugCaseView, BugReplayGateState, BugReplayRunView, BugReplaySnapshot } from '../../../shared/bugReplay';
-import { BugSection, useBugActions } from './BugSection';
+import { taskManagerApi } from '../../api/taskManagerClient';
+import { BugNowPanel, BugSection, useBugActions } from './BugSection';
 
-vi.mock('../../api/taskManagerClient', () => ({ taskManagerApi: {} }));
+vi.mock('../../api/taskManagerClient', () => ({ taskManagerApi: { allowBugReplayRuns: vi.fn(async () => undefined) } }));
 
 const AT = '2026-10-18T10:00:00.000Z';
 
@@ -61,6 +62,11 @@ function Section({ value }: { value: BugReplaySnapshot }) {
   return <BugSection taskId="task-1" snapshot={value} actions={actions} onOpenRecording={vi.fn()} />;
 }
 
+function NowPanel({ value }: { value: BugReplaySnapshot }) {
+  const actions = useBugActions('task-1', value, { onOpenRecording: vi.fn(), onError: vi.fn() }, vi.fn());
+  return <BugNowPanel view={value.activeCase!} snapshot={value} actions={actions} />;
+}
+
 describe('A recorded bug on the Overview', () => {
   it('shows what each expectation showed before the fix and after it, and marks an After about earlier code', () => {
     const view = render(<Section value={snapshot(bugCase('FIX_VERIFIED'))} />);
@@ -115,5 +121,32 @@ describe('A recorded bug on the Overview', () => {
     fireEvent.keyDown(drawer, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(document.activeElement).toBe(row);
+  });
+
+  it('asks to approve replays declining first and approving for now last, and keeps the approval only when asked to', async () => {
+    const view = bugCase('VERIFYING');
+    const waiting: BugCaseView = {
+      ...view,
+      gate: { ...view.gate, activeRun: { runId: 'run-3', kind: 'CANDIDATE', waitingFor: 'APPROVAL' } },
+      actions: ['allow-runs', 'always-allow-runs', 'cancel-run', 'remove']
+    };
+    const approvalDigest = 'a'.repeat(64);
+    render(<NowPanel value={{
+      ...snapshot(waiting),
+      pendingLease: { approvalDigest, title: 'Replays need approval', facts: [{ label: 'Runs as', value: 'Your user, without a sandbox' }], commands: [], sameAsRunningPreview: false }
+    }} />);
+
+    const decline = screen.getByRole('button', { name: 'Cancel replays' });
+    const keep = screen.getByRole('button', { name: 'Always approve in this repository' });
+    const approve = screen.getByRole('button', { name: 'Approve replays' });
+    expect(decline.compareDocumentPosition(keep) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(keep.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(approve.className).toContain('primary-button');
+
+    // Approving for now keeps nothing; keeping names the same sheet the person read.
+    fireEvent.click(approve);
+    await waitFor(() => expect(taskManagerApi.allowBugReplayRuns).toHaveBeenCalledWith({ taskId: 'task-1', approvalDigest, keep: false }));
+    fireEvent.click(keep);
+    await waitFor(() => expect(taskManagerApi.allowBugReplayRuns).toHaveBeenLastCalledWith({ taskId: 'task-1', approvalDigest, keep: true }));
   });
 });

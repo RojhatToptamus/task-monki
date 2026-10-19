@@ -13,6 +13,7 @@ import type {
   BugCaseAction,
   BugCaseReference,
   BugReplayGateProjection,
+  BugReplayKeptApproval,
   BugReplayLeaseRequest,
   BugReplayOutcomeReason,
   BugReplayRunFailure,
@@ -46,7 +47,7 @@ import {
   redactEvidence,
   type BugContextRecords
 } from './BugReplayContext';
-import type { BugRecordingSessions, BugReplayCore, BugReplayTaskAccess } from './BugReplayPorts';
+import type { BugRecordingSessions, BugReplayCore, BugReplayTaskAccess, PendingReplayApproval } from './BugReplayPorts';
 import { ceilingFor, versionDigest } from './BugReplayIdentity';
 
 /**
@@ -153,8 +154,9 @@ export class BugReplayService implements BugReplayCore {
 
   /**
    * Startup: runs a crash left mid-flight are settled as interrupted (never resumed), queued work
-   * waits for a new lease, exports and scratch nobody owns are swept, and every `br-` name is torn
-   * down in the background before new runs are admitted.
+   * waits for approval again (given now, or kept for the task's repository), exports and scratch
+   * nobody owns are swept, and every `br-` name is torn down in the background before new runs are
+   * admitted.
    */
   async init(): Promise<void> {
     await fs.mkdir(this.options.exportRoot, { recursive: true, mode: 0o700 });
@@ -225,6 +227,10 @@ export class BugReplayService implements BugReplayCore {
 
   /** The lease sheet for a clean run waiting on the person's permission, from that run's own spec. */
   async pendingLease(taskId: string): Promise<BugReplayLeaseRequest | undefined> {
+    return (await this.pendingRunApproval(taskId))?.request;
+  }
+
+  private async pendingRunApproval(taskId: string): Promise<PendingReplayApproval | undefined> {
     const waiting = (await this.options.store.read((reader) => this.options.store.listRuns(reader, { taskId, open: true })))
       .find((run) => run.state === 'WAITING' && run.waitingFor === 'APPROVAL');
     if (!waiting) return undefined;
@@ -234,16 +240,78 @@ export class BugReplayService implements BugReplayCore {
       const context = await this.options.access.context(taskId);
       const tree = waiting.kind === 'CANDIDATE' ? waiting.inputTreeId! : records.version.baselineTreeId;
       const derived = await this.derive(waiting, records.version, context.worktree.worktreePath, tree, '/<export>');
-      return leaseRequestFor(derived, records.version.envFiles.map((file) => file.relativePath), false);
+      const envFiles = records.version.envFiles.map((file) => file.relativePath);
+      return { request: leaseRequestFor(derived, envFiles, false), envFiles, calls: derived.outsideHosts };
     } catch {
       return undefined;
     }
   }
 
-  async allowRuns(taskId: string, templateDigest: string): Promise<void> {
-    this.options.authorization.grant(taskId, templateDigest);
-    await this.recording?.leaseGranted(taskId, templateDigest);
+  /** The person approved what the task asks to run: for now, or kept for its repository. */
+  async allowRuns(taskId: string, approvalDigest: string, keep = false): Promise<void> {
+    const keptId = keep ? await this.keepApproval(taskId, approvalDigest) : undefined;
+    this.options.authorization.grant(taskId, approvalDigest, keptId);
+    await this.recording?.leaseGranted(taskId, approvalDigest);
     this.schedule();
+  }
+
+  /**
+   * Keeps only what the task asks to approve right now, as its sheet states it: a digest from
+   * anywhere else, or a request that changed since the person read it, keeps nothing.
+   */
+  private async keepApproval(taskId: string, approvalDigest: string): Promise<string> {
+    const recordingAsks = this.recording?.pendingApproval(taskId);
+    const asked = recordingAsks?.request.approvalDigest === approvalDigest ? recordingAsks : await this.pendingRunApproval(taskId);
+    if (asked?.request.approvalDigest !== approvalDigest) throw new Error('What replays run has changed. Read it again.');
+    const { task } = await this.options.access.context(taskId);
+    const { approval, released } = await this.options.store.write((tx) => this.options.store.keepApproval(tx, {
+      id: randomUUID(),
+      repositoryId: task.repositoryId,
+      approvalDigest,
+      commands: asked.request.commands.slice(0, 20).map((command) => ({ ...command, command: command.command.slice(0, 500) })),
+      envFiles: asked.envFiles.slice(0, 12),
+      calls: asked.calls.slice(0, 10),
+      keptAt: now()
+    }));
+    for (const id of released) this.options.authorization.revokeKept(id);
+    return approval.id;
+  }
+
+  /**
+   * Whether replays of this recipe may start for the task: approved for now, or kept for its
+   * repository, which then covers the task until the person revokes it.
+   */
+  async approved(taskId: string, approvalDigest: string): Promise<boolean> {
+    if (this.options.authorization.covers(taskId, approvalDigest)) return true;
+    const { task } = await this.options.access.context(taskId);
+    const kept = await this.options.store.read((reader) => this.options.store.keptApproval(reader, task.repositoryId, approvalDigest));
+    if (!kept) return false;
+    this.options.authorization.grant(taskId, approvalDigest, kept.id);
+    return this.options.authorization.covers(taskId, approvalDigest);
+  }
+
+  /** The approvals the person kept, newest first, with their repository's name. */
+  async keptApprovals(): Promise<BugReplayKeptApproval[]> {
+    const records = await this.options.store.read((reader) => this.options.store.listKeptApprovals(reader));
+    const names = new Map<string, string>();
+    for (const record of records) {
+      if (!names.has(record.repositoryId)) names.set(record.repositoryId, (await this.options.tasks.getRepository(record.repositoryId))?.name ?? '');
+    }
+    return records.map((record) => ({
+      id: record.id,
+      repositoryId: record.repositoryId,
+      repositoryName: names.get(record.repositoryId) ?? '',
+      commands: record.commands,
+      envFiles: record.envFiles,
+      calls: record.calls,
+      keptAt: record.keptAt
+    }));
+  }
+
+  /** Revokes a kept approval: the leases it stood for end now, so the next replay of its recipe asks. */
+  async revokeApproval(approvalId: string): Promise<void> {
+    await this.options.store.write((tx) => this.options.store.revokeApproval(tx, approvalId));
+    this.options.authorization.revokeKept(approvalId);
   }
 
   /** Queues the two runs of a qualification for a version. */
@@ -655,8 +723,12 @@ export class BugReplayService implements BugReplayCore {
       throw new RunSettled('CANCELED', { reason: 'CANCELED_BY_PERSON', detail: 'The task is closed.' });
     }
     // After a restart every run waits for the person again; until they allow runs, the full
-    // checks below would only repeat every heartbeat.
-    if (run.state === 'WAITING' && run.waitingFor === 'APPROVAL' && !this.options.authorization.anyLease(run.taskId)) return 'APPROVAL';
+    // checks below would only repeat every heartbeat. A run whose repository kept an approval is
+    // checked, since the approval may cover it.
+    if (
+      run.state === 'WAITING' && run.waitingFor === 'APPROVAL' && !this.options.authorization.hasLease(run.taskId) &&
+      !(await this.options.store.read((reader) => this.options.store.hasKeptApprovals(reader, context.task.repositoryId)))
+    ) return 'APPROVAL';
     const worktreePath = context.worktree.worktreePath;
     const tree = run.kind === 'CANDIDATE' ? run.inputTreeId! : version.baselineTreeId;
     if (!(await this.freezer.available(worktreePath, tree))) {
@@ -692,7 +764,7 @@ export class BugReplayService implements BugReplayCore {
       if (qualification === 'PENDING') return 'QUALIFICATION';
     }
     const derived = await this.derive(run, version, worktreePath, tree, '/<export>');
-    if (!this.options.authorization.lease(run.taskId, derived.templateDigest)) return 'APPROVAL';
+    if (!(await this.approved(run.taskId, derived.approvalDigest))) return 'APPROVAL';
     if ((derived.managedDatabases.length > 0 || derived.secretIds.length > 0) && (await this.options.runtime().keystore.status()).state !== 'unlocked') {
       return 'KEYSTORE';
     }
@@ -746,7 +818,7 @@ export class BugReplayService implements BugReplayCore {
       })));
       const exported = await this.freezer.export({ worktreePath, taskId: run.taskId, runId: run.id, treeId: tree, envFiles, signal: controller.signal });
       const derived = await this.derive(run, version, worktreePath, tree, exported.sourcePath);
-      if (!this.options.authorization.lease(run.taskId, derived.templateDigest)) throw new RunWaits('APPROVAL');
+      if (!this.options.authorization.covers(run.taskId, derived.approvalDigest)) throw new RunWaits('APPROVAL');
       await this.environment.preflight(derived.spec);
       run = await this.updateRun(run, { state: 'STARTING_ENVIRONMENT', phase: 'Starting the app' }, 'BUG_REPLAY_RUN_UPDATED');
       started = true;
@@ -754,7 +826,7 @@ export class BugReplayService implements BugReplayCore {
         taskId: run.taskId,
         name: run.name,
         spec: derived.spec,
-        templateDigest: derived.templateDigest,
+        approvalDigest: derived.approvalDigest,
         secretIds: derived.secretIds,
         signal: controller.signal,
         onPhase: (phase) => this.notePhase(run, phase),

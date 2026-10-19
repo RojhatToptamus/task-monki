@@ -80,7 +80,7 @@ export class ReplayEnvironment {
     taskId: string;
     name: string;
     spec: PreviewSpec;
-    templateDigest: string;
+    approvalDigest: string;
     secretIds: string[];
     signal: AbortSignal;
     onPhase?: (phase: string) => void;
@@ -95,7 +95,7 @@ export class ReplayEnvironment {
     if (input.signal.aborted) throw new ReplayEnvironmentError('CANCELED', 'Canceled');
     this.authorization.expectStart(input.name, {
       taskId: input.taskId,
-      templateDigest: input.templateDigest,
+      approvalDigest: input.approvalDigest,
       spec: input.spec,
       secretIds: input.secretIds
     });

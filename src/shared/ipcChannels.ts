@@ -54,6 +54,8 @@ export const IPC_INVOKE_CHANNELS = [
   'board:delete',
   'board:update',
   'bug:action',
+  'bug:approvals:list',
+  'bug:approvals:revoke',
   'bug:baseline:run',
   'bug:capture:preview',
   'bug:capture:save',

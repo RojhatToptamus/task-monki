@@ -115,11 +115,16 @@ export const bugReplayInput = {
     const input = object(value);
     return { ...session(input), include: list(input.include, 12, (entry) => text(entry, 400)) };
   },
-  lease(value: unknown): { taskId: string; templateDigest: string } {
+  lease(value: unknown): { taskId: string; approvalDigest: string; keep: boolean } {
     const input = object(value);
-    const templateDigest = text(input.templateDigest, 64);
-    if (!DIGEST.test(templateDigest)) throw new BugReplayInputError();
-    return { ...task(input), templateDigest };
+    const approvalDigest = text(input.approvalDigest, 64);
+    if (!DIGEST.test(approvalDigest)) throw new BugReplayInputError();
+    return { ...task(input), approvalDigest, keep: input.keep === undefined ? false : boolean(input.keep) };
+  },
+  approval(value: unknown): { approvalId: string } {
+    const approvalId = text(object(value).approvalId, 64);
+    if (!UUID.test(approvalId)) throw new BugReplayInputError();
+    return { approvalId };
   },
   page(value: unknown): { taskId: string; sessionId: string; path: string } {
     const input = object(value);

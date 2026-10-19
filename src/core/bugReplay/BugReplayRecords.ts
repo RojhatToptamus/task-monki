@@ -95,7 +95,21 @@ export interface BugCaseDecisionRecord {
   createdAt: string;
 }
 
-export type BugReplayFileKind = 'ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES' | 'SERVICE_LOG';
+/** Replays of one recipe the person approved for a repository, until they revoke the approval. */
+export interface BugReplayKeptApprovalRecord {
+  id: string;
+  repositoryId: string;
+  /** What the person read and approved: the recipe's template, its env files and outside hosts. */
+  approvalDigest: string;
+  /** The commands as the person read them. */
+  commands: Array<{ service: string; command: string; directory: string }>;
+  /** The ignored env files replays get and the outside hosts they call. */
+  envFiles: string[];
+  calls: string[];
+  keptAt: string;
+}
+
+export type BugReplayFileKind ='ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES' | 'SERVICE_LOG';
 
 export interface BugReplayFileRecord {
   id: string;

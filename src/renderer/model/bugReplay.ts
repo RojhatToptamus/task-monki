@@ -108,6 +108,8 @@ export function bugActionLabel(action: BugCaseAction, view?: Pick<BugCaseView, '
       return 'Record again';
     case 'allow-runs':
       return 'Approve replays';
+    case 'always-allow-runs':
+      return 'Always approve in this repository';
     case 'unlock-secrets':
       return 'Unlock secrets';
     case 'use-new-env-files':
@@ -134,6 +136,7 @@ export function bugActionPendingLabel(action: BugCaseAction): string {
     case 'record-again':
       return 'Starting…';
     case 'allow-runs':
+    case 'always-allow-runs':
       return 'Approving…';
     case 'cancel-run':
       return 'Canceling…';
@@ -167,11 +170,15 @@ const STATE_BUTTONS: Record<BugReplayGateState, BugCaseAction[]> = {
   STALE: ['verify-again']
 };
 
+/** Replays waiting on approval hold the step alone: approving for now, keeping it, and declining. */
+const APPROVAL_BUTTONS: BugCaseAction[] = ['allow-runs', 'always-allow-runs', 'cancel-run'];
+
 /** The actions as buttons and a menu: a decision the bug waits on leads, then the state's own. */
 export function layoutBugActions(actions: BugCaseAction[], state: BugReplayGateState): BugActionLayout {
   const offered = new Set(actions);
-  const leading = (['allow-runs', 'unlock-secrets'] as const).filter((action) => offered.has(action));
-  const buttons = [...leading, ...STATE_BUTTONS[state].filter((action) => offered.has(action))].slice(0, 3);
+  const buttons = offered.has('allow-runs')
+    ? APPROVAL_BUTTONS.filter((action) => offered.has(action))
+    : [...(offered.has('unlock-secrets') ? ['unlock-secrets' as const] : []), ...STATE_BUTTONS[state].filter((action) => offered.has(action))].slice(0, 3);
   const shown = new Set<BugCaseAction>(buttons);
   return {
     ...(buttons[0] ? { primary: buttons[0] } : {}),

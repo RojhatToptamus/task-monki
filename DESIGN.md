@@ -1540,7 +1540,9 @@ finishing action here; otherwise PR Status offers it as a section, so it appears
 exactly once on the page. Marking done despite open evidence is the owner's
 override: never the filled primary, always last. Three actions sit side by
 side; past three, the first two stay and the rest — the overrides — move under
-a More menu, each keeping its disabled reason inline.
+a More menu, each keeping its disabled reason inline. An approval in the panel
+ends as request cards do: declining first, the primary last, and its other
+answers between them.
 
 Provider text is quoted, never set as Task Monki's own: under a title or caption
 that names the agent, with a 2px `--edge-raised` rule along its left edge.
@@ -1784,12 +1786,19 @@ the row. The
 actions wait in a 24px ⋯ menu, each with its reason when it cannot run yet.
 When the person owes the bug a step, the Now panel takes it and the section
 drops its state word: the state as title and the fact that drives the step as
-its line, never the bug's title. Approving replays is decline first: Cancel
-replays, then Approve replays, with what runs under Details. The turn that
+its line, never the bug's title. Approving replays reads as a request card:
+Cancel replays, Always approve in this repository, then the primary Approve
+replays, with what runs under Details; while replays wait on it, the panel holds
+that decision alone and the bug's other steps wait in its ⋯ menu. The turn that
 hands the bug to the agent carries it as an attachment that opens it. Discard
 recording, Remove bug and Delete evidence are 440px confirms with Keep first.
 Debug's Earlier bugs is a table: Bug, Ended, When, Evidence and a row menu
-holding Delete evidence.
+holding Delete evidence. Settings' Repositories section lists the approvals
+kept for a repository under Replay approvals: a table of Repository, What runs
+(the recipe's commands, and under them at meta size the env files and outside
+hosts replays get) and Approved, with Revoke approval in the row menu and no
+confirm, since approving again restores it. It appears once something is kept;
+revoking the last one leaves "No replay approvals" until Settings closes.
 
 ## Appendix C — where things live
 

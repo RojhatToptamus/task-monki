@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { MoreHorizontal, Plus } from 'lucide-react';
 import type { Repository } from '../../shared/contracts';
 import { abbreviateHomePath, type RepositoryOption } from '../model/repositories';
@@ -26,7 +27,7 @@ const STATUS: Record<Repository['status'], { label: string; tone: Tone }> = {
 /**
  * Repositories Task Monki can create tasks in. Lifecycle actions live in each
  * row's menu; New task remembers the repository used last, so nothing here
- * chooses a default.
+ * chooses a default. What the repositories have approved follows the table.
  */
 export function RepositorySettings({
   repositories,
@@ -36,8 +37,9 @@ export function RepositorySettings({
   onRefreshRepository,
   onReconnectRepository,
   onDisconnectRepository,
-  onRevealRepository
-}: RepositorySettingsActions & { repositories: RepositoryOption[] }) {
+  onRevealRepository,
+  children
+}: RepositorySettingsActions & { repositories: RepositoryOption[]; children?: ReactNode }) {
   return (
     <SettingsPane
       id="repositories"
@@ -108,6 +110,7 @@ export function RepositorySettings({
           </table>
         </div>
       )}
+      {children}
     </SettingsPane>
   );
 }
