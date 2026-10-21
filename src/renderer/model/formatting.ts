@@ -67,6 +67,12 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** A base the pull request fell behind or conflicts with, as the Now panel, the record and the Inbox say it. */
+export function baseMovedLine(reason: 'BEHIND' | 'CONFLICTS', base: string | undefined): string {
+  if (reason === 'CONFLICTS') return base ? `Conflicts with ${base}` : 'Conflicts';
+  return base ? `Behind ${base}` : 'Behind its base';
+}
+
 /** Names as a sentence lists them: "alice", "alice and bob", "alice, bob and 2 more". */
 export function listNames(names: readonly string[]): string {
   if (names.length <= 2) return names.join(' and ');

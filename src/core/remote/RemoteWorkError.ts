@@ -10,10 +10,6 @@ export class RemoteWorkError extends Error {
     this.name = 'RemoteWorkError';
     this.code = code;
   }
-
-  toUnavailable(): RemoteWorkUnavailable {
-    return { code: this.code, message: this.message };
-  }
 }
 
 /** What a failed remote read or write tells the person, without credentials. */
@@ -23,7 +19,7 @@ export function remoteWorkMessage(error: unknown): string {
 
 export function remoteWorkUnavailable(error: unknown): RemoteWorkUnavailable {
   return error instanceof RemoteWorkError
-    ? error.toUnavailable()
+    ? { code: error.code, message: error.message }
     : { code: 'FAILED', message: safeCliMessage(error) };
 }
 

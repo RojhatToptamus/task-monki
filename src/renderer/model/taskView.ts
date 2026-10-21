@@ -1,5 +1,5 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
-import { deliveryProvider, deliveryWords } from './deliveryWords';
+import { deliveryNoun, deliveryProvider } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
@@ -13,7 +13,8 @@ import type {
 import {
   completionPolicyRequiresMerge,
   formatRemoteWorkNumber,
-  getImplementationRetryReason
+  getImplementationRetryReason,
+  remoteWorkLabel
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
 import {
@@ -28,10 +29,8 @@ import type { Tone } from './viewTypes';
 
 /** A task's pull request as a board card shows it: GitHub's number and state. */
 export interface TaskCardPullRequest {
-  /** Undefined while the pull request is linked but not yet numbered. */
-  number?: number;
-  /** The number as its platform writes it: `#82`, or `!82` for a GitLab merge request. */
-  label?: string;
+  /** The number as its platform writes it, `#82` or `!82`, or the platform's word while it has none. */
+  label: string;
   state: 'draft' | 'open' | 'merged' | 'closed';
   /** Delivery progress the card's status word does not already say, e.g. "checks pending". */
   note?: string;
@@ -65,8 +64,9 @@ export interface RunFailureBannerViewModel {
 }
 
 export interface TaskCompletionEvidenceViewModel {
-  label: 'Marked done' | 'Auto-completed' | 'Completion unknown';
-  detail: string;
+  label: 'Marked done' | 'Merged' | 'Completion unknown';
+  /** How the task came to be done, when the label alone does not say it. */
+  detail?: string;
 }
 
 export function describeTaskCompletionEvidence(
@@ -98,10 +98,8 @@ export function describeTaskCompletionEvidence(
     completionPolicyRequiresMerge(task.completionPolicy) &&
     isMerged(task.projection)
   ) {
-    return {
-      label: 'Auto-completed',
-      detail: 'Completed by the merge policy; no one marked it done.'
-    };
+    // The merge is how it ended; its date and method are the pull request's record.
+    return { label: 'Merged' };
   }
   return {
     label: 'Completion unknown',
@@ -319,7 +317,7 @@ function describeDeliveryProgress(
   if (projection.git === 'DIVERGED') {
     // A pull request rewritten under a worktree with nothing of its own is news, not a conflict.
     return 'pullRequestRewritten' in task && task.pullRequestRewritten
-      ? { label: deliveryWords('PR rewritten', deliveryProvider({ remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection })), tone: 'action' }
+      ? { label: `${deliveryNoun(deliveryProvider(task))} rewritten`, tone: 'action' }
       : { label: 'Branch diverged', tone: 'error' };
   }
   if (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED') {
@@ -432,10 +430,11 @@ export function cardPullRequestForTask(
     return undefined;
   }
   const note = state === 'draft' || state === 'open' ? cardPullRequestNote(projection) : undefined;
-  const provider = deliveryProvider({ remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection });
+  const provider = deliveryProvider(task);
   return {
-    number: projection.githubPullRequestNumber,
-    ...(projection.githubPullRequestNumber ? { label: formatRemoteWorkNumber(provider, 'PULL_REQUEST', projection.githubPullRequestNumber) } : {}),
+    label: projection.githubPullRequestNumber
+      ? formatRemoteWorkNumber(provider, 'PULL_REQUEST', projection.githubPullRequestNumber)
+      : remoteWorkLabel(provider, 'PULL_REQUEST'),
     state,
     ...(note && !CARD_NOTE_STATED_BY[note]?.includes(stateLabel) ? { note } : {})
   };

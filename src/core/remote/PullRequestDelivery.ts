@@ -57,7 +57,6 @@ export interface PullRequestSync {
 export interface PullRequestAddress {
   number: number;
   url: string;
-  target?: DeliveryTarget;
 }
 
 /**
@@ -93,8 +92,7 @@ export interface PullRequestDelivery {
   resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved?: boolean): Promise<void>;
   commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;
   /** Asks people for another review; false when the platform cannot be asked from here. */
-  readonly canRequestReviewers: boolean;
-  requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
+  requestReviewers?(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
   /** The raw log of a failing check, when its link names a job this platform serves. */
   readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined>;
   /**
@@ -103,4 +101,23 @@ export interface PullRequestDelivery {
    * of the pull request's own repository; returns how many runs or jobs started.
    */
   rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number>;
+}
+
+/**
+ * Starts each item on its own, for a re-run of failed checks: one the platform
+ * refuses does not stop the rest, and only when none started is the refusal the answer.
+ */
+export async function startEach<T>(items: Iterable<T>, start: (item: T) => Promise<unknown>): Promise<number> {
+  let started = 0;
+  let refused: unknown;
+  for (const item of items) {
+    try {
+      await start(item);
+      started += 1;
+    } catch (error) {
+      refused ??= error;
+    }
+  }
+  if (started === 0 && refused !== undefined) throw refused;
+  return started;
 }

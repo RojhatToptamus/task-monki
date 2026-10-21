@@ -5,16 +5,11 @@ import {
   type Task
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
-import { deliveryProvider, deliveryWords } from './deliveryWords';
 import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
+import { baseMovedLine } from './formatting';
 import { pullRequestFeedbackLine } from './pullRequestFeedback';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
-
-/** A board summary names its platform only through its recorded pull request. */
-function attentionDeliverySource(task: TaskAttentionSource): Parameters<typeof deliveryProvider>[0] {
-  return { remoteSource: 'remoteSource' in task ? task.remoteSource : undefined, projection: task.projection };
-}
 
 export type TaskAttentionTone = 'warning' | 'error' | 'info';
 
@@ -202,7 +197,7 @@ function describeDeliveryAttention(
     projection.githubPullRequest === 'CLOSED_UNMERGED' ||
     projection.merge === 'CLOSED_UNMERGED'
   ) {
-    return { label: deliveryWords('PR closed without merge', deliveryProvider(attentionDeliverySource(task))), kind: 'delivery', tone: 'error' };
+    return { label: 'Closed without merge', kind: 'delivery', tone: 'error' };
   }
   // While the agent works on the pull request's asks, what they ask waits on it, not the person.
   if (IN_FLIGHT_RUNS.has(projection.agentRun)) {
@@ -210,20 +205,34 @@ function describeDeliveryAttention(
   }
   // A board summary carries the facts behind the word, which the Inbox states beneath it.
   const facts = 'delivery' in task ? task.delivery : undefined;
-  const detail = (value: string | undefined) => value ? { detail: deliveryWords(value, deliveryProvider(attentionDeliverySource(task))) } : {};
+  // Check names, reviewers, branches and push errors are the platform's own text, shown as written.
+  const detail = (value: string | undefined) => value ? { detail: value } : {};
+  // The word follows the step's order: a worktree out of step with the pull request, then a
+  // base that moved, then failed checks, then requested changes. What ran or was asked
+  // describes commits the merge would not hold until the step before it is taken.
+  if (projection.health === 'ERROR' && (projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS')) {
+    return { label: projection.branchPublication === 'FAILED' ? 'Push failed' : 'Push unconfirmed', kind: 'delivery', tone: 'error', ...detail(facts?.pushError) };
+  }
+  const checksFailed = projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED';
+  // Once the person answered, the review waits on its reviewers: nothing asks here until one of them writes.
+  const changesRequested = projection.reviews === 'CHANGES_REQUESTED' && facts?.turn !== 'REVIEWERS';
+  const moved = facts?.baseMoved;
   // Fixes waiting in the worktree come before what they answer: pushing them is the next step.
   const unpushed = hasPullRequest(projection) && (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED');
-  if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
-    return { label: unpushed ? 'Changes not pushed' : 'Checks failed', kind: 'delivery', tone: unpushed ? 'warning' : 'error', ...detail(failedChecksLine(facts?.failingChecks)) };
+  if (unpushed && (checksFailed || changesRequested || moved || projection.merge === 'BLOCKED')) {
+    return { label: 'Changes not pushed', kind: 'delivery', tone: 'warning' };
   }
-  // Once the person answered, the review waits on its reviewers: nothing asks here until one of them writes.
-  if (projection.reviews === 'CHANGES_REQUESTED' && facts?.turn !== 'REVIEWERS') {
-    return { label: unpushed ? 'Changes not pushed' : 'Changes requested', kind: 'delivery', tone: 'warning', ...detail(facts?.feedback ? pullRequestFeedbackLine(facts.feedback) : undefined) };
+  if (moved) {
+    return { label: 'Merge blocked', kind: 'delivery', tone: 'error', ...detail(baseMovedLine(moved.reason, moved.base)) };
+  }
+  if (checksFailed) {
+    return { label: 'Checks failed', kind: 'delivery', tone: 'error', ...detail(failedChecksLine(facts?.failingChecks)) };
+  }
+  if (changesRequested) {
+    return { label: 'Changes requested', kind: 'delivery', tone: 'warning', ...detail(facts?.feedback ? pullRequestFeedbackLine(facts.feedback) : undefined) };
   }
   if (projection.merge === 'BLOCKED') {
-    const moved = facts?.baseMoved;
-    return { label: 'Merge blocked', kind: 'delivery', tone: 'error',
-      ...detail(moved ? `${moved.reason === 'CONFLICTS' ? 'Conflicts with' : 'Behind'} ${moved.base}` : undefined) };
+    return { label: 'Merge blocked', kind: 'delivery', tone: 'error' };
   }
   const hasDeliveryEvidence =
     hasPullRequest(projection) ||
@@ -231,11 +240,6 @@ function describeDeliveryAttention(
     projection.reviews !== 'NOT_APPLICABLE' ||
     projection.merge !== 'NOT_APPLICABLE';
   if (projection.health === 'ERROR' && hasDeliveryEvidence) {
-    // A push the remote refused is the usual cause, and the one word that says what failed;
-    // one that may have landed is unconfirmed until a retry checks the remote.
-    if (projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS') {
-      return { label: projection.branchPublication === 'FAILED' ? 'Push failed' : 'Push unconfirmed', kind: 'delivery', tone: 'error', ...detail(facts?.pushError) };
-    }
     // The summary here can carry raw GitHub states; the label is the fact.
     return { label: 'Delivery needs attention', kind: 'delivery', tone: 'error' };
   }

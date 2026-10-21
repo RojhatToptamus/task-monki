@@ -7,11 +7,11 @@ import {
   safeCliMessage
 } from '../remote/RemoteWorkError';
 
-export interface GitLabRequest {
+interface GitLabRequest {
   host: string;
   endpoint: string;
   cwd: string;
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT';
   /** String fields, sent as they are. */
   fields?: Record<string, string>;
   /** One long string field, sent on stdin. */
@@ -34,7 +34,7 @@ export class GitLabCli {
   }
 
   async request<T>(input: GitLabRequest): Promise<T> {
-    const stdout = await this.run(input);
+    const stdout = await this.requestText(input);
     try {
       return JSON.parse(stdout) as T;
     } catch {
@@ -44,10 +44,6 @@ export class GitLabCli {
 
   /** A response that is text, not JSON, such as a job's log. */
   async requestText(input: GitLabRequest): Promise<string> {
-    return this.run(input);
-  }
-
-  private async run(input: GitLabRequest): Promise<string> {
     const argv = ['api', input.endpoint, '--hostname', input.host];
     if (input.method && input.method !== 'GET') argv.push('--method', input.method);
     for (const [key, value] of Object.entries(input.fields ?? {})) argv.push('--raw-field', `${key}=${value}`);
@@ -92,6 +88,11 @@ export class GitLabCli {
       return undefined;
     }
   }
+}
+
+/** An issue's or merge request's state. `locked` is a merge in progress: still open until GitLab reports it merged. */
+export function gitLabState(state: string | undefined): 'OPEN' | 'MERGED' | 'CLOSED' {
+  return state === 'merged' ? 'MERGED' : state === 'opened' || state === 'locked' ? 'OPEN' : 'CLOSED';
 }
 
 /** A project path as one URL path segment, as GitLab's API expects it. */

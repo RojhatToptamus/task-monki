@@ -45,7 +45,7 @@ describe('describeTaskAttention', () => {
       task: makeTaskRecord({
         projection: { githubPullRequest: 'CLOSED_UNMERGED' }
       }),
-      expected: { label: 'PR closed without merge', tone: 'error' }
+      expected: { label: 'Closed without merge', tone: 'error' }
     },
     {
       name: 'failing checks',
@@ -206,6 +206,23 @@ describe('describeTaskAttention', () => {
     // A push that may have landed is not called failed.
     expect(describeTaskAttention(withFacts({ health: 'ERROR', branchPublication: 'AMBIGUOUS' }, {})))
       .toMatchObject({ label: 'Push unconfirmed' });
+  });
+
+  it('names the blocker whose step leads: a moved base before failed checks and requested changes, fixes to push before all', () => {
+    const open = { githubPullRequest: 'OPEN_READY' as const, githubPullRequestNumber: 9 };
+    const withFacts = (projection: NonNullable<NonNullable<Parameters<typeof makeTaskRecord>[0]>['projection']>, delivery: object) =>
+      ({ ...makeTaskRecord({ projection: { ...open, ...projection } }), delivery });
+    const moved = { baseMoved: { base: 'main', reason: 'CONFLICTS' as const } };
+    // The step updates the branch first; the checks and the review describe commits the merge would not hold.
+    expect(describeTaskAttention(withFacts({ ciChecks: 'FAILING', merge: 'BLOCKED' }, moved)))
+      .toMatchObject({ label: 'Merge blocked', detail: 'Conflicts with main' });
+    expect(describeTaskAttention(withFacts({ reviews: 'CHANGES_REQUESTED', merge: 'BLOCKED' }, { ...moved, turn: 'AUTHOR' })))
+      .toMatchObject({ label: 'Merge blocked' });
+    // Fixes in the worktree are pushed before anything else, a blocked merge included.
+    expect(describeTaskAttention(withFacts({ git: 'COMMITTED_UNPUSHED', merge: 'BLOCKED' }, moved)))
+      .toMatchObject({ label: 'Changes not pushed' });
+    // Unpushed work with nothing standing behind it raises nothing.
+    expect(describeTaskAttention(withFacts({ git: 'COMMITTED_UNPUSHED' }, {}))).toBeUndefined();
   });
 
   it('asks for a review that requested changes only while it is the person\'s move, and asks for the push before it', () => {

@@ -12,17 +12,17 @@ import {
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export function ExistingWorkModal({
-  mode, worktree, pullRequestReference, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
+  mode, worktree, onListCheckouts, onSubmit, onCancel, fallbackReturnFocusRef
 }: {
   mode: 'instruction' | 'comparison' | 'reconnect';
   worktree: WorktreeRecord;
-  /** Work opened from a pull request runs in Task Monki's own copy, so nothing about the checkout needs saying. */
-  pullRequestReference?: string;
   onListCheckouts(repositoryId: string): Promise<ExistingWorktree[]>;
   onSubmit(value: string): Promise<void>;
   onCancel(): void;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
+  // Work opened from a pull request runs in Task Monki's own copy; only an imported checkout is the person's own.
+  const imported = worktree.ownership === 'EXTERNAL';
   const [value, setValue] = useState(mode === 'comparison' ? worktree.baseRef ?? '' : '');
   const [checkouts, setCheckouts] = useState<ExistingWorktree[]>();
   const [error, setError] = useState<string>();
@@ -67,9 +67,9 @@ export function ExistingWorkModal({
           {mode === 'instruction' ? (
             <label className="field"><span id="checkout-instruction-label">What should the agent do?</span>
               <textarea aria-labelledby="checkout-instruction-label"
-                aria-describedby={pullRequestReference ? undefined : 'checkout-instruction-help'}
+                aria-describedby={imported ? 'checkout-instruction-help' : undefined}
                 value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
-              {pullRequestReference ? null : <small id="checkout-instruction-help">The agent will edit your original imported checkout.</small>}
+              {imported ? <small id="checkout-instruction-help">The agent will edit your original imported checkout.</small> : null}
             </label>
           ) : mode === 'comparison' ? (
             <label className="field"><span id="checkout-comparison-label">Compare against</span>
@@ -103,7 +103,7 @@ export function ExistingWorkModal({
 }
 
 export function CreateDraftPrModal({
-  noun = 'PR',
+  noun,
   title,
   worktree,
   issueNumber,
@@ -116,10 +116,9 @@ export function CreateDraftPrModal({
   fallbackReturnFocusRef
 }: {
   /** PR on GitHub, MR on GitLab. */
-  noun?: 'PR' | 'MR';
+  noun: 'PR' | 'MR';
   title: string;
   worktree?: WorktreeRecord;
-  /** The issue the task was opened from, which the pull request names. */
   /** The issue the task was opened from, as the description writes it: `#42`. */
   issueNumber?: string;
   busy: boolean;
@@ -185,7 +184,7 @@ export function CreateDraftPrModal({
 
         {/* The keyword is all Task Monki writes; the platform closes the issue when the change merges into the default branch. */}
         {issueNumber ? (
-          <label className="tm-draftpr-modal__check">
+          <label className="tm-modal__check">
             <input type="checkbox" checked={closeIssue} disabled={busy} onChange={(event) => setCloseIssue(event.target.checked)} />
             <span>Add “Closes {issueNumber}” to the description</span>
           </label>

@@ -1524,7 +1524,10 @@ even while a pull request is open: the next step is the review's. A review asks
 for action only while a finding is open; once the user dismisses the last one,
 the pull request leads again. Its anatomy
 is fixed: a factual title, at most one line of facts or of quoted provider text,
-then the actions. The title is the board card's word for the task, unless that
+then the actions. The title and its facts read as one group, 8px apart; the
+panel's other parts stand 12px apart inside its 16px inset. A fact is set the
+same way whichever owner states it, in its tone's ink only while the step is
+the person's to take. The title is the board card's word for the task, unless that
 would only repeat the lifecycle stage. An owner with something more specific to
 say keeps its own words: "Codex wants to run a command", "Codex is working".
 While no pull request exists and finishing holds the panel, opening one is a
@@ -1535,22 +1538,30 @@ side; past three, the first two stay and the rest — the overrides — move und
 a More menu, each keeping its disabled reason inline.
 
 An open pull request's step is one blocker and its way through, in this order:
-a worktree out of step with it (Sync branch, Push update, Pull changes; fixes
-the agent made and nobody pushed lead as Changes not pushed), a base that moved
-(Update with main), failed checks (Fix checks, with each failed check and the
-end of its log listed in the panel, and Re-run failed for checks the
+evidence read for an earlier head or before a push was refused (Refresh), a
+worktree out of step with it (Sync branch, Push update, Pull changes; fixes the
+agent made and nobody pushed lead as Changes not pushed), a base that moved
+(Update with main), failed checks (Fix checks, and Re-run failed for checks the
 repository's own runs or jobs produced), comments to address or answers to post
-(Address comments, Reply on GitHub), then Ready for review and Merge. The fact
-line names the blocker and why its action leads: the checks that failed, who
-asked for changes and how many threads are open, what is not pushed, the base it
-is behind. Address comments lists what it sends, one row per comment (its
-author, its place and its first line), and a row opens that thread in Review.
+(Address comments, Reply on GitHub), then Mark as ready and Merge. A pull
+request closed without merge offers Create draft PR while its branch can open
+another, then Archive task. The title, the fact and the lead action name the
+same blocker, and the board and the Inbox name it in the same order. The fact
+line names the blocker and why its action leads: who asked for changes and how
+many threads are open, what is not pushed, the base it is behind. Failed checks
+are listed instead, three at most and then how many more failed; each row is its
+own disclosure (the mark, the name, a chevron, how long it ran), with an icon
+link to the check's page beside it. An open row shows the end of its log in a
+well under the list: 15 lines, long ones wrapped, that scroll and open at the
+end; reading holds that height. Address comments lists what it sends, one row
+per comment (its author, its place and its first line), and a row opens that
+thread in Review.
 The step follows whose turn it is: once the person wrote the latest comment, or
 asked again every reviewer who requested changes, the pull request waits on its
 reviewers (Waiting for review, "Waiting on alice"), the step offers nothing and
 the Inbox and board raise nothing, until a reviewer answers. While an agent
 turn runs, delivery raises nothing either. Writes to the platform are the
-person's: Ready for review is one
+person's: Mark as ready is one
 click; Merge and Reply open a dialog that shows what goes out (the method the
 repository allows, the branch to delete, each reply as an editable text with
 its Resolve thread choice) before anything is sent. When another step holds the
@@ -1562,12 +1573,18 @@ and fact as its facts; the section is left out while every action is paused.
 request: the platform's state icon, the number in `--muted` and the title at
 `--t-body`/500 (two lines at most, a link to the platform), the branch and its
 base in mono `--t-help`, then one `tm-props` row per gate — Checks, Reviews (a
-line per reviewer, the state in its tone's ink, and on a person who answered
-and is not asked yet, an icon to ask them to review again; a bot is never
-asked), Threads (a link to the Review tab while any is open), Merge. A gate's word takes its tone's ink, and nothing
-else in the group does. The Checks summary opens into 28px rows: the mark, the
-name, the time it ran, and an icon link to the platform. The refresh control
-and "Updated" time sit in the group's head. The group holds no action.
+line per reviewer: the state follows the name as Details sets a companion,
+muted unless it has a tone, and wraps beneath it whole when the pair does not
+fit; on a person who answered and is not asked yet, an icon to ask them to
+review again; a bot is never asked), Threads (a link to the Review tab while
+any is open), Merge (left out while another gate states what holds it). A
+gate's word takes its tone's ink, and nothing else in the group does: failed
+is blocked, checks in flight are working, and canceled or skipped ask
+nothing. A head whose checks are not listed yet reads Not reported yet. The
+Checks summary opens into 28px rows under its own row: the mark, the name, its
+state in neutral words, the time it ran, and an icon link to the platform. The
+refresh control and "Updated" time sit in the group's head. The group holds no
+action.
 
 Provider text is quoted, never set as Task Monki's own: under a title or caption
 that names the agent, with a 2px `--edge-raised` rule along its left edge.
@@ -1584,9 +1601,12 @@ stated once beside the actions and tied with `aria-describedby` (a disabled
 button cannot take focus, so a tooltip alone never reaches the keyboard).
 
 **A task page reads in lifecycle order.** The work column is the story: the Now
-panel, the request (omitted when it only repeats the title), the result (what
-the agent reported, attributed, above the files Task Monki captured, or "No file
-changes"), and the agent review once one exists. A fixed
+panel, the request (omitted when it only repeats the title; a long one opens
+in place from "Show full request" under its text, and an issue's or pull
+request's own text is quoted under its author), the result (what the agent
+reported, attributed, above the files Task Monki captured, or "No file changes"
+when the run left the worktree as it found it), and the agent review once one
+exists. A fixed
 300px record column beside it holds the pull request once one exists, then Details (one label and value per row; a
 setting's companion, such as the effort beside the model, follows in muted ink
 and wraps beneath rather than being cut off), the preview, and History: the date

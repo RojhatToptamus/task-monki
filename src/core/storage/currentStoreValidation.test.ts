@@ -96,7 +96,7 @@ describe('validateCurrentStoreRecords', () => {
       id: randomUUID(), taskId: randomUUID(), iterationId: randomUUID(), worktreeId: randomUUID(),
       pullRequestNumber: 82, headSha: 'head', status: 'CHANGES_REQUESTED', observedAt: NOW,
       feedback: {
-        artifactId: randomUUID(), digest: 'a'.repeat(64), capturedAt: NOW, unresolvedCount: 2, discussionCount: 3,
+        artifactId: randomUUID(), digest: 'a'.repeat(64), unresolvedCount: 2, discussionCount: 3,
         reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }]
       }
     };

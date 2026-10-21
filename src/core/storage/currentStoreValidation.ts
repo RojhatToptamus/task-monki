@@ -169,7 +169,11 @@ export function validateCurrentStoreRecords(state: StoreState): void {
     strings(task, 'tasks', ['runtimeId', 'title']);
     // Imported checkouts and work opened from GitHub or GitLab can start without a description.
     stringField(task, 'prompt', 'tasks', task.prompt === '' && (externalTaskIds.has(task.id) || task.remoteSource !== undefined));
-    if (task.remoteSource !== undefined) remoteSource(task.remoteSource);
+    if (task.remoteSource !== undefined) {
+      // Only a task opened from the item holds it; an alternative keeps the issue through its prompt.
+      if (task.kind !== 'NORMAL' || task.forkedFromTaskId !== undefined) invalid('tasks');
+      validateTaskRemoteSource(task.remoteSource);
+    }
     if (task.agentDraft !== undefined) {
       stringField(task, 'agentDraft', 'tasks', true);
       if (task.agentDraft.length > 65_536) throw new Error('Task draft is too long.');
@@ -1167,11 +1171,6 @@ export function validatePullRequestObservation(observation: {
   mergeSnapshotRecord(observation.merge);
 }
 
-/** A task's issue or pull request, checked before the task is stored. */
-export function validateTaskRemoteSource(value: unknown): void {
-  remoteSource(value);
-}
-
 function pullRequestRecord(record: object): void {
   optionalInteger(record, 'number', 'pullRequests', 1);
   optionalStrings(record, 'pullRequests', [
@@ -1224,7 +1223,6 @@ export function validatePullRequestFeedbackSummary(value: unknown): void {
   const summary = persistedRecord(value, 'reviewRollups');
   uuidField(summary, 'artifactId', 'reviewRollups');
   sha256Field(summary, 'digest', 'reviewRollups');
-  timestamp(summary, 'capturedAt', 'reviewRollups');
   integer(summary, 'unresolvedCount', 'reviewRollups', 0);
   integer(summary, 'discussionCount', 'reviewRollups', 0);
   if (!Array.isArray(summary.reviewers) || summary.reviewers.length > PULL_REQUEST_FEEDBACK_LIMITS.reviewers) {
@@ -1435,7 +1433,8 @@ function askSubject(value: unknown): void {
   if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
 }
 
-function remoteSource(value: unknown): void {
+/** A task's issue or pull request, checked before the task is stored. */
+export function validateTaskRemoteSource(value: unknown): void {
   const collection = 'tasks.remoteSource';
   const source = persistedRecord(value, collection);
   enumField(source, 'provider', ['GITHUB', 'GITLAB'] as const, collection);

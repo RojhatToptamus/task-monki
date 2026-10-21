@@ -3,8 +3,8 @@ import {
   formatRemoteWorkNumber,
   parseRemoteWorkReference,
   remoteWorkKey,
+  taskRemoteSourceRef,
   remoteWorkNoun,
-  remoteProviderName,
   type ListRemoteWorkRequest,
   type RemoteProvider,
   type RemoteRepositoryOption,
@@ -22,6 +22,7 @@ import {
   mergeBase,
   requireCheckoutRemote
 } from './RemoteCheckout';
+import { isGitObjectId } from '../git/gitCli';
 import { RemoteWorkError, remoteWorkUnavailable } from './RemoteWorkError';
 import type { RemotePullRequest, RemoteWorkReader } from './RemoteWorkReader';
 
@@ -32,9 +33,8 @@ export interface CapturedRemoteWork {
 }
 
 /** A pull request whose exact head and merge base are present in the checkout. */
-export interface FetchedPullRequest extends CapturedRemoteWork {
+interface FetchedPullRequest extends CapturedRemoteWork {
   pullRequest: RemotePullRequest;
-  remote: RemoteRepositoryOption;
   mergeBaseSha: string;
 }
 
@@ -44,20 +44,10 @@ export interface FetchedPullRequest extends CapturedRemoteWork {
  * a ref of the checkout, and never runs repository code.
  */
 export class RemoteWorkService {
-  private readonly readers: ReadonlyMap<RemoteProvider, RemoteWorkReader>;
-
-  constructor(readers: readonly RemoteWorkReader[]) {
-    this.readers = new Map(readers.map((reader) => [reader.provider, reader]));
-  }
+  constructor(private readonly readers: Readonly<Record<RemoteProvider, RemoteWorkReader>>) {}
 
   reader(provider: RemoteProvider): RemoteWorkReader {
-    const reader = this.readers.get(provider);
-    if (!reader) throw new RemoteWorkError('UNSUPPORTED_REMOTE', `${remoteProviderName(provider)} is not supported.`);
-    return reader;
-  }
-
-  remoteRepositories(repository: Repository): Promise<RemoteRepositoryOption[]> {
-    return listCheckoutRemoteRepositories(repository.path);
+    return this.readers[provider];
   }
 
   async list(
@@ -65,7 +55,7 @@ export class RemoteWorkService {
     input: ListRemoteWorkRequest,
     findTasks: (refs: readonly RemoteWorkRef[]) => Promise<ReadonlyMap<string, Task>>
   ): Promise<RemoteWorkListing> {
-    const repositories = await this.remoteRepositories(repository);
+    const repositories = await listCheckoutRemoteRepositories(repository.path);
     if (repositories.length === 0) {
       return { repositories, items: [], exact: false, unavailable: { code: 'NO_REMOTE', message: 'This checkout has no GitHub or GitLab remote.' } };
     }
@@ -104,7 +94,7 @@ export class RemoteWorkService {
   /** Reads an issue of one of the checkout's remote repositories for a new task. */
   async captureIssue(repository: Repository, ref: RemoteWorkRef): Promise<CapturedRemoteWork> {
     if (ref.kind !== 'ISSUE') throw new RemoteWorkError('WRONG_KIND', 'Choose an issue.');
-    const remote = requireCheckoutRemote(await this.remoteRepositories(repository), ref.repository);
+    const remote = requireCheckoutRemote(await listCheckoutRemoteRepositories(repository.path), ref.repository);
     const { snapshot } = await this.reader(remote.provider).readIssue({ ...ref, repository: remote }, repository.path);
     if (snapshot.state !== 'OPEN') {
       throw new RemoteWorkError('NOT_FOUND', `${formatRemoteWorkNumber(remote.provider, 'ISSUE', ref.number)} is closed.`);
@@ -131,7 +121,7 @@ export class RemoteWorkService {
    */
   async fetchPullRequest(repository: Repository, ref: RemoteWorkRef): Promise<FetchedPullRequest> {
     if (ref.kind !== 'PULL_REQUEST') throw new RemoteWorkError('WRONG_KIND', 'Choose a pull request.');
-    const remote = requireCheckoutRemote(await this.remoteRepositories(repository), ref.repository);
+    const remote = requireCheckoutRemote(await listCheckoutRemoteRepositories(repository.path), ref.repository);
     const pullRequest = await this.reader(remote.provider).readPullRequest({ ...ref, repository: remote }, repository.path);
     const noun = remoteWorkNoun(remote.provider, 'PULL_REQUEST');
     if (pullRequest.snapshot.state !== 'OPEN') {
@@ -144,7 +134,6 @@ export class RemoteWorkService {
     const mergeBaseSha = await this.fetchRevisions(repository.path, remote, pullRequest);
     return {
       pullRequest,
-      remote,
       mergeBaseSha,
       source: {
         provider: remote.provider,
@@ -168,23 +157,20 @@ export class RemoteWorkService {
     };
   }
 
-  /** Reads the pull request again and fetches its current head, for refresh and sync. */
-  async refetchPullRequest(repository: Repository, source: TaskRemoteSource): Promise<{ pullRequest: RemotePullRequest; mergeBaseSha: string }> {
-    const remote = requireCheckoutRemote(await this.remoteRepositories(repository), {
-      provider: source.provider, host: source.host, path: source.repositoryPath
-    });
+  /** Reads the pull request again and, while it is open, fetches its head and target for Sync. */
+  async refetchPullRequest(repository: Repository, source: TaskRemoteSource): Promise<{ pullRequest: RemotePullRequest; mergeBaseSha?: string }> {
+    const remote = requireCheckoutRemote(await listCheckoutRemoteRepositories(repository.path), taskRemoteSourceRef(source).repository);
     const pullRequest = await this.reader(remote.provider).readPullRequest(
       { repository: remote, kind: 'PULL_REQUEST', number: source.number }, repository.path);
     // A deleted or renamed fork changes only the name shown: the head is read from
     // the pull request itself, and pushes go to its own branch under a lease.
-    if (pullRequest.snapshot.state !== 'OPEN') return { pullRequest, mergeBaseSha: source.pullRequest?.mergeBaseSha ?? pullRequest.baseSha };
+    if (pullRequest.snapshot.state !== 'OPEN') return { pullRequest };
     return { pullRequest, mergeBaseSha: await this.fetchRevisions(repository.path, remote, pullRequest) };
   }
 
   private async fetchRevisions(repositoryPath: string, remote: RemoteRepositoryOption, pullRequest: RemotePullRequest): Promise<string> {
-    await fetchRemoteObjects(repositoryPath, remote, pullRequest.baseIsMergeBase
-      ? [pullRequest.headFetchRef]
-      : [pullRequest.headFetchRef, `refs/heads/${pullRequest.baseRefName}`]);
+    const head = pullRequestHeadRef(remote.provider, pullRequest.snapshot.number);
+    await fetchRemoteObjects(repositoryPath, remote, pullRequest.baseIsMergeBase ? [head] : [head, `refs/heads/${pullRequest.baseRefName}`]);
     const noun = remoteWorkNoun(remote.provider, 'PULL_REQUEST');
     if (!await hasCommit(repositoryPath, pullRequest.headSha) || !await hasCommit(repositoryPath, pullRequest.baseSha)) {
       throw new RemoteWorkError('FAILED', `The ${noun} changed while it was being read. Try again.`);
@@ -192,7 +178,7 @@ export class RemoteWorkService {
     const base = pullRequest.baseIsMergeBase
       ? pullRequest.baseSha
       : await mergeBase(repositoryPath, pullRequest.baseSha, pullRequest.headSha);
-    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(base) || !await isAncestor(repositoryPath, base, pullRequest.headSha)) {
+    if (!isGitObjectId(base) || !await isAncestor(repositoryPath, base, pullRequest.headSha)) {
       throw new RemoteWorkError('FAILED', `The ${noun} has no common history with its target branch.`);
     }
     return base;
@@ -215,4 +201,3 @@ async function annotate(
 export function pullRequestHeadRef(provider: RemoteProvider, number: number): string {
   return provider === 'GITLAB' ? `refs/merge-requests/${number}/head` : `refs/pull/${number}/head`;
 }
-

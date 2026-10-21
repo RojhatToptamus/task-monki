@@ -336,11 +336,18 @@
   display: grid;
   gap: 12px;
   min-width: 0;
-  padding: 18px 20px;
+  padding: 16px;
   border: 0;
   border-radius: var(--r-md);
   background: var(--card);
   box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card);
+}
+
+/* The title and what it turns on are one group; groups in the panel sit 12 apart. */
+.tm-slot__head {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
 }
 
 .tm-slot__headline {
@@ -348,7 +355,7 @@
   color: var(--text);
   font-size: var(--t-heading);
   font-weight: var(--w-medium);
-  line-height: 1.35;
+  line-height: var(--lh-body);
   text-wrap: balance;
 }
 
@@ -358,12 +365,12 @@
   max-width: 72ch;
   color: var(--text-soft);
   font-size: var(--t-body);
-  line-height: 1.5;
+  line-height: var(--lh-prose);
   overflow-wrap: anywhere;
 }
 
 .tm-slot__meta {
-  margin: -6px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
   font-variant-numeric: tabular-nums;
@@ -384,7 +391,7 @@
   box-shadow: inset 2px 0 0 var(--edge-raised);
   color: var(--text-soft);
   font-size: var(--t-body);
-  line-height: 1.5;
+  line-height: var(--lh-prose);
   overflow-wrap: anywhere;
 }
 
@@ -417,7 +424,6 @@
 .tm-slot__footer {
   display: grid;
   gap: 8px;
-  padding-top: 4px;
 }
 
 .tm-slot__actions {
@@ -437,7 +443,7 @@
   margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.45;
+  line-height: var(--lh-ui);
 }
 
 /* The facts that bear on finishing, as plain words. Only an unresolved one
@@ -446,12 +452,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px 20px;
-  margin: -4px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   color: var(--muted);
   font-size: var(--t-help);
-  line-height: 1.45;
+  line-height: var(--lh-ui);
 }
 
 .tm-facts__item--info {
@@ -470,7 +476,7 @@
    no rule runs under the label. */
 .tm-osection {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -508,13 +514,20 @@
   font-size: var(--t-meta);
 }
 
+/* A link to another tab: accent words with a compact control's hit area, which
+   keeps the head's line box. */
 .tm-osection__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--h-compact);
+  margin-block: calc((var(--lh-ui) - var(--h-compact)) / 2);
   padding: 0;
   border: 0;
   background: none;
   color: var(--accent-ink);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
   white-space: nowrap;
 }
 
@@ -540,8 +553,13 @@
    as a task-level transition above the tabs. */
 .tm-nextaction {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
+}
+
+/* In the Now panel the finishing step keeps the panel's rhythm. */
+.tm-nextaction--slot {
+  gap: 12px;
 }
 
 .tm-nextaction--task {
@@ -567,7 +585,7 @@
   margin: 0;
   color: var(--text);
   font-size: var(--t-body);
-  line-height: 1.6;
+  line-height: var(--lh-prose);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -577,6 +595,27 @@
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 6;
+}
+
+/* Opening the whole request happens in place, under the text it opens: a quiet
+   control with a compact hit area that keeps the text's line box. */
+.tm-orequest__more {
+  display: inline-flex;
+  justify-self: start;
+  align-items: center;
+  min-height: var(--h-compact);
+  margin-block: calc((var(--lh-ui) - var(--h-compact)) / 2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--t-help);
+  font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
+}
+
+.tm-orequest__more:hover {
+  color: var(--text);
 }
 
 /* The issue or pull request the task was opened from: its reference links to the platform. */
@@ -656,20 +695,22 @@
   color: var(--muted);
   font-size: var(--t-help);
   font-weight: var(--w-medium);
+  line-height: var(--lh-ui);
 }
 
 .tm-oresult__report blockquote {
   display: -webkit-box;
   overflow: hidden;
-  line-height: 1.55;
+  line-height: var(--lh-prose);
   white-space: pre-line;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 5;
 }
 
+/* Blocks in a section sit 12 apart: the section's 8 and this. */
 .tm-oresult__report + .tm-changes,
 .tm-oresult__report + .tm-changes__none {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 /* How the task runs and where its work lives: a label and its value per row, the value in the interface face unless it is a string to copy. */
@@ -680,6 +721,13 @@
   grid-template-columns: fit-content(92px) minmax(0, 1fr);
   gap: 2px 12px;
   margin: 0;
+}
+
+/* In the record column the groups share one label edge, at least as wide as the
+   pull request's gate labels, so a gate that appears moves no value and stacked
+   groups keep one value column. A longer label still fits whole. */
+.tm-overview__side .tm-props {
+  grid-template-columns: minmax(48px, max-content) minmax(0, 1fr);
 }
 
 .tm-props__row {
@@ -859,16 +907,6 @@
   font-weight: var(--w-medium);
   line-height: 1.45;
   overflow-wrap: anywhere;
-}
-
-.tm-prstatus__identity a {
-  color: inherit;
-  text-decoration: none;
-}
-
-.tm-prstatus__identity a:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 .tm-prstatus__state {
@@ -1661,7 +1699,8 @@
   text-align: right;
 }
 
-.tm-draftpr-modal__check {
+/* A checkbox row in a dialog: Close the issue, Delete the branch. */
+.tm-modal__check {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1669,6 +1708,12 @@
   margin-top: 12px;
   color: var(--text-soft);
   font-size: var(--t-body);
+}
+
+.tm-modal__check code {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--t-help);
 }
 
 .tm-draftpr-modal__context {
@@ -2426,11 +2471,11 @@
   text-decoration: none;
 }
 
-/* The mark sits with the first line, not the middle of a title that wraps to two. */
+/* The mark sits with the first line, not the middle of a title that wraps to two, on a whole pixel. */
 .tm-prrecord__identity > svg {
   flex: 0 0 auto;
   align-self: flex-start;
-  margin-top: calc((var(--lh-body) - 13px) / 2);
+  margin-top: round(down, calc((var(--lh-body) - 13px) / 2), 1px);
   color: var(--muted);
 }
 
@@ -2480,27 +2525,32 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   flex: 0 0 auto;
 }
 
+/* The gates, and the checks that open under their row, at the gates' own spacing. */
+.tm-prrecord__gates {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
 /* Gate values wrap rather than cut: a reviewer list has a line per person. */
 .tm-prrecord__gates .tm-props__row > dd {
   overflow: visible;
   white-space: normal;
 }
 
-.tm-prrecord__toggle,
-.tm-prrecord__value {
+/* The Checks word is its own disclosure, with a hit area of a compact control. */
+.tm-prrecord__toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   max-width: 100%;
+  min-height: var(--h-compact);
+  margin: -2px -4px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
   color: var(--text);
   font-size: var(--t-body);
   text-align: left;
-}
-
-.tm-prrecord__toggle {
-  margin: -2px -4px;
-  padding: 2px 4px;
-  border-radius: var(--r-xs);
 }
 
 .tm-prrecord__toggle:hover {
@@ -2529,18 +2579,18 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   list-style: none;
 }
 
-/* A reviewer's state wraps under their name before the name is cut short. */
+/* A reviewer's state is the name's companion, as Details sets one: after it on the
+   line, and beneath it whole when the pair does not fit. */
 .tm-prrecord__people li {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
   gap: 0 8px;
   min-width: 0;
 }
 
 .tm-prrecord__person {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -2548,11 +2598,16 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   white-space: nowrap;
 }
 
-/* A gate's word takes its tone's ink; the record has no other colour. */
+/* A gate's word takes its tone's ink; the record has no other colour. Values read at
+   Details' size; a reviewer's state is a companion in muted ink until it has a tone. */
 .tm-prrecord__word {
   flex: 0 0 auto;
-  color: var(--text-soft);
-  font-size: var(--t-help);
+  color: var(--text);
+  font-size: var(--t-body);
+}
+
+.tm-prrecord__people .tm-prrecord__word {
+  color: var(--muted);
 }
 
 /* The record's icon buttons are the shared ones at row scale. */
@@ -2572,6 +2627,7 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 .tm-prrecord__word[data-tone='success'] { color: var(--verified-ink); }
 .tm-prrecord__word[data-tone='error'] { color: var(--blocked-ink); }
 .tm-prrecord__word[data-tone='action'] { color: var(--waiting-ink); }
+.tm-prrecord__word[data-tone='working'] { color: var(--accent-ink); }
 
 .tm-prrecord__link {
   font-size: var(--t-body);
@@ -2580,9 +2636,14 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 /* Checks as dense rows: the mark, the name, its state, how long it ran, its page. */
 .tm-prrecord__checks {
   display: grid;
-  margin: -2px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.tm-prrecord__check .tm-prrecord__word {
+  color: var(--text-soft);
+  font-size: var(--t-help);
 }
 
 .tm-prrecord__check {
@@ -2619,7 +2680,6 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
-  max-width: 72ch;
 }
 
 /* A row's text gives way before the column does. */
@@ -2684,43 +2744,107 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   white-space: nowrap;
 }
 
-/* In the Now panel, the failed checks the step names, each with its log. */
+/* In the Now panel, the failed checks the step names: each row is its own
+   disclosure, and every block ends at the panel's padding. */
 .tm-prstep__checks {
   display: grid;
-  gap: 6px;
-  max-width: 72ch;
+  gap: 8px;
+  min-width: 0;
 }
 
-/* A failed check's actions stay beside its name, not across the panel. */
-.tm-prstep__checks > .tm-prrecord__checks {
-  max-width: 480px;
+.tm-prstep__checklist {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.tm-prstep__logtoggle {
+.tm-prstep__check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: var(--h-row-dense);
+}
+
+/* The mark, the name and its chevron, then how long it ran at the row's end. */
+.tm-prstep__checktoggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: var(--h-row-dense);
+  margin-left: -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--text);
+  font-size: var(--t-help);
+  text-align: left;
+}
+
+.tm-prstep__checktoggle:hover {
+  background-color: var(--hover);
+}
+
+.tm-prstep__checktoggle > svg {
   flex: 0 0 auto;
 }
 
+.tm-prstep__checkname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-prstep__checktoggle .tm-disclosure__chevron {
+  color: var(--muted);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.tm-prstep__checktoggle[aria-expanded='true'] .tm-disclosure__chevron {
+  transform: rotate(90deg);
+}
+
+.tm-prstep__checktoggle .tm-prrecord__duration {
+  margin-left: auto;
+}
+
+/* The log is a well whose padding stays put while its 15 lines scroll, so the
+   top line is never cut and opening at the end hides nothing. Long lines wrap:
+   a sideways scrollbar would take height and cut the top line. Reading holds
+   the same height. */
 .tm-prstep__log {
-  display: grid;
-  gap: 6px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  background: var(--well);
 }
 
 .tm-prstep__log pre {
-  max-height: 280px;
+  max-height: calc(var(--lh-meta) * 15);
   margin: 0;
-  padding: 8px 12px;
-  overflow: auto;
-  border-radius: var(--r-sm);
-  background: var(--well);
+  padding: 0;
+  overflow-y: auto;
+  background: none;
   color: var(--text-soft);
   font: var(--t-meta)/var(--lh-meta) var(--font-mono);
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tm-prstep__log--loading {
+  min-height: calc(var(--lh-meta) * 15 + 16px);
 }
 
 .tm-prstep__lognote {
   margin: 0;
   color: var(--muted);
   font-size: var(--t-help);
+  line-height: var(--lh-ui);
 }
 
 /* Merge: the branches, the method the repository allows, the branch to delete. */
@@ -2746,27 +2870,6 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
 
 .tm-merge-modal__methods {
   margin-top: 4px;
-}
-
-.tm-merge-modal__check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: var(--h-compact);
-  margin-top: 12px;
-  color: var(--text-soft);
-  font-size: var(--t-body);
-}
-
-.tm-merge-modal__check code {
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--t-help);
-}
-
-.tm-merge-modal .tm-modal__actions,
-.tm-reply-modal .tm-modal__actions {
-  margin-top: 20px;
 }
 
 /* Replies: each discussion's answer, the person's to edit, keep or leave out. */
@@ -2857,16 +2960,7 @@ a.tm-prrecord__identity:hover .tm-prrecord__title {
   resize: vertical;
 }
 
-.tm-reply__resolve {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: var(--h-compact);
-  color: var(--text-soft);
-  font-size: var(--t-help);
-}
-
-.tm-reply > .tm-reply__resolve,
+.tm-reply > .tm-resolve-check,
 .tm-reply > .form-error {
   padding-left: 24px;
 }

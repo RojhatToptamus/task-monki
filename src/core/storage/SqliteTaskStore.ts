@@ -161,7 +161,7 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
   remote?: RemoteTaskSourceInput;
 }
 
-export interface RemoteTaskSourceInput {
+interface RemoteTaskSourceInput {
   /** The source without its artifact, which the store creates from `snapshot`. */
   source: Omit<TaskRemoteSource, 'snapshotArtifactId'>;
   /** The captured text agents read, stored as the task's `remote-source` artifact. */
@@ -169,7 +169,7 @@ export interface RemoteTaskSourceInput {
 }
 
 /** A pull request opened as a task: its managed worktree starts at the exact head. */
-export interface OpenRemoteWorktreeInput {
+interface OpenRemoteWorktreeInput {
   branchName: string;
   worktreePath: string;
   baseRef?: string;
@@ -1999,13 +1999,7 @@ export class SqliteTaskStore {
   async getLatestGitSnapshot(taskId: string): Promise<GitSnapshotRecord | undefined> {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
-    return clone(task ? this.latestGitSnapshot(task) : undefined);
-  }
-
-  private latestGitSnapshot(task: Task): GitSnapshotRecord | undefined {
-    return this.state.gitSnapshots
-      .filter((snapshot) => snapshot.taskId === task.id && snapshot.iterationId === task.currentIterationId)
-      .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+    return clone(task ? latestGitSnapshot(this.state, task) : undefined);
   }
 
   /** The newest check rollup recorded for a pull request's head. */
@@ -2018,8 +2012,7 @@ export class SqliteTaskStore {
   /** The newest reading of what people said on a pull request. */
   async findPullRequestFeedback(taskId: string, pullRequestNumber: number): Promise<PullRequestFeedbackSummary | undefined> {
     await this.init();
-    return clone(this.state.reviewRollups.find((record) =>
-      record.taskId === taskId && record.pullRequestNumber === pullRequestNumber && record.feedback)?.feedback);
+    return clone(latestPullRequestFeedback(this.state, taskId, pullRequestNumber));
   }
 
   async getLatestPullRequest(taskId: string): Promise<PullRequestSnapshotRecord | undefined> {
@@ -3624,14 +3617,8 @@ export class SqliteTaskStore {
         return clone(existing);
       }
     }
-    const remote = fork ? undefined : input.remote;
+    const remote = input.remote;
     if (remote) {
-      if (input.issue && remoteWorkKey(input.issue) !== remoteWorkKey(taskRemoteSourceRef(remote.source))) {
-        throw new Error('The captured issue does not match the request.');
-      }
-      if ((remote.source.kind === 'PULL_REQUEST') !== Boolean(openedWorktree)) {
-        throw new Error('A pull request opens with its worktree; an issue opens without one.');
-      }
       // One task per remote item: choosing it again opens the task it already has.
       const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(remote.source));
       if (existing) return clone(existing);
@@ -3641,8 +3628,6 @@ export class SqliteTaskStore {
       } catch {
         throw new Error('This item has a value Task Monki cannot record.');
       }
-    } else if (input.issue || openedWorktree) {
-      throw new Error('The issue was not captured.');
     }
 
     const now = new Date().toISOString();
@@ -3762,17 +3747,7 @@ export class SqliteTaskStore {
             repositoryId: task.repositoryId,
             forkedFromTaskId: task.forkedFromTaskId,
             forkedFromRunId: task.forkedFromRunId,
-            attachmentIds: attachmentRecords.map((attachment) => attachment.id),
-            ...(remote ? {
-              remoteSource: {
-                provider: remote.source.provider,
-                host: remote.source.host,
-                repositoryPath: remote.source.repositoryPath,
-                kind: remote.source.kind,
-                number: remote.source.number,
-                url: remote.source.url
-              }
-            } : {})
+            attachmentIds: attachmentRecords.map((attachment) => attachment.id)
           }
         })
       );
@@ -4573,7 +4548,7 @@ export class SqliteTaskStore {
       const worktree = this.state.worktrees.find((candidate) => candidate.id === worktreeId);
       const task = worktree ? this.state.tasks.find((candidate) => candidate.id === worktree.taskId) : undefined;
       if (!worktree || !task || task.remoteSource?.kind !== 'PULL_REQUEST' || worktree.ownership !== 'MANAGED' ||
-          task.currentWorktreeId !== worktree.id || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(base.baseSha)) {
+          task.currentWorktreeId !== worktree.id || !isGitObjectId(base.baseSha) || (base.headSha !== undefined && !isGitObjectId(base.headSha))) {
         throw new Error('Only the current worktree of a pull request task can change its base.');
       }
       const now = new Date().toISOString();
@@ -5007,7 +4982,7 @@ export class SqliteTaskStore {
     );
     const taskBeforeMerge = this.state.tasks.find((task) => task.id === merge.taskId);
     const shouldComplete = taskBeforeMerge
-      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge, this.latestGitSnapshot(taskBeforeMerge))
+      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge, latestGitSnapshot(this.state, taskBeforeMerge))
       : false;
     await this.appendEvent(
       createDomainEvent({
@@ -5057,18 +5032,16 @@ export class SqliteTaskStore {
     pullRequest: PullRequestSnapshotRecord,
     feedback: PullRequestFeedback | undefined
   ): Promise<{ summary?: PullRequestFeedbackSummary; artifact?: ArtifactRecord }> {
-    const previous = this.state.reviewRollups.find((record) =>
-      record.taskId === pullRequest.taskId && record.feedback && record.pullRequestNumber === pullRequest.number)?.feedback;
+    const previous = latestPullRequestFeedback(this.state, pullRequest.taskId, pullRequest.number);
     if (!feedback || feedback.number !== pullRequest.number) return { summary: previous };
     const content = JSON.stringify(feedback);
     if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
     const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
-    // Unchanged feedback keeps its artifact; what the summary derives from it is read again, so a newer derivation reaches it.
-    if (previous?.digest === digest) return { summary: { ...previous, ...feedbackTurnFacts(feedback) } };
+    // Unchanged feedback keeps its artifact and summary.
+    if (previous?.digest === digest) return { summary: previous };
     const candidate: PullRequestFeedbackSummary = {
       artifactId: randomUUID(),
       digest,
-      capturedAt: feedback.capturedAt,
       unresolvedCount: unresolvedDiscussionCount(feedback.discussions),
       discussionCount: feedback.discussions.length,
       reviewers: feedback.reviewers,
@@ -5640,28 +5613,10 @@ function validateLoadedTaskState(current: StoreState): void {
   validatePersistedRepositoryReferences(current);
   validatePersistedBoards(current);
   validatePersistedTaskCreationMetadata(current);
-  validatePersistedRemoteSources(current);
   validatePersistedAttachments(current);
 }
 
 /** A task's remote source names its own captured text, and only one task claims an item. */
-function validatePersistedRemoteSources(state: StoreState): void {
-  const keys = new Set<string>();
-  for (const task of state.tasks) {
-    const source = task.remoteSource;
-    if (!source) continue;
-    const artifact = state.artifacts.find((candidate) => candidate.id === source.snapshotArtifactId);
-    const key = remoteWorkKey(taskRemoteSourceRef(source));
-    if (task.kind !== 'NORMAL' || task.forkedFromTaskId !== undefined || keys.has(key) ||
-        artifact?.taskId !== task.id || artifact.kind !== 'remote-source') {
-      throw new Error(
-        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: tasks contains an invalid remote source.`
-      );
-    }
-    keys.add(key);
-  }
-}
-
 function validatePersistedRelationships(state: StoreState): void {
   const tasks = indexUniqueRecords(state.tasks, 'tasks');
   const iterations = indexUniqueRecords(state.iterations, 'iterations');
@@ -5848,6 +5803,16 @@ function validatePersistedRelationships(state: StoreState): void {
         'pull request feedback artifact ownership'
       );
     }
+  }
+
+  // One task holds each issue or pull request, with its own captured text.
+  const remoteKeys = new Set<string>();
+  for (const task of tasks.values()) {
+    if (!task.remoteSource) continue;
+    assertTaskArtifact(artifacts, task.id, task.remoteSource.snapshotArtifactId, 'remote-source', 'task remote source');
+    const key = remoteWorkKey(taskRemoteSourceRef(task.remoteSource));
+    if (remoteKeys.has(key)) invalidPersistedRelationship('task remote source');
+    remoteKeys.add(key);
   }
 
   for (const task of state.tasks) {
@@ -7679,21 +7644,30 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return Number.isFinite(time) && new Date(time).toISOString() === value;
 }
 
+/** The newest Git evidence of a task's current iteration. */
+function latestGitSnapshot(state: StoreState, task: Task): GitSnapshotRecord | undefined {
+  return state.gitSnapshots
+    .filter((snapshot) => snapshot.taskId === task.id && snapshot.iterationId === task.currentIterationId)
+    .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+}
+
+/** The newest reading of what people said on a pull request; each observation carries the last one forward. */
+function latestPullRequestFeedback(state: StoreState, taskId: string, pullRequestNumber: number | undefined): PullRequestFeedbackSummary | undefined {
+  return state.reviewRollups.find((record) => record.taskId === taskId && record.pullRequestNumber === pullRequestNumber)?.feedback;
+}
+
 /** The opened pull request was rewritten under a worktree with nothing of its own, as PR Status reads it. */
 function boardPullRequestRewritten(task: Task, state: StoreState): boolean {
   const opened = task.remoteSource?.kind === 'PULL_REQUEST' ? task.remoteSource.pullRequest : undefined;
   if (!opened || task.projection.git !== 'DIVERGED') return false;
-  const latest = <T extends { iterationId: string }>(records: readonly T[], key: keyof T & string) => records
-    .filter((record) => record.iterationId === task.currentIterationId)
-    .sort((left, right) => String(right[key]).localeCompare(String(left[key])))[0];
-  const ownRecords = <T extends { taskId: string }>(records: readonly T[]) => records.filter((record) => record.taskId === task.id);
-  const git = latest(ownRecords(state.gitSnapshots), 'capturedAt');
-  const publications = ownRecords(state.branchPublications);
+  const publications = state.branchPublications.filter((record) => record.taskId === task.id);
+  const pushed = publications.filter((record) => record.iterationId === task.currentIterationId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
   return pullRequestRewrittenUnder({
-    leavableHeads: leavablePullRequestHeads(opened.headSha, ownRecords(state.pullRequests), publications),
-    localHead: git?.headSha,
+    leavableHeads: leavablePullRequestHeads(opened.headSha, state.pullRequests.filter((record) => record.taskId === task.id), publications),
+    localHead: latestGitSnapshot(state, task)?.headSha,
     diverged: true,
-    pushUnconfirmed: latest(publications, 'updatedAt')?.status === 'AMBIGUOUS'
+    pushUnconfirmed: pushed?.status === 'AMBIGUOUS'
   });
 }
 
@@ -7712,7 +7686,7 @@ function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts |
   const own = (record: { taskId: string }) => record.taskId === task.id;
   const pullRequest = state.pullRequests.find((record) => own(record) && record.number === number);
   const ci = failing ? state.ciRollups.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
-  const feedback = changes ? state.reviewRollups.find((record) => own(record) && record.pullRequestNumber === number)?.feedback : undefined;
+  const feedback = changes ? latestPullRequestFeedback(state, task.id, number) : undefined;
   const merge = blocked ? state.mergeSnapshots.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
   const reason = merge ? baseMovedReason(merge.raw) : undefined;
   const pushError = pushFailed ? state.branchPublications.find(own)?.error?.split('\n')[0]?.slice(0, 200) : undefined;

@@ -632,7 +632,7 @@ export function TaskCard({
 
 /** GitHub's convention: the icon carries the state, the number names the PR. */
 function CardPullRequest({ pullRequest }: { pullRequest: TaskCardPullRequest }) {
-  const name = pullRequest.label ?? (pullRequest.number ? `#${pullRequest.number}` : 'Pull request');
+  const name = pullRequest.label;
   return (
     <span className="tm-card__pr">
       <PullRequestStateIcon state={pullRequest.state} />

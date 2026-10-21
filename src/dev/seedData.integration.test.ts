@@ -398,7 +398,7 @@ describe('Task Monki development seed data', () => {
       kind: 'CHECKS_FAILED',
       canInvestigateFailure: true
     });
-    expect(failedChecks.checkGroups[0]).toMatchObject({ status: 'failed' });
+    expect(failedChecks.failingChecks[0]).toMatchObject({ status: 'failed' });
     const failedChecksTask = taskForScenario(manifest, snapshot, 'delivery-checks-failed');
     expect(snapshot.ciRollups.find((rollup) => rollup.taskId === failedChecksTask.id)).toMatchObject({
       status: 'FAILING'

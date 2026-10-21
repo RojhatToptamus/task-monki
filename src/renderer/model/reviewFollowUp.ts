@@ -56,7 +56,7 @@ export function planReviewRequest(
     else suggestions.push(finding);
   }
   // Other people wrote these; one goes only when the person added it, and never once resolved.
-  const addedDiscussions = new Set(draft.includedDiscussionIds ?? []);
+  const addedDiscussions = new Set(draft.includedDiscussionIds);
   const sendDiscussions = discussions.filter((discussion) => addedDiscussions.has(discussion.id) && !discussion.resolved);
   const discussionsLeftOut = discussions.filter((discussion) =>
     discussion.open && !discussion.sent && !addedDiscussions.has(discussion.id));
@@ -136,7 +136,6 @@ export function buildReviewRequestRecord(input: ReviewRequestInput): ReviewReque
       ...(located ? { side: discussion.side!, line: discussion.line! } : {}),
       ...(located && discussion.endLine && discussion.endLine > discussion.line! ? { endLine: discussion.endLine } : {}),
       text: discussionCommentText(discussion.comments[0]?.body ?? '').slice(0, DISCUSSION_TEXT_LIMIT),
-      ...(discussion.url ? { url: discussion.url } : {}),
       ...(latestCommentTime(discussion) ? { seenAt: latestCommentTime(discussion)! } : {})
     };
   });

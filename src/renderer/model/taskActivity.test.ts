@@ -135,7 +135,7 @@ describe('task activity model', () => {
 
     expect(view.items.map((item) => item.title)).toEqual([
       'Draft PR available',
-      'Checks running',
+      'Checks pending',
       'Review requested'
     ]);
     expect(view.items.find((item) => item.title === 'Draft PR available')?.evidence).toBeUndefined();
@@ -155,7 +155,7 @@ describe('task activity model', () => {
     });
 
     expect(view.items.map((item) => item.title)).toEqual([
-      'Checks running',
+      'Checks pending',
       'Checks failed',
       'Checks passed'
     ]);

@@ -293,7 +293,7 @@ function mergeRequirement(status: MergeStatus): FinishRequirement {
     case 'BLOCKED':
       return { label: 'Merge', fact: 'Merge blocked', tone: 'error', unresolved: true };
     case 'CLOSED_UNMERGED':
-      return { label: 'Merge', fact: 'PR closed without merge', tone: 'error', unresolved: true };
+      return { label: 'Merge', fact: 'Closed without merge', tone: 'error', unresolved: true };
     case 'NOT_APPLICABLE':
     case 'NOT_MERGED':
     case 'UNKNOWN':
@@ -325,7 +325,7 @@ function checksRequirement(
     };
   }
   if (status === 'PENDING') {
-    return { label: 'Checks', fact: 'Checks running', tone: 'info', unresolved: true };
+    return { label: 'Checks', fact: 'Checks pending', tone: 'info', unresolved: true };
   }
   return {
     label: 'Checks',

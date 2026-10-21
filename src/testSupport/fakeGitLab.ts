@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git } from '../core/git/gitCli';
-import { writeNodeExecutable } from './fakeExecutable';
+import { writeFakeSsh, writeNodeExecutable } from './fakeExecutable';
 
 export interface FakeGitLabItem {
   project: string;
@@ -86,15 +86,7 @@ export async function createFakeGitLab(rootDir: string): Promise<FakeGitLab> {
     { username: 'lab-tester', projects: [], items: [] };
   const writeState = () => fs.writeFile(statePath, JSON.stringify(state), 'utf8');
   await writeState();
-  const sshCommand = await writeNodeExecutable(binDir, 'fake-ssh', `
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
-const command = process.argv[process.argv.length - 1];
-const match = /^(git-upload-pack|git-receive-pack) '?\\/?([^']+?)'?$/.exec(command);
-if (!match || match[2].split('/').includes('..')) { console.error('fake ssh: unexpected command ' + command); process.exit(128); }
-const result = spawnSync('git', [match[1].slice(4), path.join(${JSON.stringify(hostRoot)}, match[2])], { stdio: 'inherit' });
-process.exit(result.status ?? 1);
-`);
+  const sshCommand = await writeFakeSsh(binDir, hostRoot);
   const glabPath = await writeNodeExecutable(binDir, 'glab', fakeGlabScript(statePath, logPath, hostRoot));
   const barePath = (project: string) => path.join(hostRoot, `${project}.git`);
   return {

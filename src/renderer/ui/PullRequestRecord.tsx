@@ -1,9 +1,8 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { CircleMinus, ExternalLink, MessageSquare, RefreshCw, RotateCw } from 'lucide-react';
-import { remoteProviderName, remoteWorkNoun, type PullRequestCheckLog } from '../../shared/contracts';
+import { remoteProviderName, remoteWorkLabel, remoteWorkNoun, type PullRequestCheckLog } from '../../shared/contracts';
 import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
 import type { PullRequestRecordCheckRow, PullRequestRecordView, RecordTone } from '../model/pullRequestRecord';
-import { remoteWorkLabel } from '../model/remoteWork';
 import { DisclosureChevron } from './DisclosureChevron';
 import { PullRequestStateIcon } from './PullRequestIcon';
 import { StatusGlyph } from './StatusBadge';
@@ -15,6 +14,26 @@ import { Tooltip } from './Tooltip';
  * waits on, from Task Monki's evidence for its current head. It sits beside
  * the step the Now panel asks for and asks nothing itself.
  */
+/** When the pull request was last read, and the control that reads it again. */
+export function PullRequestRefresh({ updated, reason, disabled, noun, onRefresh }: {
+  updated?: string;
+  reason?: string;
+  disabled?: boolean;
+  noun: string;
+  onRefresh(): void;
+}) {
+  return (
+    <span className="tm-prstatus__refreshline">
+      {updated ? <span>{updated}</span> : null}
+      <Tooltip label={reason ?? `Refresh ${noun}`}>
+        <button type="button" className="tm-prstatus__refresh" disabled={disabled} aria-label={`Refresh ${noun}`} onClick={onRefresh}>
+          <RefreshCw aria-hidden="true" size={13} />
+        </button>
+      </Tooltip>
+    </span>
+  );
+}
+
 export function PullRequestRecord({
   view,
   refresh,
@@ -24,7 +43,7 @@ export function PullRequestRecord({
   view: PullRequestRecordView;
   refresh?: { updated?: string; disabled: boolean; reason?: string; onRefresh(): void };
   /** Opens the discussions where they are read and answered. */
-  onOpenThreads?(): void;
+  onOpenThreads(): void;
   /** Asks a reviewer to review again, as beside their name on the platform; rejects with its reason. */
   onAskAgain?(reviewer: string): Promise<void>;
 }) {
@@ -51,17 +70,7 @@ export function PullRequestRecord({
       title={remoteWorkLabel(view.provider, 'PULL_REQUEST')}
       inset
       className="tm-prrecord"
-      aside={refresh ? (
-        <span className="tm-prstatus__refreshline">
-          {refresh.updated ? <span>{refresh.updated}</span> : null}
-          <Tooltip label={refresh.reason ?? `Refresh ${noun}`}>
-            <button type="button" className="tm-prstatus__refresh" disabled={refresh.disabled}
-              aria-label={`Refresh ${noun}`} onClick={refresh.onRefresh}>
-              <RefreshCw aria-hidden="true" size={13} />
-            </button>
-          </Tooltip>
-        </span>
-      ) : undefined}
+      aside={refresh ? <PullRequestRefresh {...refresh} noun={noun} /> : undefined}
     >
       {view.url ? (
         <a className="tm-prrecord__identity" href={view.url} target="_blank" rel="noreferrer">
@@ -77,21 +86,29 @@ export function PullRequestRecord({
           {view.base ? <code>{view.base}</code> : null}
         </p>
       ) : null}
-      <dl className="tm-props tm-prrecord__gates">
+      {/* The gates share one label column; the checks open under their own row. */}
+      <div className="tm-prrecord__gates">
         {view.checks ? (
-          <Row label="Checks">
-            {rows.length > 0 ? (
-              <button type="button" className="tm-prrecord__toggle" aria-expanded={checksOpen} aria-controls={checksId}
-                onClick={() => setChecksOpen((open) => !open)}>
-                <ToneGlyph tone={view.checks.tone} />
-                <span>{view.checks.summary}</span>
-                <DisclosureChevron />
-              </button>
-            ) : (
-              <span className="tm-prrecord__value"><ToneGlyph tone={view.checks.tone} /><span>{view.checks.summary}</span></span>
-            )}
-          </Row>
+          <dl className="tm-props">
+            <Row label="Checks">
+              {rows.length > 0 ? (
+                <button type="button" className="tm-prrecord__toggle" aria-expanded={checksOpen} aria-controls={checksId}
+                  onClick={() => setChecksOpen((open) => !open)}>
+                  <span className="tm-prrecord__word" data-tone={view.checks.tone}>{view.checks.summary}</span>
+                  <DisclosureChevron />
+                </button>
+              ) : (
+                <span className="tm-prrecord__word" data-tone={view.checks.tone}>{view.checks.summary}</span>
+              )}
+            </Row>
+          </dl>
         ) : null}
+        {rows.length > 0 && checksOpen ? (
+          <ul id={checksId} className="tm-prrecord__checks" aria-label="Checks">
+            {rows.map((check) => <CheckRow key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`} check={check} />)}
+          </ul>
+        ) : null}
+        <dl className="tm-props">
         {view.reviewers.length > 0 ? (
           <Row label="Reviews">
             <ul className="tm-prrecord__people">
@@ -118,7 +135,7 @@ export function PullRequestRecord({
         ) : null}
         {view.threads ? (
           <Row label="Threads">
-            {onOpenThreads && view.threads.unresolved > 0 ? (
+            {view.threads.unresolved > 0 ? (
               <button type="button" className="tm-osection__link tm-prrecord__link" onClick={onOpenThreads}>{view.threads.word}</button>
             ) : (
               <span className="tm-prrecord__word">{view.threads.word}</span>
@@ -128,12 +145,8 @@ export function PullRequestRecord({
         {view.merge ? (
           <Row label="Merge"><span className="tm-prrecord__word" data-tone={view.merge.tone}>{view.merge.word}</span></Row>
         ) : null}
-      </dl>
-      {rows.length > 0 && checksOpen ? (
-        <ul id={checksId} className="tm-prrecord__checks" aria-label="Checks">
-          {rows.map((check) => <CheckRow key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`} check={check} />)}
-        </ul>
-      ) : null}
+        </dl>
+      </div>
     </OverviewSection>
   );
 }
@@ -158,17 +171,18 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** A check row's mark: verified, blocked, running, or nothing asked. */
 function ToneGlyph({ tone }: { tone: RecordTone }) {
   return tone === 'success' ? <StatusGlyph kind="verified" />
     : tone === 'error' ? <StatusGlyph kind="blocked" />
-      : tone === 'action' ? <StatusGlyph kind="working" />
+      : tone === 'working' ? <StatusGlyph kind="working" />
         : <CircleMinus aria-hidden="true" size={13} className="tm-prrecord__idle" />;
 }
 
 const CHECK_TONES: Record<PullRequestRecordCheckRow['status'], RecordTone> = {
   passed: 'success',
   failed: 'error',
-  pending: 'action',
+  pending: 'working',
   canceled: 'neutral',
   skipped: 'neutral'
 };
@@ -176,20 +190,20 @@ const CHECK_TONES: Record<PullRequestRecordCheckRow['status'], RecordTone> = {
 const CHECK_WORDS: Record<PullRequestRecordCheckRow['status'], string> = {
   passed: 'Passed',
   failed: 'Failed',
-  pending: 'Running',
+  pending: 'Pending',
   canceled: 'Canceled',
   skipped: 'Skipped'
 };
 
 /** One check: its mark, its name, its state in words, how long it ran, and the platform's page for it. */
-export function CheckRow({ check, children }: { check: PullRequestRecordCheckRow; children?: ReactNode }) {
+function CheckRow({ check }: { check: PullRequestRecordCheckRow }) {
   return (
     <li className="tm-prrecord__check" data-status={check.status}>
       <ToneGlyph tone={CHECK_TONES[check.status]} />
       <span className="tm-prrecord__checkname" title={check.workflow ? `${check.workflow}: ${check.name}` : check.name}>{check.name}</span>
-      <span className="tm-prrecord__word" data-tone={check.status === 'failed' ? 'error' : undefined}>{CHECK_WORDS[check.status]}</span>
+      {/* In a list the mark carries the tone; the word beside it stays neutral. */}
+      <span className="tm-prrecord__word">{CHECK_WORDS[check.status]}</span>
       {check.duration ? <span className="tm-prrecord__duration">{check.duration}</span> : null}
-      {children}
       {check.link ? (
         <Tooltip label={`Open ${check.name}`}>
           <a className="tm-iconbtn tm-prrecord__iconbtn" href={check.link} target="_blank" rel="noreferrer" aria-label={`Open ${check.name}`}>
@@ -203,8 +217,8 @@ export function CheckRow({ check, children }: { check: PullRequestRecordCheckRow
 
 /**
  * The checks a failed step names, each with the end of its log on request:
- * the shortest way from a red check to what failed. The log is read from the
- * platform when first opened, once per head.
+ * the shortest way from a red check to what failed. A row is its own
+ * disclosure; the log is read from the platform when first opened, once per head.
  */
 export function FailingChecks({
   rows,
@@ -213,7 +227,7 @@ export function FailingChecks({
 }: {
   rows: PullRequestRecordCheckRow[];
   logs?: { status: 'loading' | 'ready' | 'error'; logs: PullRequestCheckLog[] };
-  onLoadLogs?(): void;
+  onLoadLogs(): void;
 }) {
   const [open, setOpen] = useState<string>();
   const logId = useId();
@@ -228,35 +242,51 @@ export function FailingChecks({
   }, [log?.text]);
   return (
     <div className="tm-prstep__checks">
-      <ul className="tm-prrecord__checks">
-        {shown.map((check) => (
-          <CheckRow key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`} check={check}>
-            {onLoadLogs ? (
-              <button type="button" className="ghost-button button--sm tm-prstep__logtoggle"
-                aria-expanded={open === checkKey(check)} aria-controls={logId}
+      <ul className="tm-prstep__checklist" aria-label="Failed checks">
+        {shown.map((check) => {
+          const key = checkKey(check);
+          return (
+            <li key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`} className="tm-prstep__check">
+              <button type="button" className="tm-prstep__checktoggle" aria-expanded={open === key} aria-controls={logId}
+                aria-label={`${check.name} log`}
                 onClick={() => {
-                  const next = open === checkKey(check) ? undefined : checkKey(check);
+                  const next = open === key ? undefined : key;
                   setOpen(next);
                   if (next && logs?.status !== 'ready' && logs?.status !== 'loading') onLoadLogs();
                 }}>
-                Log
+                <ToneGlyph tone={CHECK_TONES[check.status]} />
+                <span className="tm-prstep__checkname" title={check.workflow ? `${check.workflow}: ${check.name}` : check.name}>{check.name}</span>
+                <DisclosureChevron />
+                {check.duration ? <span className="tm-prrecord__duration">{check.duration}</span> : null}
               </button>
-            ) : null}
-          </CheckRow>
-        ))}
+              {check.link ? (
+                <Tooltip label={`Open ${check.name}`}>
+                  <a className="tm-iconbtn tm-prrecord__iconbtn" href={check.link} target="_blank" rel="noreferrer" aria-label={`Open ${check.name}`}>
+                    <ExternalLink aria-hidden="true" size={13} />
+                  </a>
+                </Tooltip>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
       {rows.length > shown.length ? <p className="tm-slot__meta">{rows.length - shown.length} more failed</p> : null}
       {openCheck ? (
-        <div id={logId} className="tm-prstep__log">
-          {logs?.status === 'loading' ? <p className="tm-prstep__lognote">Reading the log…</p>
-            : logs?.status === 'error' ? <p className="tm-prstep__lognote">The log could not be read.</p>
-              : log ? (
-                <>
-                  {log.truncated ? <p className="tm-prstep__lognote">Earlier lines left out</p> : null}
-                  <pre ref={logRef} tabIndex={0} aria-label={`End of the ${openCheck.name} log`}>{log.text}</pre>
-                </>
-              ) : <p className="tm-prstep__lognote">No log for this check here; its page has it.</p>}
-        </div>
+        logs?.status === 'loading' ? (
+          // Reading holds the open log's height, so nothing below moves when it arrives.
+          <div id={logId} className="tm-prstep__log tm-prstep__log--loading">
+            <p className="tm-prstep__lognote">Reading the log…</p>
+          </div>
+        ) : logs?.status === 'error' ? (
+          <p id={logId} className="tm-prstep__lognote">Log could not be read</p>
+        ) : log ? (
+          <>
+            {log.truncated ? <p className="tm-prstep__lognote">Earlier lines left out</p> : null}
+            <div id={logId} className="tm-prstep__log">
+              <pre ref={logRef} tabIndex={0} aria-label={`End of the ${openCheck.name} log`}>{log.text}</pre>
+            </div>
+          </>
+        ) : <p id={logId} className="tm-prstep__lognote">No log for this check</p>
       ) : null}
     </div>
   );
@@ -279,8 +309,9 @@ export function AskedComments({ discussions, onShow }: {
     <div className="tm-prstep__comments">
       <ul className="tm-prstep__commentlist" aria-label="Comments">
         {shown.map((discussion) => {
+          // A place is a file and line, set in mono; a review's own words have none.
           const file = discussion.path?.split('/').at(-1);
-          const where = file ? `${file}${discussion.line ? `:${discussion.line}` : ''}` : discussion.kind === 'REVIEW' ? 'Review' : undefined;
+          const where = file ? `${file}${discussion.line ? `:${discussion.line}` : ''}` : undefined;
           return (
             <li key={discussion.id}>
               <button type="button" className="tm-prstep__comment" onClick={() => onShow(discussion.id)}>

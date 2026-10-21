@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import type { ReviewChangesResult } from '../../shared/contracts';
-import { git, gitResult } from './gitCli';
+import { GIT_HOOKS_OFF_ENV, git, gitResult } from './gitCli';
 import { planUntrackedFiles } from './ReadOnlySnapshotService';
 
 const GIT_TIMEOUT_MS = 120_000;
@@ -97,10 +96,7 @@ export class ReviewSnapshotStore {
     const index = path.join(store.dir, `index-${randomUUID()}`);
     // A private index is no one's change, so no hook runs for it: hooks can live in the
     // worktree itself (a relative `core.hooksPath`), and there they may be a pull request's.
-    const env = {
-      ...store.env, GIT_INDEX_FILE: index,
-      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: os.devNull
-    };
+    const env = { ...store.env, GIT_INDEX_FILE: index, ...GIT_HOOKS_OFF_ENV };
     try {
       // The worktree's own index carries the staged changes and the stat cache, so only edited files are hashed.
       const ownIndex = path.resolve(worktreePath, (await git(worktreePath, ['rev-parse', '--git-path', 'index'])).trim());

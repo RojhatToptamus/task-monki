@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { Check, CircleCheck, ExternalLink } from 'lucide-react';
-import { remoteProviderName, type PullRequestComment } from '../../shared/contracts';
+import { remoteProviderName, type RemoteWorkComment } from '../../shared/contracts';
 import { commentParts, discussionAuthor, discussionCommentText, discussionSummary, reviewVerdictWords, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
 import { REVIEW_OUTCOME_LABELS } from '../model/reviewRounds';
 import { formatShortAge } from '../model/timeAgo';
@@ -23,7 +23,7 @@ export function discussionStateWord(discussion: Pick<DiscussionView, 'resolved' 
 }
 
 /** Answering a discussion where it is read: the reply row under it. */
-export interface DiscussionReply {
+interface DiscussionReply {
   /** What the person typed and did not post. */
   text?: string;
   /** The agent's answer to it, drafted as a reply. */
@@ -290,7 +290,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
       {open ? (
         <div className="tm-review-thread__reply-tools">
           {resolvable ? (
-            <label className="tm-review-thread__resolve">
+            <label className="tm-resolve-check">
               <input type="checkbox" checked={resolve} disabled={busy} onChange={(event) => setResolve(event.target.checked)} />
               <span>Resolve thread</span>
             </label>
@@ -320,7 +320,7 @@ function suggestionTarget(
 
 /** A comment's text, clamped when long until asked for in full, as the Overview's request is. */
 function CommentBody({ comment, platform, replaced }: {
-  comment: PullRequestComment;
+  comment: RemoteWorkComment;
   platform: string;
   /** The lines a suggestion in it replaces, when the diff shows them. */
   replaced?(above: number, below: number): string[] | undefined;
@@ -373,7 +373,7 @@ function SuggestedChange({ lines, replaced }: { lines: readonly string[]; replac
   );
 }
 
-function CommentAge({ comment }: { comment: PullRequestComment | undefined }) {
+function CommentAge({ comment }: { comment: RemoteWorkComment | undefined }) {
   const age = comment?.createdAt ? formatShortAge(comment.createdAt) : undefined;
   if (!age || !comment?.createdAt) return null;
   return <time className="tm-review-thread__time" dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{age}</time>;

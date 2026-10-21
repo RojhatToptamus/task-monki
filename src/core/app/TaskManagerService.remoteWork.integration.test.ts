@@ -99,6 +99,22 @@ describe('TaskManagerService remote work', () => {
     expect((await scenario.service.getTaskDetail(task.id)).task).toMatchObject({ workflowPhase: 'DONE', completionPolicy: 'MERGED' });
   }, 60_000);
 
+  it('reviews a pull request opened as a task before any turn, as imported work is', async () => {
+    const { scenario, github, contributor } = await githubScenario('task-monki-review-opened-pr');
+    await git(contributor, ['checkout', '-b', 'feature']);
+    await commit(contributor, 'feature.txt', 'change\n', 'Add a change');
+    await git(contributor, ['push', github.barePath('acme', 'widgets'), 'feature:refs/heads/feature']);
+    await github.setItem({
+      owner: 'acme', repo: 'widgets', number: 16, kind: 'PULL_REQUEST', title: 'Add a change',
+      headRefName: 'feature', baseRefName: 'main', headRepository: 'acme/widgets'
+    });
+    const task = await scenario.service.openPullRequest({ repositoryId: scenario.repositoryId, pullRequest: pullRequest(16) });
+
+    await scenario.service.startReview({ taskId: task.id });
+
+    expect(scenario.agent.startedReviews).toHaveLength(1);
+  }, 60_000);
+
   it('takes a pull request from draft to merged: reads failing logs, answers reviewers, and merges only the head it saw', async () => {
     const { scenario, github, contributor } = await githubScenario('task-monki-pr-loop');
     await git(contributor, ['checkout', '-b', 'feature']);
@@ -274,7 +290,7 @@ describe('TaskManagerService remote work', () => {
     await expect(scenario.service.createPullRequest({ taskId: task.id })).rejects.toThrow();
     expect(await github.refSha('acme', 'widgets', 'refs/heads/feature')).toBe(theirs);
     expect((await scenario.service.getTaskDetail(task.id)).branchPublications[0]).toMatchObject({
-      status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.'
+      status: 'FAILED', error: 'Remote branch has newer commits'
     });
 
     // A branch deleted after its merge is not created again.

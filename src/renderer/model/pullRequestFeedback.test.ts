@@ -148,7 +148,7 @@ describe('a request with pull request discussions', () => {
     expect(plan.discussions.map((view) => view.id)).toEqual(['thread', 'review']);
     expect(plan.discussionsLeftOut.map((view) => view.id)).toEqual(['later']);
     expect(plan.queued).toBe(true);
-    expect(planReviewRequest([], { includedFindingIds: [], comments: [], note: '' }, review, views).queued).toBe(false);
+    expect(planReviewRequest([], { includedFindingIds: [], includedDiscussionIds: [], comments: [], note: '' }, review, views).queued).toBe(false);
   });
 
   it('numbers findings, then discussions, then comments, and quotes other people\'s words inside a boundary', () => {
@@ -190,10 +190,11 @@ describe('what an agent is sent from the platform', () => {
 });
 
 describe('pullRequestFeedbackLine', () => {
-  it('says who asked for changes, who it waits on and what is unresolved, never approvals', () => {
+  it('says who asked for changes and what is unresolved; who it waits on only when no one asked, never approvals', () => {
+    // Once someone asked for changes, that request is the blocker; who else is asked is the record's.
     expect(pullRequestFeedbackLine({ unresolvedCount: 3, reviewers: [
       { name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'bob', state: 'APPROVED' }, { name: 'carol', state: 'REQUESTED' }
-    ] })).toBe('alice requested changes, waiting on carol, 3 unresolved threads');
+    ] })).toBe('alice requested changes, 3 unresolved threads');
     expect(pullRequestFeedbackLine({ unresolvedCount: 0, reviewers: [{ name: 'carol', state: 'REQUESTED' }] })).toBe('Waiting on carol');
     expect(pullRequestFeedbackLine({ unresolvedCount: 1, reviewers: [{ name: 'bob', state: 'APPROVED' }] })).toBe('1 unresolved thread');
     expect(pullRequestFeedbackLine({ unresolvedCount: 0, reviewers: [{ name: 'bob', state: 'APPROVED' }] })).toBeUndefined();

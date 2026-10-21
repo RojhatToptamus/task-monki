@@ -363,7 +363,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
 
     expect(result.status).toBe('FAILED');
     expect(result.error).toBe(
-      'Remote branch has newer commits. Sync the branch before pushing again.'
+      'Remote branch has newer commits'
     );
   }, 15_000);
 

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Check, ChevronDown, Search, X } from 'lucide-react';
 import {
   formatRemoteWorkNumber,
+  remoteWorkLabel,
   sameRemoteRepository,
   type RemoteProvider,
   type RemoteRepositoryRef,
@@ -13,7 +14,7 @@ import { ActionMenu } from './ActionMenu';
 import { StatusGlyph } from './StatusBadge';
 import { Tooltip } from './Tooltip';
 import { formatStatusValue } from './display';
-import { formatRemoteWorkDate, remoteWorkLabel } from '../model/remoteWork';
+import { formatShortAge } from '../model/timeAgo';
 
 /**
  * Open issues or pull requests of the checkout's remote repository: one list,
@@ -48,9 +49,9 @@ export function RemoteWorkFields({
   const code = error ? 'FAILED' : listing?.unavailable?.code;
   // A query names another item or repository: searching again is the way out.
   const queryProblem = code === 'OTHER_REPOSITORY' || code === 'WRONG_KIND' || code === 'NOT_FOUND';
-  const retryable = Boolean(problem) && !queryProblem && code !== 'NO_REMOTE' && code !== 'UNSUPPORTED_REMOTE';
+  const retryable = Boolean(problem) && !queryProblem && code !== 'NO_REMOTE';
   // A problem no search can fix holds the field; a failed request may be the query's own, so the field stays open.
-  const searchCannotHelp = code === 'NO_REMOTE' || code === 'UNSUPPORTED_REMOTE' || code === 'CLI_MISSING' || code === 'SIGNED_OUT';
+  const searchCannotHelp = code === 'NO_REMOTE' || code === 'CLI_MISSING' || code === 'SIGNED_OUT';
   const signIn = code === 'SIGNED_OUT' ? `${provider === 'GITLAB' ? 'glab' : 'gh'} auth login` : undefined;
   useEffect(() => {
     if (selected?.existingTaskId) existingButtonRef.current?.focus();
@@ -111,7 +112,7 @@ export function RemoteWorkFields({
         </Tooltip> : null}
       </div>
       {/* A listbox like the checkout list: arrows move focus; Space, Enter or a click selects. */}
-      <div ref={listRef} className="import-work__list remote-work__list" role="listbox" aria-label={label} aria-busy={loading}
+      <div ref={listRef} className="import-work__list" role="listbox" aria-label={label} aria-busy={loading}
         onKeyDown={(event) => {
           if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
           event.preventDefault();
@@ -126,7 +127,7 @@ export function RemoteWorkFields({
           const forkOwner = item.crossRepository ? item.headRepositoryPath?.split('/')[0] : undefined;
           const isSelected = Boolean(selected && sameRemoteRepository(selected.ref.repository, item.ref.repository) && selected.ref.number === item.ref.number);
           return <button key={`${item.ref.repository.path}${number}`} type="button" role="option"
-            className="import-work__checkout remote-work__item" aria-selected={isSelected}
+            className="import-work__checkout" aria-selected={isSelected}
             aria-label={`${number} ${item.title}${item.checks ? `, ${CHECK_WORDS[item.checks].toLowerCase()}` : ''}`} disabled={locked}
             tabIndex={selected ? (isSelected ? 0 : -1) : index === 0 ? 0 : -1}
             onClick={() => onSelect(item)}>
@@ -137,7 +138,7 @@ export function RemoteWorkFields({
                 {/* A fork's head reads as the platform writes it, owner:branch; that names the fork. */}
                 {kind === 'PULL_REQUEST' && item.headRefName ? <code>{forkOwner ? `${forkOwner}:` : ''}{item.headRefName}</code> : null}
                 {item.author ? <span>{item.author}</span> : null}
-                {item.updatedAt ? <span>{formatRemoteWorkDate(item.updatedAt)}</span> : null}
+                {item.updatedAt ? <span>{formatShortAge(item.updatedAt)}</span> : null}
                 {/* How its head's checks ended, as a mark among its facts: the word at the row's end is for its reviews. */}
                 {item.checks ? <span className="remote-work__checks">
                   <StatusGlyph kind={item.checks === 'FAILING' ? 'blocked' : item.checks === 'PENDING' ? 'working' : 'verified'} />
@@ -164,7 +165,7 @@ export function RemoteWorkFields({
 
 const CHECK_WORDS: Record<NonNullable<RemoteWorkSummary['checks']>, string> = {
   FAILING: 'Checks failed',
-  PENDING: 'Checks running',
+  PENDING: 'Checks pending',
   PASSING: 'Checks passed'
 };
 const REVIEW_WORDS: Record<NonNullable<RemoteWorkSummary['review']>, string> = {

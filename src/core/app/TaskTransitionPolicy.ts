@@ -12,6 +12,7 @@ import {
   isImplementationRunMode,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import { startsFromExistingWork } from '../../shared/promptTemplates';
 import { runMayWriteTaskWorktree } from '../../shared/sideQuestions';
 
 export const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
@@ -86,7 +87,9 @@ export function transitionBlocker(
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
     }
-    if (evidence.worktreeOwnership === 'EXTERNAL' && !task.currentRunId && !evidence.currentRun) {
+    // Existing work, an imported checkout or an opened pull request, is reviewable before its first run.
+    if (startsFromExistingWork(task, evidence.worktreeOwnership ? { ownership: evidence.worktreeOwnership } : undefined) &&
+      !task.currentRunId && !evidence.currentRun) {
       return evidence.hasGitSnapshot && !['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(evidence.gitStatus ?? 'UNKNOWN')
         ? undefined : 'Refresh the external checkout before moving to review.';
     }

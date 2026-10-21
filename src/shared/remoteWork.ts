@@ -77,7 +77,6 @@ export interface ListRemoteWorkRequest {
 
 export type RemoteWorkUnavailableCode =
   | 'NO_REMOTE'
-  | 'UNSUPPORTED_REMOTE'
   | 'CLI_MISSING'
   | 'SIGNED_OUT'
   | 'NOT_FOUND'
@@ -129,7 +128,7 @@ export interface TaskRemoteSource {
   pullRequest?: TaskRemotePullRequest;
 }
 
-export interface TaskRemotePullRequest {
+interface TaskRemotePullRequest {
   headRefName: string;
   /** Absent when the head repository was deleted. */
   headRepositoryPath?: string;
@@ -154,10 +153,6 @@ export const REMOTE_WORK_LIMITS = {
 /** The remote text a task captured, as stored in its `remote-source` artifact. */
 export interface RemoteWorkSnapshot {
   schema: typeof REMOTE_WORK_SNAPSHOT_SCHEMA;
-  provider: RemoteProvider;
-  host: string;
-  repositoryPath: string;
-  kind: RemoteWorkKind;
   number: number;
   url: string;
   title: string;
@@ -211,9 +206,20 @@ export function remoteWorkNoun(provider: RemoteProvider, kind: RemoteWorkKind): 
   return kind === 'ISSUE' ? 'issue' : provider === 'GITLAB' ? 'merge request' : 'pull request';
 }
 
+/** What the platform calls the item, as a label: Issue, Pull request or Merge request. */
+export function remoteWorkLabel(provider: RemoteProvider, kind: RemoteWorkKind): string {
+  const noun = remoteWorkNoun(provider, kind);
+  return `${noun[0]!.toUpperCase()}${noun.slice(1)}`;
+}
+
 /** `#12`, or `!12` for a GitLab merge request. */
 export function formatRemoteWorkNumber(provider: RemoteProvider, kind: RemoteWorkKind, number: number): string {
   return `${provider === 'GITLAB' && kind === 'PULL_REQUEST' ? '!' : '#'}${number}`;
+}
+
+/** The item a task was opened from: `owner/repo#12`, or `group/app!7` for a GitLab merge request. */
+export function formatTaskRemoteReference(source: Pick<TaskRemoteSource, 'provider' | 'repositoryPath' | 'kind' | 'number'>): string {
+  return `${source.repositoryPath}${formatRemoteWorkNumber(source.provider, source.kind, source.number)}`;
 }
 
 export function sameRemoteRepository(left: RemoteRepositoryRef, right: RemoteRepositoryRef): boolean {
@@ -273,7 +279,7 @@ function isRepositorySegment(segment: string): boolean {
   return /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}$/u.test(segment) && segment !== '.' && segment !== '..';
 }
 
-export interface ParsedRemoteWorkReference {
+interface ParsedRemoteWorkReference {
   /** Absent for a bare number, which names an item in the selected repository. */
   repository?: RemoteRepositoryRef;
   /** Absent when the reference does not say: a GitHub `#12` can be either. */
@@ -363,7 +369,8 @@ export function leavablePullRequestHeads(
  * byte-order mark, bidirectional controls and Unicode tag characters, which can
  * carry text no reader sees.
  */
-const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
+/** Characters a platform does not show: zero-width and direction marks, and tag characters. */
+export const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
 
 /**
  * Platform text as a reader sees it. Invisible characters are dropped, and so
@@ -423,8 +430,7 @@ export function pullRequestRewrittenUnder(input: {
 }
 
 /** Bounded text, cut at a character boundary. */
-export function boundRemoteText(value: string | undefined, limit: number): { text: string; truncated: boolean } {
-  const text = (value ?? '').replace(/\r\n?/gu, '\n');
+export function boundRemoteText(text: string, limit: number): { text: string; truncated: boolean } {
   if (text.length <= limit) return { text, truncated: false };
   const characters = Array.from(text);
   return characters.length <= limit

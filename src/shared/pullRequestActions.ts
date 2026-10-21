@@ -1,3 +1,5 @@
+import { INVISIBLE_CHARACTERS } from './remoteWork';
+
 /**
  * What a person can do to a pull or merge request from Task Monki beyond
  * creating it and pushing to it: mark it ready, merge it, answer its reviewers,
@@ -6,7 +8,7 @@
  */
 
 /** How a pull or merge request lands on its base. */
-export const PULL_REQUEST_MERGE_METHODS = ['SQUASH', 'MERGE', 'REBASE'] as const;
+const PULL_REQUEST_MERGE_METHODS = ['SQUASH', 'MERGE', 'REBASE'] as const;
 export type PullRequestMergeMethod = (typeof PULL_REQUEST_MERGE_METHODS)[number];
 
 /** What the platform lets this pull request do when it merges. */
@@ -41,8 +43,8 @@ export interface MarkPullRequestReadyRequest {
   taskId: string;
 }
 
-export const PULL_REQUEST_REPLY_BODY_LIMIT = 4_000;
-export const PULL_REQUEST_REPLIES_LIMIT = 50;
+const PULL_REQUEST_REPLY_BODY_LIMIT = 4_000;
+const PULL_REQUEST_REPLIES_LIMIT = 50;
 
 /** One answer to a discussion, posted as the signed-in person. */
 export interface PullRequestReply {
@@ -150,7 +152,7 @@ export function baseMovedReason(raw: unknown): 'BEHIND' | 'CONFLICTS' | undefine
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/gu;
 const GITLAB_SECTION = /section_(?:start|end):\d+:[A-Za-z0-9_.-]+(?:\[[^\]]*\])?\r?/gu;
 const ACTIONS_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/u;
-const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F​-‍⁠-⁤﻿‪-‮⁦-⁩\u{E0000}-\u{E007F}]/gu;
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu;
 
 /**
  * Bounds a failing check's log to its end, as the text a terminal would show.
@@ -168,13 +170,13 @@ export function boundCheckLog(raw: string): { text: string; truncated: boolean }
     .split('\n')
     // A carriage return redraws the line; what a terminal shows is the last draw.
     .map((line) => line.slice(line.lastIndexOf('\r', line.length - 2) + 1).replace(/\r$/u, ''))
-    .map((line) => line.replace(ACTIONS_TIMESTAMP, '').replace(INVISIBLE, '').trimEnd())
+    .map((line) => line.replace(ACTIONS_TIMESTAMP, '').replace(CONTROL_CHARACTERS, '').replace(INVISIBLE_CHARACTERS, '').trimEnd())
     .flatMap((line) => actionsLine(line));
   let lines = marked.map((line) => line.text);
   let lastError = -1;
   marked.forEach((line, index) => { if (line.error) lastError = index; });
   // What follows the last error is the job cleaning up; leaving it out drops no earlier line.
-  if (lastError >= 0) lines = lines.slice(0, lastError + 1 + ERROR_CONTEXT_AFTER);
+  if (lastError >= 0) lines = lines.slice(0, lastError + 1);
   while (lines.length > 0 && !lines.at(-1)) lines.pop();
   truncated = truncated || lines.length > CHECK_LOG_LIMITS.lines;
   let text = lines.slice(-CHECK_LOG_LIMITS.lines).join('\n');
@@ -186,8 +188,6 @@ export function boundCheckLog(raw: string): { text: string; truncated: boolean }
   return { text, truncated };
 }
 
-// The last marked error ends the step that failed; what follows is the job cleaning up.
-const ERROR_CONTEXT_AFTER = 0;
 // Far more than the lines kept, so a cut here never reaches what is shown.
 const RAW_TAIL_CHARS = 1_000_000;
 
@@ -220,7 +220,6 @@ export function assertMergePullRequestRequest(value: unknown): asserts value is 
   if (typeof record.deleteBranch !== 'boolean' || typeof record.taskId !== 'string') fail('The merge request is not valid.');
 }
 
-/** Checks replies as the renderer sends them; throws on anything else. */
 /** Runs the current head's failed checks again where the platform ran them. */
 export interface RerunPullRequestChecksRequest {
   taskId: string;
@@ -246,6 +245,7 @@ export function assertResolvePullRequestDiscussionRequest(value: unknown): asser
   }
 }
 
+/** Checks replies as the renderer sends them; throws on anything else. */
 export function assertReplyToPullRequestRequest(value: unknown): asserts value is ReplyToPullRequestRequest {
   const record = isRecord(value) ? value : fail('The replies are not valid.');
   if (typeof record.taskId !== 'string') fail('The replies are not valid.');

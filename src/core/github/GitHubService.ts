@@ -14,12 +14,12 @@ import type {
 } from '../../shared/contracts';
 import type { PullRequestMergeOptions } from '../../shared/pullRequestActions';
 import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import { parseRemoteWorkReference } from '../../shared/remoteWork';
 import { git, gitSucceeds } from '../git/gitCli';
 import {
   GITHUB_FEEDBACK_QUERY,
   GITHUB_THREADS_PAGE_QUERY,
   GITHUB_THREAD_PAGES,
-  gitHubPullRequestLocation,
   parseGitHubPullRequestFeedback,
   type GitHubFeedbackData,
   type GitHubThreadConnection
@@ -35,12 +35,9 @@ import {
 } from './GitHubPullRequestActions';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
 import { execFileOwnedPortable } from '../process/ownedProcess';
-import type { DeliveryRemote, DeliveryTarget, PullRequestAddress, PullRequestDelivery, PullRequestSync } from '../remote/PullRequestDelivery';
-import { UNTRUSTED_CHECKOUT_GIT_ENV } from '../remote/RemoteCheckout';
+import { startEach, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
+import { UNTRUSTED_CHECKOUT_GIT_ENV, externalTargetBranch } from '../remote/RemoteCheckout';
 import { canonicalPlatformTime } from '../remote/platformTime';
-
-export type GitHubRemote = DeliveryRemote;
-export type GitHubPrSync = PullRequestSync;
 
 interface ExecResult {
   stdout: string;
@@ -65,7 +62,7 @@ export class GitHubService implements PullRequestDelivery {
   async preflight(
     task: Task,
     worktree: WorktreeRecord,
-    pushRemote?: GitHubRemote
+    pushRemote?: DeliveryRemote
   ): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
     const remote = pushRemote ?? await detectGitHubRemote(worktree.worktreePath);
     if (!remote) {
@@ -161,7 +158,7 @@ export class GitHubService implements PullRequestDelivery {
         return { ...base, status: 'PUSHED' };
       } catch (error) {
         if (isRejectedPushError(error)) {
-          return { ...base, status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.' };
+          return { ...base, status: 'FAILED', error: 'Remote branch has newer commits' };
         }
         return this.reconcileBranchPublication({
           task: input.task,
@@ -212,8 +209,6 @@ export class GitHubService implements PullRequestDelivery {
         worktree: input.worktree,
         remoteName,
         remoteUrl: input.remoteUrl,
-        remoteBranch: input.remoteBranch,
-        previousRemoteSha: input.previousRemoteSha,
         expectedHeadSha: headSha,
         failureDetail: pushError
       });
@@ -303,7 +298,7 @@ export class GitHubService implements PullRequestDelivery {
     body: string;
     title: string;
     target?: DeliveryTarget;
-  }): Promise<GitHubPrSync> {
+  }): Promise<PullRequestSync> {
     const existing = await this.findOpenPullRequest(input.worktree, input.target);
     if (existing) {
       return existing;
@@ -337,73 +332,60 @@ export class GitHubService implements PullRequestDelivery {
     return this.viewPullRequest(input.worktree, url ?? input.worktree.branchName, input.target);
   }
 
-  async findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<GitHubPrSync | undefined> {
-    if (target) return this.findTargetPullRequest(worktree, target);
-    const remote = worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
-    if (worktree.ownership === 'EXTERNAL' && !remote) return undefined;
+  async findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<PullRequestSync | undefined> {
+    if (target) {
+      // An open pull request of the task branch in the target repository, pushed from the expected owner.
+      const owner = headOwner(target.headRepository ?? target.repository).toLowerCase();
+      return this.findListedPullRequest(worktree, repositoryArgs(target), 'headRepositoryOwner,isCrossRepository', (row) => {
+        const item = row as { headRefName?: unknown; isCrossRepository?: unknown; headRepositoryOwner?: { login?: unknown } };
+        return item.headRefName === worktree.branchName &&
+          item.isCrossRepository === Boolean(target.headRepository) &&
+          typeof item.headRepositoryOwner?.login === 'string' && item.headRepositoryOwner.login.toLowerCase() === owner;
+      }, target);
+    }
+    if (worktree.ownership === 'EXTERNAL') {
+      const remote = await detectGitHubRemote(worktree.worktreePath);
+      return remote
+        ? this.findListedPullRequest(worktree, ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`],
+          'headRepository,headRepositoryOwner,isCrossRepository', (row) => matchesExternalPullRequest(row, worktree, remote))
+        : undefined;
+    }
     const result = await this.exec(
-      [
-        'pr',
-        'list',
-        '--state',
-        'open',
-        '--head',
-        worktree.branchName,
-        '--limit',
-        '10',
-        '--json',
-        remote ? `${prJsonFields},headRepository,headRepositoryOwner,isCrossRepository` : prJsonFields,
-        ...(remote ? ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`] : [])
-      ],
+      ['pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10', '--json', prJsonFields],
       worktree.worktreePath
     );
-    const rows = remote ? JSON.parse(result.stdout) as unknown : parseJson<unknown[]>(result.stdout, []);
+    const rows = parseJson<unknown[]>(result.stdout, []);
     if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
-    if (remote) {
-      if (rows.length >= 10) throw new Error('The pull request lookup is incomplete. Inspect the branch on GitHub.');
-      const matches = rows.filter((row) => matchesExternalPullRequest(row, worktree, remote));
-      if (matches.length > 1) throw new Error('Multiple pull requests match this branch. Inspect the branch on GitHub.');
-      const match = matches[0] as { number: number } | undefined;
-      return match ? this.viewPullRequest(worktree, match.number) : undefined;
-    }
     const match = rows.map((row) => parsePrView(row, worktree)).find((row) => row.pullRequest.number);
     return match?.pullRequest.number
       ? this.viewPullRequest(worktree, match.pullRequest.number)
       : match;
   }
 
-  /** An open pull request of the task branch in the target repository, pushed from the expected owner. */
-  private async findTargetPullRequest(worktree: WorktreeRecord, target: DeliveryTarget): Promise<GitHubPrSync | undefined> {
+  /** The one open pull request of the task branch that `matches` accepts; ten rows or more are too many to judge. */
+  private async findListedPullRequest(
+    worktree: WorktreeRecord,
+    repository: string[],
+    fields: string,
+    matches: (row: unknown) => boolean,
+    target?: DeliveryTarget
+  ): Promise<PullRequestSync | undefined> {
     const result = await this.exec([
-      'pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10',
-      '--json', `${prJsonFields},headRepositoryOwner,isCrossRepository`, ...repositoryArgs(target)
+      'pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10', '--json', `${prJsonFields},${fields}`, ...repository
     ], worktree.worktreePath);
     const rows = JSON.parse(result.stdout) as unknown;
     if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
     if (rows.length >= 10) throw new Error('The pull request lookup is incomplete. Inspect the branch on GitHub.');
-    const owner = headOwner(target.headRepository ?? target.repository).toLowerCase();
-    const matches = rows.filter((row) => {
-      const item = row as { headRefName?: unknown; isCrossRepository?: unknown; headRepositoryOwner?: { login?: unknown } };
-      return item.headRefName === worktree.branchName &&
-        item.isCrossRepository === Boolean(target.headRepository) &&
-        typeof item.headRepositoryOwner?.login === 'string' && item.headRepositoryOwner.login.toLowerCase() === owner;
-    }) as Array<{ number: number }>;
-    if (matches.length > 1) throw new Error('Multiple pull requests match this branch. Inspect the branch on GitHub.');
-    return matches[0] ? this.viewPullRequest(worktree, matches[0].number, target) : undefined;
+    const found = rows.filter(matches) as Array<{ number: number }>;
+    if (found.length > 1) throw new Error('Multiple pull requests match this branch. Inspect the branch on GitHub.');
+    return found[0] ? this.viewPullRequest(worktree, found[0].number, target) : undefined;
   }
 
   async pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string> {
     if (worktree.ownership !== 'EXTERNAL') return requestedBranch ?? worktree.baseRef ?? 'main';
-    let baseRef = requestedBranch?.trim();
-    if (!baseRef) throw new Error('Choose a target branch for the new pull request.');
     const remote = await detectGitHubRemote(worktree.worktreePath);
     if (!remote) throw new Error('No GitHub remote was found.');
-    if (baseRef.startsWith('refs/heads/')) baseRef = baseRef.slice('refs/heads/'.length);
-    if (baseRef.startsWith(`${remote.remoteName}/`)) baseRef = baseRef.slice(remote.remoteName.length + 1);
-    if (baseRef === 'HEAD' || baseRef === worktree.branchName) {
-      throw new Error('Choose a named target branch other than this checkout branch.');
-    }
-    await git(worktree.worktreePath, ['check-ref-format', '--branch', baseRef]);
+    const baseRef = await externalTargetBranch(worktree, requestedBranch, remote.remoteName, 'pull request');
     const result = await this.exec([
       'api', '--hostname', remote.host,
       `repos/${remote.owner}/${remote.repo}/branches/${encodeURIComponent(baseRef)}`
@@ -413,7 +395,7 @@ export class GitHubService implements PullRequestDelivery {
     return baseRef;
   }
 
-  async viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<GitHubPrSync> {
+  async viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<PullRequestSync> {
     const remote = !target && worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
     if (!target && worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
     const repoArgs = repositoryArgs(target, remote);
@@ -445,28 +427,31 @@ export class GitHubService implements PullRequestDelivery {
    * to a bound, review summaries and the conversation.
    */
   async readPullRequestFeedback(cwd: string, url: string | undefined): Promise<PullRequestFeedback | undefined> {
-    const location = gitHubPullRequestLocation(url);
+    const location = gitHubLocation(url);
     if (!location) return undefined;
-    const query = async <T>(text: string, extra: string[] = []): Promise<T | undefined> => parseJson<{ data?: T }>((await this.exec([
-      'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${text}`,
-      '-f', `owner=${location.owner}`,
-      '-f', `name=${location.name}`,
-      '-F', `number=${location.number}`,
-      ...extra
-    ], cwd)).stdout, {}).data;
-    const data = await query<GitHubFeedbackData>(GITHUB_FEEDBACK_QUERY);
-    const threads = data?.repository?.pullRequest?.reviewThreads;
-    if (!data || !threads) return data ? parseGitHubPullRequestFeedback(data, location.number, new Date().toISOString()) : undefined;
-    let page: GitHubThreadConnection = threads;
-    for (let pages = 1; page.pageInfo?.hasNextPage && page.pageInfo.endCursor && pages < GITHUB_THREAD_PAGES; pages += 1) {
-      const next = (await query<GitHubFeedbackData>(GITHUB_THREADS_PAGE_QUERY, ['-f', `after=${page.pageInfo.endCursor}`]))
-        ?.repository?.pullRequest?.reviewThreads;
-      if (!next) break;
-      threads.nodes = [...(threads.nodes ?? []), ...(next.nodes ?? [])];
-      page = next;
+    const data = await this.pullRequestQuery<GitHubFeedbackData>(cwd, location, GITHUB_FEEDBACK_QUERY);
+    if (!data) return undefined;
+    const threads = data.repository?.pullRequest?.reviewThreads;
+    if (threads) {
+      let page: GitHubThreadConnection = threads;
+      for (let pages = 1; page.pageInfo?.hasNextPage && page.pageInfo.endCursor && pages < GITHUB_THREAD_PAGES; pages += 1) {
+        const next = (await this.pullRequestQuery<GitHubFeedbackData>(cwd, location, GITHUB_THREADS_PAGE_QUERY, ['-f', `after=${page.pageInfo.endCursor}`]))
+          ?.repository?.pullRequest?.reviewThreads;
+        if (!next) break;
+        threads.nodes = [...(threads.nodes ?? []), ...(next.nodes ?? [])];
+        page = next;
+      }
     }
     return parseGitHubPullRequestFeedback(data, location.number, new Date().toISOString());
+  }
+
+  /** A GraphQL read of one pull request, which the query names by `owner`, `name` and `number`. */
+  private async pullRequestQuery<T>(cwd: string, location: GitHubLocation, query: string, extra: string[] = []): Promise<T | undefined> {
+    const result = await this.exec([
+      'api', 'graphql', '--hostname', location.host,
+      '-f', `query=${query}`, '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`, ...extra
+    ], cwd);
+    return parseJson<{ data?: T }>(result.stdout, {}).data;
   }
 
   async markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void> {
@@ -476,12 +461,8 @@ export class GitHubService implements PullRequestDelivery {
 
   async readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions> {
     const location = requireGitHubLocation(address);
-    const result = await this.exec([
-      'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${GITHUB_MERGE_OPTIONS_QUERY}`,
-      '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`
-    ], worktree.worktreePath);
-    return parseGitHubMergeOptions(parseJson<{ data?: Parameters<typeof parseGitHubMergeOptions>[0] }>(result.stdout, {}).data);
+    return parseGitHubMergeOptions(await this.pullRequestQuery<Parameters<typeof parseGitHubMergeOptions>[0]>(
+      worktree.worktreePath, location, GITHUB_MERGE_OPTIONS_QUERY));
   }
 
   /**
@@ -533,11 +514,8 @@ export class GitHubService implements PullRequestDelivery {
     await this.exec(['pr', 'comment', address.url, '--body-file', '-'], worktree.worktreePath, 60_000, [], body);
   }
 
-  readonly canRequestReviewers = true;
-
   async requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void> {
     const location = requireGitHubLocation(address);
-    if (names.length === 0) return;
     await this.exec([
       'api', '--hostname', location.host, '--method', 'POST',
       `repos/${location.owner}/${location.name}/pulls/${location.number}/requested_reviewers`,
@@ -547,11 +525,8 @@ export class GitHubService implements PullRequestDelivery {
 
   async readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined> {
     const location = requireGitHubLocation(address);
-    const job = gitHubActionsJob(check.link);
-    // Only a job of this pull request's own repository; a link elsewhere is not read.
-    if (!job || job.owner.toLowerCase() !== location.owner.toLowerCase() || job.name.toLowerCase() !== location.name.toLowerCase()) {
-      return undefined;
-    }
+    const job = ownActionsJob(check.link, location);
+    if (!job) return undefined;
     const result = await this.exec([
       'api', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/jobs/${job.job}/logs`
     ], worktree.worktreePath, 60_000);
@@ -560,26 +535,11 @@ export class GitHubService implements PullRequestDelivery {
 
   async rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number> {
     const location = requireGitHubLocation(address);
-    // One request per run re-runs every failed job in it; a run of another repository is not this one's to start.
-    const runs = new Set(checks.flatMap((check) => {
-      const job = gitHubActionsJob(check.link);
-      return job && job.owner.toLowerCase() === location.owner.toLowerCase() && job.name.toLowerCase() === location.name.toLowerCase() ? [job.run] : [];
-    }));
-    let started = 0;
-    let refused: unknown;
-    for (const run of runs) {
-      try {
-        await this.exec([
-          'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
-        ], worktree.worktreePath, 60_000);
-        started += 1;
-      } catch (error) {
-        refused ??= error;
-      }
-    }
-    // A run the platform refuses does not stop the rest; only when none started is the refusal the answer.
-    if (started === 0 && refused !== undefined) throw refused;
-    return started;
+    // One request per run re-runs every failed job in it.
+    const runs = new Set(checks.flatMap((check) => ownActionsJob(check.link, location)?.run ?? []));
+    return startEach(runs, (run) => this.exec([
+      'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
+    ], worktree.worktreePath, 60_000));
   }
 
   buildPullRequestBody(input: {
@@ -588,8 +548,8 @@ export class GitHubService implements PullRequestDelivery {
     agentSummary?: string;
     /** A closing or plain reference to the issue the task was opened from. */
     issueLine?: string;
-    /** The platform that receives the body; GitHub when absent. */
-    provider?: RemoteProvider;
+    /** The platform that receives the body. */
+    provider: RemoteProvider;
   }): string {
     const gitLab = input.provider === 'GITLAB';
     const request = input.task.prompt.trim().slice(0, 1200);
@@ -653,8 +613,29 @@ export class GitHubService implements PullRequestDelivery {
   }
 }
 
-function requireGitHubLocation(address: PullRequestAddress): NonNullable<ReturnType<typeof gitHubPullRequestLocation>> {
-  const location = gitHubPullRequestLocation(address.url);
+/** A GitHub Actions job of this pull request's own repository; a run elsewhere is not its to read or start. */
+function ownActionsJob(link: string | undefined, location: { owner: string; name: string }): ReturnType<typeof gitHubActionsJob> {
+  const job = gitHubActionsJob(link);
+  return job && job.owner.toLowerCase() === location.owner.toLowerCase() && job.name.toLowerCase() === location.name.toLowerCase() ? job : undefined;
+}
+
+interface GitHubLocation {
+  host: string;
+  owner: string;
+  name: string;
+  number: number;
+}
+
+/** The repository and number a github.com pull request link names. */
+function gitHubLocation(url: string | undefined): GitHubLocation | undefined {
+  const reference = url ? parseRemoteWorkReference(url) : undefined;
+  if (reference?.repository?.provider !== 'GITHUB' || reference.kind !== 'PULL_REQUEST') return undefined;
+  const [owner, name] = reference.repository.path.split('/') as [string, string];
+  return { host: reference.repository.host, owner, name, number: reference.number };
+}
+
+function requireGitHubLocation(address: PullRequestAddress): GitHubLocation {
+  const location = gitHubLocation(address.url);
   if (!location || location.number !== address.number) throw new Error('The pull request is not recorded.');
   return location;
 }
@@ -668,12 +649,12 @@ function headOwner(repository: { path: string }): string {
   return repository.path.split('/')[0]!;
 }
 
-function repositoryArgs(target?: DeliveryTarget, remote?: GitHubRemote): string[] {
+function repositoryArgs(target?: DeliveryTarget, remote?: DeliveryRemote): string[] {
   if (target) return ['--repo', `${target.repository.host}/${target.repository.path}`];
   return remote ? ['--repo', `${remote.host}/${remote.owner}/${remote.repo}`] : [];
 }
 
-function matchesExternalPullRequest(raw: unknown, worktree: WorktreeRecord, remote: GitHubRemote): boolean {
+function matchesExternalPullRequest(raw: unknown, worktree: WorktreeRecord, remote: DeliveryRemote): boolean {
   if (!raw || typeof raw !== 'object') throw new Error('GitHub returned an invalid pull request.');
   const row = raw as Record<string, unknown>;
   const owner = row.headRepositoryOwner as { login?: string } | undefined;
@@ -687,7 +668,7 @@ function matchesExternalPullRequest(raw: unknown, worktree: WorktreeRecord, remo
     row.url.toLowerCase() === `https://${remote.host}/${remote.owner}/${remote.repo}/pull/${row.number}`.toLowerCase();
 }
 
-export async function detectGitHubRemote(worktreePath: string): Promise<GitHubRemote | undefined> {
+export async function detectGitHubRemote(worktreePath: string): Promise<DeliveryRemote | undefined> {
   const output = await git(worktreePath, ['remote', '-v']);
   for (const line of output.split('\n')) {
     const match = /^(?<name>\S+)\s+(?<url>\S+)\s+\((?<direction>fetch|push)\)$/.exec(line.trim());
@@ -708,22 +689,22 @@ export async function detectGitHubRemote(worktreePath: string): Promise<GitHubRe
 
 export function parseGitHubRemoteUrl(
   remoteUrl: string
-): Omit<GitHubRemote, 'remoteName' | 'remoteUrl'> | undefined {
+): Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'> | undefined {
   const normalized = remoteUrl.replace(/\.git$/i, '');
 
   const https = /^https:\/\/(?<host>github\.com)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
   if (https?.groups) {
-    return https.groups as Omit<GitHubRemote, 'remoteName' | 'remoteUrl'>;
+    return https.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
   }
 
   const ssh = /^git@(?<host>github\.com):(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
   if (ssh?.groups) {
-    return ssh.groups as Omit<GitHubRemote, 'remoteName' | 'remoteUrl'>;
+    return ssh.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
   }
 
   const sshUrl = /^ssh:\/\/git@(?<host>github\.com)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
   if (sshUrl?.groups) {
-    return sshUrl.groups as Omit<GitHubRemote, 'remoteName' | 'remoteUrl'>;
+    return sshUrl.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
   }
 
   return undefined;
@@ -733,7 +714,7 @@ export function parsePrView(
   raw: unknown,
   worktree: WorktreeRecord,
   rawCheckDetails?: unknown
-): GitHubPrSync {
+): PullRequestSync {
   const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const number = numberField(data, 'number');
   const headSha = stringField(data, 'headRefOid');
@@ -1087,7 +1068,7 @@ function errorMessage(error: unknown): string {
 function publishBranchErrorMessage(error: unknown): string {
   const message = errorMessage(error);
   if (isRejectedPushError(error)) {
-    return 'Remote branch has newer commits. Sync the branch before pushing again.';
+    return 'Remote branch has newer commits';
   }
   return message;
 }

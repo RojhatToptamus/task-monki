@@ -29,10 +29,8 @@ describe('a GitLab merge request', () => {
       pullRequest: prFixture({ url: 'https://gitlab.com/group/project/-/merge_requests/82' }),
       reviewRollup: reviewFixture({ status: 'CHANGES_REQUESTED' as const })
     };
-    expect(buildPrStatusViewModel({ ...input, provider: 'GITLAB' })).toMatchObject({
-      headline: 'Changes requested', prIdentityLine: '!82 Odd Minute Check', deliveryNoun: 'MR'
-    });
-    expect(buildPrStatusViewModel(input)).toMatchObject({ headline: 'Changes requested', prIdentityLine: '#82 Odd Minute Check' });
+    expect(buildPrStatusViewModel({ ...input, provider: 'GITLAB' })).toMatchObject({ headline: 'Changes requested' });
+    expect(buildPrStatusViewModel(input)).toMatchObject({ headline: 'Changes requested' });
     // Numbers in running text take GitLab's sign too.
     expect(deliveryWords('PR #82 and pull request #83', 'GITLAB')).toBe('MR !82 and merge request !83');
   });
@@ -105,10 +103,31 @@ describe('a task opened from a pull request', () => {
       gitSnapshot: gitFixture({ headSha: 'ddd444', upstreamSha: 'ccc333', aheadCount: 1, behindCount: 1, status: 'DIVERGED' }),
       pullRequest: prFixture({ headRefOid: 'ccc333' }),
       branchPublication: branchPublicationFixture({
-        status: 'FAILED', error: 'The pull request branch has newer commits than Task Monki last read. Refresh to see them.'
+        status: 'FAILED', error: 'Remote branch has newer commits'
       })
     });
     expect(view).toMatchObject({ kind: 'BRANCH_DIVERGED', canPullChanges: true, canPushUpdate: false });
+  });
+
+  it('reads the pull request once after a refused push, then lets Git measured against it decide', () => {
+    const refused = branchPublicationFixture({
+      status: 'FAILED', headSha: 'ddd444', previousRemoteSha: 'ccc333', error: 'Remote branch has newer commits', updatedAt: '2026-07-01T10:05:00.000Z'
+    });
+    const unread = buildPrStatusViewModel({
+      task: opened(), branchPublication: refused, pullRequest: prFixture({ headRefOid: 'ccc333', observedAt: '2026-07-01T10:04:00.000Z' }),
+      gitSnapshot: gitFixture({ headSha: 'ddd444', upstreamSha: 'ccc333', aheadCount: 1, status: 'COMMITTED_UNPUSHED' })
+    });
+    // Bringing in ccc333 would merge only what the worktree holds: the step is reading the branch.
+    expect(unread).toMatchObject({
+      kind: 'STALE', headline: 'Push failed', tone: 'error', fact: 'Remote branch has newer commits',
+      canPullChanges: false, canPushUpdate: false, canSyncBranch: false
+    });
+    const read = { task: opened(), branchPublication: refused, pullRequest: prFixture({ headRefOid: 'eee555', observedAt: '2026-07-01T10:06:00.000Z' }) };
+    expect(buildPrStatusViewModel({ ...read, gitSnapshot: gitFixture({ headSha: 'ddd444', upstreamSha: 'eee555', aheadCount: 1, behindCount: 1, status: 'DIVERGED' }) }))
+      .toMatchObject({ kind: 'BRANCH_DIVERGED', canPullChanges: true, canPushUpdate: false });
+    // Once the worktree holds the head it read, the refused push is pushed again, not pulled again.
+    expect(buildPrStatusViewModel({ ...read, gitSnapshot: gitFixture({ headSha: 'fff666', upstreamSha: 'eee555', aheadCount: 2, status: 'COMMITTED_UNPUSHED' }) }))
+      .toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canPullChanges: false, canPushUpdate: true });
   });
 
   it('states that Task Monki does not push to a fork instead of offering an update that cannot run', () => {
@@ -117,7 +136,7 @@ describe('a task opened from a pull request', () => {
       gitSnapshot: gitFixture({ headSha: 'eee555', upstreamSha: 'aaa111', aheadCount: 1, status: 'COMMITTED_UNPUSHED' }),
       pullRequest: prFixture({ headRefOid: 'aaa111' })
     });
-    expect(view).toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canPushUpdate: false, guidanceLine: 'Task Monki does not push to forks.' });
+    expect(view).toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canPushUpdate: false, guidanceLine: 'Task Monki does not push to forks' });
   });
 });
 
@@ -229,13 +248,11 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.headline).toBe('Checks failed');
-    expect(view.prTitle).toBe('Odd Minute Check');
-    expect(view.prIdentityLine).toBe('#82 Odd Minute Check');
     expect(view.checkSummaryLine).toBe('2 failed, 1 skipped, 3 passed');
     expect(view.evidenceLine).toBeUndefined();
     expect(view.guidanceLine).toBeUndefined();
     expect(view.canInvestigateFailure).toBe(true);
-    expect(view.checkGroups[0]).toMatchObject({ status: 'failed', defaultOpen: false });
+    expect(view.failingChecks.map((check) => check.status)).toEqual(['failed']);
   });
 
   it('allows blocked checks to start the same failure investigation flow', () => {
@@ -255,7 +272,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view.canInvestigateFailure).toBe(true);
   });
 
-  it('orders check rows by severity like the PR status card spec', () => {
+  it('sends only the failed checks to Fix checks', () => {
     const view = buildPrStatusViewModel({
       task: taskFixture(),
       pullRequest: prFixture(),
@@ -271,13 +288,7 @@ describe('buildPrStatusViewModel', () => {
       })
     });
 
-    expect(view.checkGroups.map((group) => group.status)).toEqual([
-      'failed',
-      'canceled',
-      'pending',
-      'skipped',
-      'passed'
-    ]);
+    expect(view.failingChecks.map((check) => check.name)).toEqual(['failed-check']);
     expect(view.evidenceLine).toBeUndefined();
   });
 
@@ -293,7 +304,7 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.headline).toBe('Checks pending');
-    expect(view.checkGroups).toEqual([]);
+    expect(view.failingChecks).toEqual([]);
     expect(view.checkSummaryLine).toBe('2 pending, 1 passed');
     expect(view.evidenceLine).toBe('2 pending, 1 passed');
   });
@@ -378,7 +389,7 @@ describe('buildPrStatusViewModel', () => {
 
   it('waits on reviewers once the person answered a review that requested changes', () => {
     const feedback = (lastViewerCommentAt?: string) => ({
-      artifactId: '00000000-0000-4000-8000-000000000001', digest: 'a'.repeat(64), capturedAt: now, unresolvedCount: 1, discussionCount: 2,
+      artifactId: '00000000-0000-4000-8000-000000000001', digest: 'a'.repeat(64), unresolvedCount: 1, discussionCount: 2,
       reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' as const }], lastOtherCommentAt: '2026-10-17T10:00:00.000Z',
       ...(lastViewerCommentAt ? { lastViewerCommentAt } : {})
     });
@@ -400,7 +411,9 @@ describe('buildPrStatusViewModel', () => {
       task: taskFixture(), pullRequest, ciRollup: pushed, checksMayNotHaveStarted: true,
       reviewRollup: reviewFixture({ status: 'NOT_REQUESTED' }), mergeSnapshot: mergeFixture({ status: 'MERGEABLE' })
     });
-    expect(view).toMatchObject({ kind: 'CHECKS_PENDING', headline: 'Checks pending', canMerge: false, fact: 'No checks reported yet' });
+    // The record says the head's checks are not reported yet; the step has nothing to add.
+    expect(view).toMatchObject({ kind: 'CHECKS_PENDING', headline: 'Checks pending', canMerge: false, checksNotReported: true });
+    expect(view.fact).toBeUndefined();
     // A reading a minute after the head appeared that still has none says this head has no checks.
     const later = ciFixture({ id: 'ci-2', headSha: 'abc123', status: 'NO_CHECKS', totalCount: 0, observedAt: '2026-10-17T10:06:10.000Z' });
     expect(checksMayNotHaveStarted(pullRequest, [later, pushed, earlier])).toBe(false);
@@ -515,7 +528,7 @@ describe('buildPrStatusViewModel', () => {
 
   it('says who asked for changes and what is unresolved, for the open pull request the feedback was read with', () => {
     const feedback = {
-      artifactId: '00000000-0000-4000-8000-000000000002', digest: 'a'.repeat(64), capturedAt: now,
+      artifactId: '00000000-0000-4000-8000-000000000002', digest: 'a'.repeat(64),
       unresolvedCount: 2, discussionCount: 3, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' as const }]
     };
     const view = (pullRequest: Partial<PullRequestSnapshotRecord>, reviewRollup: Partial<ReviewRollupRecord> = {}) => buildPrStatusViewModel({
@@ -646,7 +659,7 @@ describe('buildPrStatusViewModel', () => {
         expected: {
           kind: 'GITHUB_CHANGES_REQUESTED',
           headline: 'Changes requested',
-          tone: 'error'
+          tone: 'action'
         }
       },
       {
@@ -766,7 +779,7 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.headline).toBe('Checks stale');
-    expect(view.freshnessLine).toBe('Refresh PR status for the current head.');
+    expect(view.freshnessLine).toBe('From an earlier head');
   });
 
   it('does not offer failing-check investigation when check evidence is stale', () => {
@@ -789,12 +802,12 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.kind).toBe('STALE');
-    expect(view.freshnessLine).toBe('Refresh PR status for the current head.');
+    expect(view.freshnessLine).toBe('From an earlier head');
     expect(view.canInvestigateFailure).toBe(false);
     expect(view.guidanceLine).toBeUndefined();
     expect(view.checkSummaryLine).toBeUndefined();
     expect(view.evidenceLine).toBeUndefined();
-    expect(view.checkGroups).toEqual([]);
+    expect(view.failingChecks).toEqual([]);
   });
 
   it('marks local commits as not pushed when local head differs from PR head', () => {
@@ -841,13 +854,15 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.kind).toBe('LOCAL_NOT_PUSHED');
-    expect(view.freshnessLine).toBe('Local worktree has uncommitted changes.');
+    expect(view.freshnessLine).toBe('Local worktree has uncommitted changes');
+    // Push update commits them first: the step says how many.
+    expect(view.fact).toBe('1 uncommitted file');
     expect(view.canPushUpdate).toBe(true);
     expect(view.canInvestigateFailure).toBe(false);
     expect(view.guidanceLine).toBeUndefined();
     expect(view.checkSummaryLine).toBeUndefined();
     expect(view.evidenceLine).toBeUndefined();
-    expect(view.checkGroups).toEqual([]);
+    expect(view.failingChecks).toEqual([]);
   });
 
   it('turns a rejected push into an actionable branch state', () => {
@@ -858,15 +873,30 @@ describe('buildPrStatusViewModel', () => {
       branchPublication: branchPublicationFixture({
         status: 'FAILED',
         headSha: 'old-head',
-        error: 'Remote branch has newer commits. Sync the branch before pushing again.'
+        error: 'Remote branch has newer commits'
       })
     });
 
-    expect(view.headline).toBe('Branch diverged');
+    // The board's word for a push the remote refused, with what the remote said.
+    expect(view.headline).toBe('Push failed');
     expect(view.freshnessLine).toBe(
-      'Remote branch has newer commits. Sync the branch before pushing again.'
+      'Remote branch has newer commits'
     );
     expect(view.canPushUpdate).toBe(false);
+  });
+
+  it('asks for one read after a push refused on the task\'s own branch, never more', () => {
+    const refused = branchPublicationFixture({ status: 'FAILED', headSha: 'local-head', error: 'Remote branch has newer commits', updatedAt: '2026-07-01T10:05:00.000Z' });
+    const reading = (observedAt: string, git: Parameters<typeof gitFixture>[0]) => buildPrStatusViewModel({
+      task: taskFixture(), branchPublication: refused, pullRequest: prFixture({ headRefOid: 'remote-head', observedAt }),
+      gitSnapshot: gitFixture({ headSha: 'local-head', aheadCount: 1, status: 'COMMITTED_UNPUSHED', ...git })
+    });
+    expect(reading('2026-07-01T10:04:00.000Z', { upstreamSha: 'old-head' })).toMatchObject({ kind: 'STALE', headline: 'Push failed' });
+    // Read since, with an upstream not fetched: the head is brought in from the pull request.
+    expect(reading('2026-07-01T10:06:00.000Z', { upstreamSha: 'old-head' })).toMatchObject({ kind: 'BRANCH_DIVERGED', canPullChanges: true });
+    // Pulled outside Task Monki, the upstream is the head read, and Git says the branch is ahead of it.
+    expect(reading('2026-07-01T10:06:00.000Z', { headSha: 'merged-head', upstreamSha: 'remote-head' }))
+      .toMatchObject({ kind: 'LOCAL_NOT_PUSHED', canPushUpdate: true, canPullChanges: false });
   });
 
   it('offers a safe remote recheck while an interrupted push remains ambiguous', () => {
@@ -899,8 +929,9 @@ describe('buildPrStatusViewModel', () => {
       false
     );
     expect(withPr).toMatchObject({
-      headline: 'Branch diverged',
+      headline: 'Push unconfirmed',
       freshnessLine: reason,
+      fact: reason,
       canPushUpdate: true
     });
     expect(buildPrStatusActionState({ view: withPr }).createOrPushDisabled).toBe(
@@ -921,8 +952,9 @@ describe('buildPrStatusViewModel', () => {
     });
     const actions = buildPrStatusActionState({ view });
 
-    expect(view.headline).toBe('Changes not pushed');
+    expect(view.headline).toBe('Push failed');
     expect(view.freshnessLine).toBe('Last push failed: GitHub authentication required.');
+    expect(view.fact).toBe('GitHub authentication required.');
     expect(view.canPushUpdate).toBe(true);
     expect(actions.createOrPushDisabled).toBe(false);
   });
@@ -975,13 +1007,13 @@ describe('buildPrStatusViewModel', () => {
       })
     });
 
-    expect(buildFailingChecksInvestigationPrompt(view)).toContain(
-      'Fix the failing GitHub checks for PR #82 at head abc123.'
+    expect(buildFailingChecksInvestigationPrompt(view, 'GITHUB')).toContain(
+      'Fix the failing GitHub checks for pull request #82 at head abc123.'
     );
-    expect(buildFailingChecksInvestigationPrompt(view)).toContain(
+    expect(buildFailingChecksInvestigationPrompt(view, 'GITHUB')).toContain(
       '- build (CI): status failed | https://github.com/example/repo/actions/runs/2'
     );
-    expect(buildFailingChecksInvestigationPrompt(view)).toContain('Do not push; the person pushes the update from Task Monki.');
+    expect(buildFailingChecksInvestigationPrompt(view, 'GITHUB')).toContain('Do not push; the person pushes the update from Task Monki.');
   });
 });
 
@@ -1219,7 +1251,17 @@ describe('the pull request step', () => {
       reviewRollup: reviewFixture({ status: 'APPROVED' }),
       mergeSnapshot: mergeFixture({ status: 'BLOCKED', raw: { mergeStateStatus: 'BEHIND', mergeable: 'MERGEABLE' } })
     });
-    expect(behind).toMatchObject({ baseUpdate: { base: 'main', reason: 'BEHIND' }, fact: 'Behind main', canMerge: false });
+    expect(behind).toMatchObject({ baseUpdate: { base: 'main', reason: 'BEHIND' }, headline: 'Merge blocked', fact: 'Behind main', canMerge: false });
+    // The moved base leads failed checks too, as its step does; fixing the checks stays offered behind it.
+    const conflictingAndFailing = buildPrStatusViewModel({
+      task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'PUSHED' }), branchPublication: branchPublicationFixture(),
+      ciRollup: ciFixture({ status: 'FAILING', totalCount: 2, failingCount: 1, passingCount: 1 }),
+      mergeSnapshot: mergeFixture({ status: 'BLOCKED', raw: { mergeStateStatus: 'DIRTY', mergeable: 'CONFLICTING' } })
+    });
+    expect(conflictingAndFailing).toMatchObject({
+      kind: 'CHECKS_FAILED', headline: 'Merge blocked', tone: 'error', fact: 'Conflicts with main',
+      baseUpdate: { base: 'main', reason: 'CONFLICTS' }, canInvestigateFailure: true
+    });
     // Commits on the pull request's branch beside the worktree's own are pulled in, never pushed over.
     const diverged = buildPrStatusViewModel({
       task: taskFixture(), pullRequest: prFixture(), gitSnapshot: gitFixture({ status: 'DIVERGED', aheadCount: 1, behindCount: 2 }),

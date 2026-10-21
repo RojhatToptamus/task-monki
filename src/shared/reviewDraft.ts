@@ -26,7 +26,7 @@ export interface TaskReviewDraft {
    * Pull request discussions the person added to the request. Other people
    * wrote them on the platform, so none goes unless the person adds it.
    */
-  includedDiscussionIds?: string[];
+  includedDiscussionIds: string[];
   note: string;
 }
 
@@ -39,11 +39,11 @@ export const REVIEW_DRAFT_COMMENT_LIMIT = 200;
 export const REVIEW_COMMENT_MAX_LENGTH = 4_000;
 export const REVIEW_NOTE_MAX_LENGTH = 8_000;
 
-export const EMPTY_REVIEW_DRAFT: TaskReviewDraft = { comments: [], includedFindingIds: [], note: '' };
+export const EMPTY_REVIEW_DRAFT: TaskReviewDraft = { comments: [], includedFindingIds: [], includedDiscussionIds: [], note: '' };
 
 export function isEmptyReviewDraft(draft: TaskReviewDraft): boolean {
   return draft.comments.length === 0 && draft.includedFindingIds.length === 0 &&
-    !draft.includedDiscussionIds?.length && !draft.note.trim();
+    draft.includedDiscussionIds.length === 0 && !draft.note.trim();
 }
 
 /** Why a value is not a review draft, or undefined when it is one. */
@@ -58,8 +58,8 @@ export function reviewDraftProblem(value: unknown): string | undefined {
     !draft.includedFindingIds.every(shortText)) {
     return 'The included findings are malformed.';
   }
-  if (draft.includedDiscussionIds !== undefined && (!Array.isArray(draft.includedDiscussionIds) ||
-    draft.includedDiscussionIds.length > REVIEW_DRAFT_COMMENT_LIMIT || !draft.includedDiscussionIds.every(shortText))) {
+  if (!Array.isArray(draft.includedDiscussionIds) || draft.includedDiscussionIds.length > REVIEW_DRAFT_COMMENT_LIMIT ||
+    !draft.includedDiscussionIds.every(shortText)) {
     return 'The included discussions are malformed.';
   }
   if (!Array.isArray(draft.comments) || draft.comments.length > REVIEW_DRAFT_COMMENT_LIMIT) {

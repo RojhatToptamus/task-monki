@@ -204,14 +204,13 @@ previous records.
 SQLite migration 13 removes the `sidebarCollapsed` and `showMascot`
 preferences and advances settings to schema 15.
 
-SQLite migration 14 (`task-remote-sources`) adds a unique expression index
-over the task payload's `remoteSource` identity (provider, host, lowercased
-repository path, kind, number), so the database refuses a second task opened
-from the same issue or pull request. Task store schema 31 carries
-`Task.remoteSource` and the `remote-source` artifact kind: the captured issue or
-pull request text as immutable JSON (title, body, labels, ten most recent
-comments, each bounded), owned by the task and deleted with it. A pull request
-source also records the opened head, merge base and branches. A push to an
+Task store schema 31 carries `Task.remoteSource` and the `remote-source`
+artifact kind: the captured issue or pull request text as immutable JSON (title,
+body, labels, ten most recent comments, each bounded), owned by the task and
+deleted with it. One task holds each issue or pull request: opening one again
+returns its task, and startup refuses two tasks with the same provider, host,
+lowercased repository path, kind and number. A pull request source also records
+the opened head, merge base and branches. A push to an
 opened pull request's branch records `previousRemoteSha`, the head its lease
 names. Platform text is stored trimmed, and HTML comments outside code, which
 the platforms hide from readers, are left out of captured text. A task source, pull request,
@@ -233,9 +232,8 @@ whether the branch is deleted) before a merge, `PR_REPLIES_POSTED` (number,
 counts posted, resolved and reopened, reviewers asked again, and the ids of the
 discussions answered) after replies, a resolve or a reopen land, and
 `PR_CHECKS_RERUN_REQUESTED` after the platform accepts running failed checks
-again. Migration 15
-(`gitlab-cli-setting`) adds `externalExecutables.glabExecutablePath` and
-advances settings to schema 16.
+again. Settings schema 15 also records the `glab` path,
+`externalExecutables.glabExecutablePath`.
 
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding

@@ -11,7 +11,7 @@ interface GitLabLinePosition {
   old_line?: number | null;
 }
 
-export interface GitLabDiscussionNote {
+interface GitLabDiscussionNote {
   id?: number;
   type?: string | null;
   body?: string;

@@ -26,12 +26,13 @@ It answers:
 
 While a linked pull request is not merged — open, or closed without merge,
 where `Create draft PR` can start a new one — PR Status holds the Overview's
-Now panel with one step: a title, the one fact the step turns on (`fact`: which
-checks failed, who asked for changes, what is not pushed, or the base it is
-behind), and the actions that take it, lead first. The panel's title is the
-board card's word for the task, or the PR's headline when that word only
-repeats the lane. For failed checks the panel lists them, each with the end of
-its log on request. A merged pull request hands the panel to finishing, and so
+Now panel with one step: a title, the one fact the step turns on (`fact`: who
+asked for changes, what is not pushed, or the base it is behind), and the
+actions that take it, lead first. The panel's title is the board card's word
+for the task, or the PR's headline when that word only repeats the lane; the
+board's word follows the order below, so the title, the fact and the lead
+action name the same blocker. Failed checks are listed in place of a fact, each
+row opening the end of its log. A merged pull request hands the panel to finishing, and so
 does an agent review that asks for action, since the board card leads with it.
 While another step holds the panel, the pull request's actions stay on the
 page as a Delivery section (`deliverySection`): its headline and fact as facts,
@@ -41,7 +42,8 @@ the agent works, since it would only repeat the record.
 The pull request's record sits first in the record column whenever one exists:
 its state icon, number and title (a link to the platform), the branch and the
 base it merges into, then a row per gate — Checks (a summary that opens into a
-row per check, failures first), Reviews (each reviewer's own state), Threads
+row per check, failures first; "Not reported yet" while a head's checks have
+not registered), Reviews (each reviewer's own state), Threads
 (unresolved, opening the Review tab), and Merge (no conflicts, behind or
 conflicting with the base, held by branch rules, or merged and when). Merged or
 closed, it keeps only what ended it. The refresh control and the time of the
@@ -54,6 +56,7 @@ exactly once.
 The step's actions, in the order they lead:
 
 ```text
+Refresh              the recorded checks, reviews or merge state are for an earlier head, or a push was refused after the PR was last read
 Sync branch          a task opened from a PR, behind it or rewritten under it
 Push update          the worktree holds commits or changes the PR does not
 Pull changes         the PR's branch moved beside the worktree's own commits
@@ -62,10 +65,15 @@ Fix checks           a check failed for the current head
 Re-run failed        beside Fix checks, when a failed check ran in the PR's own repository
 Address comments     an unresolved thread or a review asking for changes was not sent
 Reply on GitHub      the agent answered sent discussions and nobody replied since
-Ready for review     a current draft whose checks did not fail
+Mark as ready        a current draft whose checks did not fail and whose base did not move
 Merge                the evidence for the current head says the platform would merge it
 Create draft PR      the PR closed without merge and the branch can be published
+Archive task         the PR closed without merge
 ```
+
+A base that moved leads over failed checks, as its step does: the headline
+reads Merge blocked and the fact names the base ("Conflicts with main", "Behind
+main"), while Fix checks stays offered after Update with <base>.
 
 Pull changes and Update with <base> fetch the commits the worktree lacks
 (`fetchPullRequestUpdate`: objects only, no ref moves) and send the agent a
@@ -88,18 +96,19 @@ pull request again.
 
 A head just pushed reports no checks until its CI registers them, and so does
 a head for a moment after its failed checks are run again. When the pull
-request had checks before, no checks for its head reads "Checks pending" ("No
-checks reported yet"), never Ready to merge, until a reading taken a minute
+request had checks before, no checks for its head reads "Checks pending", with
+"Not reported yet" on the record's Checks row, never Ready to merge, until a
+reading taken a minute
 after the head's checks went missing still finds none
 (`checksMayNotHaveStarted`). PR Status refreshes only on request and after
 Task Monki's own steps, so that later reading is the person's Refresh; the
 reading after Re-run failed waits a few seconds for the checks to be listed
 again.
 
-Ready for review, Merge and the replies are the person's writes to the
+Mark as ready, Merge and the replies are the person's writes to the
 platform, each an explicit click:
 
-- Ready for review runs `gh pr ready`, or on GitLab removes the title's draft
+- Mark as ready runs `gh pr ready`, or on GitLab removes the title's draft
   marker.
 - Merge opens a dialog with the methods the repository allows (GitHub's
   `squashMergeAllowed` and its neighbours, GitLab's `squash_option`), the
@@ -195,7 +204,7 @@ opening one:
 ```text
 Pull request                         Updated Jul 2, 10:05  ↻
 <headline, once there is one>
-<freshness / lead / guidance / evidence>
+<lead: why opening one is or is not possible>
 [Create draft PR]
 <reason the action is disabled>
 ```
@@ -210,7 +219,7 @@ Real classes:
 - PR Status root and head: `tm-prstatus`, `tm-prstatus__head`
 - refresh line and button: `tm-prstatus__refreshline`, `tm-prstatus__refresh`
 - headline: `tm-prstatus__identity`, `tm-prstatus__state`
-- freshness, lead, guidance and evidence lines: `tm-prstatus__fact`
+- lead line: `tm-prstatus__fact`
 - actions: `tm-prstatus__actions`
 - disabled action title wrapper: `tm-actiontitle`
 - record root and check list: `tm-prrecord`, `tm-prrecord__checks`,
@@ -431,10 +440,17 @@ seen head> -- <remote> <sha>:refs/heads/<branch>`: same repository only, the
 remote's single push URL naming it, fast forward from the last seen head only,
 no upstream change, hooks off. A fork pull request offers no Push update; while
 the worktree holds work the pull request does not, the card states "Task Monki
-does not push to forks." After a push, PR Status waits up to about six seconds
+does not push to forks". After a push, PR Status waits up to about six seconds
 for the platform to report the pushed head before it records the pull request.
-A push the lease refuses records "The pull request branch has newer commits
-than Task Monki last read. Refresh to see them."
+A push the lease refuses, like any push the remote refuses for commits the
+branch lacks, records "Remote branch has newer commits". While the pull request
+was last read before the refusal, those commits are unread: the step is
+Refresh, under Push failed, since bringing in the recorded head would merge
+only what the worktree holds. One read ends that step. Once Git is measured
+against the head read (an opened pull request's branch always is; a task's own
+branch once its upstream is that head), Git decides what is left: Pull changes
+while the branch lacks it, Push update once the worktree holds it. A task's own
+branch whose upstream was not fetched brings the head in with Pull changes.
 
 `PR_NEWER_COMMITS` and a rewritten pull request the worktree has no commits of
 its own against (headline "PR rewritten") offer Sync branch, the lead action;
@@ -832,7 +848,7 @@ Last push failed: <stored publication error>
 ```text
 PR Status
 o No PR
-Remote branch has newer commits. Sync the branch before pushing again.
+Remote branch has newer commits
 [Create draft PR disabled]
 ```
 
@@ -862,35 +878,33 @@ o Open PR
 
 Tone: `neutral`.
 
-### LOCAL_NOT_PUSHED, dirty worktree
+### LOCAL_NOT_PUSHED, dirty worktree or local head newer
 
 ```text
 PR Status                         Jul 2, 10:56
 o Changes not pushed
 #82 Refresh auth token
-Local worktree has uncommitted changes.
 [Push update]
 ```
 
-### LOCAL_NOT_PUSHED, local head newer
-
-```text
-PR Status                         Jul 2, 10:56
-o Changes not pushed
-#82 Refresh auth token
-Local branch has newer commits.
-[Push update]
-```
+A freshness state's title says what moved, so its step carries a fact only
+when it adds to the title: how many files Push update commits first ("2
+uncommitted files"), answers not pushed yet ("Codex answered 1 comment"), a
+failed or unconfirmed push's error, a rewrite ("No commits of its own") and a
+fork.
 
 ### LOCAL_NOT_PUSHED, retryable publication failure
 
 ```text
 PR Status                         Jul 2, 10:56
-o Changes not pushed
+o Push failed
 #82 Refresh auth token
-Last push failed: <stored publication error>
+<stored publication error>
 [Push update]
 ```
+
+A push whose result is not known reads "Push unconfirmed", with the stored
+error when there is one, until a reading of the remote settles it.
 
 ### BRANCH_DIVERGED, local and PR both changed
 
@@ -898,23 +912,24 @@ Last push failed: <stored publication error>
 PR Status                         Jul 2, 10:56
 o Branch diverged
 #82 Refresh auth token
-Local branch and PR branch both changed.
-[refresh]
+[Pull changes]
 ```
 
 No push action is shown.
 
-### BRANCH_DIVERGED, remote has newer commits
+### Push failed, remote has newer commits
 
 ```text
 PR Status                         Jul 2, 10:56
-o Branch diverged
+o Push failed
 #82 Refresh auth token
-Remote branch has newer commits. Sync the branch before pushing again.
-[refresh]
+Remote branch has newer commits
+[Refresh]
 ```
 
-No push action is shown.
+No push action is shown. After a refresh reads the new head, the step is Pull
+changes, or Push update once the worktree holds that head. A failed or
+unconfirmed push takes the error tone, as on the board.
 
 ### PR_NEWER_COMMITS
 
@@ -922,9 +937,11 @@ No push action is shown.
 PR Status                         Jul 2, 10:56
 o PR has newer commits
 #82 Refresh auth token
-This worktree is behind the PR.
-[refresh]
+[Sync branch]
 ```
+
+A task opened from the pull request syncs its branch; a task's own pull
+request offers Pull changes instead.
 
 ### STALE
 
@@ -932,8 +949,7 @@ This worktree is behind the PR.
 PR Status                         Jul 2, 10:56
 o Checks stale
 #82 Refresh auth token
-Refresh PR status for the current head.
-[refresh]
+[Refresh]
 ```
 
 Stale means at least one recorded CI, review, or merge head SHA does not match
@@ -1011,7 +1027,7 @@ alice requested changes, 3 unresolved threads
 [Address comments] [refresh]
 ```
 
-Tone: `error`. This is GitHub review evidence, not Task Monki agent-review evidence.
+Tone: `action`. This is GitHub review evidence, not Task Monki agent-review evidence.
 
 The feedback line, on any open PR whose feedback was read with it, says who
 requested changes, who it waits on and how many threads are unresolved;
@@ -1084,11 +1100,12 @@ Tone: `success`. No create or push action is shown.
 PR Status                         Jul 2, 10:56
 o Closed without merge
 #82 Refresh auth token
-[refresh] [Create draft PR]
+[refresh] [Create draft PR] [Archive task]
 ```
 
 Tone: `error`. The old PR snapshot is terminal, but Task Monki may still offer
-`Create draft PR` if the current task branch is publishable.
+`Create draft PR` if the current task branch is publishable; `Archive task` is
+the task's own way out under a merge policy.
 
 ### UNKNOWN
 
@@ -1101,9 +1118,9 @@ o Unknown
 
 Unknown is the fallback when a PR exists but no higher priority status applies.
 
-## Check Details Rendering
+## Check Rendering
 
-Check rows are grouped by severity order:
+The record lists the current head's checks in severity order:
 
 ```text
 failed
@@ -1113,37 +1130,29 @@ skipped
 passed
 ```
 
-Each check is a collapsed `details` row:
+Each row shows the check's state mark, name, status word, run time once it
+finished, and a link to its page. The mark carries the tone; the word stays
+neutral:
 
 ```text
-> <dot> <name>          <Status label> <short meta>
+<mark> <name>          <Status word> <run time> <link>
 ```
 
-Opening the row shows stored evidence only:
-
-```text
-Workflow: CI
-Status: FAILURE
-Event: pull_request
-Started: 2026-07-02T08:56:45Z
-Completed: 2026-07-02T08:56:48Z
-URL: https://github.com/...
-Description: ...
-```
-
-The card does not render GitHub Actions log output because Task Monki does not
-store logs for this feature.
+The Fix checks step lists up to three failed checks, then how many more
+failed. Each row opens the end of its log, read from the platform when a row
+is first opened, once per head; a new head's rows start closed. Task Monki does
+not store logs.
 
 ## Action Pauses
 
 `buildPrStatusActionState` layers runtime pauses over evidence gates.
-The PR Status card renders these reasons as disabled action titles, not inline
-helper text.
+The PR Status card shows these reasons on the disabled action's title and once
+below it.
 
 ```text
 delivery action in flight:
   disables refresh, create/push, investigate
-  disabled title: GitHub action is in progress.
+  disabled title: GitHub action is in progress. (GitLab for a merge request)
 
 agent review starting:
   disables create/push/investigate
@@ -1212,12 +1221,14 @@ unresolved, the base a blocked merge waits on, and why the last push failed.
 The Inbox states that fact beneath the word ("unit and lint failed", "unit,
 lint and 3 more failed", "alice requested changes, 2 unresolved threads",
 "Conflicts with main"). Delivery raises nothing while an agent turn runs, since
-the turn may be the fix, nor while the pull request waits on its reviewers; and
-fixes the agent made that are not pushed read "Changes not pushed" ahead of the
-reviewer's request they answer. A push the remote refused reads "Push failed", and one
-that may have landed reads "Push unconfirmed", not "Delivery needs attention";
-and Push update keeps an open pull request open in the projection while it
-runs, so the task never reads as having none.
+the turn may be the fix, nor while the pull request waits on its reviewers. The
+word follows the Now panel's step order: a push the remote refused ("Push
+failed") or one that may have landed ("Push unconfirmed"), fixes not pushed
+while a blocker stands ("Changes not pushed"), a base that moved ("Merge
+blocked", with "Conflicts with main" or "Behind main"), failed checks, requested
+changes, then a merge the platform blocks for another reason. Push update keeps
+an open pull request open in the projection while it runs, so the task never
+reads as having none.
 
 A pull request opened as a task that merges on the platform completes the task
 under the merge policy between turns, In progress included; a run in flight

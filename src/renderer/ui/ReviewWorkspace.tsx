@@ -417,7 +417,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   };
   const toggleIncluded = (findingId: string) => setIncluded(findingId, !included.has(findingId));
   const setDiscussionIncluded = (discussionId: string, include: boolean) => {
-    const ids = draft.includedDiscussionIds ?? [];
+    const ids = draft.includedDiscussionIds;
     updateDraft({ includedDiscussionIds: include ? [...new Set([...ids, discussionId])] : ids.filter((id) => id !== discussionId) });
   };
   const toggleDiscussion = (discussionId: string) => setDiscussionIncluded(discussionId, !includedDiscussions.has(discussionId));

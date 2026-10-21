@@ -20,7 +20,7 @@ const ci = (overrides: Partial<CiRollupRecord> = {}): CiRollupRecord => ({
 const review = (overrides: Partial<ReviewRollupRecord> = {}): ReviewRollupRecord => ({
   ...owner, id: 'review', pullRequestNumber: 82, headSha: 'head-2', status: 'CHANGES_REQUESTED',
   feedback: {
-    artifactId: '00000000-0000-4000-8000-000000000001', digest: 'a'.repeat(64), capturedAt: owner.observedAt, unresolvedCount: 2, discussionCount: 3,
+    artifactId: '00000000-0000-4000-8000-000000000001', digest: 'a'.repeat(64), unresolvedCount: 2, discussionCount: 3,
     reviewers: [{ name: 'bob', state: 'APPROVED' }, { name: 'carol', state: 'REQUESTED' }, { name: 'alice', state: 'CHANGES_REQUESTED' }]
   },
   ...overrides
@@ -49,6 +49,33 @@ describe('buildPullRequestRecord', () => {
     })!.merge;
     expect(gitLab('need_rebase')).toEqual({ word: 'Behind main', tone: 'error' });
     expect(gitLab('conflict')).toEqual({ word: 'Conflicts with main', tone: 'error' });
+  });
+
+  it('tells running checks from canceled ones, says when a pushed head has none yet, and keeps each gate to its own fact', () => {
+    // Checks in flight are running work; a canceled one asks nothing and is never drawn as running.
+    expect(buildPullRequestRecord({ pullRequest: pullRequest(), ciRollup: ci({ status: 'PENDING', failingCount: 0, pendingCount: 1, passingCount: 2 }) })!.checks)
+      .toMatchObject({ summary: '1 pending, 2 passed', tone: 'working' });
+    expect(buildPullRequestRecord({ pullRequest: pullRequest(), ciRollup: ci({ status: 'CANCELED', failingCount: 0, canceledCount: 1, passingCount: 2 }) })!.checks)
+      .toMatchObject({ summary: '1 canceled, 2 passed', tone: 'neutral' });
+    // A head just pushed has not had its checks register: that is not "None".
+    const pushed = ci({ status: 'NO_CHECKS', totalCount: 0, failingCount: 0, passingCount: 0, checkDetails: [] });
+    expect(buildPullRequestRecord({ pullRequest: pullRequest(), ciRollup: pushed, checksNotReported: true })!.checks)
+      .toEqual({ summary: 'Not reported yet', tone: 'neutral', rows: [] });
+    // A request for changes is the person's to take up, in the board's waiting tone; one still asked owes nothing.
+    expect(buildPullRequestRecord({ pullRequest: pullRequest(), reviewRollup: review() })!.reviewers.slice(0, 2))
+      .toEqual([
+        { name: 'alice', word: 'Changes requested', tone: 'action', waiting: false },
+        { name: 'carol', word: 'Waiting', tone: 'neutral', waiting: true }
+      ]);
+    // GitLab's merge gate states only what no other gate does.
+    const gitLab = (reason: string) => buildPullRequestRecord({
+      pullRequest: pullRequest({ url: 'https://gitlab.com/g/p/-/merge_requests/82' }), provider: 'GITLAB',
+      mergeSnapshot: merge({ detailed_merge_status: reason }, { status: 'NOT_MERGED' })
+    })!.merge;
+    for (const ownedElsewhere of ['draft_status', 'requested_changes', 'ci_must_pass', 'ci_still_running', 'discussions_not_resolved']) {
+      expect(gitLab(ownedElsewhere), ownedElsewhere).toBeUndefined();
+    }
+    expect(gitLab('not_approved')).toEqual({ word: 'Needs approval', tone: 'neutral' });
   });
 
   it("never presents an earlier head's checks as current, and a merged pull request asks nothing", () => {

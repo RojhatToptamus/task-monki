@@ -76,7 +76,7 @@ export async function readTaskUserContext(
  * The issue or pull request the task was opened from, as captured then. Later
  * edits on the platform do not change what the agent reads.
  */
-export async function readTaskRemoteContext(store: SqliteTaskStore, task: Task): Promise<string> {
+async function readTaskRemoteContext(store: SqliteTaskStore, task: Task): Promise<string> {
   const source = task.remoteSource;
   if (!source) return '';
   // The identity still names the item when the captured text is unreadable; it is reported as unavailable.

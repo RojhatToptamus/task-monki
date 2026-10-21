@@ -1,7 +1,7 @@
 import {
   isOpenDiscussion,
   type DomainEvent,
-  type PullRequestComment,
+  type RemoteWorkComment,
   type PullRequestDiscussion,
   type PullRequestFeedback,
   type PullRequestFeedbackSummary,
@@ -15,7 +15,7 @@ import { displayPlatformText } from '../../shared/remoteWork';
 import { formatCommentLocation, listNames } from './formatting';
 
 /** What became of a discussion the person sent to the agent. */
-export interface DiscussionSent {
+interface DiscussionSent {
   at: string;
   /** Its latest comment when sent, in the platform's clock. */
   seenAt?: string;
@@ -182,7 +182,7 @@ export function discussionCommentText(body: string): string {
 }
 
 /** A comment's prose, and each change it suggests with the lines around its own that it also replaces. */
-export type CommentPart =
+type CommentPart =
   | { kind: 'text'; text: string }
   | { kind: 'suggestion'; lines: string[]; above: number; below: number };
 
@@ -243,9 +243,11 @@ export function reviewVerdictWords(state: PullRequestDiscussion['reviewState']):
  */
 export function pullRequestFeedbackLine(summary: Pick<PullRequestFeedbackSummary, 'reviewers' | 'unresolvedCount'>): string | undefined {
   const named = (state: PullRequestReviewer['state']) => summary.reviewers.filter((reviewer) => reviewer.state === state).map((reviewer) => reviewer.name);
+  // Once someone asked for changes, that request is the blocker; who else is asked is the record's.
+  const requested = named('CHANGES_REQUESTED');
   const parts = [
-    joinNames(named('CHANGES_REQUESTED'), 'requested changes'),
-    named('REQUESTED').length ? `waiting on ${listNames(named('REQUESTED'))}` : undefined,
+    joinNames(requested, 'requested changes'),
+    !requested.length && named('REQUESTED').length ? `waiting on ${listNames(named('REQUESTED'))}` : undefined,
     summary.unresolvedCount > 0 ? `${summary.unresolvedCount} unresolved ${summary.unresolvedCount === 1 ? 'thread' : 'threads'}` : undefined
   ].filter((part): part is string => Boolean(part));
   if (!parts.length) return undefined;
@@ -279,7 +281,7 @@ export function discussionTranscript(
   const lines: string[] = [];
   const shown = discussion.comments.map((comment) => discussionCommentText(comment.body));
   const allowed = fairShares(shown.map((text) => text.length), INSTRUCTION_DISCUSSION_LIMIT);
-  discussion.comments.forEach((comment: PullRequestComment, index) => {
+  discussion.comments.forEach((comment: RemoteWorkComment, index) => {
     const body = shown[index]!.slice(0, allowed[index]);
     const cut = body.length < shown[index]!.length || comment.truncated;
     const who = `@${comment.author ?? 'unknown'}${viewer && comment.author === viewer ? ', the person sending this request' : ''}`;

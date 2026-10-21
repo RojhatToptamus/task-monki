@@ -570,7 +570,8 @@ Review:
 - Allow Run agent review when no implementation-side run is active.
 - Require the current implementation-side run to have completed successfully;
   unsuccessful or older superseded runs are not valid review sources.
-- Imported work in Review can start review before its first coding run.
+- Imported work, and a pull request opened as a task, can start review before
+  its first coding run.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -618,6 +619,8 @@ In Review:
 - Prioritize PR Status: the Now panel holds the pull request's one step (its
   blocker, one fact, the actions that take it); the record column holds the
   pull request itself, with a row per gate (checks, reviews, threads, merge).
+- Allow Run agent review as in Review: In Review is Review with a pull request
+  open, and the detached review leaves the task In Review.
 - For failed checks, list the failed checks with the end of each log on request
   and offer `Fix checks`, which sends the agent the logs as quoted data, and
   `Re-run failed` for a check that may have failed by chance, which runs the
@@ -627,7 +630,7 @@ In Review:
   `Checks failed`; stale, diverged, or locally unpublished work should surface
   its own next action instead. Repair starts implementation-side work, not a
   GitHub state update.
-- The person's writes to the platform are explicit steps: `Ready for review`,
+- The person's writes to the platform are explicit steps: `Mark as ready`,
   `Merge` (the head they saw, through a dialog with the repository's methods
   and Delete branch), and `Reply on GitHub` (the agent's answers as editable
   replies, Resolve thread, and asking reviewers again). In the Review tab each

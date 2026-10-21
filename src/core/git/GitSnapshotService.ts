@@ -35,7 +35,7 @@ export interface PullRequestHead {
   ref: string;
   sha: string;
   /** A head the checkout is known to hold, such as the one it was opened at, for when it lacks `sha`. */
-  knownSha?: string;
+  knownSha: string;
 }
 
 export async function inspectGitSnapshot(
@@ -432,7 +432,7 @@ async function relateToPullRequestHead(
     .catch(() => undefined);
   const counts = await sides(head.sha);
   if (counts) return { upstreamRef: head.ref, aheadCount: counts[0]!, behindCount: counts[1]! };
-  const known = head.knownSha && head.knownSha !== head.sha ? await sides(head.knownSha) : undefined;
+  const known = head.knownSha !== head.sha ? await sides(head.knownSha) : undefined;
   return { upstreamRef: head.ref, aheadCount: known ? known[0]! : 1, behindCount: Math.max(known?.[1] ?? 0, 1) };
 }
 

@@ -9,7 +9,8 @@ import {
 } from '../../shared/remoteWork';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
 import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
-import { GitLabCli, gitLabProject } from './GitLabCli';
+import { isGitObjectId } from '../git/gitCli';
+import { GitLabCli, gitLabProject, gitLabState } from './GitLabCli';
 
 interface GitLabItem {
   iid?: number;
@@ -27,7 +28,7 @@ interface GitLabItem {
   source_project_id?: number;
   target_project_id?: number;
   sha?: string;
-  diff_refs?: { base_sha?: string; head_sha?: string; start_sha?: string } | null;
+  diff_refs?: { base_sha?: string } | null;
 }
 
 interface GitLabNote {
@@ -41,16 +42,12 @@ interface GitLabNote {
 export class GitLabRemoteWork implements RemoteWorkReader {
   readonly provider = 'GITLAB' as const;
 
-  constructor(private readonly cli = new GitLabCli()) {}
-
-  setExecutable(executable: string | undefined): void {
-    this.cli.setExecutable(executable);
-  }
+  constructor(private readonly cli: GitLabCli) {}
 
   async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {
     const query = new URLSearchParams({ state: 'opened', order_by: 'updated_at', sort: 'desc', per_page: String(REMOTE_WORK_LIMITS.listItems) });
-    const words = text?.trim().slice(0, REMOTE_WORK_LIMITS.query);
-    if (words) query.set('search', words);
+    // The service passes the search words trimmed and bounded.
+    if (text) query.set('search', text);
     const rows = await this.cli.request<unknown>({
       host: repository.host,
       endpoint: `projects/${gitLabProject(repository.path)}/${kind === 'ISSUE' ? 'issues' : 'merge_requests'}?${query}`,
@@ -65,12 +62,7 @@ export class GitLabRemoteWork implements RemoteWorkReader {
     const item = await this.readItem(ref, cwd);
     return {
       summary: summary(ref.repository, 'ISSUE', item),
-      snapshot: buildRemoteWorkSnapshot({
-        ref, url: requireUrl(ref, item), title: item.title ?? '', state: itemState(item),
-        author: item.author?.username, labels: item.labels ?? [], body: item.description ?? '',
-        comments: await this.recentComments(ref, cwd), commentCount: item.user_notes_count ?? 0,
-        capturedAt: new Date().toISOString()
-      })
+      snapshot: await this.snapshot(ref, item, cwd)
     };
   }
 
@@ -78,31 +70,34 @@ export class GitLabRemoteWork implements RemoteWorkReader {
     const item = await this.readItem(ref, cwd);
     const headSha = item.sha;
     const baseSha = item.diff_refs?.base_sha;
-    if (!item.source_branch || !item.target_branch || !isObjectId(headSha)) {
+    if (!item.source_branch || !item.target_branch || !isGitObjectId(headSha)) {
       throw new RemoteWorkError('FAILED', 'GitLab did not report the merge request’s branches.');
     }
-    if (!isObjectId(baseSha)) {
+    if (!isGitObjectId(baseSha)) {
       throw new RemoteWorkError('FAILED', 'GitLab has not prepared this merge request’s changes yet. Try again shortly.');
     }
     const crossRepository = typeof item.source_project_id === 'number' && item.source_project_id !== item.target_project_id;
     const headRepositoryPath = crossRepository ? await this.projectPath(ref.repository, item.source_project_id!, cwd) : ref.repository.path;
     return {
       summary: { ...summary(ref.repository, 'PULL_REQUEST', item), ...(headRepositoryPath ? { headRepositoryPath } : {}) },
-      snapshot: buildRemoteWorkSnapshot({
-        ref, url: requireUrl(ref, item), title: item.title ?? '', state: itemState(item),
-        author: item.author?.username, labels: item.labels ?? [], body: item.description ?? '',
-        comments: await this.recentComments(ref, cwd), commentCount: item.user_notes_count ?? 0,
-        capturedAt: new Date().toISOString()
-      }),
+      snapshot: await this.snapshot(ref, item, cwd),
       headRefName: item.source_branch,
       headSha,
       ...(headRepositoryPath ? { headRepositoryPath } : {}),
       crossRepository,
       baseRefName: item.target_branch,
       baseSha,
-      baseIsMergeBase: true,
-      headFetchRef: `refs/merge-requests/${ref.number}/head`
+      baseIsMergeBase: true
     };
+  }
+
+  private async snapshot(ref: RemoteWorkRef, item: GitLabItem, cwd: string) {
+    return buildRemoteWorkSnapshot({
+      ref, url: requireUrl(ref, item), title: item.title ?? '', state: gitLabState(item.state),
+      author: item.author?.username, labels: item.labels ?? [], body: item.description ?? '',
+      comments: await this.recentComments(ref, cwd), commentCount: item.user_notes_count ?? 0,
+      capturedAt: new Date().toISOString()
+    });
   }
 
   private async readItem(ref: RemoteWorkRef, cwd: string): Promise<GitLabItem> {
@@ -158,7 +153,7 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, item: Gi
     ref: { repository, kind, number: item.iid },
     url: item.web_url,
     title: (item.title ?? '').trim(),
-    state: itemState(item) as RemoteWorkSummary['state'],
+    state: gitLabState(item.state) as RemoteWorkSummary['state'],
     ...(item.author?.username ? { author: item.author.username } : {}),
     ...(item.updated_at ? { updatedAt: item.updated_at } : {}),
     ...(kind === 'PULL_REQUEST' ? {
@@ -169,10 +164,6 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, item: Gi
   };
 }
 
-function itemState(item: GitLabItem): string {
-  return item.state === 'merged' ? 'MERGED' : item.state === 'opened' ? 'OPEN' : 'CLOSED';
-}
-
 function requireUrl(ref: RemoteWorkRef, item: GitLabItem): string {
   const base = `https://${ref.repository.host}/${ref.repository.path}/-/`.toLowerCase();
   const url = item.web_url?.toLowerCase() ?? '';
@@ -181,8 +172,4 @@ function requireUrl(ref: RemoteWorkRef, item: GitLabItem): string {
     throw new RemoteWorkError('FAILED', 'GitLab returned a different item than requested.');
   }
   return item.web_url!;
-}
-
-function isObjectId(value: string | undefined): value is string {
-  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 }

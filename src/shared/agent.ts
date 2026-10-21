@@ -247,7 +247,7 @@ export function isTaskManagerThemePreset(value: unknown): value is TaskManagerTh
   return TASK_MANAGER_THEME_PRESETS.includes(value as TaskManagerThemePreset);
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 16 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 15 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;

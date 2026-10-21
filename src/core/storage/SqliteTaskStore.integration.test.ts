@@ -762,7 +762,7 @@ describe('SqliteTaskStore', () => {
     await sync(reading('2026-10-10T12:00:00.000Z', 'Also add a test.'));
     expect(new Set(await feedbackOf(store)).size).toBe(2);
     // A reading the store cannot keep never costs the status it came with: the last reading stands.
-    await sync({ ...reading('2026-10-10T13:00:00.000Z', 'Changed again.'), capturedAt: 'later' });
+    await sync({ ...reading('2026-10-10T13:00:00.000Z', 'Changed again.'), reviewers: [{ name: 'alice', state: 'UNKNOWN' as 'APPROVED' }] });
     expect((await feedbackOf(store))[0]).toBe((await feedbackOf(store))[1]);
     await closeStore(store);
 

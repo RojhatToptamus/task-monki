@@ -1,4 +1,3 @@
-import os from 'node:os';
 import {
   parseRemoteRepositoryUrl,
   sameRemoteRepository,
@@ -6,7 +5,7 @@ import {
   type RemoteRepositoryOption,
   type RemoteRepositoryRef
 } from '../../shared/remoteWork';
-import { git, gitSucceeds } from '../git/gitCli';
+import { GIT_HOOKS_OFF_ENV, git, gitSucceeds } from '../git/gitCli';
 import { RemoteWorkError, safeCliMessage } from './RemoteWorkError';
 
 /**
@@ -14,9 +13,7 @@ import { RemoteWorkError, safeCliMessage } from './RemoteWorkError';
  * hooks can live in the checked-out tree (`core.hooksPath`), so they are off.
  */
 export const UNTRUSTED_CHECKOUT_GIT_ENV: NodeJS.ProcessEnv = {
-  GIT_CONFIG_COUNT: '1',
-  GIT_CONFIG_KEY_0: 'core.hooksPath',
-  GIT_CONFIG_VALUE_0: os.devNull,
+  ...GIT_HOOKS_OFF_ENV,
   // A pull request's `.lfsconfig` could point LFS downloads anywhere; files stay pointers.
   GIT_LFS_SKIP_SMUDGE: '1'
 };
@@ -58,6 +55,36 @@ export async function fetchRemoteObjects(
   } catch (error) {
     throw new RemoteWorkError('FAILED', `Could not fetch from ${remote.path}: ${safeCliMessage(error)}`);
   }
+}
+
+/**
+ * The repository a remote pushes to. `git push` uses the remote's push URLs,
+ * which can name another repository or several; only exactly one counts.
+ */
+export async function singlePushRepository(repositoryPath: string, remoteName: string): Promise<{ url: string; repository: RemoteRepositoryRef } | undefined> {
+  const urls = (await git(repositoryPath, ['remote', 'get-url', '--push', '--all', '--', remoteName]))
+    .split('\n').map((line) => line.trim()).filter(Boolean);
+  const repository = urls.length === 1 ? parseRemoteRepositoryUrl(urls[0]!) : undefined;
+  return repository ? { url: urls[0]!, repository } : undefined;
+}
+
+/**
+ * The target branch named for an external checkout's new pull request, as a
+ * branch name: without `refs/heads/` or the remote's prefix, and not this branch.
+ */
+export async function externalTargetBranch(
+  worktree: { worktreePath: string; branchName: string },
+  requested: string | undefined,
+  remoteName: string,
+  noun: string
+): Promise<string> {
+  let branch = requested?.trim() ?? '';
+  if (!branch) throw new Error(`Choose a target branch for the new ${noun}.`);
+  if (branch.startsWith('refs/heads/')) branch = branch.slice('refs/heads/'.length);
+  if (branch.startsWith(`${remoteName}/`)) branch = branch.slice(remoteName.length + 1);
+  if (branch === 'HEAD' || branch === worktree.branchName) throw new Error('Choose a named target branch other than this checkout branch.');
+  await git(worktree.worktreePath, ['check-ref-format', '--branch', branch]);
+  return branch;
 }
 
 /** The remote's current fetch URL, which must still name the same repository. */

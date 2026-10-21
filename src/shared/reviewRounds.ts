@@ -1,4 +1,5 @@
 import { AGENT_REVIEW_FINDING_SEVERITIES, type AgentReviewFindingSeverity } from './agentReviewFindings';
+import type { RemoteProvider } from './remoteWork';
 
 /**
  * A review round: the person's request after a review, numbered item by item,
@@ -35,7 +36,7 @@ export type ReviewRequestItem =
   | {
       number: number;
       kind: 'DISCUSSION';
-      provider: 'GITHUB' | 'GITLAB';
+      provider: RemoteProvider;
       discussionId: string;
       /** Who started it on the platform. */
       author?: string;
@@ -45,7 +46,6 @@ export type ReviewRequestItem =
       endLine?: number;
       /** Its first comment as sent, bounded. */
       text: string;
-      url?: string;
       /** Its latest comment when sent, in the platform's clock: a later one asks again. */
       seenAt?: string;
     };
@@ -150,7 +150,7 @@ export function assertReviewRequestRecord(value: unknown): asserts value is Revi
       if (!boundedString(entry.path, PATH_LIMIT) || !boundedString(entry.text, REVIEW_REQUEST_TEXT_LIMIT)) fail();
       if (entry.side !== 'NEW' && entry.side !== 'OLD') fail();
     } else if (entry.kind === 'DISCUSSION') {
-      if (Object.keys(entry).some((key) => !['number', 'kind', 'provider', 'discussionId', 'author', 'path', 'side', 'line', 'endLine', 'text', 'url', 'seenAt'].includes(key))) fail();
+      if (Object.keys(entry).some((key) => !['number', 'kind', 'provider', 'discussionId', 'author', 'path', 'side', 'line', 'endLine', 'text', 'seenAt'].includes(key))) fail();
       if (entry.seenAt !== undefined && (!boundedString(entry.seenAt, 64) || !Number.isFinite(Date.parse(entry.seenAt as string)))) fail();
       if (entry.provider !== 'GITHUB' && entry.provider !== 'GITLAB') fail();
       if (!boundedString(entry.discussionId, 200) || !boundedString(entry.text, REVIEW_REQUEST_TEXT_LIMIT)) fail();
@@ -158,7 +158,6 @@ export function assertReviewRequestRecord(value: unknown): asserts value is Revi
       if (entry.path !== undefined && !boundedString(entry.path, PATH_LIMIT)) fail();
       if (entry.side !== undefined && entry.side !== 'NEW' && entry.side !== 'OLD') fail();
       if (entry.line !== undefined && (entry.path === undefined || entry.side === undefined)) fail();
-      if (entry.url !== undefined && (!boundedString(entry.url, 2_000) || !/^https:\/\//u.test(entry.url as string))) fail();
     } else {
       fail();
     }

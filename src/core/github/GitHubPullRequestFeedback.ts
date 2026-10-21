@@ -113,11 +113,6 @@ export interface GitHubFeedbackData {
 }
 
 /** The repository and number a pull request URL names, as GitHub writes it. */
-export function gitHubPullRequestLocation(url: string | undefined): { host: string; owner: string; name: string; number: number } | undefined {
-  const match = /^https:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/u.exec(url ?? '');
-  return match ? { host: match[1]!, owner: match[2]!, name: match[3]!, number: Number(match[4]) } : undefined;
-}
-
 const REVIEW_STATES = new Set(['CHANGES_REQUESTED', 'APPROVED', 'COMMENTED']);
 
 /**

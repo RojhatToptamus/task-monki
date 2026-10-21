@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gitHubPullRequestLocation, parseGitHubPullRequestFeedback } from './GitHubPullRequestFeedback';
+import { parseGitHubPullRequestFeedback } from './GitHubPullRequestFeedback';
 
 const capturedAt = '2026-10-11T00:00:00.000Z';
 const comment = (id: string, login: string, body: string, extra: Record<string, unknown> = {}) => ({
@@ -61,7 +61,5 @@ describe('parseGitHubPullRequestFeedback', () => {
 
   it('reads nothing for a pull request GitHub did not return', () => {
     expect(parseGitHubPullRequestFeedback({ repository: { pullRequest: null } }, 9, capturedAt)).toBeUndefined();
-    expect(gitHubPullRequestLocation('https://github.com/acme/widgets/pull/9')).toEqual({ host: 'github.com', owner: 'acme', name: 'widgets', number: 9 });
-    expect(gitHubPullRequestLocation('https://github.com/acme/widgets/issues/9')).toBeUndefined();
   });
 });

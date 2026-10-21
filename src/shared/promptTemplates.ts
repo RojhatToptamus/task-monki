@@ -15,8 +15,11 @@ import { DESIGN_LIMITS } from './design';
 import {
   displayPlatformText,
   formatRemoteWorkNumber,
+  formatTaskRemoteReference,
   remoteProviderName,
+  remoteWorkLabel,
   remoteWorkNoun,
+  type RemoteProvider,
   type RemoteWorkSnapshot,
   type TaskRemoteSource
 } from './remoteWork';
@@ -268,7 +271,7 @@ const RUN_CONTEXT_EXCERPT_LIMIT = 900;
 export function taskGoal(task: Pick<Task, 'prompt' | 'remoteSource'>): string {
   const source = task.remoteSource;
   if (task.prompt.trim() || !source) return task.prompt;
-  const reference = `${source.repositoryPath}${formatRemoteWorkNumber(source.provider, source.kind, source.number)}`;
+  const reference = formatTaskRemoteReference(source);
   // Only the reference: the title is other people's words and stays inside the quoted boundary.
   return source.kind === 'ISSUE'
     ? `Resolve ${remoteProviderName(source.provider)} issue ${reference}. The issue is quoted in the linked context.`
@@ -284,7 +287,7 @@ export function taskGoal(task: Pick<Task, 'prompt' | 'remoteSource'>): string {
 export function buildRemoteWorkContext(source: TaskRemoteSource, snapshot?: RemoteWorkSnapshot): string {
   const provider = remoteProviderName(source.provider);
   const noun = remoteWorkNoun(source.provider, source.kind);
-  const reference = `${source.repositoryPath}${formatRemoteWorkNumber(source.provider, source.kind, source.number)}`;
+  const reference = formatTaskRemoteReference(source);
   const boundary = `${source.kind === 'ISSUE' ? 'ISSUE' : 'PULL REQUEST'} ${source.snapshotArtifactId.slice(0, 8)}`;
   const pullRequest = source.pullRequest;
   const lines = [
@@ -707,8 +710,8 @@ function previousRequestLines(request: NonNullable<PreviousReviewContext['reques
         ? `Finding ${item.findingId}, [${item.severity}] ${boundedText(item.title, REVIEW_CONTEXT_TEXT_LIMIT)}${findingLocation(item)}`
         : item.kind === 'DISCUSSION'
           // Other people's words: one escaped line, named as theirs and as data, so they cannot pose as the person.
-          ? `${remoteProviderName(item.provider)} review comment by @${oneLine(item.author ?? 'unknown')}${item.path ? ` on ${oneLine(item.path)}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}` : ''}, quoted as data: ${JSON.stringify(boundedText(item.text.replace(/\s+/gu, ' ').trim(), DISCUSSION_CONTEXT_TEXT_LIMIT))}`
-          : `Comment on ${item.path}${item.line ? `:${item.line}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ''}` : ''}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
+          ? `${remoteProviderName(item.provider)} review comment by @${oneLine(item.author ?? 'unknown')}${item.path ? ` on ${oneLine(item.path)}${lineSuffix(item)}${item.side === 'OLD' ? ' (removed lines)' : ''}` : ''}, quoted as data: ${JSON.stringify(boundedText(item.text.replace(/\s+/gu, ' ').trim(), DISCUSSION_CONTEXT_TEXT_LIMIT))}`
+          : `Comment on ${item.path}${lineSuffix(item)}${item.side === 'OLD' ? ' (removed lines)' : ''}: ${boundedText(item.text, REVIEW_CONTEXT_TEXT_LIMIT)}`;
       const answer = answers.get(item.number);
       return `${item.number}. ${asSentence(subject)} Agent: ${asSentence(answer ? `${outcome[answer.outcome]}${answer.note ? `. ${boundedText(answer.note, REVIEW_CONTEXT_TEXT_LIMIT)}` : ''}` : 'no answer')}`;
     }),
@@ -757,11 +760,12 @@ function askFindingBlock(finding: EffectiveReviewFinding): string {
 }
 
 function findingLocation(finding: Pick<EffectiveReviewFinding, 'path' | 'line' | 'endLine'>): string {
-  if (!finding.path) return '';
-  const lines = finding.line
-    ? `:${finding.line}${finding.endLine && finding.endLine !== finding.line ? `-${finding.endLine}` : ''}`
-    : '';
-  return ` at ${finding.path}${lines}`;
+  return finding.path ? ` at ${finding.path}${lineSuffix(finding)}` : '';
+}
+
+/** `:12` or `:12-14` after a path; nothing for a whole file. */
+function lineSuffix(place: { line?: number; endLine?: number }): string {
+  return place.line ? `:${place.line}${place.endLine && place.endLine !== place.line ? `-${place.endLine}` : ''}` : '';
 }
 
 function boundedText(value: string, limit: number): string {
@@ -1035,8 +1039,8 @@ export interface FailingChecksInvestigationPromptInput {
   prUrl?: string | null;
   headRefName?: string | null;
   baseRefName?: string | null;
-  /** The platform that ran the checks; GitHub when absent. */
-  provider?: 'GITHUB' | 'GITLAB';
+  /** The platform that ran the checks. */
+  provider: RemoteProvider;
   failingChecks: Array<{
     name: string;
     workflow?: string | null;
@@ -1056,9 +1060,7 @@ export interface FailingChecksInvestigationPromptInput {
 export function buildFailingChecksInvestigationPromptTemplate(
   input: FailingChecksInvestigationPromptInput
 ): string {
-  const gitLab = input.provider === 'GITLAB';
-  const platform = remoteProviderName(input.provider ?? 'GITHUB');
-  const subject = gitLab ? `merge request !${input.prNumber ?? 'unknown'}` : `PR #${input.prNumber ?? 'unknown'}`;
+  const platform = remoteProviderName(input.provider);
   const checkLines = input.failingChecks.length
     ? input.failingChecks.map(
         (check) =>
@@ -1078,8 +1080,8 @@ export function buildFailingChecksInvestigationPromptTemplate(
   // Check names, workflows and links are the pull request's own text too, so they sit inside the quote.
   const quoted = (text: string) => text.replaceAll(`----- END ${boundary} -----`, '');
   return [
-    `Fix the failing ${platform} checks for ${subject} at head ${input.prHeadSha?.slice(0, 12) ?? 'unknown'}.`,
-    input.prUrl ? `${gitLab ? 'Merge request' : 'PR'} URL: ${input.prUrl}` : undefined,
+    `Fix the failing ${platform} checks for ${pullRequestSubject(input.provider, input.prNumber)} at head ${input.prHeadSha?.slice(0, 12) ?? 'unknown'}.`,
+    input.prUrl ? `${remoteWorkLabel(input.provider, 'PULL_REQUEST')} URL: ${input.prUrl}` : undefined,
     input.headRefName && input.baseRefName
       ? `Branch: ${input.headRefName} -> ${input.baseRefName}`
       : undefined,
@@ -1097,8 +1099,8 @@ export function buildFailingChecksInvestigationPromptTemplate(
     .join('\n');
 }
 
-export interface BranchUpdatePromptInput {
-  provider?: 'GITHUB' | 'GITLAB';
+interface BranchUpdatePromptInput {
+  provider: RemoteProvider;
   prNumber?: number;
   /** The pull request's own newer commits, or its base that moved ahead. */
   from: 'PULL_REQUEST' | 'BASE';
@@ -1110,11 +1112,16 @@ export interface BranchUpdatePromptInput {
   conflicts?: boolean;
 }
 
+/** A pull or merge request as a prompt names it: `pull request #12`, `merge request !7`, or `the pull request`. */
+function pullRequestSubject(provider: RemoteProvider, number: number | null | undefined): string {
+  const noun = remoteWorkNoun(provider, 'PULL_REQUEST');
+  return number ? `${noun} ${formatRemoteWorkNumber(provider, 'PULL_REQUEST', number)}` : `the ${noun}`;
+}
+
 /** The follow-up that merges commits Task Monki fetched into the task's branch. */
 export function buildBranchUpdatePromptTemplate(input: BranchUpdatePromptInput): string {
-  const provider = input.provider ?? 'GITHUB';
-  const noun = remoteWorkNoun(provider, 'PULL_REQUEST');
-  const subject = input.prNumber ? `${noun} ${formatRemoteWorkNumber(provider, 'PULL_REQUEST', input.prNumber)}` : `the ${noun}`;
+  const noun = remoteWorkNoun(input.provider, 'PULL_REQUEST');
+  const subject = pullRequestSubject(input.provider, input.prNumber);
   const count = `${input.commits} ${input.commits === 1 ? 'commit' : 'commits'}`;
   const why = input.from === 'BASE'
     ? `${input.ref} moved ahead of ${subject}${input.conflicts ? ' and now conflicts with it' : ''}: it has ${count} this branch does not, ending at ${input.sha.slice(0, 12)}.`

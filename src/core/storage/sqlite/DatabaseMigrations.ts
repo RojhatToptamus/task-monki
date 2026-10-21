@@ -1551,29 +1551,6 @@ CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_
       SET settings_json = json_set(json_remove(settings_json, '$.sidebarCollapsed', '$.showMascot'), '$.schemaVersion', 15),
           record_revision = record_revision + 1
       WHERE json_extract(settings_json, '$.schemaVersion') = 14;`
-  },
-  {
-    version: 14,
-    name: 'task-remote-sources',
-    // A task opened from a GitHub or GitLab issue or pull request keeps its
-    // identity in the task payload. The index lets the database refuse a second
-    // task opened from the same item; repository paths are case-insensitive.
-    sql: `CREATE UNIQUE INDEX IF NOT EXISTS tasks_remote_source_idx ON tasks(
-        json_extract(payload_json, '$.remoteSource.provider'),
-        json_extract(payload_json, '$.remoteSource.host'),
-        lower(json_extract(payload_json, '$.remoteSource.repositoryPath')),
-        json_extract(payload_json, '$.remoteSource.kind'),
-        json_extract(payload_json, '$.remoteSource.number')
-      ) WHERE json_extract(payload_json, '$.remoteSource') IS NOT NULL;`
-  },
-  {
-    version: 15,
-    name: 'gitlab-cli-setting',
-    // GitLab work runs through the GitLab CLI; its path is optional like the GitHub CLI's.
-    sql: `UPDATE app_settings
-      SET settings_json = json_set(settings_json, '$.externalExecutables.glabExecutablePath', json('null'), '$.schemaVersion', 16),
-          record_revision = record_revision + 1
-      WHERE json_extract(settings_json, '$.schemaVersion') = 15;`
   }
 ] as const;
 

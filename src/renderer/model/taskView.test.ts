@@ -48,7 +48,7 @@ describe('task card view model', () => {
         projection: { ...createInitialProjection(now), merge: 'MERGED' }
       }),
       []
-    )).toMatchObject({ label: 'Auto-completed' });
+    )).toMatchObject({ label: 'Merged' });
     expect(describeTaskCompletionEvidence(doneTask, [])).toMatchObject({
       label: 'Completion unknown'
     });
@@ -81,7 +81,7 @@ describe('task card view model', () => {
     });
 
     expect(describeTaskCompletionEvidence(autoCompleted, [oldDone, reopened])).toMatchObject({
-      label: 'Auto-completed'
+      label: 'Merged'
     });
   });
 
@@ -346,31 +346,31 @@ describe('task card view model', () => {
     // No pull request is the absence of delivery state, not a footer.
     expect(pullRequest({ git: 'CLEAN', githubPullRequest: 'NOT_CREATED' })).toBeUndefined();
     expect(pullRequest({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 82, ciChecks: 'PENDING' }))
-      .toEqual({ number: 82, label: '#82', state: 'draft', note: 'checks pending' });
+      .toEqual({ label: '#82', state: 'draft', note: 'checks pending' });
     // The status word already says Checks failed, so the footer does not repeat it.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'FAILING' }))
-      .toEqual({ number: 82, label: '#82', state: 'open' });
+      .toEqual({ label: '#82', state: 'open' });
     // Scalars alone never claim ready to merge.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
-      .toEqual({ number: 82, label: '#82', state: 'open', note: 'checks passing, mergeable' });
+      .toEqual({ label: '#82', state: 'open', note: 'checks passing, mergeable' });
     // A draft is never mergeable, and neither is a pull request held back by its branch protection.
     expect(pullRequest({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'MERGEABLE' }))
-      .toEqual({ number: 82, label: '#82', state: 'draft', note: 'checks passing' });
+      .toEqual({ label: '#82', state: 'draft', note: 'checks passing' });
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'PASSING', merge: 'NOT_MERGED' }))
-      .toEqual({ number: 82, label: '#82', state: 'open', note: 'checks passing' });
+      .toEqual({ label: '#82', state: 'open', note: 'checks passing' });
     // Changes requested is the status word on either platform, so the footer leaves it out.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 7, reviews: 'CHANGES_REQUESTED',
       githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }))
-      .toEqual({ number: 7, label: '!7', state: 'open' });
+      .toEqual({ label: '!7', state: 'open' });
     // A merged or closed pull request says so with its state alone.
     expect(pullRequest({ githubPullRequest: 'MERGED', githubPullRequestNumber: 82, merge: 'MERGED', ciChecks: 'FAILING' }))
-      .toEqual({ number: 82, label: '#82', state: 'merged' });
+      .toEqual({ label: '#82', state: 'merged' });
     expect(pullRequest({ githubPullRequest: 'CLOSED_UNMERGED', githubPullRequestNumber: 82 }))
-      .toEqual({ number: 82, label: '#82', state: 'closed' });
+      .toEqual({ label: '#82', state: 'closed' });
     // A GitLab merge request is written with its own sign.
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 7,
       githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }))
-      .toEqual({ number: 7, label: '!7', state: 'open' });
+      .toEqual({ label: '!7', state: 'open' });
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {

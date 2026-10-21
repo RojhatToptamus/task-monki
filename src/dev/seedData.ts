@@ -2212,7 +2212,7 @@ async function createNoPrScenario(
       ctx,
       state,
       'FAILED',
-      'Remote branch has newer commits. Sync the branch before pushing again.'
+      'Remote branch has newer commits'
     );
   } else if (definition.slug === 'no-pr-publish-in-progress') {
     await recordBranchPublication(ctx, state, 'PUSHING');

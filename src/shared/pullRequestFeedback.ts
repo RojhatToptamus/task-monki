@@ -1,4 +1,4 @@
-import { visibleRemoteText, type RemoteProvider } from './remoteWork';
+import { visibleRemoteText, type RemoteProvider, type RemoteWorkComment } from './remoteWork';
 
 /**
  * What people said on a pull or merge request: review threads on lines and
@@ -7,7 +7,7 @@ import { visibleRemoteText, type RemoteProvider } from './remoteWork';
  * the platform stays authoritative, and nothing is written back.
  */
 
-export const PULL_REQUEST_FEEDBACK_SCHEMA = 'task-monki/pull-request-feedback/v1';
+const PULL_REQUEST_FEEDBACK_SCHEMA = 'task-monki/pull-request-feedback/v1';
 
 export const PULL_REQUEST_FEEDBACK_LIMITS = {
   discussions: 100,
@@ -35,20 +35,12 @@ export interface PullRequestReviewer {
   bot?: boolean;
 }
 
-export const PULL_REQUEST_DISCUSSION_KINDS = ['THREAD', 'REVIEW', 'COMMENT'] as const;
+const PULL_REQUEST_DISCUSSION_KINDS = ['THREAD', 'REVIEW', 'COMMENT'] as const;
 /**
  * A thread on lines, a file or the whole change, which the platform can
  * resolve; a review's summary; or a comment on the conversation.
  */
-export type PullRequestDiscussionKind = (typeof PULL_REQUEST_DISCUSSION_KINDS)[number];
-
-export interface PullRequestComment {
-  author?: string;
-  createdAt?: string;
-  body: string;
-  /** The body continues on the platform. */
-  truncated: boolean;
-}
+type PullRequestDiscussionKind = (typeof PULL_REQUEST_DISCUSSION_KINDS)[number];
 
 export interface PullRequestDiscussion {
   /** The platform's identity: a GitHub node id, or a GitLab discussion id. */
@@ -71,7 +63,7 @@ export interface PullRequestDiscussion {
   /** Where it opens on the platform. */
   url?: string;
   /** Oldest first: the first comment, then the most recent replies. */
-  comments: PullRequestComment[];
+  comments: RemoteWorkComment[];
   /** Every comment the platform holds, including those not kept. */
   commentCount: number;
 }
@@ -101,7 +93,6 @@ export interface PullRequestFeedbackSummary {
   artifactId: string;
   /** Unchanged feedback keeps its artifact; the digest says when it changed. */
   digest: string;
-  capturedAt: string;
   /** Threads the platform can resolve that are not resolved. */
   unresolvedCount: number;
   discussionCount: number;
@@ -211,7 +202,7 @@ export function boundPullRequestFeedback(input: {
     const discussion = listed[index]!;
     if (!shortText(discussion.id)) continue;
     const written = discussion.comments
-      .map((comment) => ({ ...comment, body: visibleText(comment.body) }))
+      .map((comment) => ({ ...comment, body: visibleRemoteText(comment.body).trim() }))
       .filter((comment) => comment.body);
     if (written.length === 0) continue;
     const kept = written.length > limits.comments
@@ -252,7 +243,7 @@ export function boundPullRequestFeedback(input: {
  * than shown: a discussion without an identity or text, a reviewer without a
  * name. A document of another schema or number reads as nothing.
  */
-export function parsePullRequestFeedback(text: string, number?: number): PullRequestFeedback | undefined {
+export function parsePullRequestFeedback(text: string, number: number): PullRequestFeedback | undefined {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -261,11 +252,11 @@ export function parsePullRequestFeedback(text: string, number?: number): PullReq
   }
   if (!isRecord(value) || value.schema !== PULL_REQUEST_FEEDBACK_SCHEMA) return undefined;
   if (value.provider !== 'GITHUB' && value.provider !== 'GITLAB') return undefined;
-  if (!positiveInteger(value.number) || (number !== undefined && value.number !== number)) return undefined;
+  if (value.number !== number) return undefined;
   if (typeof value.capturedAt !== 'string' || !Array.isArray(value.discussions) || !Array.isArray(value.reviewers)) return undefined;
   const discussions = value.discussions.flatMap((entry): PullRequestDiscussion[] => {
     if (!isRecord(entry) || !shortText(entry.id) || !(PULL_REQUEST_DISCUSSION_KINDS as readonly unknown[]).includes(entry.kind)) return [];
-    const comments = Array.isArray(entry.comments) ? entry.comments.flatMap((comment): PullRequestComment[] =>
+    const comments = Array.isArray(entry.comments) ? entry.comments.flatMap((comment): RemoteWorkComment[] =>
       isRecord(comment) && typeof comment.body === 'string' && comment.body.trim() ? [{
         ...(shortText(comment.author) ? { author: comment.author } : {}),
         ...(typeof comment.createdAt === 'string' ? { createdAt: comment.createdAt } : {}),
@@ -304,11 +295,6 @@ export function parsePullRequestFeedback(text: string, number?: number): PullReq
     discussions,
     truncated: value.truncated === true
   };
-}
-
-/** The text a reader sees on the platform, trimmed. */
-function visibleText(body: string): string {
-  return visibleRemoteText(body).trim();
 }
 
 function latestComment(discussion: RawPullRequestDiscussion): number {

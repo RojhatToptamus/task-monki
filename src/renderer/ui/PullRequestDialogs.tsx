@@ -116,7 +116,7 @@ export function MergePullRequestModal({
           </div>
         ) : null}
         {offersDelete && options?.head ? (
-          <label className="tm-merge-modal__check">
+          <label className="tm-modal__check">
             <input type="checkbox" checked={deleteBranch} disabled={busy} onChange={(event) => setDeleteBranch(event.target.checked)} />
             <span>Delete <code>{options.head}</code></span>
           </label>
@@ -245,7 +245,7 @@ export function ReplyToReviewersModal({
                     <textarea id={bodyId} aria-label={`Reply to ${draft.author ? `@${draft.author}` : 'the comment'}`} rows={2}
                       value={state.body} disabled={busy} onChange={(event) => update(draft.discussionId, { body: event.target.value })} />
                     {draft.resolvable ? (
-                      <label className="tm-reply__resolve">
+                      <label className="tm-resolve-check">
                         <input type="checkbox" checked={state.resolve} disabled={busy}
                           onChange={(event) => update(draft.discussionId, { resolve: event.target.checked })} />
                         <span>Resolve thread</span>
@@ -261,7 +261,7 @@ export function ReplyToReviewersModal({
         {reviewers.length > 0 ? (
           <div className="tm-reply-modal__reviewers">
             {reviewers.map((name) => (
-              <label key={name} className="tm-reply__resolve">
+              <label key={name} className="tm-resolve-check">
                 <input type="checkbox" checked={asked.has(name)} disabled={busy} onChange={(event) => setAsked((current) => {
                   const next = new Set(current);
                   if (event.target.checked) next.add(name);

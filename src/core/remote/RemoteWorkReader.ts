@@ -28,14 +28,11 @@ export interface RemotePullRequest {
    */
   baseSha: string;
   baseIsMergeBase: boolean;
-  /** The ref in the target repository that holds the head, forks included. */
-  headFetchRef: string;
 }
 
 /** Reads one platform's issues and pull requests. Platform text is untrusted. */
 export interface RemoteWorkReader {
   readonly provider: RemoteProvider;
-  setExecutable(executable: string | undefined): void;
   list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]>;
   readIssue(ref: RemoteWorkRef, cwd: string): Promise<{ summary: RemoteWorkSummary; snapshot: RemoteWorkSnapshot }>;
   readPullRequest(ref: RemoteWorkRef, cwd: string): Promise<RemotePullRequest>;
@@ -71,10 +68,6 @@ export function buildRemoteWorkSnapshot(input: {
     });
   return {
     schema: REMOTE_WORK_SNAPSHOT_SCHEMA,
-    provider: input.ref.repository.provider,
-    host: input.ref.repository.host,
-    repositoryPath: input.ref.repository.path,
-    kind: input.ref.kind,
     number: input.ref.number,
     url: input.url,
     // Display text is trimmed here: the store keeps no surrounding whitespace.

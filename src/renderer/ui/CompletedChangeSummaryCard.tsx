@@ -8,6 +8,7 @@ import type {
 import {
   buildCompletedChangeSummary,
   hasNewerGitEvidence,
+  runChangedNothing,
   selectCompletedRunChangeSnapshot,
   type CompletedChangeFile,
   type CompletedChangeSummary
@@ -61,7 +62,10 @@ export function CompletedChangeSummaryPanel({
   }
 
   let captureStatus: CaptureStatus = 'LOADING';
-  if (!snapshot && capturePending) {
+  // A run that changed nothing says so, rather than listing the work that was there before it.
+  if (snapshot && runChangedNothing(run, gitSnapshots)) {
+    captureStatus = 'NO_CHANGES';
+  } else if (!snapshot && capturePending) {
     captureStatus = 'CAPTURE_PENDING';
   } else if (!snapshot) {
     captureStatus = 'NOT_CAPTURED';

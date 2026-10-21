@@ -98,7 +98,7 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
 }
 
 /** Where each pull request discussion sits: under its last line, at its file's top, or above the files. */
-export interface AnchoredDiscussions<T> {
+interface AnchoredDiscussions<T> {
   byLine: Map<string, T[]>;
   byFile: Map<string, T[]>;
   general: T[];

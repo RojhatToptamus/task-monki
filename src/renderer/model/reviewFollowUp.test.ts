@@ -66,7 +66,7 @@ describe('planReviewRequest', () => {
     ...finding(id, severity), state
   });
   const findings = [view('leak', 'MAJOR'), view('year', 'MINOR'), view('color', 'NIT'), view('test', 'MINOR', 'DISMISSED')];
-  const draft = { includedFindingIds: [], reviewRunId: 'review-2', comments: [], note: '' };
+  const draft = { includedFindingIds: [], includedDiscussionIds: [], reviewRunId: 'review-2', comments: [], note: '' };
   const current = { runId: 'review-2', findingsSendable: true, asksForChanges: true };
 
   it('sends blocking findings and the suggestions the person added in this review', () => {

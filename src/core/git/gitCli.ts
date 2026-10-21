@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 import { execFilePortable } from '../process/portableChildProcess';
 
@@ -20,6 +21,18 @@ export function configureGitExecutablePath(executable: string | undefined): void
 
 export function getGitExecutablePath(): string {
   return configuredGitExecutable ?? 'git';
+}
+
+/** No repository hook runs: hooks can live in the checked-out tree (a relative `core.hooksPath`). */
+export const GIT_HOOKS_OFF_ENV: NodeJS.ProcessEnv = {
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.hooksPath',
+  GIT_CONFIG_VALUE_0: os.devNull
+};
+
+/** A full Git object id, SHA-1 or SHA-256. */
+export function isGitObjectId(value: string | undefined): value is string {
+  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 }
 
 export async function git(

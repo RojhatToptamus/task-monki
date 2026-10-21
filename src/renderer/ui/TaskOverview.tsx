@@ -9,6 +9,7 @@ import { MoreHorizontal } from 'lucide-react';
 import type { TaskAttachmentRecord } from '../../shared/attachments';
 import type { RemoteWorkSnapshot } from '../../shared/remoteWork';
 import type { RemoteSourceView } from '../model/remoteWork';
+import type { Tone } from '../model/viewTypes';
 import { displayApprovalCommand, isWithinWorktree } from '../model/approvalCommand';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
@@ -41,9 +42,27 @@ export interface SlotAction {
   reason?: string;
 }
 
+export interface SlotFact {
+  text: string;
+  /** Only an unresolved fact takes a tone; the rest stay muted. */
+  tone?: Tone;
+}
+
+/** The facts the step turns on, as plain words: the Now panel's one treatment for every owner. */
+export function SlotFacts({ facts, label }: { facts: readonly SlotFact[]; label?: string }) {
+  return (
+    <ul className="tm-facts" aria-label={label}>
+      {facts.map((fact) => (
+        <li key={fact.text} className={`tm-facts__item${fact.tone ? ` tm-facts__item--${fact.tone}` : ''}`}>{fact.text}</li>
+      ))}
+    </ul>
+  );
+}
+
 /** Headline, explanation and actions for an owner that has no surface of its own. */
 export function SlotContent({
   headline,
+  facts = [],
   detail,
   meta,
   reported,
@@ -52,6 +71,8 @@ export function SlotContent({
   children
 }: {
   headline: string;
+  /** What the step turns on, in the finishing panel's treatment. */
+  facts?: readonly SlotFact[];
   detail?: ReactNode;
   /** A quiet trailing fact, such as when the step happened. */
   meta?: string;
@@ -66,9 +87,13 @@ export function SlotContent({
 }) {
   return (
     <>
-      <h3 className="tm-slot__headline">{headline}</h3>
-      {detail ? <p className="tm-slot__detail">{detail}</p> : null}
-      {meta ? <p className="tm-slot__meta">{meta}</p> : null}
+      {/* The title and what it turns on read as one group; the rest of the panel stands apart from it. */}
+      <div className="tm-slot__head">
+        <h3 className="tm-slot__headline">{headline}</h3>
+        {facts.length > 0 ? <SlotFacts facts={facts} /> : null}
+        {detail ? <p className="tm-slot__detail">{detail}</p> : null}
+        {meta ? <p className="tm-slot__meta">{meta}</p> : null}
+      </div>
       {reported?.source ? (
         <ReportedQuote source={reported.source}>{reported.text}</ReportedQuote>
       ) : reported ? (
@@ -199,26 +224,28 @@ export function InteractionDecision({
 
   return (
     <DecisionSlot>
-      <h3 className="tm-slot__headline">{interactionHeadline(interaction, agentName)}</h3>
-      {subject ? (
-        <code id={subjectId} className="tm-slot__subject">
-          {subject}
-        </code>
-      ) : null}
-      {outsideDirectory ? (
-        <p className="tm-slot__reported">
-          <span>Runs in</span> <code className="tm-slot__code">{outsideDirectory}</code>
-        </p>
-      ) : null}
-      {responding ? (
-        <p className="tm-slot__detail">Your answer was sent. Waiting for the agent to confirm it.</p>
-      ) : (
-        interaction.policyWarnings.map((warning) => (
-          <p key={warning} className="tm-slot__detail tm-slot__detail--warning">
-            {warning}
+      <div className="tm-slot__head">
+        <h3 className="tm-slot__headline">{interactionHeadline(interaction, agentName)}</h3>
+        {subject ? (
+          <code id={subjectId} className="tm-slot__subject">
+            {subject}
+          </code>
+        ) : null}
+        {outsideDirectory ? (
+          <p className="tm-slot__reported">
+            <span>Runs in</span> <code className="tm-slot__code">{outsideDirectory}</code>
           </p>
-        ))
-      )}
+        ) : null}
+        {responding ? (
+          <p className="tm-slot__detail">Your answer was sent. Waiting for the agent to confirm it.</p>
+        ) : (
+          interaction.policyWarnings.map((warning) => (
+            <p key={warning} className="tm-slot__detail tm-slot__detail--warning">
+              {warning}
+            </p>
+          ))
+        )}
+      </div>
       {responding ? null : (
         <div className="tm-slot__actions">
           {inline.deny ? (
@@ -337,23 +364,20 @@ export function OverviewRequest({
   const overflowing = useClampOverflow(body, expanded, prompt);
   const quoteOverflowing = useClampOverflow(quote, expanded, quoted);
   const long = overflowing || quoteOverflowing || expanded;
-  return (
-    <OverviewSection
-      title="Request"
-      aside={
-        long ? (
-          <button
-            type="button"
-            className="tm-osection__link"
-            aria-expanded={expanded}
-            aria-controls={bodyId}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {expanded ? 'Show less' : 'Show full request'}
-          </button>
-        ) : undefined
-      }
+  // Expanding works in place, so its control sits under the text it opens, not in the head with links to other tabs.
+  const toggle = long ? (
+    <button
+      type="button"
+      className="tm-orequest__more"
+      aria-expanded={expanded}
+      aria-controls={bodyId}
+      onClick={() => setExpanded((value) => !value)}
     >
+      {expanded ? 'Show less' : 'Show full request'}
+    </button>
+  ) : null;
+  return (
+    <OverviewSection title="Request">
       {source && linked ? (
         <p className="tm-orequest__source">
           <a href={source.url} target="_blank" rel="noreferrer">{source.reference}</a>
@@ -363,7 +387,7 @@ export function OverviewRequest({
       {/* The platform's text, quoted and attributed: other people wrote it. */}
       {quoted ? (
         <figure className={`tm-oresult__report tm-orequest__quote${expanded ? ' tm-orequest__quote--expanded' : ''}`}>
-          <figcaption>{snapshot?.author ? `@${snapshot.author}` : source?.providerName}</figcaption>
+          <figcaption>{snapshot?.author ?? source?.providerName}</figcaption>
           {/* Written for the platform, which renders it: markdown here too, its HTML read as the words it shows. */}
           <blockquote ref={quote} id={source && !prompt ? bodyId : undefined}><MessageMarkdown text={displayPlatformText(quoted)} /></blockquote>
         </figure>
@@ -377,6 +401,7 @@ export function OverviewRequest({
           {prompt}
         </p>
       ) : null}
+      {toggle}
       {attachments.length > 0 ? (
         <ul className="tm-orequest__attachments" aria-label="Task attachments">
           {attachments.map((attachment) => (

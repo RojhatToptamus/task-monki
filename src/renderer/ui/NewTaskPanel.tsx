@@ -30,6 +30,7 @@ import type {
   RemoteWorkSummary,
   Repository
 } from '../../shared/contracts';
+import { remoteWorkLabel, remoteWorkNoun } from '../../shared/contracts';
 import {
   type AttachmentDraftSnapshot,
   type ClipboardAttachmentImage,
@@ -66,7 +67,7 @@ import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
 import { RemoteWorkFields } from './RemoteWorkFields';
-import { defaultRemoteProvider, remoteWorkLabel } from '../model/remoteWork';
+import { defaultRemoteProvider } from '../model/remoteWork';
 
 /** Where a new task starts: a description, an issue, a pull request, or a local checkout. */
 type TaskSource = 'new' | 'issue' | 'pull' | 'checkout';
@@ -161,11 +162,10 @@ export function NewTaskPanel({
   const [remoteRepository, setRemoteRepository] = useState<RemoteRepositoryRef>();
   const [remoteSelected, setRemoteSelected] = useState<RemoteWorkSummary>();
   const [remoteRefresh, setRemoteRefresh] = useState(0);
-  const [remoteListing, setRemoteListing] = useState<{ key: string; data?: RemoteWorkListing; error?: string }>();
-  // Text written for an issue or pull request stays apart from the New work draft.
-  const [issueTitle, setIssueTitle] = useState<string>();
+  const [remoteListing, setRemoteListing] = useState<{ scope: string; query: string; data?: RemoteWorkListing; error?: string }>();
+  // Text written for an issue or pull request stays apart from the New work draft; choosing another item clears it.
+  const [remoteTitle, setRemoteTitle] = useState<string>();
   const [issuePrompt, setIssuePrompt] = useState('');
-  const [pullTitle, setPullTitle] = useState<string>();
   const [checkoutPath, setCheckoutPath] = useState('');
   const [checkoutQuery, setCheckoutQuery] = useState('');
   const [checkoutRefresh, setCheckoutRefresh] = useState(0);
@@ -369,52 +369,50 @@ export function NewTaskPanel({
     );
     return () => { canceled = true; };
   }, [importing, selectedRepositoryId, onListExistingWorktrees, checkoutRefresh]);
-  const remoteRequestKey = remoteKind && selectedRepositoryId
-    ? JSON.stringify([selectedRepositoryId, remoteKind, remoteRepository ?? null, remoteQuery.trim()]) : undefined;
-  const currentRemoteListing = remoteListing?.key === remoteRequestKey ? remoteListing : undefined;
-  // While the next query loads, the last results for the same repository and kind stay in place.
-  const scopeOf = (key: string | undefined) => (key ? JSON.stringify((JSON.parse(key) as unknown[]).slice(0, 3)) : undefined);
-  const shownRemoteListing = currentRemoteListing ??
-    (remoteListing?.data && scopeOf(remoteListing.key) === scopeOf(remoteRequestKey) ? remoteListing : undefined);
+  // The repository, kind and remote a listing is for; the query narrows it.
+  const remoteScope = remoteKind && selectedRepositoryId
+    ? JSON.stringify([selectedRepositoryId, remoteKind, remoteRepository ?? null]) : undefined;
+  const remoteSearch = remoteQuery.trim();
+  const currentRemoteListing = remoteListing?.scope === remoteScope && remoteListing?.query === remoteSearch ? remoteListing : undefined;
+  // While the next query loads, the last results for the same scope stay in place.
+  const shownRemoteListing = currentRemoteListing ?? (remoteListing?.data && remoteListing.scope === remoteScope ? remoteListing : undefined);
   useEffect(() => {
-    if (!remoteKind || !selectedRepositoryId || !onListRemoteWork || !remoteRequestKey) return;
+    if (!remoteKind || !selectedRepositoryId || !onListRemoteWork || !remoteScope) return;
     let canceled = false;
     const request: ListRemoteWorkRequest = {
       repositoryId: selectedRepositoryId, kind: remoteKind,
       ...(remoteRepository ? { remote: remoteRepository } : {}),
-      ...(remoteQuery.trim() ? { query: remoteQuery.trim() } : {})
+      ...(remoteSearch ? { query: remoteSearch } : {})
     };
     // Typing searches the platform; a short pause keeps one request per word.
     const timer = window.setTimeout(() => {
       void onListRemoteWork(request).then(
         (data) => {
           if (canceled) return;
-          setRemoteListing({ key: remoteRequestKey, data });
+          setRemoteListing({ scope: remoteScope, query: remoteSearch, data });
           // A pasted link or number names one item: choose it.
           if (data.exact && data.items.length === 1) chooseRemote(data.items[0]);
         },
         (caught: unknown) => {
-          if (!canceled) setRemoteListing({ key: remoteRequestKey, error: caught instanceof Error ? caught.message : 'Could not reach the platform.' });
+          if (!canceled) setRemoteListing({ scope: remoteScope, query: remoteSearch, error: caught instanceof Error ? caught.message : 'Could not reach the platform.' });
         }
       );
-    }, remoteQuery.trim() ? 300 : 0);
+    }, remoteSearch ? 300 : 0);
     return () => { canceled = true; window.clearTimeout(timer); };
-  }, [remoteKind, selectedRepositoryId, remoteRepository, remoteQuery, remoteRequestKey, onListRemoteWork, remoteRefresh]);
+  }, [remoteKind, selectedRepositoryId, remoteRepository, remoteSearch, remoteScope, onListRemoteWork, remoteRefresh]);
   const remoteProvider = shownRemoteListing?.data?.remote?.provider ?? defaultRemoteProvider(selectedRepository) ?? 'GITHUB';
-  const effectiveIssueTitle = issueTitle ?? remoteSelected?.title ?? '';
-  const effectivePullTitle = pullTitle ?? remoteSelected?.title ?? '';
+  const effectiveRemoteTitle = remoteTitle ?? remoteSelected?.title ?? '';
   // A list that could not be read says why in place; the footer adds nothing to it.
   const remoteFooterQuiet = !remoteSelected && Boolean(currentRemoteListing?.error ?? currentRemoteListing?.data?.unavailable);
   const remoteDisabledReason = !remoteKind ? undefined
-    : !remoteSelected ? `Choose ${remoteKind === 'ISSUE' ? 'an issue' : `a ${remoteWorkLabel(remoteProvider, remoteKind).toLowerCase()}`}.`
+    : !remoteSelected ? `Choose ${remoteKind === 'ISSUE' ? 'an issue' : `a ${remoteWorkNoun(remoteProvider, remoteKind)}`}.`
     : remoteSelected.existingTaskId ? undefined
-    : !(remoteKind === 'ISSUE' ? effectiveIssueTitle : effectivePullTitle).trim() ? 'Enter a title.' : undefined;
+    : !effectiveRemoteTitle.trim() ? 'Enter a title.' : undefined;
   const composerLocked =
     Boolean(disabled) || isSubmitting || isRefining || creationOutcomeUnknown;
   const chooseRemote = (item: RemoteWorkSummary | undefined) => {
     setRemoteSelected(item);
-    setIssueTitle(undefined);
-    setPullTitle(undefined);
+    setRemoteTitle(undefined);
     setError(undefined);
   };
 
@@ -521,7 +519,7 @@ export function NewTaskPanel({
         await onOpenPullRequest({
           repositoryId: selectedRepositoryId,
           pullRequest: remoteSelected.ref,
-          title: effectivePullTitle,
+          title: effectiveRemoteTitle,
           runtimeId: runtimeId || undefined,
           agentSettings: {
             ...defaultAgentSettings,
@@ -581,7 +579,7 @@ export function NewTaskPanel({
       try {
         await onCreate({
           ...(source === 'issue' && remoteSelected
-            ? { title: effectiveIssueTitle, prompt: issuePrompt, issue: remoteSelected.ref }
+            ? { title: effectiveRemoteTitle, prompt: issuePrompt, issue: remoteSelected.ref }
             : { title, prompt }),
           agentProfileId,
           repositoryId: selectedRepositoryId,
@@ -921,10 +919,10 @@ export function NewTaskPanel({
             ) : null}
             {source === 'pull' && remoteSelected && !remoteSelected.existingTaskId ? (
               <div className="field">
-                <span className="field__header"><label htmlFor="pull-task-title">Title</label>{effectivePullTitle !== remoteSelected.title ?
-                  <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setPullTitle(undefined)}>Use {remoteWorkLabel(remoteProvider, 'PULL_REQUEST').toLowerCase()} title</button> : null}</span>
-                <input id="pull-task-title" value={effectivePullTitle} disabled={composerLocked} placeholder="Short imperative summary"
-                  onChange={(event) => setPullTitle(event.target.value)} />
+                <span className="field__header"><label htmlFor="pull-task-title">Title</label>{effectiveRemoteTitle !== remoteSelected.title ?
+                  <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setRemoteTitle(undefined)}>Use {remoteWorkNoun(remoteProvider, 'PULL_REQUEST')} title</button> : null}</span>
+                <input id="pull-task-title" value={effectiveRemoteTitle} disabled={composerLocked} placeholder="Short imperative summary"
+                  onChange={(event) => setRemoteTitle(event.target.value)} />
               </div>
             ) : null}
             {importing ? (
@@ -949,13 +947,13 @@ export function NewTaskPanel({
             ) : null}
             {source === 'new' || (source === 'issue' && remoteSelected && !remoteSelected.existingTaskId) ? <>
             <div className="field">
-              <span className="field__header"><label htmlFor="task-title">Title</label>{source === 'issue' && remoteSelected && effectiveIssueTitle !== remoteSelected.title ?
-                <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setIssueTitle(undefined)}>Use issue title</button> : null}</span>
+              <span className="field__header"><label htmlFor="task-title">Title</label>{source === 'issue' && remoteSelected && effectiveRemoteTitle !== remoteSelected.title ?
+                <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setRemoteTitle(undefined)}>Use issue title</button> : null}</span>
               <input
                 id="task-title"
                 ref={titleInputRef}
-                value={source === 'issue' ? effectiveIssueTitle : title}
-                onChange={(event) => source === 'issue' ? setIssueTitle(event.target.value) : updateTitle(event.target.value)}
+                value={source === 'issue' ? effectiveRemoteTitle : title}
+                onChange={(event) => source === 'issue' ? setRemoteTitle(event.target.value) : updateTitle(event.target.value)}
                 placeholder="Short imperative summary"
                 disabled={composerLocked}
               />
@@ -1126,7 +1124,7 @@ export function NewTaskPanel({
               aria-busy={isSubmitting}
               aria-keyshortcuts="Meta+Enter Control+Enter"
               aria-label={
-                importing ? 'Import' : source === 'pull' ? `Open ${remoteWorkLabel(remoteProvider, 'PULL_REQUEST').toLowerCase()}` : selectedRepository
+                importing ? 'Import' : source === 'pull' ? `Open ${remoteWorkNoun(remoteProvider, 'PULL_REQUEST')}` : selectedRepository
                   ? `Create task in ${selectedRepository.name}`
                   : 'Create task'
               }

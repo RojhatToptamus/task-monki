@@ -56,7 +56,7 @@ describe('assertReviewRequestRecord', () => {
   it('accepts a pull request discussion only with its platform, identity and text, and a place it can name', () => {
     const discussion = {
       number: 3, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_kwDOA', author: 'alice',
-      path: 'feature.ts', side: 'NEW', line: 4, endLine: 6, text: 'Handle a null layout.', url: 'https://github.com/acme/widgets/pull/9#discussion_r1'
+      path: 'feature.ts', side: 'NEW', line: 4, endLine: 6, text: 'Handle a null layout.'
     } as const;
     const withItem = (item: object) => ({ ...request, items: [...request.items, item] });
     expect(() => assertReviewRequestRecord(withItem(discussion))).not.toThrow();
@@ -66,7 +66,6 @@ describe('assertReviewRequestRecord', () => {
       { ...discussion, provider: 'BITBUCKET' },
       { ...discussion, discussionId: ' ' },
       { ...discussion, text: '' },
-      { ...discussion, url: 'javascript:alert(1)' },
       { ...discussion, side: 'LEFT' },
       { ...discussion, path: undefined },
       { ...discussion, title: 'A finding field' }

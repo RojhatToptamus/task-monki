@@ -26,6 +26,7 @@ const draft: TaskReviewDraft = {
     { id: 'c4', path: 'README.md', side: 'NEW', text: 'Mention the new route.' }
   ],
   reviewRunId: 'review-1',
+  includedDiscussionIds: [],
   includedFindingIds: ['year'],
   note: 'Keep the footer change minimal.'
 };
@@ -50,7 +51,7 @@ describe('SqliteTaskStore review drafts', () => {
       .rejects.toThrow('Keep the review note to at most 8000 characters.');
     await expect(reopened.tasks.saveTaskReviewDraft('missing', draft)).rejects.toThrow('Task not found.');
 
-    await reopened.tasks.saveTaskReviewDraft(task.id, { comments: [], includedFindingIds: [], note: '  ' });
+    await reopened.tasks.saveTaskReviewDraft(task.id, { comments: [], includedFindingIds: [], includedDiscussionIds: [], note: '  ' });
     expect((await reopened.tasks.getTaskDetail(task.id)).task.reviewDraft).toBeUndefined();
     await reopened.close();
   });

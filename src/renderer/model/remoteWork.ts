@@ -1,22 +1,14 @@
 import {
   formatRemoteWorkNumber,
+  formatTaskRemoteReference,
   remoteProviderName,
+  sameRemoteRepository,
   selectRemoteRepositories,
   type RemoteProvider,
   type RemoteWorkKind,
   type Repository,
   type Task
 } from '../../shared/contracts';
-import { formatShortAge } from './timeAgo';
-
-/** What the platform calls the item, as a label: Issue, Pull request or Merge request. */
-export function remoteWorkLabel(provider: RemoteProvider, kind: RemoteWorkKind): string {
-  return kind === 'ISSUE' ? 'Issue' : provider === 'GITLAB' ? 'Merge request' : 'Pull request';
-}
-
-export function formatRemoteWorkDate(iso: string): string | undefined {
-  return formatShortAge(iso);
-}
 
 /** The platform of a checkout's default remote, from its recorded remotes. */
 export function defaultRemoteProvider(repository: Pick<Repository, 'remotes'> | undefined): RemoteProvider | undefined {
@@ -24,7 +16,7 @@ export function defaultRemoteProvider(repository: Pick<Repository, 'remotes'> | 
 }
 
 export interface RemoteSourceView {
-  /** `acme/widgets#12`, or `!12` on GitLab. */
+  /** `#12` (`!12` on GitLab) in its own repository; `acme/widgets#12` from another. */
   reference: string;
   url: string;
   title: string;
@@ -33,11 +25,17 @@ export interface RemoteSourceView {
 }
 
 /** The issue or pull request a task was opened from, for display. */
-export function remoteSourceView(task: Pick<Task, 'remoteSource'>): RemoteSourceView | undefined {
+export function remoteSourceView(
+  task: Pick<Task, 'remoteSource'>,
+  repository?: Pick<Repository, 'remotes'>
+): RemoteSourceView | undefined {
   const source = task.remoteSource;
   if (!source) return undefined;
+  // In its own repository a number names it, as the platform writes it there.
+  const own = Boolean(repository) && selectRemoteRepositories(repository!.remotes).some((remote) =>
+    sameRemoteRepository(remote, { provider: source.provider, host: source.host, path: source.repositoryPath }));
   return {
-    reference: `${source.repositoryPath}${formatRemoteWorkNumber(source.provider, source.kind, source.number)}`,
+    reference: own ? formatRemoteWorkNumber(source.provider, source.kind, source.number) : formatTaskRemoteReference(source),
     url: source.url,
     title: source.title,
     providerName: remoteProviderName(source.provider),

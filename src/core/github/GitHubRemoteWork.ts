@@ -7,6 +7,7 @@ import {
   type RemoteWorkRef,
   type RemoteWorkSummary
 } from '../../shared/remoteWork';
+import { isGitObjectId } from '../git/gitCli';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 import {
   RemoteWorkError,
@@ -75,10 +76,10 @@ export class GitHubRemoteWork implements RemoteWorkReader {
     this.executable = executable ?? 'gh';
   }
 
-  async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {
+  async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, words: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {
     const [owner, name] = repository.path.split('/') as [string, string];
     const fields = kind === 'ISSUE' ? LIST_ISSUE_FIELDS : LIST_PULL_FIELDS;
-    const words = text?.trim().slice(0, REMOTE_WORK_LIMITS.query);
+    // The service passes the search words trimmed and bounded.
     if (words) {
       // Search qualifiers in the words can widen the query, so results are filtered to this repository.
       const data = await this.graphql<{ search?: { nodes?: Array<GitHubNode | null> } }>(repository, cwd,
@@ -102,22 +103,14 @@ export class GitHubRemoteWork implements RemoteWorkReader {
 
   async readIssue(ref: RemoteWorkRef, cwd: string) {
     const node = await this.readItem(ref, cwd, ISSUE_FIELDS);
-    const capturedAt = new Date().toISOString();
-    return {
-      summary: summary(ref.repository, 'ISSUE', node),
-      snapshot: buildRemoteWorkSnapshot({
-        ref, url: requireUrl(ref, node), title: node.title ?? '', state: node.state ?? 'UNKNOWN',
-        author: node.author?.login, labels: labels(node), body: node.body,
-        comments: comments(node), commentCount: node.comments?.totalCount ?? 0, capturedAt
-      })
-    };
+    return { summary: summary(ref.repository, 'ISSUE', node), snapshot: snapshot(ref, node, node.state ?? 'UNKNOWN') };
   }
 
   async readPullRequest(ref: RemoteWorkRef, cwd: string): Promise<RemotePullRequest> {
     const node = await this.readItem(ref, cwd, PULL_FIELDS);
     const headSha = node.headRefOid;
     const baseSha = node.baseRefOid;
-    if (!node.headRefName || !node.baseRefName || !isObjectId(headSha) || !isObjectId(baseSha) ||
+    if (!node.headRefName || !node.baseRefName || !isGitObjectId(headSha) || !isGitObjectId(baseSha) ||
         typeof node.isCrossRepository !== 'boolean') {
       throw new RemoteWorkError('FAILED', 'GitHub did not report the pull request’s branches.');
     }
@@ -125,19 +118,14 @@ export class GitHubRemoteWork implements RemoteWorkReader {
       ? normalizeRepositoryPath('GITHUB', node.headRepository.nameWithOwner) : undefined;
     return {
       summary: summary(ref.repository, 'PULL_REQUEST', node),
-      snapshot: buildRemoteWorkSnapshot({
-        ref, url: requireUrl(ref, node), title: node.title ?? '', state: pullState(node),
-        author: node.author?.login, labels: labels(node), body: node.body,
-        comments: comments(node), commentCount: node.comments?.totalCount ?? 0, capturedAt: new Date().toISOString()
-      }),
+      snapshot: snapshot(ref, node, pullState(node)),
       headRefName: node.headRefName,
       headSha,
       ...(headRepositoryPath ? { headRepositoryPath } : {}),
       crossRepository: node.isCrossRepository,
       baseRefName: node.baseRefName,
       baseSha,
-      baseIsMergeBase: false,
-      headFetchRef: `refs/pull/${ref.number}/head`
+      baseIsMergeBase: false
     };
   }
 
@@ -261,6 +249,15 @@ function pullState(node: GitHubNode): string {
   return node.merged || node.state === 'MERGED' ? 'MERGED' : node.state === 'CLOSED' ? 'CLOSED' : 'OPEN';
 }
 
+/** The captured text of an issue or a pull request: they differ only in the state read. */
+function snapshot(ref: RemoteWorkRef, node: GitHubNode, state: string) {
+  return buildRemoteWorkSnapshot({
+    ref, url: requireUrl(ref, node), title: node.title ?? '', state,
+    author: node.author?.login, labels: labels(node), body: node.body,
+    comments: comments(node), commentCount: node.comments?.totalCount ?? 0, capturedAt: new Date().toISOString()
+  });
+}
+
 function requireUrl(ref: RemoteWorkRef, node: GitHubNode): string {
   const expected = `https://${ref.repository.host}/${ref.repository.path}/${ref.kind === 'ISSUE' ? 'issues' : 'pull'}/${ref.number}`;
   if (node.number !== ref.number || node.url?.toLowerCase() !== expected.toLowerCase()) {
@@ -281,9 +278,6 @@ function comments(node: GitHubNode) {
   }] : []);
 }
 
-function isObjectId(value: string | undefined): value is string {
-  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
-}
 
 function notFound(repository: RemoteRepositoryRef): RemoteWorkError {
   return new RemoteWorkError('NOT_FOUND', `${repository.path} is not available on ${repository.host}.`);

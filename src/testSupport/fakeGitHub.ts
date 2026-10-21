@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git } from '../core/git/gitCli';
-import { writeNodeExecutable } from './fakeExecutable';
+import { writeFakeSsh, writeNodeExecutable } from './fakeExecutable';
 
 /** An issue or pull request the fake platform serves. */
 export interface FakeGitHubItem {
@@ -26,7 +26,6 @@ export interface FakeGitHubItem {
   isCrossRepository?: boolean;
   /** GitHub's review decision and merge state for `gh pr view`. */
   reviewDecision?: string;
-  mergeable?: string;
   mergeStateStatus?: string;
   /** Review feedback the GraphQL API reports. */
   reviewThreads?: FakeGitHubReviewThread[];
@@ -56,16 +55,6 @@ interface FakeGitHubState {
   viewer: string;
   signedIn: boolean;
   items: FakeGitHubItem[];
-  /** Repository merge settings by `owner/repo`; every method is allowed when absent. */
-  mergeSettings?: Record<string, FakeGitHubMergeSettings>;
-}
-
-export interface FakeGitHubMergeSettings {
-  mergeCommitAllowed: boolean;
-  squashMergeAllowed: boolean;
-  rebaseMergeAllowed: boolean;
-  deleteBranchOnMerge: boolean;
-  viewerDefaultMergeMethod: 'MERGE' | 'SQUASH' | 'REBASE';
 }
 
 export interface FakeGitHubCall {
@@ -92,7 +81,6 @@ export interface FakeGitHub {
   setItem(item: FakeGitHubItem): Promise<void>;
   /** The item as the fake holds it now, after any writes `gh` made. */
   item(owner: string, repo: string, number: number): Promise<FakeGitHubItem | undefined>;
-  setMergeSettings(owner: string, repo: string, settings: FakeGitHubMergeSettings): Promise<void>;
   setSignedIn(signedIn: boolean): Promise<void>;
   calls(): Promise<FakeGitHubCall[]>;
 }
@@ -105,15 +93,7 @@ export async function createFakeGitHub(rootDir: string): Promise<FakeGitHub> {
   await fs.mkdir(hostRoot, { recursive: true });
   const state: FakeGitHubState = { viewer: 'octo-tester', signedIn: true, items: [] };
   await writeState();
-  const sshCommand = await writeNodeExecutable(binDir, 'fake-ssh', `
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
-const command = process.argv[process.argv.length - 1];
-const match = /^(git-upload-pack|git-receive-pack) '?\\/?([^']+?)'?$/.exec(command);
-if (!match || match[2].split('/').includes('..')) { console.error('fake ssh: unexpected command ' + command); process.exit(128); }
-const result = spawnSync('git', [match[1].slice(4), path.join(${JSON.stringify(hostRoot)}, match[2])], { stdio: 'inherit' });
-process.exit(result.status ?? 1);
-`);
+  const sshCommand = await writeFakeSsh(binDir, hostRoot);
   const ghPath = await writeNodeExecutable(binDir, 'gh', fakeGhScript(statePath, logPath, hostRoot));
 
   async function writeState(): Promise<void> {
@@ -146,11 +126,6 @@ process.exit(result.status ?? 1);
     async item(owner, repo, number) {
       const current = JSON.parse(await fs.readFile(statePath, 'utf8')) as FakeGitHubState;
       return current.items.find((candidate) => candidate.owner === owner && candidate.repo === repo && candidate.number === number);
-    },
-    async setMergeSettings(owner, repo, settings) {
-      Object.assign(state, JSON.parse(await fs.readFile(statePath, 'utf8')) as FakeGitHubState);
-      state.mergeSettings = { ...state.mergeSettings, [`${owner}/${repo}`]: settings };
-      await writeState();
     },
     async setSignedIn(signedIn) {
       state.signedIn = signedIn;
@@ -255,8 +230,8 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   if (query.includes('squashMergeAllowed')) {
     const item = state.items.find((candidate) => candidate.kind === 'PULL_REQUEST' && candidate.owner === fields.owner &&
       candidate.repo === fields.name && candidate.number === Number(fields.number));
-    const settings = state.mergeSettings?.[fields.owner + '/' + fields.name] ??
-      { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true, deleteBranchOnMerge: false, viewerDefaultMergeMethod: 'MERGE' };
+    // Every method is allowed, merge commits by default.
+    const settings = { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true, deleteBranchOnMerge: false, viewerDefaultMergeMethod: 'MERGE' };
     out({ data: { repository: { ...settings, defaultBranchRef: { name: 'main' }, pullRequest: item
       ? { headRefName: item.headRefName, baseRefName: item.baseRefName ?? 'main', isCrossRepository: Boolean(item.isCrossRepository) } : null } } });
   }
@@ -318,7 +293,7 @@ const view = (item) => ({
   number: item.number, url: url(item), state: item.state ?? 'OPEN', isDraft: Boolean(item.isDraft),
   mergedAt: item.state === 'MERGED' ? '2026-10-02T00:00:00Z' : null, reviewDecision: item.reviewDecision ?? '', statusCheckRollup: [],
   headRefOid: item.headRefOid, headRefName: item.headRefName, baseRefName: item.baseRefName,
-  mergeable: item.mergeable ?? 'MERGEABLE', mergeStateStatus: item.mergeStateStatus ?? (item.isDraft ? 'DRAFT' : 'CLEAN'), title: item.title,
+  mergeable: 'MERGEABLE', mergeStateStatus: item.mergeStateStatus ?? (item.isDraft ? 'DRAFT' : 'CLEAN'), title: item.title,
   headRepository: { name: (item.headRepository ?? repoOf(item)).split('/')[1] },
   headRepositoryOwner: { login: (item.headRepository ?? repoOf(item)).split('/')[0] },
   isCrossRepository: Boolean(item.isCrossRepository)

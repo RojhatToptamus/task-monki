@@ -131,6 +131,8 @@ export function buildTaskActivityLedger(input: TaskActivityInput): TaskActivityI
   return built.map((item) => stripOrder(provider === 'GITLAB' ? inGitLabWords(item) : item));
 }
 
+const PULL_REQUEST_ROW = /^(?:PR #\d+|Pull request)$/u;
+
 /** A GitLab task's delivery history in GitLab's words. */
 function inGitLabWords<T extends TaskActivityItem>(item: T): T {
   if (item.category !== 'delivery' && item.actor !== 'GitHub') return item;
@@ -141,7 +143,8 @@ function inGitLabWords<T extends TaskActivityItem>(item: T): T {
     ...(item.evidence ? {
       evidence: {
         summary: deliveryWords(item.evidence.summary, 'GITLAB'),
-        ...(item.evidence.rows ? { rows: item.evidence.rows.map((row) => ({ ...row, label: deliveryWords(row.label, 'GITLAB'), value: deliveryWords(row.value, 'GITLAB') })) } : {})
+        // Check names are the platform's own text; only the pull request row is Task Monki's.
+        ...(item.evidence.rows ? { rows: item.evidence.rows.map((row) => PULL_REQUEST_ROW.test(row.label) ? { ...row, label: deliveryWords(row.label, 'GITLAB') } : row) } : {})
       }
     } : {})
   };
@@ -779,7 +782,7 @@ function ciRollupItem(
 
   switch (status) {
     case 'PENDING':
-      return item(event, 'delivery', 'GitHub', 'Checks running', undefined, 'action', {
+      return item(event, 'delivery', 'GitHub', 'Checks pending', undefined, 'action', {
         replaceKey
       });
     case 'PASSING':

@@ -101,12 +101,15 @@ Expected UI:
 
 ### Starting agent review
 
-1. User starts agent review from Review, or directly from an idle imported task
-   in In Progress before its first coding run.
+1. User starts agent review from Review or In Review (Review with a pull
+   request open, where the review leaves the phase as it is), or directly from
+   an idle imported task, or a pull request opened as a task, in In Progress
+   before its first coding run.
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
 3. The current source run must be the latest successfully completed
    implementation-side run. Failed and superseded runs are rejected.
-   Imported work can omit the source run before its first implementation.
+   Imported work, and a pull request opened as a task, can omit the source run
+   before its first implementation.
    Git and runtime admission checks must pass. Review still creates no primary
    coding session.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
