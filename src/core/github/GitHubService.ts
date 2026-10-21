@@ -34,6 +34,7 @@ import {
   parseGitHubMergeOptions
 } from './GitHubPullRequestActions';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
+import { graphQlQueryArgument } from './gitHubGraphQl';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 import { startEach, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
 import { UNTRUSTED_CHECKOUT_GIT_ENV, externalTargetBranch } from '../remote/RemoteCheckout';
@@ -449,7 +450,7 @@ export class GitHubService implements PullRequestDelivery {
   private async pullRequestQuery<T>(cwd: string, location: GitHubLocation, query: string, extra: string[] = []): Promise<T | undefined> {
     const result = await this.exec([
       'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${query}`, '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`, ...extra
+      '-f', graphQlQueryArgument(query), '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`, ...extra
     ], cwd);
     return parseJson<{ data?: T }>(result.stdout, {}).data;
   }
@@ -497,7 +498,7 @@ export class GitHubService implements PullRequestDelivery {
     const location = requireGitHubLocation(address);
     await this.exec([
       'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${GITHUB_THREAD_REPLY_MUTATION}`, '-f', `threadId=${discussionId}`, '-F', 'body=@-'
+      '-f', graphQlQueryArgument(GITHUB_THREAD_REPLY_MUTATION), '-f', `threadId=${discussionId}`, '-F', 'body=@-'
     ], worktree.worktreePath, 60_000, [], body);
   }
 
@@ -505,7 +506,7 @@ export class GitHubService implements PullRequestDelivery {
     const location = requireGitHubLocation(address);
     await this.exec([
       'api', 'graphql', '--hostname', location.host,
-      '-f', `query=${resolved ? GITHUB_RESOLVE_THREAD_MUTATION : GITHUB_UNRESOLVE_THREAD_MUTATION}`, '-f', `threadId=${discussionId}`
+      '-f', graphQlQueryArgument(resolved ? GITHUB_RESOLVE_THREAD_MUTATION : GITHUB_UNRESOLVE_THREAD_MUTATION), '-f', `threadId=${discussionId}`
     ], worktree.worktreePath, 60_000);
   }
 

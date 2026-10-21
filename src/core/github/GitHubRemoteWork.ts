@@ -9,6 +9,7 @@ import {
 } from '../../shared/remoteWork';
 import { isGitObjectId } from '../git/gitCli';
 import { execFileOwnedPortable } from '../process/ownedProcess';
+import { graphQlQueryArgument } from './gitHubGraphQl';
 import {
   RemoteWorkError,
   cliExitCode,
@@ -152,7 +153,7 @@ export class GitHubRemoteWork implements RemoteWorkReader {
     strings: Record<string, string>,
     integers: Record<string, number> = {}
   ): Promise<T> {
-    const argv = ['api', 'graphql', '--hostname', repository.host, '-f', `query=${query}`];
+    const argv = ['api', 'graphql', '--hostname', repository.host, '-f', graphQlQueryArgument(query)];
     for (const [key, value] of Object.entries(strings)) argv.push('-f', `${key}=${value}`);
     for (const [key, value] of Object.entries(integers)) argv.push('-F', `${key}=${Math.trunc(value)}`);
     let stdout: string;

@@ -203,6 +203,10 @@ describe('GitHubService pull request feedback', () => {
     expect(feedback?.discussions.some((discussion) => discussion.id === 'PRRT_0')).toBe(false);
     expect(feedback?.truncated).toBe(true);
     expect((await github.calls()).filter((call) => call.args.includes('after=100'))).toHaveLength(1);
+    // A gh installed as a Windows batch shim runs through cmd.exe, which ends an argument at a line break.
+    const queries = (await github.calls()).flatMap((call) => call.args.filter((arg) => arg.startsWith('query=')));
+    expect(queries.length).toBeGreaterThan(1);
+    expect(queries.filter((arg) => /[\r\n]/.test(arg))).toEqual([]);
   });
 });
 
