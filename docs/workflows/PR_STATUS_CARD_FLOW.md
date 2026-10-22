@@ -1364,7 +1364,11 @@ a worktree with nothing of its own) or fixes not pushed ("Changes not pushed");
 a base that moved ("Merge blocked", with "Conflicts with main" or "Behind
 main"), failed checks, requested changes, then a merge the platform blocks for
 another reason. Push update keeps an open pull request open in the projection
-while it runs, so the task never reads as having none.
+while it runs, so the task never reads as having none. Conflicts, failed
+checks, a blocked merge and a refused push raise the task's health to error; a
+reading that clears one (the conflicts committed, checks passing, the merge no
+longer blocked, a push that landed) lowers it to what still stands, so a
+delivery that recovered never reads "Delivery needs attention".
 
 A pull request opened as a task that merges on the platform completes the task
 under the merge policy between turns, In progress included; a run in flight

@@ -913,6 +913,28 @@ describe('projection reducer', () => {
     expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
   });
 
+  it('lowers an error once the delivery problem behind it clears, and keeps one that still stands', () => {
+    const read = (projection: ReturnType<typeof createInitialProjection>, type: DomainEvent['type'], payload: unknown) =>
+      reduceProjection(projection, createEvent(type, payload));
+    // A merge Task Monki finished: the conflicts end, then the platform no longer blocks it.
+    const conflicted = { ...createInitialProjection(now), health: 'ERROR' as const, git: 'CONFLICTED' as const, merge: 'BLOCKED' as const };
+    const merged = read(conflicted, 'GIT_SNAPSHOT_CAPTURED', { status: 'COMMITTED_UNPUSHED' });
+    expect(merged.health).toBe('ERROR');
+    expect(read(merged, 'MERGE_SNAPSHOT_CAPTURED', { status: 'MERGEABLE' }).health).toBe('HEALTHY');
+
+    // Checks passing on a re-run clear only their own error: the refused push still stands, until a push lands.
+    const failed = read(read({ ...createInitialProjection(now), ciChecks: 'FAILING' as const, health: 'ERROR' as const },
+      'BRANCH_PUBLISH_FAILED', { error: 'Remote branch has newer commits' }), 'CI_ROLLUP_CAPTURED', { status: 'PASSING' });
+    expect(failed.health).toBe('ERROR');
+    const pushed = read(failed, 'BRANCH_PUBLISHED', {});
+    expect(pushed.health).toBe('HEALTHY');
+    expect(pushed.findings.map((finding) => finding.code)).not.toContain('BRANCH_PUBLISH_FAILED');
+
+    // A failed turn keeps the task in error whatever the delivery readings say.
+    const failedTurn = { ...createInitialProjection(now), agentRun: 'FAILED' as const, ciChecks: 'FAILING' as const, health: 'ERROR' as const };
+    expect(read(failedTurn, 'CI_ROLLUP_CAPTURED', { status: 'PASSING' }).health).toBe('ERROR');
+  });
+
   it('records merged snapshots without treating incomplete event data as completion evidence', () => {
     const mergeEvent = createEvent('MERGE_SNAPSHOT_CAPTURED', { status: 'MERGED' });
     const mergePolicyTask = applyEventToState(

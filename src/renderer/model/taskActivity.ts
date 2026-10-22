@@ -620,6 +620,10 @@ function gitSnapshotItem(
     case 'PUSHED':
       return undefined;
     case 'CONFLICTED':
+      // Edits while the conflict stands, such as an agent resolving it, are the same conflict.
+      if (previousStatus === 'CONFLICTED') {
+        return undefined;
+      }
       return item(
         event,
         'git',

@@ -441,6 +441,24 @@ describe('task activity model', () => {
     ]);
   });
 
+  it('names one conflict once, however often its files are edited before it ends', () => {
+    const conflicted = (fingerprint: string) => event('GIT_SNAPSHOT_CAPTURED', { status: 'CONFLICTED', dirtyFingerprint: fingerprint, conflictedCount: 1 });
+    const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
+      task: taskFixture(),
+      events: [
+        conflicted('merge-started'),
+        // The agent resolves the file; Git counts it as conflicted until the merge is committed.
+        conflicted('agent-resolved'),
+        event('GIT_SNAPSHOT_CAPTURED', { status: 'COMMITTED_UNPUSHED', dirtyFingerprint: 'merged', aheadCount: 2 }),
+        conflicted('next-conflict')
+      ],
+      limit: 10
+    });
+
+    expect(view.items.map((item) => item.title).filter((title) => title === 'Git conflicts detected')).toHaveLength(2);
+  });
+
   it('does not repeat pushed Git evidence when branch publication already explains delivery', () => {
     const view = buildOverviewTaskActivityViewModel({
       provider: 'GITHUB',

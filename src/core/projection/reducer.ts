@@ -519,7 +519,7 @@ export function reduceProjection(
         health:
           gitStatus === 'CONFLICTED' || gitStatus === 'UNAVAILABLE'
             ? 'ERROR'
-            : base.health,
+            : healthAfterReading(base, { git: gitStatus ?? base.git }),
         summary: gitSnapshotSummary(base, agentReview, gitStatus),
         findings,
         updatedAt: event.receivedAt
@@ -570,8 +570,10 @@ export function reduceProjection(
         ...base,
         branchPublication: 'PUSHED',
         git: 'PUSHED',
+        health: healthAfterReading(base, { branchPublication: 'PUSHED', git: 'PUSHED' }),
         summary: 'Task branch was pushed to the remote.',
-        findings,
+        // A push that landed ends the failure an earlier one recorded.
+        findings: findings.filter((finding) => finding.code !== 'BRANCH_PUBLISH_FAILED'),
         updatedAt: event.receivedAt
       };
     case 'BRANCH_PUBLISH_FAILED':
@@ -609,7 +611,7 @@ export function reduceProjection(
         health:
           getCiChecksStatus(event.payload) === 'FAILING' || getCiChecksStatus(event.payload) === 'BLOCKED'
             ? 'ERROR'
-            : base.health,
+            : healthAfterReading(base, { ciChecks: getCiChecksStatus(event.payload) ?? base.ciChecks }),
         summary: `GitHub checks: ${getCiChecksStatus(event.payload) ?? 'UNKNOWN'}.`,
         findings,
         updatedAt: event.receivedAt
@@ -633,7 +635,7 @@ export function reduceProjection(
             ? base.health
             : merge === 'CLOSED_UNMERGED' || merge === 'BLOCKED'
               ? 'ERROR'
-              : base.health,
+              : healthAfterReading(base, { merge }),
         summary:
           merge === 'MERGED'
             ? 'GitHub reports the pull request merged.'
@@ -1472,6 +1474,44 @@ function mergeFindings(existing: Finding[], additions: Finding[]): Finding[] {
     byCode.set(finding.code, finding);
   }
   return [...byCode.values()];
+}
+
+/** Delivery readings that make a task ERROR while they hold. */
+const DELIVERY_PROBLEMS = {
+  git: ['CONFLICTED', 'UNAVAILABLE'],
+  ciChecks: ['FAILING', 'BLOCKED'],
+  merge: ['BLOCKED', 'CLOSED_UNMERGED'],
+  branchPublication: ['FAILED', 'AMBIGUOUS']
+} as const satisfies Partial<Record<keyof StatusProjection, readonly string[]>>;
+
+type DeliveryReading = Partial<Pick<StatusProjection, keyof typeof DELIVERY_PROBLEMS>>;
+
+function isDeliveryProblem(field: keyof typeof DELIVERY_PROBLEMS, value: string): boolean {
+  return (DELIVERY_PROBLEMS[field] as readonly string[]).includes(value);
+}
+
+/**
+ * Health after a delivery reading. A reading that clears a problem (conflicts
+ * resolved, checks passing, a merge no longer blocked, a push that landed)
+ * leaves an ERROR task with the health of what still stands; health is
+ * otherwise kept, as no other reading says what raised it.
+ */
+function healthAfterReading(base: StatusProjection, reading: DeliveryReading): HealthStatus {
+  const cleared = (Object.keys(reading) as Array<keyof typeof DELIVERY_PROBLEMS>)
+    .some((field) => isDeliveryProblem(field, base[field]) && !isDeliveryProblem(field, reading[field]!));
+  return cleared && base.health === 'ERROR' ? standingHealth({ ...base, ...reading }) : base.health;
+}
+
+/** The health of what a task still holds, as a finished agent turn sets it for its own findings. */
+function standingHealth(projection: StatusProjection): HealthStatus {
+  const failed =
+    projection.agentRun === 'FAILED' || projection.agentRun === 'LOST' || projection.agentRun === 'RECOVERY_REQUIRED' ||
+    projection.repositoryPreflight === 'INVALID' || projection.worktree === 'MISSING' || projection.worktree === 'ERROR' ||
+    (Object.keys(DELIVERY_PROBLEMS) as Array<keyof typeof DELIVERY_PROBLEMS>).some((field) => isDeliveryProblem(field, projection[field]));
+  if (failed) return 'ERROR';
+  return projection.reviews === 'CHANGES_REQUESTED' || projection.findings.some((finding) => finding.severity === 'WARNING')
+    ? 'WARNING'
+    : 'HEALTHY';
 }
 
 function maxHealth(a: HealthStatus, b: HealthStatus): HealthStatus {
