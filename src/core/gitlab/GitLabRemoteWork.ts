@@ -40,8 +40,6 @@ interface GitLabNote {
 
 /** GitLab issues and merge requests through the signed-in GitLab CLI. */
 export class GitLabRemoteWork implements RemoteWorkReader {
-  readonly provider = 'GITLAB' as const;
-
   constructor(private readonly cli: GitLabCli) {}
 
   async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {

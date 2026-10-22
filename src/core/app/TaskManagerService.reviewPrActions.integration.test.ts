@@ -166,7 +166,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     const refreshBeforeReview = scenario.service.refreshGitHub({ taskId: scenario.taskId });
     await expect(
       scenario.service.startReview({ taskId: scenario.taskId, runId: scenario.run.id })
-    ).rejects.toThrow('GitHub refresh is already running for this task.');
+    ).rejects.toThrow('Refresh is already running for this task.');
     await expect(refreshBeforeReview).resolves.toMatchObject({
       number: 82,
       headRefOid: 'fresh-head',

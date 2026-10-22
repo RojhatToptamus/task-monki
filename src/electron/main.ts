@@ -43,7 +43,7 @@ import type {
   MergePullRequestRequest,
   ReplyToPullRequestRequest,
   ReadPullRequestCheckLogsRequest,
-  FetchPullRequestUpdateRequest,
+  MergePullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -771,7 +771,7 @@ function installIpcHandlers(): void {
   handleTrustedIpc('remote:mergePullRequest', (_, input: MergePullRequestRequest) => service.mergePullRequest(input));
   handleTrustedIpc('remote:replyToPullRequest', (_, input: ReplyToPullRequestRequest) => service.replyToPullRequest(input));
   handleTrustedIpc('remote:readPullRequestCheckLogs', (_, input: ReadPullRequestCheckLogsRequest) => service.readPullRequestCheckLogs(input));
-  handleTrustedIpc('remote:fetchPullRequestUpdate', (_, input: FetchPullRequestUpdateRequest) => service.fetchPullRequestUpdate(input));
+  handleTrustedIpc('remote:mergePullRequestUpdate', (_, input: MergePullRequestUpdateRequest) => service.mergePullRequestUpdate(input));
   handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
   handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
   handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));

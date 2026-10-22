@@ -8,17 +8,9 @@ import {
   type RemoteWorkSummary
 } from '../../shared/remoteWork';
 import { isGitObjectId } from '../git/gitCli';
-import { execFileOwnedPortable } from '../process/ownedProcess';
-import { graphQlQueryArgument } from './gitHubGraphQl';
-import {
-  RemoteWorkError,
-  cliExitCode,
-  cliOutput,
-  isMissingExecutable,
-  isNetworkFailure,
-  safeCliMessage
-} from '../remote/RemoteWorkError';
+import { RemoteWorkError } from '../remote/RemoteWorkError';
 import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
+import type { GitHubCli } from './GitHubCli';
 
 const LIST_ISSUE_FIELDS = 'number title url state updatedAt author { login }';
 // The review and checks a pull request row shows, read the same way for a listing and for one item.
@@ -56,8 +48,7 @@ interface GitHubNode {
 
 const LIST_REVIEWS: Record<string, NonNullable<RemoteWorkSummary['review']>> = {
   CHANGES_REQUESTED: 'CHANGES_REQUESTED',
-  APPROVED: 'APPROVED',
-  REVIEW_REQUIRED: 'REVIEW_REQUIRED'
+  APPROVED: 'APPROVED'
 };
 const LIST_CHECKS: Record<string, NonNullable<RemoteWorkSummary['checks']>> = {
   FAILURE: 'FAILING',
@@ -69,13 +60,7 @@ const LIST_CHECKS: Record<string, NonNullable<RemoteWorkSummary['checks']>> = {
 
 /** GitHub issues and pull requests through the signed-in GitHub CLI. */
 export class GitHubRemoteWork implements RemoteWorkReader {
-  readonly provider = 'GITHUB' as const;
-
-  constructor(private executable = 'gh') {}
-
-  setExecutable(executable: string | undefined): void {
-    this.executable = executable ?? 'gh';
-  }
+  constructor(private readonly cli: GitHubCli) {}
 
   async list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, words: string | undefined, cwd: string): Promise<RemoteWorkSummary[]> {
     const [owner, name] = repository.path.split('/') as [string, string];
@@ -146,77 +131,14 @@ export class GitHubRemoteWork implements RemoteWorkReader {
     return node;
   }
 
-  private async graphql<T>(
+  private graphql<T>(
     repository: RemoteRepositoryRef,
     cwd: string,
     query: string,
     strings: Record<string, string>,
     integers: Record<string, number> = {}
   ): Promise<T> {
-    const argv = ['api', 'graphql', '--hostname', repository.host, '-f', graphQlQueryArgument(query)];
-    for (const [key, value] of Object.entries(strings)) argv.push('-f', `${key}=${value}`);
-    for (const [key, value] of Object.entries(integers)) argv.push('-F', `${key}=${Math.trunc(value)}`);
-    let stdout: string;
-    try {
-      ({ stdout } = await execFileOwnedPortable(this.executable, argv, { cwd, timeout: 30_000, maxBuffer: 20 * 1024 * 1024 }));
-    } catch (error) {
-      const answered = itemNotFoundData<T>(error);
-      if (answered) return answered;
-      throw await this.classify(error, repository, cwd);
-    }
-    try {
-      const parsed = JSON.parse(stdout) as { data?: T };
-      if (!parsed.data) throw new Error('missing data');
-      return parsed.data;
-    } catch {
-      throw new RemoteWorkError('FAILED', 'GitHub returned an unreadable response.');
-    }
-  }
-
-  private async classify(error: unknown, repository: RemoteRepositoryRef, cwd: string): Promise<RemoteWorkError> {
-    if (isMissingExecutable(error)) return new RemoteWorkError('CLI_MISSING', 'GitHub CLI was not found.');
-    const { stdout, stderr } = cliOutput(error);
-    if (cliExitCode(error) === 4 || /HTTP 401|Bad credentials|gh auth login/iu.test(stderr)) {
-      return new RemoteWorkError('SIGNED_OUT', `GitHub CLI is not signed in to ${repository.host}.`);
-    }
-    if (/"type"\s*:\s*"NOT_FOUND"/u.test(stdout) || /Could not resolve to a Repository/iu.test(stderr)) {
-      const account = await this.account(repository, cwd);
-      return new RemoteWorkError('NOT_FOUND', account
-        ? `${account} cannot see ${repository.path} on ${repository.host}.`
-        : `${repository.path} is not available on ${repository.host}.`);
-    }
-    if (isNetworkFailure(stderr)) return new RemoteWorkError('FAILED', `Could not reach ${repository.host}.`);
-    return new RemoteWorkError('FAILED', safeCliMessage(error, 'GitHub CLI failed.'));
-  }
-
-  /** The signed-in account, for naming who cannot see a repository. */
-  private async account(repository: RemoteRepositoryRef, cwd: string): Promise<string | undefined> {
-    try {
-      const { stdout } = await execFileOwnedPortable(this.executable,
-        ['api', 'graphql', '--hostname', repository.host, '-f', 'query=query { viewer { login } }'],
-        { cwd, timeout: 15_000, maxBuffer: 1024 * 1024 });
-      const login = (JSON.parse(stdout) as { data?: { viewer?: { login?: string } } }).data?.viewer?.login;
-      return login && /^[A-Za-z0-9-]{1,39}$/u.test(login) ? login : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-}
-
-/**
- * GitHub answers a number with no issue or pull request with its data, the
- * item null, and a NOT_FOUND error on the item's path; gh then exits non-zero.
- * That is an answer about the item, not about the repository.
- */
-function itemNotFoundData<T>(error: unknown): T | undefined {
-  try {
-    const parsed = JSON.parse(cliOutput(error).stdout) as { data?: T; errors?: Array<{ type?: unknown; path?: unknown }> };
-    const errors = parsed.errors ?? [];
-    return parsed.data && errors.length > 0 && errors.every((item) => item.type === 'NOT_FOUND' && Array.isArray(item.path) && item.path.length > 1)
-      ? parsed.data
-      : undefined;
-  } catch {
-    return undefined;
+    return this.cli.graphql<T>({ host: repository.host, cwd, query, strings, integers, subject: repository.path });
   }
 }
 

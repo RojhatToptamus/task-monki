@@ -76,6 +76,12 @@ describe('buildPullRequestRecord', () => {
       expect(gitLab(ownedElsewhere), ownedElsewhere).toBeUndefined();
     }
     expect(gitLab('not_approved')).toEqual({ word: 'Needs approval', tone: 'neutral' });
+    // Every other reason a person settles on GitLab is the Merge gate's to state.
+    for (const settledOnGitLab of ['status_checks_must_pass', 'security_policy_pipeline_check', 'merge_time', 'jira_association_missing', 'title_regex']) {
+      expect(gitLab(settledOnGitLab), settledOnGitLab).toEqual({ word: expect.stringMatching(/\w/u), tone: 'neutral' });
+    }
+    // A merge request GitLab is merging asks nothing.
+    expect(gitLab('not_open')).toBeUndefined();
   });
 
   it("never presents an earlier head's checks as current, and a merged pull request asks nothing", () => {

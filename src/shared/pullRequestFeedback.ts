@@ -1,4 +1,4 @@
-import { visibleRemoteText, type RemoteProvider, type RemoteWorkComment } from './remoteWork';
+import { displayPlatformText, visibleRemoteText, type RemoteProvider, type RemoteWorkComment } from './remoteWork';
 
 /**
  * What people said on a pull or merge request: review threads on lines and
@@ -153,6 +153,21 @@ export function isOpenDiscussion(discussion: Pick<PullRequestDiscussion, 'kind' 
 
 export function unresolvedDiscussionCount(discussions: readonly Pick<PullRequestDiscussion, 'resolvable' | 'resolved'>[]): number {
   return discussions.filter((discussion) => discussion.resolvable && !discussion.resolved).length;
+}
+
+/** The first line of a discussion's first comment as plain text, for a one-line row. */
+export function discussionSummary(discussion: Pick<PullRequestDiscussion, 'comments'>): string {
+  const text = displayPlatformText(discussion.comments[0]?.body ?? '');
+  const line = text.split('\n')
+    .map((value) => value.replace(/^\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|```\S*)/u, '').trim())
+    .find(Boolean) ?? '';
+  const plain = line
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, '$1')
+    .replace(/(\*\*|__)(.+?)\1/gu, '$2')
+    .replace(/(^|\W)[*_]([^*_\n]+)[*_](?=\W|$)/gu, '$1$2')
+    .replace(/`([^`]+)`/gu, '$1')
+    .trim();
+  return plain.length > 160 ? `${plain.slice(0, 159)}…` : plain;
 }
 
 /** A platform discussion as a reader produced it, before bounding. */

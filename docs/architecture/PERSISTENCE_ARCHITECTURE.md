@@ -224,16 +224,20 @@ of the person's latest comment and anyone else's, `lastViewerCommentAt` and
 `pull-request-feedback` artifact belongs to the same task and holds the bounded
 threads, reviews and comments; unchanged feedback reuses its artifact, and a
 failed read keeps the last one. Startup refuses a summary whose artifact is
-missing or another task's. A review request may hold `DISCUSSION` items, a
-review draft `includedDiscussionIds`, and a request sent before the task's first
-turn is stored as that turn's `FOLLOW_UP` instruction. Schema 31 also records the
-person's writes to a pull request: `PR_MERGE_REQUESTED` (number, head, method,
-whether the branch is deleted) before a merge, `PR_REPLIES_POSTED` (number,
-counts posted, resolved and reopened, reviewers asked again, and the ids of the
-discussions answered) after replies, a resolve or a reopen land, and
-`PR_CHECKS_RERUN_REQUESTED` after the platform accepts running failed checks
-again. Settings schema 15 also records the `glab` path,
-`externalExecutables.glabExecutablePath`.
+missing or another task's. A review request may hold `DISCUSSION` items and a
+review draft `includedDiscussionIds`. A request sent before the task's first
+turn, and the instruction that starts the first coding turn on an imported
+checkout or an opened pull request, are stored as that turn's `FOLLOW_UP`
+instruction. Schema 31 also records the person's writes to a pull request:
+`PR_MERGE_REQUESTED` (number, head, method, whether the branch is deleted)
+before a merge, `PR_REPLIES_POSTED` (number, counts posted, resolved and
+reopened, reviewers asked again, and the ids of the discussions answered) after
+replies, a resolve or a reopen land, and `PR_CHECKS_RERUN_REQUESTED` after the
+platform accepts running failed checks again. It adds `BRANCH_UPDATE_REQUESTED`
+(`from`, `ref` and `sha`, with the base branch's tip as `baseRef` and `baseSha`
+for Pull changes when it was read), recorded before Task Monki merges a pull
+request's newer commits or its moved base into the worktree. Settings schema 15
+also records the `glab` path, `externalExecutables.glabExecutablePath`.
 
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding

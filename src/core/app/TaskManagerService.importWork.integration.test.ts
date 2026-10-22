@@ -431,7 +431,9 @@ describe('Import existing work', () => {
       taskId: task.id, runId: run.id, strategy: 'SAME_SESSION', instruction: 'Add the missing boundary test.'
     });
     const retryPrompt = await s.runtimeStore.readArtifact(retry.promptArtifactId);
-    expect(retryPrompt).toContain(instruction);
+    // The first request is the task's recorded message, read once; no earlier prompt is nested inside.
+    expect(occurrences(retryPrompt, instruction)).toBe(1);
+    expect(occurrences(retryPrompt, 'Always-applicable Task Monki execution boundary')).toBe(1);
     expect(retryPrompt).toContain('Add the missing boundary test.');
     expect(retryPrompt).toContain("user's original imported checkout");
     expect(retryPrompt).not.toContain('Continue in the existing isolated task worktree.');
@@ -451,9 +453,9 @@ describe('Import existing work', () => {
       taskId: task.id, runId: followUp.id, strategy: 'FORK', instruction: 'Try the minimal alternative.'
     });
     const alternativePrompt = await s.runtimeStore.readArtifact(alternative.promptArtifactId);
-    expect(alternativePrompt).toContain(instruction);
-    expect(alternativePrompt).toContain('Check the remaining boundary case.');
-    expect(alternativePrompt).toContain('Try the minimal alternative.');
+    for (const authored of [instruction, 'Add the missing boundary test.', 'Check the remaining boundary case.', 'Try the minimal alternative.']) {
+      expect(occurrences(alternativePrompt, authored)).toBe(1);
+    }
     expect(alternative.taskId).not.toBe(task.id);
     expect((await s.store.getTask(task.id))?.prompt).toBe(task.prompt);
     await s.completeRun(alternative.id);
@@ -463,4 +465,30 @@ describe('Import existing work', () => {
     try { expect((await reopened.tasks.snapshot()).agentSessions).toHaveLength(3); }
     finally { await reopened.close(); }
   }, 20_000);
+
+  it('keeps the first request with a turn that fails to start, so a retry sends it once', async () => {
+    const s = await scenarios.create();
+    const checkout = path.join(s.rootDir, 'external');
+    await git(s.repositoryPath, ['worktree', 'add', '-b', 'feature', checkout]);
+    const task = await s.service.importTask(await importRequest(s, checkout));
+    const instruction = 'Fix only the imported null-handling regression.';
+    // Refused before a run is admitted: no turn carries the request, so no message is left to send again.
+    vi.spyOn(s.agent, 'resolveExecution').mockRejectedValueOnce(new Error('The model is unavailable.'));
+    await expect(s.service.startRun({ taskId: task.id, instruction })).rejects.toThrow('The model is unavailable.');
+    expect((await s.store.getTaskDetail(task.id)).taskInstructions).toEqual([]);
+    // Admitted, then refused by the provider: the failed run still carries its request.
+    vi.spyOn(s.agent, 'startTurn').mockRejectedValueOnce(new Error('Provider refused the turn.'));
+    await expect(s.service.startRun({ taskId: task.id, instruction })).rejects.toThrow('Provider refused the turn.');
+    const failed = (await s.store.snapshot()).runs.find((run) => run.taskId === task.id)!;
+    expect(failed.status).toBe('FAILED');
+    expect((await s.store.getTaskDetail(task.id)).taskInstructions).toEqual([expect.objectContaining({
+      text: instruction, mode: 'FOLLOW_UP', status: 'SUBMITTED', runId: failed.id, sessionId: failed.sessionId
+    })]);
+    const retry = await s.service.retryRun({ taskId: task.id, runId: failed.id, strategy: 'SAME_SESSION' });
+    expect(occurrences(await s.runtimeStore.readArtifact(retry.promptArtifactId), instruction)).toBe(1);
+  }, 20_000);
 });
+
+function occurrences(text: string, part: string): number {
+  return text.split(part).length - 1;
+}

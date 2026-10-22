@@ -64,14 +64,14 @@ export class GitLabCli {
     if (isMissingExecutable(error)) return new RemoteWorkError('CLI_MISSING', 'GitLab CLI was not found.');
     const { stdout, stderr } = cliOutput(error);
     const text = `${stderr}\n${stdout}`;
-    if (/\b401\b|unauthorized|glab auth login|not authenticated|no token/iu.test(text)) {
+    // The CLI states a refused sign-in on stderr; stdout is the response, which can say anything.
+    if (/\b401\b|unauthorized|glab auth login|not authenticated|no token/iu.test(stderr)) {
       return new RemoteWorkError('SIGNED_OUT', `GitLab CLI is not signed in to ${host}.`);
     }
     if (/\b404\b|not found/iu.test(text)) {
+      if (!subject) return new RemoteWorkError('NOT_FOUND', 'GitLab could not find it.');
       const account = await this.account(host, cwd);
-      return new RemoteWorkError('NOT_FOUND', subject
-        ? account ? `${account} cannot see ${subject} on ${host}.` : `${subject} is not available on ${host}.`
-        : 'GitLab could not find it.');
+      return new RemoteWorkError('NOT_FOUND', account ? `${account} cannot see ${subject} on ${host}.` : `${subject} is not available on ${host}.`);
     }
     if (isNetworkFailure(text)) return new RemoteWorkError('FAILED', `Could not reach ${host}.`);
     return new RemoteWorkError('FAILED', safeCliMessage(error, 'GitLab CLI failed.'));

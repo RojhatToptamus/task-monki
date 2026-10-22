@@ -112,7 +112,7 @@ export interface GitHubFeedbackData {
   } | null;
 }
 
-/** The repository and number a pull request URL names, as GitHub writes it. */
+/** The submitted reviews that still stand: a pending review is unsent, and a dismissed one withdrawn. */
 const REVIEW_STATES = new Set(['CHANGES_REQUESTED', 'APPROVED', 'COMMENTED']);
 
 /**

@@ -113,9 +113,10 @@ Expected UI:
    Git and runtime admission checks must pass. Review still creates no primary
    coding session.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
-   agent session. For a direct imported review, the existing SQLite transaction
-   publishes the Review transition and run-start event together. A failed write
-   publishes neither. An admitted review stays in Review if it fails or is canceled.
+   agent session. For a direct review of imported work or of a pull request
+   opened as a task, the existing SQLite transaction publishes the Review
+   transition and run-start event together. A failed write publishes neither.
+   An admitted review stays in Review if it fails or is canceled.
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
 6. The prompt tells the selected runtime not to modify files.
 7. `AgentOrchestrator` records repository state before provider delivery.
@@ -330,7 +331,11 @@ Questions about the task go to Ask, on Overview, Agent and Review.
    those items rather than the instruction text. Before the task's first turn,
    such as on an opened pull request, `startRun` takes the request with its
    instruction and records it as that turn's `FOLLOW_UP` message, so it reads
-   and is answered the same way. A discussion the request sent shows as Sent,
+   and is answered the same way. The instruction that starts the first coding
+   turn on existing work is recorded the same way, so later turns read it from
+   the task's instructions. It is recorded before the turn starts and kept with
+   a turn that failed to start, so a retry still carries it; a start refused
+   before any run exists records nothing. A discussion the request sent shows as Sent,
    or with the agent's answer, until someone other than the person writes on it
    again.
 4. Reducer moves the task to `IN_PROGRESS`.

@@ -2,7 +2,7 @@ import { useId, useRef, useState, type FormEvent } from 'react';
 import { Check, CircleCheck, ExternalLink } from 'lucide-react';
 import { remoteProviderName, type RemoteWorkComment } from '../../shared/contracts';
 import { commentParts, discussionAuthor, discussionCommentText, discussionSummary, reviewVerdictWords, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
-import { REVIEW_OUTCOME_LABELS } from '../model/reviewRounds';
+import { discussionStateWord } from '../model/reviewRounds';
 import { formatShortAge } from '../model/timeAgo';
 import { Avatar } from './Avatar';
 import { DisclosureChevron } from './DisclosureChevron';
@@ -12,15 +12,6 @@ import { useClampOverflow } from './useClampOverflow';
 
 /** Replies shown before the rest fold behind a count. */
 const REPLIES_SHOWN = 3;
-
-/** A discussion's state in one word, or none: what happened on the platform or to the request. */
-export function discussionStateWord(discussion: Pick<DiscussionView, 'resolved' | 'sent' | 'outdated' | 'replied'>): string | undefined {
-  if (discussion.resolved) return 'Resolved';
-  // The person answered on the platform last: the discussion waits on its other side.
-  if (discussion.replied) return 'Replied';
-  if (discussion.sent) return discussion.sent.outcome ? REVIEW_OUTCOME_LABELS[discussion.sent.outcome] : 'Sent';
-  return discussion.outdated ? 'Outdated' : undefined;
-}
 
 /** Answering a discussion where it is read: the reply row under it. */
 interface DiscussionReply {
@@ -70,6 +61,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   const [repliesOpen, setRepliesOpen] = useState(false);
   // Folded or open, the thread is one element, so keyboard focus survives it folding when resolved.
   const rootRef = useRef<HTMLElement>(null);
+  // A control that goes away when pressed hands the keys to the thread, where N and R work.
+  const keepKeys = () => rootRef.current?.focus({ preventScroll: true });
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string>();
   const resolve = async (resolved: boolean) => {
@@ -78,8 +71,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
     setResolveError(undefined);
     try {
       await onResolve(resolved);
-      // The check folds away with the thread; the thread keeps the keys, where N and R work.
-      rootRef.current?.focus({ preventScroll: true });
+      // The check folds away with the thread.
+      keepKeys();
     } catch (caught) {
       setResolveError(caught instanceof Error ? caught.message : `Could not ${resolved ? 'resolve' : 'reopen'} the thread.`);
     } finally {
@@ -102,7 +95,7 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
     return (
       <article ref={rootRef} className="tm-review-thread tm-review-thread--folded tm-review-thread--discussion" data-discussion-id={discussion.id}
         tabIndex={-1} onFocus={onFocus} aria-label={`${platform} comment by ${author}`}>
-        <button type="button" className="tm-review-thread__fold" aria-expanded={false} onClick={() => setOpened(true)}>
+        <button type="button" className="tm-review-thread__fold" aria-expanded={false} onClick={() => { setOpened(true); keepKeys(); }}>
           <span className="tm-review-thread__author">{author}</span>
           <span className="tm-review-thread__summary">{discussionSummary(discussion)}</span>
         </button>
@@ -138,7 +131,11 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           <span className="tm-review-thread__actions">
             {onToggleInclude && !discussion.resolved ? (
               <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
-                <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => onToggleInclude(discussion.id)}>
+                <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => {
+                  onToggleInclude(discussion.id);
+                  // Out of the request, a thread that starts as one line folds again.
+                  if (inRequest && foldedByDefault && !opened) keepKeys();
+                }}>
                   {inRequest ? <><Check size={13} aria-hidden="true" />In request</> : 'Add to request'}
                 </button>
               </Tooltip>
@@ -161,7 +158,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
             {openLink}
             {foldedByDefault && !inRequest ? (
               <Tooltip label="Fold">
-                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__fold-toggle" aria-expanded={true} aria-label="Fold" onClick={() => setOpened(false)}>
+                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__fold-toggle" aria-expanded={true} aria-label="Fold"
+                  onClick={() => { setOpened(false); keepKeys(); }}>
                   <DisclosureChevron />
                 </button>
               </Tooltip>
@@ -177,7 +175,7 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           {/* The replies between the first comment and the latest ones stay on the platform. */}
           {elsewhere > 0 ? <p className="tm-review-thread__earlier">{elsewhere} more {elsewhere === 1 ? 'reply' : 'replies'} on {platform}</p> : null}
           {hiddenReplies ? (
-            <button type="button" className="tm-review-thread__more" aria-expanded={false} onClick={() => setRepliesOpen(true)}>
+            <button type="button" className="tm-review-thread__more" aria-expanded={false} onClick={() => { setRepliesOpen(true); keepKeys(); }}>
               <DisclosureChevron />{hiddenReplies} more {hiddenReplies === 1 ? 'reply' : 'replies'}
             </button>
           ) : null}
@@ -266,7 +264,8 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         if (started) return;
         setStarted(true);
         if (!text && reply.draft) {
-          write(reply.draft.body);
+          // The agent's answer is only in the field: what is kept for the task is what the person typed.
+          setText(reply.draft.body);
           setResolve(resolvable && reply.draft.outcome === 'FIXED');
         }
       }}
@@ -291,7 +290,13 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         <div className="tm-review-thread__reply-tools">
           {resolvable ? (
             <label className="tm-resolve-check">
-              <input type="checkbox" checked={resolve} disabled={busy} onChange={(event) => setResolve(event.target.checked)} />
+              {/* The row is a form, where Enter on the check would post the reply; only ⌘↵ posts, as in the field. */}
+              <input type="checkbox" checked={resolve} disabled={busy} onChange={(event) => setResolve(event.target.checked)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return;
+                  event.preventDefault();
+                  if (event.metaKey || event.ctrlKey) void post();
+                }} />
               <span>Resolve thread</span>
             </label>
           ) : null}

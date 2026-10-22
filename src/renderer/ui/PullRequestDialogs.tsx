@@ -177,10 +177,14 @@ export function ReplyToReviewersModal({
   const chosen = remaining.filter((draft) => replies[draft.discussionId]?.include);
   const empty = chosen.some((draft) => !replies[draft.discussionId]?.body.trim());
   const count = chosen.length;
+  // Every reply landed and no one is left to ask: nothing is left to post, so only Close stays.
+  const done = remaining.length === 0 && asked.size === 0;
+  // Why posting waits, said once: a chosen reply with no words, or nothing chosen.
+  const reason = done ? undefined : empty ? 'Write each reply first' : count === 0 && asked.size === 0 ? 'Choose a reply first' : undefined;
   const update = (id: string, change: Partial<ReplyState>) => setReplies((current) => ({ ...current, [id]: { ...current[id]!, ...change } }));
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (busy || empty || (count === 0 && asked.size === 0)) return;
+    if (busy || done || reason) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -279,12 +283,14 @@ export function ReplyToReviewersModal({
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>{posted.size > 0 ? 'Close' : 'Cancel'}</button>
-          <button type="submit" className="primary-button" disabled={busy || empty || (count === 0 && asked.size === 0)}
-            aria-describedby={empty ? 'reply-pr-empty' : undefined}>
-            {busy ? 'Posting…' : label}
-          </button>
+          {done ? null : (
+            <button type="submit" className="primary-button" disabled={busy || Boolean(reason)}
+              aria-describedby={reason ? 'reply-pr-reason' : undefined}>
+              {busy ? 'Posting…' : label}
+            </button>
+          )}
         </div>
-        {empty ? <p id="reply-pr-empty" className="tm-slot__reason">Write each reply first</p> : null}
+        {reason ? <p id="reply-pr-reason" className="tm-slot__reason">{reason}</p> : null}
       </form>
     </div>
   );

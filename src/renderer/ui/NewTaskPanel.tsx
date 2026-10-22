@@ -514,6 +514,17 @@ export function NewTaskPanel({
         created = true;
         return;
       }
+      // Work opened from a pull request or a checkout keeps the agent settings chosen here, over the defaults.
+      const chosenSettings: AgentExecutionSettings = {
+        ...defaultAgentSettings,
+        runtimeId: runtimeId || undefined,
+        model: selectedModel?.model,
+        modelProvider: selectedModel?.modelProvider,
+        reasoningEffort: effectiveReasoningEffort || undefined,
+        ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
+          networkAccess: effectiveNetworkAccess
+        }) : {})
+      };
       if (source === 'pull') {
         if (!remoteSelected || remoteDisabledReason || !onOpenPullRequest) throw new Error(remoteDisabledReason ?? 'Choose a pull request.');
         await onOpenPullRequest({
@@ -521,16 +532,7 @@ export function NewTaskPanel({
           pullRequest: remoteSelected.ref,
           title: effectiveRemoteTitle,
           runtimeId: runtimeId || undefined,
-          agentSettings: {
-            ...defaultAgentSettings,
-            runtimeId: runtimeId || undefined,
-            model: selectedModel?.model,
-            modelProvider: selectedModel?.modelProvider,
-            reasoningEffort: effectiveReasoningEffort || undefined,
-            ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
-              networkAccess: effectiveNetworkAccess
-            }) : {})
-          }
+          agentSettings: chosenSettings
         });
         created = true;
         return;
@@ -551,16 +553,7 @@ export function NewTaskPanel({
             title: effectiveImportTitle,
             prompt: '',
             runtimeId: runtimeId || undefined,
-            agentSettings: {
-              ...defaultAgentSettings,
-              runtimeId: runtimeId || undefined,
-              model: selectedModel?.model,
-              modelProvider: selectedModel?.modelProvider,
-              reasoningEffort: effectiveReasoningEffort || undefined,
-              ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
-                networkAccess: effectiveNetworkAccess
-              }) : {})
-            }
+            agentSettings: chosenSettings
           });
         }
         created = true;

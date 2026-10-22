@@ -362,6 +362,14 @@ describe('task card view model', () => {
     expect(pullRequest({ githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 7, reviews: 'CHANGES_REQUESTED',
       githubPullRequestUrl: 'https://gitlab.com/group/project/-/merge_requests/7' }))
       .toEqual({ label: '!7', state: 'open' });
+    // Answered, the review waits on its reviewers: the card says so, as PR Status does.
+    expect(cardPullRequestForTask({
+      ...createTask({
+        projection: { ...createInitialProjection(now), agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, reviews: 'CHANGES_REQUESTED' },
+        workflowPhase: 'IN_REVIEW'
+      }),
+      delivery: { turn: 'REVIEWERS' }
+    })).toEqual({ label: '#82', state: 'open', note: 'review waiting' });
     // A merged or closed pull request says so with its state alone.
     expect(pullRequest({ githubPullRequest: 'MERGED', githubPullRequestNumber: 82, merge: 'MERGED', ciChecks: 'FAILING' }))
       .toEqual({ label: '#82', state: 'merged' });

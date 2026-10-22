@@ -161,6 +161,7 @@ import {
   interactionHeadline,
   OverviewRequest,
   OverviewSection,
+  PropRow,
   SlotActions,
   SlotContent,
   SlotFacts,
@@ -185,7 +186,7 @@ import { ReportedQuote } from './ReportedQuote';
 import { useArtifactReading } from './useArtifactReading';
 import { remoteSourceView } from '../model/remoteWork';
 import { deliveryNoun, deliveryProvider } from '../model/deliveryWords';
-import { buildBranchUpdatePromptTemplate, startsFromExistingWork } from '../../shared/promptTemplates';
+import { buildMergeConflictPromptTemplate, startsFromExistingWork } from '../../shared/promptTemplates';
 
 interface TaskDetailProps {
   attachmentOptions: AgentSessionProps['attachmentOptions'];
@@ -290,7 +291,8 @@ interface TaskDetailProps {
   /** Runs the current head's failed checks again where the platform ran them. */
   onRerunPullRequestChecks(taskId: string): Promise<void>;
   onReadPullRequestCheckLogs(taskId: string): Promise<PullRequestCheckLog[]>;
-  onFetchPullRequestUpdate(taskId: string, from: 'PULL_REQUEST' | 'BASE'): Promise<PullRequestUpdate>;
+  /** Merges what the worktree lacks into its branch; the files a conflict stops on come back. */
+  onMergePullRequestUpdate(taskId: string, from: 'PULL_REQUEST' | 'BASE'): Promise<PullRequestUpdate>;
   onReadArtifact?(artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
@@ -501,12 +503,16 @@ export function TaskDetail(props: TaskDetailProps) {
   // The status word reads what PR Status read from the records, as the board summary does,
   // including whose move a review that requested changes waits on.
   const turn = reviewRollup?.status === 'CHANGES_REQUESTED' && reviewRollup.feedback ? reviewTurn(reviewRollup.feedback) : undefined;
-  // A base that moved leads the word as its step leads the panel, here as on the board.
+  // A base that moved leads the word as its step leads the panel, here as on the board, and a merge
+  // Task Monki left in progress reads as the work Push update finishes, not as conflicts.
   const baseMoved = prStatus?.baseUpdate;
+  const mergeInProgress = prStatus?.mergeInProgress;
   const statusTask = task ? {
     ...task,
     ...(prStatus?.kind === 'BRANCH_DIVERGED' && prStatus.canSyncBranch ? { pullRequestRewritten: true } : {}),
-    ...(turn || baseMoved ? { delivery: { ...(turn ? { turn } : {}), ...(baseMoved ? { baseMoved } : {}) } } : {})
+    ...(turn || baseMoved || mergeInProgress ? { delivery: {
+      ...(turn ? { turn } : {}), ...(baseMoved ? { baseMoved } : {}), ...(mergeInProgress ? { mergeInProgress } : {})
+    } } : {})
   } : task;
   const headerState = statusTask ? describeTaskStatus(statusTask) : undefined;
   const prRecord = task ? buildPullRequestRecord({ pullRequest, ciRollup, reviewRollup, mergeSnapshot, provider, checksNotReported: prStatus?.checksNotReported }) : undefined;
@@ -611,10 +617,11 @@ export function TaskDetail(props: TaskDetailProps) {
       ? buildTaskActivityLedger({
         task,
         events: props.events,
-        runs: [...props.runs, ...(props.previewAgent?.runs ?? [])]
+        runs: [...props.runs, ...(props.previewAgent?.runs ?? [])],
+        provider
       })
       : undefined,
-    [task, props.events, props.runs, props.previewAgent?.runs]
+    [task, props.events, props.runs, props.previewAgent?.runs, provider]
   );
   const overviewActivity = useMemo(
     () => taskActivityLedger && projectOverviewTaskActivity(taskActivityLedger),
@@ -706,7 +713,6 @@ export function TaskDetail(props: TaskDetailProps) {
         )
     );
   const prActionState = buildPrStatusActionState({
-    provider,
     view: prStatus,
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
@@ -936,26 +942,25 @@ export function TaskDetail(props: TaskDetailProps) {
       return;
     }
     await runDeliveryAction(async () => {
-      // The end of each failing log goes with the request, quoted as data; without it the agent has the check's link.
+      // The failing checks and the end of each failing log go with the request, quoted as data inside a
+      // random boundary, logs or none; without a log the agent has the check's link.
       const logs = await loadCheckLogs();
-      const instruction = buildFailingChecksInvestigationPrompt(
-        prStatus,
-        provider,
-        logs.length > 0 ? { entries: logs, boundary: crypto.randomUUID().slice(0, 8) } : undefined
-      );
+      const instruction = buildFailingChecksInvestigationPrompt(prStatus, provider, { entries: logs, boundary: crypto.randomUUID().slice(0, 8) });
       if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
       else await startWithSettings(task.id, instruction);
     });
   };
 
-  // Commits the worktree lacks are fetched here, then merged by the agent, which runs without network.
+  // Task Monki merges the commits the worktree lacks. A clean merge asks nothing of the agent: Push
+  // update is the next step. A merge Git stopped on sends the agent the files to resolve, and Push
+  // update finishes it once they are.
   const bringInUpdate = async (from: 'PULL_REQUEST' | 'BASE') => {
     if (!deliverySourceRun && !importedBeforeFirstRun) return;
     await runDeliveryAction(async () => {
-      const update = await props.onFetchPullRequestUpdate(task.id, from);
-      const instruction = buildBranchUpdatePromptTemplate({
-        provider, prNumber: prStatus.prNumber, from, ref: update.ref, sha: update.sha, commits: update.commits,
-        conflicts: prStatus.baseUpdate?.reason === 'CONFLICTS'
+      const update = await props.onMergePullRequestUpdate(task.id, from);
+      if (update.conflicts.length === 0) return;
+      const instruction = buildMergeConflictPromptTemplate({
+        provider, prNumber: prStatus.prNumber, from, ref: update.ref, sha: update.sha, conflicts: update.conflicts
       });
       if (deliverySourceRun) await props.onContinue(deliverySourceRun.id, instruction);
       else await startWithSettings(task.id, instruction);
@@ -1497,8 +1502,9 @@ export function TaskDetail(props: TaskDetailProps) {
   );
 
   // The step the pull request needs: its one fact, and the actions that take it,
-  // lead first. The record beside it holds the rest.
-  const deliveryChoices = () => {
+  // lead first. The record beside it holds the rest. Read once per render by the
+  // Now panel, the Delivery section and the finishing facts.
+  const deliveryChoices = (() => {
     const pause = prActionState.pauseReason;
     const agentStepReason = pause ?? (!deliverySourceRun && !importedBeforeFirstRun ? 'No completed run is available.' : undefined);
     const createOrPushReason = prActionState.createOrPushDisabled ? prActionState.createOrPushReason : undefined;
@@ -1511,13 +1517,16 @@ export function TaskDetail(props: TaskDetailProps) {
         onClick: delivery(() => props.onRefreshGitHub(task.id)) }, fact: prStatus.freshnessFact } : undefined,
       prStatus.canSyncBranch ? { action: { label: 'Sync branch', disabled: prActionState.syncDisabled, reason: prActionState.syncReason,
         onClick: delivery(() => props.onSyncPullRequest(task.id)) }, fact: prStatus.freshnessFact } : undefined,
+      // A merge in progress is what Push update finishes, so it is the fact before the agent's answers.
       prStatus.canPushUpdate ? { action: { label: 'Push update', disabled: prActionState.createOrPushDisabled, reason: createOrPushReason,
-        onClick: delivery(() => props.onCreatePullRequest(task.id)) }, fact: unpushedAnswersLine ?? prStatus.freshnessFact } : undefined,
-      // The agent merges what moved; a conflict is its to resolve, the push is the person's.
+        onClick: delivery(() => props.onCreatePullRequest(task.id)) },
+        fact: prStatus.mergeInProgress ? prStatus.freshnessFact : unpushedAnswersLine ?? prStatus.freshnessFact } : undefined,
+      // Task Monki merges what moved; a conflict is the agent's to resolve, the push is the person's.
       prStatus.canPullChanges
         ? { action: { label: 'Pull changes', disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('PULL_REQUEST') },
           fact: prStatus.freshnessFact } : undefined,
-      prStatus.baseUpdate
+      // A fork's or an imported checkout's moved base is named, but only its owner updates the branch.
+      prStatus.baseUpdate && prStatus.canUpdateBase
         ? { action: { label: `Update with ${prStatus.baseUpdate.base}`, disabled: Boolean(agentStepReason), reason: agentStepReason, onClick: () => void bringInUpdate('BASE') },
           fact: baseMovedLine(prStatus.baseUpdate.reason, prStatus.baseUpdate.base) } : undefined,
       // The failed checks, each with its log, are the step's fact; without rows it names them.
@@ -1552,11 +1561,11 @@ export function TaskDetail(props: TaskDetailProps) {
     // A fact takes the state's tone only while the step is the person's to take.
     const tone = lead && (prStatus.tone === 'error' || prStatus.tone === 'action' || prStatus.tone === 'info') ? prStatus.tone : undefined;
     return { actions, fact, tone, failing: lead?.failing ?? [], comments: lead?.comments ?? [] };
-  };
+  })();
 
   // PR Status holds the Now panel when the pull request's step is the task's next one.
   const deliveryStep = (title: string) => {
-    const { actions, failing, fact, tone, comments } = deliveryChoices();
+    const { actions, failing, fact, tone, comments } = deliveryChoices;
     return (
       <DecisionSlot>
         <SlotContent headline={title} facts={fact ? [{ text: fact, tone }] : []} primary={actions[0]} secondary={actions.slice(1)}>
@@ -1574,7 +1583,7 @@ export function TaskDetail(props: TaskDetailProps) {
   // When another step holds the Now panel, such as the agent review's, the pull
   // request's own steps stay on the page as a section, as Finishing does.
   const deliverySection = () => {
-    const { actions, fact } = deliveryChoices();
+    const { actions, fact } = deliveryChoices;
     // Steps all paused, as while the agent works, would only repeat the record.
     if (actions.every((action) => action.disabled)) return null;
     const tone = prStatus.tone === 'error' || prStatus.tone === 'action' || prStatus.tone === 'info' ? prStatus.tone : undefined;
@@ -1591,7 +1600,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
   // PR Status, when shown, already states merge and check evidence, and the Delivery
   // section, when it renders, what the worktree holds that is not pushed.
-  const deliveryShows = prSectionVisible && prStatus.hasPullRequest && deliveryChoices().actions.some((action) => !action.disabled);
+  const deliveryShows = prSectionVisible && prStatus.hasPullRequest && deliveryChoices.actions.some((action) => !action.disabled);
   const finishFacts = prSectionVisible
     ? finishRequirements.filter((requirement) => requirement.label !== 'Merge' && requirement.label !== 'Checks' &&
       !(deliveryShows && requirement.label === 'Tree'))
@@ -2292,7 +2301,8 @@ export function TaskDetail(props: TaskDetailProps) {
             : undefined}
           busy={deliveryActionBusy}
           disabled={prActionState.createOrPushDisabled}
-          disabledReason={prActionState.createOrPushReason}
+          // Its own submission shows on its button; the busy reason is for the steps it holds back.
+          disabledReason={deliveryActionBusy ? undefined : prActionState.createOrPushReason}
           onTitleChange={setDraftPrTitle}
           onCancel={() => setDraftPrModalOpen(false)}
           onSubmit={submitDraftPr}
@@ -2324,7 +2334,16 @@ export function TaskDetail(props: TaskDetailProps) {
           reviewers={provider === 'GITHUB'
             ? (pullRequestFeedback?.reviewers ?? []).filter((reviewer) => reviewer.state === 'CHANGES_REQUESTED' && !reviewer.bot).map((reviewer) => reviewer.name)
             : []}
-          onSubmit={(replies, reviewers) => props.onReplyToPullRequest(task.id, replies, reviewers)}
+          onSubmit={async (replies, reviewers) => {
+            const result = await props.onReplyToPullRequest(task.id, replies, reviewers);
+            // A reply that landed answered its discussion, so what the person typed under it in Review is not
+            // posted a second time. One the platform refused keeps it, as the dialog keeps that reply.
+            const refused = new Set(result.failed.filter((failure) => !failure.replied).map((failure) => failure.discussionId));
+            for (const reply of replies) {
+              if (!refused.has(reply.discussionId)) replyTexts.current.delete(reply.discussionId);
+            }
+            return result;
+          }}
           onCancel={() => setReplyModalOpen(false)}
           fallbackReturnFocusRef={detailRootRef}
         />
@@ -2347,15 +2366,6 @@ export function TaskWorkPanels({ children }: { children: ReactNode }) {
       </h2>
       {children}
     </section>
-  );
-}
-
-function PropRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="tm-props__row">
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
   );
 }
 
@@ -2524,13 +2534,18 @@ function PrStatusCard({
   const name = remoteWorkLabel(provider, 'PULL_REQUEST');
   // Before a pull request exists, the lead line is the one fact: why opening one is or is not possible.
   const lead = view.leadLine !== createReason ? view.leadLine : undefined;
+  // While a delivery action runs, Refresh and Create draft wait on the same thing: the card says it once,
+  // beside Create draft, and Refresh points at that reason.
+  const sharedReason = Boolean(createReason) && actionState.refreshReason === createReason;
+  const refreshReason = sharedReason ? undefined : actionState.refreshReason;
 
   return (
     <section className="tm-prstatus" aria-label={name}>
       <div className="tm-prstatus__head">
         <h3 className="tm-osection__title">{name}</h3>
         {view.canRefresh ? (
-          <PullRequestRefresh updated={view.refreshedLine ? `Updated ${view.refreshedLine}` : undefined} reason={actionState.refreshReason}
+          <PullRequestRefresh updated={view.refreshedLine ? `Updated ${view.refreshedLine}` : undefined} reason={refreshReason}
+            describedBy={sharedReason ? reasonId : undefined}
             disabled={actionState.refreshDisabled} noun={remoteWorkNoun(provider, 'PULL_REQUEST')} onRefresh={onRefresh} />
         ) : null}
       </div>

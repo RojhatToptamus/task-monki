@@ -12,6 +12,8 @@ import {
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
   leavablePullRequestHeads,
+  remoteProviderName,
+  remoteWorkNoun,
   type CreateTaskRequest,
   type DecideReviewFindingRequest,
   type ImportTaskRequest,
@@ -39,6 +41,7 @@ import {
   type PullRequestMergeMethod,
   type PullRequestReply,
   type RefinePromptRequest,
+  type RemoteProvider,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
   type SideQuestionModelChoice,
@@ -71,6 +74,7 @@ import {
   selectTaskRuns
 } from '../model/selectors';
 import { checksMayNotHaveStarted } from '../model/prStatus';
+import { deliveryProvider } from '../model/deliveryWords';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import {
   createUpdateRefreshScheduler,
@@ -1840,7 +1844,7 @@ export function App() {
       await taskDataCoordinator.refreshBoard();
       await openTaskDetail(opened.id);
     } catch (caught) {
-      reportActionError(caught, 'Could not open the pull request.');
+      reportActionError(caught, `Could not open the ${remoteWorkNoun(input.pullRequest.repository.provider, 'PULL_REQUEST')}.`);
       throw caught;
     }
   };
@@ -2055,17 +2059,26 @@ export function App() {
     }
   };
 
+  // What a task's delivery steps report is in its platform's words, as its page reads them.
+  const deliveryPlatform = (taskId: string): RemoteProvider => {
+    const detail = taskDetail?.task.id === taskId ? taskDetail : undefined;
+    const task = detail?.task ?? snapshot.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return 'GITHUB';
+    return deliveryProvider(task, detail?.repository ?? snapshot.repositories.find((repository) => repository.id === task.repositoryId));
+  };
+
   const createPullRequest = async (taskId: string, title?: string, baseBranch?: string, closeIssue?: boolean) => {
     setError(undefined);
+    const noun = remoteWorkNoun(deliveryPlatform(taskId), 'PULL_REQUEST');
     try {
       await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch, closeIssue }));
       // Only the creation dialog creates a pull request; Push update shows its result in PR Status.
-      if (title !== undefined) notify('Draft pull request created.', 'success');
+      if (title !== undefined) notify(`Draft ${noun} created.`, 'success');
       await refresh();
     } catch (caught) {
       // The creation dialog keeps its inputs and displays the failure for retry.
       if (title !== undefined) throw caught;
-      reportActionError(caught, 'Failed to create pull request.');
+      reportActionError(caught, `Failed to create ${noun}.`);
     }
   };
 
@@ -2106,18 +2119,19 @@ export function App() {
     }
   };
 
-  // The checks run again on the platform, out of view, so a toast says they started.
-  // The update feeds the agent's instruction, so a failure is reported here and still stops that step.
-  const fetchPullRequestUpdate = async (taskId: string, from: 'PULL_REQUEST' | 'BASE') => {
+  // The files a merge stops on feed the agent's instruction, so a failure is reported here and
+  // still stops that step; a reading that fails after the merge does not.
+  const mergePullRequestUpdate = async (taskId: string, from: 'PULL_REQUEST' | 'BASE') => {
     setError(undefined);
-    try {
-      return await withAppAction(() => taskManagerApi.fetchPullRequestUpdate({ taskId, from }));
-    } catch (caught) {
-      reportActionError(caught, 'Could not fetch the update.');
+    const update = await withAppAction(() => taskManagerApi.mergePullRequestUpdate({ taskId, from })).catch((caught: unknown) => {
+      reportActionError(caught, 'Could not merge the update.');
       throw caught;
-    }
+    });
+    await refresh().catch(() => undefined);
+    return update;
   };
 
+  // The checks run again on the platform, out of view, so a toast says they started.
   const rerunPullRequestChecks = async (taskId: string) => {
     setError(undefined);
     try {
@@ -2155,7 +2169,7 @@ export function App() {
       await withAppAction(() => taskManagerApi.refreshGitHub({ taskId }));
       await refresh();
     } catch (caught) {
-      reportActionError(caught, 'Failed to refresh GitHub.');
+      reportActionError(caught, `Failed to refresh ${remoteProviderName(deliveryPlatform(taskId))}.`);
     }
   };
 
@@ -3013,7 +3027,7 @@ export function App() {
             onResolvePullRequestDiscussion={resolvePullRequestDiscussion}
             onRerunPullRequestChecks={rerunPullRequestChecks}
             onReadPullRequestCheckLogs={(taskId) => taskManagerApi.readPullRequestCheckLogs({ taskId })}
-            onFetchPullRequestUpdate={fetchPullRequestUpdate}
+            onMergePullRequestUpdate={mergePullRequestUpdate}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}

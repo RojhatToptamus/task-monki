@@ -14,7 +14,7 @@ import type { RemoteProvider, RemoteRepositoryOption, RemoteRepositoryRef } from
 
 /**
  * Where a linked task's pull or merge request lives. Without a target, the
- * platform repository is found from the checkout, as it always was.
+ * platform repository is found from the checkout.
  */
 export interface DeliveryTarget {
   repository: RemoteRepositoryRef;
@@ -75,7 +75,8 @@ export interface PullRequestDelivery {
     target?: DeliveryTarget;
   }): Promise<PullRequestSync>;
   findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<PullRequestSync | undefined>;
-  viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<PullRequestSync>;
+  /** Reads the status and what people said; with `feedback: false`, the status alone, as a wait for a step to show needs. */
+  viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget, options?: { feedback?: boolean }): Promise<PullRequestSync>;
   pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string>;
   markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void>;
   readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions>;
@@ -91,7 +92,7 @@ export interface PullRequestDelivery {
   /** Resolves a thread, or reopens it when `resolved` is false. */
   resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved?: boolean): Promise<void>;
   commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;
-  /** Asks people for another review; false when the platform cannot be asked from here. */
+  /** Asks people for another review; absent where the platform cannot be asked from here. */
   requestReviewers?(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
   /** The raw log of a failing check, when its link names a job this platform serves. */
   readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined>;

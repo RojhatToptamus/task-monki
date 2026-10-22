@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PULL_REQUEST_FEEDBACK_LIMITS, boundPullRequestFeedback, feedbackTurnFacts, parsePullRequestFeedback, reviewTurn } from './pullRequestFeedback';
+import { PULL_REQUEST_FEEDBACK_LIMITS, boundPullRequestFeedback, discussionSummary, feedbackTurnFacts, parsePullRequestFeedback, reviewTurn } from './pullRequestFeedback';
 
 const base = { provider: 'GITHUB' as const, number: 9, capturedAt: '2026-10-10T10:00:00.000Z', reviewers: [], truncated: false };
 const thread = (id: string, bodies: string[], resolved = false) => ({
@@ -55,6 +55,13 @@ describe('parsePullRequestFeedback', () => {
     // Another pull request's reading is not this one's.
     expect(parsePullRequestFeedback(JSON.stringify(document), 10)).toBeUndefined();
     expect(parsePullRequestFeedback('not json', 9)).toBeUndefined();
+  });
+});
+
+describe('discussionSummary', () => {
+  it('reads a rendered comment\'s words, never its tags', () => {
+    expect(discussionSummary({ comments: [{ body: '<details><summary>Walkthrough</summary>Text</details>', truncated: false }] }))
+      .toBe('Walkthrough');
   });
 });
 

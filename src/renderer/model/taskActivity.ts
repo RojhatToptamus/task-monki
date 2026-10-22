@@ -1,18 +1,22 @@
-import type {
-  AgentRunMode,
-  CiChecksStatus,
-  DomainEvent,
-  GitStatus,
-  MergeStatus,
-  PullRequestStatus,
-  ReviewStatus,
-  RunRecord,
-  Task,
-  WorktreeStatus
+import {
+  formatRemoteWorkNumber,
+  remoteProviderName,
+  remoteWorkLabel,
+  type AgentRunMode,
+  type CiChecksStatus,
+  type DomainEvent,
+  type GitStatus,
+  type MergeStatus,
+  type PullRequestStatus,
+  type RemoteProvider,
+  type ReviewStatus,
+  type RunRecord,
+  type Task,
+  type WorktreeStatus
 } from '../../shared/contracts';
 import { hasUncommittedChanges, reviewedCodeText } from './reviewedCode';
 import { listNames, pluralize, shortSha } from './formatting';
-import { deliveryProvider, deliveryWords } from './deliveryWords';
+import { deliveryNoun } from './deliveryWords';
 
 export type TaskActivityActor =
   | 'User'
@@ -70,6 +74,15 @@ export interface TaskActivityInput {
   task?: Task;
   events: DomainEvent[];
   runs?: RunRecord[];
+  /** The platform that delivers the task, as `deliveryProvider` decides it with the task's repository. */
+  provider: RemoteProvider;
+}
+
+/** The delivering platform in History's own words: its name, the actor of what it reported, and PR or MR. */
+interface PlatformWords {
+  provider: RemoteProvider;
+  name: 'GitHub' | 'GitLab';
+  noun: 'PR' | 'MR';
 }
 
 export interface OverviewTaskActivityInput extends TaskActivityInput {
@@ -126,28 +139,7 @@ const TERMINAL_RUN_STATUSES = new Set<RunRecord['status']>([
  * instead of reinterpreting domain events independently.
  */
 export function buildTaskActivityLedger(input: TaskActivityInput): TaskActivityItem[] {
-  const built = buildTaskActivityItems(input);
-  const provider = input.task ? deliveryProvider(input.task) : 'GITHUB';
-  return built.map((item) => stripOrder(provider === 'GITLAB' ? inGitLabWords(item) : item));
-}
-
-const PULL_REQUEST_ROW = /^(?:PR #\d+|Pull request)$/u;
-
-/** A GitLab task's delivery history in GitLab's words. */
-function inGitLabWords<T extends TaskActivityItem>(item: T): T {
-  if (item.category !== 'delivery' && item.actor !== 'GitHub') return item;
-  return {
-    ...item,
-    actor: item.actor === 'GitHub' ? 'GitLab' : item.actor,
-    title: deliveryWords(item.title, 'GITLAB'),
-    ...(item.evidence ? {
-      evidence: {
-        summary: deliveryWords(item.evidence.summary, 'GITLAB'),
-        // Check names are the platform's own text; only the pull request row is Task Monki's.
-        ...(item.evidence.rows ? { rows: item.evidence.rows.map((row) => PULL_REQUEST_ROW.test(row.label) ? { ...row, label: deliveryWords(row.label, 'GITLAB') } : row) } : {})
-      }
-    } : {})
-  };
+  return buildTaskActivityItems(input).map(stripOrder);
 }
 
 export function buildOverviewTaskActivityViewModel(
@@ -218,6 +210,8 @@ function buildTaskActivityItems(
       .map((event) => event.runId as string)
   );
   const state: TaskActivityBuildState = { uncommittedBySnapshotId: new Map() };
+  // Task Monki's words are set in the platform's before any platform text, such as an error, joins them.
+  const words: PlatformWords = { provider: input.provider, name: remoteProviderName(input.provider), noun: deliveryNoun(input.provider) };
   const items: BuiltTaskActivityItem[] = [];
   let order = 0;
 
@@ -231,7 +225,8 @@ function buildTaskActivityItems(
       runById,
       terminalRunIds,
       blockedImplementationRunIds,
-      state
+      state,
+      words
     );
     if (candidate) {
       order = appendOrReplaceHistoryItem(items, candidate, order);
@@ -251,7 +246,8 @@ function itemForEvent(
   runById: Map<string, RunRecord>,
   terminalRunIds: Set<string>,
   blockedImplementationRunIds: Set<string>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const payload = objectPayload(event.payload);
   const run = event.runId ? runById.get(event.runId) : undefined;
@@ -353,24 +349,26 @@ function itemForEvent(
         commitEvidence(payload),
         'success'
       );
+    case 'BRANCH_UPDATE_REQUESTED':
+      return branchUpdateItem(event, payload, words);
     case 'BRANCH_PUBLISHED':
-      return branchPublishedItem(event, payload, state);
+      return branchPublishedItem(event, payload, state, words);
     case 'BRANCH_PUBLISH_FAILED':
-      return branchPublishFailedItem(event, payload, state);
+      return branchPublishFailedItem(event, payload, state, words);
     case 'PR_SNAPSHOT_CAPTURED':
-      return pullRequestItem(event, payload, state);
+      return pullRequestItem(event, payload, state, words);
     case 'CI_ROLLUP_CAPTURED':
-      return ciRollupItem(event, payload, state);
+      return ciRollupItem(event, payload, state, words);
     case 'REVIEW_ROLLUP_CAPTURED':
-      return githubReviewItem(event, payload, state);
+      return githubReviewItem(event, payload, state, words);
     case 'MERGE_SNAPSHOT_CAPTURED':
-      return mergeItem(event, payload, state);
+      return mergeItem(event, payload, state, words);
     case 'GITHUB_SYNC_FAILED':
-      return githubFailureItem(event, payload, state);
+      return githubFailureItem(event, payload, state, words);
     case 'PR_REPLIES_POSTED':
-      return repliesPostedItem(event, payload);
+      return repliesPostedItem(event, payload, words);
     case 'PR_CHECKS_RERUN_REQUESTED':
-      return item(event, 'delivery', 'User', 'Re-ran failed checks on GitHub', undefined, 'info');
+      return item(event, 'delivery', 'User', `Re-ran failed checks on ${words.name}`, undefined, 'info');
     case 'TRANSITION_COMPLETED':
       return transitionCompletedItem(event, payload);
     case 'TRANSITION_BLOCKED':
@@ -653,10 +651,38 @@ function gitSnapshotItem(
   }
 }
 
+/**
+ * A merge Task Monki makes into the worktree's branch, for Update with the base
+ * or Pull changes: what it merges and at which commit. Conflicts Git stops on
+ * follow as their own row.
+ */
+function branchUpdateItem(
+  event: DomainEvent,
+  payload: Record<string, unknown>,
+  words: PlatformWords
+): TaskActivityCandidate | undefined {
+  const from = stringField(payload, 'from');
+  const ref = stringField(payload, 'ref');
+  const sha = shortSha(stringField(payload, 'sha'));
+  if (!ref || (from !== 'BASE' && from !== 'PULL_REQUEST')) {
+    return undefined;
+  }
+  return item(
+    event,
+    'git',
+    'Git',
+    // Recorded before Git merges, so it names the step taken, not its outcome.
+    from === 'BASE' ? `Update with ${ref} requested` : 'Pull changes requested',
+    fact(sha ? `${ref} at ${sha}` : undefined),
+    'info'
+  );
+}
+
 function branchPublishedItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const signature = [
     stringField(payload, 'branchName') ?? '',
@@ -670,7 +696,7 @@ function branchPublishedItem(
   return item(
     event,
     'delivery',
-    'GitHub',
+    words.name,
     'Branch pushed',
     undefined,
     'success'
@@ -680,7 +706,8 @@ function branchPublishedItem(
 function branchPublishFailedItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const signature = [
     stringField(payload, 'branchName') ?? '',
@@ -692,10 +719,11 @@ function branchPublishFailedItem(
     return undefined;
   }
   state.lastBranchPublicationSignature = signature;
+  // What the remote said is its own text, as written.
   return item(
     event,
     'delivery',
-    'GitHub',
+    words.name,
     'Branch push failed',
     fact(stringField(payload, 'error')),
     'error'
@@ -705,7 +733,8 @@ function branchPublishFailedItem(
 function pullRequestItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const status = stringField(payload, 'status') as PullRequestStatus | undefined;
   const isDraft = booleanField(payload, 'isDraft');
@@ -730,14 +759,14 @@ function pullRequestItem(
       return item(
         event,
         'delivery',
-        'GitHub',
-        'Draft PR available',
+        words.name,
+        `Draft ${words.noun} available`,
         undefined,
         'info'
       );
     }
     if (status === 'OPEN_READY') {
-      return item(event, 'delivery', 'GitHub', 'PR available', undefined, 'info');
+      return item(event, 'delivery', words.name, `${words.noun} available`, undefined, 'info');
     }
   }
 
@@ -746,21 +775,21 @@ function pullRequestItem(
     (previous.status === 'OPEN_DRAFT' || previous.isDraft) &&
     (status === 'OPEN_READY' || isDraft === false)
   ) {
-    return item(event, 'delivery', 'GitHub', 'PR marked ready', undefined, 'success');
+    return item(event, 'delivery', words.name, `${words.noun} marked ready`, undefined, 'success');
   }
   if (status === 'CLOSED_UNMERGED') {
     return item(
       event,
       'delivery',
-      'GitHub',
-      'PR closed without merge',
-      rowFacts(prEvidenceRows(payload)),
+      words.name,
+      `${words.noun} closed without merge`,
+      rowFacts(prEvidenceRows(payload, words)),
       'error',
       { replaceKey: terminalPrReplaceKey(payload, status) }
     );
   }
   if (status === 'MERGED') {
-    return item(event, 'delivery', 'GitHub', 'PR merged', undefined, 'success', {
+    return item(event, 'delivery', words.name, `${words.noun} merged`, undefined, 'success', {
       replaceKey: terminalPrReplaceKey(payload, status)
     });
   }
@@ -770,7 +799,8 @@ function pullRequestItem(
 function ciRollupItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const status = stringField(payload, 'status') as CiChecksStatus | undefined;
   const signature = ciRollupSignature(payload, status);
@@ -782,11 +812,11 @@ function ciRollupItem(
 
   switch (status) {
     case 'PENDING':
-      return item(event, 'delivery', 'GitHub', 'Checks pending', undefined, 'action', {
+      return item(event, 'delivery', words.name, 'Checks pending', undefined, 'action', {
         replaceKey
       });
     case 'PASSING':
-      return item(event, 'delivery', 'GitHub', 'Checks passed', undefined, 'success', {
+      return item(event, 'delivery', words.name, 'Checks passed', undefined, 'success', {
         replaceKey
       });
     case 'FAILING':
@@ -794,9 +824,9 @@ function ciRollupItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Checks failed',
-        failedCheckEvidence(payload, status),
+        failedCheckEvidence(payload, status, words),
         'error',
         { replaceKey }
       );
@@ -804,9 +834,9 @@ function ciRollupItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Checks canceled',
-        canceledCheckEvidence(payload),
+        canceledCheckEvidence(payload, words),
         'action',
         { replaceKey }
       );
@@ -816,7 +846,7 @@ function ciRollupItem(
         'delivery',
         'Task Monki',
         'Check evidence is stale',
-        evidence('Refresh GitHub evidence before using checks for PR readiness.'),
+        evidence(`Refresh ${words.name} evidence before using checks for ${words.noun} readiness.`),
         'action',
         { replaceKey }
       );
@@ -828,7 +858,8 @@ function ciRollupItem(
 function githubReviewItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const status = stringField(payload, 'status') as ReviewStatus | undefined;
   const signature = [
@@ -847,7 +878,7 @@ function githubReviewItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Review requested',
         undefined,
         'action'
@@ -856,7 +887,7 @@ function githubReviewItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Review pending',
         undefined,
         'action'
@@ -865,9 +896,9 @@ function githubReviewItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         changesRequestedTitle(payload),
-        rowFacts(prEvidenceRows(payload)),
+        rowFacts(prEvidenceRows(payload, words)),
         'error'
       );
     case 'APPROVED':
@@ -875,7 +906,7 @@ function githubReviewItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Review approved',
         undefined,
         'success'
@@ -885,8 +916,8 @@ function githubReviewItem(
         event,
         'delivery',
         'Task Monki',
-        'GitHub review evidence is stale',
-        rowFacts(prEvidenceRows(payload)),
+        `${words.name} review evidence is stale`,
+        rowFacts(prEvidenceRows(payload, words)),
         'action'
       );
     default:
@@ -911,7 +942,8 @@ function changesRequestedTitle(payload: Record<string, unknown>): string {
 function mergeItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const status = stringField(payload, 'status') as MergeStatus | undefined;
   const signature = [
@@ -928,16 +960,16 @@ function mergeItem(
 
   switch (status) {
     case 'MERGED':
-      return item(event, 'delivery', 'GitHub', 'PR merged', undefined, 'success', {
+      return item(event, 'delivery', words.name, `${words.noun} merged`, undefined, 'success', {
         replaceKey: terminalPrReplaceKey(payload, status)
       });
     case 'CLOSED_UNMERGED':
       return item(
         event,
         'delivery',
-        'GitHub',
-        'PR closed without merge',
-        rowFacts(prEvidenceRows(payload)),
+        words.name,
+        `${words.noun} closed without merge`,
+        rowFacts(prEvidenceRows(payload, words)),
         'error',
         { replaceKey: terminalPrReplaceKey(payload, status) }
       );
@@ -945,19 +977,19 @@ function mergeItem(
       return item(
         event,
         'delivery',
-        'GitHub',
+        words.name,
         'Merge blocked',
-        rowFacts(prEvidenceRows(payload)),
+        rowFacts(prEvidenceRows(payload, words)),
         'error'
       );
     case 'QUEUED':
-      return item(event, 'delivery', 'GitHub', 'Merge queued', undefined, 'action');
+      return item(event, 'delivery', words.name, 'Merge queued', undefined, 'action');
     case 'MERGEABLE':
       if (previous?.status === 'BLOCKED') {
         return item(
           event,
           'delivery',
-          'GitHub',
+          words.name,
           'Merge unblocked',
           undefined,
           'success'
@@ -970,7 +1002,7 @@ function mergeItem(
 }
 
 /** The person's replies on the platform: how many, what they resolved, who they asked again. */
-function repliesPostedItem(event: DomainEvent, payload: Record<string, unknown>): TaskActivityCandidate {
+function repliesPostedItem(event: DomainEvent, payload: Record<string, unknown>, words: PlatformWords): TaskActivityCandidate {
   const posted = numberField(payload, 'posted') ?? 0;
   const resolved = numberField(payload, 'resolved') ?? 0;
   const reopened = numberField(payload, 'reopened') ?? 0;
@@ -981,17 +1013,18 @@ function repliesPostedItem(event: DomainEvent, payload: Record<string, unknown>)
     requested.length ? `asked ${requested.map((name) => `@${name}`).join(' and ')} again` : ''
   ].filter(Boolean).join(', ') : undefined;
   // One write, named by what it did: a reply, a thread resolved or reopened, or a reviewer asked again.
-  const title = posted ? 'Replied on GitHub'
-    : resolved ? 'Resolved a thread on GitHub'
-      : reopened ? 'Reopened a thread on GitHub'
-        : 'Asked for review on GitHub';
+  const title = posted ? `Replied on ${words.name}`
+    : resolved ? `Resolved a thread on ${words.name}`
+      : reopened ? `Reopened a thread on ${words.name}`
+        : `Asked for review on ${words.name}`;
   return item(event, 'delivery', 'User', title, fact(summary), 'info');
 }
 
 function githubFailureItem(
   event: DomainEvent,
   payload: Record<string, unknown>,
-  state: TaskActivityBuildState
+  state: TaskActivityBuildState,
+  words: PlatformWords
 ): TaskActivityCandidate | undefined {
   const signature = stringField(payload, 'error') ?? 'github-failure';
   if (signature === state.lastGithubFailureSignature) {
@@ -1001,8 +1034,8 @@ function githubFailureItem(
   return item(
     event,
     'delivery',
-    'GitHub',
-    'Could not update GitHub evidence',
+    words.name,
+    `Could not update ${words.name} evidence`,
     fact(stringField(payload, 'error')),
     'error'
   );
@@ -1279,13 +1312,18 @@ function branchDivergenceRows(payload: Record<string, unknown>): TaskActivityEvi
   return rows.length ? rows : undefined;
 }
 
-function prEvidenceRows(payload: Record<string, unknown>): TaskActivityEvidenceRow[] | undefined {
+function prEvidenceRows(payload: Record<string, unknown>, words: PlatformWords): TaskActivityEvidenceRow[] | undefined {
   const rows: TaskActivityEvidenceRow[] = [];
   const number = numberField(payload, 'number') ?? numberField(payload, 'pullRequestNumber');
   const url = stringField(payload, 'url');
   const head = shortSha(stringField(payload, 'headSha') ?? stringField(payload, 'headRefOid'));
   if (number || url) {
-    rows.push({ label: number ? `PR #${number}` : 'Pull request', href: url });
+    rows.push({
+      label: number
+        ? `${words.noun} ${formatRemoteWorkNumber(words.provider, 'PULL_REQUEST', number)}`
+        : remoteWorkLabel(words.provider, 'PULL_REQUEST'),
+      href: url
+    });
   }
   if (head) {
     rows.push({ label: 'Head', value: head });
@@ -1343,32 +1381,33 @@ function actionableCheckDetailsSignature(
 
 function failedCheckEvidence(
   payload: Record<string, unknown>,
-  status: CiChecksStatus
+  status: CiChecksStatus,
+  words: PlatformWords
 ): TaskActivityEvidence {
-  const rows = checkEvidenceRows(payload, 'failed', 'Blocks PR readiness') ?? [];
+  const rows = checkEvidenceRows(payload, 'failed', `Blocks ${words.noun} readiness`) ?? [];
   const failedCount = Math.max(rows.length, numberField(payload, 'failingCount') ?? 0);
   if (status === 'BLOCKED' && failedCount === 0) {
-    return evidence('Check execution is blocked; PR readiness is blocked.');
+    return evidence(`Check execution is blocked; ${words.noun} readiness is blocked.`);
   }
   if (failedCount === 0) {
-    return evidence('GitHub reports failing checks; PR readiness is blocked.');
+    return evidence(`${words.name} reports failing checks; ${words.noun} readiness is blocked.`);
   }
   return evidence(
-    `${pluralize(failedCount, 'failed check')} ${failedCount === 1 ? 'blocks' : 'block'} PR readiness.`,
+    `${pluralize(failedCount, 'failed check')} ${failedCount === 1 ? 'blocks' : 'block'} ${words.noun} readiness.`,
     rows
   );
 }
 
-function canceledCheckEvidence(payload: Record<string, unknown>): TaskActivityEvidence {
-  const rows = checkEvidenceRows(payload, 'canceled', 'Needs rerun before PR readiness') ?? [];
+function canceledCheckEvidence(payload: Record<string, unknown>, words: PlatformWords): TaskActivityEvidence {
+  const rows = checkEvidenceRows(payload, 'canceled', `Needs rerun before ${words.noun} readiness`) ?? [];
   const canceledCount = Math.max(rows.length, numberField(payload, 'canceledCount') ?? 0);
   if (canceledCount === 0) {
-    return evidence('GitHub checks were canceled; PR readiness is not current.');
+    return evidence(`${words.name} checks were canceled; ${words.noun} readiness is not current.`);
   }
   return evidence(
     `${pluralize(canceledCount, 'canceled check')} ${
       canceledCount === 1 ? 'needs' : 'need'
-    } rerun before PR readiness.`,
+    } rerun before ${words.noun} readiness.`,
     rows
   );
 }

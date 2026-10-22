@@ -7,6 +7,7 @@ import {
 import { isImplementationOutcomeBlocked } from './nextAction';
 import { hasPullRequest, isClosedPhase, isMerged } from './taskPhase';
 import { baseMovedLine } from './formatting';
+import { deliveryNoun, deliveryProvider } from './deliveryWords';
 import { pullRequestFeedbackLine } from './pullRequestFeedback';
 
 export type TaskAttentionSource = Task | BoardTaskSummary;
@@ -86,7 +87,10 @@ export function describeTaskAttention(
     };
   }
 
-  const gitAttention = describeGitAttention(task);
+  // Conflicts an agent turn is resolving, as after a merge Git stopped on, wait on it, not the person.
+  const resolvingConflicts = IN_FLIGHT_RUNS.has(task.projection.agentRun) &&
+    (task.projection.git === 'CONFLICTED' || isMergeInProgress(task));
+  const gitAttention = resolvingConflicts ? undefined : describeGitAttention(task);
   if (gitAttention) {
     return gitAttention;
   }
@@ -101,7 +105,9 @@ export function describeTaskAttention(
     return deliveryAttention;
   }
 
-  if (task.projection.health === 'ERROR') {
+  // A merged pull request asks nothing more, whatever its last checks left in the task's health,
+  // and conflicts being resolved leave the health in error without asking anything yet.
+  if (task.projection.health === 'ERROR' && !isMerged(task.projection) && !resolvingConflicts) {
     return {
       label: 'Needs attention',
       kind: 'failure',
@@ -128,9 +134,19 @@ function describeCheckoutAttention(
   return undefined;
 }
 
+/**
+ * The worktree's Git state. A merge in progress in the task's own worktree is
+ * Push update's to finish, and reads as PR Status leads with it: Git counts each
+ * file it stopped on as conflicted until the merge is committed, resolved or
+ * not, and Push update names any file that still holds a conflict marker.
+ * Conflicts with no such merge are the person's own.
+ */
 function describeGitAttention(
   task: TaskAttentionSource
 ): TaskAttentionDescriptor | undefined {
+  if (isMergeInProgress(task)) {
+    return { label: 'Changes not pushed', kind: 'delivery', detail: 'Merge in progress', tone: 'warning' };
+  }
   switch (task.projection.git) {
     case 'CONFLICTED':
       return { label: 'Git conflicts', kind: 'git', tone: 'error' };
@@ -138,6 +154,11 @@ function describeGitAttention(
       return { label: 'Git unavailable', kind: 'git', tone: 'error' };
   }
   return undefined;
+}
+
+/** A merge in progress beside an open pull request, which Push update finishes (`BoardDeliveryFacts.mergeInProgress`). */
+function isMergeInProgress(task: TaskAttentionSource): boolean {
+  return 'delivery' in task && Boolean(task.delivery?.mergeInProgress);
 }
 
 /**
@@ -207,20 +228,24 @@ function describeDeliveryAttention(
   const facts = 'delivery' in task ? task.delivery : undefined;
   // Check names, reviewers, branches and push errors are the platform's own text, shown as written.
   const detail = (value: string | undefined) => value ? { detail: value } : {};
-  // The word follows the step's order: a worktree out of step with the pull request, then a
-  // base that moved, then failed checks, then requested changes. What ran or was asked
-  // describes commits the merge would not hold until the step before it is taken.
-  if (projection.health === 'ERROR' && (projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS')) {
+  // The word follows the step's order: a push that failed, a worktree out of step with the pull
+  // request, then a base that moved, then failed checks, then requested changes. What ran or was
+  // asked describes commits the merge would not hold until the step before it is taken. The
+  // publication record alone says a push failed, as PR Status reads it; later readings reset health.
+  if (projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS') {
     return { label: projection.branchPublication === 'FAILED' ? 'Push failed' : 'Push unconfirmed', kind: 'delivery', tone: 'error', ...detail(facts?.pushError) };
   }
   const checksFailed = projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED';
   // Once the person answered, the review waits on its reviewers: nothing asks here until one of them writes.
   const changesRequested = projection.reviews === 'CHANGES_REQUESTED' && facts?.turn !== 'REVIEWERS';
   const moved = facts?.baseMoved;
-  // Fixes waiting in the worktree come before what they answer: pushing them is the next step.
-  const unpushed = hasPullRequest(projection) && (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED');
-  if (unpushed && (checksFailed || changesRequested || moved || projection.merge === 'BLOCKED')) {
-    return { label: 'Changes not pushed', kind: 'delivery', tone: 'warning' };
+  // Fixes waiting in the worktree, or a branch that moved beside the pull request, come before what
+  // stands on it: pushing them, or bringing in what moved, is the next step.
+  const outOfStep = hasPullRequest(projection) && (checksFailed || changesRequested || moved || projection.merge === 'BLOCKED')
+    ? describeOutOfStep(task)
+    : undefined;
+  if (outOfStep) {
+    return outOfStep;
   }
   if (moved) {
     return { label: 'Merge blocked', kind: 'delivery', tone: 'error', ...detail(baseMovedLine(moved.reason, moved.base)) };
@@ -244,6 +269,26 @@ function describeDeliveryAttention(
     return { label: 'Delivery needs attention', kind: 'delivery', tone: 'error' };
   }
   return undefined;
+}
+
+/**
+ * A worktree out of step with its pull request, named as PR Status names it: a
+ * branch that diverged from it, or, under a worktree with nothing of its own, a
+ * pull request rewritten; else work the pull request does not hold yet.
+ */
+export function describeOutOfStep(task: TaskAttentionSource): TaskAttentionDescriptor | undefined {
+  switch (task.projection.git) {
+    case 'DIVERGED':
+      // A pull request rewritten under a worktree with nothing of its own is news, not a conflict.
+      return 'pullRequestRewritten' in task && task.pullRequestRewritten
+        ? { label: `${deliveryNoun(deliveryProvider(task))} rewritten`, kind: 'delivery', tone: 'warning' }
+        : { label: 'Branch diverged', kind: 'delivery', tone: 'error' };
+    case 'DIRTY':
+    case 'COMMITTED_UNPUSHED':
+      return { label: 'Changes not pushed', kind: 'delivery', tone: 'warning' };
+    default:
+      return undefined;
+  }
 }
 
 /** The failed checks by name: "unit and lint failed", or "unit, lint and 3 more failed". */

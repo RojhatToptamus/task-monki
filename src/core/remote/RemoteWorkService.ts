@@ -1,4 +1,5 @@
 import {
+  INVISIBLE_CHARACTERS,
   REMOTE_WORK_LIMITS,
   formatRemoteWorkNumber,
   parseRemoteWorkReference,
@@ -8,6 +9,7 @@ import {
   type ListRemoteWorkRequest,
   type RemoteProvider,
   type RemoteRepositoryOption,
+  type RemoteWorkKind,
   type RemoteWorkListing,
   type RemoteWorkRef,
   type RemoteWorkSummary,
@@ -46,7 +48,7 @@ interface FetchedPullRequest extends CapturedRemoteWork {
 export class RemoteWorkService {
   constructor(private readonly readers: Readonly<Record<RemoteProvider, RemoteWorkReader>>) {}
 
-  reader(provider: RemoteProvider): RemoteWorkReader {
+  private reader(provider: RemoteProvider): RemoteWorkReader {
     return this.readers[provider];
   }
 
@@ -82,7 +84,13 @@ export class RemoteWorkService {
         const item = input.kind === 'ISSUE'
           ? (await reader.readIssue(ref, repository.path)).summary
           : (await reader.readPullRequest(ref, repository.path)).summary;
-        return { repositories, remote, items: await annotate([item], findTasks), exact: true };
+        const items = await annotate([item], findTasks);
+        // A link names one item, which the composer chooses: one no task holds is offered only while it
+        // can start a task, as the list offers only open items.
+        if (item.state !== 'OPEN' && !items[0]?.existingTaskId) {
+          throw new RemoteWorkError('NOT_FOUND', closedItemMessage(remote.provider, input.kind, reference.number, item.state));
+        }
+        return { repositories, remote, items, exact: true };
       }
       const items = await this.reader(remote.provider).list(remote, input.kind, query || undefined, repository.path);
       return { repositories, remote, items: await annotate(items, findTasks), exact: false };
@@ -96,9 +104,7 @@ export class RemoteWorkService {
     if (ref.kind !== 'ISSUE') throw new RemoteWorkError('WRONG_KIND', 'Choose an issue.');
     const remote = requireCheckoutRemote(await listCheckoutRemoteRepositories(repository.path), ref.repository);
     const { snapshot } = await this.reader(remote.provider).readIssue({ ...ref, repository: remote }, repository.path);
-    if (snapshot.state !== 'OPEN') {
-      throw new RemoteWorkError('NOT_FOUND', `${formatRemoteWorkNumber(remote.provider, 'ISSUE', ref.number)} is closed.`);
-    }
+    if (snapshot.state !== 'OPEN') throw new RemoteWorkError('NOT_FOUND', closedItemMessage(remote.provider, 'ISSUE', ref.number, snapshot.state));
     return {
       source: {
         provider: remote.provider,
@@ -126,10 +132,6 @@ export class RemoteWorkService {
     const noun = remoteWorkNoun(remote.provider, 'PULL_REQUEST');
     if (pullRequest.snapshot.state !== 'OPEN') {
       throw new RemoteWorkError('NOT_FOUND', `This ${noun} is ${pullRequest.snapshot.state === 'MERGED' ? 'merged' : 'closed'}.`);
-    }
-    // Branch names are identities, so they are kept exactly or not at all.
-    if (![pullRequest.headRefName, pullRequest.baseRefName].every((name) => name && name.trim() === name)) {
-      throw new RemoteWorkError('FAILED', `Task Monki cannot open this ${noun}: a branch name begins or ends with a space.`);
     }
     const mergeBaseSha = await this.fetchRevisions(repository.path, remote, pullRequest);
     return {
@@ -168,10 +170,23 @@ export class RemoteWorkService {
     return { pullRequest, mergeBaseSha: await this.fetchRevisions(repository.path, remote, pullRequest) };
   }
 
+  /**
+   * Fetches an open pull request's head and target and finds the merge base,
+   * for opening it and for each Sync. Its branch names are taken as they are
+   * read here, so they are checked here.
+   */
   private async fetchRevisions(repositoryPath: string, remote: RemoteRepositoryOption, pullRequest: RemotePullRequest): Promise<string> {
+    const noun = remoteWorkNoun(remote.provider, 'PULL_REQUEST');
+    // Branch names are identities, so they are kept exactly or not at all.
+    if (![pullRequest.headRefName, pullRequest.baseRefName].every((name) => name && name.trim() === name)) {
+      throw new RemoteWorkError('FAILED', `Task Monki cannot use this ${noun}: a branch name begins or ends with a space.`);
+    }
+    // Agents read branch names, so one that holds characters a reader cannot see is refused.
+    if (![pullRequest.headRefName, pullRequest.baseRefName].every((name) => name.replace(INVISIBLE_CHARACTERS, '') === name)) {
+      throw new RemoteWorkError('FAILED', `Task Monki cannot use this ${noun}: a branch name holds invisible characters.`);
+    }
     const head = pullRequestHeadRef(remote.provider, pullRequest.snapshot.number);
     await fetchRemoteObjects(repositoryPath, remote, pullRequest.baseIsMergeBase ? [head] : [head, `refs/heads/${pullRequest.baseRefName}`]);
-    const noun = remoteWorkNoun(remote.provider, 'PULL_REQUEST');
     if (!await hasCommit(repositoryPath, pullRequest.headSha) || !await hasCommit(repositoryPath, pullRequest.baseSha)) {
       throw new RemoteWorkError('FAILED', `The ${noun} changed while it was being read. Try again.`);
     }
@@ -196,6 +211,11 @@ async function annotate(
       ? { ...item, existingTaskId: task.id, existingTaskTitle: task.title, existingTaskPhase: task.workflowPhase }
       : item;
   });
+}
+
+/** Why an item that is no longer open cannot start a task. */
+function closedItemMessage(provider: RemoteProvider, kind: RemoteWorkKind, number: number, state: string): string {
+  return `${formatRemoteWorkNumber(provider, kind, number)} is ${state === 'MERGED' ? 'merged' : 'closed'}.`;
 }
 
 export function pullRequestHeadRef(provider: RemoteProvider, number: number): string {

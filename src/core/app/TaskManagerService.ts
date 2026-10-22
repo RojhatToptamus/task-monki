@@ -10,6 +10,7 @@ import {
   type SaveAgentProfileRequest
 } from '../../shared/agentProfiles';
 import type {
+  DomainEvent,
   GitHubCheckDetailRecord,
   TaskInstruction,
   InstructionAttachments,
@@ -152,9 +153,9 @@ import {
   assertResolvePullRequestDiscussionRequest,
   boundCheckLog,
   holdsUnshippedWork,
-  type FetchPullRequestUpdateRequest,
   type MarkPullRequestReadyRequest,
   type MergePullRequestRequest,
+  type MergePullRequestUpdateRequest,
   type PullRequestCheckLog,
   type PullRequestMergeOptions,
   type PullRequestUpdate,
@@ -166,7 +167,7 @@ import {
   type RerunPullRequestChecksResult,
   type ReplyToPullRequestResult
 } from '../../shared/pullRequestActions';
-import { parsePullRequestFeedback, type PullRequestDiscussion, type PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import { discussionSummary, parsePullRequestFeedback, type PullRequestDiscussion, type PullRequestFeedback } from '../../shared/pullRequestFeedback';
 import {
   designNetworkAccessPolicy,
   projectAgentExecutionSupport
@@ -201,21 +202,22 @@ import type {
   StopDiscourseWaveRequest,
   TombstoneDiscourseMessageRequest
 } from '../../shared/discourse';
-import { realpath } from 'node:fs/promises';
+import { lstat, open as openFile, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { configureGitExecutablePath, git, gitSucceeds, isGitObjectId } from '../git/gitCli';
+import { UNTRUSTED_CHECKOUT_GIT_ENV, configureGitExecutablePath, git, gitSucceeds, isGitObjectId, type GitExecutionOptions } from '../git/gitCli';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint, type PullRequestHead } from '../git/GitSnapshotService';
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
+import { GitHubCli } from '../github/GitHubCli';
 import { GitHubService } from '../github/GitHubService';
 import { deliveryRemote, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
+import { buildPullRequestBody } from '../remote/pullRequestBody';
 import { GitHubRemoteWork } from '../github/GitHubRemoteWork';
 import { GitLabCli } from '../gitlab/GitLabCli';
 import { GitLabRemoteWork } from '../gitlab/GitLabRemoteWork';
 import { GitLabService } from '../gitlab/GitLabService';
 import { RemoteWorkService, pullRequestHeadRef, type CapturedRemoteWork } from '../remote/RemoteWorkService';
 import {
-  UNTRUSTED_CHECKOUT_GIT_ENV,
   fetchRemoteObjects,
   hasCommit,
   isAncestor,
@@ -225,8 +227,9 @@ import {
   singlePushRepository,
   requireCheckoutRemote
 } from '../remote/RemoteCheckout';
-import { remoteWorkMessage } from '../remote/RemoteWorkError';
+import { remoteWorkMessage, safeCliMessage } from '../remote/RemoteWorkError';
 import {
+  INVISIBLE_CHARACTERS,
   formatRemoteWorkNumber,
   leavablePullRequestHeads,
   parseRemoteWorkReference,
@@ -234,10 +237,10 @@ import {
   remoteWorkNoun,
   sameRemoteRepository,
   taskRemoteSourceRef,
-  visibleRemoteText,
   type ListRemoteWorkRequest,
   type OpenPullRequestRequest,
   type RemoteProvider,
+  type RemoteRepositoryOption,
   type RemoteRepositoryRef,
   type RemoteWorkListing,
   type SyncPullRequestRequest,
@@ -257,7 +260,7 @@ import { inspectRepositoryWorktreePreparation, validateRepositoryPath } from '..
 import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
-import { SqliteTaskStore, TaskCreationRequestError } from '../storage/SqliteTaskStore';
+import { SqliteTaskStore, TaskCreationRequestError, type CreateTaskStoreInput } from '../storage/SqliteTaskStore';
 import { redactCredentialText } from '../agent/AgentCredentialRedaction';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import { AgentMutationAmbiguousError, type AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
@@ -386,11 +389,10 @@ export class TaskManagerService {
   private readonly reviewSnapshots: ReviewSnapshotStore;
   private readonly sideQuestions: SideQuestionCoordinator;
   private readonly designDrafts?: DesignDraftStore;
+  private readonly githubCli: GitHubCli;
   private readonly github: GitHubService;
   private readonly gitlab: GitLabService;
   private readonly gitlabCli: GitLabCli;
-  private readonly githubRemoteWork: GitHubRemoteWork;
-  private readonly gitlabRemoteWork: GitLabRemoteWork;
   private readonly remoteWork: RemoteWorkService;
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
@@ -687,12 +689,12 @@ export class TaskManagerService {
         prepareTurn: async (detail, before) => (await this.inspectDesignSetup(detail, before)).blocker
       });
     }
-    this.github = new GitHubService(options.ghPath);
-    this.githubRemoteWork = new GitHubRemoteWork(options.ghPath);
+    // One CLI per platform: delivery and remote work run the executable settings resolved.
+    this.githubCli = new GitHubCli(options.ghPath);
+    this.github = new GitHubService(this.githubCli);
     this.gitlabCli = new GitLabCli(options.glabPath);
     this.gitlab = new GitLabService(this.gitlabCli);
-    this.gitlabRemoteWork = new GitLabRemoteWork(this.gitlabCli);
-    this.remoteWork = new RemoteWorkService({ GITHUB: this.githubRemoteWork, GITLAB: this.gitlabRemoteWork });
+    this.remoteWork = new RemoteWorkService({ GITHUB: new GitHubRemoteWork(this.githubCli), GITLAB: new GitLabRemoteWork(this.gitlabCli) });
     this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         this.trackPostRunEvidence(event.runId);
@@ -984,7 +986,7 @@ export class TaskManagerService {
       worktree.iterationId,
       'checkedAt'
     );
-    const observed = await this.github.reconcileBranchPublication({
+    const observed = recordablePublication(await this.github.reconcileBranchPublication({
       task,
       worktree,
       remoteName:
@@ -992,7 +994,7 @@ export class TaskManagerService {
         latestRepository?.remoteName ??
         'origin',
       expectedHeadSha: latestPublication?.headSha,
-      remoteUrl: latestPublication?.remoteUrl,
+      remoteUrl: await recordedPushTarget(worktree, latestPublication),
       // A push to an opened pull request went to that request's branch, last seen at its recorded head.
       remoteBranch: latestPublication && latestPublication.branchName !== worktree.branchName
         ? latestPublication.branchName : undefined,
@@ -1003,7 +1005,7 @@ export class TaskManagerService {
         (!latestPublication
           ? 'The earlier publication request did not persist its attempted head.'
           : undefined)
-    });
+    }));
     if (
       latestPublication &&
       sameBranchPublicationObservation(latestPublication, observed)
@@ -1812,9 +1814,9 @@ export class TaskManagerService {
    * commits of its own, its new head. Local commits are never discarded.
    */
   syncPullRequest(input: SyncPullRequestRequest): Promise<Task> {
-    return this.withTaskAction(input?.taskId, 'Pull request sync', async () => {
+    return this.withTaskAction(input?.taskId, 'Branch sync', async () => {
       const task = await this.requireTaskWithPostRunEvidence(input.taskId);
-      this.assertNormalTask(task, 'Pull request sync');
+      this.assertNormalTask(task, 'Branch sync');
       const source = task.remoteSource;
       if (source?.kind !== 'PULL_REQUEST' || !source.pullRequest) {
         throw new Error('Only a task opened from a pull request can sync with it.');
@@ -1822,7 +1824,7 @@ export class TaskManagerService {
       this.assertNoActiveTaskRun(await this.store.snapshot(), task.id, 'syncing the branch');
       const repository = await this.requireAvailableRepository(task.repositoryId);
       const worktree = await this.requireWorktree(task);
-      const before = await this.refreshEvidenceInternal({ taskId: task.id });
+      const before = await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
       if (before.stagedCount || before.unstagedCount || before.untrackedCount || before.conflictedCount || before.operationInProgress) {
         throw new Error('Commit or discard the worktree changes before syncing.');
       }
@@ -1853,15 +1855,16 @@ export class TaskManagerService {
           // Rewritten history: record a base both commits descend from before the branch moves,
           // so an interruption leaves a worktree that still verifies.
           const shared = await findMergeBase(worktree.worktreePath, local, head);
-          await this.store.updatePullRequestBase(worktree.id, { baseRef: worktree.baseRef ?? pullRequest.baseRefName, baseSha: shared });
+          if (!shared) throw new Error(`The ${noun} has no common history with this branch.`);
+          await this.store.updateWorktreeBase(worktree.id, { baseRef: worktree.baseRef ?? pullRequest.baseRefName, baseSha: shared });
           await git(worktree.worktreePath, ['reset', '--keep', head], { timeout: 60_000, env: UNTRUSTED_CHECKOUT_GIT_ENV });
         }
       }
       const moved = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
-      await this.store.updatePullRequestBase(worktree.id, { baseRef: pullRequest.baseRefName, baseSha: mergeBaseSha, headSha: moved });
+      await this.store.updateWorktreeBase(worktree.id, { baseRef: pullRequest.baseRefName, baseSha: mergeBaseSha, headSha: moved });
       await this.recordLinkedPullRequestStatus(await this.requireTask(task.id)).catch((error: unknown) =>
         this.recordGitHubSyncFailure(task, worktree, 'pull-request-sync', error));
-      await this.refreshEvidenceInternal({ taskId: task.id });
+      await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
       const updated = await this.requireTask(task.id);
       this.events.emit({ type: 'task.updated', taskId: task.id, payload: updated, at: new Date().toISOString() });
       return updated;
@@ -1870,7 +1873,8 @@ export class TaskManagerService {
 
   /**
    * The platform that delivers a task: the one it was opened from, else the
-   * checkout's. A checkout with any GitHub remote keeps GitHub, as before.
+   * host of its recorded pull request, else GitLab when the checkout's only
+   * platform remotes are on GitLab; GitHub otherwise.
    */
   private async deliveryFor(task: Task, worktree: WorktreeRecord): Promise<PullRequestDelivery> {
     if (task.remoteSource) return task.remoteSource.provider === 'GITLAB' ? this.gitlab : this.github;
@@ -1949,7 +1953,7 @@ export class TaskManagerService {
     const preflight = await this.store.recordGitHubPreflight(
       await (await this.deliveryFor(task, worktree)).preflight(task, worktree, deliveryRemote(remote)));
     this.emitGitHubUpdate(task.id, worktree, preflight);
-    if (preflight.status !== 'READY') throw new Error(preflight.error ?? `GitHub preflight is ${preflight.status}.`);
+    if (preflight.status !== 'READY') throw new Error(preflight.error ?? `Preflight is ${preflight.status}.`);
     const previousHead = (await this.store.getLatestPullRequest(task.id))?.headRefOid ?? source.pullRequest.headSha;
     await this.store.recordBranchPublishRequested(
       task, worktree, remote.remoteName, latestGit.headSha, undefined, source.pullRequest.headRefName, previousHead);
@@ -1961,7 +1965,7 @@ export class TaskManagerService {
       remoteBranch: source.pullRequest.headRefName,
       previousRemoteSha: previousHead
     });
-    const stored = await this.store.recordBranchPublication(publication);
+    const stored = await this.store.recordBranchPublication(recordablePublication(publication));
     this.emitGitHubUpdate(task.id, worktree, stored);
     if (stored.status !== 'PUSHED') throw new Error(stored.error ?? 'The push failed.');
     const status = await this.recordLinkedPullRequestStatus(await this.requireTask(task.id), stored.headSha);
@@ -1970,20 +1974,25 @@ export class TaskManagerService {
   }
 
   /**
-   * Refresh for a task opened from a pull request: the platform's view, the
-   * head's commits fetched so the branch's relation to it is exact, then Git
-   * evidence against that head. Nothing in the worktree moves.
+   * Refresh for a task opened from a pull request: the worktree as it is now,
+   * the platform's view, the head's commits fetched when the checkout lacks
+   * them so the branch's relation to it is exact, then Git evidence against
+   * that head. Nothing in the worktree moves.
    */
   private async refreshOpenedPullRequest(task: Task, worktree: WorktreeRecord): Promise<PullRequestSnapshotRecord> {
     try {
       const repository = await this.requireAvailableRepository(task.repositoryId);
-      // A finished turn's evidence is recorded first: a merge the reading reports completes
-      // the task only when the worktree holds nothing the pull request lacks.
+      // The worktree's evidence is recorded first, a finished turn's and any edit made since: a merge
+      // the reading reports completes the task only when the worktree holds nothing the pull request
+      // lacks. A worktree that cannot be read leaves its last capture standing.
       const currentTask = await this.requireTask(task.id);
       if (currentTask.currentRunId) await this.ensurePostRunEvidence(currentTask.currentRunId);
+      await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true }).catch(() => undefined);
       const stored = await this.recordLinkedPullRequestStatus(task);
       // The worktree is compared with the head just read; without it the last known head stands in.
-      await this.fetchPullRequestHead(repository.path, task.remoteSource!).catch(() => undefined);
+      if (stored.headRefOid && !await hasCommit(repository.path, stored.headRefOid)) {
+        await this.fetchPullRequestHead(repository.path, task.remoteSource!).catch(() => undefined);
+      }
       // An unchanged worktree keeps its snapshot: a refresh is not new work to capture.
       await this.refreshEvidenceInternal({ taskId: task.id }, { persistOnlyIfChanged: true });
       return stored;
@@ -2010,6 +2019,8 @@ export class TaskManagerService {
    * Reads a pull request and records the reading. After a step on it the
    * platform reports the change a moment later, so the read waits briefly, up
    * to three more reads, for `landed`; then it records what it last read.
+   * What people said is read once, with the first read; the waits read the
+   * status alone.
    */
   private async observePullRequest(
     task: Task,
@@ -2019,12 +2030,14 @@ export class TaskManagerService {
     target: DeliveryTarget | undefined,
     landed?: (sync: PullRequestSync) => boolean
   ): Promise<PullRequestSnapshotRecord> {
-    let sync = await delivery.viewPullRequest(worktree, number, target);
+    const first = await delivery.viewPullRequest(worktree, number, target);
+    let sync = first;
     for (let attempt = 1; landed && !landed(sync) && attempt <= 3; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
-      sync = await delivery.viewPullRequest(worktree, number, target);
+      sync = await delivery.viewPullRequest(worktree, number, target, { feedback: false });
     }
-    const stored = await this.store.recordPullRequestSync(sync);
+    const stored = await this.store.recordPullRequestSync(
+      sync === first ? sync : { ...sync, ...(first.feedback ? { feedback: first.feedback } : {}) });
     this.emitGitHubUpdate(task.id, worktree, stored);
     return stored;
   }
@@ -2086,9 +2099,12 @@ export class TaskManagerService {
       if (repository.kind !== 'USER_REGISTERED') throw new Error('Select a registered repository.');
       captured = await this.remoteWork.captureIssue(repository, requestedInput.issue);
     }
-    const storedInput = captured
-      ? { ...requestedInput, title: requestedInput.title.trim() || captured.source.title, remote: captured }
-      : requestedInput;
+    // The request crossed IPC: the task holds only what Task Monki captured, never a source the request names.
+    const storedInput: CreateTaskStoreInput = {
+      ...requestedInput,
+      ...(captured ? { title: requestedInput.title.trim() || captured.source.title } : {}),
+      remote: captured
+    };
     const agentProfile = resolveAgentProfile((await this.appSettingsStore.get()).agentProfiles, input.agentProfileId);
     this.assertRuntimeEnabled(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
@@ -3190,32 +3206,62 @@ export class TaskManagerService {
               'Prepare or restore the worktree before starting implementation.'
           );
         }
-        const run = await this.startPreparedRun({
+        return this.startPreparedRun({
           task,
           worktree,
           mode,
           settings: input.settings,
-          instruction: input.instruction
+          instruction: input.instruction,
+          reviewRequest: input.reviewRequest
         });
-        if (input.reviewRequest && input.instruction) await this.recordStartedReviewRequest(task, run, input.instruction, input.reviewRequest);
-        return run;
       })
     );
   }
 
   /**
-   * A request sent from the Review tab before the task's first turn, such as on
-   * an opened pull request, is that turn's authored message, so its items read as
-   * a request card and the agent's answers are read like any follow-up's. The run
-   * has started by now; a failure to record the round leaves it running.
+   * The request that starts a turn on existing work, or one sent from the Review
+   * tab before the task's first turn, is that turn's authored message: later
+   * turns read it from the task's instructions, a review request's items read as
+   * a request card, and the agent's answers are read like any follow-up's. It is
+   * recorded before the turn starts, under the run ID the turn is admitted with,
+   * so a run whose turn then fails to start still carries it. A start refused
+   * before any run was admitted leaves no message: no turn carries it, and the
+   * request stays where the person wrote it.
    */
-  private async recordStartedReviewRequest(task: Task, run: RunRecord, instruction: string, request: ReviewRequestRecord): Promise<void> {
+  private async startTurnWithMessage(turn: Parameters<AgentOrchestrator['startTurn']>[0], text: string,
+    reviewRequest?: ReviewRequestRecord): Promise<RunRecord> {
+    const runId = randomUUID();
+    const sessionId = randomUUID();
+    const record = await this.addInstruction(randomUUID(), turn.task,
+      { id: runId, iterationId: turn.iteration.id, worktreeId: turn.worktree.id, sessionId, requestedSettings: turn.settings },
+      text, 'FOLLOW_UP', 'SENDING', undefined, undefined, reviewRequest, runId);
+    let run: RunRecord;
     try {
-      const record = await this.addInstruction(randomUUID(), task, run, instruction, 'FOLLOW_UP', 'SUBMITTED', undefined, undefined, request);
-      await this.setInstructionReceipt(record, 'SUBMITTED', undefined, run.id, false);
-    } catch {
-      // The turn runs without its request card; nothing the person sent is lost.
+      run = await this.agents.startTurn({ ...turn, runId, createSessionId: sessionId });
+    } catch (error) {
+      await this.store.getRun(runId)
+        .then((admitted) => this.settleTurnMessage(record, admitted, error instanceof Error ? error.message : String(error)))
+        .catch(() => undefined);
+      throw error;
     }
+    await this.settleTurnMessage(record, run).catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * The message belongs to the run that was admitted, in the session it runs in;
+   * without a run, nothing carries it. A receipt that cannot be written leaves the
+   * message sending, which restart recovery settles by the stored run.
+   */
+  private async settleTurnMessage(record: TaskInstruction, run: RunRecord | undefined, detail?: string): Promise<void> {
+    await this.store.updateTaskInstructions(record.taskId, (records) => {
+      const index = records.findIndex((item) => item.id === record.id);
+      const current = records[index];
+      if (!current) throw new Error('Instruction receipt is missing.');
+      if (!run) records.splice(index, 1);
+      else Object.assign(current, { status: 'SUBMITTED', detail, runId: run.id, sessionId: run.sessionId, updatedAt: new Date().toISOString() });
+    });
+    this.emitInstructionUpdate(record.taskId);
   }
 
   private async startPreparedRun(input: {
@@ -3224,6 +3270,7 @@ export class TaskManagerService {
     mode?: Exclude<AgentRunMode, 'REVIEW'>;
     settings?: AgentExecutionSettings;
     instruction?: string;
+    reviewRequest?: ReviewRequestRecord;
   }): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
@@ -3255,8 +3302,7 @@ export class TaskManagerService {
       userContext: await readTaskUserContext(this.store, task.id)
     });
     assertCompleteRunPrompt(prompt);
-
-    return this.agents.startTurn({
+    const turn = {
       task,
       iteration,
       worktree,
@@ -3265,7 +3311,10 @@ export class TaskManagerService {
       settings,
       generationKey: snapshot.dirtyFingerprint,
       beforeGitSnapshotId: snapshot.id
-    });
+    };
+    return input.instruction?.trim() && (input.reviewRequest || startsFromExistingWork(task, worktree))
+      ? this.startTurnWithMessage(turn, input.instruction, input.reviewRequest)
+      : this.agents.startTurn(turn);
   }
 
   async saveTaskPrompt(input: SaveTaskPromptRequest): Promise<void> {
@@ -3353,7 +3402,7 @@ export class TaskManagerService {
       (record.status === 'FAILED' && record.mode !== 'STEER' && record.runId !== undefined && !await this.store.getRun(record.runId));
   }
 
-  private async validateInstructionAttachments(task: Task, run: RunRecord | undefined, files: InstructionAttachments,
+  private async validateInstructionAttachments(task: Task, run: Pick<RunRecord, 'requestedSettings'> | undefined, files: InstructionAttachments,
     settings?: AgentExecutionSettings): Promise<void> {
     const records = await this.store.getTaskAttachments(task.id);
     const selectedIds = new Set([...(task.initialAttachmentIds ?? []), ...(files.attachmentIds ?? [])]);
@@ -3399,9 +3448,14 @@ export class TaskManagerService {
     return record;
   }
 
-  private async addInstruction(id: string, task: Task, run: RunRecord, text: string,
-    mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
-    reviewRequest?: ReviewRequestRecord): Promise<TaskInstruction> {
+  /**
+   * Adds a message written against `run`. One being sent names the run that carries
+   * it: a live instruction joins `run`, and any other message starts a new run,
+   * under `reservedRunId` when the caller reserved one.
+   */
+  private async addInstruction(id: string, task: Task, run: Pick<RunRecord, 'id' | 'iterationId' | 'worktreeId' | 'sessionId' | 'requestedSettings'>,
+    text: string, mode: TaskInstruction['mode'], status: TaskInstruction['status'], files?: InstructionAttachments, settings?: AgentExecutionSettings,
+    reviewRequest?: ReviewRequestRecord, reservedRunId?: string): Promise<TaskInstruction> {
     const trimmed = this.instructionText(text);
     if (files?.attachmentDraftId || files?.attachmentIds?.length) await this.validateInstructionAttachments(task, run, files, settings);
     return this.store.updateTaskInstructions(task.id, (records, addedIds) => {
@@ -3418,7 +3472,7 @@ export class TaskManagerService {
         attachmentDraftId: files?.attachmentDraftId, attachmentIds: [...(files?.attachmentIds ?? []), ...addedIds],
         text: trimmed, mode, status, createdAt: now, updatedAt: now,
         ...(reviewRequest ? { reviewRequest } : {}),
-        ...(status === 'SENDING' ? { runId: mode === 'STEER' ? run.id : randomUUID() } : {})
+        ...(status === 'SENDING' ? { runId: reservedRunId ?? (mode === 'STEER' ? run.id : randomUUID()) } : {})
       };
       records.push(record);
       return record;
@@ -3641,9 +3695,7 @@ export class TaskManagerService {
       worktree,
       run,
       gitSnapshot,
-      instruction: input.instruction,
-      previousPrompt: startsFromExistingWork(task, worktree)
-        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+      instruction: input.instruction
     });
     assertCompleteRunPrompt(prompt);
     await this.agents.resolveRecoveryRunForReplacement(run.id);
@@ -3706,9 +3758,7 @@ export class TaskManagerService {
       worktree,
       run,
       gitSnapshot,
-      instruction: input.instruction,
-      previousPrompt: startsFromExistingWork(task, worktree)
-        ? await this.agentRuntimeStore.readArtifact(run.promptArtifactId) : undefined
+      instruction: input.instruction
     });
     assertCompleteRunPrompt(prompt);
     await this.agents.resolveRecoveryRunForReplacement(run.id);
@@ -3788,9 +3838,7 @@ export class TaskManagerService {
       task: sourceTask,
       run: input.sourceRun,
       worktree: input.sourceWorktree,
-      instruction: input.instruction,
-      previousPrompt: startsFromExistingWork(sourceTask, input.sourceWorktree)
-        ? await this.agentRuntimeStore.readArtifact(input.sourceRun.promptArtifactId) : undefined
+      instruction: input.instruction
     });
     assertCompleteRunPrompt(alternativePrompt);
     const alternativeTask = await this.store.createForkedAlternativeTask({
@@ -3842,8 +3890,7 @@ export class TaskManagerService {
       this.appSettings.externalExecutables
     );
     configureGitExecutablePath(executableForRuntime(status.tools.git));
-    this.github.setExecutable(executableForRuntime(status.tools.gh));
-    this.githubRemoteWork.setExecutable(executableForRuntime(status.tools.gh));
+    this.githubCli.setExecutable(executableForRuntime(status.tools.gh));
     this.gitlabCli.setExecutable(executableForRuntime(status.tools.glab));
     this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
     if (input.updateCodex && this.codexAdapter) {
@@ -4739,13 +4786,8 @@ export class TaskManagerService {
       taskId: task.id, iterationId: storedWorktree.iterationId, worktreeId: storedWorktree.id
     } : await inspectGitSnapshot(storedWorktree, { pullRequestHead: await this.pullRequestHead(task) });
     if (options.persistOnlyIfChanged) {
-      const state = await this.store.snapshot();
-      const latest = latestForIteration(
-        state.gitSnapshots,
-        storedWorktree.iterationId,
-        'capturedAt'
-      );
-      if (latest && sameGitObservation(latest, snapshot)) {
+      const latest = await this.store.getLatestGitSnapshot(task.id);
+      if (latest?.iterationId === storedWorktree.iterationId && sameGitObservation(latest, snapshot)) {
         return latest;
       }
     }
@@ -4765,7 +4807,7 @@ export class TaskManagerService {
   }
 
   async createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord> {
-    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+    return this.withTaskAction(input.taskId, 'Delivery', () =>
       this.createDeliveryCommitUnlocked(input)
     );
   }
@@ -4774,7 +4816,7 @@ export class TaskManagerService {
     input: CreateDeliveryCommitRequest
   ): Promise<GitSnapshotRecord> {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
-    this.assertNormalTask(task, 'GitHub delivery');
+    this.assertNormalTask(task, 'Delivery');
     this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
@@ -4794,16 +4836,29 @@ export class TaskManagerService {
     if (latestGit.workingDiffFileCount === 0 && latestGit.stagedCount === 0 && latestGit.untrackedCount === 0) {
       throw new Error('No uncommitted task changes are available to commit.');
     }
+    return this.commitWorktree(task, worktree, 'TASK');
+  }
 
-    // An opened pull request's hooks are its author's code: staging and committing do not run them.
-    const untrusted = task.remoteSource?.kind === 'PULL_REQUEST';
-    await git(worktree.worktreePath, ['add', '-A'], untrusted ? { timeout: 120_000, env: UNTRUSTED_CHECKOUT_GIT_ENV } : 120_000);
+  /**
+   * Commits everything in a managed worktree as Task Monki's own commit: the
+   * task's changes, or a merge Git stopped on once its conflicts are resolved.
+   * Callers check the Git state first; a diverged branch is exactly when a
+   * merge is needed. A task commit carries a review of its tree over to the
+   * commit. A merge commit does not: it holds commits no review here has read.
+   */
+  private async commitWorktree(task: Task, worktree: WorktreeRecord, kind: 'TASK' | 'MERGE'): Promise<GitSnapshotRecord> {
+    const options = taskGitWriteOptions(task);
+    await git(worktree.worktreePath, ['add', '-A'], options);
+    if (kind === 'MERGE') {
+      // The message the merge wrote, without Git's comment lines naming the conflicts.
+      await git(worktree.worktreePath, ['commit', '--no-edit', '--cleanup=strip'], options);
+      return this.refreshEvidenceInternal({ taskId: task.id });
+    }
     const hasStagedChanges = !(await gitSucceeds(worktree.worktreePath, ['diff', '--cached', '--quiet']));
     if (!hasStagedChanges) {
       throw new Error('No staged changes are available to commit.');
     }
-    await git(worktree.worktreePath, ['commit', '-m', `Task: ${task.title}`],
-      untrusted ? { timeout: 120_000, env: UNTRUSTED_CHECKOUT_GIT_ENV } : 120_000);
+    await git(worktree.worktreePath, ['commit', '-m', `Task: ${task.title}`], options);
     const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
     // The committed tree is what was reviewed; edits after the commit change this fingerprint.
     const dirtyFingerprint = await inspectGitWorkingTreeFingerprint(worktree.worktreePath);
@@ -4822,7 +4877,7 @@ export class TaskManagerService {
 
   async preflightGitHub(input: GitHubPreflightRequest) {
     const task = await this.requireTask(input.taskId);
-    this.assertNormalTask(task, 'GitHub preflight');
+    this.assertNormalTask(task, 'Preflight');
     const worktree = await this.requireWorktree(task);
     const preflight = await (await this.deliveryFor(task, worktree)).preflight(task, worktree, (await this.linkedPushRemote(task, worktree))?.remote);
     const stored = await this.store.recordGitHubPreflight(preflight);
@@ -4831,14 +4886,14 @@ export class TaskManagerService {
   }
 
   async publishBranch(input: PublishBranchRequest) {
-    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+    return this.withTaskAction(input.taskId, 'Delivery', () =>
       this.publishBranchUnlocked(input)
     );
   }
 
   private async publishBranchUnlocked(input: PublishBranchRequest) {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
-    this.assertNormalTask(task, 'GitHub delivery');
+    this.assertNormalTask(task, 'Delivery');
     this.assertImplementationOutcomeReady(task);
     // A pull request task publishes only to its pull request's branch, through Push update.
     if (task.remoteSource?.kind === 'PULL_REQUEST') throw new Error('Use Push update to publish to the pull request.');
@@ -4865,7 +4920,7 @@ export class TaskManagerService {
 
     const githubReady = await this.preflightGitHub({ taskId: task.id });
     if (githubReady.status !== 'READY') {
-      throw new Error(githubReady.error ?? `GitHub preflight is ${githubReady.status}.`);
+      throw new Error(githubReady.error ?? `Preflight is ${githubReady.status}.`);
     }
 
     let remoteUrl: string | undefined;
@@ -4881,12 +4936,13 @@ export class TaskManagerService {
       remoteUrl = pushed.url;
     }
 
+    // The push goes to the URL as configured; records keep it without the credentials it can carry.
     await this.store.recordBranchPublishRequested(
       task,
       worktree,
       githubReady.remoteName ?? 'origin',
       latestGit.headSha,
-      remoteUrl
+      remoteUrl && recordedPushUrl(remoteUrl)
     );
     const publication = await this.github.publishBranch({
       task,
@@ -4896,7 +4952,7 @@ export class TaskManagerService {
       expectedHeadSha: latestGit.headSha,
       expectedGitCommonDir: latestGit.gitCommonDir
     });
-    const stored = await this.store.recordBranchPublication(publication);
+    const stored = await this.store.recordBranchPublication(recordablePublication(publication));
     this.emitGitHubUpdate(task.id, worktree, stored);
     if (stored.status !== 'PUSHED') {
       throw new Error(stored.error ?? 'Branch publication failed.');
@@ -4906,7 +4962,7 @@ export class TaskManagerService {
   }
 
   async createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord> {
-    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+    return this.withTaskAction(input.taskId, 'Delivery', () =>
       this.createPullRequestUnlocked(input)
     );
   }
@@ -4915,7 +4971,7 @@ export class TaskManagerService {
     input: CreatePullRequestRequest
   ): Promise<PullRequestSnapshotRecord> {
     const task = await this.requireTaskWithPostRunEvidence(input.taskId);
-    this.assertNormalTask(task, 'GitHub delivery');
+    this.assertNormalTask(task, 'Delivery');
     this.assertImplementationOutcomeReady(task);
     if (task.remoteSource?.kind === 'PULL_REQUEST') return this.pushPullRequestUpdate(task);
     const activeSnapshot = await this.store.snapshot();
@@ -4955,7 +5011,7 @@ export class TaskManagerService {
     assertPublishReady(latestGit, worktree.ownership);
     const title = normalizePullRequestTitle(input.title, task.title);
 
-    const prBodyContent = this.github.buildPullRequestBody({
+    const prBodyContent = buildPullRequestBody({
       task,
       gitDiffStat: latestGit.diffStat,
       agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage,
@@ -4984,9 +5040,9 @@ export class TaskManagerService {
   }
 
   async refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined> {
-    return this.withTaskAction(input.taskId, 'GitHub refresh', async () => {
+    return this.withTaskAction(input.taskId, 'Refresh', async () => {
       const task = await this.requireTask(input.taskId);
-      this.assertNormalTask(task, 'GitHub refresh');
+      this.assertNormalTask(task, 'Refresh');
       const worktree = await this.requireWorktree(task);
       if (task.remoteSource?.kind === 'PULL_REQUEST') return this.refreshOpenedPullRequest(task, worktree);
       const latest = await this.store.getLatestPullRequest(task.id);
@@ -5099,7 +5155,7 @@ export class TaskManagerService {
         throw new Error('A reply names a discussion Task Monki has not read. Refresh, then reply.');
       }
       const reviewers = new Set(feedback.reviewers.map((reviewer) => reviewer.name));
-      if (input.requestReviewFrom.some((name) => !reviewers.has(name) || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/u.test(name))) {
+      if (input.requestReviewFrom.some((name) => !reviewers.has(name))) {
         throw new Error(`Ask only people who reviewed this ${noun}.`);
       }
       // A reply on GitLab already notifies the reviewer; there is nothing to ask again.
@@ -5235,31 +5291,59 @@ export class TaskManagerService {
     });
   }
 
-  /** The end of each failing check's log for the pull request's current head, read-only and bounded. */
+  /**
+   * The end of each failing check's log for the pull request's current head,
+   * read-only and bounded. The platform serves only its own jobs' logs, so a
+   * check of another system takes none of the few reads.
+   */
   async readPullRequestCheckLogs(input: ReadPullRequestCheckLogsRequest): Promise<PullRequestCheckLog[]> {
     const task = await this.requireTask(input.taskId);
-    const action = await this.pullRequestAction(task);
-    const failing = (await this.failedChecks(task, action.latest)).slice(0, CHECK_LOG_LIMITS.checks);
-    // A few reads at most, side by side. A log goes to the agent, so a token it printed is redacted first.
-    const logs = await Promise.all(failing.map(async (check): Promise<PullRequestCheckLog | undefined> => {
-      const raw = await action.delivery.readCheckLog(action.worktree, action.address, check).catch(() => undefined);
-      const bounded = raw === undefined ? undefined : boundCheckLog(redactCredentialText(raw));
-      return bounded?.text ? { name: check.name, ...(check.link ? { link: check.link } : {}), ...bounded } : undefined;
-    }));
-    return logs.filter((log): log is PullRequestCheckLog => Boolean(log));
+    const { delivery, worktree, address, latest } = await this.pullRequestAction(task);
+    const failing = await this.failedChecks(task, latest);
+    const logs: PullRequestCheckLog[] = [];
+    let reads = CHECK_LOG_LIMITS.checks;
+    // Side by side, a few at a time: a check the platform serves no log for answers at once and is passed over.
+    for (let next = 0; reads > 0 && next < failing.length;) {
+      const batch = failing.slice(next, next + reads);
+      next += batch.length;
+      const read = await Promise.all(batch.map((check) => delivery.readCheckLog(worktree, address, check).then(
+        (raw) => ({ check, served: raw !== undefined, raw }),
+        () => ({ check, served: true, raw: undefined })
+      )));
+      for (const { check, served, raw } of read) {
+        if (!served) continue;
+        reads -= 1;
+        // The log goes to the agent, so a token it printed is redacted; only the end is kept, so only
+        // the end is redacted, before the last cut can split a token: a job's log can run to megabytes.
+        const bounded = raw === undefined ? undefined : boundCheckLog(raw, redactCredentialText);
+        if (!bounded?.text) continue;
+        logs.push({ name: check.name, ...(check.link ? { link: check.link } : {}), truncated: bounded.truncated, text: bounded.text });
+      }
+    }
+    return logs;
   }
 
   /**
-   * Fetches what the worktree lacks so the agent can merge it: the pull
-   * request's newer commits, or its base that moved ahead. Objects only: no
-   * branch, remote-tracking ref or FETCH_HEAD moves, and nothing is merged here.
+   * Brings what the worktree lacks into its branch with a merge Task Monki
+   * makes: the pull request's newer commits, or its base that moved ahead,
+   * fetched as objects only. Uncommitted work is committed first, as Push
+   * update commits it. When Git stops on conflicts the merge stays in progress
+   * and the files are returned for the agent to resolve; Push update finishes it.
    */
-  async fetchPullRequestUpdate(input: FetchPullRequestUpdateRequest): Promise<PullRequestUpdate> {
+  async mergePullRequestUpdate(input: MergePullRequestUpdateRequest): Promise<PullRequestUpdate> {
+    if (input?.from !== 'PULL_REQUEST' && input?.from !== 'BASE') throw new Error('The update is not valid.');
     return this.withTaskAction(input.taskId, 'Branch update', async () => {
-      const task = await this.requireTask(input.taskId);
+      const task = await this.requireTaskWithPostRunEvidence(input.taskId);
       this.assertNormalTask(task, 'Branch update');
       const action = await this.openPullRequestAction(task);
       const { latest, noun, worktree } = action;
+      // Task Monki writes no commit in a checkout it does not own, as for a delivery commit.
+      if (worktree.ownership === 'EXTERNAL') throw new Error('Merge updates into an imported checkout in your editor or Git client.');
+      // A fork's branch is its author's: a merge made here could never be pushed.
+      if (task.remoteSource?.kind === 'PULL_REQUEST' && task.remoteSource.pullRequest?.crossRepository) {
+        throw new Error(`This ${noun} comes from a fork. Task Monki does not push to forks.`);
+      }
+      this.assertNoActiveTaskRun(await this.store.snapshot(), task.id, 'merging the update');
       const repository = await this.requireAvailableRepository(task.repositoryId);
       const location = parseRemoteWorkReference(latest.url)?.repository;
       if (!location) throw new Error(`The ${noun} is not recorded.`);
@@ -5271,9 +5355,7 @@ export class TaskManagerService {
         if (!latest.baseRefName) throw new Error(`The ${noun} names no base branch.`);
         ref = latest.baseRefName;
         fetchRef = `refs/heads/${latest.baseRefName}`;
-        const url = await remoteFetchUrl(repository.path, remote);
-        sha = (await git(repository.path, ['ls-remote', '--', url, fetchRef], { timeout: 60_000, env: { GIT_TERMINAL_PROMPT: '0' } }))
-          .split(/\s+/u)[0] || undefined;
+        sha = await remoteBranchTip(repository.path, remote, latest.baseRefName);
       } else {
         ref = latest.headRefName ?? `the ${noun}`;
         sha = latest.headRefOid;
@@ -5282,9 +5364,91 @@ export class TaskManagerService {
       if (!isGitObjectId(sha)) throw new Error(`Could not read ${ref} on the platform.`);
       await fetchRemoteObjects(repository.path, remote, [fetchRef]);
       if (!await hasCommit(repository.path, sha)) throw new Error(`${ref} changed while it was being read. Refresh, then try again.`);
-      const commits = Number((await git(worktree.worktreePath, ['rev-list', '--count', `HEAD..${sha}`])).trim());
-      return { sha, ref, commits: Number.isFinite(commits) ? commits : 0 };
+      const before = await this.refreshEvidenceInternal({ taskId: task.id });
+      if (before.operationInProgress || before.conflictedCount) throw new Error('Finish the current Git operation first.');
+      if (await isAncestor(worktree.worktreePath, sha, 'HEAD')) return { sha, ref, commits: 0, conflicts: [] };
+      const counted = Number((await git(worktree.worktreePath, ['rev-list', '--count', `HEAD..${sha}`])).trim());
+      // A head that merged its base on the platform brings the base's commits in. The base branch's tip is
+      // recorded with the update, so the task's base moves to the newest base commit the branch then holds.
+      const baseTip = input.from === 'BASE' || !latest.baseRefName ? undefined
+        : await fetchedBranchTip(repository.path, remote, latest.baseRefName).catch(() => undefined);
+      // The worktree's own work goes in first, committed as Push update commits it, so the merge holds it.
+      if (before.stagedCount || before.unstagedCount || before.untrackedCount) {
+        this.assertImplementationOutcomeReady(task);
+        await this.commitWorktree(task, worktree, 'TASK');
+      }
+      // What is merged is recorded first: Push update finishes a merge Git stops on, and reads this
+      // to know which base it brought in.
+      await this.store.appendEvent(createDomainEvent({
+        type: 'BRANCH_UPDATE_REQUESTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'git',
+        payload: { from: input.from, ref, sha, ...(baseTip ? { baseRef: latest.baseRefName, baseSha: baseTip } : {}) }
+      }));
+      // The message names what came in, as the platform's own update does; never the worktree's local branch.
+      const message = input.from === 'BASE'
+        ? `Merge branch '${ref}'${latest.headRefName ? ` into ${latest.headRefName}` : ''}`
+        : latest.headRefName
+          ? `Merge branch '${latest.headRefName}' of ${location.host}/${location.path}`
+          : `Merge ${location.path}${formatRemoteWorkNumber(action.delivery.provider, 'PULL_REQUEST', latest.number)}`;
+      const conflicts = await this.mergeIntoWorktree(task, worktree, sha, ref, message);
+      if (conflicts.length === 0) await this.adoptMergedBase(task);
+      await this.refreshEvidenceInternal({ taskId: task.id });
+      const updated = await this.requireTask(task.id);
+      this.events.emit({ type: 'task.updated', taskId: task.id, payload: updated, at: new Date().toISOString() });
+      return { sha, ref, commits: Number.isFinite(counted) ? counted : 0, conflicts };
     });
+  }
+
+  /**
+   * Merges a fetched commit into the worktree's branch, with hooks as for a
+   * delivery commit, and fast forward when it can whatever the person's merge
+   * settings say. Returns the files Git stopped on, leaving the merge in
+   * progress, when each is text Git merged line by line; a merge that needs a
+   * version chosen, or failed for any other reason, is undone.
+   */
+  private async mergeIntoWorktree(task: Task, worktree: WorktreeRecord, sha: string, ref: string, message: string): Promise<string[]> {
+    try {
+      await git(worktree.worktreePath, ['merge', '--ff', '--no-edit', '-m', message, sha], taskGitWriteOptions(task));
+      return [];
+    } catch (error) {
+      const conflicts = await unmergedFiles(worktree.worktreePath);
+      if (conflicts.length > 0) {
+        // The agent edits conflict markers; keeping one side of a binary, a deletion or a link is the person's choice.
+        const choices = conflicts.filter((file) => !file.lines).map((file) => file.path);
+        if (choices.length === 0) return conflicts.map((file) => file.path);
+        await git(worktree.worktreePath, ['merge', '--abort'], taskGitWriteOptions(task));
+        throw new Error(`${fileList(choices)} cannot be merged line by line. Merge ${ref} in your editor or Git client.`);
+      }
+      if (await gitSucceeds(worktree.worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) {
+        await git(worktree.worktreePath, ['merge', '--abort'], taskGitWriteOptions(task));
+      }
+      throw new Error(`Git could not merge ${ref}: ${safeCliMessage(error)}`);
+    }
+  }
+
+  /**
+   * Makes the newest base commit the branch holds the task's base, so the diff
+   * shows only the task's own changes: a base Task Monki merged in, or the one
+   * a pull request's head brought when it merged its base on the platform. The
+   * latest update's record names the base branch's tip it read; the base is
+   * where the branch meets it. A merge Git stopped on holds that base only
+   * after Push update finishes it, and a merge interrupted before its base was
+   * adopted is adopted then. The base only moves forward.
+   */
+  private async adoptMergedBase(task: Task): Promise<boolean> {
+    const worktree = await this.requireWorktree(task);
+    const tip = updateBaseTip(await this.store.getLatestTaskEvent(task.id, 'BRANCH_UPDATE_REQUESTED'), worktree.id);
+    const base = tip ? await findMergeBase(worktree.worktreePath, tip.sha, 'HEAD').catch(() => undefined) : undefined;
+    if (!tip || !base || base === worktree.baseSha || !await isAncestor(worktree.worktreePath, worktree.baseSha, base)) {
+      return false;
+    }
+    // The head moves with the base: recovery recreates a head that descends from it.
+    const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    await this.store.updateWorktreeBase(worktree.id, { baseRef: worktree.baseRef ?? tip.ref, baseSha: base, headSha });
+    return true;
   }
 
   /** The runtime of work brought in from a checkout or a pull request: the request's, else the default. */
@@ -6298,11 +6462,27 @@ export class TaskManagerService {
   }
 
   private async ensureCommittedPublishableGit(task: Task): Promise<GitSnapshotRecord> {
-    const latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
+    let latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
     const worktree = await this.requireWorktree(task);
     if (worktree.ownership === 'EXTERNAL' && (latestGit.operationInProgress || latestGit.stagedCount ||
         latestGit.unstagedCount || latestGit.untrackedCount || latestGit.conflictedCount)) {
       throw new Error('Commit or resolve the external checkout changes before publishing.');
+    }
+    if (worktree.ownership === 'MANAGED') {
+      // A merge Git stopped on is finished here, once every file it left conflicted is text that holds
+      // no conflict marker; a file that needs a version chosen is the person's to resolve.
+      if (latestGit.operationInProgress === 'merge') {
+        const conflicts = await unmergedFiles(worktree.worktreePath);
+        const choices = conflicts.filter((file) => !file.lines).map((file) => file.path);
+        if (choices.length > 0) throw new Error(`Resolve ${fileList(choices)} in your editor or Git client before pushing.`);
+        const marked: string[] = [];
+        for (const file of conflicts) {
+          if (await holdsConflictMarker(path.join(worktree.worktreePath, file.path))) marked.push(file.path);
+        }
+        if (marked.length > 0) throw new Error(`Resolve the conflicts in ${fileList(marked)} before pushing.`);
+        latestGit = await this.commitWorktree(task, worktree, 'MERGE');
+      }
+      if (await this.adoptMergedBase(task)) latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
     }
     if (latestGit.status === 'DIRTY') {
       return this.createDeliveryCommitUnlocked({ taskId: task.id });
@@ -6467,12 +6647,13 @@ function issueReferenceLine(task: Task, closeIssue: boolean): string | undefined
   return `${closeIssue ? 'Closes' : 'Related to'} ${formatRemoteWorkNumber(source.provider, 'ISSUE', source.number)}`;
 }
 
-/** What a reply answers when it cannot sit in a thread of its own: the discussion's author and first line, quoted. */
+/**
+ * What a reply answers when it cannot sit in a thread of its own: the
+ * discussion's author and its first line as the reply dialog showed it, never
+ * markup the platform would render.
+ */
 function quotedDiscussion(discussion: PullRequestDiscussion): string {
-  const first = discussion.comments[0];
-  const line = visibleRemoteText(first?.body).split('\n').map((value) => value.trim()).find(Boolean) ?? '';
-  const excerpt = line.length > 120 ? `${line.slice(0, 119)}…` : line;
-  return `> @${first?.author ?? 'someone'}: ${excerpt}`;
+  return `> @${discussion.comments[0]?.author ?? 'someone'}: ${discussionSummary(discussion)}`;
 }
 
 function executableForRuntime(result: ExternalToolProbeResult): string {
@@ -6763,6 +6944,35 @@ function sameGitObservation(
   return isDeepStrictEqual(storedObservation, normalizedObserved);
 }
 
+/**
+ * A push URL as records keep it: an https URL loses the user and password it
+ * can carry, a token among them. Other URLs name a login, not a secret.
+ */
+function recordedPushUrl(url: string): string {
+  return url.replace(/^(https?:\/\/)[^/?#]*@/iu, '$1');
+}
+
+/** A publication as records keep it and the person reads it: without credentials. */
+function recordablePublication<T extends { remoteUrl?: string; error?: string }>(publication: T): T {
+  return {
+    ...publication,
+    ...(publication.remoteUrl ? { remoteUrl: recordedPushUrl(publication.remoteUrl) } : {}),
+    ...(publication.error ? { error: redactCredentialText(publication.error) } : {})
+  };
+}
+
+/**
+ * Where a recorded push went, with the credentials its remote is configured
+ * with, so an interrupted push is checked where it was sent: records keep the
+ * URL without them.
+ */
+async function recordedPushTarget(worktree: WorktreeRecord, publication: BranchPublicationRecord | undefined): Promise<string | undefined> {
+  const recorded = publication?.remoteUrl;
+  if (!recorded) return undefined;
+  const configured = await singlePushRepository(worktree.worktreePath, publication.remoteName).catch(() => undefined);
+  return configured && recordedPushUrl(configured.url) === recorded ? configured.url : recorded;
+}
+
 function sameBranchPublicationObservation(
   stored: BranchPublicationRecord,
   observed: Omit<
@@ -6811,6 +7021,105 @@ function latestEventForIteration(
     .sort((left, right) =>
       right.receivedAt.localeCompare(left.receivedAt)
     )[0];
+}
+
+/** Git writes in a task's worktree. An opened pull request's hooks are its author's code: they do not run. */
+function taskGitWriteOptions(task: Task): number | GitExecutionOptions {
+  return task.remoteSource?.kind === 'PULL_REQUEST' ? { timeout: 120_000, env: UNTRUSTED_CHECKOUT_GIT_ENV } : 120_000;
+}
+
+/**
+ * The base branch's tip a branch update of this worktree recorded: the base it
+ * merged, or the tip read beside the pull request's head it merged.
+ */
+function updateBaseTip(event: DomainEvent | undefined, worktreeId: string): { sha: string; ref: string } | undefined {
+  if (event?.worktreeId !== worktreeId) return undefined;
+  const payload = event.payload as { from?: unknown; ref?: unknown; sha?: unknown; baseRef?: unknown; baseSha?: unknown } | undefined;
+  const [ref, sha] = payload?.from === 'BASE' ? [payload.ref, payload.sha] : [payload?.baseRef, payload?.baseSha];
+  return typeof sha === 'string' && isGitObjectId(sha) && typeof ref === 'string' ? { sha, ref } : undefined;
+}
+
+/** A branch's commit on the remote, as the remote reports it now. */
+async function remoteBranchTip(repositoryPath: string, remote: RemoteRepositoryOption, branch: string): Promise<string | undefined> {
+  const url = await remoteFetchUrl(repositoryPath, remote);
+  const sha = (await git(repositoryPath, ['ls-remote', '--', url, `refs/heads/${branch}`], { timeout: 60_000, env: { GIT_TERMINAL_PROMPT: '0' } }))
+    .split(/\s+/u)[0];
+  return isGitObjectId(sha) ? sha : undefined;
+}
+
+/** A branch's commit on the remote, fetched as objects only when the checkout lacks it. */
+async function fetchedBranchTip(repositoryPath: string, remote: RemoteRepositoryOption, branch: string): Promise<string | undefined> {
+  const sha = await remoteBranchTip(repositoryPath, remote, branch);
+  if (!sha) return undefined;
+  if (!await hasCommit(repositoryPath, sha)) await fetchRemoteObjects(repositoryPath, remote, [`refs/heads/${branch}`]);
+  return await hasCommit(repositoryPath, sha) ? sha : undefined;
+}
+
+/**
+ * The files Git lists as unmerged in a worktree, each marked by whether Git
+ * merged it line by line: a text file both sides changed, where it writes
+ * conflict markers. A deletion on one side, a binary, a link or a submodule
+ * leaves a version to choose instead.
+ */
+async function unmergedFiles(worktreePath: string): Promise<Array<{ path: string; lines: boolean }>> {
+  // Each entry reads `<mode> <object> <stage>\t<path>`; stage 2 is this branch's side, stage 3 the merged one's.
+  const sides = new Map<string, Map<string, string>>();
+  for (const entry of (await git(worktreePath, ['ls-files', '-u', '-z'])).split('\0').filter(Boolean)) {
+    const tab = entry.indexOf('\t');
+    const [mode, , stage] = entry.slice(0, tab).split(' ');
+    const file = entry.slice(tab + 1);
+    sides.set(file, (sides.get(file) ?? new Map<string, string>()).set(stage ?? '', mode ?? ''));
+  }
+  const regular = (mode: string | undefined) => mode === '100644' || mode === '100755';
+  return Promise.all([...sides].map(async ([file, modes]) => ({
+    path: file,
+    lines: regular(modes.get('2')) && regular(modes.get('3')) && await isTextFile(path.join(worktreePath, file))
+  })));
+}
+
+/** Whether a file is text as Git judges it: a regular file with no NUL byte in its first 8,000 bytes. */
+async function isTextFile(filePath: string): Promise<boolean> {
+  if (!(await lstat(filePath).catch(() => undefined))?.isFile()) return false;
+  const file = await openFile(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(8_000);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    return !buffer.subarray(0, bytesRead).includes(0);
+  } finally {
+    await file.close();
+  }
+}
+
+/**
+ * Whether a file still holds a conflict marker: a line that starts `<<<<<<< `
+ * or `>>>>>>> `. It is read in parts, so a large file costs no more memory than
+ * a small one.
+ */
+async function holdsConflictMarker(filePath: string): Promise<boolean> {
+  // Git writes markers into files only: a deletion, a link or a directory holds none.
+  if (!(await lstat(filePath).catch(() => undefined))?.isFile()) return false;
+  const file = await openFile(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    // A marker cut between two reads is found with the next one; the file's start is a line's start.
+    let carried = '\n';
+    for (;;) {
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) return false;
+      const text = carried + buffer.toString('latin1', 0, bytesRead);
+      if (text.includes('\n<<<<<<< ') || text.includes('\n>>>>>>> ')) return true;
+      carried = text.slice(-8);
+    }
+  } finally {
+    await file.close();
+  }
+}
+
+/** File names as an error states them: up to three, then how many more, with no character a reader would not see. */
+function fileList(files: readonly string[]): string {
+  const names = files.map((file) => file.replace(INVISIBLE_CHARACTERS, '').replace(/[\u0000-\u001f\u007f]/gu, ' '));
+  if (names.length <= 3) return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
 }
 
 function createDesignBrowserRuntime(input: {

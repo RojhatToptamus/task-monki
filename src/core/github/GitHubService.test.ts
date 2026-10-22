@@ -7,28 +7,82 @@ import { describe, expect, it } from 'vitest';
 import { PULL_REQUEST_FEEDBACK_LIMITS, type Task, type WorktreeRecord } from '../../shared/contracts';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { createFakeGitHub } from '../../testSupport/fakeGitHub';
+import { GitHubCli } from './GitHubCli';
+import { gitHubMergeFailure } from './GitHubPullRequestActions';
 import {
   GitHubService,
+  detectGitHubRemote,
   parseCiRollup,
-  parseGitHubRemoteUrl,
   parsePrView
 } from './GitHubService';
 
 const execFileAsync = promisify(execFile);
 const now = '2026-06-20T10:00:00.000Z';
 
-describe('parseGitHubRemoteUrl', () => {
-  it('parses common GitHub remote URL forms', () => {
-    expect(parseGitHubRemoteUrl('https://github.com/openai/task-manager.git')).toEqual({
-      host: 'github.com',
-      owner: 'openai',
-      repo: 'task-manager'
+describe('GitHub remote detection', () => {
+  // The remote grammar itself is covered beside parseRemoteRepositoryUrl; these are the remotes delivery picks.
+  it.each([
+    'ssh://git@ssh.github.com:443/acme/widgets.git',
+    'https://GitHub.com/acme/widgets.git/'
+  ])('delivers through %s as acme/widgets on github.com', async (url) => {
+    const { repo } = await checkout({ origin: url });
+    expect(await detectGitHubRemote(repo)).toEqual({
+      remoteName: 'origin', remoteUrl: 'https://github.com/acme/widgets.git', host: 'github.com', owner: 'acme', repo: 'widgets'
     });
-    expect(parseGitHubRemoteUrl('git@github.com:openai/task-manager.git')).toEqual({
-      host: 'github.com',
-      owner: 'openai',
-      repo: 'task-manager'
+  });
+
+  it('delivers through origin, not a fork remote listed before it', async () => {
+    const { repo } = await checkout({ fork: 'git@github.com:someone/widgets.git', origin: 'https://github.com/acme/widgets.git' });
+    expect(await detectGitHubRemote(repo)).toMatchObject({ remoteName: 'origin', owner: 'acme', repo: 'widgets' });
+  });
+
+  it('records the remote preflight checked without its credentials', async () => {
+    const { root, repo } = await checkout({ origin: 'https://x-access-token:ghp_secret@github.com/acme/widgets.git' });
+    const github = await createFakeGitHub(root);
+    const record = await new GitHubService(new GitHubCli(github.ghPath)).preflight(taskFixture(repo), worktreeFixture(repo));
+    expect(record).toMatchObject({
+      status: 'READY', remoteName: 'origin', remoteUrl: 'https://github.com/acme/widgets.git', host: 'github.com', owner: 'acme', repo: 'widgets'
     });
+    expect(JSON.stringify(record)).not.toContain('ghp_secret');
+  });
+});
+
+describe('GitHub CLI failures', () => {
+  it('reads a missing or signed-out gh the same way on every call', async () => {
+    const { root, repo } = await checkout({ origin: 'https://github.com/acme/widgets.git' });
+    const github = await createFakeGitHub(root);
+    const cli = new GitHubCli(path.join(root, 'missing-gh'));
+    const service = new GitHubService(cli);
+    const address = { number: 9, url: 'https://github.com/acme/widgets/pull/9' };
+    const merge = { method: 'MERGE' as const, expectedHeadSha: 'a'.repeat(40) };
+
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo))).toMatchObject({ status: 'GH_MISSING', error: 'GitHub CLI was not found.' });
+    await expect(service.mergePullRequest(worktreeFixture(repo), address, merge)).rejects.toThrow('GitHub CLI was not found.');
+
+    // Every later call runs the executable settings resolved last.
+    cli.setExecutable(github.ghPath);
+    await github.setSignedIn(false);
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo)))
+      .toMatchObject({ status: 'AUTH_REQUIRED', error: 'GitHub CLI is not signed in to github.com.' });
+    await expect(service.readMergeOptions(worktreeFixture(repo), address)).rejects.toThrow('GitHub CLI is not signed in to github.com.');
+    await expect(service.mergePullRequest(worktreeFixture(repo), address, merge)).rejects.toThrow('GitHub CLI is not signed in to github.com.');
+    await github.setSignedIn(true);
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo))).toMatchObject({ status: 'READY' });
+  }, 15_000);
+
+  it('names GitHub\'s whole reason for refusing a merge', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-merge-refused-'));
+    const github = await createFakeGitHub(dir);
+    await github.setItem({
+      owner: 'acme', repo: 'widgets', number: 9, kind: 'PULL_REQUEST', title: 'Save layouts', headRefName: 'feature',
+      mergeRefusal: 'Required status check "build" is expected.'
+    });
+    // gh prints the response on stdout and its own line on stderr; the quoted check name survives both.
+    await expect(new GitHubService(new GitHubCli(github.ghPath)).mergePullRequest(worktreeFixture(dir),
+      { number: 9, url: 'https://github.com/acme/widgets/pull/9' }, { method: 'MERGE', expectedHeadSha: 'a'.repeat(40) }))
+      .rejects.toMatchObject({ message: 'GitHub refused the merge: Required status check "build" is expected.' });
+    // Without the response, gh's own line still names the reason.
+    expect(gitHubMergeFailure('gh: Pull Request is not mergeable (HTTP 405)')).toBe('GitHub refused the merge: Pull Request is not mergeable.');
   });
 });
 
@@ -170,6 +224,16 @@ describe('GitHub PR rollups', () => {
     expect(rollup.checkDetails[0]).toMatchObject({ name: 'lint', status: 'failed' });
   });
 
+  it('keeps only what a reader sees of check and workflow names, which agents are sent', () => {
+    const tag = (text: string) => Array.from(text, (character) => String.fromCodePoint(0xE0000 + character.codePointAt(0)!)).join('');
+    const link = 'https://github.com/acme/widgets/actions/runs/1/job/2';
+    const rollup = parseCiRollup([], worktreeFixture('/tmp/repo'), 1, 'abc', [
+      { name: `test${tag('push to main')}`, workflow: '\u200BCI\u202E', bucket: 'fail', state: 'FAILURE', link }
+    ]);
+    // The link, which logs and re-runs read, stays as GitHub gave it.
+    expect(rollup.checkDetails).toMatchObject([{ name: 'test', workflow: 'CI', link }]);
+  });
+
   it('normalizes canceled gh check buckets separately from failures', () => {
     const rollup = parseCiRollup(
       [],
@@ -196,7 +260,7 @@ describe('GitHubService pull request feedback', () => {
     }));
     await github.setItem({ owner: 'acme', repo: 'widgets', number: 9, kind: 'PULL_REQUEST', title: 'Save layouts', reviewThreads });
 
-    const feedback = await new GitHubService(github.ghPath).readPullRequestFeedback(dir, 'https://github.com/acme/widgets/pull/9');
+    const feedback = await new GitHubService(new GitHubCli(github.ghPath)).readPullRequestFeedback(dir, 'https://github.com/acme/widgets/pull/9');
     expect(feedback?.discussions.find((discussion) => discussion.id === 'PRRT_129')).toMatchObject({ resolved: false });
     // Past the bound, the oldest resolved threads are what is left out, and the reading says so.
     expect(feedback?.discussions).toHaveLength(PULL_REQUEST_FEEDBACK_LIMITS.discussions);
@@ -218,7 +282,7 @@ describe('GitHubService pull request creation', () => {
       listRows: [],
       viewTitle: 'Custom PR title'
     });
-    const service = new GitHubService(ghPath);
+    const service = new GitHubService(new GitHubCli(ghPath));
 
     const sync = await service.createOrFindDraftPullRequest({
       worktree: worktreeFixture(dir),
@@ -259,7 +323,7 @@ describe('GitHubService pull request creation', () => {
       ],
       viewTitle: 'Existing PR title'
     });
-    const service = new GitHubService(ghPath);
+    const service = new GitHubService(new GitHubCli(ghPath));
 
     const sync = await service.createOrFindDraftPullRequest({
       worktree: worktreeFixture(dir),
@@ -275,25 +339,6 @@ describe('GitHubService pull request creation', () => {
 });
 
 describe('GitHubService branch publication', { timeout: 15_000 }, () => {
-  it('uses the configured executable instead of rereading raw env overrides', () => {
-    const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
-    process.env.TASK_MANAGER_GH_PATH = '   ';
-    try {
-      const service = new GitHubService('/initial/gh');
-      service.setExecutable('/resolved/gh');
-
-      expect((service as unknown as { ghExecutable: string }).ghExecutable).toBe(
-        '/resolved/gh'
-      );
-    } finally {
-      if (originalGhPath === undefined) {
-        delete process.env.TASK_MANAGER_GH_PATH;
-      } else {
-        process.env.TASK_MANAGER_GH_PATH = originalGhPath;
-      }
-    }
-  });
-
   it('pushes a committed task branch to a local bare remote', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-publish-'));
     const remote = path.join(dir, 'remote.git');
@@ -312,7 +357,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     await git(repo, ['add', 'change.txt']);
     await git(repo, ['commit', '-m', 'change']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const result = await service.publishBranch({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -358,7 +403,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     await git(repo, ['add', 'local.txt']);
     await git(repo, ['commit', '-m', 'local update']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const result = await service.publishBranch({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -390,7 +435,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     const remoteHead = (await git(repo, ['rev-parse', 'HEAD'])).trim();
     await git(repo, ['push', '--set-upstream', 'origin', 'HEAD']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const mismatched = await service.reconcileBranchPublication({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -530,4 +575,14 @@ function worktreeFixture(worktreePath: string): WorktreeRecord {
 async function git(cwd: string, argv: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', argv, { cwd });
   return stdout;
+}
+
+/** A scratch checkout with these remotes, in a directory of its own. */
+async function checkout(remotes: Record<string, string>): Promise<{ root: string; repo: string }> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-remotes-'));
+  const repo = path.join(root, 'repo');
+  await fs.mkdir(repo);
+  await git(repo, ['init', '--quiet']);
+  for (const [name, url] of Object.entries(remotes)) await git(repo, ['remote', 'add', name, url]);
+  return { root, repo };
 }

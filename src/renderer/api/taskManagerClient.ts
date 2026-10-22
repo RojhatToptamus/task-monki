@@ -36,7 +36,7 @@ import type {
   ReplyToPullRequestResult,
   ReadPullRequestCheckLogsRequest,
   PullRequestCheckLog,
-  FetchPullRequestUpdateRequest,
+  MergePullRequestUpdateRequest,
   PullRequestUpdate,
   ImportPreview,
   PreviewImportRequest,
@@ -394,7 +394,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     replyToPullRequest: (input: ReplyToPullRequestRequest) => post<ReplyToPullRequestResult>(baseUrl, '/api/remote/pull-request/replies', input),
     readPullRequestCheckLogs: (input: ReadPullRequestCheckLogsRequest) =>
       post<PullRequestCheckLog[]>(baseUrl, '/api/remote/pull-request/check-logs', input),
-    fetchPullRequestUpdate: (input: FetchPullRequestUpdateRequest) => post<PullRequestUpdate>(baseUrl, '/api/remote/pull-request/update', input),
+    mergePullRequestUpdate: (input: MergePullRequestUpdateRequest) => post<PullRequestUpdate>(baseUrl, '/api/remote/pull-request/update', input),
     previewImport: (input: PreviewImportRequest) => post<ImportPreview>(baseUrl, '/api/tasks/import/preview', input),
     listExistingWorktrees: (repositoryId: string) =>
       get<ExistingWorktree[]>(baseUrl, `/api/worktrees?${new URLSearchParams({ repositoryId })}`),

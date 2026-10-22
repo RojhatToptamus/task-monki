@@ -79,12 +79,20 @@ export function listNames(names: readonly string[]): string {
   return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
 }
 
-/** Where a comment points in the diff, as the agent and the person read it. */
-export function formatCommentLocation(comment: { path: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number }): string {
+/**
+ * Where a comment points in the diff, as the agent and the person read it. The
+ * person's own comments sit on the old side only on removed lines; a platform's
+ * thread there can sit on any line of the old file, so it names the old file.
+ */
+export function formatCommentLocation(
+  comment: { path: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number },
+  oldSide: 'removed' | 'old' = 'removed'
+): string {
   if (!comment.line) return `${comment.path} (whole file)`;
-  const lines = comment.endLine && comment.endLine > comment.line ? `${comment.line}-${comment.endLine}` : `${comment.line}`;
+  const range = Boolean(comment.endLine && comment.endLine > comment.line);
+  const lines = range ? `${comment.line}-${comment.endLine}` : `${comment.line}`;
   return comment.side === 'OLD'
-    ? `${comment.path} (removed line${comment.endLine && comment.endLine > comment.line ? 's' : ''} ${lines})`
+    ? `${comment.path} (${oldSide} line${range ? 's' : ''} ${lines})`
     : `${comment.path}:${lines}`;
 }
 

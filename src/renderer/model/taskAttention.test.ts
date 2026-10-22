@@ -179,8 +179,9 @@ describe('describeTaskAttention', () => {
   });
 
   it('asks nothing of a merged pull request, whatever its last review decision or checks said', () => {
+    // Failed checks left the task's health in error; the merge does not clear it.
     const merged = makeTaskRecord({ workflowPhase: 'IN_PROGRESS', projection: {
-      githubPullRequest: 'MERGED', merge: 'MERGED', reviews: 'CHANGES_REQUESTED', ciChecks: 'FAILING'
+      githubPullRequest: 'MERGED', merge: 'MERGED', reviews: 'CHANGES_REQUESTED', ciChecks: 'FAILING', health: 'ERROR'
     } });
     expect(describeTaskAttention(merged)).toBeUndefined();
     // Finishing it by hand is still the person's step.
@@ -206,6 +207,11 @@ describe('describeTaskAttention', () => {
     // A push that may have landed is not called failed.
     expect(describeTaskAttention(withFacts({ health: 'ERROR', branchPublication: 'AMBIGUOUS' }, {})))
       .toMatchObject({ label: 'Push unconfirmed' });
+    // A later reading resets the task's health; the refused push still leads, as PR Status says.
+    expect(describeTaskAttention(withFacts(
+      { health: 'WARNING', branchPublication: 'FAILED', git: 'COMMITTED_UNPUSHED', reviews: 'CHANGES_REQUESTED' },
+      { pushError: 'Remote branch has newer commits', turn: 'AUTHOR' }
+    ))).toMatchObject({ label: 'Push failed', detail: 'Remote branch has newer commits' });
   });
 
   it('names the blocker whose step leads: a moved base before failed checks and requested changes, fixes to push before all', () => {
@@ -221,8 +227,36 @@ describe('describeTaskAttention', () => {
     // Fixes in the worktree are pushed before anything else, a blocked merge included.
     expect(describeTaskAttention(withFacts({ git: 'COMMITTED_UNPUSHED', merge: 'BLOCKED' }, moved)))
       .toMatchObject({ label: 'Changes not pushed' });
+    // A branch that diverged from the pull request leads, as its step does: what moved is brought in before checks are fixed.
+    expect(describeTaskAttention(withFacts({ git: 'DIVERGED', ciChecks: 'FAILING' }, {})))
+      .toMatchObject({ label: 'Branch diverged', tone: 'error' });
+    // Rewritten under a worktree with nothing of its own, it reads as PR Status says it.
+    expect(describeTaskAttention({ ...withFacts({ git: 'DIVERGED', ciChecks: 'FAILING' }, {}), pullRequestRewritten: true }))
+      .toMatchObject({ label: 'PR rewritten' });
     // Unpushed work with nothing standing behind it raises nothing.
     expect(describeTaskAttention(withFacts({ git: 'COMMITTED_UNPUSHED' }, {}))).toBeUndefined();
+  });
+
+  it('leaves a merge an agent turn is resolving to it, then asks for the push that finishes it, and leaves other conflicts to the person', () => {
+    // As after Update with main stopped on conflicts and sent the agent the files: Git counts them as
+    // conflicted until the merge is committed, resolved or not, and the task's health stays in error.
+    const task = (agentRun: 'RUNNING' | 'COMPLETED', delivery: object, git: 'CONFLICTED' | 'DIRTY' = 'CONFLICTED') => ({
+      ...makeTaskRecord({ workflowPhase: 'IN_REVIEW', projection: {
+        githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 9, worktree: 'PRESENT', git, health: 'ERROR', merge: 'BLOCKED', agentRun
+      } }),
+      delivery
+    });
+    const merging = { mergeInProgress: true, baseMoved: { base: 'main', reason: 'CONFLICTS' as const } };
+    expect(describeTaskAttention(task('RUNNING', merging))).toBeUndefined();
+    // Push update finishes it, as PR Status leads with it, before the base it brings in.
+    expect(describeTaskAttention(task('COMPLETED', merging)))
+      .toEqual({ label: 'Changes not pushed', kind: 'delivery', detail: 'Merge in progress', tone: 'warning' });
+    // Staged by hand, it waits on the same push, and on nothing while the agent works.
+    expect(describeTaskAttention(task('COMPLETED', merging, 'DIRTY'))).toMatchObject({ label: 'Changes not pushed', detail: 'Merge in progress' });
+    expect(describeTaskAttention(task('RUNNING', merging, 'DIRTY'))).toBeUndefined();
+    // Conflicts with no merge in progress, as a rebase that stopped, are the person's once the turn ends.
+    expect(describeTaskAttention(task('RUNNING', {}))).toBeUndefined();
+    expect(describeTaskAttention(task('COMPLETED', {}))).toEqual({ label: 'Git conflicts', kind: 'git', tone: 'error' });
   });
 
   it('asks for a review that requested changes only while it is the person\'s move, and asks for the push before it', () => {

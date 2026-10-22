@@ -1,4 +1,5 @@
 import {
+  discussionSummary,
   isOpenDiscussion,
   type DomainEvent,
   type RemoteWorkComment,
@@ -11,8 +12,11 @@ import {
   type ReviewResponseAnswer,
   type ReviewResponseOutcome
 } from '../../shared/contracts';
-import { displayPlatformText } from '../../shared/remoteWork';
+import { INVISIBLE_CHARACTERS, displayPlatformText } from '../../shared/remoteWork';
 import { formatCommentLocation, listNames } from './formatting';
+
+/** A discussion's one-line summary sits with the feedback contract; the Review tab's rows read it from here. */
+export { discussionSummary };
 
 /** What became of a discussion the person sent to the agent. */
 interface DiscussionSent {
@@ -60,6 +64,9 @@ export function sentDiscussions(rounds: readonly ReviewRequestRound[]): Map<stri
   return sent;
 }
 
+/** Every pull request without feedback reads this one list, so what is derived from it keeps its identity. */
+const NO_DISCUSSION_VIEWS = Object.freeze<DiscussionView[]>([]) as DiscussionView[];
+
 /**
  * The feedback's discussions with what the person did about them. A comment
  * someone else wrote after the request was sent asks again, so the discussion
@@ -72,7 +79,7 @@ export function buildDiscussionViews(
   /** A merged or closed pull request asks nothing more; its discussions are its history. */
   pullRequestOpen = true
 ): DiscussionView[] {
-  if (!feedback) return [];
+  if (!feedback) return NO_DISCUSSION_VIEWS;
   // The person's own comments on the conversation, such as replies posted from here, ask nothing of them.
   const own = (discussion: PullRequestDiscussion) =>
     discussion.kind === 'COMMENT' && Boolean(feedback.viewer) && discussion.comments[0]?.author === feedback.viewer;
@@ -207,24 +214,16 @@ export function commentParts(text: string): CommentPart[] {
   return parts.length ? parts : [{ kind: 'text', text }];
 }
 
-/** The first line of a discussion's first comment as plain text, for a one-line row. */
-export function discussionSummary(discussion: Pick<PullRequestDiscussion, 'comments'>): string {
-  const text = displayPlatformText(discussion.comments[0]?.body ?? '');
-  const line = text.split('\n')
-    .map((value) => value.replace(/^\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|```\S*)/u, '').trim())
-    .find(Boolean) ?? '';
-  const plain = line
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, '$1')
-    .replace(/(\*\*|__)(.+?)\1/gu, '$2')
-    .replace(/(^|\W)[*_]([^*_\n]+)[*_](?=\W|$)/gu, '$1$2')
-    .replace(/`([^`]+)`/gu, '$1')
-    .trim();
-  return plain.length > 160 ? `${plain.slice(0, 159)}…` : plain;
-}
-
-/** Where a discussion points; a review or a comment on the whole pull request points at no file. */
+/**
+ * Where a discussion points; a review or a comment on the whole pull request
+ * points at no file. GitHub places a thread on the old side for any line of the
+ * old file, unchanged ones included, so that side names the old file's line,
+ * never a removed one. The path is the platform's text: characters no reader
+ * sees are dropped, so the agent reads the path the person sees.
+ */
 export function formatDiscussionLocation(discussion: Pick<PullRequestDiscussion, 'path' | 'side' | 'line' | 'endLine'>): string | undefined {
-  return discussion.path ? formatCommentLocation({ ...discussion, path: discussion.path }) : undefined;
+  const path = discussion.path?.replace(INVISIBLE_CHARACTERS, '');
+  return path ? formatCommentLocation({ ...discussion, path }, 'old') : undefined;
 }
 
 /** A review's verdict as a reviewer's action. */

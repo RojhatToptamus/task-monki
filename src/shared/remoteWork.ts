@@ -58,7 +58,7 @@ export interface RemoteWorkSummary {
   crossRepository?: boolean;
   headRepositoryPath?: string;
   /** Where its reviews stand and how its head's checks ended, as the platform's list says: what to open first. */
-  review?: 'CHANGES_REQUESTED' | 'APPROVED' | 'REVIEW_REQUIRED';
+  review?: 'CHANGES_REQUESTED' | 'APPROVED';
   checks?: 'FAILING' | 'PENDING' | 'PASSING';
   /** The task already opened from this item, or that delivered this pull request. */
   existingTaskId?: string;
@@ -365,12 +365,12 @@ export function leavablePullRequestHeads(
 }
 
 /**
- * Characters that change no visible glyph: zero-width and joining marks, the
- * byte-order mark, bidirectional controls and Unicode tag characters, which can
- * carry text no reader sees.
+ * Characters that change no visible glyph: zero-width spaces and joiners,
+ * invisible operators, the byte-order mark, direction marks and controls, and
+ * Unicode tag characters, which can carry text no reader sees. The pattern is
+ * global, so it serves `replace` and never `test`.
  */
-/** Characters a platform does not show: zero-width and direction marks, and tag characters. */
-export const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
+export const INVISIBLE_CHARACTERS = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/gu;
 
 /**
  * Platform text as a reader sees it. Invisible characters are dropped, and so

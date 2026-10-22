@@ -859,20 +859,24 @@
   min-width: 0;
 }
 
-/* When the evidence was observed, beside the control that observes it again. */
+/* When the evidence was observed, or why it cannot be observed again now, beside the control that observes it. */
 .tm-prstatus__refreshline {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   color: var(--muted);
   font-size: var(--t-meta);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.tm-prstatus__refreshline > .tm-actiontitle {
-  flex: 0 0 auto;
+/* In the narrow record column a long reason gives way before the control does. */
+.tm-prstatus__refreshtext {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tm-prstatus__refresh {

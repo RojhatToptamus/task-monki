@@ -1,6 +1,7 @@
 import {
   baseMovedReason,
   formatRemoteWorkNumber,
+  gitLabMergeReason,
   remoteWorkLabel,
   type CiRollupRecord,
   type GitHubCheckDetailRecord,
@@ -155,17 +156,6 @@ function reviewOf(rollup: ReviewRollupRecord | undefined): Pick<PullRequestRecor
   }
 }
 
-// GitLab's first reason it cannot merge. The draft state, the reviews, the checks and the
-// threads each have their own gate, so the Merge gate states only what none of them does.
-const GITLAB_NOT_YET: Record<string, string | undefined> = {
-  draft_status: undefined,
-  not_approved: 'Needs approval',
-  requested_changes: undefined,
-  ci_must_pass: undefined,
-  ci_still_running: undefined,
-  discussions_not_resolved: undefined
-};
-
 function mergeOf(
   pullRequest: PullRequestSnapshotRecord,
   merge: MergeSnapshotRecord | undefined,
@@ -184,25 +174,21 @@ function mergeOf(
   // A base that moved reads the same on both platforms, and as the Now panel and the Inbox say it.
   const moved = merge.status === 'BLOCKED' ? baseMovedReason(raw) : undefined;
   if (moved) return { merge: { word: baseMovedLine(moved, base), tone: 'error' } };
-  if (gitLab) {
-    const reason = typeof raw.detailed_merge_status === 'string' ? raw.detailed_merge_status : '';
-    if (merge.status === 'MERGEABLE') return { merge: { word: 'No conflicts', tone: 'success' } };
-    if (merge.status === 'COMPUTING') return { merge: { word: 'Checking', tone: 'neutral' } };
-    if (reason in GITLAB_NOT_YET) {
-      const word = GITLAB_NOT_YET[reason];
-      return word ? { merge: { word, tone: merge.status === 'BLOCKED' ? 'error' : 'neutral' } } : {};
-    }
-    return merge.status === 'BLOCKED' ? { merge: { word: 'Blocked', tone: 'error' } } : {};
-  }
-  const mergeState = typeof raw.mergeStateStatus === 'string' ? raw.mergeStateStatus.toUpperCase() : '';
   switch (merge.status) {
     case 'MERGEABLE':
       return { merge: { word: 'No conflicts', tone: 'success' } };
     case 'BLOCKED':
       return { merge: { word: 'Blocked', tone: 'error' } };
-    case 'NOT_MERGED':
+    case 'NOT_MERGED': {
+      // GitLab names its reason, which the draft state, the reviews, the checks or the threads may already state.
+      if (gitLab) {
+        const word = gitLabMergeReason(raw.detailed_merge_status)?.gate;
+        return word ? { merge: { word, tone: 'neutral' } } : {};
+      }
       // A draft is its own state; branch rules hold the rest until their checks and reviews are met.
+      const mergeState = typeof raw.mergeStateStatus === 'string' ? raw.mergeStateStatus.toUpperCase() : '';
       return mergeState === 'DRAFT' || pullRequest.isDraft ? {} : { merge: { word: 'Waiting on branch rules', tone: 'neutral' } };
+    }
     case 'COMPUTING':
       return { merge: { word: 'Checking', tone: 'neutral' } };
     default:

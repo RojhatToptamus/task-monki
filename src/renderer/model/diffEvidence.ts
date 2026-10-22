@@ -13,6 +13,12 @@ export interface DiffLine {
   expansion?: 'hidden' | 'shown';
 }
 
+/** A diff line's code, without the marker its kind already says. */
+export function diffLineCode(line: Pick<DiffLine, 'content' | 'kind'>): string {
+  const marker = line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '-' : line.kind === 'context' ? ' ' : undefined;
+  return marker && line.content.startsWith(marker) ? line.content.slice(1) : line.content;
+}
+
 export interface DiffBlock {
   id: string;
   label: string;

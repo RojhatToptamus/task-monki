@@ -1,14 +1,31 @@
-import type { AgentItemRecord, ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer, ReviewResponseOutcome, RunRecord, TaskInstruction } from '../../shared/contracts';
+import {
+  discussionSummary,
+  type AgentItemRecord,
+  type ReviewRequestItem,
+  type ReviewRequestRecord,
+  type ReviewResponseAnswer,
+  type ReviewResponseOutcome,
+  type RunRecord,
+  type TaskInstruction
+} from '../../shared/contracts';
 import { sessionTurn, type SessionTurn } from './agentSession';
-import type { ReviewRequestRound } from './pullRequestFeedback';
 import { formatCommentLocation } from './formatting';
-import { discussionSummary, formatDiscussionLocation } from './pullRequestFeedback';
+import { formatDiscussionLocation, type DiscussionView, type ReviewRequestRound } from './pullRequestFeedback';
 
 export const REVIEW_OUTCOME_LABELS: Record<ReviewResponseOutcome, string> = {
   FIXED: 'Fixed',
   NOT_CHANGED: 'Not changed',
   NEEDS_DECISION: 'Needs your decision'
 };
+
+/** A discussion's state in one word, or none: what happened on the platform or to the request. */
+export function discussionStateWord(discussion: Pick<DiscussionView, 'resolved' | 'sent' | 'outdated' | 'replied'>): string | undefined {
+  if (discussion.resolved) return 'Resolved';
+  // The person answered on the platform last: the discussion waits on its other side.
+  if (discussion.replied) return 'Replied';
+  if (discussion.sent) return discussion.sent.outcome ? REVIEW_OUTCOME_LABELS[discussion.sent.outcome] : 'Sent';
+  return discussion.outdated ? 'Outdated' : undefined;
+}
 
 /** What a request item says: the finding's title, the person's comment, or a discussion's first line. */
 export function requestItemText(item: ReviewRequestItem): string {

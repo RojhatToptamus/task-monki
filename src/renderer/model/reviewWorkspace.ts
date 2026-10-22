@@ -1,6 +1,6 @@
 import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
 import type { ReviewComment } from '../../shared/reviewDraft';
-import { parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
+import { diffLineCode, parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
 
 /** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
 export type ReviewFindingView = EffectiveReviewFinding;
@@ -137,14 +137,6 @@ export function anchorReviewDiscussions<T extends { path?: string; side?: 'NEW' 
   return { byLine, byFile, general };
 }
 
-/** A diff line's code, without the marker its kind already says. */
-export function diffLineCode(content: string, kind: string): string {
-  if ((kind === 'addition' && content.startsWith('+')) || (kind === 'deletion' && content.startsWith('-')) || (kind === 'context' && content.startsWith(' '))) {
-    return content.slice(1);
-  }
-  return content;
-}
-
 /** The code of lines start to end on one side of a file, when the diff holds every one of them. */
 export function sideLines(file: DiffFile, side: 'NEW' | 'OLD', start: number, end: number): string[] | undefined {
   if (start < 1 || end < start) return undefined;
@@ -152,7 +144,7 @@ export function sideLines(file: DiffFile, side: 'NEW' | 'OLD', start: number, en
   for (const block of file.blocks) {
     for (const line of block.lines) {
       const number = side === 'NEW' ? (line.kind === 'deletion' ? undefined : line.newLine) : (line.kind === 'addition' ? undefined : line.oldLine);
-      if (number !== undefined && number >= start && number <= end) byNumber.set(number, diffLineCode(line.content, line.kind));
+      if (number !== undefined && number >= start && number <= end) byNumber.set(number, diffLineCode(line));
     }
   }
   const lines: string[] = [];

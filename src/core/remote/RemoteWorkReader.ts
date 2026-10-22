@@ -3,7 +3,6 @@ import {
   REMOTE_WORK_SNAPSHOT_SCHEMA,
   boundRemoteText,
   visibleRemoteText,
-  type RemoteProvider,
   type RemoteRepositoryRef,
   type RemoteWorkComment,
   type RemoteWorkKind,
@@ -32,7 +31,6 @@ export interface RemotePullRequest {
 
 /** Reads one platform's issues and pull requests. Platform text is untrusted. */
 export interface RemoteWorkReader {
-  readonly provider: RemoteProvider;
   list(repository: RemoteRepositoryRef, kind: RemoteWorkKind, text: string | undefined, cwd: string): Promise<RemoteWorkSummary[]>;
   readIssue(ref: RemoteWorkRef, cwd: string): Promise<{ summary: RemoteWorkSummary; snapshot: RemoteWorkSnapshot }>;
   readPullRequest(ref: RemoteWorkRef, cwd: string): Promise<RemotePullRequest>;

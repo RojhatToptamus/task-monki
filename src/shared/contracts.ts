@@ -313,6 +313,7 @@ export const DOMAIN_EVENT_TYPES = [
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
   'GITHUB_PREFLIGHT_COMPLETED',
+  'BRANCH_UPDATE_REQUESTED',
   'BRANCH_PUBLISH_REQUESTED',
   'BRANCH_PUBLISHED',
   'BRANCH_PUBLISH_FAILED',
@@ -675,7 +676,7 @@ export interface BranchPublicationRecord {
   iterationId: string;
   worktreeId: string;
   remoteName: string;
-  /** Exact destination of an external-checkout push, retained for recovery. */
+  /** Destination of an external-checkout push, without the user and password an https URL can carry, retained for recovery. */
   remoteUrl?: string;
   branchName: string;
   remoteRef: string;
@@ -1002,6 +1003,12 @@ export interface BoardDeliveryFacts {
   pushError?: string;
   /** Whose move a pull request with requested changes waits on (`reviewTurn`). */
   turn?: 'AUTHOR' | 'REVIEWERS';
+  /**
+   * A merge in progress in the task's own worktree beside an open pull request,
+   * as PR Status reads it: Push update finishes it. Git counts the files it
+   * stopped on as conflicted until then, resolved or not.
+   */
+  mergeInProgress?: boolean;
 }
 
 export interface BoardTaskSummary {
@@ -1656,8 +1663,8 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   resolvePullRequestDiscussion(input: import('./pullRequestActions').ResolvePullRequestDiscussionRequest): Promise<void>;
   /** Runs the current head's failed checks again where the platform ran them. */
   rerunPullRequestChecks(input: import('./pullRequestActions').RerunPullRequestChecksRequest): Promise<import('./pullRequestActions').RerunPullRequestChecksResult>;
-  /** Fetches the commits the worktree lacks, for the agent to merge. */
-  fetchPullRequestUpdate(input: import('./pullRequestActions').FetchPullRequestUpdateRequest): Promise<import('./pullRequestActions').PullRequestUpdate>;
+  /** Merges the commits the worktree lacks into its branch; the files a conflict stops on are left for the agent. */
+  mergePullRequestUpdate(input: import('./pullRequestActions').MergePullRequestUpdateRequest): Promise<import('./pullRequestActions').PullRequestUpdate>;
   /** The end of each failing check's log for the pull request's current head. */
   readPullRequestCheckLogs(input: import('./pullRequestActions').ReadPullRequestCheckLogsRequest): Promise<import('./pullRequestActions').PullRequestCheckLog[]>;
   reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;

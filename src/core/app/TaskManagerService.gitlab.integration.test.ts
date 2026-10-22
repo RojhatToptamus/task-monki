@@ -93,7 +93,7 @@ describe('TaskManagerService GitLab work', () => {
     // GitLab names the draft first; the reviewer's own state still says changes were requested.
     expect(detail.pullRequests[0]).toMatchObject({ number: 6, status: 'OPEN_DRAFT', headRefOid: head });
     expect(detail.reviewRollups[0]).toMatchObject({
-      status: 'CHANGES_REQUESTED', reviewDecision: 'draft_status',
+      status: 'CHANGES_REQUESTED',
       feedback: { unresolvedCount: 2, discussionCount: 3, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'bob', state: 'REQUESTED' }] }
     });
     // A draft is not mergeable yet, which is no block of its own.

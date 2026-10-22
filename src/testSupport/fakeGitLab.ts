@@ -19,7 +19,7 @@ export interface FakeGitLabItem {
   sourceProject?: string;
   /** The merge request's own "Delete source branch" choice, which a merge follows unless told otherwise. */
   forceRemoveSourceBranch?: boolean;
-  /** A finished pipeline for the head: each job's name, stage and status. */
+  /** The head pipeline's jobs: each job's name, stage and status, from which the pipeline's own status follows. */
   jobs?: Array<{ id?: number; name: string; stage: string; status: string; allow_failure?: boolean }>;
   /** GitLab's first reason it cannot merge; a draft reports `draft_status` unless set. */
   detailedMergeStatus?: string;
@@ -177,9 +177,14 @@ const mergeRequest = (item) => {
     source_project_id: idOf(source), target_project_id: idOf(item.project), sha: head, force_remove_source_branch: item.forceRemoveSourceBranch ?? null,
     diff_refs: base ? { base_sha: base, head_sha: head, start_sha: target } : null,
     detailed_merge_status: item.detailedMergeStatus ?? (item.draft ? 'draft_status' : 'mergeable'), merged_at: item.state === 'merged' ? '2026-10-02T00:00:00.000Z' : null,
-    head_pipeline: item.jobs ? { id: 900 + item.iid, project_id: idOf(item.project), sha: head, status: 'running' } : null
+    head_pipeline: item.jobs ? { id: 900 + item.iid, project_id: idOf(item.project), sha: head, status: pipelineStatus(item.jobs),
+      web_url: 'https://gitlab.com/' + item.project + '/-/pipelines/' + (900 + item.iid) } : null
   };
 };
+// As GitLab composes a pipeline's status from its jobs: a job still to run keeps it running, then a failure not allowed to fail fails it.
+const pipelineStatus = (jobs) => jobs.some((job) => ['created', 'pending', 'running'].includes(job.status)) ? 'running'
+  : jobs.some((job) => job.status === 'failed' && !job.allow_failure) ? 'failed'
+    : jobs.some((job) => job.status === 'canceled') ? 'canceled' : 'success';
 const issue = (item) => ({ iid: item.iid, title: item.title, description: item.description ?? '', state: item.state ?? 'opened',
   web_url: url(item), author: { username: item.author ?? 'someone' }, labels: [], user_notes_count: (item.notes ?? []).length, updated_at: '2026-10-01T00:00:00Z' });
 const parts = endpointPath.split('/');
@@ -255,7 +260,9 @@ if (parts[4] === 'discussions' && parts[5]) {
   }
 }
 if (parts[4] === 'notes') out([...(item.notes ?? [])].reverse().map((note) => ({ body: note.body, system: Boolean(note.system), created_at: note.created_at, author: { username: note.author } })));
-if (parts[4] === 'approvals') out({ approved: false, approvals_left: 0, approved_by: [] });
+// As gitlab.com answers for a project without approval rules: approved before anyone approves.
+if (parts[4] === 'approvals') out({ approved: true, approvals_left: 0,
+  approved_by: (item.reviewers ?? []).filter((reviewer) => reviewer.state === 'approved').map((reviewer) => ({ user: { username: reviewer.username } })) });
 if (parts[4] === 'reviewers') out((item.reviewers ?? []).map((reviewer) => ({ user: { username: reviewer.username }, state: reviewer.state, created_at: '2026-10-01T00:00:00Z' })));
 if (parts[4] === 'discussions') {
   const head = mergeRequest(item).sha;

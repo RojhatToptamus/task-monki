@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { CircleMinus, ExternalLink, MessageSquare, RefreshCw, RotateCw } from 'lucide-react';
 import { remoteProviderName, remoteWorkLabel, remoteWorkNoun, type PullRequestCheckLog } from '../../shared/contracts';
 import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
@@ -6,27 +6,33 @@ import type { PullRequestRecordCheckRow, PullRequestRecordView, RecordTone } fro
 import { DisclosureChevron } from './DisclosureChevron';
 import { PullRequestStateIcon } from './PullRequestIcon';
 import { StatusGlyph } from './StatusBadge';
-import { OverviewSection } from './TaskOverview';
+import { OverviewSection, PropRow } from './TaskOverview';
 import { Tooltip } from './Tooltip';
 
 /**
- * The task's pull request in its record: where it goes, and each gate a merge
- * waits on, from Task Monki's evidence for its current head. It sits beside
- * the step the Now panel asks for and asks nothing itself.
+ * When the pull request was last read, and the control that reads it again.
+ * While the control is disabled, its reason takes the time's place, tied to
+ * the control so the keyboard reaches it too; a reason the card already states
+ * elsewhere is tied by its id instead.
  */
-/** When the pull request was last read, and the control that reads it again. */
-export function PullRequestRefresh({ updated, reason, disabled, noun, onRefresh }: {
+export function PullRequestRefresh({ updated, reason, describedBy, disabled, noun, onRefresh }: {
   updated?: string;
   reason?: string;
+  /** The id of the disabled reason when the card states it beside another action. */
+  describedBy?: string;
   disabled?: boolean;
   noun: string;
   onRefresh(): void;
 }) {
+  const reasonId = useId();
+  const why = disabled ? reason : undefined;
   return (
     <span className="tm-prstatus__refreshline">
-      {updated ? <span>{updated}</span> : null}
-      <Tooltip label={reason ?? `Refresh ${noun}`}>
-        <button type="button" className="tm-prstatus__refresh" disabled={disabled} aria-label={`Refresh ${noun}`} onClick={onRefresh}>
+      {why ? <span id={reasonId} className="tm-prstatus__refreshtext" title={why}>{why}</span>
+        : updated ? <span className="tm-prstatus__refreshtext">{updated}</span> : null}
+      <Tooltip label={`Refresh ${noun}`}>
+        <button type="button" className="tm-prstatus__refresh" disabled={disabled} aria-label={`Refresh ${noun}`}
+          aria-describedby={why ? reasonId : disabled ? describedBy : undefined} onClick={onRefresh}>
           <RefreshCw aria-hidden="true" size={13} />
         </button>
       </Tooltip>
@@ -34,6 +40,11 @@ export function PullRequestRefresh({ updated, reason, disabled, noun, onRefresh 
   );
 }
 
+/**
+ * The task's pull request in its record: where it goes, and each gate a merge
+ * waits on, from Task Monki's evidence for its current head. It sits beside
+ * the step the Now panel asks for and asks nothing itself.
+ */
 export function PullRequestRecord({
   view,
   refresh,
@@ -74,7 +85,7 @@ export function PullRequestRecord({
     >
       {view.url ? (
         <a className="tm-prrecord__identity" href={view.url} target="_blank" rel="noreferrer">
-          <Identity view={view} />
+          <Identity view={view} link />
         </a>
       ) : (
         <p className="tm-prrecord__identity"><Identity view={view} /></p>
@@ -90,17 +101,15 @@ export function PullRequestRecord({
       <div className="tm-prrecord__gates">
         {view.checks ? (
           <dl className="tm-props">
-            <Row label="Checks">
-              {rows.length > 0 ? (
-                <button type="button" className="tm-prrecord__toggle" aria-expanded={checksOpen} aria-controls={checksId}
-                  onClick={() => setChecksOpen((open) => !open)}>
-                  <span className="tm-prrecord__word" data-tone={view.checks.tone}>{view.checks.summary}</span>
-                  <DisclosureChevron />
-                </button>
-              ) : (
+            <PropRow label="Checks" value={rows.length > 0 ? (
+              <button type="button" className="tm-prrecord__toggle" aria-expanded={checksOpen} aria-controls={checksId}
+                onClick={() => setChecksOpen((open) => !open)}>
                 <span className="tm-prrecord__word" data-tone={view.checks.tone}>{view.checks.summary}</span>
-              )}
-            </Row>
+                <DisclosureChevron />
+              </button>
+            ) : (
+              <span className="tm-prrecord__word" data-tone={view.checks.tone}>{view.checks.summary}</span>
+            )} />
           </dl>
         ) : null}
         {rows.length > 0 && checksOpen ? (
@@ -110,7 +119,7 @@ export function PullRequestRecord({
         ) : null}
         <dl className="tm-props">
         {view.reviewers.length > 0 ? (
-          <Row label="Reviews">
+          <PropRow label="Reviews" value={<>
             <ul className="tm-prrecord__people">
               {view.reviewers.map((reviewer) => (
                 <li key={reviewer.name}>
@@ -129,21 +138,19 @@ export function PullRequestRecord({
               ))}
             </ul>
             {askError ? <p className="form-error" role="alert">{askError}</p> : null}
-          </Row>
+          </>} />
         ) : view.review ? (
-          <Row label="Review"><span className="tm-prrecord__word" data-tone={view.review.tone}>{view.review.word}</span></Row>
+          <PropRow label="Review" value={<span className="tm-prrecord__word" data-tone={view.review.tone}>{view.review.word}</span>} />
         ) : null}
         {view.threads ? (
-          <Row label="Threads">
-            {view.threads.unresolved > 0 ? (
-              <button type="button" className="tm-osection__link tm-prrecord__link" onClick={onOpenThreads}>{view.threads.word}</button>
-            ) : (
-              <span className="tm-prrecord__word">{view.threads.word}</span>
-            )}
-          </Row>
+          <PropRow label="Threads" value={view.threads.unresolved > 0 ? (
+            <button type="button" className="tm-osection__link tm-prrecord__link" onClick={onOpenThreads}>{view.threads.word}</button>
+          ) : (
+            <span className="tm-prrecord__word">{view.threads.word}</span>
+          )} />
         ) : null}
         {view.merge ? (
-          <Row label="Merge"><span className="tm-prrecord__word" data-tone={view.merge.tone}>{view.merge.word}</span></Row>
+          <PropRow label="Merge" value={<span className="tm-prrecord__word" data-tone={view.merge.tone}>{view.merge.word}</span>} />
         ) : null}
         </dl>
       </div>
@@ -151,23 +158,15 @@ export function PullRequestRecord({
   );
 }
 
-function Identity({ view }: { view: PullRequestRecordView }) {
+/** The pull request's mark, number and title; its state in words, and where it opens when it is a link. */
+function Identity({ view, link = false }: { view: PullRequestRecordView; link?: boolean }) {
   return (
     <>
       <PullRequestStateIcon state={view.state} />
       <span className="tm-prrecord__number">{view.label}</span>
       {view.title ? <span className="tm-prrecord__title">{view.title}</span> : null}
-      <span className="tm-visually-hidden">, {view.state}, opens on {remoteProviderName(view.provider)}</span>
+      <span className="tm-visually-hidden">, {view.state}{link ? `, opens on ${remoteProviderName(view.provider)}` : null}</span>
     </>
-  );
-}
-
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="tm-props__row">
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </div>
   );
 }
 

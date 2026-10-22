@@ -5,18 +5,8 @@ import {
   type RemoteRepositoryOption,
   type RemoteRepositoryRef
 } from '../../shared/remoteWork';
-import { GIT_HOOKS_OFF_ENV, git, gitSucceeds } from '../git/gitCli';
-import { RemoteWorkError, safeCliMessage } from './RemoteWorkError';
-
-/**
- * Checking out or moving to pull request code must not run it. Repository
- * hooks can live in the checked-out tree (`core.hooksPath`), so they are off.
- */
-export const UNTRUSTED_CHECKOUT_GIT_ENV: NodeJS.ProcessEnv = {
-  ...GIT_HOOKS_OFF_ENV,
-  // A pull request's `.lfsconfig` could point LFS downloads anywhere; files stay pointers.
-  GIT_LFS_SKIP_SMUDGE: '1'
-};
+import { git, gitSucceeds } from '../git/gitCli';
+import { RemoteWorkError, cliExitCode, safeCliMessage } from './RemoteWorkError';
 
 /** The supported repositories a checkout's remotes reach, default first. */
 export async function listCheckoutRemoteRepositories(repositoryPath: string): Promise<RemoteRepositoryOption[]> {
@@ -101,8 +91,15 @@ export function hasCommit(repositoryPath: string, sha: string): Promise<boolean>
   return gitSucceeds(repositoryPath, ['cat-file', '-e', `${sha}^{commit}`]);
 }
 
-export async function mergeBase(repositoryPath: string, left: string, right: string): Promise<string> {
-  return (await git(repositoryPath, ['merge-base', left, right])).trim();
+/** The best common ancestor of two commits; undefined when they share no history. */
+export async function mergeBase(repositoryPath: string, left: string, right: string): Promise<string | undefined> {
+  try {
+    return (await git(repositoryPath, ['merge-base', left, right])).trim();
+  } catch (error) {
+    // `git merge-base` exits 1 when there is no common ancestor; any other failure is Git's.
+    if (cliExitCode(error) === 1) return undefined;
+    throw error;
+  }
 }
 
 export function isAncestor(repositoryPath: string, ancestor: string, descendant: string): Promise<boolean> {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentReviewFinding } from '../../shared/contracts';
 import { formatCommentLocation } from './formatting';
+import type { DiscussionView } from './pullRequestFeedback';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest } from './reviewFollowUp';
 import type { ReviewFindingView } from './reviewWorkspace';
 
@@ -58,6 +59,23 @@ describe('buildReviewRequestInstruction', () => {
     expect(buildReviewRequestRecord({ taskTitle: 'T', findings: [], dismissed: [], comments: [], reviewOutput: 'Unstructured review.' })).toBeUndefined();
     expect(withComment).not.toContain('Unstructured review.');
     expect(withComment).toContain('1. a.ts (whole file): Rename this.');
+  });
+
+  it('names a platform thread\'s old side by the old file, which holds unchanged lines too, and its path as a reader sees it', () => {
+    // GitHub's left side is any line of the old file; the person's own old-side comments are on removed lines.
+    const thread: DiscussionView = {
+      id: 'thread', kind: 'THREAD', provider: 'GITHUB', open: true, path: 'src/‮save.ts', side: 'OLD', line: 12, endLine: 14,
+      resolvable: true, resolved: false, outdated: false, commentCount: 1,
+      comments: [{ author: 'alice', createdAt: '2026-10-10T10:00:00Z', body: 'Why drop this guard?', truncated: false }]
+    };
+    const text = buildReviewRequestInstruction({
+      taskTitle: 'T', findings: [], dismissed: [],
+      discussions: { provider: 'GITHUB', number: 9, boundary: 'abcd1234', items: [thread] },
+      comments: [{ id: 'c', path: 'src/save.ts', side: 'OLD', line: 3, text: 'Keep this guard.' }]
+    });
+
+    expect(text).toContain('1. src/save.ts (old lines 12-14):');
+    expect(text).toContain('2. src/save.ts (removed line 3): Keep this guard.');
   });
 });
 

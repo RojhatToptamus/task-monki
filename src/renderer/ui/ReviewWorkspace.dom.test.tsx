@@ -469,6 +469,69 @@ describe('ReviewWorkspace pull request discussions', () => {
     await waitFor(() => expect(onResolveDiscussion).toHaveBeenCalledWith('suggest', true));
   });
 
+  it('keeps only what the person typed in a reply, so an answer posted elsewhere does not come back as theirs', async () => {
+    api.readArtifact.mockResolvedValue(diffFor('src/rateLimit.ts'));
+    // What the task keeps while it is open, as the task page holds it across visits to Review.
+    const typed = new Map<string, string>();
+    const onReplyTextChange = (discussionId: string, text: string | undefined) => {
+      if (text === undefined) typed.delete(discussionId);
+      else typed.set(discussionId, text);
+    };
+    const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+    const shared = { findings: [], review: undefined, discussionsOnLines: true, replyTexts: typed, onReplyTextChange,
+      onReplyToDiscussion: vi.fn(async () => undefined) };
+    const first = render(<Harness {...shared} discussions={[discussion('open')]} replyDrafts={drafts} />);
+    const input = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    fireEvent.focusIn(input);
+    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    first.unmount();
+
+    // Posted from the Overview's dialog, the answer leaves the drafts and the thread waits on alice.
+    render(<Harness {...shared} discussions={[discussion('open', { replied: true })]} />);
+    const again = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    expect(again.value).toBe('');
+    expect(screen.queryByRole('button', { name: 'Reply' })).toBeNull();
+  });
+
+  it('keeps the keys on a thread when it opens, folds or shows every reply', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const long = discussion('long', { commentCount: 5, comments: ['alice', 'bob', 'carol', 'dave', 'erin'].map((author, index) => ({
+      author, createdAt: `2026-07-07T09:0${index}:00.000Z`, body: `Point ${index + 1}.`, truncated: false
+    })) });
+    render(<Harness findings={[]} review={undefined} discussions={[resolved, long, discussion('open')]} discussionsOnLines />);
+    await screen.findByRole('article', { name: 'GitHub comment by carol' });
+    const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
+    // A control that goes away when pressed leaves the focus on its thread, where N still moves on.
+    const press = (button: HTMLElement) => { button.focus(); fireEvent.click(button); };
+
+    press(within(thread('done')).getByRole('button', { name: /Rename the limiter/ }));
+    expect(document.activeElement).toBe(thread('done'));
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('long'));
+
+    press(within(thread('done')).getByRole('button', { name: 'Fold' }));
+    expect(document.activeElement).toBe(thread('done'));
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('long'));
+
+    press(within(thread('long')).getByRole('button', { name: '3 more replies' }));
+    expect(document.activeElement).toBe(thread('long'));
+    expect(within(thread('long')).getByText('Point 3.')).toBeDefined();
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('open'));
+  });
+
+  it('shows a discussion another surface asked to see when the diff has no files', async () => {
+    const onDiscussionRevealed = vi.fn();
+    render(<Harness findings={[]} review={undefined} currentDiffArtifactId={undefined} discussions={[discussion('open')]}
+      revealDiscussionId="open" onDiscussionRevealed={onDiscussionRevealed} />);
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(screen.getByRole('region', { name: 'Feedback without a location' })).getByRole('article')).toBe(thread);
+    await waitFor(() => expect(document.activeElement).toBe(thread));
+    expect(onDiscussionRevealed).toHaveBeenCalledOnce();
+  });
+
   it('acts with F on the thread in focus, never on a discussion focused before it', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     render(<Harness findings={[suggestion]} discussions={[discussion('open')]} discussionsOnLines />);

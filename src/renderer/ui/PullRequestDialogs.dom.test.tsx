@@ -19,9 +19,30 @@ describe('ReplyToReviewersModal', () => {
     mounted.rerender(modal([]));
     expect(within(dialog).getByText('Replied, but the thread was not resolved: GitHub refused.')).toBeDefined();
     expect(within(dialog).queryByRole('textbox', { name: 'Reply to @alice' })).toBeNull();
-    expect((within(dialog).getByRole('button', { name: 'Post replies' }) as HTMLButtonElement).disabled).toBe(true);
+    // Nothing is left to post, so Close is the one action.
+    expect(within(dialog).queryByRole('button', { name: /^Post/ })).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('says why posting waits beside a disabled Post', () => {
+    const drafts = [{ discussionId: 'PRRT_1', kind: 'THREAD' as const, author: 'alice', summary: 'Handle a null layout.', location: 'save.js:2',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4.', resolvable: true }];
+    render(<ReplyToReviewersModal platform="GitHub" drafts={drafts} reviewers={[]} onSubmit={vi.fn()} onCancel={vi.fn()}
+      fallbackReturnFocusRef={{ current: null }} />);
+    const dialog = screen.getByRole('dialog', { name: 'Reply on GitHub' });
+    const description = (element: HTMLElement) => (element.getAttribute('aria-describedby') ?? '').split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '').join(' ').trim();
+
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Reply to @alice' }), { target: { value: ' ' } });
+    const post = within(dialog).getByRole('button', { name: 'Post 1 reply' }) as HTMLButtonElement;
+    expect(post.disabled).toBe(true);
+    expect(description(post)).toBe('Write each reply first');
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /@alice/ }));
+    const none = within(dialog).getByRole('button', { name: 'Post replies' }) as HTMLButtonElement;
+    expect(none.disabled).toBe(true);
+    expect(description(none)).toBe('Choose a reply first');
   });
 
   it('posts only the replies the person kept, as they edited them, with the resolving they chose', async () => {

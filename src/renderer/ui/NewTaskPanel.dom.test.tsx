@@ -330,6 +330,13 @@ describe('mounted remote work sources', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Issue', pressed: false }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Search issues' }), { target: { value: link } });
 
+    // Picking another goes back to the search, with the focus in it.
+    const pickAnother = await screen.findByRole('button', { name: 'Pick another issue' });
+    pickAnother.focus();
+    fireEvent.click(pickAnother);
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Search issues' }));
+    fireEvent.click(screen.getByRole('option', { name: '#12 Crash on save' }));
+
     fireEvent.click(await screen.findByRole('button', { name: 'Open existing task' }));
     await waitFor(() => expect(onOpenExistingTask).toHaveBeenCalledWith('task-9'));
     expect(onCreate).not.toHaveBeenCalled();

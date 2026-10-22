@@ -1188,6 +1188,54 @@ describe('SqliteTaskStore', () => {
     expect(await store.getTask(task.id)).toMatchObject({ workflowPhase: 'DONE' });
   });
 
+  it('tells the board of a merge in progress in the task\'s own worktree, which Push update finishes, until it is committed', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-board-merge-'));
+    const store = await createStore(dir);
+    const repositoryId = (await addTestRepository(store, dir)).id;
+    const task = await store.createTask({ title: 'Update with main', prompt: 'Bring main in.', repositoryId });
+    const managed = await store.createIterationAndWorktree({
+      task, branchName: 'codex/board-merge', worktreePath: path.join(dir, 'worktree'), baseSha: 'base'
+    });
+    // Git counts the files a merge stopped on as conflicted until it is committed, resolved or not.
+    const reading = (worktreePath: string, branch: string, operationInProgress?: string) => ({
+      worktreePath, branch, repoRoot: dir, gitCommonDir: path.join(dir, '.git'), headSha: 'head', baseSha: 'base',
+      aheadCount: 1, behindCount: 0, stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      conflictedCount: operationInProgress ? 1 : 0, ...(operationInProgress ? { operationInProgress } : {}),
+      commitsAheadOfBase: 1, committedDiffFileCount: 1, workingDiffFileCount: 0, diffStat: '',
+      dirtyFingerprint: operationInProgress ?? 'committed', status: operationInProgress ? 'CONFLICTED' as const : 'COMMITTED_UNPUSHED' as const
+    });
+    const observe = ({ iteration, worktree }: { iteration: TaskIteration; worktree: WorktreeRecord }, operationInProgress?: string) =>
+      store.recordGitSnapshot({
+        taskId: worktree.taskId, iterationId: iteration.id, worktreeId: worktree.id,
+        ...reading(worktree.worktreePath, worktree.branchName, operationInProgress)
+      }, '');
+    const onBoard = async (taskId: string) => (await store.getBoardSnapshot()).tasks.find((candidate) => candidate.id === taskId);
+
+    await recordOpenPullRequest(store, task.id, managed.iteration, managed.worktree);
+    await observe(managed, 'merge');
+    expect(await onBoard(task.id)).toMatchObject({ projection: { git: 'CONFLICTED', health: 'ERROR' }, delivery: { mergeInProgress: true } });
+    // Push update committed it: the newest reading holds none, and nothing else waits on the person.
+    await observe(managed);
+    expect(await onBoard(task.id)).not.toHaveProperty('delivery');
+    // Push update finishes no rebase.
+    await observe(managed, 'rebase');
+    expect(await onBoard(task.id)).not.toHaveProperty('delivery');
+
+    // An imported checkout's merge is its owner's to finish.
+    const checkout = path.join(dir, 'checkout');
+    const imported = await store.importTask(
+      { repositoryId, worktreePath: checkout, branchName: 'feature', baseRef: 'main', title: 'Imported', prompt: 'Review it.' },
+      { snapshot: reading(checkout, 'feature'), diffEvidence: '' }
+    );
+    const detail = await store.getTaskDetail(imported.id);
+    const external = { iteration: detail.iterations[0]!, worktree: detail.worktrees[0]! };
+    await recordOpenPullRequest(store, imported.id, external.iteration, external.worktree, 83);
+    await observe(external, 'merge');
+    expect(await onBoard(imported.id)).toMatchObject({ projection: { git: 'CONFLICTED' } });
+    expect(await onBoard(imported.id)).not.toHaveProperty('delivery');
+    await closeStore(store);
+  });
+
   it('deletes only the selected task records and repairs fork links', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delete-'));
     const store = await createStore(dir);

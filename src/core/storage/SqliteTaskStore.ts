@@ -66,6 +66,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
+import { startsFromExistingWork } from '../../shared/promptTemplates';
 import {
   PULL_REQUEST_FEEDBACK_LIMITS,
   feedbackTurnFacts,
@@ -2025,6 +2026,16 @@ export class SqliteTaskStore {
     );
   }
 
+  /** The task's newest event of one type, read without copying the rest of the store. */
+  async getLatestTaskEvent(taskId: string, type: DomainEvent['type']): Promise<DomainEvent | undefined> {
+    await this.init();
+    let latest: DomainEvent | undefined;
+    for (const event of this.state.events) {
+      if (event.taskId === taskId && event.type === type && (!latest || event.receivedAt >= latest.receivedAt)) latest = event;
+    }
+    return clone(latest);
+  }
+
   async createDesignBundle(
     input: CreateDesignBundleInput
   ): Promise<CreateDesignBundleResult> {
@@ -2514,7 +2525,8 @@ export class SqliteTaskStore {
       if (this.state.runs.some((run) => run.taskId === task.id)) {
         throw new Error('This task has already run. Send a follow-up instead.');
       }
-      if (typeof input.prompt !== 'string' || input.prompt.length > 65_536 || (!input.draftOnly && !input.prompt.trim())) {
+      // A task opened from an issue or a pull request has a goal without a request of its own, as at creation.
+      if (typeof input.prompt !== 'string' || input.prompt.length > 65_536 || (!input.draftOnly && !input.prompt.trim() && !task.remoteSource)) {
         throw new Error('Enter a prompt of at most 65,536 characters.');
       }
       await this.withMessageAttachments(task.id, input.draftOnly ? undefined : input.attachmentDraftId, (addedIds) => {
@@ -3619,6 +3631,10 @@ export class SqliteTaskStore {
     }
     const remote = input.remote;
     if (remote) {
+      // Only a new task opened from an item holds it: a pull request with its worktree, an issue without one.
+      if (fork || imported || (remote.source.kind === 'PULL_REQUEST') !== Boolean(openedWorktree)) {
+        throw new Error('A pull request opens with its worktree; an issue opens without one.');
+      }
       // One task per remote item: choosing it again opens the task it already has.
       const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(remote.source));
       if (existing) return clone(existing);
@@ -4257,10 +4273,12 @@ export class SqliteTaskStore {
       );
       if (alreadyPublished) return clone(stored);
 
+      // A review is a gate of the Review phase: work that existed before the task, an imported
+      // checkout or an opened pull request, moves there when its review starts before any turn.
+      const reviewedWorktree = this.state.worktrees.find((worktree) => worktree.id === task.currentWorktreeId && worktree.id === run.worktreeId);
       if (run.mode === 'REVIEW' && task.workflowPhase === 'IN_PROGRESS' && !task.currentRunId &&
-          this.state.worktrees.some((worktree) => worktree.id === task.currentWorktreeId &&
-            worktree.id === run.worktreeId && worktree.ownership === 'EXTERNAL')) {
-        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for imported work.', false);
+          reviewedWorktree && startsFromExistingWork(task, reviewedWorktree)) {
+        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for existing work.', false);
       }
       const bindsCurrentTask = !isDetachedRunMode(run.mode);
       const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
@@ -4536,10 +4554,12 @@ export class SqliteTaskStore {
   }
 
   /**
-   * The diff base of a pull request task, after its branch moved to a newer head:
-   * the merge base the platform diffs against. Both stay ancestors of the head.
+   * The diff base of a task's managed worktree after its branch moved on: the
+   * merge base the platform diffs a pull request against, or a base commit
+   * Task Monki merged in. The iteration's copy of the base moves with it, and
+   * both stay ancestors of the head.
    */
-  async updatePullRequestBase(
+  async updateWorktreeBase(
     worktreeId: string,
     base: { baseRef: string; baseSha: string; headSha?: string }
   ): Promise<WorktreeRecord> {
@@ -4547,9 +4567,9 @@ export class SqliteTaskStore {
       await this.init();
       const worktree = this.state.worktrees.find((candidate) => candidate.id === worktreeId);
       const task = worktree ? this.state.tasks.find((candidate) => candidate.id === worktree.taskId) : undefined;
-      if (!worktree || !task || task.remoteSource?.kind !== 'PULL_REQUEST' || worktree.ownership !== 'MANAGED' ||
+      if (!worktree || task?.kind !== 'NORMAL' || worktree.ownership !== 'MANAGED' ||
           task.currentWorktreeId !== worktree.id || !isGitObjectId(base.baseSha) || (base.headSha !== undefined && !isGitObjectId(base.headSha))) {
-        throw new Error('Only the current worktree of a pull request task can change its base.');
+        throw new Error('Only the current managed worktree of a task can change its base.');
       }
       const now = new Date().toISOString();
       this.state = {
@@ -5034,11 +5054,11 @@ export class SqliteTaskStore {
   ): Promise<{ summary?: PullRequestFeedbackSummary; artifact?: ArtifactRecord }> {
     const previous = latestPullRequestFeedback(this.state, pullRequest.taskId, pullRequest.number);
     if (!feedback || feedback.number !== pullRequest.number) return { summary: previous };
+    const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
+    // Unchanged feedback keeps its artifact and summary, and is not written out again.
+    if (previous?.digest === digest) return { summary: previous };
     const content = JSON.stringify(feedback);
     if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
-    const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
-    // Unchanged feedback keeps its artifact and summary.
-    if (previous?.digest === digest) return { summary: previous };
     const candidate: PullRequestFeedbackSummary = {
       artifactId: randomUUID(),
       digest,
@@ -7681,7 +7701,12 @@ function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts |
   const changes = projection.reviews === 'CHANGES_REQUESTED';
   const blocked = projection.merge === 'BLOCKED';
   const pushFailed = projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS';
-  if (projection.githubPullRequest === 'MERGED' || (!failing && !changes && !blocked && !pushFailed)) return undefined;
+  // A merge in progress beside an open pull request, read from the Git evidence PR Status reads: in the
+  // task's own worktree, Push update finishes it. An imported checkout's merge is its owner's.
+  const merging = (projection.githubPullRequest === 'OPEN_DRAFT' || projection.githubPullRequest === 'OPEN_READY') &&
+    state.worktrees.find((worktree) => worktree.id === task.currentWorktreeId)?.ownership === 'MANAGED' &&
+    latestGitSnapshot(state, task)?.operationInProgress === 'merge';
+  if (projection.githubPullRequest === 'MERGED' || (!failing && !changes && !blocked && !pushFailed && !merging)) return undefined;
   const number = projection.githubPullRequestNumber;
   const own = (record: { taskId: string }) => record.taskId === task.id;
   const pullRequest = state.pullRequests.find((record) => own(record) && record.number === number);
@@ -7697,7 +7722,8 @@ function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts |
     ...(feedback ? { feedback: { unresolvedCount: feedback.unresolvedCount, reviewers: feedback.reviewers } } : {}),
     ...(turn ? { turn } : {}),
     ...(reason && pullRequest?.baseRefName ? { baseMoved: { base: pullRequest.baseRefName, reason } } : {}),
-    ...(pushError ? { pushError } : {})
+    ...(pushError ? { pushError } : {}),
+    ...(merging ? { mergeInProgress: true } : {})
   };
   return Object.keys(facts).length > 0 ? facts : undefined;
 }

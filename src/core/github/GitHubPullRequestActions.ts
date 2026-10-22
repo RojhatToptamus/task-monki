@@ -64,17 +64,36 @@ export function gitHubActionsJob(link: string | undefined): { owner: string; nam
   return match ? { owner: match[1]!, name: match[2]!, run: Number(match[3]), job: Number(match[4]) } : undefined;
 }
 
-/** A merge GitHub refused, in words that say what to do about it. */
+/**
+ * A merge GitHub refused, in words that say what to do about it. `text` is gh's
+ * output: the response body on stdout and `gh: <message> (HTTP <status>)` on stderr.
+ */
 export function gitHubMergeFailure(text: string): string {
   if (/\b409\b|head branch was modified|sha does not match/iu.test(text)) {
     return 'The pull request changed since Task Monki read it. Refresh, then merge.';
   }
   if (/\b405\b|not mergeable|required status|review.*required|protected branch/iu.test(text)) {
-    const reason = /"message"\s*:\s*"([^"]{1,200})"/u.exec(text)?.[1] ?? /HTTP 405:\s*([^\n(]{1,200})/u.exec(text)?.[1];
-    return reason ? `GitHub refused the merge: ${reason.trim().replace(/\.$/u, '')}.` : 'GitHub refused the merge.';
+    const reason = mergeRefusalReason(text);
+    return reason ? `GitHub refused the merge: ${reason}.` : 'GitHub refused the merge.';
   }
   if (/\b403\b|must have (?:write|push)|not authorized|permission/iu.test(text)) {
     return 'The signed-in GitHub account cannot merge this pull request.';
   }
   return 'GitHub could not merge the pull request.';
+}
+
+/** GitHub's own reason for a refused merge, on one line and bounded, without its closing period. */
+function mergeRefusalReason(text: string): string | undefined {
+  // The response's whole `message` string, escaped quotes included, else gh's line for it.
+  const literal = /"message"\s*:\s*("(?:[^"\\]|\\.)*")/u.exec(text)?.[1];
+  let reason: unknown;
+  try {
+    reason = literal ? JSON.parse(literal) : undefined;
+  } catch {
+    reason = undefined;
+  }
+  if (typeof reason !== 'string') reason = /^gh: (.{1,200}?) \(HTTP 405\)$/mu.exec(text)?.[1];
+  if (typeof reason !== 'string') return undefined;
+  const words = Array.from(reason.replace(/\s+/gu, ' ').trim()).slice(0, 200).join('').trimEnd().replace(/\.$/u, '');
+  return words || undefined;
 }

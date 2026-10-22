@@ -33,19 +33,3 @@ export function deliveryProvider(
 export function deliveryNoun(provider: RemoteProvider): 'PR' | 'MR' {
   return provider === 'GITLAB' ? 'MR' : 'PR';
 }
-
-/** Delivery copy in GitLab's words; GitHub copy is returned unchanged. */
-export function deliveryWords<T extends string | undefined>(text: T, provider: RemoteProvider): T {
-  if (provider !== 'GITLAB' || !text) return text;
-  return text
-    // GitLab writes a merge request's number with `!`.
-    .replace(/\bPR #(\d+)/gu, 'MR !$1')
-    .replace(/\b([Pp])ull request #(\d+)/gu, (_match, initial: string, number: string) => `${initial === 'P' ? 'M' : 'm'}erge request !${number}`)
-    .replace(/\bGitHub\b/gu, 'GitLab')
-    .replace(/\bPRs\b/gu, 'MRs')
-    .replace(/\bPR\b/gu, 'MR')
-    .replace(/\bpull requests\b/gu, 'merge requests')
-    .replace(/\bpull request\b/gu, 'merge request')
-    .replace(/\bPull requests\b/gu, 'Merge requests')
-    .replace(/\bPull request\b/gu, 'Merge request') as T;
-}

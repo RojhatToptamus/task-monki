@@ -37,6 +37,8 @@ export interface FakeGitHubItem {
   jobLogs?: Record<string, string>;
   /** How the pull request was merged, when the fake merged it. */
   mergedWith?: string;
+  /** GitHub's reason for refusing a merge, such as a required check that has not run. */
+  mergeRefusal?: string;
 }
 
 export interface FakeGitHubReviewThread {
@@ -310,6 +312,7 @@ if (args[0] === 'api') {
   if (pull && pull[2] === 'merge' && method === 'PUT') {
     if ((item.state ?? 'OPEN') !== 'OPEN') restFail(405, 'Pull Request is not mergeable');
     if (item.isDraft) restFail(405, 'Pull Request is still a draft');
+    if (item.mergeRefusal) restFail(405, item.mergeRefusal);
     if (fields.sha !== item.headRefOid) restFail(409, 'Head branch was modified. Review and try the merge again.');
     item.state = 'MERGED';
     item.mergedWith = fields.merge_method;

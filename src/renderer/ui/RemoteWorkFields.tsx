@@ -53,8 +53,10 @@ export function RemoteWorkFields({
   // A problem no search can fix holds the field; a failed request may be the query's own, so the field stays open.
   const searchCannotHelp = code === 'NO_REMOTE' || code === 'CLI_MISSING' || code === 'SIGNED_OUT';
   const signIn = code === 'SIGNED_OUT' ? `${provider === 'GITLAB' ? 'glab' : 'gh'} auth login` : undefined;
+  // Picking another item swaps the existing task for the search, which takes the focus once it is back.
   useEffect(() => {
     if (selected?.existingTaskId) existingButtonRef.current?.focus();
+    return () => { searchRef.current?.focus(); };
   }, [selected?.existingTaskId]);
 
   if (selected?.existingTaskId) {
@@ -69,7 +71,7 @@ export function RemoteWorkFields({
       <div className="import-work__existing-actions">
         <button ref={existingButtonRef} type="submit" className="primary-button" disabled={locked}>Open existing task</button>
         <button type="button" className="outline-button" disabled={locked}
-          onClick={() => { onSelect(undefined); searchRef.current?.focus(); }}>Pick another {label.toLowerCase()}</button>
+          onClick={() => onSelect(undefined)}>Pick another {label.toLowerCase()}</button>
       </div>
     </div>;
   }
@@ -139,14 +141,17 @@ export function RemoteWorkFields({
                 {kind === 'PULL_REQUEST' && item.headRefName ? <code>{forkOwner ? `${forkOwner}:` : ''}{item.headRefName}</code> : null}
                 {item.author ? <span>{item.author}</span> : null}
                 {item.updatedAt ? <span>{formatShortAge(item.updatedAt)}</span> : null}
-                {/* How its head's checks ended, as a mark among its facts: the word at the row's end is for its reviews. */}
-                {item.checks ? <span className="remote-work__checks">
-                  <StatusGlyph kind={item.checks === 'FAILING' ? 'blocked' : item.checks === 'PENDING' ? 'working' : 'verified'} />
-                </span> : null}
+                {/* How its head's checks ended, a mark and its word among its facts, as a check row reads; the word at the row's end is for its reviews. */}
+                {item.checks ? <>
+                  <span className="remote-work__checks">
+                    <StatusGlyph kind={item.checks === 'FAILING' ? 'blocked' : item.checks === 'PENDING' ? 'working' : 'verified'} />
+                  </span>
+                  <span>{CHECK_WORDS[item.checks]}</span>
+                </> : null}
               </small>
             </span>
             <span className="import-work__kind" data-tone={!item.existingTaskId && !item.draft ? REVIEW_TONES[item.review ?? ''] : undefined}>
-              {item.existingTaskId ? 'Has task' : item.draft ? 'Draft' : item.review && item.review !== 'REVIEW_REQUIRED' ? REVIEW_WORDS[item.review]
+              {item.existingTaskId ? 'Has task' : item.draft ? 'Draft' : item.review ? REVIEW_WORDS[item.review]
                 : item.crossRepository && !forkOwner ? 'Fork' : ''}
             </span>
           </button>;
@@ -170,7 +175,6 @@ const CHECK_WORDS: Record<NonNullable<RemoteWorkSummary['checks']>, string> = {
 };
 const REVIEW_WORDS: Record<NonNullable<RemoteWorkSummary['review']>, string> = {
   CHANGES_REQUESTED: 'Changes requested',
-  APPROVED: 'Approved',
-  REVIEW_REQUIRED: 'Review required'
+  APPROVED: 'Approved'
 };
 const REVIEW_TONES: Record<string, string | undefined> = { CHANGES_REQUESTED: 'error', APPROVED: 'success' };

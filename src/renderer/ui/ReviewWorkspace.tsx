@@ -12,7 +12,7 @@ import type {
   TaskReviewDraft,
   WorktreeRecord
 } from '../../shared/contracts';
-import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
+import { diffLineCode, type DiffBlock, type DiffEvidenceScope, type DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
 import { formatCommentLocation } from '../model/formatting';
@@ -20,6 +20,7 @@ import { discussionAuthor, discussionSummary, formatDiscussionLocation, type Dis
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
+import { discussionStateWord } from '../model/reviewRounds';
 import {
   anchorReviewComments,
   anchorReviewDiscussions,
@@ -27,7 +28,6 @@ import {
   buildReviewDiffRows,
   buildReviewIndex,
   diffFileSignature,
-  diffLineCode,
   filesChangedSinceReview,
   diffLineId,
   lineAnchorKey,
@@ -43,7 +43,7 @@ import { MessageTime } from './Message';
 import { useNotify } from './NotifyContext';
 import { OpenTargetContextMenu, useOpenTargetMenuItems } from './OpenTargetMenu';
 import { ReviewBrief, type ReviewBriefContent } from './ReviewBrief';
-import { ReviewDiscussionThread, discussionStateWord } from './ReviewDiscussionThread';
+import { ReviewDiscussionThread } from './ReviewDiscussionThread';
 import { ReviewFindingThread, settledLabel, severityLabel } from './ReviewFindingThread';
 import { ReviewGap } from './ReviewGap';
 import { ReviewOutcome, type ReviewFinishAction, type ReviewRequestAction } from './ReviewRequest';
@@ -391,10 +391,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
     if (entry && isCollapsed(entry)) expand(entry.file.id);
     setPendingScroll({ attribute: 'data-discussion-id', value: discussionId, focus: true });
   };
-  // A discussion another surface asked to see is shown once the diff it sits in is on the page, as a click in the navigator would.
+  // A discussion another surface asked to see is shown once the diff is read, on its line or above the files, as a click in the navigator would.
   useEffect(() => {
     const discussionId = props.revealDiscussionId;
-    if (!discussionId || ordered.length === 0 || !discussions.some((discussion) => discussion.id === discussionId)) return;
+    if (!discussionId || !discussions.some((discussion) => discussion.id === discussionId)) return;
     scrollToDiscussion(discussionId);
     props.onDiscussionRevealed?.();
   }, [props.revealDiscussionId, ordered, discussions]);
@@ -1067,7 +1067,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                                   {line.kind === 'addition' || line.kind === 'deletion' ? (
                                     <span className="tm-visually-hidden">{line.kind === 'addition' ? 'Added: ' : 'Removed: '}</span>
                                   ) : null}
-                                  {diffLineCode(line.content, line.kind) || ' '}
+                                  {diffLineCode(line) || ' '}
                                 </code>
                               </div>
                               {renderThreads(anchored.byLine.get(anchor))}

@@ -337,6 +337,16 @@ export function OverviewSection({
   );
 }
 
+/** One fact of a record, in its `tm-props` list: the name, then the value. */
+export function PropRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="tm-props__row">
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
 /** The request as written: prose first, collapsed past a few lines. */
 export function OverviewRequest({
   prompt,

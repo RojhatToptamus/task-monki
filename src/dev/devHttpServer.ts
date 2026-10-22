@@ -719,7 +719,7 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/update') {
-        sendJson(response, requestId, 200, await options.service.fetchPullRequestUpdate((await readJson()) as never));
+        sendJson(response, requestId, 200, await options.service.mergePullRequestUpdate((await readJson()) as never));
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/check-logs') {

@@ -29,6 +29,12 @@ describe('boundCheckLog', () => {
     const long = boundCheckLog(`${'x'.repeat(CHECK_LOG_LIMITS.chars * 2)}\nlast`);
     expect(long).toEqual({ text: 'last', truncated: true });
 
+    // A credential is redacted before that cut, which would otherwise leave its tail unrecognized.
+    const secret = 'SECRET-TOKEN-VALUE';
+    const split = boundCheckLog(`${'a'.repeat(5_000)}${secret}${'b'.repeat(CHECK_LOG_LIMITS.chars - 10)}`,
+      (text) => text.replaceAll(secret, '[REDACTED]'));
+    expect(split.text).toBe(`[REDACTED]${'b'.repeat(CHECK_LOG_LIMITS.chars - 10)}`);
+
     // A log of megabytes keeps its end, and says earlier lines were left out.
     const huge = boundCheckLog(`${'noise\n'.repeat(400_000)}##[error]The end failed.\nPost job cleanup.`);
     expect(huge.text.split('\n').slice(-1)).toEqual(['Error: The end failed.']);

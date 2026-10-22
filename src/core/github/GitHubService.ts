@@ -7,15 +7,14 @@ import type {
   GitHubRepositoryRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
-  RemoteProvider,
   ReviewRollupRecord,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
 import type { PullRequestMergeOptions } from '../../shared/pullRequestActions';
 import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
-import { parseRemoteWorkReference } from '../../shared/remoteWork';
-import { git, gitSucceeds } from '../git/gitCli';
+import { INVISIBLE_CHARACTERS, parseRemoteWorkReference } from '../../shared/remoteWork';
+import { UNTRUSTED_CHECKOUT_GIT_ENV, git, gitSucceeds } from '../git/gitCli';
 import {
   GITHUB_FEEDBACK_QUERY,
   GITHUB_THREADS_PAGE_QUERY,
@@ -34,16 +33,11 @@ import {
   parseGitHubMergeOptions
 } from './GitHubPullRequestActions';
 import { inspectExistingWorkSnapshot } from '../git/GitSnapshotService';
-import { graphQlQueryArgument } from './gitHubGraphQl';
-import { execFileOwnedPortable } from '../process/ownedProcess';
-import { startEach, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
-import { UNTRUSTED_CHECKOUT_GIT_ENV, externalTargetBranch } from '../remote/RemoteCheckout';
+import { deliveryRemote, startEach, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
+import { externalTargetBranch, listCheckoutRemoteRepositories } from '../remote/RemoteCheckout';
+import { RemoteWorkError, remoteWorkMessage } from '../remote/RemoteWorkError';
 import { canonicalPlatformTime } from '../remote/platformTime';
-
-interface ExecResult {
-  stdout: string;
-  stderr: string;
-}
+import type { GitHubCli } from './GitHubCli';
 
 interface ExecError extends Error {
   code?: number | string;
@@ -54,11 +48,7 @@ interface ExecError extends Error {
 export class GitHubService implements PullRequestDelivery {
   readonly provider = 'GITHUB' as const;
 
-  constructor(private ghExecutable = 'gh') {}
-
-  setExecutable(executable: string | undefined): void {
-    this.ghExecutable = executable ?? 'gh';
-  }
+  constructor(private readonly cli: GitHubCli) {}
 
   async preflight(
     task: Task,
@@ -78,7 +68,7 @@ export class GitHubService implements PullRequestDelivery {
 
     let ghVersion: string | undefined;
     try {
-      const version = await this.exec(['--version'], worktree.worktreePath);
+      const version = await this.cli.run(['--version'], { cwd: worktree.worktreePath, host: remote.host });
       ghVersion = version.stdout.split('\n')[0]?.trim();
     } catch (error) {
       return {
@@ -87,12 +77,12 @@ export class GitHubService implements PullRequestDelivery {
         worktreeId: worktree.id,
         ...remote,
         status: 'GH_MISSING',
-        error: errorMessage(error)
+        error: remoteWorkMessage(error)
       };
     }
 
     try {
-      await this.exec(['auth', 'status', '--hostname', remote.host], worktree.worktreePath);
+      await this.cli.run(['auth', 'status', '--hostname', remote.host], { cwd: worktree.worktreePath, host: remote.host });
     } catch (error) {
       return {
         taskId: task.id,
@@ -102,7 +92,7 @@ export class GitHubService implements PullRequestDelivery {
         ghVersion,
         authStatus: 'UNAUTHENTICATED',
         status: 'AUTH_REQUIRED',
-        error: errorMessage(error)
+        error: remoteWorkMessage(error)
       };
     }
 
@@ -308,7 +298,7 @@ export class GitHubService implements PullRequestDelivery {
     const remote = !input.target && input.worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(input.worktree.worktreePath) : undefined;
     if (!input.target && input.worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
     const baseRef = input.baseRef ?? await this.pullRequestBase(input.worktree);
-    const createResult = await this.exec(
+    const createResult = await this.cli.run(
       [
         'pr',
         'create',
@@ -323,10 +313,7 @@ export class GitHubService implements PullRequestDelivery {
         input.target?.headRepository ? `${headOwner(input.target.headRepository)}:${input.worktree.branchName}` : input.worktree.branchName,
         ...repositoryArgs(input.target, remote)
       ],
-      input.worktree.worktreePath,
-      120_000,
-      [],
-      input.body
+      { cwd: input.worktree.worktreePath, timeout: 120_000, stdin: input.body }
     );
 
     const url = createResult.stdout.trim().split(/\s+/).find((value) => value.startsWith('http'));
@@ -351,9 +338,9 @@ export class GitHubService implements PullRequestDelivery {
           'headRepository,headRepositoryOwner,isCrossRepository', (row) => matchesExternalPullRequest(row, worktree, remote))
         : undefined;
     }
-    const result = await this.exec(
+    const result = await this.cli.run(
       ['pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10', '--json', prJsonFields],
-      worktree.worktreePath
+      { cwd: worktree.worktreePath }
     );
     const rows = parseJson<unknown[]>(result.stdout, []);
     if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
@@ -371,9 +358,9 @@ export class GitHubService implements PullRequestDelivery {
     matches: (row: unknown) => boolean,
     target?: DeliveryTarget
   ): Promise<PullRequestSync | undefined> {
-    const result = await this.exec([
+    const result = await this.cli.run([
       'pr', 'list', '--state', 'open', '--head', worktree.branchName, '--limit', '10', '--json', `${prJsonFields},${fields}`, ...repository
-    ], worktree.worktreePath);
+    ], { cwd: worktree.worktreePath });
     const rows = JSON.parse(result.stdout) as unknown;
     if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list.');
     if (rows.length >= 10) throw new Error('The pull request lookup is incomplete. Inspect the branch on GitHub.');
@@ -387,27 +374,25 @@ export class GitHubService implements PullRequestDelivery {
     const remote = await detectGitHubRemote(worktree.worktreePath);
     if (!remote) throw new Error('No GitHub remote was found.');
     const baseRef = await externalTargetBranch(worktree, requestedBranch, remote.remoteName, 'pull request');
-    const result = await this.exec([
+    const result = await this.cli.run([
       'api', '--hostname', remote.host,
       `repos/${remote.owner}/${remote.repo}/branches/${encodeURIComponent(baseRef)}`
-    ], worktree.worktreePath);
+    ], { cwd: worktree.worktreePath, host: remote.host });
     const branch = JSON.parse(result.stdout) as { name?: string } | null;
     if (branch?.name !== baseRef) throw new Error('GitHub did not confirm the selected target branch.');
     return baseRef;
   }
 
-  async viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget): Promise<PullRequestSync> {
+  async viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget, options: { feedback?: boolean } = {}): Promise<PullRequestSync> {
     const remote = !target && worktree.ownership === 'EXTERNAL' ? await detectGitHubRemote(worktree.worktreePath) : undefined;
     if (!target && worktree.ownership === 'EXTERNAL' && !remote) throw new Error('No GitHub remote was found.');
     const repoArgs = repositoryArgs(target, remote);
     const [viewResult, checksResult] = await Promise.all([
-      this.exec(['pr', 'view', String(selector), '--json', remote ? `${prJsonFields},headRepository,headRepositoryOwner,isCrossRepository` : prJsonFields, ...repoArgs], worktree.worktreePath),
-      this.exec(
-        ['pr', 'checks', String(selector), '--json', prChecksJsonFields, ...repoArgs],
-        worktree.worktreePath,
-        30_000,
-        [8]
-      ).catch(() => undefined)
+      this.cli.run(['pr', 'view', String(selector), '--json', remote ? `${prJsonFields},headRepository,headRepositoryOwner,isCrossRepository` : prJsonFields, ...repoArgs],
+        { cwd: worktree.worktreePath }),
+      // Exit code 8 reports pending checks, with the checks.
+      this.cli.run(['pr', 'checks', String(selector), '--json', prChecksJsonFields, ...repoArgs],
+        { cwd: worktree.worktreePath, allowedExitCodes: [8] }).catch(() => undefined)
     ]);
     const raw = remote ? JSON.parse(viewResult.stdout) as unknown : parseJson<Record<string, unknown>>(viewResult.stdout, {});
     if (remote && !matchesExternalPullRequest(raw, worktree, remote)) {
@@ -418,6 +403,7 @@ export class GitHubService implements PullRequestDelivery {
       worktree,
       checksResult ? parseJson<unknown[]>(checksResult.stdout, []) : undefined
     );
+    if (options.feedback === false) return sync;
     // Feedback is read from the pull request GitHub reported; without it, the status still stands.
     const feedback = await this.readPullRequestFeedback(worktree.worktreePath, sync.pullRequest.url).catch(() => undefined);
     return feedback ? { ...sync, feedback } : sync;
@@ -431,13 +417,12 @@ export class GitHubService implements PullRequestDelivery {
     const location = gitHubLocation(url);
     if (!location) return undefined;
     const data = await this.pullRequestQuery<GitHubFeedbackData>(cwd, location, GITHUB_FEEDBACK_QUERY);
-    if (!data) return undefined;
     const threads = data.repository?.pullRequest?.reviewThreads;
     if (threads) {
       let page: GitHubThreadConnection = threads;
       for (let pages = 1; page.pageInfo?.hasNextPage && page.pageInfo.endCursor && pages < GITHUB_THREAD_PAGES; pages += 1) {
-        const next = (await this.pullRequestQuery<GitHubFeedbackData>(cwd, location, GITHUB_THREADS_PAGE_QUERY, ['-f', `after=${page.pageInfo.endCursor}`]))
-          ?.repository?.pullRequest?.reviewThreads;
+        const next = (await this.pullRequestQuery<GitHubFeedbackData>(cwd, location, GITHUB_THREADS_PAGE_QUERY, { after: page.pageInfo.endCursor }))
+          .repository?.pullRequest?.reviewThreads;
         if (!next) break;
         threads.nodes = [...(threads.nodes ?? []), ...(next.nodes ?? [])];
         page = next;
@@ -447,22 +432,22 @@ export class GitHubService implements PullRequestDelivery {
   }
 
   /** A GraphQL read of one pull request, which the query names by `owner`, `name` and `number`. */
-  private async pullRequestQuery<T>(cwd: string, location: GitHubLocation, query: string, extra: string[] = []): Promise<T | undefined> {
-    const result = await this.exec([
-      'api', 'graphql', '--hostname', location.host,
-      '-f', graphQlQueryArgument(query), '-f', `owner=${location.owner}`, '-f', `name=${location.name}`, '-F', `number=${location.number}`, ...extra
-    ], cwd);
-    return parseJson<{ data?: T }>(result.stdout, {}).data;
+  private pullRequestQuery<T>(cwd: string, location: GitHubLocation, query: string, strings: Record<string, string> = {}): Promise<T> {
+    return this.cli.graphql<T>({
+      host: location.host, cwd, query, subject: `${location.owner}/${location.name}`,
+      strings: { owner: location.owner, name: location.name, ...strings },
+      integers: { number: location.number }
+    });
   }
 
   async markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void> {
-    requireGitHubLocation(address);
-    await this.exec(['pr', 'ready', address.url], worktree.worktreePath, 60_000);
+    const location = requireGitHubLocation(address);
+    await this.cli.run(['pr', 'ready', address.url], { cwd: worktree.worktreePath, host: location.host, timeout: 60_000 });
   }
 
   async readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions> {
     const location = requireGitHubLocation(address);
-    return parseGitHubMergeOptions(await this.pullRequestQuery<Parameters<typeof parseGitHubMergeOptions>[0]>(
+    return parseGitHubMergeOptions(await this.pullRequestQuery<NonNullable<Parameters<typeof parseGitHubMergeOptions>[0]>>(
       worktree.worktreePath, location, GITHUB_MERGE_OPTIONS_QUERY));
   }
 
@@ -478,59 +463,61 @@ export class GitHubService implements PullRequestDelivery {
     const location = requireGitHubLocation(address);
     const repository = `repos/${location.owner}/${location.name}`;
     try {
-      await this.exec([
+      await this.cli.run([
         'api', '--hostname', location.host, '--method', 'PUT', `${repository}/pulls/${location.number}/merge`,
         '-f', `merge_method=${input.method.toLowerCase()}`, '-f', `sha=${input.expectedHeadSha}`
-      ], worktree.worktreePath, 120_000);
+      ], { cwd: worktree.worktreePath, host: location.host, timeout: 120_000 });
     } catch (error) {
-      throw new Error(gitHubMergeFailure(commandText(error)));
+      // A gh that is missing or signed out already says so; anything else is GitHub's refusal.
+      throw error instanceof RemoteWorkError ? error : new Error(gitHubMergeFailure(commandText(error)));
     }
     if (input.deleteBranch) {
       // The repository may delete it itself; a branch already gone is the outcome asked for.
-      await this.exec([
+      await this.cli.run([
         'api', '--hostname', location.host, '--method', 'DELETE',
         `${repository}/git/refs/heads/${input.deleteBranch.split('/').map(encodeURIComponent).join('/')}`
-      ], worktree.worktreePath).catch(() => undefined);
+      ], { cwd: worktree.worktreePath, host: location.host }).catch(() => undefined);
     }
   }
 
   async replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, body: string): Promise<void> {
     const location = requireGitHubLocation(address);
-    await this.exec([
-      'api', 'graphql', '--hostname', location.host,
-      '-f', graphQlQueryArgument(GITHUB_THREAD_REPLY_MUTATION), '-f', `threadId=${discussionId}`, '-F', 'body=@-'
-    ], worktree.worktreePath, 60_000, [], body);
+    await this.cli.graphql({
+      host: location.host, cwd: worktree.worktreePath, query: GITHUB_THREAD_REPLY_MUTATION,
+      strings: { threadId: discussionId }, stdinField: { name: 'body', value: body }, timeout: 60_000
+    });
   }
 
   async resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved = true): Promise<void> {
     const location = requireGitHubLocation(address);
-    await this.exec([
-      'api', 'graphql', '--hostname', location.host,
-      '-f', graphQlQueryArgument(resolved ? GITHUB_RESOLVE_THREAD_MUTATION : GITHUB_UNRESOLVE_THREAD_MUTATION), '-f', `threadId=${discussionId}`
-    ], worktree.worktreePath, 60_000);
+    await this.cli.graphql({
+      host: location.host, cwd: worktree.worktreePath, query: resolved ? GITHUB_RESOLVE_THREAD_MUTATION : GITHUB_UNRESOLVE_THREAD_MUTATION,
+      strings: { threadId: discussionId }, timeout: 60_000
+    });
   }
 
   async commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void> {
-    requireGitHubLocation(address);
-    await this.exec(['pr', 'comment', address.url, '--body-file', '-'], worktree.worktreePath, 60_000, [], body);
+    const location = requireGitHubLocation(address);
+    await this.cli.run(['pr', 'comment', address.url, '--body-file', '-'],
+      { cwd: worktree.worktreePath, host: location.host, timeout: 60_000, stdin: body });
   }
 
   async requestReviewers(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void> {
     const location = requireGitHubLocation(address);
-    await this.exec([
+    await this.cli.run([
       'api', '--hostname', location.host, '--method', 'POST',
       `repos/${location.owner}/${location.name}/pulls/${location.number}/requested_reviewers`,
       ...names.flatMap((name) => ['-f', `reviewers[]=${name}`])
-    ], worktree.worktreePath, 60_000);
+    ], { cwd: worktree.worktreePath, host: location.host, timeout: 60_000 });
   }
 
   async readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined> {
     const location = requireGitHubLocation(address);
     const job = ownActionsJob(check.link, location);
     if (!job) return undefined;
-    const result = await this.exec([
+    const result = await this.cli.run([
       'api', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/jobs/${job.job}/logs`
-    ], worktree.worktreePath, 60_000);
+    ], { cwd: worktree.worktreePath, host: location.host, timeout: 60_000 });
     return result.stdout;
   }
 
@@ -538,79 +525,9 @@ export class GitHubService implements PullRequestDelivery {
     const location = requireGitHubLocation(address);
     // One request per run re-runs every failed job in it.
     const runs = new Set(checks.flatMap((check) => ownActionsJob(check.link, location)?.run ?? []));
-    return startEach(runs, (run) => this.exec([
+    return startEach(runs, (run) => this.cli.run([
       'api', '--method', 'POST', '--hostname', location.host, `repos/${location.owner}/${location.name}/actions/runs/${run}/rerun-failed-jobs`
-    ], worktree.worktreePath, 60_000));
-  }
-
-  buildPullRequestBody(input: {
-    task: Task;
-    gitDiffStat?: string;
-    agentSummary?: string;
-    /** A closing or plain reference to the issue the task was opened from. */
-    issueLine?: string;
-    /** The platform that receives the body. */
-    provider: RemoteProvider;
-  }): string {
-    const gitLab = input.provider === 'GITLAB';
-    const request = input.task.prompt.trim().slice(0, 1200);
-    return [
-      `## Summary`,
-      '',
-      ...(input.issueLine ? [input.issueLine, ''] : []),
-      ...(request || !input.issueLine ? [request, ''] : []),
-      '## Local evidence',
-      '',
-      `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
-      '',
-      '## Agent summary',
-      '',
-      input.agentSummary?.trim().slice(0, 8000) || 'No agent final summary captured.',
-      '',
-      '## Delivery note',
-      '',
-      gitLab
-        ? 'Created by Task Monki as a draft MR. Merge remains a human/GitLab decision.'
-        : 'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
-      ''
-    ].join('\n');
-  }
-
-  private async exec(
-    argv: string[],
-    cwd: string,
-    timeout = 30_000,
-    allowedExitCodes: number[] = [],
-    stdin?: string | Buffer
-  ): Promise<ExecResult> {
-    try {
-      const { stdout, stderr } = await execFileOwnedPortable(
-        this.ghExecutable,
-        argv,
-        {
-          cwd,
-          timeout,
-          maxBuffer: 20 * 1024 * 1024
-        },
-        stdin
-      );
-      return { stdout, stderr };
-    } catch (error) {
-      const execError = error as ExecError;
-      const numericCode =
-        typeof execError.code === 'number'
-          ? execError.code
-          : typeof execError.code === 'string'
-            ? Number(execError.code)
-            : undefined;
-      if (numericCode !== undefined && allowedExitCodes.includes(numericCode)) {
-        return {
-          stdout: bufferToString(execError.stdout),
-          stderr: bufferToString(execError.stderr)
-        };
-      }
-      throw error;
-    }
+    ], { cwd: worktree.worktreePath, host: location.host, timeout: 60_000 }));
   }
 }
 
@@ -669,46 +586,16 @@ function matchesExternalPullRequest(raw: unknown, worktree: WorktreeRecord, remo
     row.url.toLowerCase() === `https://${remote.host}/${remote.owner}/${remote.repo}/pull/${row.number}`.toLowerCase();
 }
 
+/**
+ * The checkout's GitHub remote a task pushes to and opens its pull request
+ * from: `origin` when it is on GitHub (a contributor's fork or the repository
+ * itself), otherwise the first GitHub remote, as on GitLab. It names the
+ * canonical host and a URL without credentials, which preflight records.
+ */
 export async function detectGitHubRemote(worktreePath: string): Promise<DeliveryRemote | undefined> {
-  const output = await git(worktreePath, ['remote', '-v']);
-  for (const line of output.split('\n')) {
-    const match = /^(?<name>\S+)\s+(?<url>\S+)\s+\((?<direction>fetch|push)\)$/.exec(line.trim());
-    if (!match?.groups || match.groups.direction !== 'fetch') {
-      continue;
-    }
-    const parsed = parseGitHubRemoteUrl(match.groups.url);
-    if (parsed) {
-      return {
-        remoteName: match.groups.name,
-        remoteUrl: match.groups.url,
-        ...parsed
-      };
-    }
-  }
-  return undefined;
-}
-
-export function parseGitHubRemoteUrl(
-  remoteUrl: string
-): Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'> | undefined {
-  const normalized = remoteUrl.replace(/\.git$/i, '');
-
-  const https = /^https:\/\/(?<host>github\.com)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
-  if (https?.groups) {
-    return https.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
-  }
-
-  const ssh = /^git@(?<host>github\.com):(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
-  if (ssh?.groups) {
-    return ssh.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
-  }
-
-  const sshUrl = /^ssh:\/\/git@(?<host>github\.com)\/(?<owner>[^/]+)\/(?<repo>[^/]+)$/i.exec(normalized);
-  if (sshUrl?.groups) {
-    return sshUrl.groups as Omit<DeliveryRemote, 'remoteName' | 'remoteUrl'>;
-  }
-
-  return undefined;
+  const remotes = (await listCheckoutRemoteRepositories(worktreePath)).filter((candidate) => candidate.provider === 'GITHUB');
+  const remote = remotes.find((candidate) => candidate.remoteName === 'origin') ?? remotes[0];
+  return remote ? deliveryRemote(remote) : undefined;
 }
 
 export function parsePrView(
@@ -896,7 +783,6 @@ function gitHubMergeStatus(mergeStateStatus: string | undefined, mergeable: stri
     case 'BEHIND':
       return 'BLOCKED';
     case 'DRAFT':
-      return mergeable === 'CONFLICTING' ? 'BLOCKED' : 'NOT_MERGED';
     case 'BLOCKED':
       return mergeable === 'CONFLICTING' ? 'BLOCKED' : 'NOT_MERGED';
     case 'UNKNOWN':
@@ -945,11 +831,14 @@ function parseCheckDetails(rawCheckDetails: unknown): GitHubCheckDetailRecord[] 
     const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
     // Platform text is stored trimmed, and an empty value is no value: the store loads neither.
     const text = (key: string) => stringField(item, key)?.trim() || undefined;
+    // Names are labels people read and agents are sent, so they keep only what a reader sees.
+    // Logs and re-runs find a job by the id in its link.
+    const label = (key: string) => stringField(item, key)?.replace(INVISIBLE_CHARACTERS, '').trim() || undefined;
     return {
-      name: text('name') ?? 'Unnamed check',
+      name: label('name') ?? 'Unnamed check',
       status: normalizeCheckStatus(stringField(item, 'bucket'), stringField(item, 'state')),
       state: text('state'),
-      workflow: text('workflow'),
+      workflow: label('workflow'),
       link: text('link'),
       description: stringField(item, 'description'),
       event: text('event'),

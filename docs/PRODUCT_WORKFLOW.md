@@ -268,12 +268,18 @@ head (`refs/pull/N/head`, or `refs/merge-requests/N/head` on GitLab) and its
 target into the repository's objects without creating a remote, a
 remote-tracking ref or FETCH_HEAD, and checks it out in a managed worktree on
 a new task branch with repository hooks turned off. The recorded base is the
-merge base, so the diff equals the platform's. The task opens idle In
-progress, with the pull request linked in PR Status. Nothing runs: agent
-review is available before any turn, coding needs an explicit instruction, and
-Preview keeps its per-start approval. The request saved in the Agent tab's
-composer is that instruction; without one, Start asks for it. Open pull
-requests only.
+merge base, so the diff equals the platform's. A pull request whose branch
+names begin or end with a space or hold invisible characters cannot be used
+("Task Monki cannot use this pull request: a branch name holds invisible
+characters."), nor one whose target shares no history with it ("has no common
+history with its target branch"). The task opens idle In progress, with the
+pull request linked in PR Status. Nothing runs: agent review is available
+before any turn, coding needs an explicit instruction, and Preview keeps its
+per-start approval. The request saved in the Agent tab's composer is that
+instruction; without one, Start asks for it. A request saved for a task opened
+from an issue or a pull request can be cleared again. Open pull requests only.
+A link to an issue or pull request that is closed or merged, and that no task
+holds, is not offered; the list says why.
 
 Choosing an issue or pull request that already has a task, including an
 archived one or a task that delivered that pull request, opens that task. One
@@ -287,20 +293,23 @@ body then starts `Closes #N`, otherwise `Related to #N`. The platform closes the
 when the pull request merges into the default branch; agent completion never
 does.
 
-For an opened pull request, Refresh reads the platform and fetches the current
-head, so Git evidence states whether the branch is ahead of it, behind it or
-both. Sync branch moves a clean worktree to the newer head: a fast forward, or,
+For an opened pull request, Refresh records the worktree's evidence first, then
+the platform's reading, and fetches the head it read only when the checkout
+lacks it, so Git evidence states whether the branch is ahead of it, behind it
+or both. Sync branch moves a clean worktree to the newer head: a fast forward, or,
 after the author rewrote the pull request, a move that is allowed only while
-the branch holds no commits of its own, counting the ones Task Monki pushed.
+the branch holds no commits of its own, counting the ones Task Monki pushed. A
+rewrite that shares no history with the branch is refused ("has no common
+history with this branch"), and each Sync checks the branch names again.
 Push update sends new commits to the pull request's own branch, fast forward
 only, for a same-repository pull request whose remote pushes to that repository
 alone. The push is leased on the head Task Monki last saw, so a branch that
 moved or was deleted after its merge is left as it is. A pull request from a
 fork stays local. Task Monki's own Git commands in these worktrees (staging,
-commits, moves, pushes and review snapshots) run no repository hooks and skip
-LFS downloads. A push that did not land, proved by the branch still at the
-leased head, is a failed push that is safe to retry; any other uncertain result
-follows the existing AMBIGUOUS rules.
+commits, merges, moves, pushes and review snapshots) run no repository hooks
+and skip LFS downloads. A push that did not land, proved by the branch still at
+the leased head, is a failed push that is safe to retry; any other uncertain
+result follows the existing AMBIGUOUS rules.
 
 ## Import existing work
 
@@ -335,8 +344,10 @@ Start implementation requires an explicit instruction and warns that coding
 changes the original imported checkout. Request changes and
 Investigate checks supply that instruction through the same first-run path.
 Later unsuccessful runs still require retry or continuation before review.
-Retry retains the original instruction from the runtime prompt artifact; it does
-not rewrite the source task description or provider-native goal.
+The first instruction is recorded as that turn's message: retry, follow-ups and
+Fork alternative read it once from the task's instructions and never nest an
+earlier prompt. Recording it does not rewrite the source task description or
+provider-native goal.
 
 A new PR requires a separate target branch. A `HEAD` or commit comparison can
 remain unchanged. An existing PR keeps its target branch.
@@ -638,8 +649,13 @@ In Review:
   head, and a reviewer can be asked again from the pull request's record.
   Nothing posts on its own or on an agent's behalf.
 - A branch that moved beside the worktree (`Pull changes`) or a base that moved
-  ahead (`Update with <base>`) is merged by the agent from commits Task Monki
-  fetched; the person reviews and pushes.
+  ahead (`Update with <base>`) is merged by Task Monki, which commits
+  uncommitted work first. A clean merge waits for `Push update`; when Git stops
+  on conflicts in text, the agent resolves the files without Git commands that
+  write, and `Push update` finishes the merge once no file holds a conflict
+  marker. A file that needs a version chosen (a deletion, a binary, a link)
+  undoes the merge, for the person to merge in their editor or Git client.
+  Neither update is offered on a fork or in an imported checkout.
 
 Done:
 

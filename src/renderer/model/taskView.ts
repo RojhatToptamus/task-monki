@@ -1,8 +1,9 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
-import { deliveryNoun, deliveryProvider } from './deliveryWords';
+import { deliveryProvider } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
+  BoardDeliveryFacts,
   BoardTaskSummary,
   DomainEvent,
   Repository,
@@ -19,6 +20,7 @@ import {
 import { isImplementationOutcomeBlocked } from './nextAction';
 import {
   describeAttentionStatus,
+  describeOutOfStep,
   describeTaskAttention,
   isAttentionTask,
   isInFlightTask
@@ -314,14 +316,10 @@ function describeDeliveryProgress(
   if (!open || (status !== 'NOT_RUN' && status !== 'PASSED')) {
     return undefined;
   }
-  if (projection.git === 'DIVERGED') {
-    // A pull request rewritten under a worktree with nothing of its own is news, not a conflict.
-    return 'pullRequestRewritten' in task && task.pullRequestRewritten
-      ? { label: `${deliveryNoun(deliveryProvider(task))} rewritten`, tone: 'action' }
-      : { label: 'Branch diverged', tone: 'error' };
-  }
-  if (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED') {
-    return { label: 'Changes not pushed', tone: 'action' };
+  // The same word the attention model gives a worktree out of step while a blocker stands.
+  const outOfStep = describeOutOfStep(task);
+  if (outOfStep) {
+    return describeAttentionStatus(outOfStep);
   }
   if (projection.ciChecks === 'STALE') {
     return { label: 'Checks stale', tone: 'action' };
@@ -429,7 +427,9 @@ export function cardPullRequestForTask(
   if (!state) {
     return undefined;
   }
-  const note = state === 'draft' || state === 'open' ? cardPullRequestNote(projection) : undefined;
+  const note = state === 'draft' || state === 'open'
+    ? cardPullRequestNote(projection, 'delivery' in task ? task.delivery : undefined)
+    : undefined;
   const provider = deliveryProvider(task);
   return {
     label: projection.githubPullRequestNumber
@@ -450,11 +450,15 @@ function cardPullRequestState(
   return undefined;
 }
 
-function cardPullRequestNote(projection: TaskCardSource['projection']): string | undefined {
+function cardPullRequestNote(
+  projection: TaskCardSource['projection'],
+  delivery: BoardDeliveryFacts | undefined
+): string | undefined {
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') return 'checks failing';
   if (projection.ciChecks === 'PENDING') return 'checks pending';
   if (projection.ciChecks === 'CANCELED') return 'checks canceled';
-  if (projection.reviews === 'CHANGES_REQUESTED') return 'changes requested';
+  // Once the person answered, the review waits on its reviewers, as PR Status says.
+  if (projection.reviews === 'CHANGES_REQUESTED') return delivery?.turn === 'REVIEWERS' ? 'review waiting' : 'changes requested';
   if (projection.reviews === 'REQUESTED' || projection.reviews === 'PENDING') return 'review waiting';
   // Scalars alone never claim ready to merge; that needs evidence for the current head.
   // A draft is never mergeable, whatever Git says of its conflicts.
@@ -467,8 +471,7 @@ function cardPullRequestNote(projection: TaskCardSource['projection']): string |
 /** Status words that already carry a delivery note, so the card says it once, on either platform. */
 const CARD_NOTE_STATED_BY: Record<string, string[]> = {
   'checks failing': ['Checks failed'],
-  'changes requested': ['Changes requested'],
-  'review waiting': ['Waiting for review']
+  'changes requested': ['Changes requested']
 };
 
 const FINDING_SEVERITY_LABELS: Array<{

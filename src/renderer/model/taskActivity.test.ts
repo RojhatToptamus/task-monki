@@ -21,6 +21,7 @@ describe('task activity model', () => {
 
   it('hides brand-new tasks that only have creation activity', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [event('TASK_CREATED', { title: 'Add activity timeline' })]
     });
@@ -51,7 +52,7 @@ describe('task activity model', () => {
       })
     ];
 
-    const ledger = buildTaskActivityLedger({ task: taskFixture(), events });
+    const ledger = buildTaskActivityLedger({ provider: 'GITHUB', task: taskFixture(), events });
     const overview = projectOverviewTaskActivity(ledger, { limit: 10 });
     const debug = projectDebugTaskActivity(ledger);
 
@@ -63,6 +64,7 @@ describe('task activity model', () => {
 
   it('names a pending approval as an approval and a question as input', () => {
     const ledger = buildTaskActivityLedger({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('AGENT_INTERACTION_REQUESTED', { type: 'COMMAND_APPROVAL' }),
@@ -131,7 +133,7 @@ describe('task activity model', () => {
       })
     ];
 
-    const view = buildOverviewTaskActivityViewModel({ task: taskFixture(), events, limit: 10 });
+    const view = buildOverviewTaskActivityViewModel({ provider: 'GITHUB', task: taskFixture(), events, limit: 10 });
 
     expect(view.items.map((item) => item.title)).toEqual([
       'Draft PR available',
@@ -144,6 +146,7 @@ describe('task activity model', () => {
 
   it('records check status changes without repeating identical rollups', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         ciEvent('PENDING', { pendingCount: 2 }),
@@ -166,6 +169,7 @@ describe('task activity model', () => {
 
   it('collapses adjacent duplicate overview rows without hiding debug activity', () => {
     const ledger = buildTaskActivityLedger({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('AGENT_RUN_COMPLETED', {}),
@@ -184,6 +188,7 @@ describe('task activity model', () => {
 
   it('shows the Task Monki retry outcome after provider completion', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('AGENT_RUN_COMPLETED', {}),
@@ -206,6 +211,7 @@ describe('task activity model', () => {
 
   it('shows exact failed check evidence and the decision it blocks', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('CI_ROLLUP_CAPTURED', {
@@ -246,6 +252,7 @@ describe('task activity model', () => {
 
   it('replaces weaker check evidence when exact check rows arrive for the same verdict', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('CI_ROLLUP_CAPTURED', {
@@ -295,6 +302,7 @@ describe('task activity model', () => {
   it('keeps local review and GitHub review decisions separate', () => {
     const runs = [run({ id: 'review-run', mode: 'REVIEW' })];
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       runs,
       events: [
@@ -337,6 +345,7 @@ describe('task activity model', () => {
     const started = (snapshotId: string, runId: string) => event('AGENT_RUN_STARTED',
       { mode: 'REVIEW', beforeGitSnapshotId: snapshotId, reviewedHeadSha: 'f390644aa' }, { runId });
     const ledger = buildTaskActivityLedger({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [snapshot('dirty', 2), started('dirty', 'review-1'), snapshot('clean', 0), started('clean', 'review-2')]
     });
@@ -362,6 +371,7 @@ describe('task activity model', () => {
     });
 
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task,
       events: [
         event(
@@ -397,6 +407,7 @@ describe('task activity model', () => {
 
   it('collapses repeated Git snapshots but keeps real Git state changes', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('GIT_SNAPSHOT_CAPTURED', {
@@ -432,6 +443,7 @@ describe('task activity model', () => {
 
   it('does not repeat pushed Git evidence when branch publication already explains delivery', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('BRANCH_PUBLISHED', {
@@ -456,6 +468,7 @@ describe('task activity model', () => {
 
   it('shows active starts, terminal failures, blocked transitions, failed pushes, and merges', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       runs: [
         run({ id: 'active-run', mode: 'IMPLEMENTATION', status: 'RUNNING' }),
@@ -494,6 +507,7 @@ describe('task activity model', () => {
 
   it('distinguishes recovery continuations and retries from ordinary follow-up activity', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       runs: [
         run({ id: 'failed-source', mode: 'IMPLEMENTATION', status: 'FAILED' }),
@@ -525,6 +539,7 @@ describe('task activity model', () => {
 
   it('recognizes continuation after a locally blocked completed implementation', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       runs: [
         run({ id: 'blocked-source', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
@@ -554,6 +569,7 @@ describe('task activity model', () => {
 
   it('does not show a run start as active when the run record is already terminal', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       runs: [run({ id: 'completed-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' })],
       events: [event('AGENT_RUN_STARTED', { mode: 'IMPLEMENTATION' }, { runId: 'completed-run' })],
@@ -565,6 +581,7 @@ describe('task activity model', () => {
 
   it('collapses duplicate PR terminal state observed through PR and merge snapshots', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('PR_SNAPSHOT_CAPTURED', {
@@ -590,6 +607,7 @@ describe('task activity model', () => {
 
   it('shows the latest bounded window in chronological order', () => {
     const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITHUB',
       task: taskFixture(),
       events: [
         event('WORKTREE_CREATED', { branchName: 'task/demo' }),
@@ -604,6 +622,71 @@ describe('task activity model', () => {
       'Branch pushed'
     ]);
     expect(view.hiddenCount).toBe(1);
+  });
+
+  it('names the platform the caller delivers on, before any merge request is recorded', () => {
+    // A checkout whose only remotes are on GitLab: the task itself names no platform yet.
+    const ledger = buildTaskActivityLedger({
+      provider: 'GITLAB',
+      task: taskFixture(),
+      events: [event('GITHUB_SYNC_FAILED', { error: 'glab: 401 Unauthorized' })]
+    });
+
+    expect(ledger).toMatchObject([
+      { actor: 'GitLab', title: 'Could not update GitLab evidence', evidence: { summary: 'glab: 401 Unauthorized' } }
+    ]);
+  });
+
+  it('says its own words in GitLab\'s and leaves what the platform said as written', () => {
+    const error = "unable to access 'https://gitlab.com/acme/PR-tools.git/': The requested URL returned error: 403";
+    const ledger = buildTaskActivityLedger({
+      provider: 'GITLAB',
+      task: taskFixture(),
+      events: [
+        event('CI_ROLLUP_CAPTURED', {
+          pullRequestNumber: 7,
+          headSha: 'abc123456789',
+          status: 'FAILING',
+          pendingCount: 0,
+          passingCount: 0,
+          failingCount: 1,
+          canceledCount: 0,
+          checkDetails: [{ name: 'Mirror to GitHub', status: 'failed', link: 'https://gitlab.com/group/project/-/jobs/1' }]
+        }),
+        event('MERGE_SNAPSHOT_CAPTURED', { pullRequestNumber: 7, headSha: 'abc123456789', status: 'BLOCKED' }),
+        event('BRANCH_PUBLISH_FAILED', { branchName: 'task/demo', remoteRef: 'origin/task/demo', error })
+      ]
+    });
+
+    expect(ledger).toMatchObject([
+      {
+        actor: 'GitLab',
+        title: 'Checks failed',
+        evidence: {
+          summary: '1 failed check blocks MR readiness.',
+          rows: [{ label: 'Mirror to GitHub', value: 'Blocks MR readiness', href: 'https://gitlab.com/group/project/-/jobs/1' }]
+        }
+      },
+      { actor: 'GitLab', title: 'Merge blocked', evidence: { summary: 'MR !7, Head abc1234' } },
+      { actor: 'GitLab', title: 'Branch push failed', evidence: { summary: error } }
+    ]);
+  });
+
+  it('records each merge Task Monki makes into the branch, with what it merged and at which commit', () => {
+    const view = buildOverviewTaskActivityViewModel({
+      provider: 'GITLAB',
+      task: taskFixture(),
+      events: [
+        event('BRANCH_UPDATE_REQUESTED', { from: 'BASE', ref: 'main', sha: 'a'.repeat(40) }),
+        event('BRANCH_UPDATE_REQUESTED', { from: 'PULL_REQUEST', ref: 'feature', sha: 'b'.repeat(40) })
+      ],
+      limit: 10
+    });
+
+    expect(view.items).toMatchObject([
+      { actor: 'Git', title: 'Update with main requested', evidence: { summary: 'main at aaaaaaa' } },
+      { actor: 'Git', title: 'Pull changes requested', evidence: { summary: 'feature at bbbbbbb' } }
+    ]);
   });
 });
 

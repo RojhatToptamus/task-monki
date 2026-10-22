@@ -204,7 +204,18 @@ checks again is recorded as `PR_CHECKS_RERUN_REQUESTED` after the platform
 accepts it, and nothing repeats it: a crash before the record leaves the runs
 started, which the next reading shows as pending checks. Merging observes the
 worktree before the write, so a crash cannot leave local work behind a merge
-Task Monki made. Fetching a branch update writes objects only.
+Task Monki made. Refresh of a task opened from a pull request reads the
+worktree before it records the platform's reading, so a merge made on the
+platform completes the task only when the worktree holds nothing the pull
+request lacks.
+
+A branch update (Pull changes or Update with <base>) fetches objects only, then
+records `BRANCH_UPDATE_REQUESTED` before Task Monki's own `git merge` in the
+worktree; Pull changes also records the base branch's tip it read. Git owns
+the result, and nothing repeats the merge: a merge Git stopped on stays in
+progress until Push update commits it. The merged base becomes the task's base
+once the branch holds it, moving forward to where the branch meets the recorded
+tip; after an interruption, the next Push update adopts it.
 
 GitHub refresh is read-only and has no durable in-progress state. If it is
 interrupted, the last complete snapshot remains current until the user retries

@@ -77,22 +77,25 @@ export interface ReplyToPullRequestResult {
 }
 
 /**
- * Commits the worktree lacks, fetched for the agent to merge: the pull
+ * Commits the worktree lacks, merged into its branch by Task Monki: the pull
  * request's own newer commits, or its base that moved ahead. The agent runs
- * without network, so Task Monki fetches them first.
+ * without network and writes no Git history, so Task Monki fetches and merges
+ * them; the agent only resolves the files a merge stops on.
  */
-export interface FetchPullRequestUpdateRequest {
+export interface MergePullRequestUpdateRequest {
   taskId: string;
   from: 'PULL_REQUEST' | 'BASE';
 }
 
 export interface PullRequestUpdate {
-  /** The commit to merge, present in the checkout's objects. */
+  /** The commit merged, present in the checkout's objects. */
   sha: string;
   /** What it is, as the request names it: the base branch, or the pull request's branch. */
   ref: string;
-  /** Commits it has that the worktree does not. */
+  /** Commits the merge brought in; 0 when the branch already held them. */
   commits: number;
+  /** Files Git stopped on. The merge stays in progress until Push update finishes it; empty when it merged. */
+  conflicts: string[];
 }
 
 export interface ReadPullRequestCheckLogsRequest {
@@ -147,6 +150,55 @@ export function baseMovedReason(raw: unknown): 'BEHIND' | 'CONFLICTS' | undefine
   return undefined;
 }
 
+/** How a GitLab merge request's merge reads from its `detailed_merge_status`. */
+export interface GitLabMergeReason {
+  merge: 'MERGEABLE' | 'COMPUTING' | 'NOT_MERGED' | 'BLOCKED';
+  /** What the Merge gate says of a reason no other gate states. */
+  gate?: string;
+}
+
+/**
+ * GitLab reports the first reason a merge request cannot merge. A reason a
+ * person settles on GitLab leaves it not mergeable yet, and the Merge gate names
+ * it unless the draft, review, check or thread evidence already states it, or
+ * GitLab is merging it (`not_open`). A conflict or a branch that must change
+ * blocks it; a base that moved reads as `baseMovedReason` says. A reason GitLab
+ * adds later is unknown, not a block.
+ */
+const GITLAB_MERGE_REASONS: ReadonlyMap<string, GitLabMergeReason> = new Map<string, GitLabMergeReason>([
+  ['mergeable', { merge: 'MERGEABLE' }],
+  ['checking', { merge: 'COMPUTING' }],
+  ['unchecked', { merge: 'COMPUTING' }],
+  ['preparing', { merge: 'COMPUTING' }],
+  ['approvals_syncing', { merge: 'COMPUTING' }],
+  ['draft_status', { merge: 'NOT_MERGED' }],
+  ['requested_changes', { merge: 'NOT_MERGED' }],
+  ['ci_must_pass', { merge: 'NOT_MERGED' }],
+  ['ci_still_running', { merge: 'NOT_MERGED' }],
+  ['discussions_not_resolved', { merge: 'NOT_MERGED' }],
+  ['not_open', { merge: 'NOT_MERGED' }],
+  ['not_approved', { merge: 'NOT_MERGED', gate: 'Needs approval' }],
+  ['status_checks_must_pass', { merge: 'NOT_MERGED', gate: 'Waiting on status checks' }],
+  ['security_policy_pipeline_check', { merge: 'NOT_MERGED', gate: 'Waiting on security policies' }],
+  ['merge_time', { merge: 'NOT_MERGED', gate: 'Waiting on merge time' }],
+  ['jira_association_missing', { merge: 'NOT_MERGED', gate: 'Needs an issue reference' }],
+  ['title_regex', { merge: 'NOT_MERGED', gate: 'Needs a matching title' }],
+  ['conflict', { merge: 'BLOCKED' }],
+  ['need_rebase', { merge: 'BLOCKED' }],
+  ['commits_status', { merge: 'BLOCKED' }],
+  ['merge_request_blocked', { merge: 'BLOCKED' }],
+  ['locked_paths', { merge: 'BLOCKED' }],
+  ['locked_lfs_files', { merge: 'BLOCKED' }],
+  ['security_policy_violations', { merge: 'BLOCKED' }],
+  ['broken_status', { merge: 'BLOCKED' }],
+  ['blocked_status', { merge: 'BLOCKED' }]
+]);
+
+/** GitLab's reason as Task Monki reads it; none for a reason it does not know. */
+export function gitLabMergeReason(detailedMergeStatus: unknown): GitLabMergeReason | undefined {
+  return typeof detailedMergeStatus === 'string' ? GITLAB_MERGE_REASONS.get(detailedMergeStatus) : undefined;
+}
+
 // Terminal colour and cursor sequences, GitLab's collapsible section markers,
 // and the timestamp GitHub Actions puts before every line.
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/gu;
@@ -158,8 +210,10 @@ const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu;
  * Bounds a failing check's log to its end, as the text a terminal would show.
  * A log that marks its error (GitHub's `##[error]`) ends just after the last
  * one, so the cleanup steps that follow a failure do not crowd it out.
+ * `redact` cleans the kept lines before the last cut, which can fall inside a
+ * long line.
  */
-export function boundCheckLog(raw: string): { text: string; truncated: boolean } {
+export function boundCheckLog(raw: string, redact: (text: string) => string = (text) => text): { text: string; truncated: boolean } {
   // Only the end is shown, so only the end is cleaned: a job's full log can run to megabytes.
   let truncated = raw.length > RAW_TAIL_CHARS;
   const start = raw.length - RAW_TAIL_CHARS;
@@ -179,7 +233,8 @@ export function boundCheckLog(raw: string): { text: string; truncated: boolean }
   if (lastError >= 0) lines = lines.slice(0, lastError + 1);
   while (lines.length > 0 && !lines.at(-1)) lines.pop();
   truncated = truncated || lines.length > CHECK_LOG_LIMITS.lines;
-  let text = lines.slice(-CHECK_LOG_LIMITS.lines).join('\n');
+  // Credentials go before the last cut, which can fall inside a long line and split one beyond recognition.
+  let text = redact(lines.slice(-CHECK_LOG_LIMITS.lines).join('\n'));
   if (text.length > CHECK_LOG_LIMITS.chars) {
     const cut = text.slice(-CHECK_LOG_LIMITS.chars);
     text = cut.slice(cut.indexOf('\n') + 1);
