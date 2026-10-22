@@ -234,6 +234,7 @@ import {
   leavablePullRequestHeads,
   parseRemoteWorkReference,
   remoteProviderForHost,
+  remoteUrlWithoutCredentials,
   remoteWorkNoun,
   sameRemoteRepository,
   taskRemoteSourceRef,
@@ -4942,7 +4943,7 @@ export class TaskManagerService {
       worktree,
       githubReady.remoteName ?? 'origin',
       latestGit.headSha,
-      remoteUrl && recordedPushUrl(remoteUrl)
+      remoteUrl && remoteUrlWithoutCredentials(remoteUrl)
     );
     const publication = await this.github.publishBranch({
       task,
@@ -6944,19 +6945,11 @@ function sameGitObservation(
   return isDeepStrictEqual(storedObservation, normalizedObserved);
 }
 
-/**
- * A push URL as records keep it: an https URL loses the user and password it
- * can carry, a token among them. Other URLs name a login, not a secret.
- */
-function recordedPushUrl(url: string): string {
-  return url.replace(/^(https?:\/\/)[^/?#]*@/iu, '$1');
-}
-
 /** A publication as records keep it and the person reads it: without credentials. */
 function recordablePublication<T extends { remoteUrl?: string; error?: string }>(publication: T): T {
   return {
     ...publication,
-    ...(publication.remoteUrl ? { remoteUrl: recordedPushUrl(publication.remoteUrl) } : {}),
+    ...(publication.remoteUrl ? { remoteUrl: remoteUrlWithoutCredentials(publication.remoteUrl) } : {}),
     ...(publication.error ? { error: redactCredentialText(publication.error) } : {})
   };
 }
@@ -6970,7 +6963,7 @@ async function recordedPushTarget(worktree: WorktreeRecord, publication: BranchP
   const recorded = publication?.remoteUrl;
   if (!recorded) return undefined;
   const configured = await singlePushRepository(worktree.worktreePath, publication.remoteName).catch(() => undefined);
-  return configured && recordedPushUrl(configured.url) === recorded ? configured.url : recorded;
+  return configured && remoteUrlWithoutCredentials(configured.url) === recorded ? configured.url : recorded;
 }
 
 function sameBranchPublicationObservation(

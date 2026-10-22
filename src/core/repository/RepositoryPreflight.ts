@@ -1,5 +1,6 @@
 import type { RepositoryPreflight, WorktreeBaseOption } from '../../shared/contracts';
 import fs from 'node:fs/promises';
+import { remoteUrlWithoutCredentials } from '../../shared/remoteWork';
 import { git } from '../git/gitCli';
 
 export async function validateRepositoryPath(repositoryPath: string): Promise<RepositoryPreflight> {
@@ -91,10 +92,11 @@ function parseRemotes(output: string): RepositoryPreflight['remotes'] {
       if (!match?.groups) {
         return [];
       }
+      // Fetches and pushes read the live remote; the record names it without credentials.
       return [
         {
           name: match.groups.name,
-          url: match.groups.url,
+          url: remoteUrlWithoutCredentials(match.groups.url),
           direction: match.groups.direction as 'fetch' | 'push'
         }
       ];

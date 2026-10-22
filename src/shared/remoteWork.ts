@@ -268,6 +268,15 @@ export function parseRemoteRepositoryUrl(url: string): RemoteRepositoryRef | und
   return path ? { provider, host: CANONICAL_HOSTS[provider], path } : undefined;
 }
 
+/**
+ * A Git remote URL as records keep it: an http or https URL loses the user
+ * and password it can carry, a token among them. Other URLs name a login,
+ * not a secret, and stay as they are.
+ */
+export function remoteUrlWithoutCredentials(url: string): string {
+  return url.replace(/^(https?:\/\/)[^/?#]*@/iu, '$1');
+}
+
 /** A repository path the platform could serve, or undefined. */
 export function normalizeRepositoryPath(provider: RemoteProvider, value: string): string | undefined {
   const segments = value.split('/');
