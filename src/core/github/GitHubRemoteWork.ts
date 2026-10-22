@@ -9,7 +9,7 @@ import {
 } from '../../shared/remoteWork';
 import { isGitObjectId } from '../git/gitCli';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
-import { buildRemoteWorkSnapshot, visibleRemoteTitle, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
+import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
 import type { GitHubCli } from './GitHubCli';
 
 const LIST_ISSUE_FIELDS = 'number title url state updatedAt author { login }';
@@ -153,7 +153,7 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, node: Gi
   return {
     ref: { repository, kind, number: node.number },
     url: node.url,
-    title: visibleRemoteTitle(node.title),
+    title: (node.title ?? '').trim(),
     state: kind === 'PULL_REQUEST' ? pullState(node) as RemoteWorkSummary['state'] : node.state === 'CLOSED' ? 'CLOSED' : 'OPEN',
     ...(node.author?.login ? { author: node.author.login } : {}),
     ...(node.updatedAt ? { updatedAt: node.updatedAt } : {}),

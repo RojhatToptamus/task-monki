@@ -8,7 +8,7 @@ import {
   type RemoteWorkSummary
 } from '../../shared/remoteWork';
 import { RemoteWorkError } from '../remote/RemoteWorkError';
-import { buildRemoteWorkSnapshot, visibleRemoteTitle, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
+import { buildRemoteWorkSnapshot, type RemotePullRequest, type RemoteWorkReader } from '../remote/RemoteWorkReader';
 import { isGitObjectId } from '../git/gitCli';
 import { GitLabCli, gitLabProject, gitLabState } from './GitLabCli';
 
@@ -150,7 +150,7 @@ function summary(repository: RemoteRepositoryRef, kind: RemoteWorkKind, item: Gi
   return {
     ref: { repository, kind, number: item.iid },
     url: item.web_url,
-    title: visibleRemoteTitle(item.title),
+    title: (item.title ?? '').trim(),
     state: gitLabState(item.state) as RemoteWorkSummary['state'],
     ...(item.author?.username ? { author: item.author.username } : {}),
     ...(item.updated_at ? { updatedAt: item.updated_at } : {}),

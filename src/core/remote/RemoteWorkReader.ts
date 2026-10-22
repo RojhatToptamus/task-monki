@@ -36,15 +36,6 @@ export interface RemoteWorkReader {
   readPullRequest(ref: RemoteWorkRef, cwd: string): Promise<RemotePullRequest>;
 }
 
-/**
- * An item's title as a reader sees it, the same in a list as in a snapshot:
- * bounded and trimmed, since the store keeps no surrounding whitespace, and
- * `Untitled` when nothing visible remains.
- */
-export function visibleRemoteTitle(title: string | undefined): string {
-  return boundRemoteText(visibleRemoteText(title), REMOTE_WORK_LIMITS.title).text.trim() || 'Untitled';
-}
-
 /** The bounded text a task keeps: the body and the most recent comments. */
 export function buildRemoteWorkSnapshot(input: {
   ref: RemoteWorkRef;
@@ -77,7 +68,8 @@ export function buildRemoteWorkSnapshot(input: {
     schema: REMOTE_WORK_SNAPSHOT_SCHEMA,
     number: input.ref.number,
     url: input.url,
-    title: visibleRemoteTitle(input.title),
+    // Display text is trimmed here: the store keeps no surrounding whitespace.
+    title: boundRemoteText(visibleRemoteText(input.title), REMOTE_WORK_LIMITS.title).text.trim() || 'Untitled',
     state: input.state,
     ...(input.author ? { author: input.author } : {}),
     labels: input.labels.slice(0, REMOTE_WORK_LIMITS.labels).map((label) => boundRemoteText(visibleRemoteText(label), 100).text.trim()).filter(Boolean),
