@@ -10,6 +10,7 @@ import type {
   Task,
   UpdateAgentNativeSessionRequest
 } from '../../shared/contracts';
+import { taskGoal } from '../../shared/promptTemplates';
 import {
   PROVIDER_SETTING_FIELDS
 } from '../model/providerSettings';
@@ -62,6 +63,8 @@ export function ProviderOverviewPanel({
   const rejectedRuntimeProbes =
     runtimeResolution?.probes.filter((probe) => !probe.compatible) ?? [];
   const showGoalDiagnostics = shouldShowProviderGoalDiagnostics(goal, Boolean(session));
+  // The goal Task Monki syncs: the request, or for a task opened from an issue or pull request with none, the item it names.
+  const expectedGoal = taskGoal(task);
   const nativeSessionControls = useMemo(
     () => selectNativeSessionControls(runtimeState?.sessionControls, session?.id),
     [runtimeState?.sessionControls, session?.id]
@@ -257,14 +260,14 @@ export function ProviderOverviewPanel({
             </dd>
             <dt>Expected goal</dt>
             <dd>
-              <span className="provider-kv__text">{task.prompt}</span>
+              <span className="provider-kv__text">{expectedGoal}</span>
               <small>Authoritative task goal</small>
             </dd>
             <dt>Provider goal</dt>
             <dd>
               <span className="provider-kv__text">{goal?.providerObjective ?? '—'}</span>
               <small>
-                {goal?.providerObjective === task.prompt
+                {goal?.providerObjective === expectedGoal
                   ? 'Matches the Task Monki goal'
                   : 'Differs from the Task Monki goal'}
               </small>

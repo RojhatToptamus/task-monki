@@ -2212,7 +2212,7 @@ async function createNoPrScenario(
       ctx,
       state,
       'FAILED',
-      'Remote branch has newer commits. Sync the branch before pushing again.'
+      'Remote branch has newer commits'
     );
   } else if (definition.slug === 'no-pr-publish-in-progress') {
     await recordBranchPublication(ctx, state, 'PUSHING');
@@ -2233,6 +2233,7 @@ async function createDeliveryScenario(
   const task = await requireTask(ctx, state.task.id);
   const headSha = state.gitSnapshot?.headSha ?? ctx.baseSha;
   await recordBranchPublication(ctx, state, 'PUSHED', undefined, headSha);
+  if (definition.slug !== 'delivery-pr-newer-commits') await recordPushedGitSnapshot(ctx, state, headSha);
 
   if (definition.slug === 'delivery-local-not-pushed') {
     await recordPr(ctx, state, { pullRequestStatus: 'OPEN_READY', headSha });
@@ -2273,6 +2274,8 @@ async function createCompletionScenario(
   const state = await createImplementedTask(ctx, definition, completionPolicy);
   const headSha = state.gitSnapshot?.headSha ?? ctx.baseSha;
   await recordBranchPublication(ctx, state, 'PUSHED', undefined, headSha);
+  // Nothing the pull request lacks, so the merge's completion policy alone decides the task.
+  await recordPushedGitSnapshot(ctx, state, headSha);
   const ciStatus: CiChecksStatus =
     definition.slug === 'completion-merged-and-verified-passing'
       ? 'PASSING'
@@ -2703,6 +2706,14 @@ async function recordSyntheticGitSnapshot(
       ''
     ].join('\n')
   );
+}
+
+/** The worktree as Task Monki observes it after a push: its head published, nothing left in it. */
+function recordPushedGitSnapshot(ctx: SeedContext, state: SeededTaskState, headSha: string): Promise<GitSnapshotRecord> {
+  return recordSyntheticGitSnapshot(ctx, state, {
+    headSha, upstreamSha: headSha, status: 'PUSHED', aheadCount: 0, behindCount: 0, stagedCount: 0, unstagedCount: 0,
+    untrackedCount: 0, conflictedCount: 0, workingDiffFileCount: 0, dirtyFingerprint: 'pushed'
+  });
 }
 
 function stripGeneratedGitFields(

@@ -33,6 +33,17 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  ReadPullRequestMergeOptionsRequest,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReadPullRequestCheckLogsRequest,
+  MergePullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -750,6 +761,17 @@ function installIpcHandlers(): void {
     return task;
   });
   handleTrustedIpc('task:import', (_, input: ImportTaskRequest) => service.importTask(input));
+  handleTrustedIpc('remote:list', (_, input: ListRemoteWorkRequest) => service.listRemoteWork(input));
+  handleTrustedIpc('remote:openPullRequest', (_, input: OpenPullRequestRequest) => service.openPullRequest(input));
+  handleTrustedIpc('remote:syncPullRequest', (_, input: SyncPullRequestRequest) => service.syncPullRequest(input));
+  handleTrustedIpc('remote:markPullRequestReady', (_, input: MarkPullRequestReadyRequest) => service.markPullRequestReady(input));
+  handleTrustedIpc('remote:resolvePullRequestDiscussion', (_, input: ResolvePullRequestDiscussionRequest) => service.resolvePullRequestDiscussion(input));
+  handleTrustedIpc('remote:rerunPullRequestChecks', (_, input: RerunPullRequestChecksRequest) => service.rerunPullRequestChecks(input));
+  handleTrustedIpc('remote:readPullRequestMergeOptions', (_, input: ReadPullRequestMergeOptionsRequest) => service.readPullRequestMergeOptions(input));
+  handleTrustedIpc('remote:mergePullRequest', (_, input: MergePullRequestRequest) => service.mergePullRequest(input));
+  handleTrustedIpc('remote:replyToPullRequest', (_, input: ReplyToPullRequestRequest) => service.replyToPullRequest(input));
+  handleTrustedIpc('remote:readPullRequestCheckLogs', (_, input: ReadPullRequestCheckLogsRequest) => service.readPullRequestCheckLogs(input));
+  handleTrustedIpc('remote:mergePullRequestUpdate', (_, input: MergePullRequestUpdateRequest) => service.mergePullRequestUpdate(input));
   handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
   handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
   handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));

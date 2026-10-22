@@ -1,0 +1,124 @@
+import type {
+  CiRollupRecord,
+  GitHubCheckDetailRecord,
+  GitHubRepositoryRecord,
+  MergeSnapshotRecord,
+  PullRequestSnapshotRecord,
+  ReviewRollupRecord,
+  Task,
+  WorktreeRecord
+} from '../../shared/contracts';
+import type { PullRequestMergeMethod, PullRequestMergeOptions } from '../../shared/pullRequestActions';
+import type { PullRequestFeedback } from '../../shared/pullRequestFeedback';
+import type { RemoteProvider, RemoteRepositoryOption, RemoteRepositoryRef } from '../../shared/remoteWork';
+
+/**
+ * Where a linked task's pull or merge request lives. Without a target, the
+ * platform repository is found from the checkout.
+ */
+export interface DeliveryTarget {
+  repository: RemoteRepositoryRef;
+  /** The repository the branch is pushed to when it is not `repository`, a fork. */
+  headRepository?: RemoteRepositoryRef;
+}
+
+/** The remote a delivery pushes through. */
+export interface DeliveryRemote {
+  remoteName: string;
+  remoteUrl: string;
+  host: string;
+  owner: string;
+  repo: string;
+}
+
+/** A remote as a delivery reports it: the namespace, the project, and a URL without credentials. */
+export function deliveryRemote(remote: RemoteRepositoryOption): DeliveryRemote {
+  const split = remote.path.lastIndexOf('/');
+  return {
+    remoteName: remote.remoteName,
+    remoteUrl: `https://${remote.host}/${remote.path}.git`,
+    host: remote.host,
+    owner: remote.path.slice(0, split),
+    repo: remote.path.slice(split + 1)
+  };
+}
+
+/** One observation of a pull or merge request, split into Task Monki's evidence records. */
+export interface PullRequestSync {
+  pullRequest: Omit<PullRequestSnapshotRecord, 'id' | 'observedAt'>;
+  ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
+  reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
+  merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
+  /** What people said on it; absent when it could not be read, so the last reading stands. */
+  feedback?: PullRequestFeedback;
+}
+
+/** The pull or merge request an action addresses, as Task Monki last recorded it. */
+export interface PullRequestAddress {
+  number: number;
+  url: string;
+}
+
+/**
+ * A platform's pull or merge request delivery. Git pushes stay with Git; this is
+ * what the platform's CLI does: readiness, creation, lookup and status, and the
+ * person's own steps on it: ready, merge, replies and resolving, review requests.
+ */
+export interface PullRequestDelivery {
+  readonly provider: RemoteProvider;
+  preflight(task: Task, worktree: WorktreeRecord, pushRemote?: DeliveryRemote): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>>;
+  createOrFindDraftPullRequest(input: {
+    worktree: WorktreeRecord;
+    baseRef?: string;
+    body: string;
+    title: string;
+    target?: DeliveryTarget;
+  }): Promise<PullRequestSync>;
+  findOpenPullRequest(worktree: WorktreeRecord, target?: DeliveryTarget): Promise<PullRequestSync | undefined>;
+  /** Reads the status and what people said; with `feedback: false`, the status alone, as a wait for a step to show needs. */
+  viewPullRequest(worktree: WorktreeRecord, selector: string | number, target?: DeliveryTarget, options?: { feedback?: boolean }): Promise<PullRequestSync>;
+  pullRequestBase(worktree: WorktreeRecord, requestedBranch?: string): Promise<string>;
+  markReadyForReview(worktree: WorktreeRecord, address: PullRequestAddress): Promise<void>;
+  readMergeOptions(worktree: WorktreeRecord, address: PullRequestAddress): Promise<PullRequestMergeOptions>;
+  /** Merges exactly `expectedHeadSha`; the platform refuses when the head moved. */
+  mergePullRequest(worktree: WorktreeRecord, address: PullRequestAddress, input: {
+    method: PullRequestMergeMethod;
+    expectedHeadSha: string;
+    /** The branch to delete after the merge, when the person asked and it can be deleted. */
+    deleteBranch?: string;
+  }): Promise<void>;
+  /** Replies on a thread; a review or a comment has none, so its answer is a comment on the pull request. */
+  replyToDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, body: string): Promise<void>;
+  /** Resolves a thread, or reopens it when `resolved` is false. */
+  resolveDiscussion(worktree: WorktreeRecord, address: PullRequestAddress, discussionId: string, resolved?: boolean): Promise<void>;
+  commentOnPullRequest(worktree: WorktreeRecord, address: PullRequestAddress, body: string): Promise<void>;
+  /** Asks people for another review; absent where the platform cannot be asked from here. */
+  requestReviewers?(worktree: WorktreeRecord, address: PullRequestAddress, names: string[]): Promise<void>;
+  /** The raw log of a failing check, when its link names a job this platform serves. */
+  readCheckLog(worktree: WorktreeRecord, address: PullRequestAddress, check: GitHubCheckDetailRecord): Promise<string | undefined>;
+  /**
+   * Runs the failed checks again where the platform ran them: GitHub Actions
+   * re-runs each run's failed jobs, GitLab retries each failed job. Only checks
+   * of the pull request's own repository; returns how many runs or jobs started.
+   */
+  rerunFailedChecks(worktree: WorktreeRecord, address: PullRequestAddress, checks: readonly GitHubCheckDetailRecord[]): Promise<number>;
+}
+
+/**
+ * Starts each item on its own, for a re-run of failed checks: one the platform
+ * refuses does not stop the rest, and only when none started is the refusal the answer.
+ */
+export async function startEach<T>(items: Iterable<T>, start: (item: T) => Promise<unknown>): Promise<number> {
+  let started = 0;
+  let refused: unknown;
+  for (const item of items) {
+    try {
+      await start(item);
+      started += 1;
+    } catch (error) {
+      refused ??= error;
+    }
+  }
+  if (started === 0 && refused !== undefined) throw refused;
+  return started;
+}

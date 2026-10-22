@@ -12,6 +12,8 @@ import {
   reviewDraftProblem
 } from '../../shared/contracts';
 import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
+import { PULL_REQUEST_FEEDBACK_LIMITS, PULL_REQUEST_REVIEWER_STATES } from '../../shared/pullRequestFeedback';
+import { parseRemoteRepositoryUrl } from '../../shared/remoteWork';
 import { assertReviewRequestRecord } from '../../shared/reviewRounds';
 import type { StoreState } from '../projection/reducer';
 
@@ -165,7 +167,13 @@ export function validateCurrentStoreRecords(state: StoreState): void {
   const externalTaskIds = new Set(state.worktrees.filter((worktree) => worktree?.ownership === 'EXTERNAL').map((worktree) => worktree.taskId));
   validateCollection(state.tasks, 'tasks', (task) => {
     strings(task, 'tasks', ['runtimeId', 'title']);
-    stringField(task, 'prompt', 'tasks', task.prompt === '' && externalTaskIds.has(task.id));
+    // Imported checkouts and work opened from GitHub or GitLab can start without a description.
+    stringField(task, 'prompt', 'tasks', task.prompt === '' && (externalTaskIds.has(task.id) || task.remoteSource !== undefined));
+    if (task.remoteSource !== undefined) {
+      // Only a task opened from the item holds it; an alternative keeps the issue through its prompt.
+      if (task.kind !== 'NORMAL' || task.forkedFromTaskId !== undefined) invalid('tasks');
+      validateTaskRemoteSource(task.remoteSource);
+    }
     if (task.agentDraft !== undefined) {
       stringField(task, 'agentDraft', 'tasks', true);
       if (task.agentDraft.length > 65_536) throw new Error('Task draft is too long.');
@@ -1138,54 +1146,105 @@ function validateGitHubRecords(state: StoreState): void {
   for (const record of state.branchPublications) {
     strings(record, 'branchPublications', ['remoteName', 'branchName', 'remoteRef']);
     optionalStrings(record, 'branchPublications', ['remoteUrl', 'headSha', 'error'], new Set(['error']));
+    if (record.previousRemoteSha !== undefined) gitObjectIdField(record, 'previousRemoteSha', 'branchPublications');
     enumField(record, 'status', BRANCH_PUBLICATION_STATUSES, 'branchPublications');
     timestamp(record, 'requestedAt', 'branchPublications');
     timestamp(record, 'updatedAt', 'branchPublications');
   }
-  for (const record of state.pullRequests) {
-    optionalInteger(record, 'number', 'pullRequests', 1);
-    optionalStrings(record, 'pullRequests', [
-      'url', 'state', 'headRefName', 'headRefOid', 'baseRefName', 'title'
-    ], new Set(['title']));
-    enumField(record, 'status', PULL_REQUEST_STATUSES, 'pullRequests');
-    optionalUuidFields(record, 'pullRequests', ['bodyArtifactId']);
-    optionalBoolean(record, 'isDraft', 'pullRequests');
-    optionalNullableTimestamp(record, 'mergedAt', 'pullRequests');
-    timestamp(record, 'observedAt', 'pullRequests');
+  for (const record of state.pullRequests) pullRequestRecord(record);
+  for (const record of state.ciRollups) ciRollupRecord(record);
+  for (const record of state.reviewRollups) reviewRollupRecord(record);
+  for (const record of state.mergeSnapshots) mergeSnapshotRecord(record);
+}
+
+/**
+ * One pull request observation, checked before it is stored: a value the
+ * platform reported that the store could not load fails the refresh, not the
+ * next startup.
+ */
+export function validatePullRequestObservation(observation: {
+  pullRequest: object; ci: object; reviews: object; merge: object;
+}): void {
+  pullRequestRecord(observation.pullRequest);
+  ciRollupRecord(observation.ci);
+  reviewRollupRecord(observation.reviews);
+  mergeSnapshotRecord(observation.merge);
+}
+
+function pullRequestRecord(record: object): void {
+  optionalInteger(record, 'number', 'pullRequests', 1);
+  optionalStrings(record, 'pullRequests', [
+    'url', 'state', 'headRefName', 'headRefOid', 'baseRefName', 'title'
+  ], new Set(['title']));
+  enumField(record, 'status', PULL_REQUEST_STATUSES, 'pullRequests');
+  optionalUuidFields(record, 'pullRequests', ['bodyArtifactId']);
+  optionalBoolean(record, 'isDraft', 'pullRequests');
+  optionalNullableTimestamp(record, 'mergedAt', 'pullRequests');
+  timestamp(record, 'observedAt', 'pullRequests');
+}
+
+function ciRollupRecord(record: object): void {
+  const fields = record as Record<string, unknown>;
+  optionalInteger(record, 'pullRequestNumber', 'ciRollups', 1);
+  optionalStrings(record, 'ciRollups', ['headSha']);
+  strings(record, 'ciRollups', ['requiredStatus']);
+  enumField(record, 'status', CI_CHECK_STATUSES, 'ciRollups');
+  enumField(record, 'requiredStatus', CI_CHECK_STATUSES, 'ciRollups');
+  for (const key of [
+    'totalCount', 'pendingCount', 'passingCount', 'failingCount', 'skippedCount', 'canceledCount'
+  ] as const) integer(record, key, 'ciRollups', 0);
+  if (!Array.isArray(fields.checkDetails)) invalid('ciRollups');
+  for (const detail of fields.checkDetails as unknown[]) {
+    const value = persistedRecord(detail, 'ciRollups');
+    strings(value, 'ciRollups', ['name', 'status']);
+    enumField(value, 'status', GITHUB_CHECK_STATUSES, 'ciRollups');
+    optionalStrings(value, 'ciRollups', [
+      'state', 'workflow', 'link', 'description', 'event', 'startedAt', 'completedAt'
+    ], new Set(['description']));
   }
-  for (const record of state.ciRollups) {
-    optionalInteger(record, 'pullRequestNumber', 'ciRollups', 1);
-    optionalStrings(record, 'ciRollups', ['headSha']);
-    strings(record, 'ciRollups', ['requiredStatus']);
-    enumField(record, 'status', CI_CHECK_STATUSES, 'ciRollups');
-    enumField(record, 'requiredStatus', CI_CHECK_STATUSES, 'ciRollups');
-    for (const key of [
-      'totalCount', 'pendingCount', 'passingCount', 'failingCount', 'skippedCount', 'canceledCount'
-    ] as const) integer(record, key, 'ciRollups', 0);
-    if (!Array.isArray(record.checkDetails)) invalid('ciRollups');
-    for (const detail of record.checkDetails) {
-      const value = persistedRecord(detail, 'ciRollups');
-      strings(value, 'ciRollups', ['name', 'status']);
-      enumField(value, 'status', GITHUB_CHECK_STATUSES, 'ciRollups');
-      optionalStrings(value, 'ciRollups', [
-        'state', 'workflow', 'link', 'description', 'event', 'startedAt', 'completedAt'
-      ], new Set(['description']));
-    }
-    timestamp(record, 'observedAt', 'ciRollups');
+  timestamp(record, 'observedAt', 'ciRollups');
+}
+
+function reviewRollupRecord(record: object): void {
+  optionalInteger(record, 'pullRequestNumber', 'reviewRollups', 1);
+  optionalStrings(record, 'reviewRollups', ['headSha', 'reviewDecision']);
+  enumField(record, 'status', REVIEW_STATUSES, 'reviewRollups');
+  timestamp(record, 'observedAt', 'reviewRollups');
+  const feedback = (record as Record<string, unknown>).feedback;
+  if (feedback !== undefined) validatePullRequestFeedbackSummary(feedback);
+}
+
+/**
+ * What a review observation keeps of its feedback, checked on its own before it
+ * is written, so feedback the store could not load is left out of an
+ * observation rather than failing it.
+ */
+export function validatePullRequestFeedbackSummary(value: unknown): void {
+  const summary = persistedRecord(value, 'reviewRollups');
+  uuidField(summary, 'artifactId', 'reviewRollups');
+  sha256Field(summary, 'digest', 'reviewRollups');
+  integer(summary, 'unresolvedCount', 'reviewRollups', 0);
+  integer(summary, 'discussionCount', 'reviewRollups', 0);
+  if (!Array.isArray(summary.reviewers) || summary.reviewers.length > PULL_REQUEST_FEEDBACK_LIMITS.reviewers) {
+    invalid('reviewRollups');
   }
-  for (const record of state.reviewRollups) {
-    optionalInteger(record, 'pullRequestNumber', 'reviewRollups', 1);
-    optionalStrings(record, 'reviewRollups', ['headSha', 'reviewDecision']);
-    enumField(record, 'status', REVIEW_STATUSES, 'reviewRollups');
-    timestamp(record, 'observedAt', 'reviewRollups');
+  for (const reviewer of summary.reviewers as unknown[]) {
+    const entry = persistedRecord(reviewer, 'reviewRollups');
+    strings(entry, 'reviewRollups', ['name']);
+    enumField(entry, 'state', PULL_REQUEST_REVIEWER_STATES, 'reviewRollups');
+    optionalBoolean(entry, 'bot', 'reviewRollups');
   }
-  for (const record of state.mergeSnapshots) {
-    optionalInteger(record, 'pullRequestNumber', 'mergeSnapshots', 1);
-    optionalStrings(record, 'mergeSnapshots', ['headSha']);
-    enumField(record, 'status', MERGE_STATUSES, 'mergeSnapshots');
-    optionalNullableTimestamp(record, 'mergedAt', 'mergeSnapshots');
-    timestamp(record, 'observedAt', 'mergeSnapshots');
-  }
+  optionalStrings(summary, 'reviewRollups', ['viewer']);
+  optionalTimestamp(summary, 'lastViewerCommentAt', 'reviewRollups');
+  optionalTimestamp(summary, 'lastOtherCommentAt', 'reviewRollups');
+}
+
+function mergeSnapshotRecord(record: object): void {
+  optionalInteger(record, 'pullRequestNumber', 'mergeSnapshots', 1);
+  optionalStrings(record, 'mergeSnapshots', ['headSha']);
+  enumField(record, 'status', MERGE_STATUSES, 'mergeSnapshots');
+  optionalNullableTimestamp(record, 'mergedAt', 'mergeSnapshots');
+  timestamp(record, 'observedAt', 'mergeSnapshots');
 }
 
 function validateArtifacts(state: StoreState): void {
@@ -1372,6 +1431,34 @@ function askSubject(value: unknown): void {
   optionalInteger(subject, 'endLine', collection, 1);
   if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
   if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
+}
+
+/** A task's issue or pull request, checked before the task is stored. */
+export function validateTaskRemoteSource(value: unknown): void {
+  const collection = 'tasks.remoteSource';
+  const source = persistedRecord(value, collection);
+  enumField(source, 'provider', ['GITHUB', 'GITLAB'] as const, collection);
+  enumField(source, 'kind', ['ISSUE', 'PULL_REQUEST'] as const, collection);
+  strings(source, collection, ['host', 'repositoryPath', 'url', 'title']);
+  integer(source, 'number', collection, 1);
+  uuidField(source, 'snapshotArtifactId', collection);
+  timestamp(source, 'capturedAt', collection);
+  // The identity must name a supported repository, and the link must be on its host.
+  const identity = parseRemoteRepositoryUrl(`https://${String(source.host)}/${String(source.repositoryPath)}`);
+  if (!identity || identity.provider !== source.provider || identity.host !== source.host ||
+      identity.path !== source.repositoryPath || !String(source.url).startsWith(`https://${identity.host}/`)) {
+    invalid(collection);
+  }
+  if (source.kind === 'PULL_REQUEST') {
+    const pullRequest = persistedRecord(source.pullRequest, collection);
+    strings(pullRequest, collection, ['headRefName', 'baseRefName']);
+    optionalStrings(pullRequest, collection, ['headRepositoryPath']);
+    booleanField(pullRequest, 'crossRepository', collection);
+    gitObjectIdField(pullRequest, 'headSha', collection);
+    gitObjectIdField(pullRequest, 'mergeBaseSha', collection);
+  } else if (source.pullRequest !== undefined) {
+    invalid(collection);
+  }
 }
 
 function settings(value: unknown, collection: string): void {

@@ -8,12 +8,16 @@ import type {
   AgentRunMode,
   AgentSessionRecord,
   CiChecksStatus,
+  GitSnapshotRecord,
   MergeStatus,
+  PullRequestFeedback,
   RunRecord,
   Task,
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import { boundPullRequestFeedback, parsePullRequestFeedback } from '../../shared/pullRequestFeedback';
+import { remoteWorkKey } from '../../shared/remoteWork';
 import { SqliteTaskStore } from './SqliteTaskStore';
 import { SqliteAgentRuntimeStore } from './SqliteAgentRuntimeStore';
 import type { TaskAgentRuntimeAccess } from '../agent/AgentRuntimeStore';
@@ -724,6 +728,85 @@ describe('SqliteTaskStore', () => {
     expect(untouched?.completionPolicy).toBe('LOCAL_ACCEPTANCE');
   });
 
+  it('keeps pull request feedback as the task\'s artifact, reused while unchanged and kept when a read fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-feedback-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Feedback', prompt: 'Read the review.', repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/feedback', worktreePath: path.join(dir, 'feedback'), baseSha: 'base'
+    });
+    const owner = { taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id };
+    const sync = (feedback?: PullRequestFeedback) => store.recordPullRequestSync({
+      pullRequest: { ...owner, number: 82, url: 'https://github.com/example/repo/pull/82', status: 'OPEN_READY', headRefOid: 'head' },
+      ci: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NO_CHECKS', requiredStatus: 'UNKNOWN', totalCount: 0,
+        pendingCount: 0, passingCount: 0, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [] },
+      reviews: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'CHANGES_REQUESTED' },
+      merge: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_MERGED' },
+      ...(feedback ? { feedback } : {})
+    });
+    const reading = (capturedAt: string, body = 'Handle a null layout.') => boundPullRequestFeedback({
+      provider: 'GITHUB', number: 82, capturedAt, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+      discussions: [{ id: 'PRRT_1', kind: 'THREAD', path: 'a.ts', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+        comments: [{ author: 'alice', body }] }]
+    });
+    const feedbackOf = async (target: SqliteTaskStore) => (await target.snapshot()).reviewRollups
+      .filter((record) => record.taskId === task.id).map((record) => record.feedback?.artifactId);
+
+    await sync(reading('2026-10-10T10:00:00.000Z'));
+    await sync(reading('2026-10-10T11:00:00.000Z'));
+    // A read that failed keeps the last reading of the same pull request.
+    await sync();
+    expect(new Set(await feedbackOf(store)).size).toBe(1);
+    await sync(reading('2026-10-10T12:00:00.000Z', 'Also add a test.'));
+    expect(new Set(await feedbackOf(store)).size).toBe(2);
+    // A reading the store cannot keep never costs the status it came with: the last reading stands.
+    await sync({ ...reading('2026-10-10T13:00:00.000Z', 'Changed again.'), reviewers: [{ name: 'alice', state: 'UNKNOWN' as 'APPROVED' }] });
+    expect((await feedbackOf(store))[0]).toBe((await feedbackOf(store))[1]);
+    await closeStore(store);
+
+    const reopened = await createStore(dir);
+    const latest = (await reopened.snapshot()).reviewRollups.find((record) => record.taskId === task.id)!;
+    expect(latest.feedback).toMatchObject({ unresolvedCount: 1, discussionCount: 1, reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }] });
+    expect(parsePullRequestFeedback(await reopened.readArtifact(latest.feedback!.artifactId), 82)?.discussions[0]?.comments[0]?.body)
+      .toBe('Also add a test.');
+    expect((await reopened.snapshot()).artifacts.filter((artifact) => artifact.kind === 'pull-request-feedback')).toHaveLength(2);
+    await closeStore(reopened);
+  });
+
+  it('finds the task that delivered a pull request, so the pull request is never opened as a second task', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delivered-pr-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Deliver', prompt: 'Open a pull request.', repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/deliver', worktreePath: path.join(dir, 'deliver'), baseSha: 'base'
+    });
+    const owner = { taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id };
+    const sync = () => store.recordPullRequestSync({
+      pullRequest: { ...owner, number: 82, url: 'https://github.com/Example/Repo/pull/82', status: 'OPEN_READY', headRefOid: 'head' },
+      ci: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NO_CHECKS', requiredStatus: 'UNKNOWN', totalCount: 0,
+        pendingCount: 0, passingCount: 0, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [] },
+      reviews: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_REQUESTED' },
+      merge: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_MERGED' }
+    });
+    await sync();
+    await sync();
+    const repository = { provider: 'GITHUB' as const, host: 'github.com', path: 'example/repo' };
+    const delivered = { repository, kind: 'PULL_REQUEST' as const, number: 82 };
+    const found = await store.findTasksForRemoteWork([
+      delivered,
+      { repository, kind: 'PULL_REQUEST', number: 83 },
+      // An issue shares the number, not the pull request.
+      { repository, kind: 'ISSUE', number: 82 }
+    ]);
+    expect([...found].map(([key, entry]) => [key, entry.id])).toEqual([[remoteWorkKey(delivered), task.id]]);
+    expect((await store.findTaskForRemoteWork(delivered))?.id).toBe(task.id);
+    await closeStore(store);
+  });
+
   it('records in-progress branch publication as a request, not a failure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-branch-pushing-'));
     const store = await createStore(dir);
@@ -1058,6 +1141,99 @@ describe('SqliteTaskStore', () => {
         agentRun: 'FAILED'
       }
     });
+  });
+
+  it('keeps a merged task open while its worktree holds fixes the pull request does not', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-unshipped-'));
+    const store = await createStore(dir);
+    const task = await store.createTask({
+      title: 'Fix the failing check',
+      prompt: 'Make the requested change.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/unshipped-follow-up',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await createTestAgentSession(store, { task, iteration, worktree, runtimeId: task.runtimeId });
+    const run = await createTestRun(store, { task, session, mode: 'IMPLEMENTATION', prompt: task.prompt });
+    await store.appendEvent(createDomainEvent({
+      type: 'AGENT_RUN_COMPLETED',
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      worktreeId: worktree.id,
+      agentSessionId: session.id,
+      source: 'provider',
+      payload: { terminalReason: 'completed' }
+    }));
+    const observe = (status: GitSnapshotRecord['status']) => store.recordGitSnapshot({
+      taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id, worktreePath: worktree.worktreePath,
+      repoRoot: dir, gitCommonDir: path.join(dir, '.git'), headSha: 'head', branch: worktree.branchName, baseSha: 'base',
+      aheadCount: 0, behindCount: 0, stagedCount: 0, unstagedCount: status === 'DIRTY' ? 1 : 0, untrackedCount: 0,
+      conflictedCount: 0, commitsAheadOfBase: 1, committedDiffFileCount: 1, workingDiffFileCount: status === 'DIRTY' ? 1 : 0,
+      diffStat: '', dirtyFingerprint: status, status
+    }, '');
+
+    // The follow-up's fix is still only in the worktree when someone merges the pull request.
+    await observe('DIRTY');
+    await recordOpenPullRequest(store, task.id, iteration, worktree, { mergeStatus: 'MERGED' });
+    expect(await store.getTask(task.id)).toMatchObject({ workflowPhase: 'REVIEW', resolution: 'NONE', projection: { merge: 'MERGED' } });
+
+    // Once the worktree holds nothing the pull request lacks, the merge completes the task.
+    await observe('PUSHED');
+    await recordOpenPullRequest(store, task.id, iteration, worktree, { mergeStatus: 'MERGED' });
+    expect(await store.getTask(task.id)).toMatchObject({ workflowPhase: 'DONE' });
+  });
+
+  it('tells the board of a merge in progress in the task\'s own worktree, which Push update finishes, until it is committed', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-board-merge-'));
+    const store = await createStore(dir);
+    const repositoryId = (await addTestRepository(store, dir)).id;
+    const task = await store.createTask({ title: 'Update with main', prompt: 'Bring main in.', repositoryId });
+    const managed = await store.createIterationAndWorktree({
+      task, branchName: 'codex/board-merge', worktreePath: path.join(dir, 'worktree'), baseSha: 'base'
+    });
+    // Git counts the files a merge stopped on as conflicted until it is committed, resolved or not.
+    const reading = (worktreePath: string, branch: string, operationInProgress?: string) => ({
+      worktreePath, branch, repoRoot: dir, gitCommonDir: path.join(dir, '.git'), headSha: 'head', baseSha: 'base',
+      aheadCount: 1, behindCount: 0, stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      conflictedCount: operationInProgress ? 1 : 0, ...(operationInProgress ? { operationInProgress } : {}),
+      commitsAheadOfBase: 1, committedDiffFileCount: 1, workingDiffFileCount: 0, diffStat: '',
+      dirtyFingerprint: operationInProgress ?? 'committed', status: operationInProgress ? 'CONFLICTED' as const : 'COMMITTED_UNPUSHED' as const
+    });
+    const observe = ({ iteration, worktree }: { iteration: TaskIteration; worktree: WorktreeRecord }, operationInProgress?: string) =>
+      store.recordGitSnapshot({
+        taskId: worktree.taskId, iterationId: iteration.id, worktreeId: worktree.id,
+        ...reading(worktree.worktreePath, worktree.branchName, operationInProgress)
+      }, '');
+    const onBoard = async (taskId: string) => (await store.getBoardSnapshot()).tasks.find((candidate) => candidate.id === taskId);
+
+    await recordOpenPullRequest(store, task.id, managed.iteration, managed.worktree);
+    await observe(managed, 'merge');
+    expect(await onBoard(task.id)).toMatchObject({ projection: { git: 'CONFLICTED', health: 'ERROR' }, delivery: { mergeInProgress: true } });
+    // Push update committed it: the newest reading holds none, and nothing else waits on the person.
+    await observe(managed);
+    expect(await onBoard(task.id)).not.toHaveProperty('delivery');
+    // Push update finishes no rebase.
+    await observe(managed, 'rebase');
+    expect(await onBoard(task.id)).not.toHaveProperty('delivery');
+
+    // An imported checkout's merge is its owner's to finish.
+    const checkout = path.join(dir, 'checkout');
+    const imported = await store.importTask(
+      { repositoryId, worktreePath: checkout, branchName: 'feature', baseRef: 'main', title: 'Imported', prompt: 'Review it.' },
+      { snapshot: reading(checkout, 'feature'), diffEvidence: '' }
+    );
+    const detail = await store.getTaskDetail(imported.id);
+    const external = { iteration: detail.iterations[0]!, worktree: detail.worktrees[0]! };
+    await recordOpenPullRequest(store, imported.id, external.iteration, external.worktree, 83);
+    await observe(external, 'merge');
+    expect(await onBoard(imported.id)).toMatchObject({ projection: { git: 'CONFLICTED' } });
+    expect(await onBoard(imported.id)).not.toHaveProperty('delivery');
+    await closeStore(store);
   });
 
   it('deletes only the selected task records and repairs fork links', async () => {

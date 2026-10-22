@@ -1,7 +1,6 @@
 import type { AskSubject, TaskInstruction } from '../../shared/contracts';
 import type { SessionTurn } from './agentSession';
-import { formatCommentLocation } from './reviewFollowUp';
-import { pluralize } from './formatting';
+import { formatCommentLocation, pluralize } from './formatting';
 
 /** The questions asked in one side thread, in the order they were asked. */
 export function sideThreadQuestions(instructions: readonly TaskInstruction[], threadId: string | undefined): TaskInstruction[] {

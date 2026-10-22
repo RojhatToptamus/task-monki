@@ -60,6 +60,7 @@ import { openTestPersistence } from './persistenceFixture';
 export interface ScenarioOptions {
   name?: string;
   ghPath?: string;
+  glabPath?: string;
   previewEnabled?: boolean;
   previewRecipeGenerator?: PreviewRecipeGenerationService;
   designMode?: boolean;
@@ -325,14 +326,18 @@ export async function createTaskMonkiScenario(
   try {
     // Unrelated scenarios must not probe the host's installed/authenticated gh.
     // Keep this as an initial setting so GitHub scenarios can reconfigure it.
-    if (!options.ghPath) {
+    if (!options.ghPath || !options.glabPath) {
       await persistence.settings.update({
-        externalExecutables: { ghExecutablePath: path.join(rootDir, 'unconfigured-gh') }
+        externalExecutables: {
+          ...(!options.ghPath ? { ghExecutablePath: path.join(rootDir, 'unconfigured-gh') } : {}),
+          ...(!options.glabPath ? { glabExecutablePath: path.join(rootDir, 'unconfigured-glab') } : {})
+        }
       });
     }
     service = new TaskManagerService(store, repositoryPath, events, {
       worktreeRoot,
       ghPath: options.ghPath,
+      glabPath: options.glabPath,
       ...scriptedRuntime.serviceOptions,
       previewRecipeGenerator: options.previewRecipeGenerator,
       previewEnabled: options.previewEnabled,

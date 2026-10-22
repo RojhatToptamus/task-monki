@@ -234,14 +234,14 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario(
     'delivery-review-waiting',
     'delivery',
-    'GitHub review waiting',
+    'Waiting for review',
     'GitHub review is requested and pending.',
     ['pr:GITHUB_REVIEW_WAITING']
   ),
   scenario(
     'delivery-changes-requested',
     'delivery',
-    'GitHub changes requested',
+    'Changes requested',
     'GitHub review requested changes.',
     ['pr:GITHUB_CHANGES_REQUESTED']
   ),
@@ -269,7 +269,7 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario(
     'delivery-local-not-pushed',
     'delivery',
-    'Local changes not pushed',
+    'Changes not pushed',
     'Local branch has changes newer than PR evidence.',
     ['pr:LOCAL_NOT_PUSHED']
   ),

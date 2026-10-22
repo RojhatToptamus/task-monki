@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { execFileOwnedPortable } from '../process/ownedProcess';
 import { execFilePortable } from '../process/portableChildProcess';
 
@@ -20,6 +21,28 @@ export function configureGitExecutablePath(executable: string | undefined): void
 
 export function getGitExecutablePath(): string {
   return configuredGitExecutable ?? 'git';
+}
+
+/** No repository hook runs: hooks can live in the checked-out tree (a relative `core.hooksPath`). */
+export const GIT_HOOKS_OFF_ENV: NodeJS.ProcessEnv = {
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.hooksPath',
+  GIT_CONFIG_VALUE_0: os.devNull
+};
+
+/**
+ * Checking out or moving to code Task Monki did not write must not run it: no
+ * repository hook runs, and LFS files stay pointers, since a checked-out
+ * `.lfsconfig` could point LFS downloads anywhere.
+ */
+export const UNTRUSTED_CHECKOUT_GIT_ENV: NodeJS.ProcessEnv = {
+  ...GIT_HOOKS_OFF_ENV,
+  GIT_LFS_SKIP_SMUDGE: '1'
+};
+
+/** A full Git object id, SHA-1 or SHA-256. */
+export function isGitObjectId(value: string | undefined): value is string {
+  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
 }
 
 export async function git(

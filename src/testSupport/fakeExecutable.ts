@@ -43,6 +43,23 @@ export async function writeOutputExecutable(
   );
 }
 
+/**
+ * An ssh that serves `git-upload-pack` and `git-receive-pack` from bare
+ * repositories under `hostRoot`, for `GIT_SSH_COMMAND`: a fake platform's
+ * remote without a network.
+ */
+export function writeFakeSsh(directory: string, hostRoot: string): Promise<string> {
+  return writeNodeExecutable(directory, 'fake-ssh', `
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+const command = process.argv[process.argv.length - 1];
+const match = /^(git-upload-pack|git-receive-pack) '?\\/?([^']+?)'?$/.exec(command);
+if (!match || match[2].split('/').includes('..')) { console.error('fake ssh: unexpected command ' + command); process.exit(128); }
+const result = spawnSync('git', [match[1].slice(4), path.join(${JSON.stringify(hostRoot)}, match[2])], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`);
+}
+
 function ensureNodeShebang(script: string): string {
   return script.startsWith('#!') ? script : `#!/usr/bin/env node\n${script}`;
 }

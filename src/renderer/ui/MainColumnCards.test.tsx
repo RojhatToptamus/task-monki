@@ -17,7 +17,7 @@ describe('TaskCard', () => {
       stateInFlight: false,
       showState: true,
       archived: false,
-      pullRequest: { number: 42, state: 'open', note: 'checks pending' }
+      pullRequest: { label: '#42', state: 'open', note: 'checks pending' }
     };
     const html = renderToStaticMarkup(
       <TaskCard vm={vm} onSelect={() => {}} onArchive={() => {}} onRequestDelete={() => {}} />

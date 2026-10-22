@@ -55,6 +55,23 @@ describe('CompletedChangeSummaryPanel', () => {
     expect(onViewDiff).toHaveBeenCalledWith('git-1');
   });
 
+  it('says a run that left the worktree as it found it changed no files, without listing the branch it started on', async () => {
+    api.readArtifact.mockResolvedValue(diffEvidence());
+    const before = gitSnapshotFixture({ id: 'before', capturedAt: '2026-07-07T10:00:00.000Z', diffArtifactId: undefined });
+    const panel = (snapshots: GitSnapshotRecord[]) => <CompletedChangeSummaryPanel compact run={runFixture({ beforeGitSnapshotId: 'before' })}
+      artifacts={[artifactFixture()]} gitSnapshots={snapshots} onViewDiff={() => undefined} />;
+    const { rerender } = render(panel([before, gitSnapshotFixture()]));
+    await act(async () => undefined);
+    expect(screen.getByText('No file changes')).toBeDefined();
+    expect(screen.queryByText('1 file changed')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'View diff' })).toBeNull();
+
+    // A run that committed keeps its list, though it left no uncommitted changes either.
+    rerender(panel([{ ...before, headSha: 'c'.repeat(40) }, gitSnapshotFixture()]));
+    expect(await screen.findByText('1 file changed')).toBeDefined();
+    expect(screen.queryByText('No file changes')).toBeNull();
+  });
+
   it('does not convert an artifact read failure into an empty capture', async () => {
     api.readArtifact.mockRejectedValueOnce(new Error('artifact unavailable'));
     render(

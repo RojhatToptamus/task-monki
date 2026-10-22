@@ -29,6 +29,7 @@ import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import {
+  taskGoal,
   buildAgentReviewPrompt,
   type PreviousReviewContext
 } from '../../shared/promptTemplates';
@@ -2651,7 +2652,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
       },
-      authoritativeGoal: task.prompt,
+      authoritativeGoal: taskGoal(task),
       force: true
     });
   }
@@ -2737,7 +2738,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       },
       mode: input.mode,
       prompt: input.prompt,
-      authoritativeGoal: input.task.prompt,
+      authoritativeGoal: taskGoal(input.task),
       instructionProfile: input.instructionProfile,
       attachments,
       settings

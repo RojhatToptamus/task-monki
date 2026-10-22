@@ -217,6 +217,7 @@ export interface ExternalExecutablePathSettings {
   gitExecutablePath: string | null;
   codexExecutablePath: string | null;
   ghExecutablePath: string | null;
+  glabExecutablePath: string | null;
 }
 
 export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
@@ -293,7 +294,8 @@ export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
 export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSettings = {
   gitExecutablePath: null,
   codexExecutablePath: null,
-  ghExecutablePath: null
+  ghExecutablePath: null,
+  glabExecutablePath: null
 };
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {

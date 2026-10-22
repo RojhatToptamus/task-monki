@@ -1,6 +1,6 @@
 import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
 import type { ReviewComment } from '../../shared/reviewDraft';
-import { parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
+import { diffLineCode, parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
 
 /** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
 export type ReviewFindingView = EffectiveReviewFinding;
@@ -95,6 +95,65 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
     map.set(key, [...(map.get(key) ?? []), comment]);
   }
   return { byLine, byFile };
+}
+
+/** Where each pull request discussion sits: under its last line, at its file's top, or above the files. */
+interface AnchoredDiscussions<T> {
+  byLine: Map<string, T[]>;
+  byFile: Map<string, T[]>;
+  general: T[];
+}
+
+/**
+ * Anchors pull request discussions like comments. A discussion's lines are the
+ * pull request's, so it sits on them only while the diff shown is the head the
+ * platform reported (`onLines`); otherwise, or once its code has changed since it
+ * was written, it sits at its file's top. One about the whole change, or about a
+ * file the diff does not hold, sits above the files.
+ */
+export function anchorReviewDiscussions<T extends { path?: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number; outdated: boolean }>(
+  files: readonly DiffFile[],
+  discussions: readonly T[],
+  onLines: boolean
+): AnchoredDiscussions<T> {
+  const byLine = new Map<string, T[]>();
+  const byFile = new Map<string, T[]>();
+  const general: T[] = [];
+  const filesByPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
+  for (const discussion of discussions) {
+    const file = discussion.path ? filesByPath.get(normalizeReviewPath(discussion.path)) : undefined;
+    if (!file) {
+      general.push(discussion);
+      continue;
+    }
+    // A platform's old side is the base file, unchanged lines included, not only removed ones.
+    const anchor = onLines && !discussion.outdated && discussion.line && discussion.side
+      ? findRowAnchor(file, discussion.side === 'OLD' ? 'REVIEWED' : 'NEW', discussion.line, discussion.endLine)
+      : undefined;
+    const map = anchor ? byLine : byFile;
+    const key = anchor ?? file.id;
+    map.set(key, [...(map.get(key) ?? []), discussion]);
+  }
+  return { byLine, byFile, general };
+}
+
+/** The code of lines start to end on one side of a file, when the diff holds every one of them. */
+export function sideLines(file: DiffFile, side: 'NEW' | 'OLD', start: number, end: number): string[] | undefined {
+  if (start < 1 || end < start) return undefined;
+  const byNumber = new Map<number, string>();
+  for (const block of file.blocks) {
+    for (const line of block.lines) {
+      const number = side === 'NEW' ? (line.kind === 'deletion' ? undefined : line.newLine) : (line.kind === 'addition' ? undefined : line.oldLine);
+      if (number !== undefined && number >= start && number <= end) byNumber.set(number, diffLineCode(line));
+    }
+  }
+  const lines: string[] = [];
+  for (let number = start; number <= end; number += 1) {
+    const content = byNumber.get(number);
+    if (content === undefined) return undefined;
+    lines.push(content);
+  }
+  return lines;
 }
 
 /**

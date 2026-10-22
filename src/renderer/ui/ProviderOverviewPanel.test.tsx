@@ -10,9 +10,42 @@ import type {
   AgentSessionRecord,
   Task
 } from '../../shared/contracts';
+import { taskGoal } from '../../shared/promptTemplates';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 
 describe('ProviderOverviewPanel', () => {
+  it('compares the provider goal with the goal of a task opened from an issue, which has no request of its own', () => {
+    const task = {
+      id: 'task-1', prompt: '', runtimeId: 'codex',
+      remoteSource: {
+        provider: 'GITHUB', host: 'github.com', repositoryPath: 'acme/widgets', kind: 'ISSUE', number: 12,
+        url: 'https://github.com/acme/widgets/issues/12', title: 'Crash on save',
+        snapshotArtifactId: '6f1c2a5e-8f0e-4c4e-9a52-3d1f0b7c9e21', capturedAt: '2026-07-01T00:00:00.000Z'
+      }
+    } as Task;
+    const session = { id: 'session-1', taskId: task.id, runtimeId: 'codex', providerSessionId: 'thread-1', status: 'IDLE' } as AgentSessionRecord;
+    // An earlier sync set the goal; the latest attempt failed, so the goal diagnostics show.
+    const html = renderToStaticMarkup(
+      <ProviderOverviewPanel
+        task={task}
+        session={session}
+        goalSnapshots={[{
+          id: 'goal-1', taskId: task.id, iterationId: 'iteration-1', sessionId: session.id, runtimeId: 'codex',
+          taskGoalHash: 'a'.repeat(64), providerObjective: taskGoal(task), syncState: 'SYNC_FAILED', source: 'SYNC_ERROR',
+          detail: 'The provider did not answer.', observedAt: '2026-07-01T00:00:00.000Z'
+        }]}
+        usageSnapshots={[]}
+        settingsObservations={[]}
+        onSyncGoal={async () => undefined}
+        onUpdateNativeSession={async () => undefined}
+      />
+    );
+
+    expect(html).toContain(`<span class="provider-kv__text">${taskGoal(task)}</span><small>Authoritative task goal</small>`);
+    expect(html).toContain('acme/widgets#12');
+    expect(html).toContain('Matches the Task Monki goal');
+  });
+
   it('renders runtime resolution diagnostics with rejected candidates', () => {
     const task = { id: 'task-1', prompt: 'Investigate Codex runtime.' } as Task;
     const server: AgentServerInstance = {

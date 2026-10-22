@@ -204,6 +204,41 @@ previous records.
 SQLite migration 13 removes the `sidebarCollapsed` and `showMascot`
 preferences and advances settings to schema 15.
 
+Task store schema 31 carries `Task.remoteSource` and the `remote-source`
+artifact kind: the captured issue or pull request text as immutable JSON (title,
+body, labels, ten most recent comments, each bounded), owned by the task and
+deleted with it. One task holds each issue or pull request: opening one again
+returns its task, and startup refuses two tasks with the same provider, host,
+lowercased repository path, kind and number. A pull request source also records
+the opened head, merge base and branches. A push to an
+opened pull request's branch records `previousRemoteSha`, the head its lease
+names. Platform text is stored trimmed, and HTML comments outside code, which
+the platforms hide from readers, are left out of captured text. A task source, pull request,
+check, review or merge observation is validated as it is written, so a value the
+store could not load fails that action instead of startup. Schema 31 also
+carries pull request feedback: each review observation may keep a `feedback`
+summary (artifact id, digest, unresolved and discussion counts, reviewers with
+an optional `bot` mark, the reading account as `viewer`, and the platform times
+of the person's latest comment and anyone else's, `lastViewerCommentAt` and
+`lastOtherCommentAt`) whose
+`pull-request-feedback` artifact belongs to the same task and holds the bounded
+threads, reviews and comments; unchanged feedback reuses its artifact, and a
+failed read keeps the last one. Startup refuses a summary whose artifact is
+missing or another task's. A review request may hold `DISCUSSION` items and a
+review draft `includedDiscussionIds`. A request sent before the task's first
+turn, and the instruction that starts the first coding turn on an imported
+checkout or an opened pull request, are stored as that turn's `FOLLOW_UP`
+instruction. Schema 31 also records the person's writes to a pull request:
+`PR_MERGE_REQUESTED` (number, head, method, whether the branch is deleted)
+before a merge, `PR_REPLIES_POSTED` (number, counts posted, resolved and
+reopened, reviewers asked again, and the ids of the discussions answered) after
+replies, a resolve or a reopen land, and `PR_CHECKS_RERUN_REQUESTED` after the
+platform accepts running failed checks again. It adds `BRANCH_UPDATE_REQUESTED`
+(`from`, `ref` and `sha`, with the base branch's tip as `baseRef` and `baseSha`
+for Pull changes when it was read), recorded before Task Monki merges a pull
+request's newer commits or its moved base into the worktree. Settings schema 15
+also records the `glab` path, `externalExecutables.glabExecutablePath`.
+
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding
 decisions (`AgentReviewGateProjection.findingDecisions`): a dismissal with its

@@ -1,4 +1,5 @@
 import type { AgentProfilesSettingsActions } from './AgentProfilesSettings';
+import { PullRequestStateIcon } from './PullRequestIcon';
 import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   CircleCheck,
@@ -7,10 +8,7 @@ import {
   FolderX,
   GitBranch,
   GitFork,
-  GitMerge,
   GitPullRequest,
-  GitPullRequestClosed,
-  GitPullRequestDraft,
   ListChecks,
   RotateCcw,
   ShieldQuestionMark,
@@ -632,20 +630,12 @@ export function TaskCard({
   );
 }
 
-const PULL_REQUEST_ICONS = {
-  draft: GitPullRequestDraft,
-  open: GitPullRequest,
-  merged: GitMerge,
-  closed: GitPullRequestClosed
-} as const;
-
 /** GitHub's convention: the icon carries the state, the number names the PR. */
 function CardPullRequest({ pullRequest }: { pullRequest: TaskCardPullRequest }) {
-  const Icon = PULL_REQUEST_ICONS[pullRequest.state];
-  const name = pullRequest.number ? `#${pullRequest.number}` : 'Pull request';
+  const name = pullRequest.label;
   return (
     <span className="tm-card__pr">
-      <Icon aria-hidden="true" size={13} />
+      <PullRequestStateIcon state={pullRequest.state} />
       <span className="tm-card__pr-name">{name}</span>
       <span className="tm-visually-hidden">, {pullRequest.state}</span>
       {pullRequest.note ? <span className="tm-card__pr-note">{pullRequest.note}</span> : null}

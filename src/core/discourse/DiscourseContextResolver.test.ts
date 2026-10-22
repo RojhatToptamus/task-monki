@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ContextSnapshotRecord } from '../../shared/discourse';
+import { taskGoal } from '../../shared/promptTemplates';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { git } from '../git/gitCli';
 import { DiscourseContextResolver } from './DiscourseContextResolver';
@@ -143,6 +144,24 @@ describe('DiscourseContextResolver', () => {
     const preview = await fixture.resolver.preview({ pinned: [], messageContext: [{ entityKind: 'TASK', entityId: task.id }] });
     expect(preview.references[0]?.accessMode).toBe('METADATA_ONLY');
     expect(preview.filesystemRootCount).toBe(0);
+  });
+
+  it('describes a task opened from an issue by the goal its agent works to, not its empty request', async () => {
+    const fixture = await contextFixture();
+    const task = await fixture.tasks.createTask({
+      title: 'Crash on save', prompt: '', repositoryId: fixture.repository.id,
+      remote: {
+        source: {
+          provider: 'GITHUB', host: 'github.com', repositoryPath: 'acme/widgets', kind: 'ISSUE', number: 12,
+          url: 'https://github.com/acme/widgets/issues/12', title: 'Crash on save', capturedAt: new Date().toISOString()
+        },
+        snapshot: 'Saving a layout with no panes crashes.'
+      }
+    });
+    const [resolved] = await fixture.resolver.resolveSelections([{ entityKind: 'TASK', entityId: task.id }]);
+    const description = (JSON.parse(resolved!.recordedContext!) as { task: { description: string } }).task.description;
+    expect(description).toBe(taskGoal(task));
+    expect(description).toContain('acme/widgets#12');
   });
 
   it('changes source generation when the canonical read root moves despite identical Git content', async () => {

@@ -15,6 +15,17 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  ReadPullRequestMergeOptionsRequest,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReadPullRequestCheckLogsRequest,
+  MergePullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -110,8 +121,16 @@ import {
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
 
+// Electron rejects an invoke with "Error invoking remote method '<channel>': "
+// and the handler error's toString(); the renderer receives only its message.
+const REMOTE_ERROR_NAME = /^\w*Error(?: \[\w+\])?: /u;
+
 function invokeIpc(channel: IpcInvokeChannel, ...args: unknown[]): Promise<any> {
-  return ipcRenderer.invoke(channel, ...args);
+  return ipcRenderer.invoke(channel, ...args).catch((error: unknown) => {
+    const prefix = `Error invoking remote method '${channel}': `;
+    if (!(error instanceof Error) || !error.message.startsWith(prefix)) throw error;
+    throw new Error(error.message.slice(prefix.length).replace(REMOTE_ERROR_NAME, ''));
+  });
 }
 
 function getWindowChromePlatform(): WindowChromePlatform {
@@ -247,6 +266,17 @@ const api: TaskManagerApi = {
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
   importTask: (input: ImportTaskRequest) => invokeIpc('task:import', input),
+  listRemoteWork: (input: ListRemoteWorkRequest) => invokeIpc('remote:list', input),
+  openPullRequest: (input: OpenPullRequestRequest) => invokeIpc('remote:openPullRequest', input),
+  syncPullRequest: (input: SyncPullRequestRequest) => invokeIpc('remote:syncPullRequest', input),
+  markPullRequestReady: (input: MarkPullRequestReadyRequest) => invokeIpc('remote:markPullRequestReady', input),
+  resolvePullRequestDiscussion: (input: ResolvePullRequestDiscussionRequest) => invokeIpc('remote:resolvePullRequestDiscussion', input),
+  rerunPullRequestChecks: (input: RerunPullRequestChecksRequest) => invokeIpc('remote:rerunPullRequestChecks', input),
+  readPullRequestMergeOptions: (input: ReadPullRequestMergeOptionsRequest) => invokeIpc('remote:readPullRequestMergeOptions', input),
+  mergePullRequest: (input: MergePullRequestRequest) => invokeIpc('remote:mergePullRequest', input),
+  replyToPullRequest: (input: ReplyToPullRequestRequest) => invokeIpc('remote:replyToPullRequest', input),
+  readPullRequestCheckLogs: (input: ReadPullRequestCheckLogsRequest) => invokeIpc('remote:readPullRequestCheckLogs', input),
+  mergePullRequestUpdate: (input: MergePullRequestUpdateRequest) => invokeIpc('remote:mergePullRequestUpdate', input),
   previewImport: (input: PreviewImportRequest) => invokeIpc('task:importPreview', input),
   listExistingWorktrees: (repositoryId: string) => invokeIpc('worktree:list', repositoryId),
   reconnectWorktree: (input: ReconnectWorktreeRequest) => invokeIpc('worktree:reconnect', input),

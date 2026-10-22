@@ -415,7 +415,8 @@ function normalizeExternalExecutables(value: unknown): ExternalExecutablePathSet
   return {
     gitExecutablePath: normalizeExecutablePath(value.gitExecutablePath),
     codexExecutablePath: normalizeExecutablePath(value.codexExecutablePath),
-    ghExecutablePath: normalizeExecutablePath(value.ghExecutablePath)
+    ghExecutablePath: normalizeExecutablePath(value.ghExecutablePath),
+    glabExecutablePath: normalizeExecutablePath(value.glabExecutablePath)
   };
 }
 
@@ -558,10 +559,11 @@ function isCurrentAppSettingsRecord(
     ['disabled', 'all'].includes(String(tools.mcpServers)) &&
     ['disabled', 'enabled'].includes(String(tools.apps)) &&
     isRecord(executables) &&
-    Object.keys(executables).length === 3 &&
+    Object.keys(executables).length === 4 &&
     isCanonicalNullableString(executables.gitExecutablePath) &&
     isCanonicalNullableString(executables.codexExecutablePath) &&
     isCanonicalNullableString(executables.ghExecutablePath) &&
+    isCanonicalNullableString(executables.glabExecutablePath) &&
     isRecord(runtimeExecutablePaths) &&
     Object.entries(runtimeExecutablePaths).every(
       ([runtimeId, executable]) =>

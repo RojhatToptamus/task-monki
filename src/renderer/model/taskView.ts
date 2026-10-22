@@ -1,7 +1,9 @@
 import { effectiveReviewGateStatus, openReviewFindings } from '../../shared/agentReviewFindings';
+import { deliveryProvider } from './deliveryWords';
 import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
+  BoardDeliveryFacts,
   BoardTaskSummary,
   DomainEvent,
   Repository,
@@ -11,11 +13,14 @@ import type {
 } from '../../shared/contracts';
 import {
   completionPolicyRequiresMerge,
-  getImplementationRetryReason
+  formatRemoteWorkNumber,
+  getImplementationRetryReason,
+  remoteWorkLabel
 } from '../../shared/contracts';
 import { isImplementationOutcomeBlocked } from './nextAction';
 import {
   describeAttentionStatus,
+  describeOutOfStep,
   describeTaskAttention,
   isAttentionTask,
   isInFlightTask
@@ -26,8 +31,8 @@ import type { Tone } from './viewTypes';
 
 /** A task's pull request as a board card shows it: GitHub's number and state. */
 export interface TaskCardPullRequest {
-  /** Undefined while the pull request is linked but not yet numbered. */
-  number?: number;
+  /** The number as its platform writes it, `#82` or `!82`, or the platform's word while it has none. */
+  label: string;
   state: 'draft' | 'open' | 'merged' | 'closed';
   /** Delivery progress the card's status word does not already say, e.g. "checks pending". */
   note?: string;
@@ -61,8 +66,9 @@ export interface RunFailureBannerViewModel {
 }
 
 export interface TaskCompletionEvidenceViewModel {
-  label: 'Marked done' | 'Auto-completed' | 'Completion unknown';
-  detail: string;
+  label: 'Marked done' | 'Merged' | 'Completion unknown';
+  /** How the task came to be done, when the label alone does not say it. */
+  detail?: string;
 }
 
 export function describeTaskCompletionEvidence(
@@ -94,10 +100,8 @@ export function describeTaskCompletionEvidence(
     completionPolicyRequiresMerge(task.completionPolicy) &&
     isMerged(task.projection)
   ) {
-    return {
-      label: 'Auto-completed',
-      detail: 'Completed by the merge policy; no one marked it done.'
-    };
+    // The merge is how it ended; its date and method are the pull request's record.
+    return { label: 'Merged' };
   }
   return {
     label: 'Completion unknown',
@@ -213,7 +217,11 @@ export interface TaskCardRepositoryIdentity {
   repositoryName: string;
 }
 
-export type TaskCardSource = Task | BoardTaskSummary;
+/**
+ * A task as the status function reads it. A full task can carry the facts a
+ * board summary derives from its records, so both read the same word.
+ */
+export type TaskCardSource = Task | BoardTaskSummary | (Task & Partial<Pick<BoardTaskSummary, 'pullRequestRewritten' | 'delivery'>>);
 
 /**
  * The one status word for a task. The board card, the task header and Active
@@ -264,6 +272,12 @@ export function describeTaskStatus(task: TaskCardSource): { label: string; tone:
     const status = cardReviewStatus(task);
     return describeDeliveryProgress(task, status) ?? describeReviewGateStatus(task, status);
   }
+  // Between turns, an open pull request's own progress is the task's state in any
+  // phase, such as a pull request opened as a task before its first turn.
+  const delivery = describeDeliveryProgress(task, cardReviewStatus(task));
+  if (delivery) {
+    return delivery;
+  }
   if (run === 'COMPLETED') {
     return { label: 'Completed', tone: 'success' };
   }
@@ -302,11 +316,10 @@ function describeDeliveryProgress(
   if (!open || (status !== 'NOT_RUN' && status !== 'PASSED')) {
     return undefined;
   }
-  if (projection.git === 'DIVERGED') {
-    return { label: 'Branch diverged', tone: 'error' };
-  }
-  if (projection.git === 'DIRTY' || projection.git === 'COMMITTED_UNPUSHED') {
-    return { label: 'Changes not pushed', tone: 'action' };
+  // The same word the attention model gives a worktree out of step while a blocker stands.
+  const outOfStep = describeOutOfStep(task);
+  if (outOfStep) {
+    return describeAttentionStatus(outOfStep);
   }
   if (projection.ciChecks === 'STALE') {
     return { label: 'Checks stale', tone: 'action' };
@@ -414,9 +427,14 @@ export function cardPullRequestForTask(
   if (!state) {
     return undefined;
   }
-  const note = state === 'draft' || state === 'open' ? cardPullRequestNote(projection) : undefined;
+  const note = state === 'draft' || state === 'open'
+    ? cardPullRequestNote(projection, 'delivery' in task ? task.delivery : undefined)
+    : undefined;
+  const provider = deliveryProvider(task);
   return {
-    number: projection.githubPullRequestNumber,
+    label: projection.githubPullRequestNumber
+      ? formatRemoteWorkNumber(provider, 'PULL_REQUEST', projection.githubPullRequestNumber)
+      : remoteWorkLabel(provider, 'PULL_REQUEST'),
     state,
     ...(note && !CARD_NOTE_STATED_BY[note]?.includes(stateLabel) ? { note } : {})
   };
@@ -432,21 +450,28 @@ function cardPullRequestState(
   return undefined;
 }
 
-function cardPullRequestNote(projection: TaskCardSource['projection']): string | undefined {
+function cardPullRequestNote(
+  projection: TaskCardSource['projection'],
+  delivery: BoardDeliveryFacts | undefined
+): string | undefined {
   if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') return 'checks failing';
   if (projection.ciChecks === 'PENDING') return 'checks pending';
   if (projection.ciChecks === 'CANCELED') return 'checks canceled';
-  if (projection.reviews === 'CHANGES_REQUESTED') return 'changes requested';
+  // Once the person answered, the review waits on its reviewers, as PR Status says.
+  if (projection.reviews === 'CHANGES_REQUESTED') return delivery?.turn === 'REVIEWERS' ? 'review waiting' : 'changes requested';
   if (projection.reviews === 'REQUESTED' || projection.reviews === 'PENDING') return 'review waiting';
   // Scalars alone never claim ready to merge; that needs evidence for the current head.
-  if (projection.ciChecks === 'PASSING' && projection.merge === 'MERGEABLE') return 'checks passing, mergeable';
+  // A draft is never mergeable, whatever Git says of its conflicts.
+  if (projection.ciChecks === 'PASSING') {
+    return projection.merge === 'MERGEABLE' && projection.githubPullRequest === 'OPEN_READY' ? 'checks passing, mergeable' : 'checks passing';
+  }
   return undefined;
 }
 
-/** Status words that already carry a delivery note, so the card says it once. */
+/** Status words that already carry a delivery note, so the card says it once, on either platform. */
 const CARD_NOTE_STATED_BY: Record<string, string[]> = {
   'checks failing': ['Checks failed'],
-  'changes requested': ['GitHub changes requested']
+  'changes requested': ['Changes requested']
 };
 
 const FINDING_SEVERITY_LABELS: Array<{

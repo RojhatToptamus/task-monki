@@ -52,4 +52,25 @@ describe('assertReviewRequestRecord', () => {
     expect(() => assertReviewRequestRecord({ items: [{ ...request.items[1], number: 1, line: 9, endLine: 3 }] })).toThrow();
     expect(() => assertReviewRequestRecord({ ...request, extra: true })).toThrow();
   });
+
+  it('accepts a pull request discussion only with its platform, identity and text, and a place it can name', () => {
+    const discussion = {
+      number: 3, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_kwDOA', author: 'alice',
+      path: 'feature.ts', side: 'NEW', line: 4, endLine: 6, text: 'Handle a null layout.'
+    } as const;
+    const withItem = (item: object) => ({ ...request, items: [...request.items, item] });
+    expect(() => assertReviewRequestRecord(withItem(discussion))).not.toThrow();
+    // A review summary or a conversation comment has no place in the diff.
+    expect(() => assertReviewRequestRecord(withItem({ number: 3, kind: 'DISCUSSION', provider: 'GITLAB', discussionId: 'a'.repeat(40), text: 'Looks close.' }))).not.toThrow();
+    for (const malformed of [
+      { ...discussion, provider: 'BITBUCKET' },
+      { ...discussion, discussionId: ' ' },
+      { ...discussion, text: '' },
+      { ...discussion, side: 'LEFT' },
+      { ...discussion, path: undefined },
+      { ...discussion, title: 'A finding field' }
+    ]) {
+      expect(() => assertReviewRequestRecord(withItem(malformed))).toThrow('The review request is not valid.');
+    }
+  });
 });

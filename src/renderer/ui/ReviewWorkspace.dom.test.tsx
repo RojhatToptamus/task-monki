@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
+import type { DiscussionView } from '../model/pullRequestFeedback';
 import { planReviewRequest } from '../model/reviewFollowUp';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
@@ -45,7 +46,7 @@ function Harness(overrides: Partial<ReviewWorkspaceProps> & { onSubmit?(draft: T
       artifacts={[artifact()]}
       draft={draft}
       onDraftChange={setDraft}
-      plan={planReviewRequest(findings, draft, { runId: review?.runId, findingsSendable, asksForChanges: false })}
+      plan={planReviewRequest(findings, draft, { runId: review?.runId, findingsSendable, asksForChanges: false }, overrides.discussions ?? [])}
       findingsSendable={findingsSendable}
       requestChanges={{ busy: false, instruction: () => 'Address the review.', onSubmit: () => overrides.onSubmit?.(draft) }}
       {...overrides}
@@ -367,6 +368,200 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getByText('Codex asked a question')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Go to request' }));
     expect(onOpen).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ReviewWorkspace pull request discussions', () => {
+  beforeEach(() => {
+    api.readArtifact.mockReset();
+  });
+  const discussion = (id: string, extra: Partial<DiscussionView> = {}): DiscussionView => ({
+    id, kind: 'THREAD', provider: 'GITHUB', path: 'src/rateLimit.ts', side: 'NEW', line: 1, resolvable: true, resolved: false,
+    outdated: false, open: true, url: `https://github.com/acme/widgets/pull/9#${id}`, commentCount: 2,
+    comments: [
+      { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Return **seconds** here.', truncated: false },
+      { author: 'bob', createdAt: '2026-07-07T09:30:00.000Z', body: 'Agreed.', truncated: false }
+    ],
+    ...extra
+  });
+  const resolved = discussion('done', {
+    resolved: true, open: false, commentCount: 1, comments: [{ author: 'carol', body: 'Rename the limiter.', truncated: false }]
+  });
+
+  it('shows a reviewer\'s thread with its replies, sends it only once added, and folds a resolved one to a line', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const onSubmit = vi.fn();
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), resolved]} discussionsOnLines onSubmit={onSubmit} />);
+
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(thread).getByText('seconds').tagName).toBe('STRONG');
+    expect(within(thread).getByText('Agreed.')).toBeDefined();
+    expect(within(thread).getByRole('link', { name: 'Open on GitHub' }).getAttribute('href')).toBe('https://github.com/acme/widgets/pull/9#open');
+    // On its own line, the thread does not repeat where it is.
+    expect(within(thread).queryByText('Line 1')).toBeNull();
+    // Other people's words go to the agent only when the person adds them.
+    expect(screen.queryByRole('button', { name: 'Address comments' })).toBeNull();
+    fireEvent.click(within(thread).getByRole('button', { name: 'Add to request' }));
+    fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
+    const sheet = screen.getByRole('dialog', { name: 'Address comments' });
+    expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Return seconds here.')).toBeDefined();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Address comments' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ includedDiscussionIds: ['open'] }));
+    // Sending answers the sheet.
+    expect(screen.queryByRole('dialog', { name: 'Address comments' })).toBeNull();
+    // Taking out the last item empties the request, and the sheet goes with it.
+    fireEvent.click(screen.getByRole('button', { name: /^1 GitHub comment/ }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Address comments' }))
+      .getByRole('button', { name: 'Take the comment by alice out of the request' }));
+    expect(screen.queryByRole('dialog', { name: 'Address comments' })).toBeNull();
+
+    // A resolved thread is one line that opens; it cannot be added.
+    const folded = screen.getByRole('button', { name: /carol/ });
+    expect(folded.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(folded);
+    const opened = screen.getByRole('article', { name: 'GitHub comment by carol' });
+    expect(within(opened).queryByRole('button', { name: 'Add to request' })).toBeNull();
+  });
+
+  it('answers a thread where it is read: a reply starts from the agent\'s answer and posts with the resolving chosen', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts', 'const window = 60;'));
+    const onReplyToDiscussion = vi.fn(async () => undefined);
+    const onResolveDiscussion = vi.fn(async () => undefined);
+    const suggestion = discussion('suggest', { commentCount: 1, comments: [
+      { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Name it:\n\n```suggestion\nconst windowSeconds = 60;\n```', truncated: false }
+    ] });
+    const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), suggestion]} discussionsOnLines
+      replyDrafts={drafts} onReplyToDiscussion={onReplyToDiscussion} onResolveDiscussion={onResolveDiscussion} />);
+    await screen.findAllByRole('article', { name: 'GitHub comment by alice' });
+    const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
+
+    // A suggested change reads as a diff: the line it replaces, then the line it suggests.
+    const figure = within(thread('suggest')).getByText('Suggested change').closest('figure')!;
+    expect(within(figure).getByText('const window = 60;')).toBeDefined();
+    expect(within(figure).getByText('const windowSeconds = 60;')).toBeDefined();
+
+    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the agent's answer.
+    const input = within(thread('open')).getByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    expect(input.value).toBe('');
+    expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
+    fireEvent.focusIn(thread('open'));
+    fireEvent.keyDown(thread('open'), { key: 'r' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.focusIn(input);
+    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    // Resolving stays the person's call.
+    const resolve = within(thread('open')).getByRole('checkbox', { name: 'Resolve thread' });
+    expect((resolve as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(resolve);
+    fireEvent.change(input, { target: { value: 'Returns seconds now.' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Returns seconds now.', false));
+    // Posted, the row is empty again and folds back to its field.
+    await waitFor(() => expect(input.value).toBe(''));
+    expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
+
+    // Resolving needs no reply: the check on the thread's head.
+    const check = within(thread('suggest')).getByRole('button', { name: 'Resolve thread' });
+    expect(check.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(check);
+    await waitFor(() => expect(onResolveDiscussion).toHaveBeenCalledWith('suggest', true));
+  });
+
+  it('keeps only what the person typed in a reply, so an answer posted elsewhere does not come back as theirs', async () => {
+    api.readArtifact.mockResolvedValue(diffFor('src/rateLimit.ts'));
+    // What the task keeps while it is open, as the task page holds it across visits to Review.
+    const typed = new Map<string, string>();
+    const onReplyTextChange = (discussionId: string, text: string | undefined) => {
+      if (text === undefined) typed.delete(discussionId);
+      else typed.set(discussionId, text);
+    };
+    const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
+      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+    const shared = { findings: [], review: undefined, discussionsOnLines: true, replyTexts: typed, onReplyTextChange,
+      onReplyToDiscussion: vi.fn(async () => undefined) };
+    const first = render(<Harness {...shared} discussions={[discussion('open')]} replyDrafts={drafts} />);
+    const input = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    fireEvent.focusIn(input);
+    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    first.unmount();
+
+    // Posted from the Overview's dialog, the answer leaves the drafts and the thread waits on alice.
+    render(<Harness {...shared} discussions={[discussion('open', { replied: true })]} />);
+    const again = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
+    expect(again.value).toBe('');
+    expect(screen.queryByRole('button', { name: 'Reply' })).toBeNull();
+  });
+
+  it('keeps the keys on a thread when it opens, folds or shows every reply', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const long = discussion('long', { commentCount: 5, comments: ['alice', 'bob', 'carol', 'dave', 'erin'].map((author, index) => ({
+      author, createdAt: `2026-07-07T09:0${index}:00.000Z`, body: `Point ${index + 1}.`, truncated: false
+    })) });
+    render(<Harness findings={[]} review={undefined} discussions={[resolved, long, discussion('open')]} discussionsOnLines />);
+    await screen.findByRole('article', { name: 'GitHub comment by carol' });
+    const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
+    // A control that goes away when pressed leaves the focus on its thread, where N still moves on.
+    const press = (button: HTMLElement) => { button.focus(); fireEvent.click(button); };
+
+    press(within(thread('done')).getByRole('button', { name: /Rename the limiter/ }));
+    expect(document.activeElement).toBe(thread('done'));
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('long'));
+
+    press(within(thread('done')).getByRole('button', { name: 'Fold' }));
+    expect(document.activeElement).toBe(thread('done'));
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('long'));
+
+    press(within(thread('long')).getByRole('button', { name: '3 more replies' }));
+    expect(document.activeElement).toBe(thread('long'));
+    expect(within(thread('long')).getByText('Point 3.')).toBeDefined();
+    fireEvent.keyDown(document.activeElement!, { key: 'n' });
+    expect(document.activeElement).toBe(thread('open'));
+  });
+
+  it('shows a discussion another surface asked to see when the diff has no files', async () => {
+    const onDiscussionRevealed = vi.fn();
+    render(<Harness findings={[]} review={undefined} currentDiffArtifactId={undefined} discussions={[discussion('open')]}
+      revealDiscussionId="open" onDiscussionRevealed={onDiscussionRevealed} />);
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(screen.getByRole('region', { name: 'Feedback without a location' })).getByRole('article')).toBe(thread);
+    await waitFor(() => expect(document.activeElement).toBe(thread));
+    expect(onDiscussionRevealed).toHaveBeenCalledOnce();
+  });
+
+  it('acts with F on the thread in focus, never on a discussion focused before it', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[suggestion]} discussions={[discussion('open')]} discussionsOnLines />);
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    const minor = screen.getByRole('article', { name: 'Minor finding: Name the limit' });
+    fireEvent.focusIn(thread);
+    fireEvent.focusIn(minor);
+    fireEvent.keyDown(minor, { key: 'f' });
+    expect(within(minor).getByRole('button', { name: /In request/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(thread).getByRole('button', { name: 'Add to request' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('says which line a thread is about once the code it was written on may have moved, and lists threads by what happens to them', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const sent = discussion('sent', { comments: [{ author: 'dave', body: 'Cap the burst.', truncated: false }], commentCount: 1,
+      sent: { at: '2026-07-07T10:00:00.000Z', outcome: 'FIXED' } });
+    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), sent, resolved]} discussionsOnLines={false} />);
+
+    const thread = await screen.findByRole('article', { name: 'GitHub comment by alice' });
+    expect(within(thread).getByText('Line 1')).toBeDefined();
+    expect(within(screen.getByRole('article', { name: 'GitHub comment by dave' })).getByText('Fixed')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
+    const rail = screen.getByRole('navigation', { name: 'Feedback' });
+    const onGitHub = within(rail).getByText('On GitHub').parentElement!;
+    // What still needs a decision comes before what was sent.
+    expect(within(onGitHub).getAllByRole('button').map((row) => row.textContent)).toEqual([
+      expect.stringContaining('alice'), expect.stringContaining('dave')
+    ]);
+    expect(within(within(rail).getByText('Resolved on GitHub').parentElement!).getByText('Rename the limiter.')).toBeDefined();
   });
 });
 

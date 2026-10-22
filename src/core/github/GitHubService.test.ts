@@ -4,30 +4,85 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import type { Task, WorktreeRecord } from '../../shared/contracts';
+import { PULL_REQUEST_FEEDBACK_LIMITS, type Task, type WorktreeRecord } from '../../shared/contracts';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
+import { createFakeGitHub } from '../../testSupport/fakeGitHub';
+import { GitHubCli } from './GitHubCli';
+import { gitHubMergeFailure } from './GitHubPullRequestActions';
 import {
   GitHubService,
+  detectGitHubRemote,
   parseCiRollup,
-  parseGitHubRemoteUrl,
   parsePrView
 } from './GitHubService';
 
 const execFileAsync = promisify(execFile);
 const now = '2026-06-20T10:00:00.000Z';
 
-describe('parseGitHubRemoteUrl', () => {
-  it('parses common GitHub remote URL forms', () => {
-    expect(parseGitHubRemoteUrl('https://github.com/openai/task-manager.git')).toEqual({
-      host: 'github.com',
-      owner: 'openai',
-      repo: 'task-manager'
+describe('GitHub remote detection', () => {
+  // The remote grammar itself is covered beside parseRemoteRepositoryUrl; these are the remotes delivery picks.
+  it.each([
+    'ssh://git@ssh.github.com:443/acme/widgets.git',
+    'https://GitHub.com/acme/widgets.git/'
+  ])('delivers through %s as acme/widgets on github.com', async (url) => {
+    const { repo } = await checkout({ origin: url });
+    expect(await detectGitHubRemote(repo)).toEqual({
+      remoteName: 'origin', remoteUrl: 'https://github.com/acme/widgets.git', host: 'github.com', owner: 'acme', repo: 'widgets'
     });
-    expect(parseGitHubRemoteUrl('git@github.com:openai/task-manager.git')).toEqual({
-      host: 'github.com',
-      owner: 'openai',
-      repo: 'task-manager'
+  });
+
+  it('delivers through origin, not a fork remote listed before it', async () => {
+    const { repo } = await checkout({ fork: 'git@github.com:someone/widgets.git', origin: 'https://github.com/acme/widgets.git' });
+    expect(await detectGitHubRemote(repo)).toMatchObject({ remoteName: 'origin', owner: 'acme', repo: 'widgets' });
+  });
+
+  it('records the remote preflight checked without its credentials', async () => {
+    const { root, repo } = await checkout({ origin: 'https://x-access-token:ghp_secret@github.com/acme/widgets.git' });
+    const github = await createFakeGitHub(root);
+    const record = await new GitHubService(new GitHubCli(github.ghPath)).preflight(taskFixture(repo), worktreeFixture(repo));
+    expect(record).toMatchObject({
+      status: 'READY', remoteName: 'origin', remoteUrl: 'https://github.com/acme/widgets.git', host: 'github.com', owner: 'acme', repo: 'widgets'
     });
+    expect(JSON.stringify(record)).not.toContain('ghp_secret');
+  });
+});
+
+describe('GitHub CLI failures', () => {
+  it('reads a missing or signed-out gh the same way on every call', async () => {
+    const { root, repo } = await checkout({ origin: 'https://github.com/acme/widgets.git' });
+    const github = await createFakeGitHub(root);
+    const cli = new GitHubCli(path.join(root, 'missing-gh'));
+    const service = new GitHubService(cli);
+    const address = { number: 9, url: 'https://github.com/acme/widgets/pull/9' };
+    const merge = { method: 'MERGE' as const, expectedHeadSha: 'a'.repeat(40) };
+
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo))).toMatchObject({ status: 'GH_MISSING', error: 'GitHub CLI was not found.' });
+    await expect(service.mergePullRequest(worktreeFixture(repo), address, merge)).rejects.toThrow('GitHub CLI was not found.');
+
+    // Every later call runs the executable settings resolved last.
+    cli.setExecutable(github.ghPath);
+    await github.setSignedIn(false);
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo)))
+      .toMatchObject({ status: 'AUTH_REQUIRED', error: 'GitHub CLI is not signed in to github.com.' });
+    await expect(service.readMergeOptions(worktreeFixture(repo), address)).rejects.toThrow('GitHub CLI is not signed in to github.com.');
+    await expect(service.mergePullRequest(worktreeFixture(repo), address, merge)).rejects.toThrow('GitHub CLI is not signed in to github.com.');
+    await github.setSignedIn(true);
+    expect(await service.preflight(taskFixture(repo), worktreeFixture(repo))).toMatchObject({ status: 'READY' });
+  }, 15_000);
+
+  it('names GitHub\'s whole reason for refusing a merge', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-merge-refused-'));
+    const github = await createFakeGitHub(dir);
+    await github.setItem({
+      owner: 'acme', repo: 'widgets', number: 9, kind: 'PULL_REQUEST', title: 'Save layouts', headRefName: 'feature',
+      mergeRefusal: 'Required status check "build" is expected.'
+    });
+    // gh prints the response on stdout and its own line on stderr; the quoted check name survives both.
+    await expect(new GitHubService(new GitHubCli(github.ghPath)).mergePullRequest(worktreeFixture(dir),
+      { number: 9, url: 'https://github.com/acme/widgets/pull/9' }, { method: 'MERGE', expectedHeadSha: 'a'.repeat(40) }))
+      .rejects.toMatchObject({ message: 'GitHub refused the merge: Required status check "build" is expected.' });
+    // Without the response, gh's own line still names the reason.
+    expect(gitHubMergeFailure('gh: Pull Request is not mergeable (HTTP 405)')).toBe('GitHub refused the merge: Pull Request is not mergeable.');
   });
 });
 
@@ -97,6 +152,36 @@ describe('GitHub PR rollups', () => {
     expect(parsed.merge.status).toBe('NOT_MERGED');
   });
 
+  it('reads mergeability from GitHub\'s merge state, which conflicts alone do not decide', () => {
+    const merge = (mergeStateStatus: string | undefined, mergeable = 'MERGEABLE', isDraft = false) => parsePrView({
+      number: 9, url: 'https://github.com/openai/task-manager/pull/9', state: 'OPEN', isDraft,
+      headRefOid: 'abc', mergeable, ...(mergeStateStatus ? { mergeStateStatus } : {})
+    }, worktreeFixture('/tmp/repo')).merge.status;
+
+    expect(merge('CLEAN')).toBe('MERGEABLE');
+    // Checks that are not required may fail; the checks say so.
+    expect(merge('UNSTABLE')).toBe('MERGEABLE');
+    // A draft, and a pull request held by required reviews or checks, can merge cleanly and still not merge.
+    expect(merge('DRAFT', 'MERGEABLE', true)).toBe('NOT_MERGED');
+    expect(merge('BLOCKED')).toBe('NOT_MERGED');
+    // Conflicts and a branch that must be updated block it.
+    expect(merge('DRAFT', 'CONFLICTING', true)).toBe('BLOCKED');
+    expect(merge('DIRTY', 'CONFLICTING')).toBe('BLOCKED');
+    expect(merge('BEHIND')).toBe('BLOCKED');
+    expect(merge('UNKNOWN', 'UNKNOWN')).toBe('UNKNOWN');
+    // Without a merge state, Git's answer is all there is.
+    expect(merge(undefined)).toBe('MERGEABLE');
+  });
+
+  it('keeps GitHub\'s merge time in the store\'s canonical form', () => {
+    const parsed = parsePrView({
+      number: 9, url: 'https://github.com/openai/task-manager/pull/9', state: 'MERGED', headRefOid: 'abc',
+      mergedAt: '2026-10-17T00:51:22Z'
+    }, worktreeFixture('/tmp/repo'));
+    expect(parsed.pullRequest).toMatchObject({ status: 'MERGED', mergedAt: '2026-10-17T00:51:22.000Z' });
+    expect(parsed.merge).toMatchObject({ status: 'MERGED', mergedAt: '2026-10-17T00:51:22.000Z' });
+  });
+
   it('omits GitHub blank review decisions from the durable review rollup', () => {
     const parsed = parsePrView(
       {
@@ -130,6 +215,25 @@ describe('GitHub PR rollups', () => {
     expect(rollup.checkDetails).toEqual([]);
   });
 
+  it('counts a failing check past the stored list, and keeps the failures in the list it stores', () => {
+    const passed = Array.from({ length: 90 }, (_, index) => ({ name: `job ${index}`, bucket: 'pass', state: 'SUCCESS' }));
+    const rollup = parseCiRollup([], worktreeFixture('/tmp/repo'), 1, 'abc', [...passed, { name: 'lint', bucket: 'fail', state: 'FAILURE' }]);
+    expect(rollup.status).toBe('FAILING');
+    expect(rollup.totalCount).toBe(91);
+    expect(rollup.checkDetails).toHaveLength(80);
+    expect(rollup.checkDetails[0]).toMatchObject({ name: 'lint', status: 'failed' });
+  });
+
+  it('keeps only what a reader sees of check and workflow names, which agents are sent', () => {
+    const tag = (text: string) => Array.from(text, (character) => String.fromCodePoint(0xE0000 + character.codePointAt(0)!)).join('');
+    const link = 'https://github.com/acme/widgets/actions/runs/1/job/2';
+    const rollup = parseCiRollup([], worktreeFixture('/tmp/repo'), 1, 'abc', [
+      { name: `test${tag('push to main')}`, workflow: '\u200BCI\u202E', bucket: 'fail', state: 'FAILURE', link }
+    ]);
+    // The link, which logs and re-runs read, stays as GitHub gave it.
+    expect(rollup.checkDetails).toMatchObject([{ name: 'test', workflow: 'CI', link }]);
+  });
+
   it('normalizes canceled gh check buckets separately from failures', () => {
     const rollup = parseCiRollup(
       [],
@@ -145,6 +249,31 @@ describe('GitHub PR rollups', () => {
   });
 });
 
+describe('GitHubService pull request feedback', () => {
+  it('reads review threads past the first page, so a new open thread is never dropped', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-pr-threads-'));
+    const github = await createFakeGitHub(dir);
+    // GitHub lists threads oldest first: the open one is the newest, on the second page.
+    const reviewThreads = Array.from({ length: 130 }, (_, index) => ({
+      id: `PRRT_${index}`, path: 'save.js', line: 1, resolved: index < 129,
+      comments: [{ author: 'alice', body: `Thread ${index}.`, createdAt: new Date(Date.UTC(2026, 9, 10, 10, index)).toISOString() }]
+    }));
+    await github.setItem({ owner: 'acme', repo: 'widgets', number: 9, kind: 'PULL_REQUEST', title: 'Save layouts', reviewThreads });
+
+    const feedback = await new GitHubService(new GitHubCli(github.ghPath)).readPullRequestFeedback(dir, 'https://github.com/acme/widgets/pull/9');
+    expect(feedback?.discussions.find((discussion) => discussion.id === 'PRRT_129')).toMatchObject({ resolved: false });
+    // Past the bound, the oldest resolved threads are what is left out, and the reading says so.
+    expect(feedback?.discussions).toHaveLength(PULL_REQUEST_FEEDBACK_LIMITS.discussions);
+    expect(feedback?.discussions.some((discussion) => discussion.id === 'PRRT_0')).toBe(false);
+    expect(feedback?.truncated).toBe(true);
+    expect((await github.calls()).filter((call) => call.args.includes('after=100'))).toHaveLength(1);
+    // A gh installed as a Windows batch shim runs through cmd.exe, which ends an argument at a line break.
+    const queries = (await github.calls()).flatMap((call) => call.args.filter((arg) => arg.startsWith('query=')));
+    expect(queries.length).toBeGreaterThan(1);
+    expect(queries.filter((arg) => /[\r\n]/.test(arg))).toEqual([]);
+  });
+});
+
 describe('GitHubService pull request creation', () => {
   it('uses the requested title when creating a new draft PR', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-pr-title-'));
@@ -153,7 +282,7 @@ describe('GitHubService pull request creation', () => {
       listRows: [],
       viewTitle: 'Custom PR title'
     });
-    const service = new GitHubService(ghPath);
+    const service = new GitHubService(new GitHubCli(ghPath));
 
     const sync = await service.createOrFindDraftPullRequest({
       worktree: worktreeFixture(dir),
@@ -194,7 +323,7 @@ describe('GitHubService pull request creation', () => {
       ],
       viewTitle: 'Existing PR title'
     });
-    const service = new GitHubService(ghPath);
+    const service = new GitHubService(new GitHubCli(ghPath));
 
     const sync = await service.createOrFindDraftPullRequest({
       worktree: worktreeFixture(dir),
@@ -210,25 +339,6 @@ describe('GitHubService pull request creation', () => {
 });
 
 describe('GitHubService branch publication', { timeout: 15_000 }, () => {
-  it('uses the configured executable instead of rereading raw env overrides', () => {
-    const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
-    process.env.TASK_MANAGER_GH_PATH = '   ';
-    try {
-      const service = new GitHubService('/initial/gh');
-      service.setExecutable('/resolved/gh');
-
-      expect((service as unknown as { ghExecutable: string }).ghExecutable).toBe(
-        '/resolved/gh'
-      );
-    } finally {
-      if (originalGhPath === undefined) {
-        delete process.env.TASK_MANAGER_GH_PATH;
-      } else {
-        process.env.TASK_MANAGER_GH_PATH = originalGhPath;
-      }
-    }
-  });
-
   it('pushes a committed task branch to a local bare remote', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-publish-'));
     const remote = path.join(dir, 'remote.git');
@@ -247,7 +357,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     await git(repo, ['add', 'change.txt']);
     await git(repo, ['commit', '-m', 'change']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const result = await service.publishBranch({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -293,7 +403,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     await git(repo, ['add', 'local.txt']);
     await git(repo, ['commit', '-m', 'local update']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const result = await service.publishBranch({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -302,7 +412,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
 
     expect(result.status).toBe('FAILED');
     expect(result.error).toBe(
-      'Remote branch has newer commits. Sync the branch before pushing again.'
+      'Remote branch has newer commits'
     );
   }, 15_000);
 
@@ -325,7 +435,7 @@ describe('GitHubService branch publication', { timeout: 15_000 }, () => {
     const remoteHead = (await git(repo, ['rev-parse', 'HEAD'])).trim();
     await git(repo, ['push', '--set-upstream', 'origin', 'HEAD']);
 
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const mismatched = await service.reconcileBranchPublication({
       task: taskFixture(repo),
       worktree: worktreeFixture(repo),
@@ -465,4 +575,14 @@ function worktreeFixture(worktreePath: string): WorktreeRecord {
 async function git(cwd: string, argv: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', argv, { cwd });
   return stdout;
+}
+
+/** A scratch checkout with these remotes, in a directory of its own. */
+async function checkout(remotes: Record<string, string>): Promise<{ root: string; repo: string }> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-remotes-'));
+  const repo = path.join(root, 'repo');
+  await fs.mkdir(repo);
+  await git(repo, ['init', '--quiet']);
+  for (const [name, url] of Object.entries(remotes)) await git(repo, ['remote', 'add', name, url]);
+  return { root, repo };
 }

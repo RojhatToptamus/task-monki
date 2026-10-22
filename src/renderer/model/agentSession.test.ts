@@ -112,6 +112,11 @@ describe('agent session history', () => {
       'Agent: Looking at the parser.', 'You: Also keep spaces.', 'steps', 'Agent: The parser now accepts tabs.'
     ]);
     expect(turn).toMatchObject({ state: 'completed', durationMs: 150_000, answer: 'The parser now accepts tabs.' });
+    // An issue task without a request of its own starts from the issue, never from an empty message.
+    expect(sessionTurn(first, [], [], { prompt: '', openedFrom: 'Started from issue #42' }).opener)
+      .toMatchObject({ kind: 'marker', label: 'Started from issue #42' });
+    expect(sessionTurn(first, [], [], { prompt: 'Keep the API.', openedFrom: 'Started from issue #42' }).opener)
+      .toMatchObject({ kind: 'prompt', text: 'Keep the API.' });
 
     const retry = makeRunRecord({ id: 'retry', mode: 'RETRY', status: 'FAILED', startedAt: '2026-07-19T12:05:00Z', finalMessage: 'Partial notes.' });
     const retried = sessionTurn(retry, [], []);

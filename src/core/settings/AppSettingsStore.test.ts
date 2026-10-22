@@ -182,7 +182,8 @@ describe('AppSettingsStore', () => {
       externalExecutables: {
         gitExecutablePath: '/usr/bin/git',
         codexExecutablePath: '/opt/bin/codex',
-        ghExecutablePath: null
+        ghExecutablePath: null,
+        glabExecutablePath: null
       }
     });
 
@@ -199,7 +200,8 @@ describe('AppSettingsStore', () => {
     expect(settings.externalExecutables).toEqual({
       gitExecutablePath: '/usr/bin/git',
       codexExecutablePath: '/opt/bin/codex',
-      ghExecutablePath: '/usr/bin/gh'
+      ghExecutablePath: '/usr/bin/gh',
+      glabExecutablePath: null
     });
   });
 
@@ -267,7 +269,8 @@ describe('AppSettingsStore', () => {
       externalExecutables: {
         gitExecutablePath: '/usr/bin/git',
         codexExecutablePath: '/opt/bin/codex',
-        ghExecutablePath: '/usr/bin/gh'
+        ghExecutablePath: '/usr/bin/gh',
+        glabExecutablePath: null
       }
     });
 

@@ -208,6 +208,12 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
       : { title: 'Merged', secondaries: finishEvidence.mode === 'override' ? [markDone(true)] : [] };
   }
 
+  // A pull request closed without merge ends its delivery: a review of its work asks
+  // nothing more, and the task's way out is the Now panel's.
+  if (task.projection.githubPullRequest === 'CLOSED_UNMERGED' || task.projection.merge === 'CLOSED_UNMERGED') {
+    return { title: 'Closed without merge', secondaries: [] };
+  }
+
   switch (reviewStatus) {
     case 'NOT_RUN': {
       return {

@@ -15,6 +15,7 @@ import {
   type TaskInstruction
 } from '../../shared/contracts';
 import {
+  taskGoal,
   SIDE_QUESTION_CONVERSATION_LIMIT,
   SIDE_QUESTION_HISTORY_LIMIT,
   buildSideQuestionPrompt,
@@ -333,7 +334,7 @@ export class SideQuestionCoordinator {
       .at(-1);
     const { worktree } = questionWorktree(detail);
     return {
-      task: { title: detail.task.title, request: detail.task.prompt },
+      task: { title: detail.task.title, request: taskGoal(detail.task) },
       conversation,
       ...(plan ? { plan: { ...(plan.explanation ? { explanation: plan.explanation } : {}), steps: plan.steps } } : {}),
       implementationActive: detail.runs.some(isActiveWorktreeWriter),

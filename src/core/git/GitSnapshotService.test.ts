@@ -138,6 +138,23 @@ describe('inspectGitSnapshot', () => {
     expect(parsedFiles.every((file) => file.blocks[0]?.source === 'unstaged')).toBe(true);
   });
 
+  it('never reads commits as pushed while the pull request head they would be on is missing from the checkout', async () => {
+    const { dir, worktree } = await createCommittedRepoFixture();
+    const openedAt = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await fs.writeFile(path.join(dir, 'fix.txt'), 'fix\n', 'utf8');
+    await git(dir, ['add', 'fix.txt']);
+    await git(dir, ['commit', '-m', 'fix']);
+    const head = { ref: 'refs/pull/7/head', knownSha: openedAt };
+
+    // The pull request moved to a commit this checkout never fetched: the local fix is not on it.
+    const moved = await inspectGitSnapshot(worktree, { pullRequestHead: { ...head, sha: 'f'.repeat(40) } });
+    expect(moved).toMatchObject({ aheadCount: 1, behindCount: 1, status: 'DIVERGED' });
+
+    // At the head it was opened at, the same fix reads as not yet pushed.
+    expect(await inspectGitSnapshot(worktree, { pullRequestHead: { ...head, sha: openedAt } }))
+      .toMatchObject({ aheadCount: 1, behindCount: 0, status: 'COMMITTED_UNPUSHED' });
+  });
+
   it('does not report empty directories because Git has no file entry to diff', async () => {
     const { dir, worktree } = await createCommittedRepoFixture();
     await fs.mkdir(path.join(dir, 'empty-folder'), { recursive: true });

@@ -62,6 +62,26 @@ describe('TaskManagerService review and PR action coordination', () => {
     expect(scenario.agent.startedReviews).toHaveLength(0);
   });
 
+  it('starts a review on a task whose own pull request is open, and leaves it In review', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-in-review-review'
+    });
+    const task = await scenario.createTask({
+      title: 'Reviewed with its pull request open',
+      prompt: 'Implement, open a pull request, then ask for a review.'
+    });
+    await prepareTestWorktree(scenario.service, task.id);
+    const run = await scenario.service.startRun({ taskId: task.id });
+    await scenario.completeRun(run.id, 'Implementation finished.');
+    // An open pull request moves the task to In review, which is still the Review lane.
+    await scenario.store.transitionTask(task.id, 'IN_REVIEW', 'A matching open pull request.');
+
+    await scenario.service.startReview({ taskId: task.id, runId: run.id });
+
+    expect(scenario.agent.startedReviews).toHaveLength(1);
+    expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_REVIEW');
+  });
+
   it('rejects a completed analysis run as a review source', async () => {
     const scenario = await createTaskMonkiScenario({
       name: 'task-monki-analysis-review-guard'
@@ -146,7 +166,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     const refreshBeforeReview = scenario.service.refreshGitHub({ taskId: scenario.taskId });
     await expect(
       scenario.service.startReview({ taskId: scenario.taskId, runId: scenario.run.id })
-    ).rejects.toThrow('GitHub refresh is already running for this task.');
+    ).rejects.toThrow('Refresh is already running for this task.');
     await expect(refreshBeforeReview).resolves.toMatchObject({
       number: 82,
       headRefOid: 'fresh-head',

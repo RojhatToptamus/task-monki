@@ -42,7 +42,7 @@ details[open] > summary .tm-disclosure__chevron {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 20px;
+  height: var(--h-mark);
   padding: 0 8px;
   border: 0;
   border-radius: var(--r-xs);
@@ -52,6 +52,23 @@ details[open] > summary .tm-disclosure__chevron {
   font-weight: var(--w-medium);
   line-height: 1;
   white-space: nowrap;
+}
+
+/* A person beside their name: their initials on the avatar fallback plane
+   (DESIGN.md A.6), as tall as a badge. The name beside it is what is read aloud. */
+.tm-avatar {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: var(--h-mark);
+  height: var(--h-mark);
+  border-radius: var(--r-pill);
+  background: var(--field);
+  color: var(--muted);
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  line-height: 1;
+  user-select: none;
 }
 
 .tm-workspace-loading {

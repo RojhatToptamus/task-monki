@@ -724,6 +724,17 @@ function ToolSettings({
             }
             onTest={onTestExternalTool}
           />
+          <ExecutableToolSetting
+            tool="glab"
+            label="GitLab CLI"
+            hint="Used for merge requests and delivery evidence"
+            value={appSettings.externalExecutables.glabExecutablePath}
+            status={externalToolStatus?.tools.glab}
+            onSetPath={(glabExecutablePath) =>
+              onSetAppSettings({ externalExecutables: { glabExecutablePath } })
+            }
+            onTest={onTestExternalTool}
+          />
         </div>
       </SettingsSubsection>
 

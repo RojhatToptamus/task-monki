@@ -50,6 +50,15 @@
 .tm-review__index-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review__index-loc { grid-column: 2; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); text-overflow: ellipsis; white-space: nowrap; }
 
+/* A discussion's row leads with who wrote it; its state and place follow on the second line. */
+.tm-review__index-discussion { grid-template-columns: minmax(0, max-content) minmax(0, 1fr); }
+.tm-review__index-who { max-width: 96px; overflow: hidden; color: var(--muted); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review__index-meta { display: flex; grid-column: 1 / -1; align-items: baseline; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
+.tm-review__index-place { min-width: 0; overflow: hidden; color: var(--faint); font-family: var(--font-mono); text-overflow: ellipsis; }
+.tm-review__index-discussion[data-state='RESOLVED'] :is(.tm-review__index-title, .tm-review__index-who) { color: var(--faint); }
+.tm-review__index-more { padding: 5px 8px; border-radius: var(--r-xs); color: var(--accent-ink); font-size: var(--t-help); text-decoration: none; transition: background-color var(--motion-fast) var(--ease-out); }
+.tm-review__index-more:hover { background-color: var(--hover); }
+
 /* Severity is a word in ink, never a badge: blockers and majors must be fixed. */
 .tm-review__severity { color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-review__severity[data-severity='BLOCKER'],
@@ -66,13 +75,14 @@
 .tm-review-brief__toggle:hover { color: var(--text-soft); }
 .tm-review-brief[data-folded] .tm-review-brief__toggle { grid-column: 1 / -1; }
 .tm-review-brief__line { min-width: 0; overflow: hidden; font-size: var(--t-body); text-overflow: ellipsis; white-space: nowrap; }
-.tm-review-brief__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 32px; }
-.tm-review-brief__block { display: grid; align-content: start; gap: 2px; min-width: 0; }
+/* Facts share a row and wrap; the answers below take a row of their own, so they never narrow the facts to a column each. */
+.tm-review-brief__grid { display: flex; flex-wrap: wrap; gap: 12px 32px; }
+.tm-review-brief__block { display: grid; flex: 1 1 220px; align-content: start; gap: 2px; min-width: 0; }
 .tm-review-brief__label { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); line-height: 20px; }
 .tm-review-brief__label span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: var(--w-regular); text-overflow: ellipsis; white-space: nowrap; }
-.tm-review-brief__text { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__text { max-width: 72ch; margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
 /* Provider text is quoted: attributed above, with a 2px rule along its left edge. */
-.tm-review-brief__quote { margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
+.tm-review-brief__quote { max-width: 72ch; margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
 .tm-review-brief__clamped--2,
 .tm-review-brief__clamped--3 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; }
 .tm-review-brief__clamped--2 { -webkit-line-clamp: 2; }
@@ -80,8 +90,8 @@
 .tm-review-brief__clampable { transition: color var(--motion-fast) var(--ease-out); }
 .tm-review-brief__clampable:hover { color: var(--text); }
 
-.tm-review-general { display: flex; flex-direction: column; }
-.tm-review-general .tm-review-thread { margin-left: 0; }
+/* Feedback without a location is framed as a file is, so its bands read the same. */
+.tm-review-general { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); display: flex; flex: 0 0 auto; flex-direction: column; border: 1px solid var(--edge-raised); border-radius: var(--r-sm); overflow: clip; }
 
 /* A file is an edge with a sticky head at table-row scale; a viewed or generated file starts collapsed.
    It collapses to a 36px row, so its corners are a control's (8px), and so is everything in the diff. */
@@ -155,50 +165,113 @@
 .tm-review-line__comment:focus-visible { opacity: 1; }
 .tm-diffline__num:hover .tm-review-line__comment { background-color: var(--accent); box-shadow: none; color: var(--on-primary); }
 
-/* Threads, comments and the composer start at the code column. */
-:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) { max-width: 720px; margin: 6px 16px 10px var(--review-code-inset); }
-
-/* A finding opens under the line it is about: a card on the diff, the reasoning,
-   and its actions on the title line. */
-.tm-review-thread { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised), var(--shadow-card); font-size: var(--t-body); outline: none; transition: box-shadow var(--motion-fast) var(--ease-out); }
+/* What is said about the code sits in the file, under the line it is about: a
+   band across the file on the card plane, a hairline where it meets the code,
+   its words on one reading column from the code column (720px at most) and each
+   author's mark in the gutter. Nothing in it is a box of its own; the file's
+   clip squares it (DESIGN.md §9). */
+:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) { --thread-end: max(8px, calc(100% - var(--review-code-inset) - 720px)); position: relative; padding: 6px var(--thread-end) 8px var(--review-code-inset); border-block: 1px solid var(--hair); background: var(--card); color: var(--text); font-size: var(--t-body); outline: none; }
+/* Bands in a row share one seam; the file's head and edges are seams already. */
+:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) + :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
+.tm-review-file__head + :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
+.tm-review-general > :first-child { border-top: 0; }
+.tm-review-block:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
+.tm-review-general > :last-child { border-bottom: 0; }
+/* The thread jumped to, or the one the keys act on: a mark down its left edge, along the file's own. */
 .tm-review-thread--focused,
-.tm-review-thread:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring), var(--shadow-card); }
+:is(.tm-review-thread, .tm-review-comment):focus-visible { box-shadow: inset 2px 0 var(--focus-ring); }
+
+/* Each author's mark hangs in the gutter beside their name, so every comment's words start on the code column. */
+.tm-review-thread__comment { position: relative; display: grid; gap: 2px; min-width: 0; }
+.tm-review-thread__avatar { position: absolute; top: 2px; right: calc(100% + 8px); }
+
+/* A finding: its severity, title and actions on one line, the reasoning under it. */
+.tm-review-thread { display: flex; flex-direction: column; gap: 2px; }
 .tm-review-thread__head { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); }
 .tm-review-thread__head strong { flex: 1; min-width: 0; color: var(--text); font-weight: var(--w-medium); }
-.tm-review-thread__actions { display: inline-flex; align-items: center; gap: 2px; margin: -2px -4px -2px 0; }
+.tm-review-thread__actions { display: inline-flex; align-items: center; gap: 2px; }
 .tm-review__mini { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-thread__dismiss-menu__trigger.tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); }
 .tm-review-thread__include { height: var(--h-compact); padding: 0 8px; border-radius: var(--r-xs); font-weight: var(--w-regular); }
 .tm-review-thread__include[aria-pressed='true'] { color: var(--text-soft); }
 .tm-review-thread__include svg { color: var(--verified-ink); }
 .tm-review-thread__location { color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); }
-.tm-review-thread__why { margin: 0; color: var(--text-soft); line-height: 1.55; text-wrap: pretty; }
-.tm-review-thread__fix { margin: 0; color: var(--text); line-height: 1.55; text-wrap: pretty; }
+.tm-review-thread__why { margin: 0; color: var(--text-soft); line-height: var(--lh-prose); text-wrap: pretty; }
+.tm-review-thread__fix { margin: 0; color: var(--text); line-height: var(--lh-prose); text-wrap: pretty; }
 .tm-review-thread__earlier { margin: 0; color: var(--muted); font-size: var(--t-help); }
-.tm-review-thread--earlier { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
+.tm-review-thread--earlier { background: var(--panel); }
 .tm-review-thread__dismiss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }
 .tm-review-thread__dismiss .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
 .tm-review-thread__dismiss input { flex: 1 1 160px; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
-.tm-review-thread--folded { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 6px 6px 6px 12px; background: var(--panel); box-shadow: none; color: var(--faint); font-size: var(--t-help); }
+.tm-review-thread__error { margin: 4px 0 0; }
+
+/* Folded, a thread is a dense row like a gap's: the panel plane, its words on the code column. */
+.tm-review-thread--folded { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-height: var(--h-row-dense); padding-block: 2px; background: var(--panel); color: var(--faint); font-size: var(--t-help); }
 .tm-review-thread--folded .tm-review__severity { color: var(--faint); }
 .tm-review-thread__struck { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--edge); }
 .tm-review-thread__undo { margin-left: auto; height: var(--h-compact); }
 
-/* The person's own comments read as theirs: the field plane, not a card. */
-.tm-review-comment { display: flex; align-items: flex-start; gap: 8px; padding: 7px 6px 7px 12px; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); outline: none; }
-.tm-review-comment:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
-.tm-review-comment__body { display: grid; flex: 1; gap: 1px; min-width: 0; padding-top: 2px; }
+/* A pull request discussion: other people's words, each comment under its author
+   and their mark, replies under a hairline, and the reply row last. Resolved
+   threads and remarks that ask for nothing fold to one line that opens them. */
+.tm-review-thread__author { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-thread__time { color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tm-review-thread__spacer { flex: 1; }
+.tm-review-thread__body { display: grid; gap: 2px; min-width: 0; }
+.tm-review-thread__body .tm-message-markdown { overflow-wrap: anywhere; }
+/* A long comment is clamped until asked for in full, about twelve lines. */
+.tm-review-thread__text--clamped { max-height: 240px; overflow: hidden; }
+.tm-review-thread__replies { display: grid; gap: 8px; margin-top: 8px; }
+.tm-review-thread__reply { padding-top: 8px; border-top: 1px solid var(--hair); }
+.tm-review-thread__reply > .tm-review-thread__avatar { top: 10px; }
+.tm-review-thread__reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: var(--h-compact); }
+.tm-review-thread__more { display: inline-flex; align-items: center; gap: 4px; justify-self: start; height: var(--h-compact); padding: 0 6px 0 2px; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-help); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review-thread__more:hover { background-color: var(--hover); color: var(--text-soft); }
+.tm-review-thread__fold-toggle .tm-disclosure__chevron { transform: rotate(90deg); }
+/* Resolved, the check is pressed and carries the verified ink. */
+.tm-review-thread__resolve-toggle[aria-pressed='true'] { color: var(--verified-ink); }
+/* The folded row's label takes 8px of the gutter, so its hover clears the words while they stay on the code column. */
+.tm-review-thread--discussion.tm-review-thread--folded { flex-wrap: nowrap; gap: 8px; padding: 2px var(--thread-end) 2px calc(var(--review-code-inset) - 8px); }
+.tm-review-thread__fold { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: var(--h-compact); padding: 0 8px; border: 0; border-radius: var(--r-xs); background: none; color: inherit; font: inherit; text-align: left; transition: background-color var(--motion-fast) var(--ease-out); }
+.tm-review-thread__fold:hover { background-color: var(--hover); }
+.tm-review-thread__fold .tm-review-thread__author { color: var(--muted); }
+.tm-review-thread__summary { flex: 1; min-width: 0; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-thread__fold:hover .tm-review-thread__summary { color: var(--text-soft); }
+.tm-review-thread--folded > span { flex: 0 0 auto; white-space: nowrap; }
+.tm-review-checkpoint__who { flex: 0 1 auto; max-width: 128px; overflow: hidden; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
+
+/* The person's own comment reads as a comment like the others, under their mark
+   and You, with Edit and Delete on its head while the pointer or the keys are on it. */
 .tm-review-comment__about { color: var(--muted); font-size: var(--t-help); }
-.tm-review-comment p { margin: 0; color: var(--text); line-height: 1.55; white-space: pre-wrap; }
-.tm-review-comment__actions { display: flex; flex: 0 0 auto; gap: 2px; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
+.tm-review-comment__body { display: grid; gap: 2px; min-width: 0; }
+.tm-review-comment__body p { margin: 0; color: var(--text); line-height: var(--lh-prose); white-space: pre-wrap; }
+.tm-review-comment__actions { opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
-/* Writing one is the app's composer, at the comment's place in the diff. */
-.tm-review-comment-composer { border-radius: var(--r-sm); }
-.tm-review-comment-composer > .tm-review-comment__about { display: block; padding: 8px 12px 0; }
-.tm-review-comment-composer .tm-composer__input { min-height: 56px; padding-top: 8px; }
-.tm-review-comment-composer > .tm-review-comment__about + label + .tm-composer__input { padding-top: 4px; }
+
+/* Writing in the diff, a comment or a reply, is a field on the code column that
+   grows into a composer: the field, then its choices and the primary under it. */
+.tm-review-thread__reply-row { position: relative; display: grid; gap: 6px; margin-top: 8px; }
+.tm-review-thread__reply-row > .tm-review-thread__avatar { top: 4px; }
+.tm-review-thread__reply-input { display: block; width: 100%; min-height: var(--h-toolbar); max-height: min(200px, 24vh); padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
+.tm-review-thread__reply-input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
+.tm-review-thread__reply-row--open .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
+.tm-review-thread__reply-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tm-resolve-check { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
+.tm-review-comment-composer > .tm-review-thread__reply-row { margin-top: 0; }
 .tm-review-comment-composer__spacer { flex: 1; }
+
+/* A suggested change reads as a diff in a well: the lines it replaces, then the lines it suggests. */
+.tm-suggestion { display: grid; gap: 4px; margin: 6px 0 2px; }
+.tm-suggestion__label { color: var(--muted); font-size: var(--t-help); }
+.tm-suggestion__lines { overflow-x: auto; padding-block: 4px; border-radius: var(--r-xs); background: var(--well); font: var(--t-help)/var(--lh-body) var(--font-mono); }
+.tm-suggestion__line { display: grid; grid-template-columns: 20px max-content; min-width: 100%; width: max-content; color: var(--text-soft); }
+.tm-suggestion__line > span { color: var(--muted); text-align: center; user-select: none; }
+.tm-suggestion__line code { padding-right: 12px; color: inherit; white-space: pre; }
+.tm-suggestion__line--removed { background: var(--diff-removed-bg); }
+.tm-suggestion__line--removed > span { color: var(--blocked-ink); }
+.tm-suggestion__line--added { background: var(--diff-added-bg); }
+.tm-suggestion__line--added > span { color: var(--verified-ink); }
 
 /* The foot: what the request holds, a note, and the tab's one decision. It is
    always here, and its controls end 16px above the sheet, on the same line as an
@@ -229,6 +302,9 @@
 .tm-review-sheet__item .tm-iconbtn { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-sheet__item--comment { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
 .tm-review-sheet__item--out { grid-template-columns: 44px minmax(0, 1fr) auto auto; }
+.tm-review-sheet__item--discussion { grid-template-columns: 16px minmax(0, max-content) minmax(0, 1fr) auto auto; }
+.tm-review-sheet__item--discussion-out { grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto auto; }
+.tm-review-sheet__who { max-width: 112px; overflow: hidden; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
 .tm-review-sheet__n { color: var(--faint); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
 .tm-review-sheet__title { min-width: 0; padding: 0; overflow: hidden; border: 0; background: none; color: var(--text); font-size: var(--t-body); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review-sheet__item--out .tm-review-sheet__title { color: var(--text-soft); }
@@ -245,7 +321,7 @@
 }
 
 /* The agent's answers to the last request span the brief, under what was asked and reported. */
-.tm-review-brief__round { grid-column: 1 / -1; gap: 6px; }
+.tm-review-brief__round { flex-basis: 100%; gap: 6px; }
 .tm-review-brief__round .tm-review-brief__label .ghost-button { margin-left: auto; }
 /* A re-review marks an earlier finding still open, or a new one, beside its severity. */
 .tm-review-thread__round { color: var(--muted); font-size: var(--t-help); white-space: nowrap; }

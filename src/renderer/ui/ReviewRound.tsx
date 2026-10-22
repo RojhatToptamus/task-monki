@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer } from '../../shared/contracts';
+import { remoteProviderName, type ReviewRequestItem, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/contracts';
 import { findingLevel } from '../model/findings';
 import { REVIEW_OUTCOME_LABELS, requestItemLocation, requestItemText } from '../model/reviewRounds';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
@@ -15,7 +15,7 @@ export function ReviewRequestCard({ request, time }: { request: ReviewRequestRec
             <RoundItem key={item.number} item={item}
               lead={item.kind === 'FINDING'
                 ? <span className="tm-review__severity" data-severity={item.severity}>{findingLevel(item.severity).label}</span>
-                : <span className="tm-round__kind">Comment</span>} />
+                : <span className="tm-round__kind">{item.kind === 'DISCUSSION' ? item.author ?? remoteProviderName(item.provider) : 'Comment'}</span>} />
           ))}
         </ol>
         {request.note ? <p className="tm-round__note">{request.note}</p> : null}
