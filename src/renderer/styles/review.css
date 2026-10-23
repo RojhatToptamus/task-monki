@@ -214,9 +214,10 @@
 :is(.tm-review-thread, .tm-review-comment-composer):focus-visible,
 .tm-review-comment:focus-within { box-shadow: inset 2px 0 var(--focus-ring); }
 
-/* Each author's mark hangs in the gutter beside their name, so every comment's words start on the code column. */
+/* Each author's mark hangs in the gutter beside their name, so every comment's words start on the code column;
+   a filled 24px circle centred on the 24px head, so the initials have room and the thread reads by its people. */
 .tm-review-thread__comment { position: relative; display: grid; gap: 2px; min-width: 0; }
-.tm-review-thread__avatar { position: absolute; top: 2px; right: calc(100% + 8px); }
+.tm-review-thread__avatar { position: absolute; top: 0; right: calc(100% + 8px); width: var(--h-compact); height: var(--h-compact); background: var(--edge); color: var(--text-soft); }
 
 /* A finding: its severity, title and actions on one line, the reasoning under it. */
 .tm-review-thread { display: flex; flex-direction: column; gap: 2px; }
@@ -258,7 +259,7 @@
 .tm-review-thread__text--clamped { max-height: 240px; overflow: hidden; }
 .tm-review-thread__replies { display: grid; gap: 8px; margin-top: 8px; }
 .tm-review-thread__reply { padding-top: 8px; border-top: 1px solid var(--hair); }
-.tm-review-thread__reply > .tm-review-thread__avatar { top: 10px; }
+.tm-review-thread__reply > .tm-review-thread__avatar { top: 8px; }
 .tm-review-thread__reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: var(--h-compact); }
 /* Its 2px of padding hangs in the gutter, so its words or chevron start on the code column. */
 .tm-review-thread__more { display: inline-flex; align-items: center; gap: 4px; justify-self: start; height: var(--h-compact); margin-left: -2px; padding: 0 6px 0 2px; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-help); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
@@ -306,7 +307,7 @@
    is the thread's last row, a field that grows into a composer; a comment being written is the comment it
    becomes, the person's head over its field. */
 .tm-review-thread__reply-row { position: relative; display: grid; gap: 6px; margin-top: 8px; }
-.tm-review-thread__reply-row > .tm-review-thread__avatar { top: 4px; }
+.tm-review-thread__reply-row > .tm-review-thread__avatar { top: 2px; }
 .tm-review-comment-composer > .tm-review-thread__comment { gap: 6px; }
 .tm-review-thread__reply-input { display: block; width: 100%; min-height: var(--h-toolbar); max-height: min(200px, 24vh); padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
 :is(.tm-review-thread__reply-row--open, .tm-review-comment-composer) .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
