@@ -10,7 +10,7 @@ import { taskManagerApi } from '../api/taskManagerClient';
 import { TaskDetail } from './TaskDetail';
 
 vi.mock('../api/taskManagerClient', () => ({
-  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })) }
+  taskManagerApi: { getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })), readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'), readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })), listTaskCommits: vi.fn(async () => ({ status: 'UNAVAILABLE' })) }
 }));
 
 function detailProps(): ComponentProps<typeof TaskDetail> {

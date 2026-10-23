@@ -17,8 +17,8 @@ Every value here is a token; the cited section owns the details.
 | Need | Value |
 |---|---|
 | Faces | Instrument Sans (`--font-ui`) for the interface; Geist Mono (`--font-mono`) only for strings the user copies: paths, hashes, branches, commands, payloads (§8) |
-| Type | 22 page title, 15 heading, 13 body and labels, 12 help and group labels, 11.5 metadata (`--t-*`); weights 400 and 500 only (`--w-*`) |
-| Line boxes | 16, 18, 20 and 28 (`--lh-*`); the 1.55 factor only for multi-line prose |
+| Type | 22 page title, 17 a walkthrough's chapter, 15 heading, 13 body and labels, 12 help and group labels, 11.5 metadata (`--t-*`); weights 400 and 500 only (`--w-*`) |
+| Line boxes | 16, 18, 20, 24 and 28 (`--lh-*`); the 1.55 factor only for multi-line prose |
 | Heights | 32 decision controls, 28 toolbar controls and icon buttons, 24 controls inside a row, 20 badges and avatars, 28 dense rows, 36 rows and file heads, 40 a toolbar under a head, 48 heads and two-line rows (`--h-*`, §3) |
 | Radii | 4 marks and keys, 6 rows and badges, 8 controls and anything shorter than 40px, 10 menus, 12 cards, sheets and tables, 14 modals (`--r-*`, §9) |
 | Spacing | 2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48 (§9) |
@@ -143,9 +143,9 @@ surface beside it is built at this table, not at the mock.
 - **A disclosure is its row.** A file or section toggle is the 13px chevron and
   its label at the row's own height, never a separate large button.
 - **Type is 13 for what is read, 12 for what is scanned, 11.5 for metadata.**
-  Nothing in a dense surface is larger than 13 except a page title or a section
-  heading. Weight is 400; 500 marks titles, labels and the one emphasised word in
-  a row.
+  Nothing in a dense surface is larger than 13 except a page title, a section
+  heading or a walkthrough's chapter. Weight is 400; 500 marks titles, labels and
+  the one emphasised word in a row.
 - **Heights are tokens.** `height: 36px` is the same error as a hex colour; use
   `--h-row`.
 - **Check against the neighbour.** At 100% zoom, beside the closest shipped
@@ -356,6 +356,13 @@ a state on its own. When two surfaces disagree, fix the selector, not the copy.
   colours — a check for done, a dot for the current step, a ring for what is
   left. A word appears only on the step where a run failed or stopped. The plan
   never moves; the live words below it carry the motion.
+- **A changed file is read by its mark.** Every list and head that names a
+  changed file leads with one 13px mark (`FileMark`): a new file's is a file
+  with a plus, a deleted file's a file with a minus, in the diff's own
+  `--verified-ink` and `--blocked-ink`; any other file shows what it is (code,
+  text, data, an image, a script, a lockfile, configuration) in its row's ink.
+  The shape carries the fact, and the hue only repeats the diff's own; a rename
+  says its old path in words where there is room for them, on the file's head.
 - **One tone per unit, carried by one element.** Never tint the mark, the heading
   and the border of the same card. The badge or the status word carries it: the
   waiting tone when the user owes a step, the blocked tone when something
@@ -662,6 +669,7 @@ Interface type is one sans; machine values are one mono. No third family.
 | Role | Token | Size / weight |
 |---|---|---|
 | Page title | `--t-title` | 22 / 500 · `-0.02em` |
+| Chapter: an intent of a walkthrough, read in order as a document | `--t-chapter` | 17 / 500 · `-0.01em` |
 | Section heading | `--t-heading` | 15 / 500 |
 | Panel title, control label | `--t-label` | 13 / 500 |
 | Body, prose | `--t-body` | 13 / 400 — the body's own size, so text with no size of its own is 13, never the browser's 16 |
@@ -671,8 +679,8 @@ Interface type is one sans; machine values are one mono. No third family.
 
 Line boxes are whole pixels in single-line controls, rows, headings and code:
 `--lh-meta` 16, `--lh-ui` 18, `--lh-body` 20 (13px text in a control or row, a
-15px heading, and 12px code, so a diff row is exactly 20), and `--lh-title` 28
-for a page title. Only multi-line
+15px heading, and 12px code, so a diff row is exactly 20), `--lh-chapter` 24
+for a chapter, and `--lh-title` 28 for a page title. Only multi-line
 reading text uses the `--lh-prose` factor (1.55). A single-line control's height
 comes from its height token, never from a line-height times a size plus padding.
 The regular weight is `--w-regular` (400), never a literal.
@@ -681,10 +689,13 @@ Every label is sentence case. Nothing is set in capitals with added tracking: an
 eyebrow in caps reads as a web template, and a group label is quiet because it is
 small and `--muted`, not because it shouts.
 
-**Seven sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
+**Eight sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
 and never a literal. A size that is not on this list does not exist: the reason
 to name them is that an unnamed scale is not a scale, and the renderer had
-drifted to 22 distinct sizes against these seven.
+drifted to 22 distinct sizes against a scale of seven. The chapter is the one
+size added since, for the one surface read as a document: an intent heads a
+stage of the walkthrough, and at the section heading's 15 it did not stand
+apart from the 13px account under it.
 
 **Times follow the system clock format everywhere** — "5:29 PM" or "17:29"
 as the OS says, never a forced 24-hour clock or a zero-padded hour; a date is
@@ -1662,34 +1673,46 @@ control's icon, state or tooltip already carries.
   reviewed the pull request; Fixing review feedback while the agent takes a
   turn after the review; the agent's request, such as "Codex asked a question",
   with Go to request while it waits on the person; a turn that stopped, such as
-  "Recovery required", with Go to agent); then Compare (All changes,
-  Committed, Uncommitted, and the round: Since the review once an out-of-date
+  "Recovery required", with Go to agent); then Compare, the menu of what the
+  Diff shows: All changes; the round, Since the review once an out-of-date
   review has changes since it, which it then leads with, or Since the last review
-  once a re-review is current; each is exactly what changed from the code that
+  once a re-review is current (each exactly what changed from the code that
   review read, kept when it started, so an out-of-date review's findings sit on
-  the lines it read, on the old side; never an empty scope) and a View icon (By
-  importance, By path; expand or collapse every file), both in the Diff alone,
-  and the review action. A stale review keeps Run review again as the primary
+  the lines it read, on the old side); then the branch's history in order, after
+  a `--hair`: All commits while work beside them is uncommitted, each commit by
+  its number, subject and age, and Uncommitted. It never offers an empty scope,
+  or one that shows what another does: one commit alone is the whole change.
+  While a commit is read, Previous and Next commit sit after the menu, so they
+  never move as its subject changes. Then a View icon (By importance, By path;
+  expand or collapse every file); all of these in the Diff alone; and the review
+  action. A stale review keeps Run review again as the primary
   there, in both modes; a finished, current one offers it as an icon beside its
   time. When the Guide has no walkthrough to show, its step sits where the
   walkthrough would be instead.
 - *Navigator* (248px on `--panel`, in the Diff). Its switch (Files, with viewed
-  progress as "2/7", and Feedback) sits at its top. Files by importance: files with an open
+  progress as "2/7", and Feedback) sits at its top. Files: the shared file
+  filter (every word typed is in the path, in any case; Enter goes to the first
+  file it keeps, Escape clears it and then gives the keys back; / finds it),
+  then the files by importance: files with an open
   Blocker or Major, then code with each test right after the code it covers,
   then styles and markup, configuration, documentation, and generated files,
-  collapsed. One 28px row each: the name in mono, its folder muted, a comment
-  count when it has feedback, then the counts or the viewed check. The file
+  collapsed. One 28px row each: the file's mark, the name in mono, its folder
+  muted, a comment count when it has feedback, then the counts or the viewed
+  check; "No files match" when the filter keeps none. The file
   being read, followed as the person scrolls and set by every move, sits on
   `--sel`: one plane under the rows that slides to the current row, with
   `--hover` laid over it while the pointer is there. Feedback
-  lists every finding and comment by what happens to it: To send, Suggestions,
-  On GitHub (the pull request's discussions not added: unsent ones that still
-  ask for something, then sent ones, then remarks), Settled, after a re-review
-  Resolved (a check and the reviewer's note; it has no place in the code to go
-  to), and Resolved on GitHub. A discussion's row leads with its author, then its
-  first line, with its state and place beneath; on GitLab the words are GitLab's.
-  When the platform has more discussions than were read, More on GitHub ends
-  the list.
+  lists every finding and comment by what happens to it, each group's label
+  with its count: To send, Suggestions, On GitHub (the pull request's
+  discussions not added: unsent ones that still ask for something, then sent
+  ones, then remarks), or for an out-of-date review From the earlier review;
+  then what is settled (dismissed or accepted findings, those a re-review
+  resolved, threads resolved on GitHub) as one last group, Settled, folded until
+  opened. Each row is a list rail's row: what was said, then who said it (a
+  finding's severity, blocker and major in `--blocked-ink`), its state, and its
+  place as the file and line (the whole path in its title); the author gives way
+  first when the line is short. On GitLab the words are GitLab's. When the
+  platform has more discussions than were read, More on GitHub ends its group.
 - *Brief.* Facts before opinions: the request, what the agent reported (quoted),
   then the review's summary. After the agent answers a request, its answer to
   each item spans the brief under them (Fixed, Not changed, Needs your decision,
@@ -1697,16 +1720,18 @@ control's icon, state or tooltip already carries.
   goes to the finding or file), with Reply when an item waits on the person,
   until the next review reads them. Open
   on the first visit to a review run and again when new answers arrive; folded,
-  it is the request's first line.
+  it is the request's first line. While the Diff reads a commit, the commit's
+  own brief stands in its place (*Commits*).
 - *Files.* Each file is a 1px `--edge-raised` border (`--r-sm`; it collapses to
   its 36px head) with a sticky head at table-row scale and no edge of its own,
-  only a `--hair` seam under it while open: the chevron and path as one toggle (⌥: every file),
-  the directory muted before the name, a word only for New, Deleted or a rename,
+  only a `--hair` seam under it while open: the chevron, the file's mark and
+  its path as one toggle (⌥: every file), the directory muted before the name,
+  "from" and the old path for a rename,
   "Invisible characters" in `--waiting-ink` when an added line holds a
   character no reader sees that changes how code reads (a direction control,
   a zero-width space, a byte-order mark past the file's start; never the
   joiners emoji need), the open findings in words, the counts, the shared
-  checkbox for viewed (no label), ⋯ (Comment on file, Show whole file, Ask about
+  checkbox for viewed (no label; none on a commit), ⋯ (Comment on file, Show whole file, Ask about
   this file, then where it opens), then Full
   screen: the file takes the whole page, its head the sheet's 48px first line,
   while the tab bar, toolbar, navigator, brief and foot step aside; J/K and N/P
@@ -1823,8 +1848,19 @@ control's icon, state or tooltip already carries.
   it with no implementation run to belong to, so it becomes earlier context. An
   out-of-date review keeps its threads as earlier context, without Ask or
   Dismiss; its findings are never sent, the person's comments still are.
-- *Keys.* G the other mode, J/K files, [ and ] intents in the Guide, N/P open
-  findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
+- *Commits.* A commit is read as history: its change against its first parent,
+  its own brief where the change's stands (Commit 2 of 3, its short hash, author
+  and age, then its subject and the rest of its message, kept to three lines
+  until asked for), then its files. Its lines may no longer be the code's, so
+  what was said about its files sits at each file's top with its lines, what was
+  said about other files does not show, and nothing is written or marked viewed
+  on it: comments and Viewed belong to the change. The Diff moves to a commit
+  once its change is read, never through an empty state. The commits are the
+  branch's own, first parents only (a merge of the base branch is one commit),
+  at most its latest 100, numbered in its whole history.
+- *Keys.* G the other mode, J/K files, [ and ] intents in the Guide and commits
+  in the Diff (from any other scope, the first or the last), / the file filter,
+  N/P open findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
   or take out a suggestion or discussion, R reply to the discussion, C comment
   on the chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being
   read full screen and back in the Diff (Escape returns). Every move of the
@@ -1849,12 +1885,13 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   in the change sits under Outside the change, framed as the Diff frames it.
 - *Stage column.* 360 wide (320 when the code area is under 1180), 32 from the
   code, resting where it sticks while its code passes; the next stage's seam
-  pushes it away, so the scroll is the transition. The title at `--t-heading`,
-  with Ask about this intent beside it while the pointer or the keys are on the
-  column; a 20px meta row: the counter "2/3", which opens the menu of stages (an
-  `ActionMenu` 280 wide: Overview, then each intent with its number, a title
-  wrapping to two lines and its files viewed, the current one on `--sel`), and
-  Open in Diff at the right; the explanation at `--t-body` on `--lh-prose`
+  pushes it away, so the scroll is the transition. The title is the intent's
+  chapter, at `--t-chapter` on `--lh-chapter` and centred on the line of the
+  first file's head, with Ask about this intent beside it while the pointer or
+  the keys are on the column; a 20px meta row: the counter "2/3", which opens
+  the menu of stages (an `ActionMenu` 280 wide: Overview, then each intent with
+  its number, a title wrapping to two lines and its files viewed, the current
+  one on `--sel`); the explanation at `--t-body` on `--lh-prose`
   with its terms; at most two attention lines; then the intent's files as the
   navigator's rows, those its code shows first, at most ten, then one row for
   the rest. The file being read takes the sliding `--sel` plane.
@@ -1863,10 +1900,13 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   it sits in in mono `--faint`), the lines open feedback is about, then one
   gap-style row for the rest ("3 more changes", or "211 more lines" for a new
   file) that opens below them, so nothing above moves. A new file reads as
-  plain code, with no added fill or marker: its head's New says it. The
+  plain code, with no added fill or marker: its head's mark says it. The
   intent's other files (tests, fixtures, docs and generated files, unless they
   hold its key change) are one row at the code column's edge, "N more files",
-  that opens them folded.
+  that opens them folded. The code is laid out by what was said when the
+  person arrived: a comment they write while reading lands under its line
+  where the code already is, and nothing moves; the next visit lays it out with
+  the rest.
 - *Terms* are phrases of the explanation tied to the lines that implement them,
   a 1px dotted `--faint` underline at rest. Under the pointer or the keys their
   lines take `--hover` where they are in view, with no row rendering again, and
@@ -1876,10 +1916,10 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
 - *Moving.* A file row, a term, an attention line, a menu choice, J/K (across
   intents), [ and ], N/P and V all move the code with the one travel; the layout
   never moves. G opens the Diff at the same file and line, at the same height,
-  and back; from an intent, the Diff narrows to its files, as Open in Diff does,
-  and the scope menu names it until another scope is chosen. While the
-  walkthrough is of earlier code, the line numbers no longer match, so G keeps
-  the file alone and the Diff leads with what changed since the review.
+  and back; it is the one way between the modes, so the Diff is never narrowed
+  to an intent. While the walkthrough is of earlier code, or the Diff reads a
+  commit, the line numbers no longer match, so G keeps the file alone; on an
+  earlier walkthrough the Diff leads with what changed since the review.
 - *Stacked.* Under 1000 of code width (the minimum window with a docked side
   panel), each column becomes a block above its code: the title, the meta row
   with the intent's files as a menu ("File 2 of 4"), and the explanation
@@ -1896,8 +1936,8 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   again, one state word and one step for the tab; the answers to the request
   sent on its code sit on their lines, and nothing new is written on it.
 - *One intent.* A change with one intent has no overview, map, counter or list
-  of one file: one stage whose column is the account, the byline with Open in
-  Diff, the summary, then attention.
+  of one file: one stage whose column is the account, the byline, the summary,
+  then attention.
 - *Progress* is the per-file viewed check, one mark for both modes: a file
   viewed in one reads as viewed in the other while both read one code, and
   reads as new again once its change changes.

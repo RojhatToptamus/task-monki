@@ -8,8 +8,8 @@ import type { ReviewRoundView } from '../model/reviewRounds';
 import { lineAnchor, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
 
-const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn() }));
-vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: { readArtifact: api.readArtifact, readReviewChanges: api.readReviewChanges } }));
+const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn(), listTaskCommits: vi.fn(), readTaskCommitDiff: vi.fn() }));
+vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: api }));
 
 function artifact(id = 'diff-1'): ArtifactRecord {
   return { id, taskId: 'task-1', kind: 'diff', path: `/tmp/${id}.md`, byteCount: 256, createdAt: '2026-07-07T10:10:00.000Z', updatedAt: '2026-07-07T10:10:00.000Z' };
@@ -163,8 +163,12 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     const thread = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
     expect(within(thread).getByText('Still open')).toBeDefined();
     expect(within(screen.getByRole('article', { name: 'Minor finding: Name the limit' })).getByText('New')).toBeDefined();
+    // What the re-review resolved is settled: folded at the end of the Feedback list until opened.
     fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
-    expect(within(screen.getByRole('navigation', { name: 'Feedback' })).getByText('Unclear name')).toBeDefined();
+    const settled = within(screen.getByRole('navigation', { name: 'Feedback' })).getByRole('region', { name: 'Settled' });
+    expect(within(settled).queryByText('Unclear name')).toBeNull();
+    fireEvent.click(within(settled).getByRole('button', { name: /Settled/ }));
+    expect(within(settled).getByText('Unclear name').closest('.tm-review__feedback')?.textContent).toContain('Resolved');
   });
 
   it('shows a finding under its line and dismisses it with a reason, or a reason and a note', async () => {
@@ -664,12 +668,90 @@ describe('ReviewWorkspace pull request discussions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
     const rail = screen.getByRole('navigation', { name: 'Feedback' });
-    const onGitHub = within(rail).getByText('On GitHub').parentElement!;
-    // What still needs a decision comes before what was sent.
+    const onGitHub = within(rail).getByRole('region', { name: 'On GitHub' });
+    // What still needs a decision comes before what was sent; each row says what was said, then who said it.
     expect(within(onGitHub).getAllByRole('button').map((row) => row.textContent)).toEqual([
       expect.stringContaining('alice'), expect.stringContaining('dave')
     ]);
-    expect(within(within(rail).getByText('Resolved on GitHub').parentElement!).getByText('Rename the limiter.')).toBeDefined();
+    expect(within(onGitHub).getAllByRole('button')[1]!.textContent).toMatch(/^Cap the burst\.dave\s*Fixed/u);
+    // A resolved thread is settled, at the end and folded.
+    const settled = within(rail).getByRole('region', { name: 'Settled' });
+    fireEvent.click(within(settled).getByRole('button', { name: /Settled/ }));
+    expect(within(settled).getByText('Rename the limiter.')).toBeDefined();
+  });
+});
+
+describe('ReviewWorkspace commits and files', () => {
+  const sha = (letter: string) => letter.repeat(40);
+  const commits = [
+    { sha: sha('a'), subject: 'Raise the limit', body: 'The old one throttled imports.', author: 'Ana', authoredAt: '2026-07-07T09:00:00.000Z' },
+    { sha: sha('b'), subject: 'Rename the limiter', author: 'Ana', authoredAt: '2026-07-07T10:00:00.000Z' }
+  ];
+  const own = `# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20')}\n${fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`;
+
+  beforeEach(() => {
+    api.readArtifact.mockReset().mockResolvedValue(own);
+    api.listTaskCommits.mockReset().mockResolvedValue({ status: 'READY', commits, total: 2 });
+    api.readTaskCommitDiff.mockReset().mockImplementation(async ({ sha: chosen }: { sha: string }) => ({
+      status: 'READY',
+      sha: chosen,
+      diff: chosen === sha('a') ? fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20') : fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')
+    }));
+    window.localStorage.clear();
+  });
+
+  const files = () => within(screen.getByRole('navigation', { name: 'Files' })).getAllByRole('button').map((row) => row.querySelector('.tm-review__index-name')?.textContent);
+
+  it('reads the branch commit by commit as history, from the menu and with [ and ], and back to the whole change', async () => {
+    render(<Harness gitSnapshotId="snapshot-1" />);
+    const scope = await screen.findByRole('button', { name: 'Changes to show' });
+    await waitFor(() => expect(api.listTaskCommits).toHaveBeenCalledWith({ taskId: expect.any(String), gitSnapshotId: 'snapshot-1' }));
+    scope.focus();
+    fireEvent.keyDown(scope, { key: 'ArrowDown' });
+    const menu = await screen.findByRole('menu', { name: 'Changes to show' });
+    expect(within(menu).getAllByRole('menuitemradio').map((item) => item.getAttribute('aria-label'))).toEqual(['All changes', 'Raise the limit', 'Rename the limiter']);
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'Raise the limit' }));
+
+    // The commit's own message stands where the brief does, over its own files; nothing is marked viewed or written on history.
+    const brief = await screen.findByRole('region', { name: 'Commit' });
+    expect(brief.textContent).toContain('Commit 1 of 2');
+    expect(within(brief).getByText('The old one throttled imports.')).toBeDefined();
+    expect(files()).toEqual(['limit.ts']);
+    expect(screen.queryByRole('checkbox', { name: 'Viewed' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Comment on line/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Previous commit' }).hasAttribute('disabled')).toBe(true);
+
+    // ] moves on once the next commit is read; the finding on its file sits at the file's top, not on a line that may since have changed.
+    fireEvent.keyDown(screen.getByRole('region', { name: 'src/limit.ts' }), { key: ']' });
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Commit' }).textContent).toContain('Commit 2 of 2'));
+    expect(files()).toEqual(['rateLimit.ts']);
+    expect(within(screen.getByRole('region', { name: 'src/rateLimit.ts' })).getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Next commit' }).hasAttribute('disabled')).toBe(true);
+
+    scope.focus();
+    fireEvent.keyDown(scope, { key: 'ArrowDown' });
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Changes to show' })).getByRole('menuitemradio', { name: 'All changes' }));
+    expect(screen.queryByRole('region', { name: 'Commit' })).toBeNull();
+    expect(files()).toHaveLength(2);
+    expect(screen.getAllByRole('checkbox', { name: 'Viewed' })).toHaveLength(2);
+  });
+
+  it('filters the files by every word typed, goes to the first with Enter, and finds the filter with /', async () => {
+    render(<Harness findings={[]} />);
+    await screen.findByRole('region', { name: 'src/limit.ts' });
+    fireEvent.keyDown(screen.getByRole('region', { name: 'src/limit.ts' }), { key: '/' });
+    const filter = screen.getByRole('searchbox', { name: 'Filter files' });
+    expect(document.activeElement).toBe(filter);
+
+    fireEvent.change(filter, { target: { value: 'RATE src' } });
+    expect(files()).toEqual(['rateLimit.ts']);
+    fireEvent.keyDown(filter, { key: 'Enter' });
+    expect(within(screen.getByRole('navigation', { name: 'Files' })).getByRole('button', { name: /rateLimit\.ts/ }).getAttribute('aria-current')).toBe('true');
+    fireEvent.change(filter, { target: { value: 'nothing here' } });
+    expect(screen.getByText('No files match')).toBeDefined();
+    // Escape clears the filter before it gives the keys back.
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    expect(files()).toHaveLength(2);
   });
 });
 

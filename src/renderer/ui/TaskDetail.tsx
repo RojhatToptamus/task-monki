@@ -2151,6 +2151,7 @@ export function TaskDetail(props: TaskDetailProps) {
             walkthrough={reviewGate.walkthrough ? { state: reviewGate.walkthrough, view: walkthroughView, author: reviewerName } : undefined}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
+            gitSnapshotId={evidenceGitSnapshot?.id}
             reviewedDiffArtifactId={reviewGate.status === 'STALE'
               ? gitSnapshots.find((candidate) => candidate.id === reviewGate.reviewedGitSnapshotId)?.diffArtifactId
               : undefined}

@@ -496,6 +496,10 @@ Rules:
   each intent beside its code) and the Diff (the complete change). A
   walkthrough of earlier code stays as context, never as current; on someone
   else's pull request, none is written until the person asks.
+- The Diff can also read the branch commit by commit: each commit's change
+  against its first parent, with its message. A commit is history: feedback
+  shows at its files' tops, and comments and viewed marks belong to the change
+  as a whole, never to a commit.
 
 The detailed source of truth is
 `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.

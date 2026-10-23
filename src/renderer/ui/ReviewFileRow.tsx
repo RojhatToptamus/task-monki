@@ -4,6 +4,7 @@ import { isBlockingFinding } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
 import { normalizeReviewPath } from '../model/reviewWorkspace';
 import { DiffStat } from './DiffStat';
+import { FileMark } from './FileMark';
 import type { ReviewModel } from './useReviewModel';
 
 /** What is said about each file of a mode that still asks for something: open findings and discussions, and the person's comments. */
@@ -68,8 +69,9 @@ export function ReviewFileList({ current, children }: {
 }
 
 /**
- * A file in a navigator: its name in mono and its folder muted, a count of
- * what is said about it when anything is, then its counts or the viewed check.
+ * A file in a navigator: its mark, its name in mono and its folder muted, a
+ * count of what is said about it when anything is, then its counts or the
+ * viewed check.
  */
 export const ReviewFileRow = memo(function ReviewFileRow({ file, current, viewed, feedback, blocking, onSelect }: {
   file: DiffFile;
@@ -90,6 +92,7 @@ export const ReviewFileRow = memo(function ReviewFileRow({ file, current, viewed
       aria-current={current ? 'true' : undefined}
       onClick={() => onSelect(file.id)}
     >
+      <FileMark file={file} />
       <span className="tm-review__index-path">
         <span className="tm-review__index-name">{name}</span>
         {parts.length ? <span className="tm-review__index-dir">{parts.join('/')}</span> : null}

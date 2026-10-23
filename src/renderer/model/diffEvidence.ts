@@ -87,8 +87,13 @@ interface ParsedDiffSections {
   parsedChunkCount: number;
 }
 
-export function inspectGitDiffEvidence(text: string): GitDiffEvidenceInspection {
-  const sections = extractDiffSections(text);
+/**
+ * A captured diff's files and how completely they were read. A plain Git diff
+ * is one section, named `label`, which keeps its blocks apart from another
+ * diff's of the same file (a commit's, or what changed since a review).
+ */
+export function inspectGitDiffEvidence(text: string, label?: string): GitDiffEvidenceInspection {
+  const sections = extractDiffSections(text, label);
   const parsed = parseDiffSections(sections);
   const files = parsed.files;
   const hasUnparsedChunk = parsed.totalChunkCount > parsed.parsedChunkCount;
@@ -194,7 +199,7 @@ function filterDiffSectionsByScope(
   );
 }
 
-function extractDiffSections(text: string): RawDiffSection[] {
+function extractDiffSections(text: string, label = 'Local diff'): RawDiffSection[] {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const sections: RawDiffSection[] = [];
   let current: RawDiffSection | undefined;
@@ -218,7 +223,7 @@ function extractDiffSections(text: string): RawDiffSection[] {
   }
 
   if (sections.length === 0 && lines.some((line) => line.startsWith('diff --git '))) {
-    return [{ label: 'Local diff', source: 'local', lines }];
+    return [{ label, source: 'local', lines }];
   }
 
   return sections;

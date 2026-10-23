@@ -183,6 +183,22 @@ describe('the Guide', () => {
     expect(within(fetching).getByRole('button', { name: /more files?$/u }).getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('keeps the code where it is read when a comment is written there, laid out by what was said when the person arrived', async () => {
+    await open(<Harness />);
+    const fetching = stage('Fetch remote work');
+    fireEvent.click(within(fetching).getByRole('button', { name: '1 more file' }));
+    fireEvent.click(within(fetching).getByRole('button', { name: `Expand ${TEST}` }));
+    const test = within(fetching).getByRole('region', { name: TEST });
+    fireEvent.click(within(test).getByRole('button', { name: 'Comment on line 2' }));
+    fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Check the snapshot too.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+
+    // The comment lands under its line, and its file stays among the stage's other files, still open.
+    expect(within(test).getByText('Check the snapshot too.')).toBeDefined();
+    expect([...fetching.querySelectorAll('[data-file-id]')].map((unit) => unit.getAttribute('data-file-id'))).toEqual([SERVICE, READER, TEST]);
+    expect(within(fetching).getByRole('button', { name: '1 more file' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('lights a term\'s lines while it is pointed at, and pressed, opens what hides them and keeps them chosen until the next move', async () => {
     await open(<Harness />);
     const fetching = stage('Fetch remote work');
@@ -246,7 +262,7 @@ describe('the Guide', () => {
     expect(reading('Fetch remote work')).toBe('reader.ts');
   });
 
-  it('switches modes with G and keeps the file and line read, at the same height, both ways, and the stage as the Diff\'s files', async () => {
+  it('switches modes with G and keeps the file and line read, at the same height, both ways', async () => {
     await open(<Harness />);
     const element = scroller();
     Object.defineProperty(element, 'clientHeight', { configurable: true, value: 600 });
@@ -266,10 +282,10 @@ describe('the Guide', () => {
     press('j');
     press('g');
     expect(modePressed('Diff')).toBe(true);
-    // From a stage, the Diff holds its files, as its Open in Diff does.
-    expect(screen.getByRole('button', { name: 'Changes to show' }).textContent).toContain('Fetch remote work');
+    // The Diff is the whole change, read from the same file.
+    expect(screen.getByRole('button', { name: 'Changes to show' }).textContent).toContain('All changes');
     const navigator = within(screen.getByRole('navigation', { name: 'Files' })).getAllByRole('button');
-    expect(navigator).toHaveLength(3);
+    expect(navigator).toHaveLength(5);
     expect(navigator.find((row) => row.getAttribute('aria-current') === 'true')?.textContent).toContain('service.ts');
     // The line lands 50px under the scroller's top, as it was: 400 - 100 - 50.
     expect(element.scrollTop).toBe(250);
@@ -386,18 +402,6 @@ describe('the Guide', () => {
     expect(viewed().checked).toBe(false);
   });
 
-  it('opens a stage in the Diff narrowed to its files, until another scope is chosen', async () => {
-    await open(<Harness />);
-    fireEvent.click(within(stage('Document remote work')).getByRole('button', { name: 'Open in Diff' }));
-    expect(modePressed('Diff')).toBe(true);
-    expect(within(screen.getByRole('navigation', { name: 'Files' })).getAllByRole('button').map((row) => row.querySelector('.tm-review__index-name')?.textContent))
-      .toEqual(['remote.md']);
-    const scope = screen.getByRole('button', { name: 'Changes to show' });
-    expect(scope.textContent).toContain('Document remote work');
-    fireEvent.click(within(await openMenu(scope, 'Changes to show')).getByRole('menuitemradio', { name: 'All changes' }));
-    expect(within(screen.getByRole('navigation', { name: 'Files' })).getAllByRole('button')).toHaveLength(5);
-  });
-
   it('asks about an intent, a file or a discussion with that subject', async () => {
     const onAskAboutStage = vi.fn();
     const onAskAboutFile = vi.fn();
@@ -429,8 +433,5 @@ describe('the Guide', () => {
     expect(within(account).queryByRole('button', { name: /^Intent/ })).toBeNull();
     expect(within(account).queryByRole('navigation', { name: 'Files' })).toBeNull();
     expect(within(account).getByRole('region', { name: DOCS })).toBeDefined();
-    // Its one stage is the whole change, so its Diff is not narrowed under a title the Guide never showed.
-    fireEvent.click(within(account).getByRole('button', { name: 'Open in Diff' }));
-    expect(screen.getByRole('button', { name: 'Changes to show' }).textContent).toContain('All changes');
   });
 });

@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useRef, useState, type KeyboardEvent } from 'react';
 import type { GuideAttention, GuideInline, GuideRun, GuideSpan } from '../model/reviewWalkthrough';
 import { severityLabel } from './ReviewFindingThread';
 import { Tooltip } from './Tooltip';
@@ -12,12 +12,11 @@ export function GuideInlines({ parts }: { parts: readonly GuideInline[] }) {
 }
 
 /** "Walkthrough by" and the agent that wrote it, said once for the whole Guide. */
-export function GuideByline({ author, children }: { author?: string; children?: ReactNode }) {
+export function GuideByline({ author }: { author?: string }) {
   return (
     <p className="tm-review-guide__byline">
       <AgentMark />
       <span>Walkthrough{author ? <> by <b>{author}</b></> : null}</span>
-      {children}
     </p>
   );
 }

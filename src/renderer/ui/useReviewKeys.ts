@@ -5,13 +5,14 @@ import { isExpandShortcut } from './ExpandToggle';
 import type { ReviewModel } from './useReviewModel';
 
 /**
- * The Review keys, for the tab's section: J/K files, [ and ] the Guide's stages,
- * N/P open findings and discussions, V viewed and on, G the other mode at the
- * same place, D/A/F the focused finding, R the focused discussion's reply, C
- * the selected lines, Escape the lines a move chose. The order they step
- * through is the mode's; a held key repeating arrives at once.
+ * The Review keys, for the tab's section: J/K files, [ and ] the Guide's stages
+ * or the Diff's commits, / the Diff's file filter, N/P open findings and
+ * discussions, V viewed and on, G the other mode at the same place, D/A/F the
+ * focused finding, R the focused discussion's reply, C the selected lines,
+ * Escape the lines a move chose. The order they step through is the mode's; a
+ * held key repeating arrives at once.
  */
-export function useReviewKeys(model: ReviewModel) {
+export function useReviewKeys(model: ReviewModel, { findFile }: { findFile(): void }) {
   const { actions, props, activeFileId, focusedFile, selection, commentDraft, sheetOpen, mode, fileIds: files } = model;
   const focusedFinding = props.findings.find((finding) => finding.id === model.focusedFindingId);
   const focusedDiscussion = model.discussions.find((discussion) => discussion.id === model.focusedDiscussionId);
@@ -40,8 +41,13 @@ export function useReviewKeys(model: ReviewModel) {
     if (key === 'j' || key === 'k') {
       const next = stepThrough(files, activeFileId, key === 'j' ? 1 : -1);
       if (next) { event.preventDefault(); actions.showFile(next, { instant }); }
+    } else if ((key === '[' || key === ']') && mode === 'diff') {
+      // The Diff steps through the branch's commits, as the Guide steps through its stages.
+      if (!model.commitSteps[key === ']' ? 'next' : 'previous']) return;
+      event.preventDefault();
+      actions.stepCommit(key === ']' ? 1 : -1);
     } else if (key === '[' || key === ']') {
-      if (mode !== 'guide' || !stages?.length) return;
+      if (!stages?.length) return;
       event.preventDefault();
       // The overview leads when there is more than one stage.
       const order = [...(stages.length > 1 ? ['overview'] : []), ...stages.map((stage) => String(stage.section))];
@@ -52,6 +58,9 @@ export function useReviewKeys(model: ReviewModel) {
       const back = key === '[' && current !== undefined && scroller && top !== undefined && top < scroller.getBoundingClientRect().top - 4;
       const next = back ? current : stepThrough(order, current, key === ']' ? 1 : -1);
       if (next !== undefined) actions.showStage(next === 'overview' ? 'overview' : Number(next), { instant });
+    } else if (key === '/' && mode === 'diff') {
+      event.preventDefault();
+      findFile();
     } else if (key === 'g') {
       event.preventDefault();
       actions.setMode(mode === 'guide' ? 'diff' : 'guide');
@@ -66,7 +75,7 @@ export function useReviewKeys(model: ReviewModel) {
       }
     } else if (key === 'v') {
       const fileId = activeFileId ?? files[0];
-      if (!fileId || !files.includes(fileId)) return;
+      if (!fileId || !files.includes(fileId) || model.history) return;
       event.preventDefault();
       const nowViewed = !model.viewedIds.has(fileId);
       actions.setFileViewed(fileId, nowViewed);

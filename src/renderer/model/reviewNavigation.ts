@@ -52,6 +52,12 @@ export function stepFeedback(order: readonly FeedbackRef[], current: FeedbackRef
   return order[Math.min(order.length - 1, Math.max(0, position + delta))];
 }
 
+/** A file the navigator's filter keeps: every word of the query is in its path, in any case. */
+export function matchesFileQuery(path: string, query: string): boolean {
+  const lower = path.toLowerCase();
+  return query.toLowerCase().split(/\s+/u).every((word) => lower.includes(word));
+}
+
 /** After `fileId` is marked viewed, the first file after it, in reading order, not yet viewed. */
 export function nextUnviewed(files: readonly string[], fileId: string, viewed: ReadonlySet<string>): string | undefined {
   return files.slice(files.indexOf(fileId) + 1).find((candidate) => !viewed.has(candidate));

@@ -1,5 +1,5 @@
 import { ReviewBands } from './ReviewBands';
-import { ReviewBrief } from './ReviewBrief';
+import { ReviewBrief, ReviewCommitBrief } from './ReviewBrief';
 import { ReviewFileUnit } from './ReviewFileUnit';
 import type { ReviewModel } from './useReviewModel';
 
@@ -7,8 +7,8 @@ const NO_FEEDBACK: readonly never[] = [];
 
 /**
  * The Diff: the complete review, file by file in the order that matters. The
- * brief states the facts first; feedback without a place in the files sits
- * above them, framed as a file is.
+ * brief states the facts first, or a commit's own when the Diff reads one;
+ * feedback without a place in the files sits above them, framed as a file is.
  */
 export function ReviewDiff({ model }: { model: ReviewModel }) {
   const { anchors, focusedFile, commentDraft, selection } = model;
@@ -17,6 +17,7 @@ export function ReviewDiff({ model }: { model: ReviewModel }) {
   const askable = Boolean(model.props.onAskAboutFile) && !model.props.historical;
   return (
     <div className="tm-review__diff">
+      {model.commit ? <ReviewCommitBrief {...model.commit} /> : null}
       {model.brief ? <ReviewBrief content={model.brief} folded={model.briefFolded} onFoldedChange={model.actions.foldBrief} /> : null}
       {model.emptyText ? <p className="tm-review__empty">{model.emptyText}</p> : null}
       {general.findings.length > 0 || general.discussions.length > 0 ? (
@@ -31,7 +32,7 @@ export function ReviewDiff({ model }: { model: ReviewModel }) {
             key={id}
             file={entry.file}
             collapsed={model.isCollapsed(entry)}
-            viewed={model.viewedIds.has(id)}
+            viewed={model.history ? undefined : model.viewedIds.has(id)}
             findings={model.openFindingsByFile.get(id) ?? NO_FEEDBACK}
             discussions={model.openDiscussionsByFile.get(id) ?? NO_FEEDBACK}
             anchors={anchors}

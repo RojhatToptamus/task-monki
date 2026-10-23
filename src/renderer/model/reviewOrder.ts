@@ -49,6 +49,20 @@ export function reviewFileRole(path: string): ReviewFileRole {
   return 'code';
 }
 
+/** What a file is, as its mark shows it. */
+export type ReviewFileKind = 'code' | 'text' | 'data' | 'image' | 'script' | 'lock' | 'config';
+
+export function reviewFileKind(path: string): ReviewFileKind {
+  const name = (path.split('/').at(-1) ?? path).toLowerCase();
+  if (LOCKFILES.has(name)) return 'lock';
+  if (/\.(?:png|jpe?g|gif|webp|avif|bmp|ico|svg)$/u.test(name)) return 'image';
+  if (/\.(?:md|mdx|rst|txt|adoc)$/u.test(name)) return 'text';
+  if (reviewFileRole(path) === 'config') return 'config';
+  if (/\.(?:json|jsonc|json5|csv|tsv|xml)$/u.test(name)) return 'data';
+  if (/\.(?:sh|bash|zsh|fish|ps1|bat|cmd)$/u.test(name)) return 'script';
+  return 'code';
+}
+
 /** The name a test and the file it covers share: `foo` for foo.ts and foo.test.ts. */
 function stem(path: string): string {
   const name = path.split('/').at(-1) ?? path;

@@ -1,7 +1,9 @@
 import { useRef, useState, type CSSProperties } from 'react';
-import { ChevronDown, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { flushSync } from 'react-dom';
+import { ChevronDown, ChevronLeft, ChevronRight, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import type { AgentReviewGateStatus } from '../../shared/contracts';
 import type { ReviewMode } from '../model/reviewNavigation';
+import { sameScope } from '../model/reviewScope';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { MessageTime } from './Message';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
@@ -11,7 +13,7 @@ import { ReviewNavigator, type ReviewRail } from './ReviewNavigator';
 import { ReviewOutcome } from './ReviewRequest';
 import { Tooltip } from './Tooltip';
 import { useReviewKeys } from './useReviewKeys';
-import { ReviewActionsProvider, ReviewBandsProvider, SCOPE_LABELS, useReviewModel, type ReviewWorkspaceProps } from './useReviewModel';
+import { ReviewActionsProvider, ReviewBandsProvider, useReviewModel, type ReviewWorkspaceProps } from './useReviewModel';
 
 export type { ReviewWorkspaceProps } from './useReviewModel';
 
@@ -46,22 +48,33 @@ function reviewHeadline(status: AgentReviewGateStatus | undefined, openCount: nu
  */
 export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
   const model = useReviewModel(props, scrollerRef);
-  const onKeyDown = useReviewKeys(model);
   const [rail, setRail] = useState<ReviewRail>('files');
+  // / finds a file: the navigator shows the files, and its filter takes the caret.
+  const onKeyDown = useReviewKeys(model, {
+    findFile: () => {
+      flushSync(() => setRail('files'));
+      filterRef.current?.focus();
+      filterRef.current?.select();
+    }
+  });
   const { review, plan, draft } = props;
-  const { actions, effectiveScope, sinceReviewLabel, mode, guide } = model;
+  const { actions, scope, mode, guide } = model;
   const diffMode = mode === 'diff';
 
+  // Commits are numbered in the menu; every other choice keeps their column, as the stages' menu does.
+  const numbered = model.scopeChoices.some((choice) => choice.lead);
   const scopeItems: ActionMenuItem[] = [
-    ...(['all', 'committed', 'uncommitted'] as const).map((value) => ({
-      id: value, label: SCOPE_LABELS[value], pressed: !model.diffFilter && effectiveScope === value, onSelect: () => actions.setScope(value)
+    ...model.scopeChoices.map((choice): ActionMenuItem => ({
+      id: choice.scope.kind === 'commit' ? `commit:${choice.scope.sha}` : choice.scope.kind,
+      label: choice.label,
+      ...(numbered ? { lead: choice.lead ?? '' } : {}),
+      ...(choice.meta ? { meta: choice.meta } : {}),
+      separated: choice.separated,
+      pressed: sameScope(choice.scope, scope),
+      onSelect: () => actions.setScope(choice.scope)
     })),
-    ...(model.sinceReviewAvailable ? [{
-      id: 'since-review', label: sinceReviewLabel, pressed: !model.diffFilter && effectiveScope === 'since-review', onSelect: () => actions.setScope('since-review')
-    }] : []),
-    // A stage opened from the Guide narrows the Diff to its files; another choice shows them all again.
-    ...(model.diffFilter ? [{ id: 'stage', label: model.diffFilter.title, pressed: true, separated: true }] : []),
     ...(props.comparison ? [{
       id: 'comparison', label: 'Change comparison…', meta: props.comparison.label, separated: true,
       disabled: Boolean(props.comparison.disabledReason), disabledReason: props.comparison.disabledReason, onSelect: props.comparison.onChange
@@ -143,12 +156,28 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                       label="Changes to show"
                       selection="single"
                       side="bottom"
+                      wide={numbered}
                       trigger={<>
-                        <span className="tm-review__scope-label">{model.diffFilter?.title ?? (effectiveScope === 'since-review' ? sinceReviewLabel : SCOPE_LABELS[effectiveScope])}</span>
+                        <span className="tm-review__scope-label">{model.scopeChoices.find((choice) => sameScope(choice.scope, scope))?.label ?? 'All changes'}</span>
                         <ChevronDown size={13} aria-hidden="true" />
                       </>}
                       items={scopeItems}
                     />
+                    {/* While a commit is read, the next and previous ones are a step away; after the menu, so they never move. */}
+                    {scope.kind === 'commit' ? (
+                      <span className="tm-review__steps">
+                        <Tooltip label="Previous commit" shortcut="[">
+                          <button type="button" className="tm-iconbtn" aria-label="Previous commit" aria-keyshortcuts="[" disabled={!model.commitSteps.previous} onClick={() => actions.stepCommit(-1)}>
+                            <ChevronLeft size={16} aria-hidden="true" />
+                          </button>
+                        </Tooltip>
+                        <Tooltip label="Next commit" shortcut="]">
+                          <button type="button" className="tm-iconbtn" aria-label="Next commit" aria-keyshortcuts="]" disabled={!model.commitSteps.next} onClick={() => actions.stepCommit(1)}>
+                            <ChevronRight size={16} aria-hidden="true" />
+                          </button>
+                        </Tooltip>
+                      </span>
+                    ) : null}
                     <ActionMenu
                       className="tm-review__view"
                       label="View options"
@@ -179,7 +208,7 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
             <p className="tm-review__notice" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
           ) : null}
           <div className="tm-review__work">
-            {diffMode ? <ReviewNavigator model={model} rail={rail} onRailChange={setRail} /> : null}
+            {diffMode ? <ReviewNavigator model={model} rail={rail} onRailChange={setRail} filterRef={filterRef} /> : null}
             {/* One scroller for the code, whichever mode reads it; heads stick at its --review-sticky-top. */}
             <div ref={scrollerRef} className="tm-review__scroller" tabIndex={-1} style={{ '--review-num': `${model.gutterWidth}px` } as CSSProperties}>
               {diffMode ? <ReviewDiff model={model} /> : <ReviewGuide model={model} />}

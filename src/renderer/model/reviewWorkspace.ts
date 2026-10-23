@@ -59,12 +59,14 @@ export function normalizeReviewPath(path: string): string {
  * the review read. In a diff from the reviewed code to the worktree now, the
  * reviewed code is the old side, so `side: 'REVIEWED'` finds the range there,
  * on unchanged and removed lines alike. A line outside the diff falls back to
- * the file's top.
+ * the file's top, as every finding does while the lines shown are not the code
+ * the review read (`onLines` off), such as a commit's.
  */
 export function anchorReviewFindings(
   files: readonly DiffFile[],
   findings: readonly ReviewFindingView[],
-  side: 'NEW' | 'REVIEWED' = 'NEW'
+  side: 'NEW' | 'REVIEWED' = 'NEW',
+  onLines = true
 ): AnchoredFindings {
   const byLine = new Map<string, ReviewFindingView[]>();
   const byFile = new Map<string, ReviewFindingView[]>();
@@ -82,7 +84,7 @@ export function anchorReviewFindings(
       general.push(finding);
       continue;
     }
-    const anchor = finding.line ? findRowAnchor(file, side, finding.line, finding.endLine) : undefined;
+    const anchor = onLines && finding.line ? findRowAnchor(file, side, finding.line, finding.endLine) : undefined;
     if (anchor) push(byLine, anchor, finding);
     else push(byFile, file.id, finding);
   }
@@ -98,14 +100,17 @@ export interface AnchoredComments {
 /**
  * Anchors comments the same way as findings, on the side each was written on: a
  * removed line is found on the old side. A comment whose lines the diff no longer
- * shows, or one on the whole file, sits under the file's header. Each comment
- * anchors once, so a file shown in several blocks never repeats it.
+ * shows, or one on the whole file, sits under the file's header, as every one
+ * does while the lines shown are not the code it was written on (`onLines`
+ * off). Each comment anchors once, so a file shown in several blocks never
+ * repeats it.
  */
 export function anchorReviewComments(
   files: readonly DiffFile[],
   comments: readonly ReviewComment[],
   /** The side a comment's numbers are on: its own, or the code a review read (`REVIEWED`), as `anchorReviewFindings` takes it. */
-  sideOf: (comment: ReviewComment) => ReviewComment['side'] | 'REVIEWED' = (comment) => comment.side
+  sideOf: (comment: ReviewComment) => ReviewComment['side'] | 'REVIEWED' = (comment) => comment.side,
+  onLines = true
 ): AnchoredComments {
   const byLine = new Map<string, ReviewComment[]>();
   const byFile = new Map<string, ReviewComment[]>();
@@ -113,7 +118,7 @@ export function anchorReviewComments(
   for (const comment of comments) {
     const file = filesByPath.get(normalizeReviewPath(comment.path));
     if (!file) continue;
-    const anchor = comment.line ? findRowAnchor(file, sideOf(comment), comment.line, comment.endLine) : undefined;
+    const anchor = onLines && comment.line ? findRowAnchor(file, sideOf(comment), comment.line, comment.endLine) : undefined;
     const map = anchor ? byLine : byFile;
     const key = anchor ?? file.id;
     map.set(key, [...(map.get(key) ?? []), comment]);

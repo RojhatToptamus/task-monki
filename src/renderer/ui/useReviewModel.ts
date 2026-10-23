@@ -12,13 +12,14 @@ import type {
   TaskReviewDraft,
   WorktreeRecord
 } from '../../shared/contracts';
-import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
+import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
 import type { WholeFileState } from '../model/reviewContext';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
 import type { ReviewMode } from '../model/reviewNavigation';
 import { orderReviewFiles, reviewFileRole, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
+import { stepCommit, type ReviewScope } from '../model/reviewScope';
 import {
   readBriefFolded,
   readReviewFileOrder,
@@ -37,7 +38,6 @@ import {
   anchorReviewFindings,
   diffFileSignature,
   diffLineId,
-  filesChangedSinceReview,
   lineAnchor,
   lineAnchorKey,
   normalizeReviewPath,
@@ -51,9 +51,8 @@ import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { useNotify } from './NotifyContext';
 import { landing, linesOf, quoted, readPlace } from './reviewPlace';
 import { stopTravel, travel } from './travel';
-import { useDiffArtifact } from './useDiffArtifact';
-import { useReviewChanges } from './useReviewChanges';
 import { useReviewContext } from './useReviewContext';
+import { useReviewScope } from './useReviewScope';
 import { useScrollSpy } from './useScrollSpy';
 import type { WalkthroughView } from './useWalkthrough';
 
@@ -62,8 +61,6 @@ import type { WalkthroughView } from './useWalkthrough';
  * code and the foot. What the parts can do is `ReviewActions`: stable for the
  * tab's life, so a row given one renders again only when its own inputs change.
  */
-
-export type ReviewScope = DiffEvidenceScope | 'since-review';
 
 export interface ReviewWorkspaceProps {
   taskId: string;
@@ -78,6 +75,8 @@ export interface ReviewWorkspaceProps {
   };
   findings: ReviewFindingView[];
   currentDiffArtifactId?: string;
+  /** The capture shown, which its commits are read from. */
+  gitSnapshotId?: string;
   reviewedDiffArtifactId?: string;
   /**
    * The review to measure changes from: the current one once it is out of date,
@@ -233,13 +232,13 @@ export interface ReviewActions {
   revealLines(blockId: string, from: number, to: number): void;
   setWholeFile(fileId: string, whole: boolean): void;
   setScope(scope: ReviewScope): void;
+  /** Compares the commit after or before the one compared, from any other scope the first or the last. */
+  stepCommit(direction: 1 | -1): void;
   setOrder(order: ReviewFileOrder): void;
   foldBrief(folded: boolean): void;
 
   /** Reads the review the other way, keeping the place: the file and line being read, and in the Guide, its stage. */
   setMode(mode: ReviewMode): void;
-  /** The Diff of one stage's files, from the place being read when it is one of them. */
-  openInDiff(section: number): void;
   /** Moves to the overview or a stage of the walkthrough. */
   showStage(stage: GuideStageId, options?: { instant?: boolean }): void;
   /** Opens or folds a stage's other files ("N more files"). */
@@ -347,9 +346,6 @@ export interface GuideView {
   outside: { findings: readonly ReviewFindingView[]; discussions: readonly DiscussionView[] };
 }
 
-/** A filter the Diff takes from a stage: its files only. */
-interface DiffFilter { title: string; fileIds: ReadonlySet<string> }
-
 const NO_FINDINGS: ReviewFindingView[] = [];
 const NO_DISCUSSIONS: DiscussionView[] = [];
 const NO_COMMENTS: ReviewComment[] = [];
@@ -363,12 +359,7 @@ const STAGE_BAND = () => 40;
 /** A file viewed keeps the signatures of its last few changes. */
 const VIEWED_SIGNATURES = 4;
 
-export const SCOPE_LABELS: Record<ReviewScope, string> = {
-  all: 'All changes',
-  committed: 'Committed',
-  uncommitted: 'Uncommitted',
-  'since-review': 'Since the review'
-};
+const NO_SIGNATURES: ReadonlyMap<string, string> = new Map();
 
 interface PendingTravel {
   /** What to move to; none moves to the top. */
@@ -386,60 +377,66 @@ interface PendingTravel {
 
 export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObject<HTMLElement | null>) {
   const { review, findings, draft, plan } = props;
-  const diff = useDiffArtifact(props.currentDiffArtifactId, props.artifacts);
-  const reviewed = useDiffArtifact(props.reviewedDiffArtifactId, props.artifacts);
+  const scoped = useReviewScope({
+    taskId: props.taskId,
+    stale: review?.status === 'STALE',
+    historical: Boolean(props.historical),
+    changesSince: props.changesSince,
+    currentDiffArtifactId: props.currentDiffArtifactId,
+    reviewedDiffArtifactId: props.reviewedDiffArtifactId,
+    artifacts: props.artifacts,
+    gitSnapshotId: props.gitSnapshotId
+  });
+  const { capture: diff, scope, exactChanges, loading } = scoped;
   const stale = review?.status === 'STALE';
-  const canCompareSinceReview = stale && !props.historical && !reviewed.missing && !reviewed.error;
-  // Exactly what changed since the review, from the code it read; without that code, the files whose diff changed.
-  const changes = useReviewChanges(props.taskId, props.historical ? undefined : props.changesSince?.reviewRunId, props.changesSince?.refreshKey);
-  const changedSinceReview = useMemo(
-    () => (canCompareSinceReview && !reviewed.loading && !diff.loading ? filesChangedSinceReview(reviewed.filesByScope.all, diff.filesByScope.all) : undefined),
-    [canCompareSinceReview, diff.filesByScope.all, diff.loading, reviewed.filesByScope.all, reviewed.loading]
-  );
-  // The scope is offered only when something changed since the review, and leads while the review is out of date; never an empty scope.
-  const sinceReviewAvailable = changes.files ? changes.files.length > 0 : Boolean(changedSinceReview?.size);
-  const sinceReviewLabel = props.changesSince?.label ?? SCOPE_LABELS['since-review'];
-  const [chosenScope, setScope] = useState<ReviewScope>();
-  const scope = chosenScope ?? (stale && sinceReviewAvailable ? 'since-review' : 'all');
-  const effectiveScope: ReviewScope = scope === 'since-review' && !sinceReviewAvailable ? 'all' : scope;
-  // The exact changes' removed lines are the reviewed code's, not the base's, so they take no comments.
-  const exactChanges = effectiveScope === 'since-review' && Boolean(changes.files);
-  const capturedFiles: DiffFile[] = useMemo(() => (effectiveScope === 'since-review'
-    ? changes.files ?? diff.filesByScope.all.filter((file) => changedSinceReview?.has(normalizeReviewPath(file.path)))
-    : diff.filesByScope[effectiveScope]), [changedSinceReview, changes.files, diff.filesByScope, effectiveScope]);
+  // A commit is history: its lines may no longer be the code's, so what was said sits at its file's top, and
+  // nothing is written or marked viewed on it.
+  const history = scope.kind === 'commit';
   // The checkout's unchanged lines fill each file's gaps, hidden until revealed; never for an earlier capture.
   const context = useReviewContext({
     worktree: props.historical ? undefined : props.worktree,
     captureId: props.historical ? undefined : props.currentDiffArtifactId,
     artifacts: props.artifacts,
-    files: capturedFiles
+    files: scoped.files
   });
   const files = context.files;
   const gutterWidth = useMemo(() => reviewGutterWidth(files, context.fillable), [files, context.fillable]);
-  // Until the reviewed diff is read, the default scope is unknown, so the tab is loading, not showing one and then the other.
-  const loading = diff.loading || (canCompareSinceReview && !chosenScope && (reviewed.loading || changes.loading));
 
+  // A commit shows what was said about its own files; anything else belongs to the whole change.
+  const ofScope = useMemo(() => {
+    const paths = history ? new Set(files.map((file) => normalizeReviewPath(file.path))) : undefined;
+    return <T extends { path?: string }>(items: readonly T[]): readonly T[] =>
+      (paths ? items.filter((item) => item.path !== undefined && paths.has(normalizeReviewPath(item.path))) : items);
+  }, [files, history]);
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
   // Measured from this review's own code, the findings' lines are on the old side.
   const findingSide = exactChanges && props.changesSince?.reviewRunId === review?.runId ? 'REVIEWED' : 'NEW';
-  const anchoredFindings = useMemo(() => anchorReviewFindings(files, visibleFindings, findingSide), [files, visibleFindings, findingSide]);
+  const anchoredFindings = useMemo(
+    () => anchorReviewFindings(files, ofScope(visibleFindings), findingSide, !history),
+    [files, findingSide, history, ofScope, visibleFindings]
+  );
   // The agent's answers wait for the diff as findings do. The answered request's own comments left the
   // draft when it went, so they sit where they were written again, before any written since.
   const bandAnswers = useMemo(
     () => (props.answers?.round && !props.historical && !loading ? reviewBandAnswers(props.answers.round) : undefined),
     [loading, props.answers?.round, props.historical]
   );
-  const shownComments = useMemo(() => (bandAnswers?.comments.size
-    ? [...[...bandAnswers.comments.values()].map((sent) => sent.comment), ...draft.comments]
-    : draft.comments), [bandAnswers, draft.comments]);
+  const roundComments = useMemo(
+    () => (bandAnswers?.comments.size ? [...bandAnswers.comments.values()].map((sent) => sent.comment) : NO_COMMENTS),
+    [bandAnswers]
+  );
+  const shownComments = useMemo(() => (roundComments.length ? [...roundComments, ...draft.comments] : draft.comments), [draft.comments, roundComments]);
   // The latest request's comments were written on the code the review read: measured from that code, their lines are on the old side, as its findings' are.
   const anchoredComments = useMemo(() => anchorReviewComments(files, shownComments, (comment) =>
-    (findingSide === 'REVIEWED' && comment.side === 'NEW' && bandAnswers?.comments.has(comment.id) ? 'REVIEWED' : comment.side)), [bandAnswers, files, findingSide, shownComments]);
+    (findingSide === 'REVIEWED' && comment.side === 'NEW' && bandAnswers?.comments.has(comment.id) ? 'REVIEWED' : comment.side), !history), [bandAnswers, files, findingSide, history, shownComments]);
   // Discussions wait for the diff as findings do, and belong to the current head, not an earlier capture.
   const discussions = props.historical || loading ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
-  const discussionsOnLines = Boolean(props.discussionsOnLines) && effectiveScope !== 'since-review';
-  const anchoredDiscussions = useMemo(() => anchorReviewDiscussions(files, discussions, discussionsOnLines), [files, discussions, discussionsOnLines]);
+  const discussionsOnLines = Boolean(props.discussionsOnLines) && !history && scope.kind !== 'since-review';
+  const anchoredDiscussions = useMemo(
+    () => anchorReviewDiscussions(files, ofScope(discussions), discussionsOnLines),
+    [discussions, discussionsOnLines, files, ofScope]
+  );
   const anchors = useMemo<ReviewAnchors>(
     () => ({ findings: anchoredFindings, discussions: anchoredDiscussions, comments: anchoredComments }),
     [anchoredComments, anchoredDiscussions, anchoredFindings]
@@ -448,17 +445,15 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
 
   const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);
   const ordered = useMemo(() => orderReviewFiles(files, diffFeedback.findingsByFile, order), [diffFeedback.findingsByFile, files, order]);
-  // A stage opened in the Diff narrows it to the stage's files, while any of them is in it: never an empty scope.
-  const [diffFilter, setDiffFilter] = useState<DiffFilter>();
-  const diffOrdered = useMemo(() => {
-    const kept = diffFilter ? ordered.filter((entry) => diffFilter.fileIds.has(entry.file.id)) : ordered;
-    return kept.length ? kept : ordered;
-  }, [diffFilter, ordered]);
-  // Each file's change has one signature per capture; viewed holds while unchanged lines open.
-  const signatures = useMemo(() => new Map(capturedFiles.map((file) => [file.id, diffFileSignature(file)])), [capturedFiles]);
+  // Each file's change has one signature per capture; viewed holds while unchanged lines open. Viewed is the
+  // change's progress, so a commit's files, which are history, carry none and are never marked.
+  const signatures = useMemo(
+    () => (history ? NO_SIGNATURES : new Map(scoped.files.map((file) => [file.id, diffFileSignature(file)]))),
+    [history, scoped.files]
+  );
   const diffReading = useMemo(
-    () => readingOf({ files, ordered: diffOrdered, anchors, feedback: diffFeedback, signatures, gutterWidth, foldedByDefault: (entry) => entry.role === 'generated' }),
-    [anchors, diffFeedback, diffOrdered, files, gutterWidth, signatures]
+    () => readingOf({ files, ordered, anchors, feedback: diffFeedback, signatures, gutterWidth, foldedByDefault: (entry) => entry.role === 'generated' }),
+    [anchors, diffFeedback, files, gutterWidth, ordered, signatures]
   );
 
   // The walkthrough, over the code the review read: this review's findings, the discussions where they sit
@@ -476,19 +471,34 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   // walkthrough with their answers: a request names its review only when it was sent while that review
   // was current, so they were written on the code the walkthrough shows. Comments written since were not.
   const guideComments = useMemo(
-    () => (guideCurrent ? shownComments : ownWalkthrough && bandAnswers ? [...bandAnswers.comments.values()].map((sent) => sent.comment) : NO_COMMENTS),
-    [bandAnswers, guideCurrent, ownWalkthrough, shownComments]
+    () => (guideCurrent ? shownComments : ownWalkthrough ? roundComments : NO_COMMENTS),
+    [guideCurrent, ownWalkthrough, roundComments, shownComments]
+  );
+  // The Guide lays its code out by what was said when the person arrived: a comment written while reading
+  // lands under its line and nothing they read moves. The next visit lays it out with the rest.
+  const [arrivedWith] = useState(() => draft.comments);
+  const guideLayoutComments = useMemo(
+    () => (guideCurrent ? (roundComments.length ? [...roundComments, ...arrivedWith] : arrivedWith) : ownWalkthrough ? roundComments : NO_COMMENTS),
+    [arrivedWith, guideCurrent, ownWalkthrough, roundComments]
   );
   const guideFiles = walkthrough?.view.files ?? NO_FILES;
   const guideDiscussions = props.historical ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
-  const guideAnchors = useMemo<ReviewAnchors>(() => ({
-    findings: anchorReviewFindings(guideFiles, ownWalkthrough ? findings : NO_FINDINGS),
-    discussions: anchorReviewDiscussions(guideFiles, guideDiscussions, Boolean(props.discussionsOnLines) && guideCurrent),
-    comments: anchorReviewComments(guideFiles, guideComments)
-  }), [findings, guideComments, guideCurrent, guideDiscussions, guideFiles, ownWalkthrough, props.discussionsOnLines]);
+  const guideFindingAnchors = useMemo(() => anchorReviewFindings(guideFiles, ownWalkthrough ? findings : NO_FINDINGS), [findings, guideFiles, ownWalkthrough]);
+  const guideDiscussionAnchors = useMemo(
+    () => anchorReviewDiscussions(guideFiles, guideDiscussions, Boolean(props.discussionsOnLines) && guideCurrent),
+    [guideCurrent, guideDiscussions, guideFiles, props.discussionsOnLines]
+  );
+  const guideAnchors = useMemo<ReviewAnchors>(
+    () => ({ findings: guideFindingAnchors, discussions: guideDiscussionAnchors, comments: anchorReviewComments(guideFiles, guideComments) }),
+    [guideComments, guideDiscussionAnchors, guideFiles, guideFindingAnchors]
+  );
+  const guideLayout = useMemo<ReviewAnchors>(
+    () => ({ findings: guideFindingAnchors, discussions: guideDiscussionAnchors, comments: anchorReviewComments(guideFiles, guideLayoutComments) }),
+    [guideDiscussionAnchors, guideFiles, guideFindingAnchors, guideLayoutComments]
+  );
   const guideModel = useMemo(
-    () => (walkthrough?.view.walkthrough && walkthrough.view.files ? buildGuide(walkthrough.view.walkthrough, walkthrough.view.files, guideAnchors) : undefined),
-    [guideAnchors, walkthrough?.view.files, walkthrough?.view.walkthrough]
+    () => (walkthrough?.view.walkthrough && walkthrough.view.files ? buildGuide(walkthrough.view.walkthrough, walkthrough.view.files, guideLayout) : undefined),
+    [guideLayout, walkthrough?.view.files, walkthrough?.view.walkthrough]
   );
   const folders = useMemo(() => filesByFolder(files), [files]);
   const [guideOpenState, setGuideOpen] = useState<GuideOpen>(NO_GUIDE_OPEN);
@@ -525,8 +535,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const { filesById, ordered: readingOrdered, fileIds, findingsByFile, discussionsByFile } = reading;
   const openFindings = useMemo(() => findings.filter((finding) => finding.state === 'OPEN'), [findings]);
   const findingsActionable = props.findingsSendable && !props.historical;
-  // Comments are written on the code shown now: never on an earlier capture or an earlier walkthrough.
-  const canComment = !props.historical && (mode === 'diff' || !guideModel || guideCurrent);
+  // Comments are written on the code shown now: never on an earlier capture, an earlier walkthrough or a commit.
+  const canComment = !props.historical && (mode === 'guide' && guideModel ? guideCurrent : !history);
   const included = useMemo(() => new Set(plan.send.map((finding) => finding.id)), [plan.send]);
   const includedDiscussions = useMemo(() => new Set(plan.discussions.map((discussion) => discussion.id)), [plan.discussions]);
   const reReview = Boolean(props.resolvedFindings?.length || findings.some((finding) => finding.previousFindingId));
@@ -585,7 +595,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const latest = {
     props, mode, ordered: readingOrdered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, collapsedIn, focusedFile,
     selection, commentDraft, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
-    included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile
+    included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile,
+    history, scopeChoice: scoped.choice, steppedCommits: scoped.commits, chooseScope: scoped.choose
   };
   const live = useRef(latest);
   useLayoutEffect(() => { live.current = latest; });
@@ -681,16 +692,14 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     };
     // Switching modes keeps the place: the same line at the same height, opening whatever hides it. Lines
     // match only while both modes read one code, the Diff's own or a walkthrough of it; on an earlier
-    // walkthrough, the file is kept.
-    const switchMode = (next: ReviewMode, filter?: DiffFilter) => {
+    // walkthrough or a commit, the file is kept.
+    const switchMode = (next: ReviewMode) => {
       const current = now();
       if (current.props.historical || current.mode === next) return;
       const scroller = scrollerRef.current;
       const read = scroller ? readPlace(scroller, current.activeFileId) : undefined;
-      // A stage's Diff holds its files alone: a place outside them is not kept.
-      const kept = read && (!filter || filter.fileIds.has(read.fileId)) ? read : undefined;
-      const place: { fileId: string; lineAnchor?: string; offset?: number } | undefined = kept && current.guide && !current.guideCurrent ? { fileId: kept.fileId } : kept;
-      setDiffFilter(next === 'diff' ? filter : undefined);
+      const place: { fileId: string; lineAnchor?: string; offset?: number } | undefined =
+        read && ((current.guide && !current.guideCurrent) || current.history) ? { fileId: read.fileId } : read;
       setFocusedFileId(undefined);
       const entry = place ? current.readings[next].ordered.find((candidate) => candidate.file.id === place.fileId) : undefined;
       if (place && entry) {
@@ -704,18 +713,6 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         ? { attribute: place.lineAnchor ? 'data-line-anchor' : 'data-file-id', value: place.lineAnchor ?? place.fileId, within: place.fileId, ...(place.offset !== undefined ? { offset: place.offset } : {}), instant: true, focus: false }
         : { instant: true, focus: false });
     };
-    // A stage in the Diff: its files of the change the review read, all of it and never a Git layer of it. Once
-    // the code moved on from the walkthrough, the Diff leads as it does for the review, with what changed since
-    // it. The one stage of a one-intent change is the whole change, so its Diff is not narrowed.
-    const openStageInDiff = (section: number) => {
-      const { guide, guideCurrent } = now();
-      const stages = guide?.stages ?? [];
-      const stage = stages[section];
-      if (!stage) return;
-      setScope(guideCurrent ? 'all' : undefined);
-      switchMode('diff', stages.length > 1 ? { title: stage.title, fileIds: new Set(stage.files.map((file) => file.file.id)) } : undefined);
-    };
-
     const applySelection = (next?: LineSelection) => { selectionRef.current = next; setSelection(next); };
     const blockOf = (fileId: string, blockId: string) => {
       const file = now().filesById.get(fileId);
@@ -806,7 +803,12 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         if (whole) openIfCollapsed(entry);
         now().setWholeFile(fileId, whole);
       },
-      setScope: (next) => { setScope(next); setDiffFilter(undefined); },
+      setScope: (next) => now().chooseScope(next),
+      stepCommit: (direction) => {
+        const { scopeChoice, steppedCommits, chooseScope } = now();
+        const next = stepCommit(steppedCommits, scopeChoice, direction);
+        if (next) chooseScope(next);
+      },
       setOrder: (next) => { setOrder(next); writeReviewFileOrder(next); },
       foldBrief: (folded) => {
         const { briefRound: round, props: current } = now();
@@ -814,18 +816,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         writeBriefFolded(current.taskId, round, folded);
       },
 
-      // From a stage, the Diff opens narrowed to its files, as the stage's Open in Diff does; elsewhere it is the mode alone.
-      setMode: (next) => {
-        const current = now();
-        const scroller = scrollerRef.current;
-        if (next === 'diff' && current.mode === 'guide' && current.guide && scroller) {
-          const read = readPlace(scroller, current.activeFileId);
-          const section = read ? current.guide.files.get(read.fileId)?.stage : current.activeStage === 'overview' ? undefined : current.activeStage;
-          if (section !== undefined) { openStageInDiff(section); return; }
-        }
-        switchMode(next);
-      },
-      openInDiff: openStageInDiff,
+      setMode: switchMode,
       showStage: (stage, { instant = false } = {}) => {
         const { guide } = now();
         if (!guide) return;
@@ -1089,7 +1080,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     props.onDiscussionRevealed?.();
   }, [props.revealDiscussionId, readingOrdered, discussions]);
 
-  const brief: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical
+  // The brief is the whole change's; a commit leads with its own message instead.
+  const brief: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical && !history
     ? { ...props.brief, ...(props.brief.round ? { round: { ...props.brief.round, onShowItem: actions.showRequestItem } } : {}) }
     : undefined;
   const unavailable = loading ? 'Loading changes…'
@@ -1099,8 +1091,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
           : undefined;
   // An incomplete capture never reads as empty: missing paths are unknown, not absent.
   const emptyScope = !unavailable && files.length === 0
-    ? diff.inspection.completeness === 'INCOMPLETE' ? 'No paths could be confirmed from the incomplete capture.'
-      : effectiveScope === 'since-review' ? 'Nothing changed since the review.' : 'No changes in this scope.'
+    ? diff.inspection.completeness === 'INCOMPLETE' && !history ? 'No paths could be confirmed from the incomplete capture.' : scoped.empty
     : undefined;
 
   // The Guide shows the walkthrough the gate keeps, the earlier one included, while it is read; or why there is none.
@@ -1128,8 +1119,6 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     mode,
     guide,
     activeStage,
-    /** The stage the Diff is narrowed to. */
-    diffFilter: mode === 'diff' && diffOrdered !== ordered ? diffFilter : undefined,
     anchors: reading.anchors,
     loading,
     incomplete: diff.inspection.completeness === 'INCOMPLETE' && !diff.loading,
@@ -1144,9 +1133,17 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     // The checkout fills the Diff's files, which the Guide reads too before a walkthrough; a walkthrough's
     // files are the code the review read, from the base, never the exact changes since a review.
     wholeFile: mode === 'diff' || !guideModel ? context.wholeFile : noWholeFile,
-    effectiveScope,
-    sinceReviewAvailable,
-    sinceReviewLabel,
+    /** What the Diff compares, what it offers instead, and the commit compared, with its number. */
+    scope,
+    /** The Diff reads a commit: history, so nothing is written or marked viewed on it. */
+    history: mode === 'diff' && history,
+    scopeChoices: scoped.choices,
+    commit: scoped.commit,
+    /** A commit to step back to and on to, from the one chosen. */
+    commitSteps: {
+      previous: stepCommit(scoped.commits, scoped.choice, -1) !== undefined,
+      next: stepCommit(scoped.commits, scoped.choice, 1) !== undefined
+    },
     exactChanges: (mode === 'diff' || !guideModel) && exactChanges,
     stale,
     order,

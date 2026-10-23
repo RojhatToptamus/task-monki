@@ -31,11 +31,11 @@ export interface GuideScope {
 
 /**
  * One stage: a sticky column with the intent's title, its place among the
- * stages (the menu of stages), Open in Diff, the explanation with its terms,
- * what deserves attention and the stage's files; beside it, the code of the
- * files that hold its key changes or open feedback, then the rest behind one
- * row. Stacked, the column is a block above the code, and a line holds the
- * stage and the file being read once the block has scrolled away.
+ * stages (the menu of stages), the explanation with its terms, what deserves
+ * attention and the stage's files; beside it, the code of the files that hold
+ * its key changes or open feedback, then the rest behind one row. Stacked, the
+ * column is a block above the code, and a line holds the stage and the file
+ * being read once the block has scrolled away.
  * A one-intent change is one stage: the account and the summary lead it, and
  * it needs no title, counter or list of one file.
  */
@@ -45,15 +45,12 @@ export function GuideStageSection({ scope, stage, count }: { scope: GuideScope; 
   const single = count === 1;
   const titleId = useId();
   const columnRef = useRef<HTMLDivElement>(null);
-  const openInDiff = (
-    <button type="button" className="tm-osection__link tm-review-guide__open" onClick={() => actions.openInDiff(stage.section)}>Open in Diff</button>
-  );
   return (
     <section className="tm-review-guide__stage" data-stage={stage.section} aria-labelledby={single ? undefined : titleId} aria-label={single ? 'Walkthrough' : undefined}>
       <div ref={columnRef} className="tm-review-guide__column">
         {single ? (
           <>
-            <GuideByline author={guide.author}>{openInDiff}</GuideByline>
+            <GuideByline author={guide.author} />
             <blockquote className="tm-review-guide__summary"><GuideInlines parts={guide.model!.summary} /></blockquote>
           </>
         ) : (
@@ -71,7 +68,6 @@ export function GuideStageSection({ scope, stage, count }: { scope: GuideScope; 
             <div className="tm-review-guide__meta">
               <StageMenu model={model} stage={stage} count={count} />
               <FilesMenu model={model} stage={stage} />
-              {openInDiff}
             </div>
           </>
         )}

@@ -15,18 +15,20 @@
 @container review-scroller (max-width: 1179px) {
   .tm-review-guide__stage { --guide-column: 320px; }
 }
-/* At a stage's top its title and its first file's head share a centre line. */
+/* At a stage's top its first line (the title, or the byline) and its first file's head share a centre line. */
 .tm-review-guide__column { position: sticky; top: 0; min-width: 0; padding-top: 32px; }
 .tm-review-guide__code { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 24px; }
 .tm-review-guide__stage--overview .tm-review-guide__code { gap: 0; padding-top: 32px; }
 .tm-review-guide__loading { margin: 0; padding: 32px; color: var(--muted); font-size: var(--t-body); line-height: var(--lh-body); }
 
-/* The column: the title with Ask beside it, a meta row (the counter that opens
-   the menu of stages, Open in Diff), the explanation, attention, the files. */
-.tm-review-guide__head { display: flex; align-items: flex-start; gap: 8px; }
-.tm-review-guide__title { flex: 1; min-width: 0; margin: 0; color: var(--text); font-size: var(--t-heading); font-weight: var(--w-medium); line-height: var(--lh-body); text-wrap: pretty; }
-/* Ask holds its place at rest and shows while the pointer or the keys are on the column. */
-.tm-review-guide__ask { flex: 0 0 auto; margin: -2px -4px -2px 0; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
+/* The column: the title with Ask beside it, the counter that opens the menu of
+   stages, the explanation, attention, the files. */
+/* The title's 24px line is centred where the byline's 20px line is. */
+.tm-review-guide__head { display: flex; align-items: flex-start; gap: 8px; margin-top: -2px; }
+/* An intent's title is a chapter heading: the walkthrough is read as a document. */
+.tm-review-guide__title { flex: 1; min-width: 0; margin: 0; color: var(--text); font-size: var(--t-chapter); font-weight: var(--w-medium); line-height: var(--lh-chapter); letter-spacing: -0.01em; text-wrap: pretty; }
+/* Ask holds its place at rest and shows while the pointer or the keys are on the column, centred on the title's first line. */
+.tm-review-guide__ask { flex: 0 0 auto; margin: 0 -4px 0 0; opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
 .tm-review-guide__column:hover .tm-review-guide__ask,
 .tm-review-guide__ask:focus-visible { opacity: 1; }
 .tm-review-guide__meta { display: flex; align-items: center; gap: 8px; min-height: var(--lh-body); margin-top: 6px; }
@@ -34,7 +36,6 @@
 :is(.tm-review-guide__stages__trigger, .tm-review-guide__files-menu__trigger).tm-action-menu__trigger { gap: 4px; min-width: 0; height: var(--h-compact); margin: -2px 0 -2px -4px; padding: 0 4px; border-radius: var(--r-xs); color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
 :is(.tm-review-guide__stages__trigger, .tm-review-guide__files-menu__trigger) svg { color: var(--faint); }
 .tm-review-guide__files-menu { display: none; }
-.tm-review-guide__open { margin-left: auto; }
 
 .tm-review-guide__explanation { margin: 12px 0 0; color: var(--text); font-size: var(--t-body); line-height: var(--lh-prose); text-wrap: pretty; }
 .tm-review-guide__more-words { margin-top: 2px; color: var(--accent-ink); font-size: var(--t-help); font-weight: var(--w-medium); line-height: var(--lh-ui); }
@@ -71,7 +72,6 @@
 .tm-review-guide__byline { display: flex; align-items: center; gap: 8px; min-height: var(--lh-body); margin: 0; color: var(--muted); font-size: var(--t-help); }
 .tm-review-guide__byline > svg { flex: 0 0 auto; color: var(--text-soft); }
 .tm-review-guide__byline b { color: var(--text-soft); font-weight: var(--w-medium); }
-.tm-review-guide__byline > .tm-review-guide__open { margin-left: auto; }
 .tm-review-guide__summary { margin: 10px 0 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); color: var(--text); font-size: var(--t-body); line-height: var(--lh-prose); text-wrap: pretty; }
 .tm-review-guide__summary + .tm-review-guide__explanation { margin-top: 12px; }
 .tm-review-guide__map-head { display: flex; align-items: baseline; justify-content: space-between; margin: 0; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); line-height: var(--lh-body); }

@@ -9,6 +9,7 @@ import { buildReviewDiffRows, lineAnchorKey, reviewRowRange, selectionRange, typ
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { DiffStat } from './DiffStat';
 import { ExpandToggle } from './ExpandToggle';
+import { FileMark } from './FileMark';
 import { useOpenTargetMenuItems } from './OpenTargetMenu';
 import { ReviewBands } from './ReviewBands';
 import { severityLabel } from './ReviewFindingThread';
@@ -34,7 +35,8 @@ export interface ReviewFileUnitProps {
   file: DiffFile;
   /** Folded to its head; what asks for something stays as one row each. */
   collapsed: boolean;
-  viewed: boolean;
+  /** Marked viewed; absent where nothing is marked, as on a commit. */
+  viewed?: boolean;
   /** Open findings anywhere in the file: in words on its head, and a row each while it is collapsed. */
   findings: readonly ReviewFindingView[];
   /** Open discussions anywhere in the file: a row each while it is collapsed. */
@@ -112,26 +114,28 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
             onClick={(event) => actions.toggleCollapsed(file.id, event.altKey)}
           >
             <ChevronRight size={13} aria-hidden="true" />
+            <FileMark file={file} />
             <span className="tm-review-file__path">
               {parts.length ? <span className="tm-review-file__dir">{parts.join('/')}/</span> : null}
               <span className="tm-review-file__name">{name}</span>
             </span>
           </button>
         </Tooltip>
-        {file.oldPath ? <span className="tm-review-file__word">from <code>{file.oldPath}</code></span>
-          : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'New' : 'Deleted'}</span> : null}
+        {file.oldPath ? <span className="tm-review-file__word">from <code>{file.oldPath}</code></span> : null}
         {file.invisibleCharacters ? <span className="tm-review-file__word" data-tone="waiting">Invisible characters</span> : null}
         <span className="tm-review-file__spacer" />
         {findings.length ? (
           <span className="tm-review-file__count" data-tone={findings.some(isBlockingFinding) ? 'blocked' : undefined}>{findingWords(findings)}</span>
         ) : null}
         <DiffStat additions={file.additions} deletions={file.deletions} />
-        <Tooltip label="Viewed" shortcut="V">
-          {/* The 16px mark sits in a 24px target, like every control in the head. */}
-          <label className="tm-review-file__viewed">
-            <input type="checkbox" aria-label="Viewed" checked={viewed} onChange={() => actions.setFileViewed(file.id, !viewed)} />
-          </label>
-        </Tooltip>
+        {viewed === undefined ? null : (
+          <Tooltip label="Viewed" shortcut="V">
+            {/* The 16px mark sits in a 24px target, like every control in the head. */}
+            <label className="tm-review-file__viewed">
+              <input type="checkbox" aria-label="Viewed" checked={viewed} onChange={() => actions.setFileViewed(file.id, !viewed)} />
+            </label>
+          </Tooltip>
+        )}
         <FileMenu file={file} worktree={props.worktree} canComment={props.canComment} askable={Boolean(props.askable)} wholeFile={props.wholeFile} />
         {/* The head's Expand and Collapse are the chevron's, so this control names full screen. */}
         {fullScreen === undefined ? null : (
