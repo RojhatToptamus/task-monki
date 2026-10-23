@@ -15,6 +15,7 @@ export const IPC_INVOKE_CHANNELS = [
   'agent:queueTaskInstruction',
   'agent:readProtocolMessage',
   'agent:readReviewChanges',
+  'agent:readReviewedDiff',
   'agent:respondToInteraction',
   'agent:retryRun',
   'agent:runtimeCatalog',

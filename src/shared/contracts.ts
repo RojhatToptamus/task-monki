@@ -68,6 +68,7 @@ export * from './agent';
 export * from './agentReviewFindings';
 export * from './reviewDraft';
 export * from './reviewRounds';
+export * from './reviewWalkthrough';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -376,6 +377,7 @@ export const ARTIFACT_KINDS = [
   'pr-body',
   'remote-source',
   'pull-request-feedback',
+  'review-walkthrough',
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -1209,12 +1211,17 @@ export interface AskSideQuestionRequest {
 }
 
 /**
- * What an Ask question is about: a finding of the task's current review, or a line
- * range of the current diff (the old side's numbers on removed lines).
+ * What an Ask question is about: a finding of the task's current review; a line
+ * range of the current diff (the old side's numbers on removed lines); a section
+ * of the review gate's walkthrough, by its index; a changed file; or a thread
+ * of the task's pull request.
  */
 export type AskSubject =
   | { kind: 'FINDING'; reviewRunId: string; findingId: string }
-  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number };
+  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }
+  | { kind: 'STAGE'; reviewRunId: string; section: number }
+  | { kind: 'FILE'; path: string }
+  | { kind: 'THREAD'; discussionId: string };
 
 export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
   runtimeId: AgentRuntimeId;
@@ -1806,6 +1813,8 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
   /** What changed from the code a review read to the worktree now. */
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** The change a review read: from the base it compared against to the code it read. */
+  readReviewedDiff(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
   /** Records a question in Ask and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;

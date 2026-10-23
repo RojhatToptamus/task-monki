@@ -8,19 +8,33 @@ import {
 
 export const AGENT_REVIEW_RESULT_SCHEMA_VERSION = 'agent-review/v1' as const;
 
-export function parseAgentReviewResult(text: string | undefined): AgentReviewResult | undefined {
+/** What a review's output holds: its result, and the walkthrough it wrote. */
+export interface AgentReviewOutput {
+  result?: AgentReviewResult;
+  /** As the agent wrote it; Task Monki checks it against the change it read before keeping any of it. */
+  walkthrough?: unknown;
+}
+
+/**
+ * Reads an agent-review/v2 output: its last fenced json block holds the result
+ * and the walkthrough, after prose that may quote code. Output without one is
+ * read as bare JSON, then as native review comments.
+ */
+export function parseAgentReviewOutput(text: string | undefined): AgentReviewOutput {
   if (!text?.trim()) {
-    return undefined;
+    return {};
   }
-  const jsonText = extractJsonBlock(text) ?? extractBareJson(text);
-  if (!jsonText) {
-    return parseNativeAgentReviewResult(text);
+  const value = parseJson(lastJsonBlock(text) ?? extractBareJson(text));
+  if (value === undefined) {
+    const result = parseNativeAgentReviewResult(text);
+    return result ? { result } : {};
   }
-  try {
-    return normalizeReviewResult(JSON.parse(jsonText));
-  } catch {
-    return parseNativeAgentReviewResult(text);
-  }
+  const result = normalizeReviewResult(value);
+  const walkthrough = isRecord(value) ? value.walkthrough : undefined;
+  return {
+    ...(result ? { result } : {}),
+    ...(walkthrough !== undefined ? { walkthrough } : {})
+  };
 }
 
 export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {
@@ -57,9 +71,17 @@ function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | 
   return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
-function extractJsonBlock(text: string): string | undefined {
-  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return match?.[1]?.trim();
+function lastJsonBlock(text: string): string | undefined {
+  return [...text.matchAll(/```json[ \t]*\r?\n([\s\S]*?)```/giu)].at(-1)?.[1]?.trim();
+}
+
+function parseJson(text: string | undefined): unknown {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 function extractBareJson(text: string): string | undefined {

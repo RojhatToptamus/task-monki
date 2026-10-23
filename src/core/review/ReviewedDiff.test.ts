@@ -47,8 +47,7 @@ describe('reviewed diff evidence', () => {
       '@@ -1,2 +1,2 @@',
       ' const a = 1;',
       '-const b = 2;',
-      '+const b = 3;',
-      ''
+      '+const b = 3;'
     ].join('\n'));
   });
 });

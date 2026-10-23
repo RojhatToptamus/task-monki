@@ -15,6 +15,7 @@ import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
 import { PULL_REQUEST_FEEDBACK_LIMITS, PULL_REQUEST_REVIEWER_STATES } from '../../shared/pullRequestFeedback';
 import { parseRemoteRepositoryUrl } from '../../shared/remoteWork';
 import { assertReviewRequestRecord } from '../../shared/reviewRounds';
+import { REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS } from '../../shared/reviewWalkthrough';
 import type { StoreState } from '../projection/reducer';
 
 const WORKFLOW_PHASES = [
@@ -1322,6 +1323,7 @@ function projection(value: unknown): void {
       booleanField(persistedRecord(review.requestAnswer, 'tasks.projection'), 'awaitingDecision', 'tasks.projection');
     }
     if (review.result !== undefined) reviewResult(review.result);
+    if (review.walkthrough !== undefined) reviewWalkthrough(review.walkthrough);
     if (review.findingDecisions !== undefined) {
       if (
         !Array.isArray(review.findingDecisions) ||
@@ -1360,6 +1362,24 @@ function reviewResult(value: unknown): void {
       strings(item, 'tasks.projection', ['previousFindingId', 'title']);
       optionalStrings(item, 'tasks.projection', ['note']);
     }
+  }
+}
+
+/** A stored walkthrough names its review run, artifact and counts; an unavailable one, only why. */
+function reviewWalkthrough(value: unknown): void {
+  const collection = 'tasks.projection';
+  const walkthrough = persistedRecord(value, collection);
+  enumField(walkthrough, 'status', ['STORED', 'UNAVAILABLE'] as const, collection);
+  if (walkthrough.status === 'UNAVAILABLE') {
+    enumField(walkthrough, 'reason', REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS, collection);
+    if (Object.keys(walkthrough).some((key) => !['status', 'reason'].includes(key))) invalid(collection);
+    return;
+  }
+  uuidFields(walkthrough, collection, ['reviewRunId', 'artifactId']);
+  integer(walkthrough, 'sectionCount', collection, 1);
+  integer(walkthrough, 'droppedCount', collection, 0);
+  if (Object.keys(walkthrough).some((key) => !['status', 'reviewRunId', 'artifactId', 'sectionCount', 'droppedCount'].includes(key))) {
+    invalid(collection);
   }
 }
 
@@ -1414,23 +1434,44 @@ export function validateTaskInstructionConversation(instruction: Record<string, 
   }
 }
 
-/** An Ask subject: a finding of a review, or a line range of the diff. */
+/**
+ * An Ask subject: a finding of a review, a line range of the diff, a section of
+ * a review's walkthrough, a changed file, or a thread of the pull request.
+ */
 function askSubject(value: unknown): void {
   const collection = 'taskInstructions';
   const subject = persistedRecord(value, collection);
-  enumField(subject, 'kind', ['FINDING', 'LINES'] as const, collection);
-  if (subject.kind === 'FINDING') {
-    uuidField(subject, 'reviewRunId', collection);
-    stringField(subject, 'findingId', collection);
-    if (Object.keys(subject).some((key) => !['kind', 'reviewRunId', 'findingId'].includes(key))) invalid(collection);
-    return;
+  enumField(subject, 'kind', ['FINDING', 'LINES', 'STAGE', 'FILE', 'THREAD'] as const, collection);
+  const keys: Record<string, readonly string[]> = {
+    FINDING: ['kind', 'reviewRunId', 'findingId'],
+    LINES: ['kind', 'path', 'side', 'line', 'endLine'],
+    STAGE: ['kind', 'reviewRunId', 'section'],
+    FILE: ['kind', 'path'],
+    THREAD: ['kind', 'discussionId']
+  };
+  if (Object.keys(subject).some((key) => !keys[subject.kind as string]!.includes(key))) invalid(collection);
+  switch (subject.kind) {
+    case 'FINDING':
+      uuidField(subject, 'reviewRunId', collection);
+      stringField(subject, 'findingId', collection);
+      return;
+    case 'LINES':
+      stringField(subject, 'path', collection);
+      enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
+      integer(subject, 'line', collection, 1);
+      optionalInteger(subject, 'endLine', collection, 1);
+      if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
+      return;
+    case 'STAGE':
+      uuidField(subject, 'reviewRunId', collection);
+      integer(subject, 'section', collection, 0);
+      return;
+    case 'FILE':
+      stringField(subject, 'path', collection);
+      return;
+    case 'THREAD':
+      stringField(subject, 'discussionId', collection);
   }
-  stringField(subject, 'path', collection);
-  enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
-  integer(subject, 'line', collection, 1);
-  optionalInteger(subject, 'endLine', collection, 1);
-  if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
-  if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
 }
 
 /** A task's issue or pull request, checked before the task is stored. */

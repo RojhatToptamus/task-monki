@@ -338,6 +338,8 @@ const api: TaskManagerApi = {
     invokeIpc('agent:decideReviewFinding', input),
   readReviewChanges: (input: ReadReviewChangesRequest) =>
     invokeIpc('agent:readReviewChanges', input),
+  readReviewedDiff: (input: ReadReviewChangesRequest) =>
+    invokeIpc('agent:readReviewedDiff', input),
   askSideQuestion: (input: AskSideQuestionRequest) => invokeIpc('agent:askSideQuestion', input),
   stopSideQuestion: (input: StopSideQuestionRequest) =>
     invokeIpc('agent:stopSideQuestion', input),

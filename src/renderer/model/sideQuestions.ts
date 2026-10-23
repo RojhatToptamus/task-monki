@@ -10,17 +10,27 @@ export function sideThreadQuestions(instructions: readonly TaskInstruction[], th
     .sort((a, b) => a.order - b.order);
 }
 
-/** What a question is about, as its line in Ask reads: the finding's title, or the lines' location. */
+/** What a question is about, as its line in Ask reads: the finding's title, the lines' or the file's location, or the section or discussion it names. */
 export function askSubjectLabel(subject: AskSubject, findingTitles: ReadonlyMap<string, string>): string {
-  if (subject.kind === 'FINDING') return findingTitles.get(subject.findingId) ?? 'A finding from an earlier review';
-  return formatCommentLocation(subject);
+  switch (subject.kind) {
+    case 'FINDING': return findingTitles.get(subject.findingId) ?? 'A finding from an earlier review';
+    case 'LINES': return formatCommentLocation(subject);
+    case 'FILE': return subject.path;
+    case 'STAGE': return `Section ${subject.section + 1} of the walkthrough`;
+    case 'THREAD': return 'A discussion on the pull request';
+  }
 }
 
 /** The field's placeholder, which also names it: what the next question is about. */
 export function askPlaceholder(subject: AskSubject | undefined): string {
-  if (subject?.kind === 'FINDING') return 'Ask about this finding';
-  if (subject?.kind === 'LINES') return subject.endLine && subject.endLine > subject.line ? 'Ask about these lines' : 'Ask about this line';
-  return 'Ask about the work';
+  switch (subject?.kind) {
+    case 'FINDING': return 'Ask about this finding';
+    case 'LINES': return subject.endLine && subject.endLine > subject.line ? 'Ask about these lines' : 'Ask about this line';
+    case 'FILE': return 'Ask about this file';
+    case 'STAGE': return 'Ask about this section';
+    case 'THREAD': return 'Ask about this discussion';
+    default: return 'Ask about the work';
+  }
 }
 
 /**

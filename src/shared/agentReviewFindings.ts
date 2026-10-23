@@ -1,3 +1,5 @@
+import type { ReviewWalkthroughState } from './reviewWalkthrough';
+
 /**
  * The agent review gate contract and the decisions recorded on its findings.
  *
@@ -46,7 +48,10 @@ export interface AgentReviewResolvedFinding {
 }
 
 export interface AgentReviewResult {
-  /** Durable schema-13 wire value for provider-neutral review artifacts. */
+  /**
+   * The stored result's shape, unchanged since schema 13. The review prompt's
+   * agent-review/v2 adds the walkthrough, which is kept apart.
+   */
   schemaVersion: 'agent-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
@@ -78,6 +83,12 @@ export interface AgentReviewGateProjection {
    * turn starts.
    */
   requestAnswer?: { awaitingDecision: boolean };
+  /**
+   * The walkthrough the review wrote with its findings. A new review keeps a
+   * stored one, which names its own review, as earlier context until its own
+   * outcome replaces it.
+   */
+  walkthrough?: ReviewWalkthroughState;
   updatedAt?: string;
 }
 

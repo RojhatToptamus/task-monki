@@ -84,6 +84,7 @@ import {
   type RemoteWorkRef,
   type TaskRemoteSource
 } from '../../shared/remoteWork';
+import { REVIEW_WALKTHROUGH_MAX_BYTES } from '../../shared/reviewWalkthrough';
 import {
   BOARD_COLORS,
   REVIEW_FINDING_DECISION_LIMIT,
@@ -355,6 +356,7 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'pr-body': 256 * 1024,
   'remote-source': 256 * 1024,
   'pull-request-feedback': PULL_REQUEST_FEEDBACK_LIMITS.bytes,
+  'review-walkthrough': REVIEW_WALKTHROUGH_MAX_BYTES,
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -5189,6 +5191,37 @@ export class SqliteTaskStore {
     return clone(stored);
   }
 
+  /**
+   * Keeps a review's checked walkthrough as an artifact of its run, once: a run
+   * that has one gets it back, so an outcome projected again after a restart
+   * writes nothing new. A walkthrough past its limit is refused before any byte
+   * is written, and nothing is returned.
+   */
+  async recordReviewWalkthrough(reviewRunId: string, content: string): Promise<ArtifactRecord | undefined> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const run = this.state.runs.find((candidate) => candidate.id === reviewRunId);
+      if (run?.mode !== 'REVIEW') throw new Error('A walkthrough belongs to a review run of a task.');
+      const existing = this.state.artifacts.find((artifact) => artifact.runId === run.id && artifact.kind === 'review-walkthrough');
+      if (existing) return clone(existing);
+      const limit = ARTIFACT_BYTE_LIMITS['review-walkthrough'];
+      // The document is never cut: whatever does not fit whole is not kept.
+      if (Buffer.byteLength(content, 'utf8') > limit - artifactTruncationMarker('review-walkthrough', limit).byteLength) {
+        return undefined;
+      }
+      const artifact = await this.createArtifactRecord(run.taskId, 'review-walkthrough', { runId: run.id }, content);
+      this.state = { ...this.state, artifacts: [artifact, ...this.state.artifacts] };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        await this.cleanupUnpublishedArtifacts([artifact]);
+        throw error;
+      }
+      return clone(artifact);
+    });
+  }
+
   private async createTextArtifact(
     taskId: string,
     kind: ArtifactKind,
@@ -5933,6 +5966,15 @@ function assertAgentReviewOwnership(
     if (!reviewRun || decision.reviewRunId !== reviewRun.id) {
       invalidPersistedRelationship('task agent review decision ownership');
     }
+  }
+
+  // A stored walkthrough, this review's or an earlier one kept as context, is its review run's artifact.
+  if (review.walkthrough?.status === 'STORED') {
+    const walkthroughRun = runs.get(review.walkthrough.reviewRunId);
+    if (!walkthroughRun || walkthroughRun.taskId !== task.id || walkthroughRun.mode !== 'REVIEW') {
+      invalidPersistedRelationship('task agent review walkthrough ownership');
+    }
+    assertRunArtifact(artifacts, walkthroughRun, review.walkthrough.artifactId, 'review-walkthrough');
   }
 }
 

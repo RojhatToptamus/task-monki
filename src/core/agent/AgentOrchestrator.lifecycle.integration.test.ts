@@ -1451,6 +1451,7 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     });
     let canonical = (await runtime.store.getRun(review.id))!;
     const output = await runtime.store.getArtifact(canonical.outputArtifactId);
+    const walkthrough = { summary: 'Recovered.', sections: [] };
     await runtime.store.updateArtifact({
       artifactId: output!.id,
       expectedRevision: output!.recordRevision,
@@ -1458,9 +1459,16 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       content: JSON.stringify({
         verdict: 'PASSED',
         summary: 'The recovered review passed.',
-        findings: []
+        findings: [],
+        walkthrough
       })
     });
+    // The walkthrough is checked once, with the outcome that records it.
+    const walkthroughChecks: Array<{ runId: string; walkthrough: unknown }> = [];
+    const reviewWalkthrough = async (run: { id: string }, value: unknown) => {
+      walkthroughChecks.push({ runId: run.id, walkthrough: value });
+      return { status: 'UNAVAILABLE' as const, reason: 'NO_SECTIONS' as const };
+    };
     const completedAt = new Date().toISOString();
     canonical = await runtime.store.updateRun(
       canonical.id,
@@ -1487,7 +1495,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       store,
       runtime.store,
       new AppEventBus(),
-      adapter
+      adapter,
+      { reviewWalkthrough }
     );
     await restarted.initialize();
 
@@ -1500,10 +1509,12 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
         agentReview: {
           status: 'PASSED',
           runId: review.id,
-          summary: 'The recovered review passed.'
+          summary: 'The recovered review passed.',
+          walkthrough: { status: 'UNAVAILABLE', reason: 'NO_SECTIONS' }
         }
       }
     });
+    expect(walkthroughChecks).toEqual([{ runId: review.id, walkthrough }]);
     expect(
       (await runtime.store.snapshot()).queueEntries.find(
         (entry) => entry.runId === review.id
@@ -1521,13 +1532,14 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
       const reopened = await openOrchestratorTaskStore(path.join(dir, 'profile'));
       const reopenedRuntime = bindTaskRuntime(reopened);
       const nextAdapter = new Phase4Adapter(reopenedRuntime.task);
-      const next = new AgentOrchestrator(reopened, reopenedRuntime.store, new AppEventBus(), nextAdapter);
+      const next = new AgentOrchestrator(reopened, reopenedRuntime.store, new AppEventBus(), nextAdapter, { reviewWalkthrough });
       await next.initialize();
       expect((await reopenedRuntime.store.getRun(review.id))?.endedAt).toBe(completedAt);
       expect((await reopened.snapshot()).events.filter(
         (event) => event.runId === review.id && event.type === 'AGENT_RUN_COMPLETED'
       )).toEqual(terminalEvents);
       expect(nextAdapter.runtimeReleaseCount).toBe(0);
+      expect(walkthroughChecks).toHaveLength(1);
       await next.shutdown();
       await persistenceByTaskStore.get(reopened)!.close();
     }

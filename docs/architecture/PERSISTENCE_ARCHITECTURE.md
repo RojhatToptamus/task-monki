@@ -237,7 +237,20 @@ platform accepts running failed checks again. It adds `BRANCH_UPDATE_REQUESTED`
 (`from`, `ref` and `sha`, with the base branch's tip as `baseRef` and `baseSha`
 for Pull changes when it was read), recorded before Task Monki merges a pull
 request's newer commits or its moved base into the worktree. Settings schema 15
-also records the `glab` path, `externalExecutables.glabExecutablePath`.
+also records the `glab` path, `externalExecutables.glabExecutablePath`. Schema
+31 also keeps the walkthrough each review writes with its findings: the review
+gate's `walkthrough` is `STORED` (the review run, its artifact, and the counts of
+sections kept and parts dropped) or `UNAVAILABLE` with a reason. The
+`review-walkthrough` artifact belongs to the review run and holds the walkthrough
+as Task Monki checked it against the change the review read; one larger than 2
+MiB is refused before anything is written, and a run keeps one, so an outcome
+projected again after a restart reuses it. A new review keeps a stored
+walkthrough on its gate as earlier context until its own outcome replaces it.
+Startup refuses a stored walkthrough whose run is not a review of the task or
+whose artifact is another run's. The tree a review reads is pinned under its run
+before the run starts and recorded with its start, and an Ask `subject` may also
+be a walkthrough section (`STAGE`), a changed file (`FILE`) or a pull request
+discussion (`THREAD`).
 
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding

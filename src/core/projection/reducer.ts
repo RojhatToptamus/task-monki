@@ -4,6 +4,7 @@ import type {
   AgentReviewResolvedFinding,
   AgentReviewResult,
   ReviewFindingDecision,
+  ReviewWalkthroughState,
   Finding,
   HealthStatus,
   RunRecord,
@@ -14,6 +15,7 @@ import type {
 } from '../../shared/contracts';
 import {
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS,
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
   isDetachedRunMode,
@@ -1010,6 +1012,8 @@ function reduceAgentReview(
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
           summary: 'An agent is reviewing the current diff.',
           findingDecisions: [],
+          // A stored walkthrough stays as earlier context until this review's own outcome.
+          ...(base.walkthrough?.status === 'STORED' ? { walkthrough: base.walkthrough } : {}),
           updatedAt: event.receivedAt
         };
       }
@@ -1039,6 +1043,7 @@ function reduceAgentReview(
         return base;
       }
       const result = getAgentReviewResult(event.payload);
+      const walkthrough = getReviewWalkthroughState(event.payload);
       return {
         ...base,
         status:
@@ -1050,6 +1055,7 @@ function reduceAgentReview(
         summary:
           result?.summary ??
           'Agent review completed, but no structured pass/fail verdict was provided.',
+        ...(walkthrough ? { walkthrough } : {}),
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_FAILED':
@@ -1330,6 +1336,26 @@ function getResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefi
   if (!previousFindingId || !title) return undefined;
   const note = getString(value, 'note');
   return { previousFindingId, title, ...(note ? { note } : {}) };
+}
+
+/** The walkthrough a review outcome carries, only in a shape the store loads. */
+function getReviewWalkthroughState(payload: unknown): ReviewWalkthroughState | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).agentReviewWalkthrough;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (getString(value, 'status') === 'UNAVAILABLE') {
+    const reason = isOneOf(getString(value, 'reason'), REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS);
+    return reason ? { status: 'UNAVAILABLE', reason } : undefined;
+  }
+  const reviewRunId = getString(value, 'reviewRunId');
+  const artifactId = getString(value, 'artifactId');
+  const sectionCount = getNumber(value, 'sectionCount');
+  const droppedCount = getNumber(value, 'droppedCount');
+  const isCount = (count: number | undefined, minimum: number): count is number =>
+    count !== undefined && Number.isSafeInteger(count) && count >= minimum;
+  return getString(value, 'status') === 'STORED' && reviewRunId && artifactId && isCount(sectionCount, 1) && isCount(droppedCount, 0)
+    ? { status: 'STORED', reviewRunId, artifactId, sectionCount, droppedCount }
+    : undefined;
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {

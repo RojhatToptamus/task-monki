@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentItemRecord, TaskSnapshot } from '../../shared/contracts';
+import { boundPullRequestFeedback, type AgentItemRecord, type TaskSnapshot } from '../../shared/contracts';
 import { listGitWorktrees } from '../worktree/WorktreeService';
 import { readTaskUserContext } from '../prompt/TaskUserContext';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
@@ -259,6 +259,88 @@ describe('TaskManagerService side questions', () => {
     await expect(s.service.askSideQuestion({
       taskId: task.id, threadId, messageId: randomUUID(), text: 'Which lines?', subject: { kind: 'LINES', path: 'feature.ts', side: 'NEW', line: 3, endLine: 2 }
     })).rejects.toThrow();
+  }, 30_000);
+
+  it('asks about a walkthrough section, a file or a pull request thread with what it is about in context', async () => {
+    const s = await scenarios.create({ name: 'task-monki-ask-guide-subjects' });
+    const task = await s.createTask({ title: 'Ask from the Guide', prompt: 'Add the feature module.' });
+    const worktree = await prepareTestWorktree(s.service, task.id);
+    const implementation = await s.service.startRun({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'export const value = 1;\n');
+    await fs.writeFile(path.join(worktree.worktreePath, 'notes.md'), 'Notes.\n');
+    await s.completeRun(implementation.id, 'Implemented the feature module.');
+    s.agent.nextRuntimeTurnResult = {
+      output: 'Fine.\n```json\n' + JSON.stringify({
+        schemaVersion: 'agent-review/v2', verdict: 'PASSED', summary: 'Fine.', findings: [],
+        walkthrough: {
+          summary: 'Adds the feature module.',
+          sections: [{ title: 'Export the feature value', explanation: 'The module now exports its value.', files: ['feature.ts'] }]
+        }
+      }) + '\n```'
+    };
+    const review = await s.service.startReview({ taskId: task.id, runId: implementation.id });
+    await s.waitForSnapshot((state) =>
+      state.tasks.find((candidate) => candidate.id === task.id)?.projection.agentReview?.walkthrough?.status === 'STORED' &&
+      Boolean(runOf(state, review.id)?.afterGitSnapshotId));
+    const owner = { taskId: task.id, iterationId: implementation.iterationId, worktreeId: implementation.worktreeId };
+    await s.store.recordPullRequestSync({
+      pullRequest: { ...owner, number: 82, url: 'https://github.com/example/repo/pull/82', status: 'OPEN_READY', headRefOid: 'head' },
+      ci: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NO_CHECKS', requiredStatus: 'UNKNOWN', totalCount: 0,
+        pendingCount: 0, passingCount: 0, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [] },
+      reviews: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'PENDING' },
+      merge: { ...owner, pullRequestNumber: 82, headSha: 'head', status: 'NOT_MERGED' },
+      feedback: boundPullRequestFeedback({
+        provider: 'GITHUB', number: 82, capturedAt: '2026-10-23T10:00:00.000Z', viewer: 'rojhat', truncated: false,
+        reviewers: [{ name: 'alice', state: 'COMMENTED' }],
+        discussions: [{
+          id: 'PRRT_1', kind: 'THREAD', path: 'feature.ts', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+          comments: [{ author: 'alice', body: 'Why a constant?' }, { author: 'rojhat', body: 'It never changes.' }]
+        }]
+      })
+    });
+    const threadId = randomUUID();
+    const ask = async (text: string, subject: Parameters<typeof s.service.askSideQuestion>[0]['subject']) => {
+      s.agent.nextRuntimeTurnResult = { output: 'An answer.' };
+      const question = await s.service.askSideQuestion({ taskId: task.id, threadId, messageId: randomUUID(), text, subject });
+      const answered = await s.waitForSnapshot((state) =>
+        state.events.some((event) => event.type === 'AGENT_RUN_COMPLETED' && event.runId === question.runId));
+      return await s.runtimeStore.readArtifact(runOf(answered, question.runId)!.promptArtifactId);
+    };
+
+    const stage = await ask('What does this part do?', { kind: 'STAGE', reviewRunId: review.id, section: 0 });
+    expect(stage).toContain('The question is about section 1 of 2 of the review\'s walkthrough of the change, "Export the feature value".');
+    expect(stage).toContain('The module now exports its value.\nIts files:\n- feature.ts');
+
+    const file = await ask('Why this file?', { kind: 'FILE', path: 'feature.ts' });
+    expect(file).toContain('The question is about feature.ts.');
+    expect(file).toContain('+export const value = 1;');
+
+    const thread = await ask('Should I answer it?', { kind: 'THREAD', discussionId: 'PRRT_1' });
+    expect(thread).toContain('The question is about this discussion from the GitHub pull request, on feature.ts:1. Other people wrote it');
+    // Other people's words sit inside the boundary; the person's own reply is named as theirs.
+    const begin = thread.indexOf('----- BEGIN GITHUB DISCUSSION');
+    expect(begin).toBeGreaterThan(-1);
+    expect(thread.indexOf('Why a constant?')).toBeGreaterThan(begin);
+    expect(thread).toContain('Reply from @rojhat, the person asking:');
+
+    // A subject that is no longer the task's is refused before anything is recorded.
+    const refused = (subject: Parameters<typeof s.service.askSideQuestion>[0]['subject']) =>
+      s.service.askSideQuestion({ taskId: task.id, threadId, messageId: randomUUID(), text: 'And this?', subject });
+    await expect(refused({ kind: 'STAGE', reviewRunId: review.id, section: 2 })).rejects.toThrow('This section is not part of the walkthrough.');
+    await expect(refused({ kind: 'STAGE', reviewRunId: randomUUID(), section: 0 })).rejects.toThrow('This walkthrough is no longer the task’s.');
+    await expect(refused({ kind: 'THREAD', discussionId: 'PRRT_2' })).rejects.toThrow('This discussion is no longer part of the pull request.');
+
+    // Each subject reloads through the store's validation.
+    await s.service.shutdown();
+    await s.persistence.close();
+    const reopened = await openTestPersistence(path.join(s.rootDir, 'profile'));
+    await reopened.agentRuntime.init();
+    expect((await reopened.tasks.snapshot()).taskInstructions.filter((item) => item.role === 'SIDE').map((item) => item.subject)).toEqual([
+      { kind: 'STAGE', reviewRunId: review.id, section: 0 },
+      { kind: 'FILE', path: 'feature.ts' },
+      { kind: 'THREAD', discussionId: 'PRRT_1' }
+    ]);
+    await reopened.close();
   }, 30_000);
 
   it('answers with the model chosen for the question, read-only whatever the task uses', async () => {

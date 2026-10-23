@@ -830,6 +830,8 @@ function installIpcHandlers(): void {
     service.decideReviewFinding(input));
   handleTrustedIpc('agent:readReviewChanges', async (_, input: ReadReviewChangesRequest) =>
     service.readReviewChanges(input));
+  handleTrustedIpc('agent:readReviewedDiff', async (_, input: ReadReviewChangesRequest) =>
+    service.readReviewedDiff(input));
 
   handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
     service.askSideQuestion(input));

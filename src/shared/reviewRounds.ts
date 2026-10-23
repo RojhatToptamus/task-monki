@@ -71,12 +71,17 @@ export interface ReviewResponseAnswer {
 
 export const REVIEW_RESPONSE_BLOCK = 'task-monki-review-response';
 
-/** What changed since a review: an exact diff from the code it read to the worktree now. */
+/** A read of the code one review read. */
 export interface ReadReviewChangesRequest {
   taskId: string;
   reviewRunId: string;
 }
 
+/**
+ * An exact diff of the code a review read: from it to the worktree now (what
+ * changed since the review), or from the base it compared against to it (the
+ * change it read).
+ */
 export type ReviewChangesResult =
   | { status: 'READY'; reviewRunId: string; /** The tree the review read. */ tree: string; diff: string }
   /** No tree was recorded for the review, the diff is too large to show, or the tree can no longer be read. */

@@ -528,6 +528,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
     readReviewChanges: (input: ReadReviewChangesRequest) =>
       post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
+    readReviewedDiff: (input: ReadReviewChangesRequest) =>
+      post<ReviewChangesResult>(baseUrl, '/api/review/reviewed-diff', input),
     askSideQuestion: (input: AskSideQuestionRequest) =>
       post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
     stopSideQuestion: (input: StopSideQuestionRequest) =>

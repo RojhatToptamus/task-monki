@@ -1,8 +1,9 @@
 import {
+  discussionCommentText,
   discussionSummary,
+  discussionTranscript,
   isOpenDiscussion,
   type DomainEvent,
-  type RemoteWorkComment,
   type PullRequestDiscussion,
   type PullRequestFeedback,
   type PullRequestFeedbackSummary,
@@ -12,11 +13,11 @@ import {
   type ReviewResponseAnswer,
   type ReviewResponseOutcome
 } from '../../shared/contracts';
-import { INVISIBLE_CHARACTERS, displayPlatformText } from '../../shared/remoteWork';
+import { INVISIBLE_CHARACTERS } from '../../shared/remoteWork';
 import { formatCommentLocation, listNames } from './formatting';
 
-/** A discussion's one-line summary sits with the feedback contract; the Review tab's rows read it from here. */
-export { discussionSummary };
+/** A discussion's summary, a comment's text and its transcript sit with the feedback contract; the Review tab reads them from here. */
+export { discussionCommentText, discussionSummary, discussionTranscript };
 
 /** What became of a discussion the person sent to the agent. */
 interface DiscussionSent {
@@ -183,11 +184,6 @@ export function discussionAuthor(discussion: Pick<PullRequestDiscussion, 'commen
   return discussion.comments[0]?.author;
 }
 
-/** A comment as the person reads it in Task Monki, and so as an agent is sent it; never empty. */
-export function discussionCommentText(body: string): string {
-  return displayPlatformText(body) || '(No text: an image or other content only.)';
-}
-
 /** A comment's prose, and each change it suggests with the lines around its own that it also replaces. */
 type CommentPart =
   | { kind: 'text'; text: string }
@@ -264,56 +260,6 @@ export function reviewWaitingLine(summary: Pick<PullRequestFeedbackSummary, 'rev
 
 function joinNames(names: readonly string[], verb: string): string | undefined {
   return names.length ? `${listNames(names)} ${verb}` : undefined;
-}
-
-const INSTRUCTION_DISCUSSION_LIMIT = 4_000;
-
-/**
- * A discussion as the agent reads it: who said what, oldest first, bounded.
- * Every comment is attributed; none is Task Monki's or the person's word.
- */
-export function discussionTranscript(
-  discussion: Pick<PullRequestDiscussion, 'comments' | 'commentCount'>,
-  /** The signed-in account: the person who sends the request. */
-  viewer?: string
-): string[] {
-  const lines: string[] = [];
-  const shown = discussion.comments.map((comment) => discussionCommentText(comment.body));
-  const allowed = fairShares(shown.map((text) => text.length), INSTRUCTION_DISCUSSION_LIMIT);
-  discussion.comments.forEach((comment: RemoteWorkComment, index) => {
-    const body = shown[index]!.slice(0, allowed[index]);
-    const cut = body.length < shown[index]!.length || comment.truncated;
-    const who = `@${comment.author ?? 'unknown'}${viewer && comment.author === viewer ? ', the person sending this request' : ''}`;
-    lines.push(`   ${index === 0 ? '' : 'Reply from '}${who}:`);
-    for (const line of body.split('\n')) lines.push(`   ${line}`);
-    if (cut) lines.push('   (The comment continues on the platform.)');
-    // The replies between the first comment and the latest ones were not read.
-    if (index === 0 && discussion.commentCount > discussion.comments.length) {
-      lines.push(`   (${discussion.commentCount - discussion.comments.length} replies in between are on the platform.)`);
-    }
-  });
-  return lines;
-}
-
-/**
- * A bound shared by several texts: a short one keeps all of it and the long ones
- * split the rest, so every text keeps at least an even share. The latest reply of
- * a long thread, where it ended, is never crowded out by its first comment.
- */
-function fairShares(lengths: readonly number[], limit: number): number[] {
-  const shares = lengths.map(() => 0);
-  let remaining = limit;
-  let open = lengths.map((_, index) => index).filter((index) => lengths[index]! > 0);
-  while (open.length > 0 && remaining >= open.length) {
-    const share = Math.floor(remaining / open.length);
-    for (const index of open) {
-      const take = Math.min(lengths[index]! - shares[index]!, share);
-      shares[index]! += take;
-      remaining -= take;
-    }
-    open = open.filter((index) => shares[index]! < lengths[index]!);
-  }
-  return shares;
 }
 
 function time(value: string | undefined): number {

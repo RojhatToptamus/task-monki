@@ -2,12 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ReviewChangesResult } from '../../shared/contracts';
+import { changeIndexText, parseReviewedDiff, type ReviewedDiffFile } from '../review/ReviewedDiff';
 import { GIT_HOOKS_OFF_ENV, git, gitResult } from './gitCli';
 import { planUntrackedFiles } from './ReadOnlySnapshotService';
 
 const GIT_TIMEOUT_MS = 120_000;
-/** A diff of changes since a review larger than this is not shown; the full diff still is. */
+/** A diff of a review's code larger than this is not shown; the worktree's full diff still is. */
 export const REVIEW_CHANGES_MAX_BYTES = 8 * 1024 * 1024;
+
+type UnavailableReason = Extract<ReviewChangesResult, { status: 'UNAVAILABLE' }>['reason'];
+
+/** The change a review read, file by file, and as its prompt lists it. */
+export type ReviewChangeIndex =
+  | { status: 'READY'; files: ReviewedDiffFile[]; text: string }
+  | { status: 'UNAVAILABLE'; reason: Exclude<UnavailableReason, 'NOT_RECORDED'> };
 
 interface SnapshotRepository {
   /** The private bare repository that holds this source repository's review trees. */
@@ -23,8 +31,9 @@ interface SnapshotRepository {
  * private bare repository under the profile, one per source repository, and
  * pinned by a ref named for the task and the review. The store borrows the
  * source repository's objects read-only, so only new file contents are stored,
- * and nothing is ever written to the user's repository. "What changed since a
- * review" is then an exact diff from that tree to the worktree as it is now.
+ * and nothing is ever written to the user's repository. The change a review read
+ * is then an exact diff from its base to that tree, and "what changed since a
+ * review" one from that tree to the worktree as it is now.
  */
 export class ReviewSnapshotStore {
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -50,20 +59,52 @@ export class ReviewSnapshotStore {
   async changesSince(worktreePath: string, taskId: string, reviewRunId: string, expectedTree?: string): Promise<ReviewChangesResult> {
     const store = await this.storeFor(worktreePath);
     return this.serialize(store.dir, async () => {
-      const recorded = await gitResult(store.dir, ['rev-parse', '--verify', '--quiet', `${reviewRef(taskId, reviewRunId)}^{tree}`], GIT_TIMEOUT_MS)
-        .then((result) => result.stdout.trim(), () => '');
-      if (!recorded) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
-      if (expectedTree && recorded !== expectedTree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+      const recorded = await this.recordedTree(store, taskId, reviewRunId, expectedTree);
+      if (typeof recorded !== 'string') return recorded;
+      let current: string;
       try {
-        const current = await this.writeTree(worktreePath, store);
-        const diff = await git(worktreePath, ['diff-tree', '-p', '-M', '--no-color', '--no-ext-diff', recorded, current], { timeout: GIT_TIMEOUT_MS, env: store.env });
-        if (Buffer.byteLength(diff) > REVIEW_CHANGES_MAX_BYTES) return { status: 'UNAVAILABLE', reason: 'TOO_LARGE' };
-        return { status: 'READY', reviewRunId, tree: recorded, diff };
-      } catch (error) {
-        // A tree whose objects the source repository has since pruned, or output past the buffer.
-        return { status: 'UNAVAILABLE', reason: /maxBuffer/i.test(String(error)) ? 'TOO_LARGE' : 'UNREADABLE' };
+        current = await this.writeTree(worktreePath, store);
+      } catch {
+        return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
       }
+      const diff = await this.diff(worktreePath, store, recorded, current);
+      return typeof diff === 'string'
+        ? { status: 'READY', reviewRunId, tree: recorded, diff }
+        : { status: 'UNAVAILABLE', reason: diff.reason };
     });
+  }
+
+  /**
+   * The change a review read, as one diff from the base it compared against to
+   * the tree it read. A recorded tree that differs from `expectedTree` is never
+   * shown as the review's.
+   */
+  async reviewedDiff(worktreePath: string, taskId: string, reviewRunId: string, baseSha: string, expectedTree?: string): Promise<ReviewChangesResult> {
+    const store = await this.storeFor(worktreePath);
+    return this.serialize(store.dir, async () => {
+      const recorded = await this.recordedTree(store, taskId, reviewRunId, expectedTree);
+      if (typeof recorded !== 'string') return recorded;
+      const diff = await this.diff(worktreePath, store, baseSha, recorded);
+      return typeof diff === 'string'
+        ? { status: 'READY', reviewRunId, tree: recorded, diff }
+        : { status: 'UNAVAILABLE', reason: diff.reason };
+    });
+  }
+
+  /**
+   * The change from `baseSha` to a captured tree, file by file with its hunks,
+   * and as the review prompt lists it. Bounded like the diff it reads.
+   */
+  async changeIndex(worktreePath: string, baseSha: string, tree: string): Promise<ReviewChangeIndex> {
+    try {
+      const store = await this.storeFor(worktreePath);
+      const diff = await this.serialize(store.dir, () => this.diff(worktreePath, store, baseSha, tree));
+      if (typeof diff !== 'string') return { status: 'UNAVAILABLE', reason: diff.reason };
+      const files = parseReviewedDiff(diff);
+      return { status: 'READY', files, text: changeIndexText(files) };
+    } catch {
+      return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    }
   }
 
   /** Lets go of every review tree of a task; the trees themselves go with the store's next prune. */
@@ -89,6 +130,43 @@ export class ReviewSnapshotStore {
     // Reads through to the source repository's objects; rewritten in case the repository moved.
     await fs.writeFile(path.join(dir, 'objects', 'info', 'alternates'), `${objects}\n`);
     return { dir, env: { GIT_OBJECT_DIRECTORY: path.join(dir, 'objects'), GIT_ALTERNATE_OBJECT_DIRECTORIES: objects } };
+  }
+
+  /** The tree pinned for a review, unless it is missing or is not `expectedTree`. */
+  private async recordedTree(
+    store: SnapshotRepository,
+    taskId: string,
+    reviewRunId: string,
+    expectedTree: string | undefined
+  ): Promise<string | Extract<ReviewChangesResult, { status: 'UNAVAILABLE' }>> {
+    const recorded = await gitResult(store.dir, ['rev-parse', '--verify', '--quiet', `${reviewRef(taskId, reviewRunId)}^{tree}`], GIT_TIMEOUT_MS)
+      .then((result) => result.stdout.trim(), () => '');
+    if (!recorded) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
+    if (expectedTree && recorded !== expectedTree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    return recorded;
+  }
+
+  /**
+   * One unified diff between two trees, bounded. Paths are written as they are,
+   * so a file name in any script reads the same in the diff and in its index.
+   */
+  private async diff(
+    worktreePath: string,
+    store: SnapshotRepository,
+    from: string,
+    to: string
+  ): Promise<string | { reason: Exclude<UnavailableReason, 'NOT_RECORDED'> }> {
+    try {
+      const diff = await git(
+        worktreePath,
+        ['-c', 'core.quotePath=false', 'diff-tree', '-r', '-p', '-M', '-U3', '--no-color', '--no-ext-diff', from, to],
+        { timeout: GIT_TIMEOUT_MS, env: store.env }
+      );
+      return Buffer.byteLength(diff) > REVIEW_CHANGES_MAX_BYTES ? { reason: 'TOO_LARGE' } : diff;
+    } catch (error) {
+      // A tree whose objects the source repository has since pruned, or output past the buffer.
+      return { reason: /maxBuffer/i.test(String(error)) ? 'TOO_LARGE' : 'UNREADABLE' };
+    }
   }
 
   /** The worktree's content as a tree, staged in a private copy of its index so the worktree is untouched. */
