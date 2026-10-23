@@ -266,10 +266,15 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
       const warning = await reply.onPost(text.trim(), resolvable && resolve);
       write('');
       setResolve(false);
+      // Posted, the row folds back to its field, wherever the keys were: a control disabled while posting
+      // drops its focus without a blur.
+      setFocused(false);
       leave();
       if (warning) onWarning(warning);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : `Could not post the reply on ${platform}.`);
+      // The words stay for another try, with the caret in them.
+      formRef.current?.querySelector('textarea')?.focus();
     } finally {
       setBusy(false);
     }
@@ -295,7 +300,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         className="tm-review-thread__reply-input"
         rows={1}
         value={text}
-        disabled={busy}
+        readOnly={busy}
         placeholder="Reply"
         onChange={(event) => write(event.target.value)}
         onKeyDown={(event) => {

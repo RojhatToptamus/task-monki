@@ -291,7 +291,6 @@
 .tm-review-thread__reply-row > .tm-review-thread__avatar { top: 4px; }
 .tm-review-comment-composer > .tm-review-thread__comment { gap: 6px; }
 .tm-review-thread__reply-input { display: block; width: 100%; min-height: var(--h-toolbar); max-height: min(200px, 24vh); padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
-.tm-review-thread__reply-input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
 :is(.tm-review-thread__reply-row--open, .tm-review-comment-composer) .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
 .tm-review-thread__reply-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
 /* A choice leading the row hangs its padding in the gutter, so its mark starts on the code column. */
