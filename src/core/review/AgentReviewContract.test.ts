@@ -13,7 +13,7 @@ describe('AgentReviewContract', () => {
       'One finding.',
       '```json',
       JSON.stringify({
-        schemaVersion: 'agent-review/v2',
+        schemaVersion: 'agent-review/v1',
         verdict: 'NEEDS_CHANGES',
         summary: 'One finding.',
         findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'It is never removed.', path: 'src/retry.ts', line: 4 }],

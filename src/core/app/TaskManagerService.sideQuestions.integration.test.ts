@@ -271,7 +271,7 @@ describe('TaskManagerService side questions', () => {
     await s.completeRun(implementation.id, 'Implemented the feature module.');
     s.agent.nextRuntimeTurnResult = {
       output: 'Fine.\n```json\n' + JSON.stringify({
-        schemaVersion: 'agent-review/v2', verdict: 'PASSED', summary: 'Fine.', findings: [],
+        schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Fine.', findings: [],
         walkthrough: {
           summary: 'Adds the feature module.',
           sections: [{ title: 'Export the feature value', explanation: 'The module now exports its value.', files: ['feature.ts'] }]

@@ -55,8 +55,8 @@ export async function isTaskCommit(worktreePath: string, base: string, head: str
 export async function readTaskCommitDiff(worktreePath: string, sha: string): Promise<TaskCommitDiffResult> {
   if (!isGitObjectId(sha)) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
   try {
-    const parent = await git(worktreePath, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${sha}^1`])
-      .then((value) => value.trim(), () => undefined);
+    // Its parents as Git lists them: a root commit has none, while a lookup that fails is unreadable, not a root.
+    const [, parent] = (await git(worktreePath, ['rev-list', '--parents', '-n', '1', '--end-of-options', sha])).trim().split(' ');
     const from = parent ?? (await git(worktreePath, ['hash-object', '-t', 'tree', '--stdin'], { stdin: '' })).trim();
     const diff = await boundedTreeDiff(worktreePath, from, sha);
     return typeof diff === 'string' ? { status: 'READY', sha, diff } : { status: 'UNAVAILABLE', reason: diff.reason };

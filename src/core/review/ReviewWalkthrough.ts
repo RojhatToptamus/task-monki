@@ -18,7 +18,7 @@ export interface ReviewedChange {
 }
 
 export type ReviewWalkthroughCheck =
-  | { status: 'VALID'; walkthrough: ReviewWalkthrough; droppedCount: number }
+  | { status: 'VALID'; walkthrough: ReviewWalkthrough }
   | { status: 'UNAVAILABLE'; reason: 'NOT_WRITTEN' | 'NO_SECTIONS' };
 
 /** The prompt's counts, held: its own sections, each one's excerpts and terms, and the attention pointers. */
@@ -48,7 +48,7 @@ const TERM_TEXT_LIMIT = 120;
  *   file it names is the review's own, of that section;
  * - files no section claims join a last Other changes section;
  * - the counts the prompt asks for are held and long words are cut.
- * Each part left out is counted. Without a section that holds, nothing is kept.
+ * Without a section that holds, nothing is kept.
  */
 export function checkReviewWalkthrough(value: unknown, change: ReviewedChange, findingIds: ReadonlySet<string>): ReviewWalkthroughCheck {
   if (value === undefined || value === null) return { status: 'UNAVAILABLE', reason: 'NOT_WRITTEN' };
@@ -58,16 +58,11 @@ export function checkReviewWalkthrough(value: unknown, change: ReviewedChange, f
   // The agent numbers its sections from 1; a kept section's index in the walkthrough.
   const kept = new Map<number, number>();
   const sections: ReviewWalkthroughSection[] = [];
-  let dropped = 0;
   value.sections.forEach((entry: unknown, position) => {
-    const checked = sections.length < SECTION_LIMIT ? checkSection(entry, files, claimed) : undefined;
-    if (!checked) {
-      dropped += 1;
-      return;
-    }
-    dropped += checked.dropped;
+    const section = sections.length < SECTION_LIMIT ? checkSection(entry, files, claimed) : undefined;
+    if (!section) return;
     kept.set(position + 1, sections.length);
-    sections.push(checked.section);
+    sections.push(section);
   });
   if (sections.length === 0) return { status: 'UNAVAILABLE', reason: 'NO_SECTIONS' };
 
@@ -79,10 +74,7 @@ export function checkReviewWalkthrough(value: unknown, change: ReviewedChange, f
   for (const entry of list(value.attention)) {
     const text = isRecord(entry) ? bounded(entry.text, ATTENTION_TEXT_LIMIT) : undefined;
     const section = isRecord(entry) && typeof entry.section === 'number' ? kept.get(entry.section) : undefined;
-    if (!isRecord(entry) || !text || section === undefined || attention.length >= ATTENTION_LIMIT) {
-      dropped += 1;
-      continue;
-    }
+    if (!isRecord(entry) || !text || section === undefined || attention.length >= ATTENTION_LIMIT) continue;
     // What it names beyond its section must be the review's own: a finding it wrote, a file of the section.
     const finding = trimmed(entry.finding);
     const path = filePath(entry.path);
@@ -90,10 +82,8 @@ export function checkReviewWalkthrough(value: unknown, change: ReviewedChange, f
       ...(finding && findingIds.has(finding) ? { finding } : {}),
       ...(path && sections[section]!.files.includes(path) ? { path } : {})
     };
-    if ((finding && !named.finding) || (path && !named.path)) dropped += 1;
     attention.push({ text, section, ...named });
   }
-  if (value.summary !== undefined && typeof value.summary !== 'string') dropped += 1;
   return {
     status: 'VALID',
     walkthrough: {
@@ -104,31 +94,26 @@ export function checkReviewWalkthrough(value: unknown, change: ReviewedChange, f
       summary: bounded(value.summary, SUMMARY_LIMIT) ?? '',
       attention,
       sections
-    },
-    droppedCount: dropped
+    }
   };
 }
 
-/** A section that holds, with the count of its parts left out; nothing when the section itself fails. */
+/** A section that holds, with what holds of its parts; nothing when the section itself fails. */
 function checkSection(
   value: unknown,
   change: ReadonlyMap<string, ReviewedDiffFile>,
   claimed: Set<string>
-): { section: ReviewWalkthroughSection; dropped: number } | undefined {
+): ReviewWalkthroughSection | undefined {
   if (!isRecord(value)) return undefined;
   const title = bounded(value.title, TITLE_LIMIT);
   if (!title || typeof value.explanation !== 'string') return undefined;
   const explanation = bounded(value.explanation, EXPLANATION_LIMIT) ?? '';
-  let dropped = 0;
   const own = new Map<string, ReviewedDiffFile>();
   for (const entry of list(value.files)) {
     // A file is named by its path, or by an object that carries it.
     const path = filePath(isRecord(entry) ? entry.path : entry);
     const file = path ? change.get(path) : undefined;
-    if (!file || claimed.has(file.path) || own.has(file.path)) {
-      dropped += 1;
-      continue;
-    }
+    if (!file || claimed.has(file.path) || own.has(file.path)) continue;
     own.set(file.path, file);
   }
   if (own.size === 0) return undefined;
@@ -137,10 +122,7 @@ function checkSection(
   const excerpts: ReviewWalkthroughExcerpt[] = [];
   for (const entry of list(value.excerpts)) {
     const lines = checkLines(entry, own);
-    if (!lines || excerpts.length >= EXCERPT_LIMIT || excerpts.some((excerpt) => sameLines(excerpt, lines))) {
-      dropped += 1;
-      continue;
-    }
+    if (!lines || excerpts.length >= EXCERPT_LIMIT || excerpts.some((excerpt) => sameLines(excerpt, lines))) continue;
     const caption = isRecord(entry) ? bounded(entry.caption, CAPTION_LIMIT) : undefined;
     excerpts.push({ ...lines, ...(caption ? { caption } : {}) });
   }
@@ -149,13 +131,10 @@ function checkSection(
     const text = isRecord(entry) ? trimmed(entry.text) : undefined;
     const lines = checkLines(entry, own);
     if (!text || !lines || text.length > TERM_TEXT_LIMIT || terms.length >= TERM_LIMIT ||
-      terms.some((term) => term.text === text) || !isPhraseOf(text, explanation)) {
-      dropped += 1;
-      continue;
-    }
+      terms.some((term) => term.text === text) || !isPhraseOf(text, explanation)) continue;
     terms.push({ text, ...lines });
   }
-  return { section: { title, explanation, files: [...own.keys()], excerpts, terms }, dropped };
+  return { title, explanation, files: [...own.keys()], excerpts, terms };
 }
 
 /**

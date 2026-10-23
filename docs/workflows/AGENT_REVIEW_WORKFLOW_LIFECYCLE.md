@@ -73,9 +73,11 @@ The important product rule is:
     (`acceptedRequestItems`). Absent before the first; a new review starts
     without them.
   - `walkthrough`: the walkthrough the review wrote with its findings, as
-    `STORED` (the review run, its `review-walkthrough` artifact, and how many
-    sections were kept and parts dropped) or `UNAVAILABLE` with a reason
-    (`NOT_WRITTEN`, `NO_SECTIONS`, `NOT_RECORDED`, `TOO_LARGE`, `UNREADABLE`).
+    `STORED` (the review run and its `review-walkthrough` artifact) or
+    `UNAVAILABLE` with a reason (`NOT_WRITTEN`, `NO_SECTIONS`, `NOT_RECORDED`,
+    `TOO_LARGE`, `UNREADABLE`). A review given no change to describe (its code
+    not kept, or the change too large to list) is asked for none and records
+    that reason, not `NOT_WRITTEN`.
     A new review keeps a stored one, which names its own review, as earlier
     context until its own outcome replaces it.
 - `RunRecord.mode`
@@ -133,9 +135,9 @@ Expected UI:
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
    Before the run starts, the exact code it reads is kept under its run
    (`reviewedTreeSha`), and recorded with the run's start, so even a review that
-   ends at once finds that code. The prompt (`agent-review/v2`) lists that
-   change from the task's base, one line per file with its status, counts and
-   hunk ranges, and asks for the walkthrough with the findings.
+   ends at once finds that code. The prompt lists that change from the task's
+   base, one line per file with its status, counts and hunk ranges, and asks
+   for the walkthrough with the findings in its one `agent-review/v1` result.
 6. The prompt tells the selected runtime not to modify files.
 7. `AgentOrchestrator` records repository state before provider delivery.
 8. It compares repository state after terminal output.
@@ -227,8 +229,10 @@ When the review run emits a terminal event:
     in the first section that claims it, and files no section claims join a
     last Other changes section; an excerpt or a term must lie inside one hunk
     of its section's files, on the base side only for a deleted file, and a
-    term must be an exact phrase of its explanation. What fails is dropped and
-    counted; with no section left, nothing is kept. The kept walkthrough is
+    term must be an exact phrase of its explanation. What fails is dropped;
+    with no section left, nothing is kept. The check reuses the change index
+    the review was given at its start, so the runtime's event queue reads no
+    diff again; after a restart it is read once more. The kept walkthrough is
     the run's artifact, written once, so an outcome projected again after a
     restart gets it back. A walkthrough that cannot be kept never holds back
     the verdict. The Guide reads it with `readReviewedDiff`, the diff from the

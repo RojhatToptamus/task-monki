@@ -7,6 +7,7 @@ import {
   type ReviewWalkthroughState,
   type TaskSnapshot
 } from '../../shared/contracts';
+import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { TaskMonkiScenarioRegistry, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
@@ -126,7 +127,7 @@ describe('TaskManagerService review walkthrough', () => {
     await reopened.close();
   }, 30_000);
 
-  it('records why a review has no walkthrough when it wrote none, none of it holds, or it cannot be kept', async () => {
+  it('records why a review has no walkthrough when it was given no code to describe, wrote none, none of it holds, or it cannot be kept', async () => {
     const s = await scenarios.create({ name: 'task-monki-review-walkthrough-unavailable' });
     const { task, implementation } = await implemented(s);
     s.agent.nextRuntimeTurnResult = {
@@ -135,6 +136,15 @@ describe('TaskManagerService review walkthrough', () => {
     const first = await s.service.startReview({ taskId: task.id, runId: implementation.id });
     const invalid = reviewOf(await s.waitForSnapshot((state) => reviewOf(state, task.id)?.status === 'PASSED'), task.id)!;
     expect(invalid).toMatchObject({ runId: first.id, walkthrough: { status: 'UNAVAILABLE', reason: 'NO_SECTIONS' } });
+
+    // A change too large to list asks for no walkthrough, and the review says so, not that it wrote none.
+    vi.spyOn(ReviewSnapshotStore.prototype, 'changeIndex').mockResolvedValueOnce({ status: 'UNAVAILABLE', reason: 'TOO_LARGE' });
+    s.agent.nextRuntimeTurnResult = { output: review() };
+    const large = await s.service.startReview({ taskId: task.id, runId: implementation.id });
+    expect(await s.runtimeStore.readArtifact(large.promptArtifactId)).not.toContain('retry.ts new');
+    const tooLarge = reviewOf(await s.waitForSnapshot((state) =>
+      reviewOf(state, task.id)?.runId === large.id && reviewOf(state, task.id)?.status === 'PASSED'), task.id)!;
+    expect(tooLarge.walkthrough).toEqual({ status: 'UNAVAILABLE', reason: 'TOO_LARGE' });
 
     s.agent.nextRuntimeTurnResult = { output: review() };
     const second = await s.service.startReview({ taskId: task.id, runId: implementation.id });

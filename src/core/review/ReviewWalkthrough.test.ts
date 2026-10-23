@@ -26,7 +26,7 @@ const section = (title: string, files: unknown[], rest: object = {}) => ({ title
 
 describe('checkReviewWalkthrough', () => {
   it('places every changed file once: the first claim wins and files no section claims join Other changes', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       summary: ' Uploads retry. ',
       sections: [
         section('Retry failed uploads', ['src/retry.ts', 'src/upload.ts', 'src/missing.ts']),
@@ -41,11 +41,10 @@ describe('checkReviewWalkthrough', () => {
       ['Other changes', ['docs/upload.md', 'src/legacy.ts']]
     ]);
     // The unknown path and the second claim.
-    expect(droppedCount).toBe(2);
   });
 
   it('drops a section without a title or a file of its own, so its claims and the attention on it fall away', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       summary: 'Uploads retry.',
       attention: [
         { text: 'The legacy upload path is deleted', section: 4 },
@@ -68,11 +67,10 @@ describe('checkReviewWalkthrough', () => {
     ]);
     // The pointer follows its section to its new place.
     expect(walkthrough.attention).toEqual([{ text: 'The legacy upload path is deleted', section: 1 }]);
-    expect(droppedCount).toBe(5);
   });
 
   it('keeps what an attention pointer names only when it is the review\'s own: one of its findings, or a file of its section', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       attention: [
         { text: 'Retries never stop', section: 1, finding: 'endless-retry', path: '"src/upload.ts"' },
         { text: 'A finding the review did not write', section: 1, finding: 'made-up' },
@@ -86,11 +84,10 @@ describe('checkReviewWalkthrough', () => {
       { text: 'A finding the review did not write', section: 0 },
       { text: 'A file of another section', section: 0 }
     ]);
-    expect(droppedCount).toBe(2);
   });
 
   it('keeps an excerpt only inside one hunk of a file of its own section, at the base only for a deleted file', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       sections: [
         section('Retry failed uploads', ['src/upload.ts', 'src/legacy.ts'], {
           excerpts: [
@@ -114,11 +111,10 @@ describe('checkReviewWalkthrough', () => {
       { path: 'src/upload.ts', side: 'NEW', line: 40 },
       { path: 'src/legacy.ts', side: 'OLD', line: 2, endLine: 6 }
     ]);
-    expect(droppedCount).toBe(6);
   });
 
   it('keeps a term that is an exact phrase of its explanation, whole code spans only, tied to changed lines of its section', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       sections: [
         {
           title: 'Retry failed uploads',
@@ -142,11 +138,10 @@ describe('checkReviewWalkthrough', () => {
       { text: 'Failed uploads', path: 'src/upload.ts', side: 'NEW', line: 10, endLine: 12 },
       { text: '`backoff()`', path: 'src/retry.ts', side: 'NEW', line: 3 }
     ]);
-    expect(droppedCount).toBe(5);
   });
 
   it('holds the counts the prompt asks for, keeps an excerpt once and cuts long words', () => {
-    const { walkthrough, droppedCount } = valid({
+    const { walkthrough } = valid({
       summary: 'x'.repeat(900),
       attention: [1, 2, 3, 4].map((count) => ({ text: `Fact ${count}`, section: 1 })),
       sections: [
@@ -166,7 +161,6 @@ describe('checkReviewWalkthrough', () => {
     expect(walkthrough.sections[0]!.terms.map((term) => term.text)).toEqual(['One', 'two', 'three']);
     expect(walkthrough.attention.map((fact) => fact.text)).toEqual(['Fact 1', 'Fact 2', 'Fact 3']);
     // The repeated excerpt, the fourth excerpt, the fourth term and the fourth pointer.
-    expect(droppedCount).toBe(4);
 
     // Past nine sections, the files of the rest join Other changes.
     const many: ReviewedChange = {
@@ -176,7 +170,6 @@ describe('checkReviewWalkthrough', () => {
     const crowded = valid({ sections: many.files.map((file) => section(`Change ${file.path}`, [file.path])) }, new Set(), many);
     expect(crowded.walkthrough.sections).toHaveLength(10);
     expect(crowded.walkthrough.sections.at(-1)).toMatchObject({ title: 'Other changes', files: ['src/part9.ts', 'src/part10.ts'] });
-    expect(crowded.droppedCount).toBe(2);
   });
 
   it('keeps nothing when the review wrote no walkthrough or no section holds a changed file', () => {
@@ -191,6 +184,6 @@ describe('checkReviewWalkthrough', () => {
   it('reads a path the agent kept quoted, as the change index quotes one that holds a space', () => {
     const spaced: ReviewedChange = { ...CHANGE, files: [{ path: 'docs/User Guide.md', status: 'modified', additions: 1, deletions: 0, hunks: [hunk(2, 1, 2, 2)] }] };
     const check = checkReviewWalkthrough({ sections: [section('Document retries', ['"docs/User Guide.md"'])] }, spaced, new Set());
-    expect(check).toMatchObject({ status: 'VALID', droppedCount: 0, walkthrough: { sections: [{ files: ['docs/User Guide.md'] }] } });
+    expect(check).toMatchObject({ status: 'VALID', walkthrough: { sections: [{ files: ['docs/User Guide.md'] }] } });
   });
 });
