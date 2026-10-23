@@ -4,7 +4,9 @@ import type {
   AgentReviewGateProjection,
   AgentReviewGateStatus,
   DecideReviewFindingRequest,
-  ReviewFindingDecision
+  DecideReviewRequestItemRequest,
+  ReviewFindingDecision,
+  ReviewRequestItemDecision
 } from './agentReviewFindings';
 import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
 import type { ReviewRequestRecord } from './reviewRounds';
@@ -310,6 +312,7 @@ export const DOMAIN_EVENT_TYPES = [
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
   'REVIEW_REQUEST_ANSWERED',
+  'REVIEW_REQUEST_ITEM_DECIDED',
   'REVIEW_SNAPSHOT_RECORDED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
@@ -1811,6 +1814,8 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   startReview(input: StartReviewRequest): Promise<RunRecord>;
   /** Dismisses or restores a finding of the current, completed review. */
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
+  /** Accepts the agent's answer to an item of the latest request after the review, or reopens it. */
+  decideReviewRequestItem(input: DecideReviewRequestItemRequest): Promise<ReviewRequestItemDecision>;
   /** What changed from the code a review read to the worktree now. */
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
   /** The change a review read: from the base it compared against to the code it read. */

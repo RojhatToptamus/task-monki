@@ -7,6 +7,8 @@ import {
   REVIEW_FINDING_DECISION_LIMIT,
   REVIEW_FINDING_DISMISS_REASONS,
   REVIEW_FINDING_TEXT_MAX_LENGTH,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   isTaskCreationToken,
   reviewDraftProblem
@@ -1114,6 +1116,9 @@ function validateEvents(state: StoreState): void {
     if (event.type === 'AGENT_REVIEW_FINDING_DECIDED') {
       validateReviewFindingDecision(persistedRecord(event.payload, 'events').decision, 'events');
     }
+    if (event.type === 'REVIEW_REQUEST_ITEM_DECIDED') {
+      validateReviewRequestItemDecision(persistedRecord(event.payload, 'events').decision, 'events');
+    }
   });
 }
 
@@ -1333,6 +1338,15 @@ function projection(value: unknown): void {
         validateReviewFindingDecision(decision, 'tasks.projection');
       }
     }
+    if (review.requestItemDecisions !== undefined) {
+      if (
+        !Array.isArray(review.requestItemDecisions) ||
+        review.requestItemDecisions.length > REVIEW_REQUEST_ITEM_DECISION_LIMIT
+      ) invalid('tasks.projection');
+      for (const decision of review.requestItemDecisions) {
+        validateReviewRequestItemDecision(decision, 'tasks.projection');
+      }
+    }
   }
 }
 
@@ -1399,6 +1413,19 @@ function validateReviewFindingDecision(value: unknown, collection: string): void
     stringField(decision, 'note', collection);
     if ((decision.note as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
   }
+}
+
+/** A decision on an answer names its review, the message that carried the request, and the item's number. */
+function validateReviewRequestItemDecision(value: unknown, collection: string): void {
+  const decision = persistedRecord(value, collection);
+  if (Object.keys(decision).some((key) => !['id', 'reviewRunId', 'instructionId', 'item', 'kind', 'createdAt'].includes(key))) {
+    invalid(collection);
+  }
+  uuidFields(decision, collection, ['id', 'reviewRunId', 'instructionId']);
+  integer(decision, 'item', collection, 1);
+  if ((decision.item as number) > REVIEW_REQUEST_ITEM_LIMIT) invalid(collection);
+  enumField(decision, 'kind', ['ACCEPT', 'REOPEN'] as const, collection);
+  timestamp(decision, 'createdAt', collection);
 }
 
 /**

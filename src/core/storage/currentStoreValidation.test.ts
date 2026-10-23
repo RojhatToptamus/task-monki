@@ -91,6 +91,39 @@ describe('validateCurrentStoreRecords', () => {
     expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
   });
 
+  it('accepts durable decisions on the agent\'s answers and rejects decisions outside their contract', () => {
+    const reviewRunId = randomUUID();
+    const accept = { id: randomUUID(), reviewRunId, instructionId: randomUUID(), item: 2, kind: 'ACCEPT' as const, createdAt: NOW };
+    const withDecisions = (decisions: unknown[]) => {
+      const task = validTask();
+      task.projection.agentReview = { status: 'STALE', runId: reviewRunId, requestItemDecisions: decisions as never };
+      const state = createEmptyState();
+      state.tasks = [task];
+      return state;
+    };
+
+    expect(() => validateCurrentStoreRecords(withDecisions([accept, { ...accept, id: randomUUID(), kind: 'REOPEN' }]))).not.toThrow();
+    for (const malformed of [
+      { ...accept, kind: 'DONE' },
+      { ...accept, item: 0 },
+      { ...accept, item: 101 },
+      { ...accept, instructionId: 'request' },
+      { ...accept, note: 'A decision takes no note.' }
+    ]) {
+      expect(() => validateCurrentStoreRecords(withDecisions([malformed]))).toThrow('tasks.projection contains a malformed record');
+    }
+    expect(() => validateCurrentStoreRecords(withDecisions(Array.from({ length: 201 }, () => ({ ...accept, id: randomUUID() })))))
+      .toThrow('tasks.projection contains a malformed record');
+
+    const eventState = createEmptyState();
+    eventState.events = [{
+      id: randomUUID(), type: 'REVIEW_REQUEST_ITEM_DECIDED' as const, taskId: randomUUID(),
+      source: 'ui' as const, sourceEventId: 'decision', occurredAt: NOW, receivedAt: NOW,
+      payload: { decision: { ...accept, item: '2' } }
+    }];
+    expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
+  });
+
   it('accepts a review observation\'s feedback summary only in its durable shape', () => {
     const rollup = {
       id: randomUUID(), taskId: randomUUID(), iterationId: randomUUID(), worktreeId: randomUUID(),

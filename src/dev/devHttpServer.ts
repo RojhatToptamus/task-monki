@@ -1098,6 +1098,10 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         );
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/review/decide-answer') {
+        sendJson(response, requestId, 200, await options.service.decideReviewRequestItem((await readJson()) as never));
+        return;
+      }
 
       if (request.method === 'POST' && url.pathname === '/api/side-question/ask') {
         sendJson(

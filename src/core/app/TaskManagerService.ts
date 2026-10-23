@@ -58,7 +58,9 @@ import type {
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   AskSideQuestionRequest,
   SideQuestionModelChoice,
   EndSideThreadRequest,
@@ -288,7 +290,7 @@ import { checkReviewWalkthrough } from '../review/ReviewWalkthrough';
 import { SideQuestionCoordinator } from '../sideQuestion/SideQuestionCoordinator';
 import { ReadOnlySnapshotService } from '../git/ReadOnlySnapshotService';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
-import { assertReviewRequestRecord, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
+import { assertReviewRequestRecord, latestReviewRequest, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
 import type { ReviewWalkthroughState } from '../../shared/reviewWalkthrough';
 import type {
   PreviewUrlHost,
@@ -3661,9 +3663,7 @@ export class TaskManagerService {
    */
   private async reviewRound(taskId: string, reviewRunId: string): Promise<{ record: ReviewRequestRecord; answers: ReviewResponseAnswer[] } | undefined> {
     const detail = await this.store.getTaskDetail(taskId);
-    const instruction = detail.taskInstructions
-      .filter((item) => item.reviewRequest?.reviewRunId === reviewRunId && item.runId)
-      .sort((left, right) => right.order - left.order)[0];
+    const instruction = latestReviewRequest(detail.taskInstructions, reviewRunId);
     if (!instruction?.reviewRequest) return undefined;
     const run = detail.runs.find((candidate) => candidate.id === instruction.runId);
     const reply = run?.status === 'COMPLETED' ? await runReplyText(run, (id) => this.agentRuntimeStore.readArtifact(id)) : '';
@@ -4267,6 +4267,13 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Review finding decision', async () => {
       await this.requireNormalTask(input.taskId, 'Review finding decision');
       return this.reviews.decide(input);
+    });
+  }
+
+  decideReviewRequestItem(input: DecideReviewRequestItemRequest): Promise<ReviewRequestItemDecision> {
+    return this.withTaskAction(input.taskId, 'Review answer decision', async () => {
+      await this.requireNormalTask(input.taskId, 'Review answer decision');
+      return this.reviews.decideRequestItem(input);
     });
   }
 

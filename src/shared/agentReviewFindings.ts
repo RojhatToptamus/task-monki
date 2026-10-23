@@ -84,6 +84,11 @@ export interface AgentReviewGateProjection {
    */
   requestAnswer?: { awaitingDecision: boolean };
   /**
+   * The person's decisions on the agent's answers to their requests after this
+   * review, in the order they were made; absent before the first.
+   */
+  requestItemDecisions?: ReviewRequestItemDecision[];
+  /**
    * The walkthrough the review wrote with its findings. A new review keeps a
    * stored one, which names its own review, as earlier context until its own
    * outcome replaces it.
@@ -121,6 +126,51 @@ export type ReviewFindingDecision =
     note?: string;
   })
   | (ReviewFindingDecisionBase & { kind: 'RESTORE' });
+
+/** Decisions on answers kept per review; a review that reaches it must be run again. */
+export const REVIEW_REQUEST_ITEM_DECISION_LIMIT = 200;
+
+export type ReviewRequestItemDecisionKind = 'ACCEPT' | 'REOPEN';
+
+/**
+ * The person's decision on the agent's answer to one item of a request they
+ * sent after a review. The agent's own answer, even Fixed, never settles an
+ * item: accepting it does, and reopening takes that back. Only the latest
+ * request after the review takes decisions.
+ */
+export interface ReviewRequestItemDecision {
+  id: string;
+  /** The review the request followed. */
+  reviewRunId: string;
+  /** The message that carried the request. */
+  instructionId: string;
+  /** The item's number in that request. */
+  item: number;
+  kind: ReviewRequestItemDecisionKind;
+  createdAt: string;
+}
+
+export interface DecideReviewRequestItemRequest {
+  taskId: string;
+  reviewRunId: string;
+  instructionId: string;
+  item: number;
+  kind: ReviewRequestItemDecisionKind;
+}
+
+/** The items of one request whose answer the person accepted, once every decision on it applies in order. */
+export function acceptedRequestItems(
+  decisions: readonly ReviewRequestItemDecision[],
+  instructionId: string
+): Set<number> {
+  const accepted = new Set<number>();
+  for (const decision of decisions) {
+    if (decision.instructionId !== instructionId) continue;
+    if (decision.kind === 'ACCEPT') accepted.add(decision.item);
+    else accepted.delete(decision.item);
+  }
+  return accepted;
+}
 
 export type ReviewFindingState = 'OPEN' | 'DISMISSED';
 

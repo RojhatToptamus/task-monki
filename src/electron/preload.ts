@@ -3,6 +3,7 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
@@ -336,6 +337,8 @@ const api: TaskManagerApi = {
     invokeIpc('agent:startReview', input),
   decideReviewFinding: (input: DecideReviewFindingRequest) =>
     invokeIpc('agent:decideReviewFinding', input),
+  decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+    invokeIpc('agent:decideReviewRequestItem', input),
   readReviewChanges: (input: ReadReviewChangesRequest) =>
     invokeIpc('agent:readReviewChanges', input),
   readReviewedDiff: (input: ReadReviewChangesRequest) =>

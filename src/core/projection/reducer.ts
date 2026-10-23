@@ -4,6 +4,7 @@ import type {
   AgentReviewResolvedFinding,
   AgentReviewResult,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   ReviewWalkthroughState,
   Finding,
   HealthStatus,
@@ -15,6 +16,7 @@ import type {
 } from '../../shared/contracts';
 import {
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
   REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS,
   TASK_STORE_SCHEMA_VERSION,
   createInitialProjection,
@@ -816,6 +818,7 @@ export function reduceProjection(
         updatedAt: event.receivedAt
       };
     case 'AGENT_REVIEW_FINDING_DECIDED':
+    case 'REVIEW_REQUEST_ITEM_DECIDED':
       return {
         ...base,
         agentReview: reduceAgentReview(base.agentReview, event, run),
@@ -1143,6 +1146,21 @@ function reduceAgentReview(
       }
       return { ...base, findingDecisions: [...decisions, decision] };
     }
+    // A decision on an answer belongs to the review its request followed; one for another review changes nothing.
+    case 'REVIEW_REQUEST_ITEM_DECIDED': {
+      const decision = getReviewRequestItemDecision(event.payload);
+      const decisions = base.requestItemDecisions ?? [];
+      if (
+        !decision ||
+        !base.runId ||
+        decision.reviewRunId !== base.runId ||
+        decisions.length >= REVIEW_REQUEST_ITEM_DECISION_LIMIT ||
+        decisions.some((candidate) => candidate.id === decision.id)
+      ) {
+        return base;
+      }
+      return { ...base, requestItemDecisions: [...decisions, decision] };
+    }
     // The exact code the review read was kept.
     case 'REVIEW_SNAPSHOT_RECORDED': {
       const tree = getString(event.payload, 'tree');
@@ -1261,6 +1279,20 @@ function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | und
   return typeof decision.id === 'string' &&
     typeof decision.reviewRunId === 'string' &&
     typeof decision.findingId === 'string'
+    ? structuredClone(decision)
+    : undefined;
+}
+
+function getReviewRequestItemDecision(payload: unknown): ReviewRequestItemDecision | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).decision;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const decision = value as ReviewRequestItemDecision;
+  return typeof decision.id === 'string' &&
+    typeof decision.reviewRunId === 'string' &&
+    typeof decision.instructionId === 'string' &&
+    Number.isInteger(decision.item) &&
+    (decision.kind === 'ACCEPT' || decision.kind === 'REOPEN')
     ? structuredClone(decision)
     : undefined;
 }

@@ -247,10 +247,16 @@ MiB is refused before anything is written, and a run keeps one, so an outcome
 projected again after a restart reuses it. A new review keeps a stored
 walkthrough on its gate as earlier context until its own outcome replaces it.
 Startup refuses a stored walkthrough whose run is not a review of the task or
-whose artifact is another run's. The tree a review reads is pinned under its run
-before the run starts and recorded with its start, and an Ask `subject` may also
-be a walkthrough section (`STAGE`), a changed file (`FILE`) or a pull request
-discussion (`THREAD`).
+whose artifact is another run's. Schema 31 also records the person's decisions
+on the agent's answers to a request: `REVIEW_REQUEST_ITEM_DECIDED` carries one
+(`ACCEPT` or `REOPEN`, the review, the message that carried the request and the
+item's number), and the review gate keeps them in order as
+`requestItemDecisions`, at most 200 per review, cleared when a new review starts.
+Startup refuses a decision whose review is not the gate's, or whose request is
+not one of the task's messages sent after that review holding that item. The
+tree a review reads is pinned under its run before the run starts and recorded
+with its start, and an Ask `subject` may also be a walkthrough section
+(`STAGE`), a changed file (`FILE`) or a pull request discussion (`THREAD`).
 
 SQLite migrations 11 (`review-finding-decisions`) and 12 (`side-questions`) are
 version fences with no table change. Task store schema 29 adds review finding

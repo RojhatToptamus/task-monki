@@ -2,9 +2,11 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
   ReviewChangesResult,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -526,6 +528,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/review', input),
     decideReviewFinding: (input: DecideReviewFindingRequest) =>
       post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+      post<ReviewRequestItemDecision>(baseUrl, '/api/review/decide-answer', input),
     readReviewChanges: (input: ReadReviewChangesRequest) =>
       post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
     readReviewedDiff: (input: ReadReviewChangesRequest) =>

@@ -112,9 +112,12 @@ describe('projection reducer', () => {
     }
   );
 
-  it('records finding decisions only for the current review and resets them for a new review', () => {
+  it('records decisions on findings and answers only for the current review and resets them for a new review', () => {
     const decision = (id: string, reviewRunId: string) => ({
       id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, dismissReason: 'ACCEPTED' as const, createdAt: now
+    });
+    const acceptance = (id: string, reviewRunId: string) => ({
+      id, reviewRunId, instructionId: 'request', item: 1, kind: 'ACCEPT' as const, createdAt: now
     });
     const task = createTask({
       workflowPhase: 'REVIEW',
@@ -132,7 +135,11 @@ describe('projection reducer', () => {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('first', 'review-run') }),
       id: 'decided-first', runId: undefined, receivedAt: '2026-06-20T11:00:00.000Z'
     });
-    const ignored = applyEventToState(decided, {
+    const answered = [acceptance('accepted', 'review-run'), acceptance('accepted-other', 'older-review')].reduce(
+      (current, value) => applyEventToState(current, { ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: value }), id: value.id, runId: undefined }),
+      decided
+    );
+    const ignored = applyEventToState(answered, {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('other', 'older-review') }),
       id: 'decided-other', runId: undefined
     });
@@ -140,7 +147,8 @@ describe('projection reducer', () => {
       status: 'NEEDS_CHANGES',
       runId: 'review-run',
       updatedAt: now,
-      findingDecisions: [decision('first', 'review-run')]
+      findingDecisions: [decision('first', 'review-run')],
+      requestItemDecisions: [acceptance('accepted', 'review-run')]
     });
 
     const rerun = createRun({ id: 'next-review', mode: 'REVIEW', status: 'RUNNING' });
@@ -153,6 +161,7 @@ describe('projection reducer', () => {
       runId: 'next-review',
       findingDecisions: []
     });
+    expect(restarted.tasks[0].projection.agentReview?.requestItemDecisions).toBeUndefined();
   });
 
   it('separates agent completion from process exit', () => {

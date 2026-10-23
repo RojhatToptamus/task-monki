@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ReviewRequestRecord, TaskSnapshot } from '../../shared/contracts';
+import { acceptedRequestItems, type ReviewRequestRecord, type TaskSnapshot } from '../../shared/contracts';
 import { openTestPersistence } from '../../testSupport/persistenceFixture';
 import { prepareTestWorktree } from '../../testSupport/prepareWorktree';
 import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
@@ -124,6 +124,76 @@ describe('TaskManagerService review rounds', () => {
     const restored = await reopened.tasks.snapshot();
     expect(restored.taskInstructions.find((item) => item.runId === followUp.id)?.reviewRequest).toEqual(request);
     expect(reviewOf(restored, task.id)?.result?.resolvedFindings).toHaveLength(1);
+    await reopened.close();
+  }, 30_000);
+
+  it('settles an answer only when the person accepts it, on the latest request after the review, and keeps that through a restart', async () => {
+    const s = await scenarios.create({ name: 'task-monki-review-answer-decisions' });
+    const task = await s.createTask({ title: 'Answer decisions', prompt: 'Add the feature module.' });
+    const worktree = await prepareTestWorktree(s.service, task.id);
+    const implementation = await s.service.startRun({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'window.addEventListener("x", () => {});\n');
+    await s.completeRun(implementation.id, 'Implemented the feature module.');
+    s.agent.nextRuntimeTurnResult = {
+      output: review({
+        verdict: 'NEEDS_CHANGES',
+        summary: 'One leak.',
+        findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'It is never removed.', path: 'feature.ts', line: 1 }]
+      })
+    };
+    const reviewed = await s.service.startReview({ taskId: task.id, runId: implementation.id });
+    await s.waitForSnapshot((state) => reviewOf(state, task.id)?.status === 'NEEDS_CHANGES' &&
+      Boolean(state.runs.find((run) => run.id === reviewed.id)?.afterGitSnapshotId));
+
+    const send = async (from: string, comment: string) => {
+      const run = await s.service.continueRun({
+        taskId: task.id, runId: from, clientMessageId: randomUUID(), instruction: 'Address the review.',
+        reviewRequest: { reviewRunId: reviewed.id, items: [
+          { number: 1, kind: 'FINDING', findingId: 'leak', severity: 'MAJOR', title: 'Listener leaks', path: 'feature.ts', line: 1 },
+          { number: 2, kind: 'COMMENT', path: 'feature.ts', side: 'NEW', line: 1, text: comment }
+        ] }
+      });
+      return { run, message: (await s.store.getTaskDetail(task.id)).taskInstructions.find((item) => item.runId === run.id)! };
+    };
+    const answer = async (runId: string) => {
+      await s.completeRun(runId, ['Done.', '```task-monki-review-response',
+        JSON.stringify([{ item: 1, outcome: 'FIXED', note: 'Removed on close.' }, { item: 2, outcome: 'NOT_CHANGED', note: 'The name is fine.' }]), '```'].join('\n'));
+      await s.waitForSnapshot((state) => Boolean(reviewOf(state, task.id)?.requestAnswer));
+    };
+    const decide = (instructionId: string, item: number, kind: 'ACCEPT' | 'REOPEN', reviewRunId = reviewed.id) =>
+      s.service.decideReviewRequestItem({ taskId: task.id, reviewRunId, instructionId, item, kind });
+
+    const first = await send(implementation.id, 'Name the handler?');
+    await expect(decide(first.message.id, 1, 'ACCEPT')).rejects.toThrow('Wait for the agent to answer the request.');
+    await fs.writeFile(path.join(worktree.worktreePath, 'feature.ts'), 'const onX = () => {};\nwindow.addEventListener("x", onX);\n');
+    await answer(first.run.id);
+
+    // The agent changed the code, so the review is out of date; the person still settles its answers, and only they do.
+    expect(reviewOf(await s.store.snapshot(), task.id)?.status).toBe('STALE');
+    await decide(first.message.id, 1, 'ACCEPT');
+    await expect(decide(first.message.id, 1, 'ACCEPT')).rejects.toThrow('This answer is already accepted.');
+    await expect(decide(first.message.id, 2, 'REOPEN')).rejects.toThrow('Only an accepted answer can be reopened.');
+    await expect(decide(first.message.id, 3, 'ACCEPT')).rejects.toThrow('This item is not part of the request.');
+    await expect(decide(first.message.id, 1, 'ACCEPT', randomUUID())).rejects.toThrow('no longer the task’s current review');
+    await decide(first.message.id, 1, 'REOPEN');
+    await decide(first.message.id, 2, 'ACCEPT');
+    expect(acceptedRequestItems(reviewOf(await s.store.snapshot(), task.id)?.requestItemDecisions ?? [], first.message.id)).toEqual(new Set([2]));
+
+    // A later request after the same review takes the decisions from then on.
+    const second = await send(first.run.id, 'Name it onX.');
+    await answer(second.run.id);
+    await expect(decide(first.message.id, 1, 'ACCEPT')).rejects.toThrow('Only the latest request after the review takes decisions.');
+    await decide(second.message.id, 1, 'ACCEPT');
+
+    // The decisions reload through the store's validation.
+    await s.service.shutdown();
+    await s.persistence.close();
+    const reopened = await openTestPersistence(path.join(s.rootDir, 'profile'));
+    const restored = reviewOf(await reopened.tasks.snapshot(), task.id)?.requestItemDecisions ?? [];
+    expect(restored.map((decision) => [decision.instructionId === first.message.id ? 'first' : 'second', decision.item, decision.kind])).toEqual([
+      ['first', 1, 'ACCEPT'], ['first', 1, 'REOPEN'], ['first', 2, 'ACCEPT'], ['second', 1, 'ACCEPT']
+    ]);
+    expect(acceptedRequestItems(restored, second.message.id)).toEqual(new Set([1]));
     await reopened.close();
   }, 30_000);
 });

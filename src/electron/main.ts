@@ -80,6 +80,7 @@ import type {
   StartRunRequest,
   StartReviewRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
@@ -828,6 +829,8 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
     service.decideReviewFinding(input));
+  handleTrustedIpc('agent:decideReviewRequestItem', async (_, input: DecideReviewRequestItemRequest) =>
+    service.decideReviewRequestItem(input));
   handleTrustedIpc('agent:readReviewChanges', async (_, input: ReadReviewChangesRequest) =>
     service.readReviewChanges(input));
   handleTrustedIpc('agent:readReviewedDiff', async (_, input: ReadReviewChangesRequest) =>

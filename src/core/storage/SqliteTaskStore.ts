@@ -88,6 +88,7 @@ import { REVIEW_WALKTHROUGH_MAX_BYTES } from '../../shared/reviewWalkthrough';
 import {
   BOARD_COLORS,
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   ARTIFACT_KINDS,
   CODEX_RUNTIME_ID,
@@ -107,6 +108,7 @@ import {
   holdsUnshippedWork,
   verifiedChecksMatchMergeHead,
   type ReviewFindingDecision,
+  type ReviewRequestItemDecision,
   type TaskReviewDraft
 } from '../../shared/contracts';
 import {
@@ -4396,6 +4398,48 @@ export class SqliteTaskStore {
     });
   }
 
+  /**
+   * Records the person's decision on the agent's answer to a request item. `decide`
+   * runs inside the serialized mutation against the task, its messages and its
+   * runs as they are now, so its checks and the recorded event cannot interleave
+   * with a new request or a new review. It throws to refuse.
+   */
+  async recordReviewRequestItemDecision(
+    taskId: string,
+    decide: (task: Task, messages: readonly TaskInstruction[], runs: readonly RunRecord[]) => ReviewRequestItemDecision
+  ): Promise<ReviewRequestItemDecision> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
+      const decision = decide(
+        clone(task),
+        clone(this.state.taskInstructions.filter((message) => message.taskId === task.id)),
+        clone(this.state.runs.filter((run) => run.taskId === task.id))
+      );
+      const review = task.projection.agentReview;
+      const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
+      if (!review || !reviewRun) throw new Error('This review is no longer current.');
+      if ((review.requestItemDecisions ?? []).length >= REVIEW_REQUEST_ITEM_DECISION_LIMIT) {
+        throw new Error('This review has reached its decision limit. Run the review again.');
+      }
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'REVIEW_REQUEST_ITEM_DECIDED',
+          taskId: task.id,
+          iterationId: reviewRun.iterationId,
+          worktreeId: reviewRun.worktreeId,
+          source: 'ui',
+          payload: { decision }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(decision);
+    });
+  }
+
   async createIterationAndWorktree(input: {
     task: Task;
     branchName: string;
@@ -5868,6 +5912,7 @@ function validatePersistedRelationships(state: StoreState): void {
     remoteKeys.add(key);
   }
 
+  const messages = new Map(state.taskInstructions.map((message) => [message.id, message]));
   for (const task of state.tasks) {
     const iteration = task.currentIterationId
       ? iterations.get(task.currentIterationId)
@@ -5880,7 +5925,7 @@ function validatePersistedRelationships(state: StoreState): void {
       : undefined;
     const run = task.currentRunId ? runs.get(task.currentRunId) : undefined;
     if (hasRuntimeProjection) {
-      assertAgentReviewOwnership(runs, artifacts, gitSnapshots, task);
+      assertAgentReviewOwnership(runs, artifacts, gitSnapshots, messages, task);
     }
     if (
       (task.currentIterationId && (!iteration || iteration.taskId !== task.id)) ||
@@ -5909,6 +5954,7 @@ function assertAgentReviewOwnership(
   runs: ReadonlyMap<string, RunRecord>,
   artifacts: ReadonlyMap<string, ArtifactRecord>,
   gitSnapshots: ReadonlyMap<string, GitSnapshotRecord>,
+  messages: ReadonlyMap<string, TaskInstruction>,
   task: Task
 ): void {
   const review = task.projection.agentReview;
@@ -5965,6 +6011,20 @@ function assertAgentReviewOwnership(
   for (const decision of review.findingDecisions ?? []) {
     if (!reviewRun || decision.reviewRunId !== reviewRun.id) {
       invalidPersistedRelationship('task agent review decision ownership');
+    }
+  }
+
+  // A decision on an answer names a request the task's own messages sent after this review, and one of its items.
+  for (const decision of review.requestItemDecisions ?? []) {
+    const request = messages.get(decision.instructionId);
+    if (
+      !reviewRun ||
+      decision.reviewRunId !== reviewRun.id ||
+      request?.taskId !== task.id ||
+      request.reviewRequest?.reviewRunId !== reviewRun.id ||
+      !request.reviewRequest.items.some((item) => item.number === decision.item)
+    ) {
+      invalidPersistedRelationship('task agent review answer decision ownership');
     }
   }
 

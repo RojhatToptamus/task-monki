@@ -59,6 +59,29 @@ export interface ReviewRequestRecord {
   note?: string;
 }
 
+/** A message that reached the agent, or is on its way; a failed or held one did not. */
+const SENT_MESSAGE_STATUSES: readonly string[] = ['SENDING', 'SUBMITTED', 'UNCERTAIN'];
+
+export function reviewRequestSent(message: { reviewRequest?: ReviewRequestRecord; status: string }): boolean {
+  return Boolean(message.reviewRequest) && SENT_MESSAGE_STATUSES.includes(message.status);
+}
+
+/**
+ * The person's latest request after a review, among the task's messages: the
+ * round whose answers take the person's decisions and the next review reads.
+ */
+export function latestReviewRequest<T extends { reviewRequest?: ReviewRequestRecord; status: string; order: number }>(
+  messages: readonly T[],
+  reviewRunId: string
+): T | undefined {
+  let latest: T | undefined;
+  for (const message of messages) {
+    if (message.reviewRequest?.reviewRunId !== reviewRunId || !reviewRequestSent(message)) continue;
+    if (!latest || message.order > latest.order) latest = message;
+  }
+  return latest;
+}
+
 export const REVIEW_RESPONSE_OUTCOMES = ['FIXED', 'NOT_CHANGED', 'NEEDS_DECISION'] as const;
 export type ReviewResponseOutcome = (typeof REVIEW_RESPONSE_OUTCOMES)[number];
 
