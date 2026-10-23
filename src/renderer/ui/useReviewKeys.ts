@@ -1,6 +1,7 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { isBlockingFinding } from '../../shared/contracts';
 import { nextUnviewed, stepFeedback, stepThrough, type FeedbackRef } from '../model/reviewNavigation';
+import { guideStepFrom } from '../model/reviewWalkthrough';
 import { isExpandShortcut } from './ExpandToggle';
 import type { ReviewModel } from './useReviewModel';
 
@@ -17,7 +18,9 @@ export function useReviewKeys(model: ReviewModel, { findFile }: { findFile(): vo
   const focusedFinding = props.findings.find((finding) => finding.id === model.focusedFindingId);
   const focusedDiscussion = model.discussions.find((discussion) => discussion.id === model.focusedDiscussionId);
   const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy && props.plan.queued);
-  const stages = model.guide.model?.stages;
+  const guide = mode === 'guide' ? model.guide.model : undefined;
+  const stages = guide?.stages;
+  const underWay = activeFileId !== undefined && files.includes(activeFileId);
   // An answered item goes into the request again from under its answer, in the person's words, as its band offers.
   const answers = model.bands.answers;
 
@@ -39,7 +42,9 @@ export function useReviewKeys(model: ReviewModel, { findFile }: { findFile(): vo
     const instant = event.repeat;
     const key = event.key.toLowerCase();
     if (key === 'j' || key === 'k') {
-      const next = stepThrough(files, activeFileId, key === 'j' ? 1 : -1);
+      const delta = key === 'j' ? 1 : -1;
+      // In the Guide, with no file under way, the keys go on from the stage being read.
+      const next = guide && !underWay ? guideStepFrom(guide, files, model.activeStage, delta) : stepThrough(files, activeFileId, delta);
       if (next) { event.preventDefault(); actions.showFile(next, { instant }); }
     } else if ((key === '[' || key === ']') && mode === 'diff') {
       // The Diff steps through the branch's commits, as the Guide steps through its stages.
@@ -74,8 +79,9 @@ export function useReviewKeys(model: ReviewModel, { findFile }: { findFile(): vo
         else actions.showDiscussion(next.id, { instant });
       }
     } else if (key === 'v') {
-      const fileId = activeFileId ?? files[0];
-      if (!fileId || !files.includes(fileId) || model.history) return;
+      // In the Guide, V marks only a file being read; at the Diff's top, its first file is.
+      const fileId = underWay ? activeFileId : !guide && activeFileId === undefined ? files[0] : undefined;
+      if (!fileId || model.history) return;
       event.preventDefault();
       const nowViewed = !model.viewedIds.has(fileId);
       actions.setFileViewed(fileId, nowViewed);

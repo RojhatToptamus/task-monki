@@ -9,7 +9,8 @@ import { isTraveling } from './travel';
  * travel's scrolling is never read back, so a navigation's choice holds until the
  * person scrolls, and once they scroll above every item (an overview, a brief),
  * none is being read. It reads again when `itemsKey` names a new set of items,
- * keeping what a navigation chose when no item is in the band.
+ * keeping what a navigation chose when no item is in the band, or while a travel
+ * is under way: the move decides what it lands on.
  *
  * `offset` must keep its identity between renders.
  */
@@ -39,7 +40,7 @@ export function useScrollSpy(
       scheduled = true;
       frame = requestAnimationFrame(() => { scheduled = false; read(true); });
     };
-    read(false);
+    if (!isTraveling(scroller)) read(false);
     scroller.addEventListener('scroll', onScroll, { passive: true });
     const resize = new ResizeObserver(onScroll);
     resize.observe(scroller);

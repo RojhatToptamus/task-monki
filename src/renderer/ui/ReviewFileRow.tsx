@@ -1,24 +1,8 @@
-import { memo, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
+import { memo, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { Check, MessageSquare } from 'lucide-react';
-import { isBlockingFinding } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
-import { normalizeReviewPath } from '../model/reviewWorkspace';
 import { DiffStat } from './DiffStat';
 import { FileMark } from './FileMark';
-import type { ReviewModel } from './useReviewModel';
-
-/** What is said about each file of a mode that still asks for something: open findings and discussions, and the person's comments. */
-export function useFileNotes(model: ReviewModel): ReadonlyMap<string, { count: number; blocking: boolean }> {
-  const comments = model.props.draft.comments;
-  return useMemo(() => new Map(model.ordered.map(({ file }) => {
-    const findings = model.openFindingsByFile.get(file.id) ?? [];
-    const path = normalizeReviewPath(file.path);
-    const count = findings.length +
-      comments.filter((comment) => normalizeReviewPath(comment.path) === path).length +
-      (model.discussionsByFile.get(file.id) ?? []).filter((discussion) => !discussion.resolved).length;
-    return [file.id, { count, blocking: findings.some(isBlockingFinding) }];
-  })), [comments, model.discussionsByFile, model.openFindingsByFile, model.ordered]);
-}
 
 /**
  * Files as navigator rows, with one `--sel` plane under the current row. When

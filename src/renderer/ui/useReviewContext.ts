@@ -3,6 +3,7 @@ import type { ArtifactRecord, WorktreeRecord } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import {
+  NO_WHOLE_FILE,
   contextCandidates,
   fillableLines,
   fillFileGaps,
@@ -31,7 +32,6 @@ export interface ReviewContextView {
 
 const NO_READS: ReadonlyMap<string, CheckoutRead> = new Map();
 const NO_REVEALS: Readonly<Record<string, ReadonlySet<number>>> = {};
-const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };
 
 /** The whole-file state of code with no checkout to read: nothing to show beyond its changes. */
 export function noWholeFile(): WholeFileState {

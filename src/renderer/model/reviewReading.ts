@@ -1,3 +1,4 @@
+import { isBlockingFinding, type ReviewComment } from '../../shared/contracts';
 import type { DiffFile } from './diffEvidence';
 import type { DiscussionView } from './pullRequestFeedback';
 import { feedbackOrder, type FeedbackRef } from './reviewNavigation';
@@ -36,6 +37,8 @@ export interface ReviewReading {
   discussionsByFile: ReadonlyMap<string, DiscussionView[]>;
   openFindingsByFile: ReadonlyMap<string, ReviewFindingView[]>;
   openDiscussionsByFile: ReadonlyMap<string, DiscussionView[]>;
+  /** The person's comments each file shows. */
+  commentsByFile: ReadonlyMap<string, ReviewComment[]>;
   /** N and P. */
   feedback: FeedbackRef[];
   /** Each file's change as this mode reads it (`diffFileSignature`). */
@@ -48,13 +51,25 @@ export interface ReviewReading {
 /** What each file holds of the feedback anchored in the files, and what of it still asks for something. */
 export function feedbackByFile(files: readonly DiffFile[], anchors: ReviewAnchors) {
   const findingsByFile = new Map(buildReviewIndex(files, anchors.findings).map((entry) => [entry.file.id, entry.findings]));
-  const discussionsByFile = new Map(files.map((file) => [file.id, [
-    ...(anchors.discussions.byFile.get(file.id) ?? []),
-    ...file.blocks.flatMap((block) => block.lines.flatMap((line, index) => anchors.discussions.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []))
-  ]]));
+  const discussionsByFile = new Map<string, DiscussionView[]>();
+  const commentsByFile = new Map<string, ReviewComment[]>();
+  for (const file of files) {
+    const discussions = [...(anchors.discussions.byFile.get(file.id) ?? [])];
+    const comments = [...(anchors.comments.byFile.get(file.id) ?? [])];
+    for (const block of file.blocks) {
+      block.lines.forEach((line, index) => {
+        const key = lineAnchorKey(file.id, block.id, line, index);
+        discussions.push(...(anchors.discussions.byLine.get(key) ?? []));
+        comments.push(...(anchors.comments.byLine.get(key) ?? []));
+      });
+    }
+    discussionsByFile.set(file.id, discussions);
+    commentsByFile.set(file.id, comments);
+  }
   return {
     findingsByFile,
     discussionsByFile,
+    commentsByFile,
     // A file's head says what still asks for something, and a folded file keeps a row for each.
     openFindingsByFile: new Map([...findingsByFile].map(([fileId, list]) => [fileId, list.filter((finding) => finding.state === 'OPEN')])),
     openDiscussionsByFile: new Map([...discussionsByFile].map(([fileId, list]) => [fileId, list.filter((discussion) => discussion.open)]))
@@ -90,6 +105,19 @@ export function readingOf({ files, ordered, fileIds, anchors, feedback, signatur
     foldedByDefault,
     gutterWidth
   };
+}
+
+/**
+ * What each file's row counts, as its head does: open findings and discussions,
+ * and the person's comments in the draft (`written`), whether the file holds a
+ * Blocker or Major among them.
+ */
+export function fileNotes(reading: ReviewReading, written: ReadonlySet<string>): ReadonlyMap<string, { count: number; blocking: boolean }> {
+  return new Map(reading.ordered.map(({ file }) => {
+    const findings = reading.openFindingsByFile.get(file.id) ?? [];
+    const comments = (reading.commentsByFile.get(file.id) ?? []).filter((comment) => written.has(comment.id)).length;
+    return [file.id, { count: findings.length + (reading.openDiscussionsByFile.get(file.id)?.length ?? 0) + comments, blocking: findings.some(isBlockingFinding) }];
+  }));
 }
 
 /** What the person opened in one walkthrough: stages' other files, and files' other changes. */

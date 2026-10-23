@@ -205,6 +205,9 @@ const WHOLE_FILE_STATES = {
   whole: { kind: 'whole' }
 } as const satisfies Record<string, WholeFileState>;
 
+/** A file with nothing to show beyond its changes. */
+export const NO_WHOLE_FILE: WholeFileState = WHOLE_FILE_STATES.none;
+
 /** Reading a filled and revealed file whole, given its offer; reasons in the fewest words. */
 export function wholeFileState(file: DiffFile, offer: FilledFile['offer']): WholeFileState {
   switch (offer) {

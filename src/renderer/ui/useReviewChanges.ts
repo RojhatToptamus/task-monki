@@ -9,6 +9,20 @@ export interface ReviewChangesView {
   files?: DiffFile[];
 }
 
+/** Reads under way, by task, review and capture: the task page and the Review tab read the same changes once. */
+const reading = new Map<string, Promise<ReviewChangesResult | undefined>>();
+
+function readReviewChanges(key: string, taskId: string, reviewRunId: string): Promise<ReviewChangesResult | undefined> {
+  const known = reading.get(key);
+  if (known) return known;
+  const read = taskManagerApi.readReviewChanges({ taskId, reviewRunId })
+    // A review whose code cannot be read falls back to the file comparison.
+    .catch(() => undefined)
+    .finally(() => reading.delete(key));
+  reading.set(key, read);
+  return read;
+}
+
 /**
  * What changed from the code a review read to the worktree now, read again
  * whenever the worktree's capture changes (`refreshKey`).
@@ -20,10 +34,7 @@ export function useReviewChanges(taskId: string, reviewRunId: string | undefined
   useEffect(() => {
     if (!key || !reviewRunId) return;
     let canceled = false;
-    void taskManagerApi.readReviewChanges({ taskId, reviewRunId })
-      .then((value) => { if (!canceled) setResult({ key, value }); })
-      // A review whose code cannot be read falls back to the file comparison.
-      .catch(() => { if (!canceled) setResult({ key }); });
+    void readReviewChanges(key, taskId, reviewRunId).then((value) => { if (!canceled) setResult({ key, value }); });
     return () => { canceled = true; };
   }, [key, reviewRunId, taskId]);
 

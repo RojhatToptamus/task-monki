@@ -324,10 +324,18 @@ export function buildReviewDiffRows(lines: readonly DiffLine[]): readonly Review
  * change first. Undefined when either line is not a row.
  */
 export function reviewRowRange(rows: readonly ReviewDiffRow[], start: string, end: string): { from: number; to: number } | undefined {
-  const at = (id: string) => rows.findIndex((row) => row.kind === 'line' && diffLineId(row.line, row.index) === id);
-  const [from, to] = [at(start), at(end)];
-  return from < 0 || to < from ? undefined : { from, to };
+  let positions = rowPositions.get(rows);
+  if (!positions) {
+    positions = new Map(rows.flatMap((row, position): Array<[string, number]> => (row.kind === 'line' ? [[diffLineId(row.line, row.index), position]] : [])));
+    rowPositions.set(rows, positions);
+  }
+  const from = positions.get(start);
+  const to = positions.get(end);
+  return from === undefined || to === undefined || to < from ? undefined : { from, to };
 }
+
+/** Each line row's place among a block's rows, by `diffLineId`, read once per set of rows. */
+const rowPositions = new WeakMap<readonly ReviewDiffRow[], ReadonlyMap<string, number>>();
 
 function diffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
   const rows: ReviewDiffRow[] = [];

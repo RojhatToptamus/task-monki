@@ -1877,9 +1877,10 @@ control's icon, state or tooltip already carries.
   and age, then its subject and the rest of its message, kept to three lines
   until asked for), then its files. Its lines may no longer be the code's, so
   what was said about its files sits at each file's top with its lines, what was
-  said about other files does not show, and nothing is written, asked or marked
-  viewed on it: comments, Ask and Viewed belong to the code now. The Diff moves
-  to a commit once its change is read, never through an empty state. The commits
+  said about other files does not show (a move to it opens All changes), and
+  nothing is written, asked or marked viewed on it: comments, Ask and Viewed
+  belong to the code now. The Diff moves to a commit, at its top, once its
+  change is read, never through an empty state. The commits
   are the branch's own, first parents only (a merge of the base branch is one
   commit), at most its latest 100, numbered in its whole history.
 - *Keys.* G the other mode, J/K files, [ and ] intents in the Guide and commits
@@ -1918,7 +1919,8 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   one on `--sel`); the explanation at `--t-body` on `--lh-prose`
   with its terms; at most two attention lines; then the intent's files as the
   navigator's rows, those its code shows first, at most ten, then one row for
-  the rest. The file being read takes the sliding `--sel` plane.
+  the rest. The file being read takes the sliding `--sel` plane. A column
+  taller than the code area scrolls within itself.
 - *Code.* The files that hold a key change or open feedback: the key change
   first under the walkthrough's caption (12/500 `--text-soft`, with the symbol
   it sits in in mono `--faint`), the lines open feedback is about, then one
@@ -1929,8 +1931,9 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   hold its key change) are one row at the code column's edge, "N more files",
   that opens them folded. The code is laid out by what was said when the
   person arrived: a comment they write while reading lands under its line
-  where the code already is, and nothing moves; the next visit lays it out with
-  the rest.
+  where the code already is, a finding they settle or a discussion resolved
+  keeps its lines and its place, and nothing moves; the next visit lays it out
+  anew.
 - *Terms* are phrases of the explanation tied to the lines that implement them,
   a 1px dotted `--faint` underline at rest. Under the pointer or the keys their
   lines take `--hover` where they are in view, with no row rendering again, and
@@ -1939,7 +1942,9 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   move.
 - *Moving.* A file row, a term, an attention line, a menu choice, J/K (across
   intents), [ and ], N/P and V all move the code with the one travel; the layout
-  never moves. G opens the Diff at the same file and line, at the same height,
+  never moves. With no file under way, as in an intent whose code shows no
+  file, J and K go on from the intent being read, and V marks nothing.
+  Feedback the Guide does not show opens in the Diff's All changes. G opens the Diff at the same file and line, at the same height,
   and back; it is the one way between the modes, so the Diff is never narrowed
   to an intent. While the walkthrough is of earlier code, or the Diff reads a
   commit, the line numbers no longer match, so G keeps the file alone; on an
@@ -1951,8 +1956,9 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   28px line holds the intent's title, its place and the file being read; it
   takes no room in the flow, comes in 6px up as it fades, and file heads stick
   under it.
-- *States.* Before a walkthrough: the change's files by folder, each folded to
-  its head, and Write walkthrough, which runs the review; on someone else's
+- *States.* Before a walkthrough: the whole change's files by folder, whatever
+  the Diff shows, each folded to its head, after any feedback with no place in
+  them, and Write walkthrough, which runs the review; on someone else's
   pull request nothing runs until the person asks. While the review writes it:
   "Writing walkthrough" with the still half-filled circle. When none could be
   kept: why, in a few words, and the review action. A walkthrough of earlier

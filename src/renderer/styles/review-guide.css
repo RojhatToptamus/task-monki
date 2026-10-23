@@ -15,8 +15,9 @@
 @container review-scroller (max-width: 1179px) {
   .tm-review-guide__stage { --guide-column: 320px; }
 }
-/* At a stage's top its first line (the title, or the byline) and its first file's head share a centre line. */
-.tm-review-guide__column { position: sticky; top: 0; min-width: 0; padding-top: 32px; }
+/* At a stage's top its first line (the title, or the byline) and its first file's head share a centre line.
+   A column taller than the scroller scrolls within itself; 4px each side keep Ask and focus rings unclipped. */
+.tm-review-guide__column { position: sticky; top: 0; min-width: 0; max-height: 100cqb; margin: 0 -4px; padding: 32px 4px 0; overflow-y: auto; overscroll-behavior: contain; }
 .tm-review-guide__code { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 24px; }
 .tm-review-guide__stage--overview .tm-review-guide__code { gap: 0; padding-top: 32px; }
 .tm-review-guide__loading { margin: 0; padding: 32px; color: var(--muted); font-size: var(--t-body); line-height: var(--lh-body); }
@@ -129,7 +130,7 @@
    explanation keeps three lines, and file heads stick under the stage's line. */
 @container review-scroller (max-width: 999px) {
   .tm-review-guide__stage { grid-template-columns: minmax(0, 1fr); margin: 0 24px; padding-top: 20px; }
-  .tm-review-guide__column { position: static; padding: 0 0 16px; }
+  .tm-review-guide__column { position: static; max-height: none; margin: 0; padding: 0 0 16px; overflow: visible; }
   .tm-review-guide__code { --review-sticky-top: var(--h-row-dense); padding-top: 0; }
   .tm-review-guide__stage--overview .tm-review-guide__code { padding-top: 16px; }
   .tm-review-guide__files { display: none; }

@@ -348,7 +348,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Viewed' }));
     expect(screen.queryByText((_, element) => element?.tagName === 'CODE' && element.textContent === 'Added: new')).toBeNull();
     const file = screen.getByRole('region', { name: 'src/rateLimit.ts' });
-    expect(screen.getByLabelText('1 of 1 viewed')).toBeDefined();
+    expect(screen.getByRole('button', { name: /1 of 1 viewed/ })).toBeDefined();
 
     fireEvent.click(within(file).getByRole('button', { name: /Limiter state is per process/ }));
     expect(await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
@@ -495,12 +495,13 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(within(file).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
     expect(within(file).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
     expect(api.readReviewChanges).toHaveBeenCalledWith({ taskId: expect.any(String), reviewRunId: 'review-1' });
-    // Before a walkthrough the Guide reads these same files, and their removed lines take no comment there either.
+    // Before a walkthrough the Guide reads the whole change as the code is now, whatever the Diff shows.
     fireEvent.click(screen.getByRole('button', { name: 'Guide' }));
+    expect(screen.getByRole('region', { name: 'src/other.ts' })).toBeDefined();
     const facts = screen.getByRole('region', { name: 'src/rateLimit.ts' });
     fireEvent.click(within(facts).getByRole('button', { name: 'Expand src/rateLimit.ts' }));
-    expect(within(facts).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
-    expect(within(facts).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
+    expect([...facts.querySelectorAll('code')].map((code) => code.textContent)).toEqual(expect.arrayContaining(['Removed: old', 'Added: newer']));
+    expect(within(facts).getByRole('button', { name: 'Comment on removed line 1' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Diff' }));
 
     // Once a re-review is current, the previous round is offered, not led with.
@@ -837,6 +838,35 @@ describe('ReviewWorkspace commits and files', () => {
     expect(screen.getAllByRole('checkbox', { name: 'Viewed' })).toHaveLength(2);
   });
 
+  it('starts a commit at its top once it shows, and shows feedback outside it in the whole change', async () => {
+    let release: (() => void) | undefined;
+    api.readTaskCommitDiff.mockImplementation(({ sha: chosen }: { sha: string }) => new Promise((resolve) => {
+      release = () => resolve({ status: 'READY', sha: chosen, diff: fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20') });
+    }));
+    render(<Harness taskId="task-commits" gitSnapshotId="snapshot-1" />);
+    await screen.findByRole('region', { name: 'src/limit.ts' });
+    await waitFor(() => expect(api.listTaskCommits).toHaveBeenCalled());
+    await act(async () => undefined);
+    const scroller = document.querySelector<HTMLElement>('.tm-review__scroller')!;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 5000 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
+    scroller.scrollTop = 900;
+
+    // While the commit is read, the whole change stays where the person was reading it.
+    fireEvent.keyDown(scroller, { key: ']' });
+    expect(scroller.scrollTop).toBe(900);
+    await act(async () => { release?.(); });
+    expect(await screen.findByRole('region', { name: 'Commit' })).toBeDefined();
+    expect(scroller.scrollTop).toBe(0);
+
+    // The finding is about a file the commit leaves alone: the whole change shows it.
+    fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Feedback' })).getByRole('button', { name: /Limiter state is per process/ }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Commit' })).toBeNull());
+    expect(screen.getByRole('button', { name: 'Changes to show' }).textContent).toContain('All changes');
+    expect(within(screen.getByRole('region', { name: 'src/rateLimit.ts' })).getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
+  });
+
   it('filters the files by every word typed, goes to the first with Enter, and finds the filter with /', async () => {
     render(<Harness findings={[]} />);
     await screen.findByRole('region', { name: 'src/limit.ts' });
@@ -862,14 +892,12 @@ describe('ReviewWorkspace reading position', () => {
     window.localStorage.clear();
   });
 
-  it('slides the --sel plane to the file being read, and moves it with K and V', async () => {
+  it('marks the file being read in the navigator, and moves the mark with K and V', async () => {
     render(<Harness findings={[]} />);
     const sections = [await screen.findByRole('region', { name: 'src/a.ts' }), screen.getByRole('region', { name: 'src/b.ts' })];
     const scroller = sections[0]!.closest<HTMLElement>('.tm-review__scroller')!;
     const navigator = screen.getByRole('navigation', { name: 'Files' });
     const rows = within(navigator).getAllByRole('button');
-    const plane = navigator.querySelector<HTMLElement>('.tm-review-files__sel')!;
-    rows.forEach((row, index) => Object.defineProperty(row, 'offsetTop', { configurable: true, value: 8 + index * 29 }));
     // The scroller's top is at 100 and it is 600 tall, so its reading band runs to 280.
     scroller.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect;
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
@@ -880,19 +908,15 @@ describe('ReviewWorkspace reading position', () => {
 
     scrollTo([112, 522]);
     expect(rows[0]!.getAttribute('aria-current')).toBe('true');
-    expect(plane.hidden).toBe(false);
-    expect(plane.style.transform).toBe('translateY(8px)');
 
-    // Read on until the first file has left the top: the second is read, and the plane slides to its row.
+    // Read on until the first file has left the top: the second is read.
     scrollTo([-300, 110]);
     expect(rows[1]!.getAttribute('aria-current')).toBe('true');
     expect(rows[0]!.hasAttribute('aria-current')).toBe(false);
-    expect(plane.style.transform).toBe('translateY(37px)');
 
     // K goes back a file; V marks it viewed and moves on to the next file not viewed.
     fireEvent.keyDown(scroller, { key: 'k' });
     expect(rows[0]!.getAttribute('aria-current')).toBe('true');
-    expect(plane.style.transform).toBe('translateY(8px)');
     fireEvent.keyDown(scroller, { key: 'v' });
     expect((within(sections[0]!).getByRole('checkbox', { name: 'Viewed' }) as HTMLInputElement).checked).toBe(true);
     expect(rows[1]!.getAttribute('aria-current')).toBe('true');

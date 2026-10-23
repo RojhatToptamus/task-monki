@@ -4,6 +4,7 @@ import { isBlockingFinding, type WorktreeRecord } from '../../shared/contracts';
 import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
 import type { WholeFileState } from '../model/reviewContext';
+import type { OrderedReviewFile } from '../model/reviewOrder';
 import type { ReviewAnchors } from '../model/reviewReading';
 import { buildReviewDiffRows, lineAnchorKey, reviewRowRange, selectionRange, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
@@ -17,7 +18,7 @@ import { ReviewGap } from './ReviewGap';
 import { ReviewLine } from './ReviewLine';
 import { Tooltip } from './Tooltip';
 import { useDiffSyntax } from './useSyntaxLines';
-import { useReviewActions, type LineSelection } from './useReviewModel';
+import { useReviewActions, type LineSelection, type ReviewModel } from './useReviewModel';
 
 /** A run of one block's rows shown on its own, by line identity (`diffLineId`), under its caption. */
 export interface ReviewFileSegment {
@@ -72,6 +73,33 @@ export interface ReviewFileUnitProps {
  * collapsed, but its open findings and discussions stay as one-line rows:
  * Viewed never hides them. It renders again only when its own inputs change.
  */
+const NO_FEEDBACK: readonly never[] = [];
+
+/**
+ * What a file unit reads from the model, the same in the Guide and the Diff. An
+ * earlier capture and a commit are not the code now: nothing is marked viewed,
+ * opened in the checkout or asked about on them.
+ */
+export function fileUnitProps(model: ReviewModel, entry: OrderedReviewFile) {
+  const { id } = entry.file;
+  const { commentDraft, selection, props } = model;
+  return {
+    file: entry.file,
+    collapsed: model.isCollapsed(entry),
+    viewed: model.history ? undefined : model.viewedIds.has(id),
+    findings: model.openFindingsByFile.get(id) ?? NO_FEEDBACK,
+    discussions: model.openDiscussionsByFile.get(id) ?? NO_FEEDBACK,
+    anchors: model.anchors,
+    wholeFile: model.wholeFile(id),
+    composer: commentDraft && !commentDraft.editingId && commentDraft.fileId === id ? commentDraft.key : undefined,
+    selection: selection?.fileId === id ? selection : undefined,
+    canComment: model.canComment,
+    exactChanges: model.exactChanges,
+    worktree: props.historical ? undefined : props.worktree,
+    askable: Boolean(props.onAskAboutFile) && !props.historical && !model.history
+  } satisfies Partial<ReviewFileUnitProps>;
+}
+
 export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnitProps) {
   const { file, collapsed, viewed, findings, discussions, anchors, composer, selection, fullScreen } = props;
   const actions = useReviewActions();

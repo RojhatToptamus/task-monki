@@ -84,7 +84,7 @@ export function GuideAttentionList({ items, actions }: { items: readonly GuideAt
     else actions.showStage(item.stage);
   };
   return (
-    <section className="tm-review-guide__attention" aria-label="Attention">
+    <section className="tm-review-guide__attention">
       <h3 className="tm-review-guide__label">Attention</h3>
       <ol>
         {items.map((item, index) => (

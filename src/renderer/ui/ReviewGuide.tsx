@@ -1,8 +1,7 @@
 import { useId, useMemo, useRef } from 'react';
 import { stageProgress } from '../model/reviewWalkthrough';
 import { ReviewBands } from './ReviewBands';
-import { useFileNotes } from './ReviewFileRow';
-import { GuideFileUnit, GuideStageSection, type GuideScope } from './ReviewGuideStage';
+import { GuideFeedbackWithoutPlace, GuideFileUnit, GuideStageSection, type GuideScope } from './ReviewGuideStage';
 import { GuideAttentionList, GuideByline, GuideInlines } from './ReviewGuideParts';
 import { StatusGlyph } from './StatusBadge';
 import type { ReviewModel } from './useReviewModel';
@@ -18,7 +17,7 @@ export function ReviewGuide({ model }: { model: ReviewModel }) {
   // Disclosures the person opens in this visit fade in; those open before show still.
   const opened = useRef(new Set<string>()).current;
   const entries = useMemo(() => new Map(model.ordered.map((entry) => [entry.file.id, entry])), [model.ordered]);
-  const notes = useFileNotes(model);
+  const { notes } = model;
   const scope: GuideScope = { model, entries, notes, opened };
   if (guide.status === 'loading') return <div className="tm-review-guide"><p className="tm-review-guide__loading">Loading walkthrough…</p></div>;
   if (guide.status !== 'ready' || !guide.model) return <GuideBeforeWalkthrough scope={scope} />;
@@ -41,7 +40,6 @@ function GuideOverview({ model }: { model: ReviewModel }) {
   const { guide, actions } = model;
   const mapLabel = useId();
   const walkthrough = guide.model!;
-  const outside = guide.outside.findings.length > 0 || guide.outside.discussions.length > 0;
   return (
     <section className="tm-review-guide__stage tm-review-guide__stage--overview" data-stage="overview" aria-label="Overview">
       <div className="tm-review-guide__column">
@@ -61,7 +59,7 @@ function GuideOverview({ model }: { model: ReviewModel }) {
               return (
                 <li key={stage.section}>
                   <button type="button" className="tm-review-guide__map-row" data-done={progress.viewed === progress.total ? '' : undefined}
-                    aria-label={`${stage.section + 1}. ${stage.title}`} onClick={() => actions.showStage(stage.section)}>
+                    aria-label={`${stage.section + 1}. ${stage.title}, ${progress.viewed} of ${progress.total} viewed`} onClick={() => actions.showStage(stage.section)}>
                     <span className="tm-review-guide__map-number" aria-hidden="true">{stage.section + 1}</span>
                     <span className="tm-review-guide__map-title">{stage.title}</span>
                     <span className="tm-review-guide__map-progress">{progress.viewed}/{progress.total}</span>
@@ -72,14 +70,7 @@ function GuideOverview({ model }: { model: ReviewModel }) {
             })}
           </ol>
         </nav>
-        {outside ? (
-          <section className="tm-review-guide__outside" aria-label="Outside the change">
-            <h3 className="tm-review-guide__label">Outside the change</h3>
-            <div className="tm-review-general">
-              <ReviewBands place="general" findings={guide.outside.findings} discussions={guide.outside.discussions} />
-            </div>
-          </section>
-        ) : null}
+        <GuideOutside guide={guide} />
       </div>
     </section>
   );
@@ -117,6 +108,7 @@ function GuideBeforeWalkthrough({ scope }: { scope: GuideScope }) {
       <section className={`tm-review-guide__stage tm-review-guide__stage--folders${step ? '' : ' tm-review-guide__stage--code'}`} aria-label="The change by folder">
         {step ? <div className="tm-review-guide__column">{step}</div> : null}
         <div className="tm-review-guide__code">
+          <GuideFeedbackWithoutPlace guide={guide} />
           {guide.folders.map(({ folder, fileIds }) => (
             <section key={folder} className="tm-review-guide__folder" aria-label={folder || 'Top level'}>
               {folder ? <h3 className="tm-review-guide__folder-name">{folder}</h3> : null}
@@ -126,5 +118,19 @@ function GuideBeforeWalkthrough({ scope }: { scope: GuideScope }) {
         </div>
       </section>
     </div>
+  );
+}
+
+/** Feedback with no place in the code the Guide reads, framed as the Diff frames it. */
+function GuideOutside({ guide }: { guide: ReviewModel['guide'] }) {
+  const { findings, discussions } = guide.outside;
+  if (!findings.length && !discussions.length) return null;
+  return (
+    <section className="tm-review-guide__outside" aria-label="Outside the change">
+      <h3 className="tm-review-guide__label">Outside the change</h3>
+      <div className="tm-review-general">
+        <ReviewBands place="general" findings={findings} discussions={discussions} />
+      </div>
+    </section>
   );
 }

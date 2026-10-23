@@ -176,6 +176,21 @@ export function guideReadingOrder(guide: GuideModel, openGroups: ReadonlySet<num
 }
 
 /**
+ * Where J and K go while no file is under way, as at the overview or a stage
+ * whose code shows no file: the first file read from that stage on, or the last
+ * one before it.
+ */
+export function guideStepFrom(guide: GuideModel, order: readonly string[], stage: number | 'overview' | undefined, delta: 1 | -1): string | undefined {
+  const from = typeof stage === 'number' ? stage : -1;
+  const stageOf = (fileId: string) => guide.files.get(fileId)?.stage ?? -1;
+  if (delta > 0) return order.find((fileId) => stageOf(fileId) >= from);
+  for (let position = order.length - 1; position >= 0; position -= 1) {
+    if (stageOf(order[position]!) < from) return order[position];
+  }
+  return undefined;
+}
+
+/**
  * What must open for a place in the Guide to show: its stage's other files when
  * the file is among them, or the file's other changes when the line is there.
  * Nothing for a file the walkthrough does not hold.

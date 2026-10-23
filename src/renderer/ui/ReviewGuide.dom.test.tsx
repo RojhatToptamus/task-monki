@@ -122,7 +122,7 @@ const scroller = () => document.querySelector<HTMLElement>('.tm-review__scroller
 const press = (key: string) => fireEvent.keyDown(scroller(), { key });
 const stage = (title: string) => screen.getByRole('region', { name: title });
 /** The file a stage's list holds as the one being read. */
-const reading = (title: string) => within(within(stage(title)).getByRole('navigation', { name: 'Files' })).queryAllByRole('button')
+const reading = (title: string) => within(within(stage(title)).getByRole('group', { name: 'Files' })).queryAllByRole('button')
   .find((row) => row.getAttribute('aria-current') === 'true')?.querySelector('.tm-review__index-name')?.textContent;
 const rows = (anchor: string) => [...document.querySelectorAll(`[data-line-anchor="${anchor}"]`)];
 const modePressed = (mode: 'Guide' | 'Diff') => screen.getByRole('button', { name: mode }).getAttribute('aria-pressed') === 'true';
@@ -148,7 +148,7 @@ describe('the Guide', () => {
 
     const overview = stage('Overview');
     expect(within(overview).getByText('Codex')).toBeDefined();
-    expect(within(overview).getByRole('button', { name: '1. Fetch remote work' }).textContent).toContain('0/3');
+    expect(within(overview).getByRole('button', { name: '1. Fetch remote work, 0 of 3 viewed' }).textContent).toContain('0/3');
     // The fact names the finding, which leads it with its severity and lands on it.
     fireEvent.click(within(overview).getByRole('button', { name: /Clearing leaves the cache in place/ }));
     expect(document.activeElement).toBe(screen.getByRole('article', { name: 'Major finding: Clearing leaves the cache in place' }));
@@ -174,7 +174,7 @@ describe('the Guide', () => {
 
     // The stage's list names every file of the intent, those the code shows first; pressing one among
     // the others opens them and the file.
-    const list = within(fetching).getByRole('navigation', { name: 'Files' });
+    const list = within(fetching).getByRole('group', { name: 'Files' });
     const listed = within(list).getAllByRole('button');
     expect(listed.map((row) => row.querySelector('.tm-review__index-name')?.textContent)).toEqual(['service.ts', 'reader.ts', 'service.test.ts']);
     fireEvent.click(listed[2]!);
@@ -197,6 +197,16 @@ describe('the Guide', () => {
     expect(within(test).getByText('Check the snapshot too.')).toBeDefined();
     expect([...fetching.querySelectorAll('[data-file-id]')].map((unit) => unit.getAttribute('data-file-id'))).toEqual([SERVICE, READER, TEST]);
     expect(within(fetching).getByRole('button', { name: '1 more file' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps the code where it is read when a finding there is settled, laid out by what was said when the person arrived', async () => {
+    const view = await open(<Harness />);
+    // The open Major is why line 44 shows among the key changes.
+    expect(rows(lineAnchor(SERVICE, 'NEW', 44))).toHaveLength(1);
+    view.rerender(<Harness findings={[{ ...major, state: 'DISMISSED', dismissal: { reason: 'NOT_A_PROBLEM', decidedAt: '2026-07-07T10:13:00.000Z' } }]} />);
+    // Settled, it keeps its line and its place; the next visit lays the code out without it.
+    expect(rows(lineAnchor(SERVICE, 'NEW', 44))).toHaveLength(1);
+    expect(stage('Fetch remote work').querySelector('.tm-review-thread--folded[data-finding-id="cache"]')).not.toBeNull();
   });
 
   it('lights a term\'s lines while it is pointed at, and pressed, opens what hides them and keeps them chosen until the next move', async () => {
@@ -260,6 +270,37 @@ describe('the Guide', () => {
     // Viewed folds the file, and its open finding stays as a row.
     expect(within(service).getByRole('button', { name: /Clearing leaves the cache in place/ })).toBeDefined();
     expect(reading('Fetch remote work')).toBe('reader.ts');
+  });
+
+  it('steps J and K on from the intent being read when no file is under way there, and V marks only a file being read', async () => {
+    await open(<Harness />);
+    // Other changes shows no file of its own: its one file waits behind "1 more file".
+    for (let step = 0; step < 4; step += 1) press(']');
+    press('v');
+    press('j');
+    const service = within(stage('Fetch remote work')).getByRole('region', { name: SERVICE });
+    expect((within(service).getByRole('checkbox', { name: 'Viewed' }) as HTMLInputElement).checked).toBe(false);
+    expect(reading('Fetch remote work')).toBeUndefined();
+    // K goes back to the last file before the intent.
+    press('k');
+    expect(reading('Document remote work')).toBe('remote.md');
+  });
+
+  it('shows a discussion another surface asked for once the walkthrough has been read', async () => {
+    const onDiscussionRevealed = vi.fn();
+    const thread: DiscussionView = {
+      id: 'docs-thread', kind: 'THREAD', provider: 'GITHUB', path: DOCS, side: 'NEW', line: 2, resolvable: true, resolved: false, outdated: false,
+      open: true, url: 'https://github.com/acme/widgets/pull/9#docs-thread', commentCount: 1,
+      comments: [{ author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Say which CLI.', truncated: false }]
+    };
+    const asked = { discussions: [thread], discussionsOnLines: true, revealDiscussionId: thread.id, onDiscussionRevealed };
+    const view = await open(<Harness {...asked} walkthrough={{ ...STORED, view: { loading: true } }} />);
+    expect(screen.getByText('Loading walkthrough…')).toBeDefined();
+    expect(onDiscussionRevealed).not.toHaveBeenCalled();
+    view.rerender(<Harness {...asked} />);
+    await act(async () => undefined);
+    expect(onDiscussionRevealed).toHaveBeenCalledOnce();
+    expect(document.activeElement?.getAttribute('data-discussion-id')).toBe(thread.id);
   });
 
   it('switches modes with G and keeps the file and line read, at the same height, both ways', async () => {
@@ -431,7 +472,7 @@ describe('the Guide', () => {
     expect(within(account).getByText('Tasks start from', { exact: false })).toBeDefined();
     expect(within(account).getByText('The docs say how.')).toBeDefined();
     expect(within(account).queryByRole('button', { name: /^Intent/ })).toBeNull();
-    expect(within(account).queryByRole('navigation', { name: 'Files' })).toBeNull();
+    expect(within(account).queryByRole('group', { name: 'Files' })).toBeNull();
     expect(within(account).getByRole('region', { name: DOCS })).toBeDefined();
   });
 });

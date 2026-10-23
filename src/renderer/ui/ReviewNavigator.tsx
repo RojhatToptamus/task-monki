@@ -6,7 +6,7 @@ import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { matchesFileQuery } from '../model/reviewNavigation';
 import { discussionStateWord } from '../model/reviewRounds';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
-import { ReviewFileList, ReviewFileRow, useFileNotes } from './ReviewFileRow';
+import { ReviewFileList, ReviewFileRow } from './ReviewFileRow';
 import { settledLabel, severityLabel } from './ReviewFindingThread';
 import type { ReviewModel } from './useReviewModel';
 
@@ -27,7 +27,7 @@ export function ReviewNavigator({ model, rail, onRailChange, filterRef }: {
 }) {
   const { actions, props } = model;
   const comments = props.draft.comments;
-  const notes = useFileNotes(model);
+  const { notes } = model;
   const [query, setQuery] = useState('');
   const openFile = useCallback((fileId: string) => actions.showFile(fileId, { open: true }), [actions]);
   const viewedCount = model.ordered.filter(({ file }) => model.viewedIds.has(file.id)).length;
@@ -39,7 +39,9 @@ export function ReviewNavigator({ model, rail, onRailChange, filterRef }: {
     <div className="tm-review__rail">
       <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
         <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => onRailChange('files')}>
-          Files<span className="tm-review__rail-count" aria-label={viewedCount ? `${viewedCount} of ${fileCount} viewed` : undefined}>{viewedCount ? `${viewedCount}/${fileCount}` : `${fileCount}`}</span>
+          Files<span className="tm-review__rail-count">
+            {viewedCount ? <><span aria-hidden="true">{viewedCount}/{fileCount}</span><span className="tm-visually-hidden">{viewedCount} of {fileCount} viewed</span></> : fileCount}
+          </span>
         </button>
         <button type="button" className="segmented__btn" aria-pressed={rail === 'feedback'} onClick={() => onRailChange('feedback')}>
           Feedback<span className="tm-review__rail-count">{feedbackCount}</span>

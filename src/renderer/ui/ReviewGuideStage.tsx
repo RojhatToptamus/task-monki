@@ -7,7 +7,7 @@ import type { OrderedReviewFile } from '../model/reviewOrder';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { ReviewBands } from './ReviewBands';
 import { ReviewFileList, ReviewFileRow } from './ReviewFileRow';
-import { ReviewFileUnit, type ReviewFileSegment } from './ReviewFileUnit';
+import { ReviewFileUnit, fileUnitProps, type ReviewFileSegment } from './ReviewFileUnit';
 import { GuideAttentionList, GuideByline, GuideExplanation, GuideInlines, GuideRunLabel } from './ReviewGuideParts';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
@@ -15,7 +15,6 @@ import type { ReviewModel } from './useReviewModel';
 
 /** A stage lists this many files at most; the rest are one row, "N more files", which never grows the column. */
 const LISTED_FILES = 10;
-const NO_FEEDBACK: readonly never[] = [];
 
 /**
  * What a stage's parts share: the files by id with their place in the reading
@@ -77,14 +76,21 @@ export function GuideStageSection({ scope, stage, count }: { scope: GuideScope; 
       </div>
       {single ? null : <StageLine model={model} stage={stage} count={count} block={columnRef} />}
       <div className="tm-review-guide__code">
-        {/* With no overview, what is said about the whole change leads the code, framed as a file is. */}
-        {single && (guide.outside.findings.length || guide.outside.discussions.length) ? (
-          <section className="tm-review-general" aria-label="Feedback without a location">
-            <ReviewBands place="general" findings={guide.outside.findings} discussions={guide.outside.discussions} />
-          </section>
-        ) : null}
+        {/* With no overview, what is said about the whole change leads the code. */}
+        {single ? <GuideFeedbackWithoutPlace guide={guide} /> : null}
         <GuideStageFiles scope={scope} stage={stage} />
       </div>
+    </section>
+  );
+}
+
+/** Feedback with no place in the code the Guide reads, leading that code, framed as the Diff frames it. */
+export function GuideFeedbackWithoutPlace({ guide }: { guide: ReviewModel['guide'] }) {
+  const { findings, discussions } = guide.outside;
+  if (!findings.length && !discussions.length) return null;
+  return (
+    <section className="tm-review-general" aria-label="Feedback without a location">
+      <ReviewBands place="general" findings={findings} discussions={discussions} />
     </section>
   );
 }
@@ -157,7 +163,7 @@ function GuideFileList({ scope, stage }: { scope: GuideScope; stage: GuideStage 
   const restCurrent = Boolean(activeFileId && rest.includes(activeFileId));
   const filesById = new Map(stage.files.map((file) => [file.file.id, file.file]));
   return (
-    <nav className="tm-review-guide__files" aria-label="Files">
+    <div className="tm-review-guide__files" role="group" aria-label="Files">
       <ReviewFileList current={restCurrent ? 'rest' : activeFileId}>
         {listed.map((fileId) => (
           <ReviewFileRow
@@ -181,7 +187,7 @@ function GuideFileList({ scope, stage }: { scope: GuideScope; stage: GuideStage 
           </button>
         ) : null}
       </ReviewFileList>
-    </nav>
+    </div>
   );
 }
 
@@ -273,28 +279,7 @@ export function GuideFileUnit({ scope, fileId }: { scope: GuideScope; fileId: st
     }
   } : undefined), [actions, fileId, guideFile, moreKey, moreOpen, opened]);
   if (!entry) return null;
-  const { file } = entry;
-  const { commentDraft, selection } = model;
-  return (
-    <ReviewFileUnit
-      file={file}
-      collapsed={model.isCollapsed(entry)}
-      viewed={model.viewedIds.has(fileId)}
-      findings={model.openFindingsByFile.get(fileId) ?? NO_FEEDBACK}
-      discussions={model.openDiscussionsByFile.get(fileId) ?? NO_FEEDBACK}
-      anchors={model.anchors}
-      wholeFile={model.wholeFile(fileId)}
-      composer={commentDraft && !commentDraft.editingId && commentDraft.fileId === fileId ? commentDraft.key : undefined}
-      selection={selection?.fileId === fileId ? selection : undefined}
-      canComment={model.canComment}
-      exactChanges={model.exactChanges}
-      worktree={model.props.worktree}
-      askable={Boolean(model.props.onAskAboutFile)}
-      plain={file.status === 'added'}
-      segments={segments}
-      more={more}
-    />
-  );
+  return <ReviewFileUnit {...fileUnitProps(model, entry)} plain={entry.file.status === 'added'} segments={segments} more={more} />;
 }
 
 function segmentOf(run: GuideRun, entering: boolean): ReviewFileSegment {
