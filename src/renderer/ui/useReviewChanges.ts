@@ -40,7 +40,8 @@ export function useReviewChanges(taskId: string, reviewRunId: string | undefined
 
   const current = result?.key === key ? result : undefined;
   const files = useMemo(
-    () => (current?.value?.status === 'READY' ? inspectGitDiffEvidence(current.value.diff).files : undefined),
+    // Named for what it is, its blocks never share an id with the Diff's or the walkthrough's of the same file.
+    () => (current?.value?.status === 'READY' ? inspectGitDiffEvidence(current.value.diff, 'Since the review').files : undefined),
     [current]
   );
   return { loading: Boolean(key) && !current, files };

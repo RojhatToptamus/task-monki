@@ -208,7 +208,7 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
           ))}
         </div>
       ) : null}
-      {answer ? <RequestItemAnswer answer={answer} /> : null}
+      {answered ? <RequestItemAnswer answer={answered} /> : null}
       {resolveError ? <p className="form-error tm-review-thread__error" role="alert">{resolveError}</p> : null}
       {/* Answering is the conversation's last row, as on the platform. */}
       {reply && !discussion.resolved ? (

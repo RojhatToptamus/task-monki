@@ -47,18 +47,6 @@ export function requestItemLocation(item: ReviewRequestItem): string | undefined
   return `${item.path}:${item.line}${item.endLine && item.endLine > item.line ? `-${item.endLine}` : ''}`;
 }
 
-/** The lines of code an item is about, as a comment on them sits; nothing for an item about the whole change. */
-export function requestItemPlace(item: ReviewRequestItem): Omit<ReviewComment, 'id' | 'text'> | undefined {
-  if (!item.path) return undefined;
-  return {
-    path: item.path,
-    // A finding is about the code the review read, on the new side.
-    side: item.kind === 'FINDING' ? 'NEW' : item.side ?? 'NEW',
-    ...(item.line ? { line: item.line } : {}),
-    ...(item.line && item.endLine && item.endLine > item.line ? { endLine: item.endLine } : {})
-  };
-}
-
 /** An answered item the person sends again starts their words with what it said, quoted, so the agent knows which one. */
 export function requestItemQuote(item: ReviewRequestItem): string {
   const line = requestItemText(item).split('\n').map((value) => value.trim()).find(Boolean) ?? '';
@@ -165,8 +153,10 @@ export function reviewBandAnswers(round: ReviewRoundView): ReviewBandAnswers {
     if (item.kind === 'FINDING') findings.set(item.findingId, band);
     else if (item.kind === 'DISCUSSION') discussions.set(item.discussionId, band);
     else {
+      // The comment as it was sent, on the lines it is about.
       const id = `request:${round.instructionId}:${item.number}`;
-      comments.set(id, { ...band, comment: { id, ...requestItemPlace(item)!, text: item.text } });
+      const { path, side, line, endLine, text } = item;
+      comments.set(id, { ...band, comment: { id, path, side, ...(line ? { line } : {}), ...(line && endLine && endLine > line ? { endLine } : {}), text } });
     }
   }
   return { answeredAt: round.answeredAt, findings, discussions, comments };

@@ -55,7 +55,8 @@ export function useWalkthrough(taskId: string, state: ReviewWalkthroughState | u
 
   const current = reading?.key === key ? reading : undefined;
   const files = useMemo(
-    () => (current?.diff.status === 'READY' ? inspectGitDiffEvidence(current.diff.diff).files : undefined),
+    // Named for what it is, its blocks never share an id with the Diff's or what changed since of the same file.
+    () => (current?.diff.status === 'READY' ? inspectGitDiffEvidence(current.diff.diff, 'Reviewed code').files : undefined),
     [current]
   );
   return {

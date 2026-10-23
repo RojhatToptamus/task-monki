@@ -57,12 +57,31 @@ export interface SyntaxJob {
   key: string;
 }
 
-/** The job for a file side's lines, or none when the side stays plain. */
+/**
+ * The job for a file side's lines, or none when the side stays plain. Read
+ * once per array and path: each windowed run and each Guide excerpt of a block
+ * asks for the same sides again.
+ */
 export function syntaxJob(path: string, lines: readonly string[]): SyntaxJob | undefined {
+  const known = jobsByLines.get(lines);
+  if (known?.path === path) return known.job;
+  const job = sideJob(path, lines);
+  jobsByLines.set(lines, { path, job });
+  return job;
+}
+
+const jobsByLines = new WeakMap<readonly string[], { path: string; job: SyntaxJob | undefined }>();
+
+function sideJob(path: string, lines: readonly string[]): SyntaxJob | undefined {
   const language = syntaxLanguage(path);
   if (!language || lines.length === 0) return undefined;
+  // Measured before it is joined, so a side too long to colour is never copied.
+  let length = lines.length - 1;
+  for (const line of lines) {
+    length += line.length;
+    if (length > MAX_SYNTAX_LENGTH) return undefined;
+  }
   const text = lines.join('\n');
-  if (text.length > MAX_SYNTAX_LENGTH) return undefined;
   return { language, text, key: `${language}:${text.length}:${contentHash(text)}` };
 }
 
@@ -96,6 +115,18 @@ export interface DiffSides {
  * gaps a capture leaves between hunks are the only lines either side lacks.
  */
 export function diffSides(lines: readonly DiffLine[]): DiffSides {
+  let sides = sidesByLines.get(lines);
+  if (!sides) {
+    sides = blockSides(lines);
+    sidesByLines.set(lines, sides);
+  }
+  return sides;
+}
+
+/** Each block's sides, read once per set of lines. */
+const sidesByLines = new WeakMap<readonly DiffLine[], DiffSides>();
+
+function blockSides(lines: readonly DiffLine[]): DiffSides {
   const sides: DiffSides = { oldLines: [], newLines: [], index: [] };
   for (const line of lines) {
     if (line.kind === 'deletion') {

@@ -1,7 +1,6 @@
 import { memo } from 'react';
 import { Plus } from 'lucide-react';
 import { diffLineCode, type DiffLine } from '../model/diffEvidence';
-import { lineAnchor } from '../model/reviewWorkspace';
 import type { TokenLine } from '../model/syntaxHighlight';
 import { SyntaxCode } from './SyntaxCode';
 import { useReviewActions } from './useReviewModel';
@@ -12,15 +11,19 @@ import { useReviewActions } from './useReviewModel';
  * It renders again only when its own inputs change, and carries its place
  * (`data-line-anchor`) for what points at a line.
  */
-export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, selected, commentable, plain, tokens }: {
+export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, place, selected, marked, commentable, plain, tokens }: {
   path: string;
   fileId: string;
   blockId: string;
   line: DiffLine;
   /** The line's position in its block. */
   index: number;
+  /** Its place (`linePlace`), for what points at a line. */
+  place?: string;
   /** In the range chosen in the gutter. */
   selected: boolean;
+  /** Among the lines the last move chose. */
+  marked: boolean;
   /** Pressing the number comments on the line. */
   commentable: boolean;
   /** A new file's line, read as plain code: every line is added, which its file's head says once. */
@@ -35,7 +38,8 @@ export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line
   return (
     <div
       className={`tm-diffline tm-diffline--${kind} tm-diffline--annotated${selected ? ' tm-diffline--selected' : ''}`}
-      data-line-anchor={number === undefined ? undefined : lineAnchor(path, removed ? 'OLD' : 'NEW', number)}
+      data-line-anchor={place}
+      data-marked={marked ? '' : undefined}
       onContextMenu={(event) => actions.openPathMenu(path, event, line.newLine ?? line.oldLine)}
     >
       {/* The number is the comment control: press or drag across numbers to comment on a range. */}

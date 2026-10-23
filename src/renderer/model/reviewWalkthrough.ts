@@ -15,6 +15,7 @@ import {
   diffLineId,
   fileLineAnchor,
   lineAnchorKey,
+  lineKeyedFiles,
   type AnchoredDiscussions,
   type ReviewDiffRow,
   type ReviewFindingView
@@ -123,6 +124,8 @@ const FEEDBACK_BELOW = 3;
  */
 export function buildGuide(walkthrough: ReviewWalkthrough, files: readonly DiffFile[], anchors: GuideAnchors): GuideModel {
   const byPath = new Map(files.map((file) => [file.path, file]));
+  // Only a file something is said about line by line is read row by row for it.
+  const lined = lineKeyedFiles(anchors.findings.byLine, anchors.discussions.byLine, anchors.comments.byLine);
   const index = new Map<string, { stage: number; file: GuideFile }>();
   // The open findings the files hold, by id: what an attention pointer lands on.
   const openFindings = new Map<string, { finding: ReviewFindingView; file: DiffFile }>();
@@ -137,6 +140,7 @@ export function buildGuide(walkthrough: ReviewWalkthrough, files: readonly DiffF
         file,
         section.excerpts.filter((excerpt) => excerpt.path === file.path),
         anchors,
+        lined.has(file.id),
         // Lines a term points at stay among what the file can open.
         new Set(terms.filter((term) => term.target.fileId === file.id).flatMap((term) => term.target.anchors))
       );
@@ -311,6 +315,8 @@ function guideFileOf(
   file: DiffFile,
   excerpts: readonly ReviewWalkthroughExcerpt[],
   anchors: GuideAnchors,
+  /** Something is said about its lines. */
+  lined: boolean,
   targets: ReadonlySet<string>
 ): { guideFile: GuideFile; open: ReviewFindingView[] } {
   const open = (anchors.findings.byFile.get(file.id) ?? []).filter((finding) => finding.state === 'OPEN');
@@ -356,7 +362,7 @@ function guideFileOf(
   // Rows with something said about them; those still asking for something show around it.
   const banded = new Set<number>();
   const asking: number[] = [];
-  rows.forEach((row, position) => {
+  if (lined) rows.forEach((row, position) => {
     if (row.kind !== 'line') return;
     const key = lineAnchorKey(file.id, block.id, row.line, row.index);
     const findings = anchors.findings.byLine.get(key);

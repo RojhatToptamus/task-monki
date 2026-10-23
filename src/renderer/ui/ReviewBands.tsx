@@ -17,6 +17,20 @@ import { useReviewActions, useReviewBands, type CommentDraft } from './useReview
 /** Where a band sits: under the last line it is about, at its file's top, or above the files. */
 type BandPlace = 'line' | 'file' | 'general';
 
+/** What is said about no line of the change, above the files and framed as a file is; nothing when there is none. */
+export function GeneralBands({ findings, discussions, label = 'Feedback without a location' }: {
+  findings: readonly ReviewFindingView[];
+  discussions: readonly DiscussionView[];
+  label?: string;
+}) {
+  if (!findings.length && !discussions.length) return null;
+  return (
+    <section className="tm-review-general" aria-label={label}>
+      <ReviewBands place="general" findings={findings} discussions={discussions} />
+    </section>
+  );
+}
+
 /**
  * What is said about the code at one place: under a line, at a file's top, or
  * above the files. The reviewer's findings, then people's discussions, then the

@@ -1754,9 +1754,9 @@ control's icon, state or tooltip already carries.
   it: under the last line of its range, a band across the file on `--card`
   with a `--hair` seam where it meets code (bands in a row share one), no ring,
   radius or shadow. Its words keep one reading column from the code column,
-  720px at most, and each author's mark (a 20px avatar: initials on `--field`
-  in `--muted`, or a person glyph when the account is unknown) hangs in the
-  gutter beside their name, so a comment and the code it is about start on one
+  720px at most, and each author's mark (a 24px avatar: initials on `--edge`,
+  which holds on the band's `--card`, in `--text-soft`, or a person glyph when
+  the account is unknown) hangs in the gutter beside their name, so a comment and the code it is about start on one
   column. A band says the lines it is about only where its place does not:
   under its row only a range ("Lines 3–5"), at its file's top any line ("Line
   19"; the person's own on the old side are "Removed", the platform's "Old"),
@@ -1959,10 +1959,15 @@ base to that code, so a worktree that moved since keeps one set of line numbers.
   under it.
 - *States.* Before a walkthrough: the whole change's files by folder, whatever
   the Diff shows, each folded to its head, after any feedback with no place in
-  them, and Write walkthrough, which runs the review; on someone else's
-  pull request nothing runs until the person asks. While the review writes it:
-  "Writing walkthrough" with the still half-filled circle. When none could be
-  kept: why, in a few words, and the review action. A walkthrough of earlier
+  them; the column holds the walkthrough's place: its byline, "Not written
+  yet", the change's file count and lines (or why there are none: still read,
+  unreadable, empty), and Run review, which says "Starting…" on itself until
+  the review runs; on someone else's pull request nothing runs until the
+  person asks. While the review writes it: "Arrives with the review", the
+  review's latest step as one muted line, and Stop review; the bar's Reviewing
+  counts the time. While a stored one is read: its byline, and still
+  `--field-disabled` bars where its title, summary and first files go. When
+  none could be kept: why, in a few words, and the review action. A walkthrough of earlier
   code stays as context under the bar's Review out of date and its Run review
   again, one state word and one step for the tab; the answers to the request
   sent on its code sit on their lines, and nothing new is written on it.

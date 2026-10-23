@@ -101,8 +101,20 @@ describe('travel', () => {
 
   it('lands an element under the sticky line, with the room asked for above it', () => {
     const element = scroller(1000);
-    travel(element, { getBoundingClientRect: () => ({ top: 400 }) } as Element, { instant: true, margin: 120 });
+    travel(element, { isConnected: true, getBoundingClientRect: () => ({ top: 400 }) } as Element, { instant: true, margin: 120 });
     expect(element.scrollTop).toBe(1000 + 400 - 36 - 120);
+  });
+
+  it('comes to rest where its target is when it arrives, though rows rendering on the way moved it', () => {
+    const element = scroller(1000);
+    let target = 5000;
+    travel(element, () => target);
+    runFrame(100);
+    // Rows above the target render taller than they were held, as a long file's do once near.
+    target = 5240;
+    runFrame(150);
+    runFrame(200);
+    expect(element.scrollTop).toBe(5240);
   });
 
   it('hands the scroller back when the person scrolls, and a new travel takes over from where the last one is', () => {

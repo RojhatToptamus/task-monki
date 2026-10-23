@@ -53,11 +53,17 @@ const flights = new WeakMap<HTMLElement, Flight>();
 const TAKEOVER = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
 
 /**
- * Moves `scroller` to `target`: a scroll position, or an element whose top
- * comes to rest `margin` under the sticky line.
+ * Moves `scroller` to `target`: a scroll position, an element whose top comes
+ * to rest `margin` under the sticky line, or a position read from what the
+ * scroller holds (none once that has left it). An element's place, and a
+ * position read, are read again at each step: rows that render on the way can
+ * move them.
  */
-export function travel(scroller: HTMLElement, target: number | Element, { instant = false, margin = 0 }: TravelOptions = {}): void {
-  const to = typeof target === 'number' ? target : scrollTopFor(scroller, target, margin);
+export function travel(scroller: HTMLElement, target: number | Element | (() => number | undefined), { instant = false, margin = 0 }: TravelOptions = {}): void {
+  const place = typeof target === 'number' ? () => target
+    : typeof target === 'function' ? target
+      : () => (target.isConnected ? scrollTopFor(scroller, target, margin) : undefined);
+  const to = place() ?? scroller.scrollTop;
   stopTravel(scroller);
   const style = getComputedStyle(scroller);
   const curve = parseCubicBezier(style.getPropertyValue('--ease-in-out'));
@@ -81,9 +87,12 @@ export function travel(scroller: HTMLElement, target: number | Element, { instan
   scroller.scrollTop = plan.start;
   // A step's scroll event arrives in the next frame, before its callbacks, so the
   // travel ends a frame after its last step: its own scrolling never reads as the person's.
+  let drift = 0;
   const step = (now: number) => {
     const elapsed = now - began;
-    scroller.scrollTop = travelPosition(plan, elapsed, ease);
+    const current = place();
+    if (current !== undefined) drift = current - to;
+    scroller.scrollTop = travelPosition(plan, elapsed, ease) + drift;
     flight.frame = requestAnimationFrame(elapsed >= plan.duration ? stop : step);
   };
   flight.frame = requestAnimationFrame(plan.duration ? step : stop);

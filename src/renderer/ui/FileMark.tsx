@@ -18,8 +18,13 @@ const KIND_ICONS: Record<ReviewFileKind, LucideIcon> = {
  * file shows what it is, in its row's ink.
  */
 export function FileMark({ file }: { file: Pick<DiffFile, 'path' | 'status'> }) {
-  if (file.status === 'added') return <FilePlus size={13} className="tm-file-mark" data-status="added" role="img" aria-label="New file" />;
-  if (file.status === 'deleted') return <FileMinus size={13} className="tm-file-mark" data-status="deleted" role="img" aria-label="Deleted file" />;
+  if (file.status === 'added') return <FilePlus size={13} className="tm-file-mark" data-status="added" role="img" aria-label={fileStatusLabel(file)} />;
+  if (file.status === 'deleted') return <FileMinus size={13} className="tm-file-mark" data-status="deleted" role="img" aria-label={fileStatusLabel(file)} />;
   const Icon = KIND_ICONS[reviewFileKind(file.path)];
   return <Icon size={13} className="tm-file-mark" aria-hidden="true" />;
+}
+
+/** What a new or deleted file's mark says, for a control whose own name hides the mark's. */
+export function fileStatusLabel(file: Pick<DiffFile, 'status'>): string | undefined {
+  return file.status === 'added' ? 'New file' : file.status === 'deleted' ? 'Deleted file' : undefined;
 }

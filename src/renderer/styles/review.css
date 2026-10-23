@@ -204,9 +204,9 @@
 :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) { --thread-end: max(8px, calc(100% - var(--review-code-inset) - 720px)); position: relative; padding: 6px var(--thread-end) 8px var(--review-code-inset); border-block: 1px solid var(--hair); background: var(--card); color: var(--text); font-size: var(--t-body); outline: none; }
 /* Bands in a row share one seam; the file's head and edges are seams already. */
 :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) + :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
-.tm-review-file__head + :is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
+.tm-review-file__body > :first-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
 .tm-review-general > :first-child { border-top: 0; }
-.tm-review-block:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
+.tm-review-block:last-child > .tm-review-rows:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
 .tm-review-general > :last-child { border-bottom: 0; }
 /* The thread jumped to or the one the keys act on, a comment the keys are in, and a comment being written
    while the keys are back on its band: a mark down its left edge, along the file's own. */

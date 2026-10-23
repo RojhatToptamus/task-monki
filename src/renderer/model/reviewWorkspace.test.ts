@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { DiffFile } from './diffEvidence';
 import {
+  anchoredByFile,
   anchorReviewFindings,
   buildReviewDiffRows,
-  buildReviewIndex,
+  byReviewPath,
   filesChangedSinceReview,
+  lineAnchor,
   lineAnchorKey,
+  placeIsWorktreeLine,
   sideLines,
   type ReviewFindingView
 } from './reviewWorkspace';
@@ -51,7 +54,24 @@ describe('anchorReviewFindings', () => {
     expect(anchored.byLine.get(key('unstaged', 1))?.map((item) => item.id)).toEqual(['latest-block']);
     expect(anchored.byFile.get(rateLimit.id)?.map((item) => item.id)).toEqual(['outside-diff']);
     expect(anchored.general.map((item) => item.id)).toEqual(['other-file', 'no-location']);
-    expect(buildReviewIndex([rateLimit], anchored)[0]?.findings.map((item) => item.id)).toEqual(['outside-diff', 'range', 'latest-block']);
+    expect(anchoredByFile([rateLimit], anchored).get(rateLimit.id)?.map((item) => item.id)).toEqual(['outside-diff', 'range', 'latest-block']);
+  });
+
+  it('keeps a line across the modes only as the worktree numbers it: a one-block file, or a new line only its last layer shows', () => {
+    const at = (side: 'NEW' | 'OLD', line: number) => lineAnchor(rateLimit.path, side, line);
+    // The worktree's layer numbers its new side as the Guide does; the committed layer numbers lines as HEAD did.
+    expect(placeIsWorktreeLine(rateLimit, at('NEW', 76))).toBe(true);
+    expect(placeIsWorktreeLine(rateLimit, at('NEW', 39))).toBe(false);
+    expect(placeIsWorktreeLine(file(rateLimit.path, [rateLimit.blocks[0]!]), at('NEW', 39))).toBe(true);
+  });
+
+  it('reads a path the agent wrote as a diff header names it, unless a real a/ or b/ directory holds it', () => {
+    const app = file('src/app.ts', []);
+    const real = file('b/src/app.ts', []);
+    expect(anchorReviewFindings([app], [finding('header', { path: 'b/src/app.ts' })]).byFile.get(app.id)?.map((item) => item.id)).toEqual(['header']);
+    expect(anchorReviewFindings([app, real], [finding('header', { path: 'b/src/app.ts' })]).byFile.get(real.id)?.map((item) => item.id)).toEqual(['header']);
+    // A commit's own files keep it by the same reading, so it never drops out of the commit it is about.
+    expect(byReviewPath('b/src/app.ts', (path) => (path === 'src/app.ts' ? app : undefined))).toBe(app);
   });
 
   it('finds a review\'s lines on the old side of the changes since that review', () => {

@@ -23,6 +23,13 @@ export function lineAnchorKey(fileId: string, blockId: string, line: Pick<DiffLi
   return `${fileId}\u0000${blockId}\u0000${diffLineId(line, index)}`;
 }
 
+/** The files whose rows the line keys (`lineAnchorKey`) of these maps name: only those need reading row by row. */
+export function lineKeyedFiles(...maps: ReadonlyMap<string, unknown>[]): Set<string> {
+  const files = new Set<string>();
+  for (const map of maps) for (const key of map.keys()) files.add(key.slice(0, key.indexOf('\u0000')));
+  return files;
+}
+
 /** A line's identity within its block: its side and number, else its position. */
 export function diffLineId(line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>, index: number): string {
   return line.kind === 'deletion' && line.oldLine !== undefined ? `o${line.oldLine}`
@@ -34,10 +41,17 @@ export function diffLineId(line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>,
  * choice holds while unchanged lines open around it; the anchor is where it began.
  */
 export function selectionRange(block: Pick<DiffBlock, 'lines'>, chosen: { start: string; end: string; anchor: string }): { start: number; end: number; anchor: number } | undefined {
-  const indexOf = (id: string) => block.lines.findIndex((line, index) => diffLineId(line, index) === id);
-  const [start, end, anchor] = [indexOf(chosen.start), indexOf(chosen.end), indexOf(chosen.anchor)];
-  return start < 0 || end < 0 || anchor < 0 ? undefined : { start: Math.min(start, end), end: Math.max(start, end), anchor };
+  let indexes = lineIndexes.get(block.lines);
+  if (!indexes) {
+    indexes = new Map(block.lines.map((line, index) => [diffLineId(line, index), index]));
+    lineIndexes.set(block.lines, indexes);
+  }
+  const [start, end, anchor] = [indexes.get(chosen.start), indexes.get(chosen.end), indexes.get(chosen.anchor)];
+  return start === undefined || end === undefined || anchor === undefined ? undefined : { start: Math.min(start, end), end: Math.max(start, end), anchor };
 }
+
+/** Each line's position in its block, by `diffLineId`, read once per set of lines: a drag reads it at every row. */
+const lineIndexes = new WeakMap<readonly DiffLine[], ReadonlyMap<string, number>>();
 
 /**
  * A line's place by its file, side and number, the same in every mode, scope and Git
@@ -54,9 +68,54 @@ export function fileLineAnchor(path: string): (side: 'NEW' | 'OLD', line: number
   return (side, line) => `${prefix}${side === 'OLD' ? 'o' : 'n'}${line}`;
 }
 
+/** A row's own place (`lineAnchor`, through `fileLineAnchor`): a removed line by its old number, any other by its new one. */
+export function linePlace(anchorOf: ReturnType<typeof fileLineAnchor>, line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>): string | undefined {
+  const removed = line.kind === 'deletion';
+  const number = removed ? line.oldLine : line.newLine;
+  return number === undefined ? undefined : anchorOf(removed ? 'OLD' : 'NEW', number);
+}
+
+/**
+ * Whether a place (`lineAnchor`) names one line of the code as the worktree
+ * holds it, in a file of the whole change: the file is one block, or the place
+ * is a new-side line only its last block shows. That block's new side is the
+ * worktree's; an earlier layer numbers lines as its commit or the index did.
+ */
+export function placeIsWorktreeLine(file: DiffFile, place: string): boolean {
+  if (file.blocks.length === 1) return true;
+  const anchorOf = fileLineAnchor(file.path);
+  const shows = (block: DiffBlock, side: 'any' | 'new') => block.lines.some((line) =>
+    line.expansion !== 'hidden' && (side === 'any' || line.kind !== 'deletion') && linePlace(anchorOf, line) === place);
+  const last = file.blocks.at(-1);
+  return Boolean(last && shows(last, 'new') && !file.blocks.slice(0, -1).some((block) => shows(block, 'any')));
+}
+
+/** The row (`lineAnchorKey`) a move to a place lands on: the last row showing it, in the latest block that does. */
+export function placeRow(file: DiffFile, place: string): string | undefined {
+  const anchorOf = fileLineAnchor(file.path);
+  for (let blockIndex = file.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+    const block = file.blocks[blockIndex]!;
+    for (let index = block.lines.length - 1; index >= 0; index -= 1) {
+      const line = block.lines[index]!;
+      if (line.expansion !== 'hidden' && linePlace(anchorOf, line) === place) return lineAnchorKey(file.id, block.id, line, index);
+    }
+  }
+  return undefined;
+}
+
 /** A path as the diff writes it, whichever separators and leading "./" it came with. */
 export function normalizeReviewPath(path: string): string {
   return path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * What `lookup` finds for a path the agent or a person wrote: by the path, else
+ * by it read as a diff header names it ("b/src/a.ts"), so a real directory
+ * named a or b wins over that reading.
+ */
+export function byReviewPath<T>(path: string, lookup: (path: string) => T | undefined): T | undefined {
+  const normalized = normalizeReviewPath(path);
+  return lookup(normalized) ?? lookup(normalized.replace(/^[ab]\//u, ''));
 }
 
 /**
@@ -86,10 +145,7 @@ export function anchorReviewFindings(
   };
 
   for (const finding of findings) {
-    // The agent writes a finding's path, at times as a diff header names it ("b/src/a.ts"); a real
-    // directory named a or b wins over that reading.
-    const path = finding.path ? normalizeReviewPath(finding.path) : undefined;
-    const file = path ? filesByPath.get(path) ?? filesByPath.get(path.replace(/^[ab]\//u, '')) : undefined;
+    const file = finding.path ? byReviewPath(finding.path, (path) => filesByPath.get(path)) : undefined;
     if (!file) {
       general.push(finding);
       continue;
@@ -217,22 +273,24 @@ function findRowAnchor(file: DiffFile, side: ReviewComment['side'] | 'REVIEWED',
   return undefined;
 }
 
-export interface ReviewIndexFile {
-  file: DiffFile;
-  findings: ReviewFindingView[];
-}
-
-/** The rail: files in diff order, each with the findings anchored anywhere in it. */
-export function buildReviewIndex(files: readonly DiffFile[], anchored: AnchoredFindings): ReviewIndexFile[] {
-  return files.map((file) => {
-    const findings = [...(anchored.byFile.get(file.id) ?? [])];
-    for (const block of file.blocks) {
-      block.lines.forEach((line, index) => {
-        findings.push(...(anchored.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []));
-      });
+/**
+ * What is anchored anywhere in each file: at its top, then under its lines in
+ * line order. Only a file a line key names is read line by line, so a change of
+ * thousands of lines costs the lines of the files something sits on.
+ */
+export function anchoredByFile<T>(files: readonly DiffFile[], anchored: { byLine: ReadonlyMap<string, T[]>; byFile: ReadonlyMap<string, T[]> }): Map<string, T[]> {
+  const lined = lineKeyedFiles(anchored.byLine);
+  return new Map(files.map((file) => {
+    const items = [...(anchored.byFile.get(file.id) ?? [])];
+    if (lined.has(file.id)) {
+      for (const block of file.blocks) {
+        block.lines.forEach((line, index) => {
+          items.push(...(anchored.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []));
+        });
+      }
     }
-    return { file, findings };
-  });
+    return [file.id, items];
+  }));
 }
 
 /**

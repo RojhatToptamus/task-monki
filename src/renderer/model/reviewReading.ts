@@ -4,8 +4,7 @@ import type { DiscussionView } from './pullRequestFeedback';
 import { feedbackOrder, type FeedbackRef } from './reviewNavigation';
 import type { OrderedReviewFile } from './reviewOrder';
 import {
-  buildReviewIndex,
-  lineAnchorKey,
+  anchoredByFile,
   type AnchoredComments,
   type AnchoredDiscussions,
   type AnchoredFindings,
@@ -50,22 +49,9 @@ export interface ReviewReading {
 
 /** What each file holds of the feedback anchored in the files, and what of it still asks for something. */
 export function feedbackByFile(files: readonly DiffFile[], anchors: ReviewAnchors) {
-  const findingsByFile = new Map(buildReviewIndex(files, anchors.findings).map((entry) => [entry.file.id, entry.findings]));
-  const discussionsByFile = new Map<string, DiscussionView[]>();
-  const commentsByFile = new Map<string, ReviewComment[]>();
-  for (const file of files) {
-    const discussions = [...(anchors.discussions.byFile.get(file.id) ?? [])];
-    const comments = [...(anchors.comments.byFile.get(file.id) ?? [])];
-    for (const block of file.blocks) {
-      block.lines.forEach((line, index) => {
-        const key = lineAnchorKey(file.id, block.id, line, index);
-        discussions.push(...(anchors.discussions.byLine.get(key) ?? []));
-        comments.push(...(anchors.comments.byLine.get(key) ?? []));
-      });
-    }
-    discussionsByFile.set(file.id, discussions);
-    commentsByFile.set(file.id, comments);
-  }
+  const findingsByFile = anchoredByFile(files, anchors.findings);
+  const discussionsByFile = anchoredByFile(files, anchors.discussions);
+  const commentsByFile = anchoredByFile(files, anchors.comments);
   return {
     findingsByFile,
     discussionsByFile,

@@ -478,6 +478,14 @@ export function TaskDetail(props: TaskDetailProps) {
   );
   // The review's walkthrough with the code it describes, read while the Review tab or Ask can show it.
   const walkthroughView = useWalkthrough(task?.id ?? '', tab === 'review' || askThread ? reviewGate?.walkthrough : undefined);
+  // What Ask names its subjects by, read again only when they change, not on every event the page renders for.
+  const askSubjectNames = useMemo<AskSubjectNames>(() => ({
+    findings: new Map(reviewFindingViews.map((finding) => [finding.id, finding.title])),
+    ...(walkthroughView.walkthrough ? {
+      walkthrough: { reviewRunId: walkthroughView.walkthrough.reviewRunId, titles: walkthroughView.walkthrough.sections.map((section) => section.title) }
+    } : {}),
+    discussions: new Map(discussionViews.map((discussion) => [discussion.id, discussionSubjectName(discussion)]))
+  }), [discussionViews, reviewFindingViews, walkthroughView.walkthrough]);
   // The latest request after the review, once the agent answered it: the brief and the bands show
   // its answers, and the person settles each one.
   const reviewRound = useMemo(
@@ -1788,13 +1796,6 @@ export function TaskDetail(props: TaskDetailProps) {
     setAskFocusToken((value) => value + 1);
   };
   // What a question names its subject by: a finding's title, an intent's title, a discussion's author and first line.
-  const askSubjectNames: AskSubjectNames = {
-    findings: new Map(reviewFindingViews.map((finding) => [finding.id, finding.title])),
-    ...(walkthroughView.walkthrough ? {
-      walkthrough: { reviewRunId: walkthroughView.walkthrough.reviewRunId, titles: walkthroughView.walkthrough.sections.map((section) => section.title) }
-    } : {}),
-    discussions: new Map(discussionViews.map((discussion) => [discussion.id, discussionSubjectName(discussion)]))
-  };
   const askPanel = askOpensHere && askThread && askAvailable && props.ask ? (
     <AskPanel
       conversation={props.ask}
@@ -2257,7 +2258,15 @@ export function TaskDetail(props: TaskDetailProps) {
               label: reviewGate.status === 'NOT_RUN' ? 'Run review' : 'Run review again',
               disabledReason: reviewActionsPaused ? reviewActionPauseTitle : undefined,
               busy: reviewActionBusy || reviewPending,
+              starting: reviewPending,
               onRun: () => void runReview(actionableReviewSourceRun?.id)
+            } : undefined}
+            reviewing={reviewIsRunning ? {
+              agent: reviewerName,
+              startedAt: reviewRun?.startedAt,
+              activity: reviewActivity?.label,
+              stopping: reviewActionBusy,
+              onStop: reviewRun ? () => void stopReview(reviewRun.id) : undefined
             } : undefined}
           />
         ) : null}

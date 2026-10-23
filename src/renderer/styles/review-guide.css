@@ -20,7 +20,11 @@
 .tm-review-guide__column { position: sticky; top: 0; min-width: 0; max-height: 100cqb; margin: 0 -4px; padding: 32px 4px 0; overflow-y: auto; overscroll-behavior: contain; }
 .tm-review-guide__code { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 24px; }
 .tm-review-guide__stage--overview .tm-review-guide__code { gap: 0; padding-top: 32px; }
-.tm-review-guide__loading { margin: 0; padding: 32px; color: var(--muted); font-size: var(--t-body); line-height: var(--lh-body); }
+/* While a walkthrough is read, its summary and first files hold their places. */
+.tm-review-guide__placeholder { display: block; height: 8px; margin-top: 12px; border-radius: var(--r-2xs); background: var(--field-disabled); }
+.tm-review-guide__column > .tm-review-guide__placeholder:nth-of-type(2) { width: 88%; }
+.tm-review-guide__column > .tm-review-guide__placeholder:nth-of-type(3) { width: 64%; }
+.tm-review-guide__placeholder--file { height: var(--h-row); margin-top: 0; border-radius: var(--r-sm); }
 
 /* The column: the title with Ask beside it, the counter that opens the menu of
    stages, the explanation, attention, the files. */
@@ -86,7 +90,7 @@
 .tm-review-guide__map-lead { grid-column: 2; min-width: 0; color: var(--text-soft); text-wrap: pretty; }
 /* A stage whose files are all viewed reads as done. */
 .tm-review-guide__map-row[data-done] :is(.tm-review-guide__map-title, .tm-review-guide__map-lead) { color: var(--muted); }
-.tm-review-guide__outside { display: grid; gap: 8px; margin-top: 24px; }
+.tm-review-guide__outside { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 24px; }
 
 /* A key change's caption: the walkthrough's few words on the code column, then the symbol it sits in.
    A caption after another run takes the seam; a band ending a run gives it its own. */
@@ -94,7 +98,7 @@
 .tm-review-guide__caption > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tm-review-guide__caption > code { flex: 0 10 auto; min-width: 0; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: var(--t-meta); font-weight: var(--w-regular); text-overflow: ellipsis; }
 .tm-review-guide .tm-review-block + .tm-review-block > .tm-review-guide__caption { box-shadow: inset 0 1px var(--hair); }
-.tm-review-guide .tm-review-block:not(:last-child) > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) { border-bottom: 0; }
+.tm-review-guide .tm-review-block:not(:last-child) > .tm-review-rows:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer) { border-bottom: 0; }
 
 /* The rest of a stage's files: one disclosure at the code column's edge, opening them as folded files. */
 .tm-review-guide__more-files { display: flex; align-items: center; align-self: flex-start; gap: 6px; height: var(--h-row-dense); padding: 0 10px 0 8px; border-radius: var(--r-sm); color: var(--text-soft); font-size: var(--t-help); }
@@ -106,14 +110,16 @@
 .tm-review-guide [data-entering] { animation: tm-scrim-in var(--motion-fast) var(--ease-out); }
 
 /* Before a walkthrough: the step, or why there is none; the change's files by folder. */
-.tm-review-guide__state { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-soft); font-size: var(--t-body); line-height: var(--lh-body); }
-.tm-review-guide__state > svg { flex: 0 0 auto; color: var(--accent); }
-.tm-review-guide__state + .tm-review-guide__step { margin-top: 12px; }
-.tm-review-guide__step { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* Before a walkthrough, the column holds its place: the byline, a chapter line, the change's facts or the
+   review's latest step, then the one action. */
+.tm-review-guide__title--pending { margin-top: 12px; }
+.tm-review-guide__facts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0; color: var(--text-soft); font-size: var(--t-body); line-height: var(--lh-body); }
+.tm-review-guide__activity { margin: 4px 0 0; overflow: hidden; color: var(--muted); font-size: var(--t-help); line-height: var(--lh-meta); text-overflow: ellipsis; white-space: nowrap; }
+.tm-review-guide__step { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+.tm-review-guide__step > .ghost-button { margin-left: -8px; }
 .tm-review-guide__reason { color: var(--muted); font-size: var(--t-help); }
 .tm-review-guide__stage--folders .tm-review-guide__code { gap: 24px; }
 /* With nothing to say beside it, the code takes the stage's width. */
-.tm-review-guide__stage--code { grid-template-columns: minmax(0, 1fr); }
 .tm-review-guide__folder { display: flex; flex-direction: column; gap: 10px; }
 .tm-review-guide__folder-name { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: var(--t-help); font-weight: var(--w-regular); line-height: var(--lh-meta); }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TaskCommit, TaskCommitDiffResult, TaskCommitsResult } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { inspectGitDiffEvidence, type DiffFile } from '../model/diffEvidence';
@@ -39,11 +39,17 @@ export interface CommitChange {
  */
 export function useCommitChange(taskId: string, gitSnapshotId: string | undefined, sha: string | undefined): CommitChange | undefined {
   const [result, setResult] = useState<{ sha: string; value: TaskCommitDiffResult }>();
+  // The commit whose change was read whole: a new capture reads it again only if it could not be read.
+  const read = useRef<string>(undefined);
   useEffect(() => {
-    if (!gitSnapshotId || !sha) return;
+    if (!gitSnapshotId || !sha || read.current === `${taskId}:${sha}`) return;
     let canceled = false;
     void taskManagerApi.readTaskCommitDiff({ taskId, gitSnapshotId, sha }).then(
-      (value) => { if (!canceled) setResult({ sha, value }); },
+      (value) => {
+        if (canceled) return;
+        setResult({ sha, value });
+        if (value.status === 'READY') read.current = `${taskId}:${sha}`;
+      },
       () => { if (!canceled) setResult({ sha, value: { status: 'UNAVAILABLE', reason: 'UNREADABLE' } }); }
     );
     return () => { canceled = true; };

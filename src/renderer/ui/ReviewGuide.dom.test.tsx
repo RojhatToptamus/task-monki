@@ -295,7 +295,7 @@ describe('the Guide', () => {
     };
     const asked = { discussions: [thread], discussionsOnLines: true, revealDiscussionId: thread.id, onDiscussionRevealed };
     const view = await open(<Harness {...asked} walkthrough={{ ...STORED, view: { loading: true } }} />);
-    expect(screen.getByText('Loading walkthrough…')).toBeDefined();
+    expect(screen.getByRole('region', { name: 'Reading the walkthrough' })).toBeDefined();
     expect(onDiscussionRevealed).not.toHaveBeenCalled();
     view.rerender(<Harness {...asked} />);
     await act(async () => undefined);
@@ -364,28 +364,41 @@ describe('the Guide', () => {
     expect(modePressed('Diff')).toBe(true);
   });
 
-  it('shows the change by folder before a walkthrough, with the one step that writes it, and says when one is being written or could not be', async () => {
+  it('holds the walkthrough\'s place before one is written: the change\'s facts and the review, then its latest step and Stop, or why none could be kept', async () => {
     const onRun = vi.fn();
+    const onStop = vi.fn();
     const { rerender } = await open(<Harness walkthrough={undefined} runReview={{ label: 'Run review', busy: false, onRun }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Guide' }));
     const folders = screen.getByRole('region', { name: 'The change by folder' });
+    expect(within(folders).getByRole('heading', { name: 'Not written yet' })).toBeDefined();
+    expect(within(folders).getByText('5 files changed')).toBeDefined();
     expect(within(folders).getByRole('region', { name: 'src/remote' })).toBeDefined();
     expect(within(within(folders).getByRole('region', { name: SERVICE })).getByRole('button', { name: `Expand ${SERVICE}` })).toBeDefined();
-    // The Guide holds the step, so the bar does not repeat it.
-    expect(screen.queryByRole('button', { name: 'Run review' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Write walkthrough' }));
+    // The column holds the review, so the bar does not repeat it.
+    expect(screen.getAllByRole('button', { name: 'Run review' })).toHaveLength(1);
+    fireEvent.click(within(folders).getByRole('button', { name: 'Run review' }));
     expect(onRun).toHaveBeenCalledOnce();
 
-    rerender(<Harness walkthrough={undefined} review={{ status: 'RUNNING', runId: 'review-2' }} />);
-    expect(screen.getByText('Writing walkthrough')).toBeDefined();
+    // Pressed, until the review runs, the control says it is starting; nothing reads as blocked.
+    rerender(<Harness walkthrough={undefined} runReview={{ label: 'Run review', disabledReason: 'Review is starting.', busy: true, starting: true, onRun }} />);
+    expect((screen.getByRole('button', { name: 'Starting…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText('Review is starting.')).toBeNull();
+
+    rerender(<Harness walkthrough={undefined} review={{ status: 'RUNNING', runId: 'review-2' }}
+      reviewing={{ agent: 'Codex', activity: 'Reading src/remote/service.ts.', stopping: false, onStop }} />);
+    expect(screen.getByRole('heading', { name: 'Arrives with the review' })).toBeDefined();
+    expect(screen.getByText('Reading src/remote/service.ts.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop review' }));
+    expect(onStop).toHaveBeenCalledOnce();
 
     rerender(<Harness walkthrough={{ ...STORED, state: { status: 'UNAVAILABLE', reason: 'NOT_WRITTEN' } }} runReview={{ label: 'Run review again', busy: false, onRun }} />);
-    expect(screen.getByText('The review wrote no walkthrough')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'The review wrote no walkthrough' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Run review again' }));
     expect(onRun).toHaveBeenCalledTimes(2);
 
+    // While a stored one is read, its byline is known at once and the reading is busy.
     rerender(<Harness walkthrough={{ ...STORED, view: { loading: true } }} />);
-    expect(screen.getByText('Loading walkthrough…')).toBeDefined();
+    expect(screen.getByRole('region', { name: 'Reading the walkthrough' }).textContent).toContain('Walkthrough by Codex');
   });
 
   it('keeps an out-of-date walkthrough as earlier context, with the answers to the request sent on its code', async () => {

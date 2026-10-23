@@ -35,11 +35,14 @@ import {
   anchorReviewComments,
   anchorReviewDiscussions,
   anchorReviewFindings,
+  byReviewPath,
   diffFileSignature,
   diffLineId,
   lineAnchor,
   lineAnchorKey,
   normalizeReviewPath,
+  placeIsWorktreeLine,
+  placeRow,
   reviewGutterWidth,
   selectionRange,
   type ReviewFindingView
@@ -103,8 +106,13 @@ export interface ReviewWorkspaceProps {
   requestChanges?: ReviewRequestAction;
   /** With nothing to send, the step that finishes the task. */
   finish?: ReviewFinishAction;
-  /** Present when a review can run: none yet, the code changed since it, or a finished one to run again. */
-  runReview?: { label: string; disabledReason?: string; busy: boolean; onRun(): void };
+  /**
+   * Present when a review can run: none yet, the code changed since it, or a finished one to run again.
+   * `starting` from the press until the review runs: the control says so on itself.
+   */
+  runReview?: { label: string; disabledReason?: string; busy: boolean; starting?: boolean; onRun(): void };
+  /** The review in flight: who reviews, since when, its latest step, and Stop while it can stop. */
+  reviewing?: { agent: string; startedAt?: string; activity?: string; stopping: boolean; onStop?(): void };
   onDismissFinding?(findingId: string, reason: ReviewFindingDismissReason, note?: string): Promise<void>;
   onRestoreFinding?(findingId: string): Promise<void>;
   onAskAboutFinding?(findingId: string): void;
@@ -363,10 +371,19 @@ interface PendingTravel {
   within?: string;
   /** Puts the element this far from the scroller's top, instead of where `landing` would. */
   offset?: number;
-  /** Lines chosen until the next move. */
-  mark?: readonly string[];
   instant: boolean;
   focus: boolean;
+}
+
+/**
+ * Where the last move landed, until the next one: the row its target sits on
+ * (`lineAnchorKey`), whose rows stay rendered wherever the view goes, and the
+ * lines it chose (`lineAnchor`), which stay marked.
+ */
+export interface ReviewLanding {
+  fileId: string;
+  row?: string;
+  marks?: readonly string[];
 }
 
 /**
@@ -417,7 +434,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const ofScope = useMemo(() => {
     const paths = history ? new Set(files.map((file) => normalizeReviewPath(file.path))) : undefined;
     return <T extends { path?: string }>(items: readonly T[]): readonly T[] =>
-      (paths ? items.filter((item) => item.path !== undefined && paths.has(normalizeReviewPath(item.path))) : items);
+      (paths ? items.filter((item) => item.path !== undefined && byReviewPath(item.path, (path) => paths.has(path) || undefined)) : items);
   }, [files, history]);
   // Findings wait for the diff, so they never appear under General and then jump to their lines.
   const visibleFindings = props.historical || loading ? NO_FINDINGS : findings;
@@ -502,8 +519,11 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const findingsActionable = props.findingsSendable && !props.historical;
   // Comments are written on the code shown now: never on an earlier capture, an earlier walkthrough or a commit.
   const canComment = !props.historical && (mode === 'guide' ? !guideModel || guideCurrent : !history);
-  const included = useMemo(() => new Set(plan.send.map((finding) => finding.id)), [plan.send]);
-  const includedDiscussions = useMemo(() => new Set(plan.discussions.map((discussion) => discussion.id)), [plan.discussions]);
+  // Kept by their members, so a new plan with the same items (the note typed, any event on the page) renders no band.
+  const includedKey = plan.send.map((finding) => finding.id).join('\u0000');
+  const includedDiscussionsKey = plan.discussions.map((discussion) => discussion.id).join('\u0000');
+  const included = useMemo(() => new Set(includedKey ? includedKey.split('\u0000') : []), [includedKey]);
+  const includedDiscussions = useMemo(() => new Set(includedDiscussionsKey ? includedDiscussionsKey.split('\u0000') : []), [includedDiscussionsKey]);
   const reReview = Boolean(props.resolvedFindings?.length || findings.some((finding) => finding.previousFindingId));
 
   // Viewed is one system for both modes, by path: a file is viewed in a mode while its change there is one
@@ -555,6 +575,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const [pathMenu, setPathMenu] = useState<{ target: OpenTargetRef; position: { x: number; y: number } }>();
   // A move into a file that has to open first waits for it to render.
   const [pendingTravel, setPendingTravel] = useState<PendingTravel>();
+  const [landed, setLanded] = useState<ReviewLanding>();
   // Feedback shown from the Diff's whole change once the Diff reads it.
   const [pendingShow, setPendingShow] = useState<ShowTarget>();
   const notify = useNotify();
@@ -569,6 +590,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     if (mode === 'diff') {
       setActiveFileId(undefined);
       setPendingTravel({ instant: true, focus: false });
+      setLanded(undefined);
     }
   }
 
@@ -577,7 +599,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     props, mode, ordered: readingOrdered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, collapsedIn, focusedFile,
     selection, commentDraft, deletedComments, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
     included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile,
-    history, scopeKind: scope.kind, scopeChoice: scoped.choice, steppedCommits: scoped.commits, chooseScope: scoped.choose, wholeSignatures, viewed
+    history, scopeKind: scope.kind, scopeChoice: scoped.choice, steppedCommits: scoped.commits, chooseScope: scoped.choose, wholeSignatures, viewed, landed
   };
   const live = useRef(latest);
   useLayoutEffect(() => { live.current = latest; });
@@ -587,7 +609,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     const fileElement = (fileId: string | undefined) => (fileId === undefined ? null
       : scrollerRef.current?.querySelector<HTMLElement>(`[data-file-id=${quoted(fileId)}]`) ?? null);
     const entryOf = (fileId: string | undefined) => now().ordered.find((entry) => entry.file.id === fileId);
-    const entryOfPath = (path: string) => now().ordered.find((entry) => normalizeReviewPath(entry.file.path) === normalizeReviewPath(path));
+    const entryOfPath = (path: string) => byReviewPath(path, (wanted) => now().ordered.find((entry) => normalizeReviewPath(entry.file.path) === wanted));
     const expandIn = (target: ReviewMode, fileId: string) => setCollapsedOverride((current) => ({ ...current, [target]: { ...current[target], [fileId]: false } }));
     const expand = (fileId: string) => expandIn(now().mode, fileId);
     const openIfCollapsed = (entry: OrderedReviewFile | undefined) => { if (entry && now().isCollapsed(entry)) expand(entry.file.id); };
@@ -606,8 +628,17 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     // The line a band sits under: the last of its range, on its side.
     const bandPlace = (path: string, place: { side?: 'NEW' | 'OLD'; line?: number; endLine?: number }) =>
       (place.line ? lineAnchor(path, place.side ?? 'NEW', place.endLine && place.endLine > place.line ? place.endLine : place.line) : undefined);
+    // The row a band sits under, as the reading on screen anchors it.
+    const bandRow = (kind: 'findings' | 'discussions' | 'comments', id: string) => {
+      const { readings, mode: current } = now();
+      for (const [row, items] of readings[current].anchors[kind].byLine) if (items.some((item) => item.id === id)) return row;
+      return undefined;
+    };
     const updateDraft = (patch: Partial<TaskReviewDraft>) => now().props.onDraftChange({ ...now().props.draft, ...patch });
-    const go = (target: PendingTravel) => setPendingTravel(target);
+    const go = (target: PendingTravel, place?: ReviewLanding) => {
+      setPendingTravel(target);
+      setLanded(place);
+    };
 
     const showFullScreen = (fileId: string | undefined, animate: boolean) => {
       const { focusedFile: current } = now();
@@ -663,7 +694,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         follow(entry.file.id);
       }
       openIfCollapsed(entry);
-      go({ attribute: 'data-finding-id', value: findingId, instant, focus: true });
+      go({ attribute: 'data-finding-id', value: findingId, instant, focus: true }, entry && { fileId: entry.file.id, row: bandRow('findings', findingId) });
     };
     const showDiscussion = (discussionId: string, { instant = false } = {}) => {
       if (shownElsewhere({ kind: 'discussion', id: discussionId })) return;
@@ -677,7 +708,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         follow(entry.file.id);
       }
       openIfCollapsed(entry);
-      go({ attribute: 'data-discussion-id', value: discussionId, instant, focus: true });
+      go({ attribute: 'data-discussion-id', value: discussionId, instant, focus: true }, entry && { fileId: entry.file.id, row: bandRow('discussions', discussionId) });
     };
     const showFile = (fileId: string, { open = false, instant = false } = {}) => {
       const { focusedFile: current } = now();
@@ -690,15 +721,19 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       go({ attribute: 'data-file-id', value: fileId, instant, focus: false });
     };
     // Switching modes keeps the place: the same line at the same height, opening whatever hides it. Lines
-    // match only while both modes read one code, the Diff's own or a walkthrough of it; on an earlier
-    // walkthrough or a commit, the file is kept.
+    // match only while both modes number one code: the Guide's own or a walkthrough of it, and in the Diff's
+    // whole change a line as the worktree holds it. Otherwise (an earlier walkthrough, a commit, another
+    // scope, a line of an earlier layer of the file) the file is kept.
     const switchMode = (next: ReviewMode) => {
       const current = now();
       if (current.props.historical || current.mode === next) return;
       const scroller = scrollerRef.current;
       const read = scroller ? readPlace(scroller, current.activeFileId) : undefined;
+      const diffFile = read ? current.readings.diff.filesById.get(read.fileId) : undefined;
+      const lineKept = Boolean(read?.lineAnchor && diffFile && current.scopeKind === 'all' && !(current.guide && !current.guideCurrent) &&
+        placeIsWorktreeLine(diffFile, read.lineAnchor));
       const place: { fileId: string; lineAnchor?: string; offset?: number } | undefined =
-        read && ((current.guide && !current.guideCurrent) || current.history) ? { fileId: read.fileId } : read;
+        read && !lineKept ? { fileId: read.fileId } : read;
       setFocusedFileId(undefined);
       const entry = place ? current.readings[next].ordered.find((candidate) => candidate.file.id === place.fileId) : undefined;
       if (place && entry) {
@@ -714,7 +749,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       writeReviewMode(current.props.taskId, next);
       go(place && entry
         ? { attribute: place.lineAnchor ? 'data-line-anchor' : 'data-file-id', value: place.lineAnchor ?? place.fileId, within: place.fileId, ...(place.offset !== undefined ? { offset: place.offset } : {}), instant: true, focus: false }
-        : { instant: true, focus: false });
+        : { instant: true, focus: false }, place && entry ? { fileId: place.fileId, row: place.lineAnchor ? placeRow(entry.file, place.lineAnchor) : undefined } : undefined);
     };
     const applySelection = (next?: LineSelection) => { selectionRef.current = next; setSelection(next); };
     const blockOf = (fileId: string, blockId: string) => {
@@ -800,7 +835,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         }
         openIfCollapsed(entry);
         // Landed on, the comment takes the keys and its mark, as a finding or a discussion does.
-        go({ attribute: 'data-comment-id', value: commentId, instant: false, focus: true });
+        go({ attribute: 'data-comment-id', value: commentId, instant: false, focus: true }, entry && { fileId: entry.file.id, row: bandRow('comments', commentId) });
       },
       showRequestItem: (item) => {
         if (item.kind === 'FINDING' && now().props.findings.some((finding) => finding.id === item.findingId)) { showFinding(item.findingId); return; }
@@ -886,7 +921,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         revealIn(now().mode, fileId, anchors[0]);
         openIfCollapsed(entry);
         follow(fileId);
-        go({ attribute: 'data-line-anchor', value: anchors[0], within: fileId, instant: false, focus: false, ...(mark ? { mark: anchors } : {}) });
+        go({ attribute: 'data-line-anchor', value: anchors[0], within: fileId, instant: false, focus: false }, { fileId, row: placeRow(entry.file, anchors[0]), ...(mark ? { marks: anchors } : {}) });
       },
       // Lit by setting an attribute on the rows themselves, so the pointer never renders a row.
       lightLines: (fileId, anchors) => {
@@ -897,9 +932,10 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         if (file && anchors) for (const row of linesOf(file, anchors)) row.setAttribute('data-lit', '');
       },
       clearMarks: () => {
-        const marked = scrollerRef.current?.querySelectorAll('[data-marked]') ?? [];
-        marked.forEach((row) => row.removeAttribute('data-marked'));
-        return marked.length > 0;
+        const current = now().landed;
+        if (!current?.marks) return false;
+        setLanded({ fileId: current.fileId, row: current.row });
+        return true;
       },
       askAboutStage: (section) => now().props.onAskAboutStage?.(section),
       askAboutFile: (fileId) => {
@@ -960,10 +996,12 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         if (!found || event.button > 0) return;
         event.preventDefault();
         const current = selectionRef.current;
-        const id = diffLineId(found.block.lines[index]!, index);
+        const idAt = (at: number) => diffLineId(found.block.lines[at]!, at);
+        const id = idAt(index);
         const range = current?.fileId === fileId && current.blockId === blockId ? selectionRange(found.block, current) : undefined;
+        // Shift grows the range as it is on screen, top to bottom, whichever way it was dragged.
         applySelection(event.shiftKey && current && range
-          ? { ...current, ...(index < range.start ? { start: id } : index > range.end ? { end: id } : {}) }
+          ? { ...current, start: idAt(Math.min(index, range.start)), end: idAt(Math.max(index, range.end)) }
           : { fileId, blockId, start: id, end: id, anchor: id });
         dragging.current = true;
         const finish = () => {
@@ -1087,6 +1125,14 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
 
   const canDecideAnswers = Boolean(props.answers?.onDecide);
   const deletedCommentIds = useMemo(() => new Set(deletedComments.map((deleted) => deleted.comment.id)), [deletedComments]);
+  // The bands read only whether each action exists: the page passes new functions on every render.
+  const canDismiss = Boolean(props.onDismissFinding);
+  const canRestore = Boolean(props.onRestoreFinding);
+  const canAskAboutFinding = Boolean(props.onAskAboutFinding);
+  const canAskAboutLines = Boolean(props.onAskAboutLines);
+  const canAskAboutDiscussion = Boolean(props.onAskAboutDiscussion);
+  const canReply = Boolean(props.onReplyToDiscussion);
+  const canResolve = Boolean(props.onResolveDiscussion);
   const bands = useMemo<ReviewBandsState>(() => ({
     focusedFindingId,
     focusedDiscussionId,
@@ -1102,21 +1148,20 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     deletedCommentIds,
     replyTexts: props.replyTexts,
     replyDrafts: props.replyDrafts,
-    canDismiss: Boolean(props.onDismissFinding),
-    canRestore: Boolean(props.onRestoreFinding),
-    canAskAboutFinding: Boolean(props.onAskAboutFinding),
-    canAskAboutLines: Boolean(props.onAskAboutLines),
-    canAskAboutDiscussion: Boolean(props.onAskAboutDiscussion),
-    canReply: Boolean(props.onReplyToDiscussion),
-    canResolve: Boolean(props.onResolveDiscussion),
+    canDismiss,
+    canRestore,
+    canAskAboutFinding,
+    canAskAboutLines,
+    canAskAboutDiscussion,
+    canReply,
+    canResolve,
     agent: props.answers?.agent,
     answers: bandAnswers,
     canDecideAnswers
   }), [
-    bandAnswers, canComment, canDecideAnswers, commentDraft, deletedCommentIds, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId,
-    included, includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
-    props.onDismissFinding, props.onReplyToDiscussion, props.onResolveDiscussion, props.onRestoreFinding, props.replyDrafts, props.replyTexts,
-    props.viewer, reReview
+    bandAnswers, canAskAboutDiscussion, canAskAboutFinding, canAskAboutLines, canComment, canDecideAnswers, canDismiss, canReply, canResolve, canRestore,
+    commentDraft, deletedCommentIds, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId, included, includedDiscussions,
+    props.answers?.agent, props.findingsSendable, props.replyDrafts, props.replyTexts, props.viewer, reReview
   ]);
 
   // Another surface asked to see the request; it opens once, so coming back to the tab does not reopen it.
@@ -1132,8 +1177,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     setPendingTravel(undefined);
     const scroller = scrollerRef.current;
     if (!scroller) return;
-    scroller.querySelectorAll('[data-marked]').forEach((row) => row.removeAttribute('data-marked'));
-    const { attribute, value, within, offset, mark, instant, focus } = pendingTravel;
+    const { attribute, value, within, offset, instant, focus } = pendingTravel;
     if (!attribute || value === undefined) {
       travel(scroller, 0, { instant });
       return;
@@ -1144,8 +1188,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     const element = (attribute === 'data-line-anchor' ? linesOf(scope, [value]).at(-1) : scope.querySelector<HTMLElement>(`[${attribute}=${quoted(value)}]`)) ?? file;
     if (!element) return;
     const top = scroller.getBoundingClientRect().top + scroller.clientTop;
-    travel(scroller, offset === undefined ? landing(scroller, element) : scroller.scrollTop + element.getBoundingClientRect().top - top - offset, { instant });
-    if (mark && file) for (const row of linesOf(file, mark)) row.setAttribute('data-marked', '');
+    travel(scroller, () => (!element.isConnected ? undefined
+      : offset === undefined ? landing(scroller, element) : scroller.scrollTop + element.getBoundingClientRect().top - top - offset), { instant });
     if (focus) element.focus({ preventScroll: true });
   }, [pendingTravel, scrollerRef]);
 
@@ -1242,7 +1286,6 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     exactChanges: mode === 'diff' && exactChanges,
     stale,
     order,
-    discussionsByFile,
     /** What each file's row counts. */
     notes,
     openFindingsByFile: reading.openFindingsByFile,
@@ -1255,6 +1298,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     viewedIds,
     isCollapsed,
     activeFileId,
+    landed,
     focusedFile,
     focusedFindingId,
     focusedDiscussionId,

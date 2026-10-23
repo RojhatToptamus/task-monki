@@ -1,4 +1,4 @@
-import { useRef, useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { flushSync } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import type { AgentReviewGateStatus } from '../../shared/contracts';
@@ -6,11 +6,13 @@ import type { ReviewMode } from '../model/reviewNavigation';
 import { sameScope } from '../model/reviewScope';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { MessageTime } from './Message';
+import { NearView, NearViewContext } from './nearView';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
 import { ReviewDiff } from './ReviewDiff';
 import { ReviewGuide } from './ReviewGuide';
 import { ReviewNavigator, type ReviewRail } from './ReviewNavigator';
 import { ReviewOutcome } from './ReviewRequest';
+import { Elapsed } from './SessionTurns';
 import { Tooltip } from './Tooltip';
 import { useReviewKeys } from './useReviewKeys';
 import { ReviewActionsProvider, ReviewBandsProvider, useReviewModel, type ReviewWorkspaceProps } from './useReviewModel';
@@ -50,6 +52,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const model = useReviewModel(props, scrollerRef);
+  // Which file bodies and runs of rows are near the scroller's view, so only those rows are in the document.
+  const [nearView] = useState(() => new NearView());
+  useLayoutEffect(() => (scrollerRef.current ? nearView.connect(scrollerRef.current) : undefined), [nearView]);
   const [rail, setRail] = useState<ReviewRail>('files');
   // / finds a file: the navigator shows the files, and its filter takes the caret.
   const onKeyDown = useReviewKeys(model, {
@@ -135,16 +140,31 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     <span className={`tm-review__headline${review?.status === 'RUNNING' || review?.working ? ' tm-shimmer' : ''}`} data-tone={headline.tone}>
                       {headline.label}
                     </span>
-                    {review?.reviewedAt && review.status !== 'RUNNING' && review.status !== 'NOT_RUN' && !review.working ? (
+                    {review?.status === 'RUNNING' && props.reviewing?.startedAt ? (
+                      <span className="tm-review__meta"><Elapsed since={props.reviewing.startedAt} /></span>
+                    ) : review?.reviewedAt && review.status !== 'NOT_RUN' && !review.working ? (
                       <span className="tm-review__meta"><MessageTime value={review.reviewedAt} /></span>
                     ) : null}
                     {/* A finished, current review can run again from beside its time. */}
-                    {rerunSettled && run && !run.disabledReason && !guideHoldsRun ? (
+                    {rerunSettled && run && (run.starting || !run.disabledReason) && !guideHoldsRun ? (
                       <Tooltip label={run.label}>
                         <button type="button" className="tm-iconbtn" aria-label={run.label} disabled={run.busy} onClick={run.onRun}>
                           <RefreshCw size={16} aria-hidden="true" />
                         </button>
                       </Tooltip>
+                    ) : null}
+                    {/* The review that changes the state sits beside it; scope and view keep the far end. */}
+                    {run && !rerunSettled && !guideHoldsRun ? (
+                      <span className="tm-actiontitle" title={run.disabledReason}>
+                        <button
+                          type="button"
+                          className={model.stale ? 'primary-button button--sm' : 'outline-button button--sm'}
+                          disabled={Boolean(run.disabledReason) || run.busy}
+                          onClick={run.onRun}
+                        >
+                          {run.starting ? 'Starting…' : run.label}
+                        </button>
+                      </span>
                     ) : null}
                   </>
                 )}
@@ -188,30 +208,21 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                     />
                   </>
                 ) : null}
-                {run && !rerunSettled && !guideHoldsRun ? (
-                  <span className="tm-actiontitle" title={run.disabledReason}>
-                    <button
-                      type="button"
-                      className={model.stale ? 'primary-button button--sm' : 'outline-button button--sm'}
-                      disabled={Boolean(run.disabledReason) || run.busy}
-                      onClick={run.onRun}
-                    >
-                      {run.label}
-                    </button>
-                  </span>
-                ) : null}
               </>
             )}
           </div>
 
-          {diffMode && model.incomplete ? (
+          {/* The Guide reads the capture too until a walkthrough brings its own code. */}
+          {model.incomplete && (diffMode || !model.guide.model) ? (
             <p className="tm-review__notice" role="status">The captured diff is incomplete. Listed files are real; missing ones are not established.</p>
           ) : null}
           <div className="tm-review__work">
             {diffMode ? <ReviewNavigator model={model} rail={rail} onRailChange={setRail} filterRef={filterRef} /> : null}
             {/* One scroller for the code, whichever mode reads it; heads stick at its --review-sticky-top. */}
             <div ref={scrollerRef} className="tm-review__scroller" tabIndex={-1} style={{ '--review-num': `${model.gutterWidth}px` } as CSSProperties}>
-              {diffMode ? <ReviewDiff model={model} /> : <ReviewGuide model={model} />}
+              <NearViewContext.Provider value={nearView}>
+                {diffMode ? <ReviewDiff model={model} /> : <ReviewGuide model={model} />}
+              </NearViewContext.Provider>
             </div>
           </div>
 

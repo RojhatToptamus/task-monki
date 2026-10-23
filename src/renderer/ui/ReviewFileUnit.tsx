@@ -6,11 +6,12 @@ import { discussionAuthor, discussionSummary, type DiscussionView } from '../mod
 import type { WholeFileState } from '../model/reviewContext';
 import type { OrderedReviewFile } from '../model/reviewOrder';
 import type { ReviewAnchors } from '../model/reviewReading';
-import { buildReviewDiffRows, lineAnchorKey, reviewRowRange, selectionRange, type ReviewFindingView } from '../model/reviewWorkspace';
+import { buildReviewDiffRows, fileLineAnchor, lineAnchorKey, linePlace, reviewRowRange, selectionRange, type ReviewDiffRow, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { DiffStat } from './DiffStat';
 import { ExpandToggle } from './ExpandToggle';
-import { FileMark } from './FileMark';
+import { FileMark, fileStatusLabel } from './FileMark';
+import { NearBox } from './nearView';
 import { useOpenTargetMenuItems } from './OpenTargetMenu';
 import { ReviewBands } from './ReviewBands';
 import { severityLabel } from './ReviewFindingThread';
@@ -18,7 +19,7 @@ import { ReviewGap } from './ReviewGap';
 import { ReviewLine } from './ReviewLine';
 import { Tooltip } from './Tooltip';
 import { useDiffSyntax } from './useSyntaxLines';
-import { useReviewActions, type LineSelection, type ReviewModel } from './useReviewModel';
+import { useReviewActions, type LineSelection, type ReviewLanding, type ReviewModel } from './useReviewModel';
 
 /** A run of one block's rows shown on its own, by line identity (`diffLineId`), under its caption. */
 export interface ReviewFileSegment {
@@ -28,11 +29,11 @@ export interface ReviewFileSegment {
   end: string;
   /** What the run is, above it, such as a walkthrough's caption. */
   caption?: ReactNode;
-  /** The person just opened it: it fades in. */
-  entering?: boolean;
+  /** The person just opened it: it fades in, and this runs once the fade has run, so it fades only then. */
+  entered?(): void;
 }
 
-export interface ReviewFileUnitProps {
+interface ReviewFileUnitProps {
   file: DiffFile;
   /** Folded to its head; what asks for something stays as one row each. */
   collapsed: boolean;
@@ -46,6 +47,8 @@ export interface ReviewFileUnitProps {
   wholeFile: WholeFileState;
   /** The composer's place, while it is in this file. */
   composer?: string;
+  /** The comment being edited, while it is in this file. */
+  editing?: string;
   /** The gutter's choice, while it is in this file. */
   selection?: LineSelection;
   canComment: boolean;
@@ -65,14 +68,12 @@ export interface ReviewFileUnitProps {
   fullScreen?: boolean;
   /** Another file is shown alone. */
   hidden?: boolean;
+  /** Its rows stay in the document wherever it is: the file being read, shown alone, or written on. */
+  keepRendered?: boolean;
+  /** Where the last move landed, while it is in this file. */
+  landed?: ReviewLanding;
 }
 
-/**
- * A file of the change: a sticky head at table-row scale over its rows, with
- * what is said about it where it belongs. A viewed or generated file starts
- * collapsed, but its open findings and discussions stay as one-line rows:
- * Viewed never hides them. It renders again only when its own inputs change.
- */
 const NO_FEEDBACK: readonly never[] = [];
 
 /**
@@ -92,14 +93,24 @@ export function fileUnitProps(model: ReviewModel, entry: OrderedReviewFile) {
     anchors: model.anchors,
     wholeFile: model.wholeFile(id),
     composer: commentDraft && !commentDraft.editingId && commentDraft.fileId === id ? commentDraft.key : undefined,
+    editing: commentDraft?.editingId && commentDraft.path === entry.file.path ? commentDraft.editingId : undefined,
     selection: selection?.fileId === id ? selection : undefined,
     canComment: model.canComment,
     exactChanges: model.exactChanges,
     worktree: props.historical ? undefined : props.worktree,
-    askable: Boolean(props.onAskAboutFile) && !props.historical && !model.history
+    askable: Boolean(props.onAskAboutFile) && !props.historical && !model.history,
+    keepRendered: model.activeFileId === id || model.focusedFile === id || selection?.fileId === id ||
+      Boolean(commentDraft && (commentDraft.fileId === id || commentDraft.path === entry.file.path)),
+    landed: model.landed?.fileId === id ? model.landed : undefined
   } satisfies Partial<ReviewFileUnitProps>;
 }
 
+/**
+ * A file of the change: a sticky head at table-row scale over its rows, with
+ * what is said about it where it belongs. A viewed or generated file starts
+ * collapsed, but its open findings and discussions stay as one-line rows:
+ * Viewed never hides them. It renders again only when its own inputs change.
+ */
 export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnitProps) {
   const { file, collapsed, viewed, findings, discussions, anchors, composer, selection, fullScreen } = props;
   const actions = useReviewActions();
@@ -118,10 +129,12 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
       segment={segment}
       anchors={anchors}
       composer={composer}
+      editing={props.editing}
       selection={selection?.blockId === block.id ? selection : undefined}
       canComment={props.canComment}
       exactChanges={props.exactChanges}
       plain={props.plain}
+      landed={props.landed}
     />
   );
   return (
@@ -138,7 +151,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
             type="button"
             className="tm-review-file__toggle"
             aria-expanded={!collapsed}
-            aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${file.path}`}
+            aria-label={[`${collapsed ? 'Expand' : 'Collapse'} ${file.path}`, fileStatusLabel(file)?.toLowerCase()].filter(Boolean).join(', ')}
             onClick={(event) => actions.toggleCollapsed(file.id, event.altKey)}
           >
             <ChevronRight size={13} aria-hidden="true" />
@@ -193,49 +206,88 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
           ))}
         </>
       ) : (
-        <>
-          {top.findings || top.discussions || top.comments || composer === fileKey ? <ReviewBands place="file" at={fileKey} file={file} {...top} /> : null}
-          {props.segments ? props.segments.map((segment) => {
-            const block = file.blocks.find((candidate) => candidate.id === segment.blockId);
-            return block ? (
-              <div key={`${segment.blockId}:${segment.start}`} className="tm-review-block" data-entering={segment.entering ? '' : undefined}>
-                {segment.caption}
-                {blockRows(block, segment)}
-              </div>
-            ) : null;
-          }) : file.blocks.map((block) => (
-            <div key={block.id} className="tm-review-block">
-              {file.blocks.length > 1 ? <div className="tm-review-block__label">{block.label}</div> : null}
-              {blockRows(block)}
-            </div>
-          ))}
-          {props.more ? (
-            <div className="tm-review-gap tm-review-gap--open">
-              <button type="button" className="tm-review-gap__all" onClick={props.more.onOpen}><span>{props.more.label}</span></button>
-            </div>
-          ) : null}
-        </>
+        // Only a file near the view, or one kept, has its rows in the document; another holds their place.
+        <NearBox className="tm-review-file__body" keep={props.keepRendered} content={props.segments ?? file} estimate={() => estimatedHeight(file, props.segments)}>
+          {() => (
+            <>
+              {top.findings || top.discussions || top.comments || composer === fileKey ? <ReviewBands place="file" at={fileKey} file={file} {...top} /> : null}
+              {props.segments ? props.segments.map((segment) => {
+                const block = file.blocks.find((candidate) => candidate.id === segment.blockId);
+                return block ? (
+                  <div key={`${segment.blockId}:${segment.start}`} className="tm-review-block" data-entering={segment.entered ? '' : undefined}
+                    onAnimationEnd={segment.entered && ((event) => { if (event.target === event.currentTarget) segment.entered?.(); })}>
+                    {segment.caption}
+                    {blockRows(block, segment)}
+                  </div>
+                ) : null;
+              }) : file.blocks.map((block) => (
+                <div key={block.id} className="tm-review-block">
+                  {file.blocks.length > 1 ? <div className="tm-review-block__label">{block.label}</div> : null}
+                  {blockRows(block)}
+                </div>
+              ))}
+              {props.more ? (
+                <div className="tm-review-gap tm-review-gap--open">
+                  {/* The gutter's slot, empty, so the words sit on the code column as every gap's do. */}
+                  <span className="tm-review-gap__steps" />
+                  <button type="button" className="tm-review-gap__all" onClick={props.more.onOpen}><span>{props.more.label}</span></button>
+                </div>
+              ) : null}
+            </>
+          )}
+        </NearBox>
       )}
     </section>
   );
 });
 
+/** A line's least height, and a gap row's (`--lh-body`, `--h-row-dense`): a first guess until rows have rendered. */
+const LINE_HEIGHT = 20;
+const GAP_HEIGHT = 28;
+/** Rows render in runs of this many, so one long file is only in the document where it is read. */
+const RUN_ROWS = 50;
+
+/** The height rows have at least, before they have rendered once. */
+function rowsHeight(rows: readonly ReviewDiffRow[]): number {
+  let height = 0;
+  for (const row of rows) height += row.kind === 'line' ? LINE_HEIGHT : GAP_HEIGHT;
+  return height;
+}
+
+/** The height a body has at least, from its rows, before it has rendered once. */
+function estimatedHeight(file: DiffFile, segments?: readonly ReviewFileSegment[]): number {
+  let height = 0;
+  for (const block of file.blocks) {
+    const rows = buildReviewDiffRows(block.lines);
+    if (!segments) { height += rowsHeight(rows); continue; }
+    for (const segment of segments) {
+      const range = segment.blockId === block.id ? reviewRowRange(rows, segment.start, segment.end) : undefined;
+      if (range) height += rowsHeight(rows.slice(range.from, range.to + 1));
+    }
+  }
+  return height;
+}
+
 /**
  * The rows of one block, or of one run of it, with each row's bands under it.
  * Unchanged lines between hunks are gap rows; the range chosen in the gutter is
  * found once per render. The whole block is coloured, so a run shown on its own
- * reads a comment or string opened above it.
+ * reads a comment or string opened above it. Rows render in runs; a run away
+ * from the view holds their place, unless it holds the composer, the comment
+ * being edited, the range chosen in the gutter or the row a move landed on.
  */
-const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, composer, selection, canComment, exactChanges, plain }: {
+const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, composer, editing, selection, canComment, exactChanges, plain, landed }: {
   file: DiffFile;
   block: DiffBlock;
   segment?: ReviewFileSegment;
   anchors: ReviewAnchors;
   composer?: string;
+  editing?: string;
   selection?: LineSelection;
   canComment: boolean;
   exactChanges: boolean;
   plain?: boolean;
+  landed?: ReviewLanding;
 }) {
   const actions = useReviewActions();
   const syntax = useDiffSyntax(file.path, block.lines, file.oldPath);
@@ -243,7 +295,15 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
   const range = segment ? reviewRowRange(rows, segment.start, segment.end) : { from: 0, to: rows.length - 1 };
   if (!range) return null;
   const chosen = selection ? selectionRange(block, selection) : undefined;
-  return rows.slice(range.from, range.to + 1).map((row, offset) => {
+  const isChosen = (index: number) => Boolean(chosen && index >= chosen.start && index <= chosen.end);
+  const anchorOf = fileLineAnchor(file.path);
+  const marks = landed?.marks ? new Set(landed.marks) : undefined;
+  // The rows that keep their run in the document wherever the view is.
+  const holding = composer !== undefined || editing !== undefined || landed?.row !== undefined;
+  const holds = (key: string) => key === composer || key === landed?.row ||
+    Boolean(editing && anchors.comments.byLine.get(key)?.some((comment) => comment.id === editing));
+  const shown = rows.slice(range.from, range.to + 1);
+  const rowAt = (row: ReviewDiffRow, offset: number) => {
     if (row.kind === 'gap') {
       if (row.hidden === 0 && !row.heading) return null;
       // Keyed by the hunk it leads into, so it keeps focus while lines open above it.
@@ -256,6 +316,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
     const comments = anchors.comments.byLine.get(key);
     const number = line.kind === 'deletion' ? line.oldLine : line.newLine;
     const commentable = canComment && number !== undefined && !(exactChanges && line.kind === 'deletion');
+    const place = linePlace(anchorOf, line);
     return (
       <div key={key} className="tm-review-line-group">
         <ReviewLine
@@ -264,7 +325,9 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
           blockId={block.id}
           line={line}
           index={index}
-          selected={Boolean(chosen && index >= chosen.start && index <= chosen.end)}
+          place={place}
+          selected={isChosen(index)}
+          marked={Boolean(place && marks?.has(place))}
           commentable={commentable}
           plain={plain}
           tokens={syntax[index]}
@@ -274,6 +337,17 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
             findings={findings} discussions={discussions} comments={comments} />
           : null}
       </div>
+    );
+  };
+  const runs: ReviewDiffRow[][] = [];
+  for (let start = 0; start < shown.length; start += RUN_ROWS) runs.push(shown.slice(start, start + RUN_ROWS));
+  return runs.map((run, part) => {
+    const keep = run.some((row) => row.kind === 'line' && (isChosen(row.index) ||
+      (holding && holds(lineAnchorKey(file.id, block.id, row.line, row.index)))));
+    return (
+      <NearBox key={part} className="tm-review-rows" keep={keep} content={segment ?? block} part={part} estimate={() => rowsHeight(run)}>
+        {() => run.map((row, offset) => rowAt(row, part * RUN_ROWS + offset))}
+      </NearBox>
     );
   });
 });

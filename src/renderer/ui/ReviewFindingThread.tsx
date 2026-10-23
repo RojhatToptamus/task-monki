@@ -10,7 +10,7 @@ import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
 /** Why a finding is dismissed: the reviewer is wrong, the code is so on purpose, or it waits. */
-export const DISMISS_REASON_LABELS: Record<ReviewFindingDismissReason, string> = {
+const DISMISS_REASON_LABELS: Record<ReviewFindingDismissReason, string> = {
   NOT_A_PROBLEM: 'Incorrect',
   ACCEPTED: 'Intentional',
   DEFERRED: 'Won’t fix now'
@@ -147,7 +147,7 @@ export function ReviewFindingThread({
             ) : null}
             {onAsk ? (
               <Tooltip label="Ask about this finding" shortcut="A">
-                <button type="button" className="tm-iconbtn tm-review__mini tm-review-thread__ask" aria-label="Ask about this finding" onClick={() => onAsk(finding.id)}>
+                <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Ask about this finding" onClick={() => onAsk(finding.id)}>
                   <AgentMark />
                 </button>
               </Tooltip>

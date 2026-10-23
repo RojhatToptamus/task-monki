@@ -5,7 +5,7 @@ import { pluralize } from '../model/formatting';
 import { stageProgress, type GuideFile, type GuideRun, type GuideStage } from '../model/reviewWalkthrough';
 import type { OrderedReviewFile } from '../model/reviewOrder';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
-import { ReviewBands } from './ReviewBands';
+import { GeneralBands } from './ReviewBands';
 import { ReviewFileList, ReviewFileRow } from './ReviewFileRow';
 import { ReviewFileUnit, fileUnitProps, type ReviewFileSegment } from './ReviewFileUnit';
 import { GuideAttentionList, GuideByline, GuideExplanation, GuideInlines, GuideRunLabel } from './ReviewGuideParts';
@@ -16,16 +16,11 @@ import type { ReviewModel } from './useReviewModel';
 /** A stage lists this many files at most; the rest are one row, "N more files", which never grows the column. */
 const LISTED_FILES = 10;
 
-/**
- * What a stage's parts share: the files by id with their place in the reading
- * order, what is said about each, and what the person opened in this visit.
- */
+/** What a stage's parts share: the files by id with their place in the reading order, and what is said about each. */
 export interface GuideScope {
   model: ReviewModel;
   entries: ReadonlyMap<string, OrderedReviewFile>;
   notes: ReadonlyMap<string, { count: number; blocking: boolean }>;
-  /** Disclosures the person opened since the Guide mounted fade in; any open before shows still. */
-  opened: Set<string>;
 }
 
 /**
@@ -77,20 +72,9 @@ export function GuideStageSection({ scope, stage, count }: { scope: GuideScope; 
       {single ? null : <StageLine model={model} stage={stage} count={count} block={columnRef} />}
       <div className="tm-review-guide__code">
         {/* With no overview, what is said about the whole change leads the code. */}
-        {single ? <GuideFeedbackWithoutPlace guide={guide} /> : null}
+        {single ? <GeneralBands findings={guide.outside.findings} discussions={guide.outside.discussions} /> : null}
         <GuideStageFiles scope={scope} stage={stage} />
       </div>
-    </section>
-  );
-}
-
-/** Feedback with no place in the code the Guide reads, leading that code, framed as the Diff frames it. */
-export function GuideFeedbackWithoutPlace({ guide }: { guide: ReviewModel['guide'] }) {
-  const { findings, discussions } = guide.outside;
-  if (!findings.length && !discussions.length) return null;
-  return (
-    <section className="tm-review-general" aria-label="Feedback without a location">
-      <ReviewBands place="general" findings={findings} discussions={discussions} />
     </section>
   );
 }
@@ -221,11 +205,14 @@ function StageLine({ model, stage, count, block }: { model: ReviewModel; stage: 
   );
 }
 
-/** A stage's code: its shown files, then the rest behind one row that opens them as folded files. */
+/**
+ * A stage's code: its shown files, then the rest behind one row that opens them
+ * as folded files. What the press opens fades in once; open before, it is still.
+ */
 function GuideStageFiles({ scope, stage }: { scope: GuideScope; stage: GuideStage }) {
-  const { model, opened } = scope;
+  const { model } = scope;
   const open = model.guide.openGroups.has(stage.section);
-  const key = `group:${stage.section}`;
+  const [entering, setEntering] = useState(false);
   return (
     <>
       {stage.shown.map((fileId) => <GuideFileUnit key={fileId} scope={scope} fileId={fileId} />)}
@@ -236,7 +223,7 @@ function GuideStageFiles({ scope, stage }: { scope: GuideScope; stage: GuideStag
             className="tm-review-guide__more-files"
             aria-expanded={open}
             onClick={() => {
-              if (!open) opened.add(key);
+              setEntering(!open);
               model.actions.toggleStageFiles(stage.section);
             }}
           >
@@ -244,7 +231,8 @@ function GuideStageFiles({ scope, stage }: { scope: GuideScope; stage: GuideStag
             <span>{pluralize(stage.folded.length, 'more file')}</span>
           </button>
           {open ? (
-            <div className="tm-review-guide__group" data-entering={opened.has(key) ? '' : undefined}>
+            <div className="tm-review-guide__group" data-entering={entering ? '' : undefined}
+              onAnimationEnd={(event) => { if (event.target === event.currentTarget) setEntering(false); }}>
               {stage.folded.map((fileId) => <GuideFileUnit key={fileId} scope={scope} fileId={fileId} />)}
             </div>
           ) : null}
@@ -261,29 +249,29 @@ function GuideStageFiles({ scope, stage }: { scope: GuideScope; stage: GuideStag
  * among a stage's other files, it is the whole file, folded to its head.
  */
 export function GuideFileUnit({ scope, fileId }: { scope: GuideScope; fileId: string }) {
-  const { model, entries, opened } = scope;
+  const { model, entries } = scope;
   const { actions } = model;
   const entry = entries.get(fileId);
   const guideFile: GuideFile | undefined = model.guide.model?.files.get(fileId)?.file;
   const moreOpen = model.guide.openMore.has(fileId);
-  const moreKey = `more:${fileId}`;
-  const entering = moreOpen && opened.has(moreKey);
+  // The rest fades in once, as it is opened; rendered again later, as the view comes back to it, it is still.
+  const [entering, setEntering] = useState(false);
   const segments = useMemo(() => (guideFile?.shown
-    ? [...guideFile.runs.map((run) => segmentOf(run, false)), ...(moreOpen ? guideFile.rest.map((run) => segmentOf(run, entering)) : [])]
+    ? [...guideFile.runs.map((run) => segmentOf(run)), ...(moreOpen ? guideFile.rest.map((run) => segmentOf(run, entering ? () => setEntering(false) : undefined)) : [])]
     : undefined), [entering, guideFile, moreOpen]);
   const more = useMemo(() => (guideFile?.shown && guideFile.more && !moreOpen ? {
     label: guideFile.more,
     onOpen: () => {
-      opened.add(moreKey);
+      setEntering(true);
       actions.openMoreChanges(fileId);
     }
-  } : undefined), [actions, fileId, guideFile, moreKey, moreOpen, opened]);
+  } : undefined), [actions, fileId, guideFile, moreOpen]);
   if (!entry) return null;
   return <ReviewFileUnit {...fileUnitProps(model, entry)} plain={entry.file.status === 'added'} segments={segments} more={more} />;
 }
 
-function segmentOf(run: GuideRun, entering: boolean): ReviewFileSegment {
-  return { blockId: run.blockId, start: run.start, end: run.end, caption: <GuideRunLabel label={run.label} />, entering };
+function segmentOf(run: GuideRun, entered?: () => void): ReviewFileSegment {
+  return { blockId: run.blockId, start: run.start, end: run.end, caption: <GuideRunLabel label={run.label} />, entered };
 }
 
 function pathParts(file: DiffFile): { folder: string; name: string } {

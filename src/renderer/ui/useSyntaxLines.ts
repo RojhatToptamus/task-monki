@@ -100,7 +100,7 @@ export function useSyntaxLines(path: string, lines: readonly string[]): readonly
  * side is read as its old path.
  */
 export function useDiffSyntax(path: string, lines: readonly DiffLine[], oldPath = path): readonly (TokenLine | undefined)[] {
-  const sides = useMemo(() => diffSides(lines), [lines]);
+  const sides = diffSides(lines);
   const before = useSyntaxLines(oldPath, sides.oldLines);
   const after = useSyntaxLines(path, sides.newLines);
   return useMemo(
