@@ -15,7 +15,11 @@ import {
 } from '../model/reviewWorkspace';
 import type { WalkthroughView } from './useWalkthrough';
 
-/** What the Guide shows: the walkthrough the gate keeps while it is read, or why there is none. */
+/**
+ * What the Guide shows: the walkthrough (`ready`), the earlier one while the
+ * next is read (`loading`), or why there is none: none yet, one being written
+ * with a running review, or one the review could not give (`reason`).
+ */
 export interface GuideView {
   status: 'loading' | 'ready' | 'none' | 'running' | 'unavailable';
   model?: GuideModel;

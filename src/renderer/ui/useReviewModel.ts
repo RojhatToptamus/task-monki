@@ -341,11 +341,6 @@ export type ReviewModel = ReturnType<typeof useReviewModel>;
 /** The overview, or a stage by its section's index. */
 export type GuideStageId = 'overview' | number;
 
-/**
- * What the Guide shows: the walkthrough (`ready`), the earlier one while the
- * next is read (`loading`), or why there is none: none yet, one being written
- * with a running review, or one the review could not give (`reason`).
- */
 const NO_FINDINGS: ReviewFindingView[] = [];
 const NO_DISCUSSIONS: DiscussionView[] = [];
 const NO_COMMENTS: ReviewComment[] = [];
