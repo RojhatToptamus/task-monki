@@ -33,6 +33,21 @@ describe('AgentReviewContract', () => {
     expect(parseAgentReviewOutput('```json\n{"verdict": "PASSED", "summary": "Fine.", "findings": []}\n```')).not.toHaveProperty('walkthrough');
   });
 
+  it('keeps a result whose text quotes a fenced block, since only a fence on its own line closes the JSON', () => {
+    const output = parseAgentReviewOutput([
+      'One finding.',
+      '```json',
+      JSON.stringify({
+        verdict: 'NEEDS_CHANGES',
+        summary: 'One finding.',
+        findings: [{ id: 'fence', severity: 'MINOR', title: 'Document the flag', explanation: 'Add ```--shout``` to the usage block.' }]
+      }),
+      '```'
+    ].join('\n'));
+
+    expect(output.result).toMatchObject({ verdict: 'NEEDS_CHANGES', findings: [{ id: 'fence', explanation: 'Add ```--shout``` to the usage block.' }] });
+  });
+
   it('parses the fenced structured review result', () => {
     const { result } = parseAgentReviewOutput(`
 Review found one blocker.
