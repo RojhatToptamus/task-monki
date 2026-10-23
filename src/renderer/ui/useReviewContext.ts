@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ArtifactRecord, WorktreeRecord } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
-import type { DiffFile } from '../model/diffEvidence';
+import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import {
   contextCandidates,
   fillableLines,
@@ -9,21 +9,35 @@ import {
   revealLines,
   wholeFileState,
   type CheckoutRead,
-  type FilledFile
+  type FilledFile,
+  type WholeFileState
 } from '../model/reviewContext';
-import type { ActionMenuItem } from './ActionMenu';
 
 export interface ReviewContextView {
-  /** The files, with the checkout's unchanged lines in the gaps of every block it still matches. */
+  /**
+   * The files, with the checkout's unchanged lines in the gaps of every block it
+   * still matches. A file keeps its identity until its own lines change.
+   */
   files: DiffFile[];
+  /** Whether the checkout can add lines to any file: some may run past the change, to the file's end. */
+  fillable: boolean;
   /** Shows a block's unchanged lines from..to, by new-side number. */
   reveal(blockId: string, from: number, to: number): void;
-  /** The file menu's item for reading the file whole, when it offers one; `before` runs first (to open a collapsed file). */
-  wholeFileItem(fileId: string, before?: () => void): ActionMenuItem | undefined;
+  /** What the file menu offers for reading the file whole. */
+  wholeFile(fileId: string): WholeFileState;
+  /** Shows every unchanged line of the file, or its changes only. */
+  setWholeFile(fileId: string, whole: boolean): void;
 }
 
 const NO_READS: ReadonlyMap<string, CheckoutRead> = new Map();
 const NO_REVEALS: Readonly<Record<string, ReadonlySet<number>>> = {};
+const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };
+/**
+ * Each filled file as last shown, with the reveals it was shown with: a reveal
+ * changes only its own block, so every other file keeps its identity and its
+ * rows do not render again.
+ */
+const shownFiles = new WeakMap<DiffFile, { reveals: ReadonlyArray<ReadonlySet<number> | undefined>; file: DiffFile }>();
 
 /**
  * The unchanged lines around the current capture's changes. Each changed file is
@@ -79,10 +93,18 @@ export function useReviewContext({ worktree, captureId, artifacts, files }: {
     return files.map((file) => {
       const entry = filled.get(file.id)!;
       if (entry.offer !== 'lines') return entry.file;
-      return { ...entry.file, blocks: entry.file.blocks.map((block) => revealLines(block, currentReveals[block.id])) };
+      const blockReveals = entry.file.blocks.map((block) => currentReveals[block.id]);
+      const cached = shownFiles.get(entry.file);
+      if (cached && cached.reveals.every((revealed, index) => revealed === blockReveals[index])) return cached.file;
+      const shownFile = { ...entry.file, blocks: entry.file.blocks.map((block, index) => revealLines(block, blockReveals[index])) };
+      shownFiles.set(entry.file, { reveals: blockReveals, file: shownFile });
+      return shownFile;
     });
   }, [currentReveals, files, filled, key]);
-  const shownById = useMemo(() => new Map(shown.map((file) => [file.id, file])), [shown]);
+  const wholeFiles = useMemo(
+    () => new Map(shown.map((file) => [file.id, wholeFileState(file, filled.get(file.id)?.offer ?? 'none')])),
+    [filled, shown]
+  );
 
   const reveal = useCallback((blockId: string, from: number, to: number) => {
     setReveals((current) => {
@@ -93,28 +115,20 @@ export function useReviewContext({ worktree, captureId, artifacts, files }: {
     });
   }, [key]);
 
-  const setWhole = (entry: FilledFile, whole: boolean) => setReveals((current) => {
-    const byBlock = { ...(current.key === key ? current.byBlock : NO_REVEALS) };
-    for (const block of entry.file.blocks) {
-      if (!block.lines.some((line) => line.expansion)) continue;
-      if (whole) byBlock[block.id] = new Set(fillableLines(block));
-      else delete byBlock[block.id];
-    }
-    return { key, byBlock };
-  });
+  const wholeFile = (fileId: string): WholeFileState => wholeFiles.get(fileId) ?? NO_WHOLE_FILE;
 
-  const wholeFileItem = (fileId: string, before?: () => void): ActionMenuItem | undefined => {
-    const entry = filled.get(fileId);
-    const file = shownById.get(fileId);
-    if (!entry || !file) return undefined;
-    const state = wholeFileState(file, entry.offer);
-    switch (state.kind) {
-      case 'none': return undefined;
-      case 'unavailable': return { id: 'whole-file', label: 'Show whole file', disabled: true, disabledReason: state.reason };
-      case 'partial': return { id: 'whole-file', label: 'Show whole file', onSelect: () => { before?.(); setWhole(entry, true); } };
-      case 'whole': return { id: 'whole-file', label: 'Show changes only', onSelect: () => setWhole(entry, false) };
-    }
-  };
+  const setWholeFile = useCallback((fileId: string, whole: boolean) => {
+    const blocks: readonly DiffBlock[] = filled.get(fileId)?.file.blocks ?? [];
+    setReveals((current) => {
+      const byBlock = { ...(current.key === key ? current.byBlock : NO_REVEALS) };
+      for (const block of blocks) {
+        if (!block.lines.some((line) => line.expansion)) continue;
+        if (whole) byBlock[block.id] = new Set(fillableLines(block));
+        else delete byBlock[block.id];
+      }
+      return { key, byBlock };
+    });
+  }, [filled, key]);
 
-  return { files: shown, reveal, wholeFileItem };
+  return { files: shown, fillable: candidates.length > 0, reveal, wholeFile, setWholeFile };
 }

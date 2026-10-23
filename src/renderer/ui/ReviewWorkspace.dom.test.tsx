@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
 import type { DiscussionView } from '../model/pullRequestFeedback';
 import { planReviewRequest } from '../model/reviewFollowUp';
+import { reviewPlace } from '../model/reviewNavigation';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
 
@@ -562,6 +563,57 @@ describe('ReviewWorkspace pull request discussions', () => {
       expect.stringContaining('alice'), expect.stringContaining('dave')
     ]);
     expect(within(within(rail).getByText('Resolved on GitHub').parentElement!).getByText('Rename the limiter.')).toBeDefined();
+  });
+});
+
+describe('ReviewWorkspace reading position', () => {
+  beforeEach(() => {
+    api.readArtifact.mockReset().mockResolvedValueOnce(`# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/a.ts', '@@ -1 +1 @@\n-a\n+b')}\n${fileDiff('src/b.ts', '@@ -1 +1 @@\n-c\n+d')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    window.localStorage.clear();
+  });
+
+  it('slides the --sel plane to the file being read, and moves it with K and V', async () => {
+    render(<Harness findings={[]} />);
+    const sections = [await screen.findByRole('region', { name: 'src/a.ts' }), screen.getByRole('region', { name: 'src/b.ts' })];
+    const scroller = sections[0]!.closest<HTMLElement>('.tm-review__scroller')!;
+    const navigator = screen.getByRole('navigation', { name: 'Files' });
+    const rows = within(navigator).getAllByRole('button');
+    const plane = navigator.querySelector<HTMLElement>('.tm-review-files__sel')!;
+    rows.forEach((row, index) => Object.defineProperty(row, 'offsetTop', { configurable: true, value: 8 + index * 29 }));
+    // The scroller's top is at 100 and it is 600 tall, so its reading band runs to 280.
+    scroller.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect;
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
+    const scrollTo = (tops: number[]) => {
+      sections.forEach((element, index) => { element.getBoundingClientRect = () => ({ top: tops[index]!, bottom: tops[index]! + 400 }) as DOMRect; });
+      fireEvent.scroll(scroller);
+    };
+
+    scrollTo([112, 522]);
+    expect(rows[0]!.getAttribute('aria-current')).toBe('true');
+    expect(plane.hidden).toBe(false);
+    expect(plane.style.transform).toBe('translateY(8px)');
+
+    // Read on until the first file has left the top: the second is read, and the plane slides to its row.
+    scrollTo([-300, 110]);
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true');
+    expect(rows[0]!.hasAttribute('aria-current')).toBe(false);
+    expect(plane.style.transform).toBe('translateY(37px)');
+
+    // K goes back a file; V marks it viewed and moves on to the next file not viewed.
+    fireEvent.keyDown(scroller, { key: 'k' });
+    expect(rows[0]!.getAttribute('aria-current')).toBe('true');
+    expect(plane.style.transform).toBe('translateY(8px)');
+    fireEvent.keyDown(scroller, { key: 'v' });
+    expect((within(sections[0]!).getByRole('checkbox', { name: 'Viewed' }) as HTMLInputElement).checked).toBe(true);
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true');
+  });
+
+  it('marks each row with the place a walkthrough and G point at', async () => {
+    render(<Harness findings={[]} />);
+    const file = await screen.findByRole('region', { name: 'src/a.ts' });
+    const anchored = (side: 'NEW' | 'OLD') => file.querySelector(`[data-line-anchor="${reviewPlace({ id: 'src/a.ts', path: 'src/a.ts' }, { side, line: 1 }).lineAnchor}"]`);
+    expect(anchored('OLD')?.querySelector('code')?.textContent).toBe('Removed: a');
+    expect(anchored('NEW')?.querySelector('code')?.textContent).toBe('Added: b');
   });
 });
 

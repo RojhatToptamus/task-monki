@@ -33,10 +33,13 @@
 .tm-review__index-label { margin: 10px 8px 4px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-review__index-group:first-child .tm-review__index-label { margin-top: 2px; }
 .tm-review__index-empty { margin: 6px 8px; color: var(--muted); font-size: var(--t-help); }
-.tm-review__index-file { display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 8px; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+/* Files as rows over one --sel plane, which slides to the current row; the rows paint above it. */
+.tm-review-files { position: relative; display: flex; flex-direction: column; gap: 1px; }
+.tm-review-files__sel { position: absolute; top: 0; right: 0; left: 0; border-radius: var(--r-xs); background: var(--sel); pointer-events: none; transition: transform var(--motion-move) var(--ease-in-out); }
+.tm-review__index-file { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 8px; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+.tm-review__index-file[aria-current='true'] { color: var(--text); }
+.tm-review__index-file.tm-review__index-file--viewed { color: var(--faint); }
 .tm-review__index-file:hover { background-color: var(--hover); color: var(--text); }
-.tm-review__index-file--active { background: var(--sel); color: var(--text); }
-.tm-review__index-file--viewed { color: var(--faint); }
 .tm-review__index-path { display: flex; flex: 1; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; }
 .tm-review__index-name { flex: 0 1 auto; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--t-help); text-overflow: ellipsis; }
 .tm-review__index-dir { flex: 0 10 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-meta); text-overflow: ellipsis; }
@@ -64,7 +67,11 @@
 .tm-review__severity[data-severity='BLOCKER'],
 .tm-review__severity[data-severity='MAJOR'] { color: var(--blocked-ink); }
 
-.tm-review__diff { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 12px 16px 24px; outline: none; }
+/* The one scroller every mode reads the code in. Heads stick at --review-sticky-top,
+   and a travel lands what it moves to under that line; a mode that pins something
+   above its heads raises it. */
+.tm-review__scroller { --review-sticky-top: 0px; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; outline: none; }
+.tm-review__diff { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; }
 .tm-review__empty { margin: 0; padding: 12px 0; color: var(--muted); font-size: var(--t-body); }
 
 /* The brief: what was asked, what the agent reported, then the review. Folded, the request's first line. */
@@ -98,20 +105,18 @@
 /* The edge is a border, not an inset ring: rows paint their tints to the card's
    sides, and a border stays above them while the clip rounds them at the corners. */
 .tm-review-file { --review-code-inset: calc(var(--review-num, 44px) + var(--review-marker)); flex: 0 0 auto; border: 1px solid var(--edge-raised); border-radius: var(--r-sm); overflow: clip; }
-.tm-review-file__head { position: sticky; top: -12px; z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: var(--h-row); padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
+.tm-review-file__head { position: sticky; top: var(--review-sticky-top); z-index: var(--layer-sticky); display: flex; align-items: center; gap: 8px; height: var(--h-row); padding: 0 8px 0 4px; border-bottom: 1px solid var(--hair); background: var(--surface); font-size: var(--t-help); }
 .tm-review-file--collapsed .tm-review-file__head { position: static; border-bottom: 0; }
 /* Full screen: the file takes the whole page sheet. The task's tab bar (in
    TaskDetail), the toolbar, the navigator, the brief, findings without a
    location, the other files (by their hidden attribute) and the foot step
    aside; the file's head becomes the sheet's 48px first line and its code runs
    edge to edge. It passes over its neighbours while it moves there and back. */
-.tm-review[data-file-full-screen] > :is(.tm-review__bar, .tm-review__foot),
-.tm-review[data-file-full-screen] .tm-review__index,
-.tm-review__diff:has(> .tm-review-file[data-expanded]) > :not(.tm-review-file) { display: none; }
+.tm-review[data-file-full-screen] :is(.tm-review__bar, .tm-review__foot, .tm-review__index, .tm-review-brief, .tm-review-general) { display: none; }
 .tm-review[data-file-full-screen] .tm-review__work { grid-template-columns: minmax(0, 1fr); }
 .tm-review[data-file-full-screen] .tm-review__diff { padding: 0; }
 .tm-review-file[data-expanded] { border: 0; border-radius: 0; }
-.tm-review-file[data-expanded] > .tm-review-file__head { top: 0; height: var(--h-head); padding: 0 12px 0 8px; }
+.tm-review-file[data-expanded] > .tm-review-file__head { height: var(--h-head); padding: 0 12px 0 8px; }
 .tm-review-file[data-expand-motion] { position: relative; z-index: var(--layer-overlay); }
 .tm-review-file__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: var(--h-compact); padding: 0 6px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review-file__toggle:hover { background-color: var(--hover); }
@@ -316,7 +321,8 @@
 .tm-review-sheet__foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px 14px; border-top: 1px solid var(--hair); }
 .tm-review-sheet__spacer { flex: 1; }
 
-@media (max-width: 1100px) {
+/* The page's own width decides: 1036 at the minimum window, less once a docked side panel takes its room. */
+@container task-body (max-width: 1036px) {
   .tm-review { --review-index-width: 208px; }
 }
 

@@ -1,6 +1,6 @@
 import type { EffectiveReviewFinding } from '../../shared/agentReviewFindings';
 import type { ReviewComment } from '../../shared/reviewDraft';
-import { diffLineCode, parseHunkHeader, type DiffFile, type DiffLine } from './diffEvidence';
+import { diffLineCode, parseHunkHeader, type DiffBlock, type DiffFile, type DiffLine } from './diffEvidence';
 
 /** A finding as the Review tab shows it: the review's finding with the person's and reviewer's decisions applied. */
 export type ReviewFindingView = EffectiveReviewFinding;
@@ -27,6 +27,25 @@ export function lineAnchorKey(fileId: string, blockId: string, line: Pick<DiffLi
 export function diffLineId(line: Pick<DiffLine, 'kind' | 'oldLine' | 'newLine'>, index: number): string {
   return line.kind === 'deletion' && line.oldLine !== undefined ? `o${line.oldLine}`
     : line.newLine !== undefined ? `n${line.newLine}` : `i${index}`;
+}
+
+/**
+ * Where lines chosen by identity (`diffLineId`) sit in a block as it is now, so a
+ * choice holds while unchanged lines open around it; the anchor is where it began.
+ */
+export function selectionRange(block: Pick<DiffBlock, 'lines'>, chosen: { start: string; end: string; anchor: string }): { start: number; end: number; anchor: number } | undefined {
+  const indexOf = (id: string) => block.lines.findIndex((line, index) => diffLineId(line, index) === id);
+  const [start, end, anchor] = [indexOf(chosen.start), indexOf(chosen.end), indexOf(chosen.anchor)];
+  return start < 0 || end < 0 || anchor < 0 ? undefined : { start: Math.min(start, end), end: Math.max(start, end), anchor };
+}
+
+/**
+ * A line's place by its file, side and number, the same in every mode, scope and Git
+ * layer: what a term, an excerpt and G point at. A row carries its own as
+ * `data-line-anchor`: a removed line its old number, any other its new one.
+ */
+export function lineAnchor(path: string, side: 'NEW' | 'OLD', line: number): string {
+  return `${normalizeReviewPath(path)}:${side === 'OLD' ? 'o' : 'n'}${line}`;
 }
 
 export function normalizeReviewPath(path: string): string {
@@ -98,7 +117,7 @@ export function anchorReviewComments(files: readonly DiffFile[], comments: reado
 }
 
 /** Where each pull request discussion sits: under its last line, at its file's top, or above the files. */
-interface AnchoredDiscussions<T> {
+export interface AnchoredDiscussions<T> {
   byLine: Map<string, T[]>;
   byFile: Map<string, T[]>;
   general: T[];
@@ -196,6 +215,23 @@ export function buildReviewIndex(files: readonly DiffFile[], anchored: AnchoredF
   });
 }
 
+/**
+ * The review's one gutter, in px: wide enough for the largest line number it shows and
+ * the comment "+" beside it, so code starts on one column in every file. While the
+ * checkout can fill files (`fillable`), their unchanged lines can run to a file's end,
+ * known only once read, so the gutter holds four digits from the start: neither their
+ * arrival nor revealing them widens it.
+ */
+export function reviewGutterWidth(files: readonly DiffFile[], fillable: boolean): number {
+  let largest = fillable ? 9999 : 0;
+  for (const file of files) {
+    for (const block of file.blocks) {
+      for (const line of block.lines) largest = Math.max(largest, line.newLine ?? 0, line.oldLine ?? 0);
+    }
+  }
+  return Math.max(44, 32 + String(largest).length * 7);
+}
+
 /** A stable signature of a file's captured change, so "viewed" resets when the file changes and never when context is revealed. */
 export function diffFileSignature(file: DiffFile): string {
   let hash = 2166136261;
@@ -250,8 +286,30 @@ export type ReviewDiffRow =
  */
 export interface GapReveal { from: number; to: number; edge: 'start' | 'middle' | 'end' }
 
+/** Rows are built once per version of a block's lines, which are never changed in place. */
+const rowsByLines = new WeakMap<readonly DiffLine[], readonly ReviewDiffRow[]>();
 
-export function buildReviewDiffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
+export function buildReviewDiffRows(lines: readonly DiffLine[]): readonly ReviewDiffRow[] {
+  let rows = rowsByLines.get(lines);
+  if (!rows) {
+    rows = diffRows(lines);
+    rowsByLines.set(lines, rows);
+  }
+  return rows;
+}
+
+/**
+ * Where the rows from line `start` to line `end` (by `diffLineId`) sit among a block's
+ * rows, gaps between them included: a run a caller shows on its own, such as a key
+ * change first. Undefined when either line is not a row.
+ */
+export function reviewRowRange(rows: readonly ReviewDiffRow[], start: string, end: string): { from: number; to: number } | undefined {
+  const at = (id: string) => rows.findIndex((row) => row.kind === 'line' && diffLineId(row.line, row.index) === id);
+  const [from, to] = [at(start), at(end)];
+  return from < 0 || to < from ? undefined : { from, to };
+}
+
+function diffRows(lines: readonly DiffLine[]): ReviewDiffRow[] {
   const rows: ReviewDiffRow[] = [];
   const filled = lines.some((line) => line.expansion);
   let lastNewLine = 0;

@@ -5,6 +5,8 @@ import { gapSteps } from '../model/reviewContext';
 import type { ReviewDiffRow } from '../model/reviewWorkspace';
 import { Tooltip } from './Tooltip';
 import { pluralize } from '../model/formatting';
+import { keepInView } from './travel';
+import { useReviewActions } from './useReviewModel';
 
 type GapRow = Extract<ReviewDiffRow, { kind: 'gap' }>;
 
@@ -16,6 +18,7 @@ type GapRow = Extract<ReviewDiffRow, { kind: 'gap' }>;
  * lines become ordinary rows and the gap shrinks, or goes when none are left.
  */
 export function ReviewGap({ row, onReveal }: { row: GapRow; onReveal?(from: number, to: number): void }) {
+  const actions = useReviewActions();
   const words = pluralize(row.hidden, 'unchanged line');
   const heading = row.heading ? <code>{row.heading}</code> : null;
   if (!row.reveal || !onReveal) {
@@ -28,7 +31,7 @@ export function ReviewGap({ row, onReveal }: { row: GapRow; onReveal?(from: numb
   }
   const steps = gapSteps(row.reveal);
   const reveal = (range: readonly [number, number]) => (event: ReactMouseEvent<HTMLElement>) =>
-    revealInPlace(event, () => onReveal(range[0], range[1]));
+    revealInPlace(actions.scroller(), event, () => onReveal(range[0], range[1]));
   return (
     <div className="tm-review-gap tm-review-gap--open">
       {/* Fixed slots in the gutter, so each step sits in one place on every gap row. */}
@@ -63,21 +66,13 @@ export function ReviewGap({ row, onReveal }: { row: GapRow; onReveal?(from: numb
  * goes (the gap is down to one step) hands focus to the gap's label, and a step
  * taken from the keyboard keeps its control in view, wherever the gap moved to.
  */
-function revealInPlace(event: ReactMouseEvent<HTMLElement>, reveal: () => void) {
+function revealInPlace(scroller: HTMLElement | null, event: ReactMouseEvent<HTMLElement>, reveal: () => void) {
   const control = event.currentTarget;
   const row = control.closest('.tm-review-gap');
-  const scroller = scrollParent(control);
   const top = scroller?.scrollTop;
   flushSync(reveal);
   if (scroller && top !== undefined) scroller.scrollTop = top;
   const focused = control.isConnected ? control : row?.isConnected ? row.querySelector<HTMLElement>('.tm-review-gap__all') : null;
   if (focused !== control) focused?.focus({ preventScroll: true });
-  if (event.detail === 0) focused?.scrollIntoView?.({ block: 'nearest' });
-}
-
-function scrollParent(element: HTMLElement): HTMLElement | undefined {
-  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-    if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) return parent;
-  }
-  return undefined;
+  if (event.detail === 0 && scroller && focused) keepInView(scroller, focused);
 }
