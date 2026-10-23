@@ -14,7 +14,7 @@
 // then hover, toggle, expand, send and wait for loads; every shift it logs whose
 // source is not the element you meant to move is a defect.
 (() => {
-  const typeSizes = new Set(['22px', '15px', '13px', '12px', '11.5px']);
+  const typeSizes = new Set(['22px', '17px', '15px', '13px', '12px', '11.5px']);
   const controlHeights = new Set([16, 18, 20, 24, 28, 32, 36, 48]);
   const iconSizes = new Set([12, 13, 16, 18]);
   const separator = /\s[·•—]\s/;

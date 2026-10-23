@@ -66,11 +66,11 @@
 .tm-review__feedback-lead,
 .tm-review__feedback-state,
 .tm-review__feedback-place { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tm-review__feedback-lead { flex: 0 10 auto; color: var(--muted); font-weight: var(--w-medium); }
+.tm-review__feedback-lead { flex: 0 1000 auto; color: var(--muted); font-weight: var(--w-medium); }
 .tm-review__feedback-lead[data-tone='blocked'] { color: var(--blocked-ink); }
-.tm-review__feedback-state { flex: 0 1 auto; }
+.tm-review__feedback-state { flex: 0 0 auto; max-width: 70%; }
 .tm-review__feedback-state[data-tone='waiting'] { color: var(--waiting-ink); }
-.tm-review__feedback-place { flex: 0 3 auto; margin-left: auto; color: var(--faint); font-family: var(--font-mono); }
+.tm-review__feedback-place { flex: 0 1 auto; margin-left: auto; color: var(--faint); font-family: var(--font-mono); }
 .tm-review__index-more { padding: 5px 8px; border-radius: var(--r-xs); color: var(--accent-ink); font-size: var(--t-help); text-decoration: none; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review__index-more:hover { background-color: var(--hover); }
 
