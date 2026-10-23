@@ -208,6 +208,45 @@ index 0000000..0000000
     expect(files[0].blocks[0]?.source).toBe('unstaged');
   });
 
+  it('flags a file only when its added lines hide characters that change how the code reads', () => {
+    const files = parseAll(`diff --git a/bidi.ts b/bidi.ts
+--- a/bidi.ts
++++ b/bidi.ts
+@@ -3 +3 @@
+-const access = 'user';
++const access = 'user‮ ⁦// admin⁩';
+diff --git a/emoji.ts b/emoji.ts
+--- a/emoji.ts
++++ b/emoji.ts
+@@ -1 +1 @@
+-const family = '';
++const family = '\u{1F468}‍\u{1F469}‍\u{1F467}';
+diff --git a/opening-mark.ts b/opening-mark.ts
+new file mode 100644
+--- /dev/null
++++ b/opening-mark.ts
+@@ -0,0 +1,2 @@
++﻿export const a = 1;
++export const b = 2;
+diff --git a/inner-mark.ts b/inner-mark.ts
+--- a/inner-mark.ts
++++ b/inner-mark.ts
+@@ -4 +4 @@
+-const x = 1;
++const x = ﻿1;
+diff --git a/removed.ts b/removed.ts
+--- a/removed.ts
++++ b/removed.ts
+@@ -1 +1 @@
+-const hidden = 'a​b';
++const hidden = 'ab';
+`);
+
+    // Direction controls and a mark inside a file hide; joiners in an emoji, a
+    // mark that opens a file, and what a change removes do not.
+    expect(files.filter((file) => file.invisibleCharacters).map((file) => file.path)).toEqual(['bidi.ts', 'inner-mark.ts']);
+  });
+
   it('separates committed and uncommitted evidence scopes', () => {
     const text = `# Git diff evidence
 

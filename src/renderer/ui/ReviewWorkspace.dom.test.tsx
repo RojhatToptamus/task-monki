@@ -104,6 +104,14 @@ describe('ReviewWorkspace captured diff states', () => {
     expect(screen.getByText((_, element) => element?.tagName === 'CODE' && element.textContent === 'Added: new')).toBeDefined();
   });
 
+  it('says on a file’s head when its added lines hide characters no reader sees', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/access.ts', "const role = 'user‮';"));
+    render(<Harness findings={[]} />);
+
+    const file = await screen.findByRole('region', { name: 'src/access.ts' });
+    expect(within(file).getByText('Invisible characters')).toBeDefined();
+  });
+
   it('labels an earlier capture and leaves findings, comments and requests out of it', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     const onBack = vi.fn();

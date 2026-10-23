@@ -33,8 +33,19 @@ export interface DiffFile {
   status: 'added' | 'deleted' | 'modified' | 'renamed';
   additions: number;
   deletions: number;
+  /** An added line holds a character no reader sees that can change how the code reads (`HIDDEN_CODE_CHARACTER`). */
+  invisibleCharacters?: boolean;
   blocks: DiffBlock[];
 }
+
+/**
+ * A character no reader sees that can change how code reads: the zero-width
+ * space and word joiner, direction marks, embeddings, overrides and isolates,
+ * the Arabic letter mark, a byte-order mark past a file's start, and tag
+ * characters. Zero-width joiners and non-joiners are left out: emoji and some
+ * scripts need them. Not global, so it serves `test`.
+ */
+const HIDDEN_CODE_CHARACTER = /[\u061C\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/u;
 
 export type DiffEvidenceScope = 'all' | 'committed' | 'uncommitted';
 export type DiffSectionSource = 'committed' | 'staged' | 'unstaged' | 'local';
@@ -66,6 +77,7 @@ interface ParsedFileBlock {
   status: DiffFile['status'];
   additions: number;
   deletions: number;
+  invisibleCharacters: boolean;
   lines: DiffLine[];
 }
 
@@ -143,6 +155,7 @@ function parseDiffSections(
         existing.additions += parsed.additions;
         existing.deletions += parsed.deletions;
         existing.status = mergeStatus(existing.status, parsed.status);
+        if (parsed.invisibleCharacters) existing.invisibleCharacters = true;
         existing.blocks.push(block);
       } else {
         filesByPath.set(parsed.path, {
@@ -152,6 +165,7 @@ function parseDiffSections(
           status: parsed.status,
           additions: parsed.additions,
           deletions: parsed.deletions,
+          ...(parsed.invisibleCharacters ? { invisibleCharacters: true } : {}),
           blocks: [block]
         });
       }
@@ -256,6 +270,7 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
   let status: DiffFile['status'] = 'modified';
   let additions = 0;
   let deletions = 0;
+  let invisibleCharacters = false;
   let oldLine = 0;
   let newLine = 0;
   let inHunk = false;
@@ -316,6 +331,9 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
 
     if (line.startsWith('+')) {
       parsedLines.push({ kind: 'addition', newLine, content: line });
+      const code = line.slice(1);
+      // A byte-order mark may open a file; anywhere else it hides.
+      invisibleCharacters ||= HIDDEN_CODE_CHARACTER.test(newLine === 1 ? code.replace(/^\uFEFF/u, '') : code);
       additions += 1;
       newLine += 1;
       newRemaining -= 1;
@@ -344,6 +362,7 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
     status,
     additions,
     deletions,
+    invisibleCharacters,
     lines: parsedLines
   };
 }

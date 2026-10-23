@@ -1,17 +1,18 @@
-import { memo, type ReactNode } from 'react';
+import { memo } from 'react';
 import { Plus } from 'lucide-react';
 import { diffLineCode, type DiffLine } from '../model/diffEvidence';
 import { lineAnchor } from '../model/reviewWorkspace';
+import type { TokenLine } from '../model/syntaxHighlight';
+import { SyntaxCode } from './SyntaxCode';
 import { useReviewActions } from './useReviewModel';
 
 /**
  * One row of a file's diff: the line number (the old side's on a removed line),
- * which is the comment control, the marker, and the code. It renders again only
- * when its own inputs change, and carries its place (`data-line-anchor`) for what
- * points at a line. The code is `children` when a caller draws it, such as with
- * syntax colour; otherwise its text.
+ * which is the comment control, the marker, and the code in its syntax colour.
+ * It renders again only when its own inputs change, and carries its place
+ * (`data-line-anchor`) for what points at a line.
  */
-export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, selected, commentable, children }: {
+export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, selected, commentable, tokens }: {
   path: string;
   fileId: string;
   blockId: string;
@@ -22,7 +23,8 @@ export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line
   selected: boolean;
   /** Pressing the number comments on the line. */
   commentable: boolean;
-  children?: ReactNode;
+  /** The code's syntax colour, once its side is tokenized. */
+  tokens?: TokenLine;
 }) {
   const actions = useReviewActions();
   const removed = line.kind === 'deletion';
@@ -55,12 +57,7 @@ export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line
       <span className="tm-diffline__marker" aria-hidden="true">
         {line.kind === 'addition' ? '+' : removed ? '−' : ''}
       </span>
-      <code>
-        {line.kind === 'addition' || removed ? (
-          <span className="tm-visually-hidden">{line.kind === 'addition' ? 'Added: ' : 'Removed: '}</span>
-        ) : null}
-        {children ?? (diffLineCode(line) || ' ')}
-      </code>
+      <SyntaxCode text={diffLineCode(line)} tokens={tokens} kind={line.kind} />
     </div>
   );
 });

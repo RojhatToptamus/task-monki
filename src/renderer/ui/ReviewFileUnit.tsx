@@ -14,6 +14,7 @@ import { severityLabel } from './ReviewFindingThread';
 import { ReviewGap } from './ReviewGap';
 import { ReviewLine } from './ReviewLine';
 import { Tooltip } from './Tooltip';
+import { useDiffSyntax } from './useSyntaxLines';
 import { useReviewActions, type LineSelection, type ReviewAnchors } from './useReviewModel';
 
 /** A run of one block's rows shown on its own, by line identity (`diffLineId`), under its caption. */
@@ -113,6 +114,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
         </Tooltip>
         {file.oldPath ? <span className="tm-review-file__word">from <code>{file.oldPath}</code></span>
           : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'New' : 'Deleted'}</span> : null}
+        {file.invisibleCharacters ? <span className="tm-review-file__word" data-tone="waiting">Invisible characters</span> : null}
         {props.headWords}
         <span className="tm-review-file__spacer" />
         {findings.length ? (
@@ -184,7 +186,8 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
 /**
  * The rows of one block, or of one run of it, with each row's bands under it.
  * Unchanged lines between hunks are gap rows; the range chosen in the gutter is
- * found once per render.
+ * found once per render. The whole block is coloured, so a run shown on its own
+ * reads a comment or string opened above it.
  */
 const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, composer, selection, canComment, exactChanges }: {
   file: DiffFile;
@@ -197,6 +200,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
   exactChanges: boolean;
 }) {
   const actions = useReviewActions();
+  const syntax = useDiffSyntax(file.path, block.lines, file.oldPath);
   const rows = buildReviewDiffRows(block.lines);
   const range = segment ? reviewRowRange(rows, segment.start, segment.end) : { from: 0, to: rows.length - 1 };
   if (!range) return null;
@@ -223,6 +227,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
           index={index}
           selected={Boolean(chosen && index >= chosen.start && index <= chosen.end)}
           commentable={canComment && number !== undefined && !(exactChanges && line.kind === 'deletion')}
+          tokens={syntax[index]}
         />
         {findings || discussions || comments || composer === key
           ? <ReviewBands place="line" at={key} file={file} findings={findings} discussions={discussions} comments={comments} />
