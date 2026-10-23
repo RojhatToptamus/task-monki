@@ -1465,8 +1465,8 @@ describe('AgentOrchestrator lifecycle and recovery', () => {
     });
     // The walkthrough is checked once, with the outcome that records it.
     const walkthroughChecks: Array<{ runId: string; walkthrough: unknown }> = [];
-    const reviewWalkthrough = async (run: { id: string }, value: unknown) => {
-      walkthroughChecks.push({ runId: run.id, walkthrough: value });
+    const reviewWalkthrough = async (run: { id: string }, output: { walkthrough?: unknown }) => {
+      walkthroughChecks.push({ runId: run.id, walkthrough: output.walkthrough });
       return { status: 'UNAVAILABLE' as const, reason: 'NO_SECTIONS' as const };
     };
     const completedAt = new Date().toISOString();
