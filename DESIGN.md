@@ -1735,7 +1735,9 @@ control's icon, state or tooltip already carries.
   under its row only a range ("Lines 3–5"), at its file's top any line ("Line
   19"; the person's own on the old side are "Removed", the platform's "Old"),
   in muted 12px on its head after the author and age, or after a finding's
-  title; above the files, its file and lines in mono under its head. Every
+  title; above the files, its file and lines in mono under its head. A head
+  reads as its facts first (who, when, which lines, its state) and its
+  controls last, at the right end. Every
   comment's words read the same, the person's own and other people's: rendered
   markdown in `--text-soft`, clamped until Show full comment. Nothing inside a
   band is a box of its own: a suggested change is a `--well` with the diff's
@@ -1762,19 +1764,20 @@ control's icon, state or tooltip already carries.
 - *Findings.* A thread band with no mark in the gutter (the severity says it is
   the review's), its severity as a word (blocker and major in
   `--blocked-ink`), in a re-review "Still open" or "New" beside it, its lines
-  after the title where its place does not say them, and its
-  actions on the title line: Add to request on a Minor or Nit (Blocker and Major
-  are in by default), Ask (opens Ask about this finding), and Dismiss, a menu of
+  after the title where its place does not say them and the agent's answer
+  once there is one, then its actions at the end of the title line: Add to
+  request on a Minor or Nit (Blocker and Major are in by default), Ask (opens
+  Ask about this finding), and Dismiss, a menu of
   reasons (Incorrect, Intentional, Won't fix now, With a note…). The next review
   never raises an Incorrect finding again, raises an Intentional one only when
   the code around it changed, and leaves a deferred one alone. A dismissed
   finding folds to one line with its reason and Restore.
 - *Pull request discussions* are other people's words in the same band as a
   finding: the author at 500 beside their mark, a review's verdict and the
-  comment's age muted, its lines where its place does not say them, its state
-  at the end of the head (Resolved, Replied once
-  the person wrote last, Sent, the agent's answer, or Outdated), then Add to
-  request, Ask (opens Ask about this discussion), a check that resolves the
+  comment's age muted, its lines where its place does not say them and its
+  state (Resolved, Replied once the person wrote last, Sent, the agent's
+  answer, or Outdated), then at the end of the head Add to request, Ask
+  (opens Ask about this discussion), a check that resolves the
   thread (pressed, in `--verified-ink`, once resolved, and pressing it reopens
   it), and Open on GitHub. Each comment sits under its author, replies under a
   `--hair` from the code column, and HTML the platform renders reads as its
@@ -1813,7 +1816,7 @@ control's icon, state or tooltip already carries.
   until the request goes or the tab closes.
 - *Answers.* Once the agent answered the person's latest request after the
   review, each answered item's own band, a finding, a thread or a comment, says
-  the answer: its outcome under the agent's mark at the end of the head
+  the answer: its outcome under the agent's mark among the head's facts
   (Fixed, Not changed, Needs your decision), its note quoted under the agent's
   name and time, then Accept answer and Add to request. The agent's word never
   settles an item, even Fixed; accepting does, and folds a finding or a
@@ -1841,8 +1844,9 @@ control's icon, state or tooltip already carries.
   changes nothing leaves it current, and a diff back to exactly what was
   reviewed makes it current again. Any other turn (analysis, compaction) leaves
   it with no implementation run to belong to, so it becomes earlier context. An
-  out-of-date review keeps its threads as earlier context, without Ask or
-  Dismiss; its findings are never sent, the person's comments still are.
+  out-of-date review keeps its threads as earlier context, on `--panel` and
+  without Ask or Dismiss; the bar says the review is out of date, so no band
+  repeats it. Its findings are never sent, the person's comments still are.
 - *Keys.* G the other mode, J/K files, [ and ] intents in the Guide, N/P open
   findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
   or take out a suggestion or discussion, R reply to the discussion, C back to

@@ -179,7 +179,8 @@ describe('imported task actions', () => {
     // An out-of-date review's findings are context only: nothing is left to send.
     expect(screen.queryByRole('button', { name: /^\d+ fix/ })).toBeNull();
     expect(screen.queryAllByRole('button', { name: 'Request changes' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
-    expect(screen.getByText('From the earlier review')).toBeDefined();
+    expect(screen.getByRole('article', { name: 'Major finding: Invalid input accepted' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Dismiss this finding' })).toBeNull();
     expect(props.onStart).not.toHaveBeenCalled();
     expect(props.onContinue).not.toHaveBeenCalled();
   });

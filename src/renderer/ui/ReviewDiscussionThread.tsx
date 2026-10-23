@@ -136,8 +136,8 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
           {verdict ? <span className="tm-review-thread__round">{verdict}</span> : null}
           <CommentAge comment={first} />
           {about ? <span className="tm-review-thread__about">{about}</span> : null}
-          <span className="tm-review-thread__spacer" />
           {answered ? <AnswerState answer={answered} /> : state ? <span className="tm-review-thread__round">{state}</span> : null}
+          <span className="tm-review-thread__spacer" />
           <span className="tm-review-thread__actions">
             {/* An answered thread goes in the request again from under the answer, in the person's words. */}
             {onToggleInclude && !discussion.resolved && (!answered?.onRequestAgain || inRequest) ? (

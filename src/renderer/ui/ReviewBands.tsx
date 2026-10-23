@@ -157,8 +157,8 @@ function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment;
   return (
     <div className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
       <div className="tm-review-thread__comment">
-        <OwnHead about={about}>
-          {answer ? <AnswerState answer={answer} /> : canComment ? (
+        <OwnHead about={about} answer={answer}>
+          {!answer && canComment ? (
             <span className="tm-review-thread__actions tm-review-comment__actions">
               <Tooltip label="Edit">
                 <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Edit comment" onClick={() => actions.editComment(comment)}>
@@ -237,8 +237,11 @@ function CommentComposer({ draft, about }: { draft: CommentDraft; about?: string
   );
 }
 
-/** The person's head on what they write: their mark, You, the lines when its place does not say them, then its controls. */
-function OwnHead({ about, children }: { about?: string; children?: ReactNode }) {
+/**
+ * The person's head on what they write: their mark, then its facts (You, the
+ * lines when its place does not say them, the agent's answer), then its controls.
+ */
+function OwnHead({ about, answer, children }: { about?: string; answer?: ItemAnswer; children?: ReactNode }) {
   const { viewer } = useReviewBands();
   return (
     <>
@@ -246,6 +249,7 @@ function OwnHead({ about, children }: { about?: string; children?: ReactNode }) 
       <header className="tm-review-thread__head">
         <span className="tm-review-thread__author">You</span>
         {about ? <span className="tm-review-thread__about">{about}</span> : null}
+        {answer ? <AnswerState answer={answer} /> : null}
         <span className="tm-review-thread__spacer" />
         {children}
       </header>

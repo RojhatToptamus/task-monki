@@ -133,8 +133,8 @@ export function ReviewFindingThread({
         {round ? <span className="tm-review-thread__round">{round === 'STILL_OPEN' ? 'Still open' : 'New'}</span> : null}
         <strong>{finding.title}</strong>
         {about ? <span className="tm-review-thread__about">{about}</span> : null}
-        <span className="tm-review-thread__spacer" />
         {answer ? <AnswerState answer={answer} /> : null}
+        <span className="tm-review-thread__spacer" />
         {actionable ? (
           <span className="tm-review-thread__actions">
             {/* Blocker and Major are in the request already; a suggestion is added here, or under the agent's answer once it has one. */}
@@ -168,7 +168,6 @@ export function ReviewFindingThread({
       {location ? <span className="tm-review-thread__location">{location}</span> : null}
       <p className="tm-review-thread__why">{finding.explanation}</p>
       {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
-      {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
       {answer ? <RequestItemAnswer answer={answer} /> : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>

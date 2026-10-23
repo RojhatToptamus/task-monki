@@ -372,7 +372,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
 
     const thread = await screen.findByRole('article', { name: /Limiter state is per process/ });
     expect(within(thread).queryByRole('button', { name: 'Dismiss this finding' })).toBeNull();
-    expect(within(thread).getByText('From the earlier review')).toBeDefined();
+    expect(within(thread).queryByRole('button', { name: 'Ask about this finding' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^1 fix/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
 
