@@ -508,8 +508,9 @@ describe('Pull request feedback', () => {
 
   it('holds a request with more items than one can carry, and says why before anything is sent', async () => {
     const props = feedbackDetail(REVIEW_REQUEST_ITEM_LIMIT + 1);
-    fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByRole('button', { name: 'Address comments' }));
-    const send = within(await screen.findByRole('dialog', { name: 'Address comments' })).getByRole('button', { name: 'Address comments' });
+    // A hundred comments are a page of buttons whose names jsdom computes slowly, so the controls are found by their words.
+    fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByText('Address comments', { selector: 'button' }));
+    const send = within(await screen.findByRole('dialog', { name: 'Address comments' })).getByText('Address comments', { selector: 'button' });
     expect((send as HTMLButtonElement).disabled).toBe(true);
     expect(document.getElementById(send.getAttribute('aria-describedby')!)?.textContent).toBe(`${REVIEW_REQUEST_ITEM_LIMIT + 1} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`);
     fireEvent.click(send);
