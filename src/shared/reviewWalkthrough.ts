@@ -5,11 +5,11 @@
  * with its findings, from the same captured code, so both describe one
  * revision. Task Monki checks it against that change before keeping it as the
  * review run's `review-walkthrough` artifact: a part that fails a check is
- * dropped, files no section claims join a last Other changes section, and file
- * statuses and line counts come from the change itself.
+ * dropped, files no section claims join a last Other changes section, and the
+ * counts and lengths the prompt asks for are held.
  */
 
-export const REVIEW_WALKTHROUGH_SCHEMA = 'task-monki/review-walkthrough/v1';
+export const REVIEW_WALKTHROUGH_SCHEMA = 'task-monki/review-walkthrough/v2';
 /** The stored document; a walkthrough past it is not kept. */
 export const REVIEW_WALKTHROUGH_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -20,36 +20,33 @@ export interface ReviewWalkthrough {
   base: string;
   tree: string;
   summary: string;
+  /** At most three. */
   attention: ReviewWalkthroughAttention[];
   /** In reading order. The last is Other changes when the agent left a changed file out. */
   sections: ReviewWalkthroughSection[];
 }
 
+/** A fact that deserves attention, in its section; it may name the review's finding it is about, or a file of its section. */
 export interface ReviewWalkthroughAttention {
   text: string;
   /** The section it belongs to, as an index into `sections`. */
   section: number;
+  /** The id of one of the review's own findings. */
+  finding?: string;
+  /** A file of its section. */
+  path?: string;
 }
 
 export interface ReviewWalkthroughSection {
   title: string;
   /** Empty for Other changes. */
   explanation: string;
-  /** Every changed file sits in exactly one section; the most important first. */
-  files: ReviewWalkthroughFile[];
-  /** The lines to read first. */
+  /** The paths of its files: every changed file sits in exactly one section, the most important first. */
+  files: string[];
+  /** The lines to read first; at most three. */
   excerpts: ReviewWalkthroughExcerpt[];
-  /** Phrases of the explanation tied to the lines that implement them. */
+  /** Phrases of the explanation tied to the lines that implement them; at most three. */
   terms: ReviewWalkthroughTerm[];
-}
-
-export interface ReviewWalkthroughFile {
-  path: string;
-  status: 'added' | 'deleted' | 'modified' | 'renamed';
-  /** A renamed file's path at the base. */
-  oldPath?: string;
-  additions: number;
-  deletions: number;
 }
 
 /**
@@ -100,9 +97,6 @@ export type ReviewWalkthroughState =
       reviewRunId: string;
       /** The review run's `review-walkthrough` artifact. */
       artifactId: string;
-      sectionCount: number;
-      /** Parts the check left out: sections, file claims, excerpts, terms and attention pointers. */
-      droppedCount: number;
     }
   | { status: 'UNAVAILABLE'; reason: ReviewWalkthroughUnavailableReason };
 

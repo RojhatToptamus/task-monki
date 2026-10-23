@@ -4,7 +4,7 @@ import { boundedTreeDiff } from './treeDiff';
 
 const GIT_TIMEOUT_MS = 120_000;
 /** A capture lists at most this many commits: its latest, oldest first. */
-export const TASK_COMMIT_LIMIT = 100;
+const TASK_COMMIT_LIMIT = 100;
 const BODY_LIMIT = 4_000;
 const FIELD = '\u0000';
 const RECORD = '\u001e';
@@ -21,12 +21,12 @@ export async function listTaskCommits(
   head: string,
   limit = TASK_COMMIT_LIMIT
 ): Promise<{ commits: TaskCommit[]; total: number }> {
-  if (!isGitObjectId(base) || !isGitObjectId(head)) throw new Error('A capture names its base and head by object id.');
-  const range = `${base}..${head}`;
+  const range = commitRange(base, head);
   const [count, log] = await Promise.all([
     git(worktreePath, ['rev-list', '--first-parent', '--count', range, '--'], GIT_TIMEOUT_MS),
-    // --reverse orders what --max-count chose: the latest commits, oldest first.
-    git(worktreePath, ['log', '--first-parent', `--max-count=${limit}`, '--reverse', '--no-color',
+    // --reverse orders what --max-count chose: the latest commits, oldest first. A signature check
+    // the person's configuration asks for would print into the records.
+    git(worktreePath, ['log', '--first-parent', `--max-count=${limit}`, '--reverse', '--no-color', '--no-show-signature',
       '--format=%H%x00%an%x00%aI%x00%s%x00%b%x1e', range, '--'], GIT_TIMEOUT_MS)
   ]);
   const commits = log.split(RECORD).flatMap((record): TaskCommit[] => {
@@ -44,8 +44,16 @@ export async function listTaskCommits(
   return { commits, total: Math.max(Number(count.trim()) || 0, commits.length) };
 }
 
+/** Whether `sha` is one of the branch's own commits from `base` to `head`. */
+export async function isTaskCommit(worktreePath: string, base: string, head: string, sha: string): Promise<boolean> {
+  if (!isGitObjectId(sha)) return false;
+  const listed = await git(worktreePath, ['rev-list', '--first-parent', commitRange(base, head), '--'], GIT_TIMEOUT_MS);
+  return listed.split('\n').includes(sha);
+}
+
 /** One commit's change against its first parent; a commit with none is compared against the empty tree. */
 export async function readTaskCommitDiff(worktreePath: string, sha: string): Promise<TaskCommitDiffResult> {
+  if (!isGitObjectId(sha)) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
   try {
     const parent = await git(worktreePath, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${sha}^1`])
       .then((value) => value.trim(), () => undefined);
@@ -55,4 +63,9 @@ export async function readTaskCommitDiff(worktreePath: string, sha: string): Pro
   } catch {
     return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
   }
+}
+
+function commitRange(base: string, head: string): string {
+  if (!isGitObjectId(base) || !isGitObjectId(head)) throw new Error('A capture names its base and head by object id.');
+  return `${base}..${head}`;
 }

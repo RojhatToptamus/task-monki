@@ -1,18 +1,23 @@
 import type { AgentReviewFindingSeverity } from '../../shared/agentReviewFindings';
 import type { ReviewChangesResult } from '../../shared/reviewRounds';
-import type { ReviewWalkthrough, ReviewWalkthroughExcerpt, ReviewWalkthroughLines, ReviewWalkthroughUnavailableReason } from '../../shared/reviewWalkthrough';
+import type {
+  ReviewWalkthrough,
+  ReviewWalkthroughAttention,
+  ReviewWalkthroughExcerpt,
+  ReviewWalkthroughLines,
+  ReviewWalkthroughUnavailableReason
+} from '../../shared/reviewWalkthrough';
 import { diffLineCode, type DiffBlock, type DiffFile, type DiffLine } from './diffEvidence';
 import { pluralize } from './formatting';
+import type { ReviewAnchors } from './reviewReading';
 import {
   buildReviewDiffRows,
   diffLineId,
-  lineAnchor,
+  fileLineAnchor,
   lineAnchorKey,
-  normalizeReviewPath,
-  type AnchoredComments,
   type AnchoredDiscussions,
-  type AnchoredFindings,
-  type ReviewDiffRow
+  type ReviewDiffRow,
+  type ReviewFindingView
 } from './reviewWorkspace';
 
 /**
@@ -67,13 +72,13 @@ export interface GuideFile {
 }
 
 export interface GuideAttention {
-  /** The agent's fact, without the words the finding's own severity word stands for. */
+  /** The agent's fact. */
   text: GuideInline[];
   /** Its section. */
   stage: number;
-  /** Where it lands beyond its stage: the open finding it names, with the finding's file and line, or a file it names. */
+  /** Where it lands beyond its stage: the open finding it names, with the finding's file and line, or the file it names. */
   target?:
-    | { kind: 'finding'; findingId: string; severity: AgentReviewFindingSeverity; fileId: string; place: string }
+    | { kind: 'finding'; findingId: string; severity: AgentReviewFindingSeverity; place: string }
     | { kind: 'file'; fileId: string };
 }
 
@@ -104,35 +109,38 @@ export interface GuideModel {
   files: ReadonlyMap<string, { stage: number; file: GuideFile }>;
 }
 
-/** What has a place in the Guide's files: `anchorReview*` over them. */
-export interface GuideAnchors {
-  findings: AnchoredFindings;
-  discussions: AnchoredDiscussions<{ id: string; open: boolean }>;
-  comments: AnchoredComments;
-}
+/** What the layout reads of the feedback `anchorReview*` placed in the files: of a discussion, only whether it is open. */
+type GuideAnchors = Omit<ReviewAnchors, 'discussions'> & { discussions: AnchoredDiscussions<{ open: boolean }> };
 
 /** Feedback no key change holds shows with the lines a reader needs to see what it is about. */
 const FEEDBACK_ABOVE = 7;
 const FEEDBACK_BELOW = 3;
 
+/**
+ * The Guide of a walkthrough over the files of the diff it was checked against,
+ * laid out by what `anchors` places in them. The check kept that diff's own
+ * paths, so a path names its file exactly.
+ */
 export function buildGuide(walkthrough: ReviewWalkthrough, files: readonly DiffFile[], anchors: GuideAnchors): GuideModel {
-  const byPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
-  const fileOf = (path: string) => byPath.get(normalizeReviewPath(path));
+  const byPath = new Map(files.map((file) => [file.path, file]));
   const index = new Map<string, { stage: number; file: GuideFile }>();
+  // The open findings the files hold, by id: what an attention pointer lands on.
+  const openFindings = new Map<string, { finding: ReviewFindingView; file: DiffFile }>();
   const stages = walkthrough.sections.map((section, sectionIndex): GuideStage => {
-    const sectionFiles = section.files.map((entry) => fileOf(entry.path)).filter((file): file is DiffFile => Boolean(file));
+    const sectionFiles = section.files.flatMap((path) => byPath.get(path) ?? []);
     const terms = section.terms.flatMap((term, termIndex) => {
-      const file = fileOf(term.path);
-      return file && sectionFiles.includes(file) ? [{ id: `${sectionIndex}:${termIndex}`, text: term.text, target: lineTarget(file, term) }] : [];
+      const file = byPath.get(term.path);
+      return file ? [{ id: `${sectionIndex}:${termIndex}`, text: term.text, target: lineTarget(file, term) }] : [];
     });
     const guideFiles = sectionFiles.map((file) => {
-      const guideFile = guideFileOf(
+      const { guideFile, open } = guideFileOf(
         file,
-        section.excerpts.filter((excerpt) => fileOf(excerpt.path) === file),
+        section.excerpts.filter((excerpt) => excerpt.path === file.path),
         anchors,
         // Lines a term points at stay among what the file can open.
         new Set(terms.filter((term) => term.target.fileId === file.id).flatMap((term) => term.target.anchors))
       );
+      for (const finding of open) openFindings.set(finding.id, { finding, file });
       index.set(file.id, { stage: sectionIndex, file: guideFile });
       return guideFile;
     });
@@ -150,7 +158,7 @@ export function buildGuide(walkthrough: ReviewWalkthrough, files: readonly DiffF
   const attention = walkthrough.attention.flatMap((fact) => {
     const stage = stages[fact.section];
     if (!stage) return [];
-    const item = attentionItem(fact.text, stage, anchors);
+    const item = attentionItem(fact, openFindings, byPath);
     stage.attention.push(item);
     return [item];
   });
@@ -210,12 +218,12 @@ export function filesByFolder(files: readonly DiffFile[]): Array<{ folder: strin
 }
 
 /** Prose with its code spans: the walkthrough marks code with backticks. */
-export function inlines(text: string): GuideInline[] {
+function inlines(text: string): GuideInline[] {
   return text.split('`').flatMap((part, position): GuideInline[] => (part ? [{ kind: position % 2 ? 'code' : 'text', text: part }] : []));
 }
 
 /** The first sentence, never cut inside a code span. */
-export function firstSentence(text: string): string {
+function firstSentence(text: string): string {
   let code = false;
   for (let position = 0; position < text.length; position += 1) {
     const character = text[position]!;
@@ -249,41 +257,86 @@ function explanationSpans(text: string, terms: ReadonlyArray<{ id: string; text:
 
 function lineTarget(file: DiffFile, lines: ReviewWalkthroughLines): GuideTarget {
   const last = lines.endLine ?? lines.line;
+  const anchorAt = fileLineAnchor(file.path);
   const anchors: string[] = [];
-  for (let line = lines.line; line <= last; line += 1) anchors.push(lineAnchor(file.path, lines.side, line));
+  for (let line = lines.line; line <= last; line += 1) anchors.push(anchorAt(lines.side, line));
   return { fileId: file.id, anchors, label: `${baseName(file.path)}, ${last > lines.line ? `lines ${lines.line}–${last}` : `line ${lines.line}`}` };
+}
+
+/**
+ * Where an attention pointer lands: on the finding it names while the files
+ * hold it open, else on the file it names, else on its stage.
+ */
+function attentionItem(
+  fact: ReviewWalkthroughAttention,
+  openFindings: ReadonlyMap<string, { finding: ReviewFindingView; file: DiffFile }>,
+  byPath: ReadonlyMap<string, DiffFile>
+): GuideAttention {
+  const text = inlines(fact.text);
+  const named = fact.finding === undefined ? undefined : openFindings.get(fact.finding);
+  if (named) {
+    const { finding, file } = named;
+    const lines = finding.line ? `:${finding.line}${finding.endLine && finding.endLine > finding.line ? `–${finding.endLine}` : ''}` : '';
+    return {
+      text,
+      stage: fact.section,
+      target: { kind: 'finding', findingId: finding.id, severity: finding.severity, place: `${baseName(file.path)}${lines}` }
+    };
+  }
+  const file = fact.path === undefined ? undefined : byPath.get(fact.path);
+  return { text, stage: fact.section, ...(file ? { target: { kind: 'file' as const, fileId: file.id } } : {}) };
 }
 
 // ---------------------------------------------------------------- a file's runs
 
 interface Span { from: number; to: number }
 
-function guideFileOf(file: DiffFile, excerpts: readonly ReviewWalkthroughExcerpt[], anchors: GuideAnchors, targets: ReadonlySet<string>): GuideFile {
+/** A file of a stage, laid out, with the open findings it holds. */
+function guideFileOf(
+  file: DiffFile,
+  excerpts: readonly ReviewWalkthroughExcerpt[],
+  anchors: GuideAnchors,
+  targets: ReadonlySet<string>
+): { guideFile: GuideFile; open: ReviewFindingView[] } {
+  const open = (anchors.findings.byFile.get(file.id) ?? []).filter((finding) => finding.state === 'OPEN');
   const fileFeedbackOpen = Boolean(
-    anchors.findings.byFile.get(file.id)?.some((finding) => finding.state === 'OPEN') ||
+    open.length ||
     anchors.discussions.byFile.get(file.id)?.some((discussion) => discussion.open) ||
     anchors.comments.byFile.get(file.id)?.length
   );
-  // The code a review read holds each file as one block.
+  const unshown = (shown: boolean) => ({ guideFile: { file, shown, runs: [], rest: [], restAnchors: new Set<string>() }, open });
+  // The code a review read is one diff, so each file is one block.
   const block = file.blocks[0];
-  if (!block) return { file, shown: fileFeedbackOpen, runs: [], rest: [], restAnchors: new Set() };
+  if (!block) return unshown(fileFeedbackOpen);
   const rows = buildReviewDiffRows(block.lines);
+  const anchorAt = fileLineAnchor(file.path);
+  const anchorOf = (line: DiffLine) => (line.kind === 'deletion' ? anchorAt('OLD', line.oldLine ?? 0) : anchorAt('NEW', line.newLine ?? 0));
   const taken = new Set<number>();
   const take = (span: Span) => { for (let position = span.from; position <= span.to; position += 1) taken.add(position); };
 
-  const keys: GuideRun[] = [];
+  // Excerpts that share rows read as one key change, under the first one's caption.
+  const keyed: Array<Span & { caption?: string; side: 'NEW' | 'OLD' }> = [];
   for (const excerpt of excerpts) {
     const range = excerptRange(rows, excerpt);
-    // Two excerpts never show a row twice: a later one keeps the rows not shown yet.
-    const free = range ? freeAround(range, firstFree(range, taken), taken) : undefined;
-    if (!free) continue;
-    take(free);
-    keys.push(runOf(block, rows, free, {
-      kind: 'key',
-      ...(excerpt.caption ? { caption: excerpt.caption } : {}),
-      ...optional('symbol', enclosingSymbol(rows, free.from, excerpt.side))
-    }));
+    if (!range) continue;
+    const shared = keyed.filter((key) => key.from <= range.to && range.from <= key.to);
+    const first = shared[0];
+    if (!first) {
+      keyed.push({ ...range, ...optional('caption', excerpt.caption), side: excerpt.side });
+      continue;
+    }
+    for (const key of [...shared, range]) {
+      first.from = Math.min(first.from, key.from);
+      first.to = Math.max(first.to, key.to);
+    }
+    for (const key of shared.slice(1)) keyed.splice(keyed.indexOf(key), 1);
   }
+  keyed.forEach(take);
+  const keys = keyed.map((key) => runOf(block, rows, key, {
+    kind: 'key',
+    ...optional('caption', key.caption),
+    ...optional('symbol', enclosingSymbol(rows, key.from, key.side))
+  }));
 
   // Rows with something said about them; those still asking for something show around it.
   const banded = new Set<number>();
@@ -296,7 +349,9 @@ function guideFileOf(file: DiffFile, excerpts: readonly ReviewWalkthroughExcerpt
     const comments = anchors.comments.byLine.get(key);
     if (!findings && !discussions && !comments) return;
     banded.add(position);
-    if (findings?.some((finding) => finding.state === 'OPEN') || discussions?.some((discussion) => discussion.open) || comments?.length) asking.push(position);
+    const openHere = findings?.filter((finding) => finding.state === 'OPEN') ?? [];
+    open.push(...openHere);
+    if (openHere.length || discussions?.some((discussion) => discussion.open) || comments?.length) asking.push(position);
   });
   const feedback: Span[] = [];
   for (const position of asking) {
@@ -307,7 +362,7 @@ function guideFileOf(file: DiffFile, excerpts: readonly ReviewWalkthroughExcerpt
     if (last && span.from === last.to + 1) last.to = span.to;
     else feedback.push(span);
   }
-  if (!keys.length && !asking.length && !fileFeedbackOpen) return { file, shown: false, runs: [], rest: [], restAnchors: new Set() };
+  if (!keys.length && !asking.length && !fileFeedbackOpen) return unshown(false);
 
   // Everything else that changed, cut at hunk boundaries. A stretch with no change drops,
   // unless something is said about it or a term points into it.
@@ -319,7 +374,7 @@ function guideFileOf(file: DiffFile, excerpts: readonly ReviewWalkthroughExcerpt
   };
   rows.forEach((row, position) => {
     if (row.kind === 'gap' || taken.has(position)) { close(); return; }
-    const keep = row.line.kind === 'addition' || row.line.kind === 'deletion' || banded.has(position) || targets.has(anchorOf(file, row.line));
+    const keep = row.line.kind === 'addition' || row.line.kind === 'deletion' || banded.has(position) || targets.has(anchorOf(row.line));
     if (stretch) {
       stretch.to = position;
       stretch.keep ||= keep;
@@ -331,12 +386,15 @@ function guideFileOf(file: DiffFile, excerpts: readonly ReviewWalkthroughExcerpt
   const changed = restRows.filter((line) => line.kind === 'addition' || line.kind === 'deletion').length;
   const whole = file.status === 'added' || file.status === 'deleted';
   return {
-    file,
-    shown: true,
-    runs: [...keys, ...feedback.map((span) => runOf(block, rows, span, placeLabel(rows, span)))],
-    rest: rest.map((span) => runOf(block, rows, span, placeLabel(rows, span))),
-    ...(rest.length ? { more: whole ? pluralize(changed, 'more line') : pluralize(rest.length, 'more change') } : {}),
-    restAnchors: new Set(restRows.map((line) => anchorOf(file, line)))
+    guideFile: {
+      file,
+      shown: true,
+      runs: [...keys, ...feedback.map((span) => runOf(block, rows, span, placeLabel(rows, span)))],
+      rest: rest.map((span) => runOf(block, rows, span, placeLabel(rows, span))),
+      ...(rest.length ? { more: whole ? pluralize(changed, 'more line') : pluralize(rest.length, 'more change') } : {}),
+      restAnchors: new Set(restRows.map(anchorOf))
+    },
+    open
   };
 }
 
@@ -374,12 +432,6 @@ function hunkSpan(rows: readonly ReviewDiffRow[], position: number): Span {
   return { from, to };
 }
 
-function firstFree(span: Span, taken: ReadonlySet<number>): number {
-  let position = span.from;
-  while (position <= span.to && taken.has(position)) position += 1;
-  return position;
-}
-
 /** The stretch of a span around a row that no other run shows; nothing when that row is shown already. */
 function freeAround(span: Span, position: number, taken: ReadonlySet<number>): Span | undefined {
   if (position > span.to || taken.has(position)) return undefined;
@@ -396,23 +448,32 @@ function runOf(block: DiffBlock, rows: readonly ReviewDiffRow[], span: Span, lab
   return { blockId: block.id, start: diffLineId(first.line, first.index), end: diffLineId(last.line, last.index), label };
 }
 
-/** Where a run sits: its lines (the new side's, or the old side's for lines only removed), and its hunk's heading. */
+/**
+ * Where a run sits: its lines, the new side's or, for lines only removed, the
+ * old side's, which run in order within a block; and its hunk's heading.
+ */
 function placeLabel(rows: readonly ReviewDiffRow[], span: Span): GuideRun['label'] {
-  const lines = rows.slice(span.from, span.to + 1).flatMap((row) => (row.kind === 'line' ? [row.line] : []));
-  const kept = lines.flatMap((line) => (line.kind !== 'deletion' && line.newLine !== undefined ? [line.newLine] : []));
-  const numbers = kept.length ? kept : lines.flatMap((line) => (line.oldLine !== undefined ? [line.oldLine] : []));
-  const first = Math.min(...numbers);
-  const last = Math.max(...numbers);
+  const numberAt = (position: number, side: 'NEW' | 'OLD') => {
+    const row = rows[position];
+    if (row?.kind !== 'line') return undefined;
+    return side === 'NEW' ? (row.line.kind === 'deletion' ? undefined : row.line.newLine) : row.line.oldLine;
+  };
+  const edge = (side: 'NEW' | 'OLD', from: number, step: 1 | -1) => {
+    for (let position = from; position >= span.from && position <= span.to; position += step) {
+      const number = numberAt(position, side);
+      if (number !== undefined) return number;
+    }
+    return undefined;
+  };
+  const side = edge('NEW', span.from, 1) === undefined ? 'OLD' : 'NEW';
+  const first = edge(side, span.from, 1) ?? 0;
+  const last = edge(side, span.to, -1) ?? first;
   let heading: string | undefined;
   for (let position = span.from; position >= 0; position -= 1) {
     const row = rows[position];
     if (row?.kind === 'gap') { heading = row.heading; break; }
   }
   return { kind: 'place', lines: last > first ? `Lines ${first}–${last}` : `Line ${first}`, ...optional('heading', heading) };
-}
-
-function anchorOf(file: DiffFile, line: DiffLine): string {
-  return line.kind === 'deletion' ? lineAnchor(file.path, 'OLD', line.oldLine ?? 0) : lineAnchor(file.path, 'NEW', line.newLine ?? 0);
 }
 
 /**
@@ -422,12 +483,16 @@ function anchorOf(file: DiffFile, line: DiffLine): string {
  * start, the heading Git gives the hunk. Nothing for a run at the top level, or
  * when what encloses it declares nothing.
  */
-export function enclosingSymbol(rows: readonly ReviewDiffRow[], from: number, side: 'NEW' | 'OLD' = 'NEW'): string | undefined {
+function enclosingSymbol(rows: readonly ReviewDiffRow[], from: number, side: 'NEW' | 'OLD' = 'NEW'): string | undefined {
   const onSide = (line: DiffLine) => (side === 'NEW' ? line.kind !== 'deletion' : line.kind !== 'addition');
-  const firstText = rows.slice(from).flatMap((row) => (row.kind === 'line' && onSide(row.line) ? [diffLineCode(row.line)] : [])).find((text) => text.trim());
-  if (firstText === undefined) return undefined;
-  let indent = indentation(firstText);
-  if (indent === 0) return undefined;
+  let indent: number | undefined;
+  for (let position = from; position < rows.length && indent === undefined; position += 1) {
+    const row = rows[position]!;
+    if (row.kind !== 'line' || !onSide(row.line)) continue;
+    const text = diffLineCode(row.line);
+    if (text.trim()) indent = indentation(text);
+  }
+  if (!indent) return undefined;
   // A line that closes a signature ("}) {") ends one that began above at its own indentation.
   let continued = false;
   for (let position = from - 1; position >= 0; position -= 1) {
@@ -435,7 +500,7 @@ export function enclosingSymbol(rows: readonly ReviewDiffRow[], from: number, si
     if (row.kind === 'gap') return declaredName(row.heading ?? '');
     if (!onSide(row.line)) continue;
     const text = diffLineCode(row.line);
-    if (!text.trim()) continue;
+    if (!text.trim() || COMMENT_LINE.test(text)) continue;
     const depth = indentation(text);
     if (depth > indent || (depth === indent && !continued)) continue;
     const name = declaredName(text);
@@ -447,20 +512,36 @@ export function enclosingSymbol(rows: readonly ReviewDiffRow[], from: number, si
   return undefined;
 }
 
-const CONTROL_WORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'await', 'throw', 'else', 'do', 'try', 'new', 'case', 'typeof', 'void', 'yield', 'super', 'with']);
+/** A line that only comments, whatever words it holds. */
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#|--)/u;
+/** Words a statement opens with, which a call-like line never declares. */
+const CONTROL_WORDS = new Set([
+  'if', 'elif', 'else', 'for', 'while', 'do', 'switch', 'case', 'match', 'try', 'catch', 'except', 'finally', 'with',
+  'return', 'await', 'throw', 'yield', 'assert', 'new', 'typeof', 'void', 'super', 'func', 'function'
+]);
+/** Words that may come before what a line declares: `export default async`, `pub(crate) unsafe`, `public static`. */
+const MODIFIERS = String.raw`(?:[A-Za-z_$][\w$]*(?:\([^)]*\))?\s+)*?`;
+const TEST = /^\s*(?:it|test|describe)(?:\.\w+)?\(\s*(['"`])(.+?)\1/u;
+const TYPE = new RegExp(String.raw`^\s*${MODIFIERS}(?:class|interface|enum|struct|trait|impl|module|namespace|type)\s+(?:<[^>]*>\s*)?([A-Za-z_$][\w$]*)`, 'u');
+/** A function by keyword; Go's methods name their receiver first. */
+const FUNCTION = new RegExp(String.raw`^\s*${MODIFIERS}(?:function\*?|def|fn|fun|func)\s+(?:\([^)]*\)\s*)?\*?\s*([A-Za-z_$][\w$]*)`, 'u');
+const BOUND = /^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=/u;
+const METHOD = /^\s*(?:(?:export|default|public|private|protected|static|readonly|async|override|abstract|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/u;
 
 /** The name a line declares, as a reader names it; nothing for a line that declares nothing. */
-export function declaredName(text: string): string | undefined {
-  const test = /^\s*(?:it|test|describe)(?:\.\w+)?\(\s*(['"`])(.+?)\1/u.exec(text);
+function declaredName(text: string): string | undefined {
+  if (COMMENT_LINE.test(text)) return undefined;
+  const test = TEST.exec(text);
   if (test) return test[2];
-  const type = /\b(?:class|interface|enum|struct|trait|impl|module|namespace|type)\s+([A-Za-z_$][\w$]*)/u.exec(text);
+  const type = TYPE.exec(text);
   if (type) return type[1];
-  const fn = /\b(?:function\*?|def|fn|func)\s+\*?\s*([A-Za-z_$][\w$]*)/u.exec(text);
+  const fn = FUNCTION.exec(text);
   if (fn) return `${fn[1]}()`;
-  const bound = /^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=/u.exec(text);
+  const bound = BOUND.exec(text);
   if (bound) return bound[1];
-  const method = /^\s*(?:(?:export|default|public|private|protected|static|readonly|async|override|abstract|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/u.exec(text);
-  if (method && !CONTROL_WORDS.has(method[1]!)) return `${method[1]}()`;
+  // A call ends its statement; a method opens a body.
+  const method = METHOD.exec(text);
+  if (method && !CONTROL_WORDS.has(method[1]!) && !/;\s*$/u.test(text)) return `${method[1]}()`;
   return undefined;
 }
 
@@ -468,74 +549,8 @@ function indentation(text: string): number {
   return text.length - text.trimStart().length;
 }
 
-// ---------------------------------------------------------------- attention
-
-const SEVERITY_WORDS: Record<string, AgentReviewFindingSeverity> = { blocker: 'BLOCKER', major: 'MAJOR', minor: 'MINOR', nit: 'NIT' };
-/** "A Major finding: ", "Major: ": what the finding's own severity word says. */
-const SEVERITY_LEAD = /^\s*(?:an?\s+)?(?:blocker|major|minor|nit)(?:\s+finding)?\s*[:,]\s*/iu;
-const COMMON_WORDS = new Set([
-  'that', 'this', 'with', 'from', 'when', 'into', 'than', 'then', 'they', 'their', 'there', 'have', 'does', 'only', 'each', 'every',
-  'which', 'while', 'without', 'still', 'finding', 'blocker', 'major', 'minor'
-]);
-
-/**
- * Where an attention fact lands. A fact that names one of its stage's open
- * findings, by most of its title's words or by its severity when the stage has
- * one such finding, lands on that finding; one that names a file of the stage
- * by its name lands on the file; any other on its stage.
- */
-function attentionItem(text: string, stage: GuideStage, anchors: GuideAnchors): GuideAttention {
-  const open = stage.files.flatMap(({ file }) => openFindingsOf(file, anchors).map((finding) => ({ finding, file })));
-  const named = /\b(blocker|major|minor|nit)\b/iu.exec(text)?.[1]?.toLowerCase();
-  const severity = named ? SEVERITY_WORDS[named] : undefined;
-  const candidates = severity ? open.filter((entry) => entry.finding.severity === severity) : open;
-  const words = new Set(significantWords(text));
-  const scored = candidates
-    .map((entry) => ({ entry, score: significantWords(entry.finding.title).filter((word) => words.has(word)).length }))
-    .sort((left, right) => right.score - left.score);
-  const [best, next] = scored;
-  const chosen = best && best.score > (next?.score ?? -1) && (best.score >= 2 || (severity && candidates.length === 1 && best.score >= 1))
-    ? best.entry : undefined;
-  if (chosen) {
-    const rest = text.replace(SEVERITY_LEAD, '');
-    return {
-      text: inlines(rest === text ? text : rest.charAt(0).toUpperCase() + rest.slice(1)),
-      stage: stage.section,
-      target: {
-        kind: 'finding',
-        findingId: chosen.finding.id,
-        severity: chosen.finding.severity,
-        fileId: chosen.file.id,
-        place: chosen.finding.line ? `${baseName(chosen.file.path)} ${chosen.finding.line}` : baseName(chosen.file.path)
-      }
-    };
-  }
-  const file = stage.files.find(({ file: candidate }) => new RegExp(`(^|[^\\w./-])${escapeRegExp(baseName(candidate.path))}(?![\\w-])`, 'u').test(text));
-  return {
-    text: inlines(text),
-    stage: stage.section,
-    ...(file ? { target: { kind: 'file' as const, fileId: file.file.id } } : {})
-  };
-}
-
-function openFindingsOf(file: DiffFile, anchors: GuideAnchors) {
-  const found = [...(anchors.findings.byFile.get(file.id) ?? [])];
-  for (const block of file.blocks) {
-    block.lines.forEach((line, index) => found.push(...(anchors.findings.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? [])));
-  }
-  return found.filter((finding) => finding.state === 'OPEN');
-}
-
-function significantWords(text: string): string[] {
-  return text.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter((word) => word.length >= 4 && !COMMON_WORDS.has(word));
-}
-
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {

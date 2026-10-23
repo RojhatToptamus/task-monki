@@ -19,7 +19,7 @@ import {
   REVIEW_REQUEST_ITEM_DECISION_LIMIT,
   REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS,
   TASK_STORE_SCHEMA_VERSION,
-  acceptedRequestItems,
+  awaitsDecision,
   createInitialProjection,
   isDetachedRunMode,
   isImplementationRunMode,
@@ -1163,10 +1163,13 @@ function reduceAgentReview(
       const requestItemDecisions = [...decisions, decision];
       // The reply waits on the person while an answer it left to them is not accepted.
       const answer = base.requestAnswer;
-      const requestAnswer = answer?.instructionId === decision.instructionId && answer.decisionItems
-        ? { ...answer, awaitingDecision: answer.decisionItems.some((item) => !acceptedRequestItems(requestItemDecisions, decision.instructionId).has(item)) }
-        : answer;
-      return { ...base, requestItemDecisions, ...(requestAnswer ? { requestAnswer } : {}) };
+      return {
+        ...base,
+        requestItemDecisions,
+        ...(answer?.instructionId === decision.instructionId && answer.decisionItems
+          ? { requestAnswer: { ...answer, awaitingDecision: awaitsDecision({ instructionId: answer.instructionId, decisionItems: answer.decisionItems }, requestItemDecisions) } }
+          : {})
+      };
     }
     // The exact code the review read was kept.
     case 'REVIEW_SNAPSHOT_RECORDED': {
@@ -1174,16 +1177,18 @@ function reduceAgentReview(
       if (!tree || !base.runId || base.runId !== event.runId) return base;
       return { ...base, reviewedTreeSha: tree };
     }
-    // The agent's reply to the request after this review settled.
+    // The agent's reply to the request after this review settled. The person may have accepted an answer
+    // already, while the reply's evidence was still being captured: the wait counts every decision recorded.
+    // `needsDecision`, the count of the items, is for the task's activity.
     case 'REVIEW_REQUEST_ANSWERED': {
-      const needsDecision = getNumber(event.payload, 'needsDecision');
-      if (base.runId !== getString(event.payload, 'reviewRunId') || needsDecision === undefined) return base;
       const instructionId = getString(event.payload, 'instructionId');
       const items = (event.payload as Record<string, unknown>).decisionItems;
-      const decisionItems = Array.isArray(items) && items.every((item) => Number.isSafeInteger(item) && item > 0) ? items as number[] : undefined;
+      if (base.runId !== getString(event.payload, 'reviewRunId') || !instructionId || !Array.isArray(items) ||
+        !items.every((item) => Number.isSafeInteger(item) && item > 0)) return base;
+      const answer = { instructionId, decisionItems: items as number[] };
       return {
         ...base,
-        requestAnswer: { awaitingDecision: needsDecision > 0, ...(instructionId && decisionItems ? { instructionId, decisionItems } : {}) },
+        requestAnswer: { ...answer, awaitingDecision: awaitsDecision(answer, base.requestItemDecisions ?? []) },
         updatedAt: event.receivedAt
       };
     }
@@ -1395,13 +1400,7 @@ function getReviewWalkthroughState(payload: unknown): ReviewWalkthroughState | u
   }
   const reviewRunId = getString(value, 'reviewRunId');
   const artifactId = getString(value, 'artifactId');
-  const sectionCount = getNumber(value, 'sectionCount');
-  const droppedCount = getNumber(value, 'droppedCount');
-  const isCount = (count: number | undefined, minimum: number): count is number =>
-    count !== undefined && Number.isSafeInteger(count) && count >= minimum;
-  return getString(value, 'status') === 'STORED' && reviewRunId && artifactId && isCount(sectionCount, 1) && isCount(droppedCount, 0)
-    ? { status: 'STORED', reviewRunId, artifactId, sectionCount, droppedCount }
-    : undefined;
+  return getString(value, 'status') === 'STORED' && reviewRunId && artifactId ? { status: 'STORED', reviewRunId, artifactId } : undefined;
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {

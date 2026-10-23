@@ -201,7 +201,7 @@ Return a concise human-readable review followed by exactly one fenced JSON block
 The JSON block must match this schema:
 
 {
-  "schemaVersion": "agent-review/v2",
+  "schemaVersion": "agent-review/v1",
   "verdict": "PASSED" | "NEEDS_CHANGES" | "INCONCLUSIVE",
   "summary": "One short sentence explaining the review result.",
   "findings": [
@@ -236,7 +236,7 @@ Also write the walkthrough of the change. It tells the whole change as a short s
 
 "walkthrough": {
   "summary": "Two sentences, at most 55 words.",
-  "attention": [{"text": "A short fact.", "section": 2}],
+  "attention": [{"text": "A short fact.", "section": 2, "finding": "stable-kebab-case-id"}, {"text": "A short fact.", "section": 1, "path": "src/uploads/retry.ts"}],
   "sections": [
     {
       "title": "A few words saying what this part does",
@@ -262,7 +262,7 @@ Excerpts: one to three per section, the code a reviewer most needs to read: the 
 
 Terms: one to three per section. Each is an exact phrase of its section's explanation that names a code concept, such as "quoted data" or "the head the person saw": plain words or one whole code span, never a clause or generic words. It points at the lines that define or implement the concept, inside one hunk of a file of its own section, preferably inside one of the section's excerpts; its "side" is "base" only for a deleted file. Give no term to a concept with no clear place.
 
-Summary and attention: the summary is two sentences, at most 55 words, that anyone on the team understands: first what the change lets someone do, then how its parts fit together, without counts. Attention is at most three pointers, each a fact that names its section by number, counted from 1. Draw them from facts: your findings by severity, a deleted or renamed export, removed or edited tests, a changed check or CI configuration, a new entry point, stored data whose shape changes without a migration. Never a status, a score or a verdict.
+Summary and attention: the summary is two sentences, at most 55 words, that anyone on the team understands: first what the change lets someone do, then how its parts fit together, without counts. Attention is at most three pointers, each a fact that names its section by number, counted from 1. Draw them from facts: your findings by severity, a deleted or renamed export, removed or edited tests, a changed check or CI configuration, a new entry point, stored data whose shape changes without a migration. Never a status, a score or a verdict. A pointer drawn from one of your findings names its id in "finding" and leaves its severity to the finding; one about a single file of its section names it in "path".
 
 Words: write for a teammate who has not read the code, and name controls as the product labels them. Use plain punctuation, without em dashes or middle dots.
 
@@ -1016,7 +1016,7 @@ function askSubjectLines(subject: NonNullable<SideQuestionPromptContext['subject
         `The question is about section ${subject.number} of ${subject.count} of the review's walkthrough of the change, "${boundedText(subject.section.title, REVIEW_CONTEXT_TEXT_LIMIT)}". The review agent wrote it; check it against the code yourself.`,
         ...(subject.section.explanation ? [boundedText(subject.section.explanation, REVIEW_CONTEXT_TEXT_LIMIT)] : []),
         'Its files:',
-        ...files.map((file) => `- ${file.path}`),
+        ...files.map((path) => `- ${path}`),
         ...(subject.section.files.length > files.length ? [`- … and ${subject.section.files.length - files.length} more files`] : [])
       ];
     }

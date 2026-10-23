@@ -1,3 +1,5 @@
+import { diffHeaderPaths, diffSidePath, gitPath } from '../../shared/gitDiffPaths';
+
 export type DiffLineKind = 'meta' | 'hunk' | 'context' | 'addition' | 'deletion';
 
 export interface DiffLine {
@@ -40,12 +42,13 @@ export interface DiffFile {
 
 /**
  * A character no reader sees that can change how code reads: the zero-width
- * space and word joiner, direction marks, embeddings, overrides and isolates,
- * the Arabic letter mark, a byte-order mark past a file's start, and tag
- * characters. Zero-width joiners and non-joiners are left out: emoji and some
- * scripts need them. Not global, so it serves `test`.
+ * space and word joiner, invisible math operators, direction marks,
+ * embeddings, overrides and isolates, the Arabic letter mark, the Mongolian
+ * vowel separator, the Hangul fillers a name can be made of, a byte-order mark
+ * past a file's start, and tag characters. Zero-width joiners and non-joiners
+ * are left out: emoji and some scripts need them. Not global, so it serves `test`.
  */
-const HIDDEN_CODE_CHARACTER = /[\u061C\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/u;
+const HIDDEN_CODE_CHARACTER = /[\u061C\u115F\u1160\u180E\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFA0\u{E0000}-\u{E007F}]/u;
 
 export type DiffEvidenceScope = 'all' | 'committed' | 'uncommitted';
 export type DiffSectionSource = 'committed' | 'staged' | 'unstaged' | 'local';
@@ -89,8 +92,9 @@ interface ParsedDiffSections {
 
 /**
  * A captured diff's files and how completely they were read. A plain Git diff
- * is one section, named `label`, which keeps its blocks apart from another
- * diff's of the same file (a commit's, or what changed since a review).
+ * is one section named `label`: its blocks carry that label, and their ids
+ * differ from another diff's blocks of the same file (a commit's, or what
+ * changed since a review), so nothing kept by block carries across.
  */
 export function inspectGitDiffEvidence(text: string, label?: string): GitDiffEvidenceInspection {
   const sections = extractDiffSections(text, label);
@@ -265,13 +269,13 @@ function splitFileChunks(lines: string[]): string[][] {
 }
 
 function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
-  const header = /^diff --git a\/(.+) b\/(.+)$/.exec(lines[0] ?? '');
+  const header = diffHeaderPaths(lines[0] ?? '');
   if (!header) {
     return undefined;
   }
 
-  let oldPath: string | undefined = header[1];
-  let newPath: string | undefined = header[2];
+  let oldPath: string | undefined = header.oldPath;
+  let newPath: string | undefined = header.newPath;
   let status: DiffFile['status'] = 'modified';
   let additions = 0;
   let deletions = 0;
@@ -299,14 +303,14 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
         status = 'deleted';
       } else if (line.startsWith('rename from ')) {
         status = 'renamed';
-        oldPath = line.slice('rename from '.length);
+        oldPath = gitPath(line.slice('rename from '.length));
       } else if (line.startsWith('rename to ')) {
         status = 'renamed';
-        newPath = line.slice('rename to '.length);
+        newPath = gitPath(line.slice('rename to '.length));
       } else if (line.startsWith('--- ')) {
-        oldPath = parseDiffPath(line.slice(4), oldPath);
+        oldPath = diffSidePath(line.slice(4), 'a/');
       } else if (line.startsWith('+++ ')) {
-        newPath = parseDiffPath(line.slice(4), newPath);
+        newPath = diffSidePath(line.slice(4), 'b/');
       }
     }
 
@@ -356,30 +360,20 @@ function parseFileChunk(lines: string[]): ParsedFileBlock | undefined {
     }
   }
 
-  const path = newPath && newPath !== '/dev/null' ? newPath : oldPath;
-  if (!path || path === '/dev/null') {
+  const path = newPath ?? oldPath;
+  if (!path) {
     return undefined;
   }
 
   return {
     path,
-    oldPath: oldPath && oldPath !== path && oldPath !== '/dev/null' ? oldPath : undefined,
+    oldPath: oldPath && oldPath !== path ? oldPath : undefined,
     status,
     additions,
     deletions,
     invisibleCharacters,
     lines: parsedLines
   };
-}
-
-function parseDiffPath(value: string, fallback: string | undefined): string | undefined {
-  if (value === '/dev/null') {
-    return value;
-  }
-  if (value.startsWith('a/') || value.startsWith('b/')) {
-    return value.slice(2);
-  }
-  return value || fallback;
 }
 
 function mergeStatus(a: DiffFile['status'], b: DiffFile['status']): DiffFile['status'] {

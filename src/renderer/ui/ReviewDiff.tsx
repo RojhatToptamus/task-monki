@@ -14,7 +14,8 @@ export function ReviewDiff({ model }: { model: ReviewModel }) {
   const { anchors, focusedFile, commentDraft, selection } = model;
   const general = { findings: anchors.findings.general, discussions: anchors.discussions.general };
   const worktree = model.props.historical ? undefined : model.props.worktree;
-  const askable = Boolean(model.props.onAskAboutFile) && !model.props.historical;
+  // Ask reads the code as it is now, so it is offered only while the Diff shows that code, never a commit's.
+  const askable = Boolean(model.props.onAskAboutFile) && !model.props.historical && !model.history;
   return (
     <div className="tm-review__diff">
       {model.commit ? <ReviewCommitBrief {...model.commit} /> : null}

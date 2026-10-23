@@ -16,15 +16,15 @@ export interface AgentReviewOutput {
 }
 
 /**
- * Reads an agent-review/v2 output: its last fenced json block holds the result
- * and the walkthrough, after prose that may quote code. Output without one is
- * read as bare JSON, then as native review comments.
+ * Reads a review's output: its last fenced JSON block holds the result and the
+ * walkthrough, after prose that may quote code. Output without one is read as
+ * bare JSON, then as native review comments.
  */
 export function parseAgentReviewOutput(text: string | undefined): AgentReviewOutput {
   if (!text?.trim()) {
     return {};
   }
-  const value = parseJson(lastJsonBlock(text) ?? extractBareJson(text));
+  const value = lastJsonObject(text) ?? parseJson(extractBareJson(text));
   if (value === undefined) {
     const result = parseNativeAgentReviewResult(text);
     return result ? { result } : {};
@@ -72,11 +72,31 @@ function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | 
 }
 
 /**
- * Fences on lines of their own, indented or not: a JSON string holds no line
- * break, so its backticks never close the block.
+ * The last fenced block, tagged json or not, that holds a JSON object. Fences
+ * sit on lines of their own, indented or not, and pair in order, so a block of
+ * other code before it never swallows its opening fence; a JSON string holds no
+ * line break, so its backticks never close the block.
  */
-function lastJsonBlock(text: string): string | undefined {
-  return [...text.matchAll(/^[ \t]*```json[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*$/gimu)].at(-1)?.[1]?.trim();
+function lastJsonObject(text: string): Record<string, unknown> | undefined {
+  const blocks: Array<{ tag: string; lines: string[] }> = [];
+  let open: { tag: string; lines: string[] } | undefined;
+  for (const line of text.split(/\r?\n/u)) {
+    const fence = /^[ \t]*```([\w-]*)[ \t]*$/u.exec(line);
+    if (!open) {
+      if (fence) open = { tag: fence[1]!.toLowerCase(), lines: [] };
+    } else if (fence && !fence[1]) {
+      blocks.push(open);
+      open = undefined;
+    } else {
+      open.lines.push(line);
+    }
+  }
+  for (const block of blocks.reverse()) {
+    if (block.tag && block.tag !== 'json') continue;
+    const value = parseJson(block.lines.join('\n').trim());
+    if (isRecord(value)) return value;
+  }
+  return undefined;
 }
 
 function parseJson(text: string | undefined): unknown {

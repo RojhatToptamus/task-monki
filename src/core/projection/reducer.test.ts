@@ -174,10 +174,11 @@ describe('projection reducer', () => {
       ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: { id, reviewRunId: 'review-run', instructionId: 'request', item, kind, createdAt: now } }),
       id, runId: undefined
     });
-    const waiting = applyEventToState(state, {
+    const answered = (current: typeof state) => applyEventToState(current, {
       ...createEvent('REVIEW_REQUEST_ANSWERED', { reviewRunId: 'review-run', instructionId: 'request', needsDecision: 2, decisionItems: [2, 3] }),
       runId: undefined
     });
+    const waiting = answered(state);
     const awaiting = (current: typeof state) => current.tasks[0].projection.agentReview?.requestAnswer?.awaitingDecision;
     expect(awaiting(waiting)).toBe(true);
     // A Fixed item accepted settles nothing the person was asked; one of two questions still waits.
@@ -186,6 +187,8 @@ describe('projection reducer', () => {
     const both = decide(one, 'third', 3, 'ACCEPT');
     expect(awaiting(both)).toBe(false);
     expect(awaiting(decide(both, 'reopened', 3, 'REOPEN'))).toBe(true);
+    // Answers accepted while the reply's evidence was still being captured count once the reply lands.
+    expect(awaiting(answered(decide(decide(state, 'early-2', 2, 'ACCEPT'), 'early-3', 3, 'ACCEPT')))).toBe(false);
   });
 
   it('separates agent completion from process exit', () => {

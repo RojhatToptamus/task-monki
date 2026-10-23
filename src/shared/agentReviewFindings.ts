@@ -48,10 +48,7 @@ export interface AgentReviewResolvedFinding {
 }
 
 export interface AgentReviewResult {
-  /**
-   * The stored result's shape, unchanged since schema 13. The review prompt's
-   * agent-review/v2 adds the walkthrough, which is kept apart.
-   */
+  /** The stored result's shape, unchanged since schema 13; the walkthrough written with it is kept apart. */
   schemaVersion: 'agent-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
@@ -128,9 +125,11 @@ export type ReviewFindingDecision =
   | (ReviewFindingDecisionBase & { kind: 'RESTORE' });
 
 /**
- * The agent's reply to the person's latest request after a review: whether it
- * waits on the person, and which items it left to them (`decisionItems`, of the
- * request `instructionId`). Accepting each of those answers settles the wait.
+ * The agent's reply to the person's latest request after a review: which items
+ * it left to them (`decisionItems`, of the request `instructionId`), and whether
+ * any of those still waits on them. Accepting each of those answers settles the
+ * wait (`awaitsDecision`). A reply recorded before SQLite migration 14 holds
+ * only whether it waits.
  */
 export interface ReviewRequestAnswerState {
   awaitingDecision: boolean;
@@ -181,6 +180,15 @@ export function acceptedRequestItems(
     else accepted.delete(decision.item);
   }
   return accepted;
+}
+
+/** An answer the agent left to the person is not accepted yet, by the decisions recorded so far, whenever they came. */
+export function awaitsDecision(
+  answer: Required<Pick<ReviewRequestAnswerState, 'instructionId' | 'decisionItems'>>,
+  decisions: readonly ReviewRequestItemDecision[]
+): boolean {
+  const accepted = acceptedRequestItems(decisions, answer.instructionId);
+  return answer.decisionItems.some((item) => !accepted.has(item));
 }
 
 export type ReviewFindingState = 'OPEN' | 'DISMISSED';

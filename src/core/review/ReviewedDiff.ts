@@ -1,3 +1,5 @@
+import { diffHeaderPaths, diffSidePath, gitPath } from '../../shared/gitDiffPaths';
+
 /**
  * Reads unified diffs Task Monki captured: the diff evidence of a Git snapshot,
  * whose committed, staged and unstaged sections are merged per file, so a path
@@ -201,27 +203,16 @@ function chunkIdentity(chunk: readonly string[]): Pick<ReviewedDiffFile, 'path' 
   let renamedFrom: string | undefined;
   for (const line of chunk) {
     if (HUNK_HEADER.test(line)) break;
-    if (line.startsWith('+++ ')) newPath = headerPath(line.slice(4), 'b/');
-    else if (line.startsWith('--- ')) oldPath = headerPath(line.slice(4), 'a/');
-    else if (line.startsWith('rename to ')) newPath ??= unquote(line.slice('rename to '.length));
+    if (line.startsWith('+++ ')) newPath = diffSidePath(line.slice(4), 'b/');
+    else if (line.startsWith('--- ')) oldPath = diffSidePath(line.slice(4), 'a/');
+    else if (line.startsWith('rename to ')) newPath ??= gitPath(line.slice('rename to '.length));
     else if (line.startsWith('rename from ')) {
       status = 'renamed';
-      renamedFrom = unquote(line.slice('rename from '.length));
+      renamedFrom = gitPath(line.slice('rename from '.length));
     } else if (line.startsWith('new file mode ')) status = 'added';
     else if (line.startsWith('deleted file mode ')) status = 'deleted';
   }
-  const header = /^diff --git (?:"?a\/)(.+?)"? (?:"?b\/)(.+?)"?$/u.exec(chunk[0] ?? '');
-  const path = newPath ?? oldPath ?? header?.[2];
+  const path = newPath ?? oldPath ?? diffHeaderPaths(chunk[0] ?? '')?.newPath;
   if (!path) return undefined;
   return { path, status, ...(renamedFrom ? { oldPath: renamedFrom } : {}) };
-}
-
-function headerPath(value: string, prefix: string): string | undefined {
-  const path = unquote(value.trim());
-  if (path === '/dev/null') return undefined;
-  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
-}
-
-function unquote(value: string): string {
-  return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 }

@@ -51,6 +51,12 @@ export class ReviewSnapshotStore {
     await this.serialize(store.dir, () => git(store.dir, ['update-ref', reviewRef(taskId, reviewRunId), tree], GIT_TIMEOUT_MS));
   }
 
+  /** Lets go of the code kept for a review that never started; its tree goes with the store's next prune. */
+  async unpin(worktreePath: string, taskId: string, reviewRunId: string): Promise<void> {
+    const store = await this.storeFor(worktreePath);
+    await this.serialize(store.dir, () => git(store.dir, ['update-ref', '-d', reviewRef(taskId, reviewRunId)], GIT_TIMEOUT_MS));
+  }
+
   /**
    * The changes from the code a review read to the worktree as it is now. A
    * recorded tree that differs from `expectedTree` is never shown as the review's.
@@ -79,25 +85,25 @@ export class ReviewSnapshotStore {
    * shown as the review's.
    */
   async reviewedDiff(worktreePath: string, taskId: string, reviewRunId: string, baseSha: string, expectedTree?: string): Promise<ReviewChangesResult> {
+    // Reads pinned objects only, so it waits on no capture.
     const store = await this.storeFor(worktreePath);
-    return this.serialize(store.dir, async () => {
-      const recorded = await this.recordedTree(store, taskId, reviewRunId, expectedTree);
-      if (typeof recorded !== 'string') return recorded;
-      const diff = await boundedTreeDiff(worktreePath, baseSha, recorded, store.env);
-      return typeof diff === 'string'
-        ? { status: 'READY', reviewRunId, tree: recorded, diff }
-        : { status: 'UNAVAILABLE', reason: diff.reason };
-    });
+    const recorded = await this.recordedTree(store, taskId, reviewRunId, expectedTree);
+    if (typeof recorded !== 'string') return recorded;
+    const diff = await boundedTreeDiff(worktreePath, baseSha, recorded, store.env);
+    return typeof diff === 'string'
+      ? { status: 'READY', reviewRunId, tree: recorded, diff }
+      : { status: 'UNAVAILABLE', reason: diff.reason };
   }
 
   /**
    * The change from `baseSha` to a captured tree, file by file with its hunks,
-   * and as the review prompt lists it. Bounded like the diff it reads.
+   * and as the review prompt lists it. Bounded like the diff it reads; it reads
+   * kept objects only, so it waits on no capture.
    */
   async changeIndex(worktreePath: string, baseSha: string, tree: string): Promise<ReviewChangeIndex> {
     try {
       const store = await this.storeFor(worktreePath);
-      const diff = await this.serialize(store.dir, () => boundedTreeDiff(worktreePath, baseSha, tree, store.env));
+      const diff = await boundedTreeDiff(worktreePath, baseSha, tree, store.env);
       if (typeof diff !== 'string') return { status: 'UNAVAILABLE', reason: diff.reason };
       const files = parseReviewedDiff(diff);
       return { status: 'READY', files, text: changeIndexText(files) };

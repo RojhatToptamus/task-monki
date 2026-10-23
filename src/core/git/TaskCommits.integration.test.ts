@@ -2,9 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { parseReviewedDiff } from '../review/ReviewedDiff';
 import { git } from './gitCli';
-import { listTaskCommits, readTaskCommitDiff } from './TaskCommits';
+import { isTaskCommit, listTaskCommits, readTaskCommitDiff } from './TaskCommits';
+import { boundedTreeDiff } from './treeDiff';
 
 const roots: string[] = [];
 
@@ -69,6 +72,41 @@ describe('task commits', () => {
     const { commits, total } = await listTaskCommits(repo, base, head, 2);
     expect(total).toBe(3);
     expect(commits.map((entry) => entry.subject)).toEqual(['Step 2', 'Step 3']);
+  });
+
+  it('reads only the branch\'s own commits, and never hands git anything but object ids', async () => {
+    const repo = await repository();
+    const base = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    await git(repo, ['switch', '--quiet', '-c', 'other']);
+    const foreign = await commit(repo, 'app.js', 'export const a = 9;\n', 'Elsewhere');
+    await git(repo, ['switch', '--quiet', 'main']);
+    const own = await commit(repo, 'app.js', 'export const a = 2;\n', 'Raise a');
+
+    expect(await isTaskCommit(repo, base, own, own)).toBe(true);
+    expect(await isTaskCommit(repo, base, own, foreign)).toBe(false);
+    // Git reads options among revisions: an option-shaped value is refused before git sees it.
+    const target = path.join(path.dirname(repo), 'written-by-git');
+    expect(await isTaskCommit(repo, base, own, `--output=${target}`)).toBe(false);
+    expect(await boundedTreeDiff(repo, `--output=${target}`, own)).toEqual({ reason: 'UNREADABLE' });
+    expect(await readTaskCommitDiff(repo, `--output=${target}`)).toEqual({ status: 'UNAVAILABLE', reason: 'UNREADABLE' });
+    await expect(fs.access(target)).rejects.toThrow();
+  });
+
+  it('lists signed commits when the person\'s git shows signatures in its log', async () => {
+    const repo = await repository();
+    const base = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    const key = path.join(path.dirname(repo), 'signing-key');
+    await promisify(execFile)('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
+    await git(repo, ['config', 'gpg.format', 'ssh']);
+    await git(repo, ['config', 'user.signingkey', key]);
+    await git(repo, ['config', 'log.showSignature', 'true']);
+    await fs.writeFile(path.join(repo, 'app.js'), 'export const a = 2;\n');
+    await git(repo, ['commit', '--quiet', '-S', '-am', 'Signed']);
+    const head = await commit(repo, 'app.js', 'export const a = 3;\n', 'Unsigned');
+
+    const { commits, total } = await listTaskCommits(repo, base, head);
+    expect(total).toBe(2);
+    expect(commits.map((entry) => entry.subject)).toEqual(['Signed', 'Unsigned']);
   });
 
   it('compares a commit without a parent against the empty tree', async () => {

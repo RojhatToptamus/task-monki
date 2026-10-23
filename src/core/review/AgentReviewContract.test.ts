@@ -33,6 +33,22 @@ describe('AgentReviewContract', () => {
     expect(parseAgentReviewOutput('```json\n{"verdict": "PASSED", "summary": "Fine.", "findings": []}\n```')).not.toHaveProperty('walkthrough');
   });
 
+  it('reads a result in a fence without a language, after prose and code that are not one', () => {
+    const output = parseAgentReviewOutput([
+      'The guard reads `function limit() { return 3; }` now.',
+      '```ts',
+      'const limit = 3;',
+      '```',
+      '```',
+      '{"verdict": "PASSED", "summary": "Fine.", "findings": []}',
+      '```',
+      '```',
+      'npm test',
+      '```'
+    ].join('\n'));
+    expect(output.result).toMatchObject({ verdict: 'PASSED', summary: 'Fine.' });
+  });
+
   it('reads a result block nested, indented, under a list item', () => {
     const output = parseAgentReviewOutput(['Review:', '- Result:', '  ```json', '  {"verdict": "PASSED", "summary": "Fine.", "findings": []}', '  ```'].join('\n'));
     expect(output.result).toMatchObject({ verdict: 'PASSED', summary: 'Fine.' });

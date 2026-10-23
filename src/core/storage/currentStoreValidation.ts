@@ -1327,10 +1327,13 @@ function projection(value: unknown): void {
     if (review.requestAnswer !== undefined) {
       const answer = persistedRecord(review.requestAnswer, 'tasks.projection');
       booleanField(answer, 'awaitingDecision', 'tasks.projection');
-      optionalUuidFields(answer, 'tasks.projection', ['instructionId']);
-      if (answer.decisionItems !== undefined && (!Array.isArray(answer.decisionItems) ||
-        answer.decisionItems.some((item) => !Number.isSafeInteger(item) || (item as number) < 1 || (item as number) > REVIEW_REQUEST_ITEM_LIMIT))) {
-        invalid('tasks.projection');
+      // A reply recorded before migration 14 holds neither; a later one, both.
+      if (answer.instructionId !== undefined || answer.decisionItems !== undefined) {
+        uuidField(answer, 'instructionId', 'tasks.projection');
+        if (!Array.isArray(answer.decisionItems) ||
+          answer.decisionItems.some((item) => !Number.isSafeInteger(item) || (item as number) < 1 || (item as number) > REVIEW_REQUEST_ITEM_LIMIT)) {
+          invalid('tasks.projection');
+        }
       }
     }
     if (review.result !== undefined) reviewResult(review.result);
@@ -1396,11 +1399,7 @@ function reviewWalkthrough(value: unknown): void {
     return;
   }
   uuidFields(walkthrough, collection, ['reviewRunId', 'artifactId']);
-  integer(walkthrough, 'sectionCount', collection, 1);
-  integer(walkthrough, 'droppedCount', collection, 0);
-  if (Object.keys(walkthrough).some((key) => !['status', 'reviewRunId', 'artifactId', 'sectionCount', 'droppedCount'].includes(key))) {
-    invalid(collection);
-  }
+  if (Object.keys(walkthrough).some((key) => !['status', 'reviewRunId', 'artifactId'].includes(key))) invalid(collection);
 }
 
 /** A dismissal carries its reason and, optionally, a note; a restore carries neither. */

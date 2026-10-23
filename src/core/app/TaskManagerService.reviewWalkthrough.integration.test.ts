@@ -17,13 +17,17 @@ afterEach(async () => {
   await scenarios.dispose();
 });
 
+const FINDING = {
+  id: 'unbounded-retry', severity: 'NIT', title: 'Retries never stop', explanation: 'The loop has no limit.', path: 'retry.ts', line: 2, recommendation: 'Bound it.'
+};
+
 const review = (walkthrough?: object) => 'Review.\n```json\n' + JSON.stringify({
-  schemaVersion: 'agent-review/v2', verdict: 'PASSED', summary: 'Fine.', findings: [], ...(walkthrough ? { walkthrough } : {})
+  schemaVersion: 'agent-review/v1', verdict: 'PASSED', summary: 'Fine.', findings: [FINDING], ...(walkthrough ? { walkthrough } : {})
 }) + '\n```';
 
 const WALKTHROUGH = {
   summary: 'Calls retry with backoff. The retry module holds the loop.',
-  attention: [{ text: 'A new retry module', section: 1 }],
+  attention: [{ text: 'A new retry module', section: 1, path: 'retry.ts' }, { text: 'Retries never stop', section: 1, finding: FINDING.id }],
   sections: [{
     title: 'Retry failed calls',
     explanation: 'Failed calls now retry with backoff.',
@@ -59,7 +63,6 @@ describe('TaskManagerService review walkthrough', () => {
     s.agent.nextRuntimeTurnResult = { output: review(WALKTHROUGH) };
     const first = await s.service.startReview({ taskId: task.id, runId: implementation.id });
     const prompt = await s.runtimeStore.readArtifact(first.promptArtifactId);
-    expect(prompt).toContain('"schemaVersion": "agent-review/v2"');
     expect(prompt).toContain('notes.md new +1 -0 head 1');
     expect(prompt).toContain('retry.ts new +3 -0 head 1-3');
 
@@ -68,7 +71,7 @@ describe('TaskManagerService review walkthrough', () => {
     expect(treeBeforeAnswer).toEqual(expect.any(String));
     expect(reviewed.reviewedTreeSha).toBe(treeBeforeAnswer);
     expect(reviewed.walkthrough).toEqual({
-      status: 'STORED', reviewRunId: first.id, artifactId: expect.any(String), sectionCount: 2, droppedCount: 0
+      status: 'STORED', reviewRunId: first.id, artifactId: expect.any(String)
     });
     const stored = reviewed.walkthrough as Extract<ReviewWalkthroughState, { status: 'STORED' }>;
     const walkthrough = parseReviewWalkthrough(await s.service.readArtifact({ artifactId: stored.artifactId }), first.id);
@@ -76,15 +79,16 @@ describe('TaskManagerService review walkthrough', () => {
       base: worktree.baseSha,
       tree: reviewed.reviewedTreeSha,
       summary: WALKTHROUGH.summary,
-      attention: [{ text: 'A new retry module', section: 0 }],
+      // What a pointer names holds: a file of its section, and a finding the review wrote with it.
+      attention: [{ text: 'A new retry module', section: 0, path: 'retry.ts' }, { text: 'Retries never stop', section: 0, finding: FINDING.id }],
       sections: [
         {
           title: 'Retry failed calls',
-          files: [{ path: 'retry.ts', status: 'added', additions: 3, deletions: 0 }],
+          files: ['retry.ts'],
           excerpts: [{ path: 'retry.ts', side: 'NEW', line: 1, endLine: 3, caption: 'The retry loop' }],
           terms: [{ text: 'backoff', path: 'retry.ts', side: 'NEW', line: 2 }]
         },
-        { title: 'Other changes', explanation: '', files: [{ path: 'notes.md', status: 'added', additions: 1, deletions: 0 }] }
+        { title: 'Other changes', explanation: '', files: ['notes.md'] }
       ]
     });
     // Projected again, as after a restart, the outcome gets the same artifact back.

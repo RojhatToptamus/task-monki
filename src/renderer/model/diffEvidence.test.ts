@@ -3,6 +3,15 @@ import { inspectGitDiffEvidence, parseGitDiffEvidenceForScope } from './diffEvid
 
 const parseAll = (text: string) => parseGitDiffEvidenceForScope(text, 'all');
 
+/** Files whose names a diff writes specially, as Git wrote them: a space, a byte past ASCII, no hunk, a rename. */
+const NAMES = [
+  'diff --git a/my file.ts b/my file.ts', 'new file mode 100644', '--- /dev/null', '+++ b/my file.ts\t', '@@ -0,0 +1 @@', '+one',
+  'diff --git "a/caf\\303\\251.md" "b/caf\\303\\251.md"', 'new file mode 100644', '--- /dev/null', '+++ "b/caf\\303\\251.md"', '@@ -0,0 +1 @@', '+two',
+  'diff --git a/empty file.txt b/empty file.txt', 'new file mode 100644', 'index 0000000..e69de29',
+  'diff --git a/old name.ts b/new name.ts', 'similarity index 100%', 'rename from old name.ts', 'rename to new name.ts',
+  ''
+].join('\n');
+
 describe('diff evidence parser', () => {
   it('parses Git evidence sections into files with line stats', () => {
     const files = parseAll(`# Git diff evidence
@@ -96,9 +105,9 @@ No unstaged diff.
 @@ -1 +1 @@
 -old
 +new
-diff --git "a/src/quoted name.ts" "b/src/quoted name.ts"
---- "a/src/quoted name.ts"
-+++ "b/src/quoted name.ts"
+diff --git src/unprefixed.ts src/unprefixed.ts
+--- src/unprefixed.ts
++++ src/unprefixed.ts
 @@ -1 +1 @@
 -old
 +new
@@ -208,6 +217,15 @@ index 0000000..0000000
     expect(files[0].blocks[0]?.source).toBe('unstaged');
   });
 
+  it('reads each path as the file is named, whichever way Git wrote it, as the review\'s own parser does', () => {
+    expect(inspectGitDiffEvidence(NAMES).files.map(({ path, status, oldPath }) => [path, status, oldPath])).toEqual([
+      ['café.md', 'added', undefined],
+      ['empty file.txt', 'added', undefined],
+      ['my file.ts', 'added', undefined],
+      ['new name.ts', 'renamed', 'old name.ts']
+    ]);
+  });
+
   it('flags a file only when its added lines hide characters that change how the code reads', () => {
     const files = parseAll(`diff --git a/bidi.ts b/bidi.ts
 --- a/bidi.ts
@@ -240,11 +258,17 @@ diff --git a/removed.ts b/removed.ts
 @@ -1 +1 @@
 -const hidden = 'a​b';
 +const hidden = 'ab';
+diff --git a/filler-name.ts b/filler-name.ts
+--- a/filler-name.ts
++++ b/filler-name.ts
+@@ -1 +1 @@
+-const role = 'user';
++const role = 'user', \u3164 = 'admin';
 `);
 
-    // Direction controls and a mark inside a file hide; joiners in an emoji, a
-    // mark that opens a file, and what a change removes do not.
-    expect(files.filter((file) => file.invisibleCharacters).map((file) => file.path)).toEqual(['bidi.ts', 'inner-mark.ts']);
+    // Direction controls, a mark inside a file and a name made of a Hangul filler hide; joiners in an
+    // emoji, a mark that opens a file, and what a change removes do not.
+    expect(files.filter((file) => file.invisibleCharacters).map((file) => file.path)).toEqual(['bidi.ts', 'filler-name.ts', 'inner-mark.ts']);
   });
 
   it('separates committed and uncommitted evidence scopes', () => {

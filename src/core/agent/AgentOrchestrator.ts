@@ -79,7 +79,7 @@ import {
   createAgentSessionAccessEpoch
 } from './AgentRuntimeOwnership';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
-import { parseAgentReviewOutput } from '../review/AgentReviewContract';
+import { parseAgentReviewOutput, type AgentReviewOutput } from '../review/AgentReviewContract';
 import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
@@ -357,10 +357,10 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       ownsReadOnlySnapshot?: (candidate: string) => boolean;
       /**
        * Checks the walkthrough a completed review wrote against the code it read
-       * and keeps what holds, idempotently by run; resolves to what the review
-       * gate records with the outcome.
+       * and the findings it wrote with it, and keeps what holds, idempotently by
+       * run; resolves to what the review gate records with the outcome.
        */
-      reviewWalkthrough?: (run: RunRecord, walkthrough: unknown) => Promise<ReviewWalkthroughState>;
+      reviewWalkthrough?: (run: RunRecord, review: AgentReviewOutput) => Promise<ReviewWalkthroughState>;
     } = {}
   ) {
     this.runtimes =
@@ -1355,7 +1355,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       const review = event.status === 'completed' ? parseAgentReviewOutput(output) : undefined;
       // The walkthrough is checked and kept before the outcome is recorded, so both land together.
       const walkthrough = review && this.options.reviewWalkthrough
-        ? await this.options.reviewWalkthrough(run, review.walkthrough)
+        ? await this.options.reviewWalkthrough(run, review)
         : undefined;
       outcome = {
         agentReviewStatus: reviewGateStatusFromResult(review?.result),

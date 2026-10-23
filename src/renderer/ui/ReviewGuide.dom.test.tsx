@@ -52,12 +52,12 @@ const walkthrough: ReviewWalkthrough = {
   base: 'b'.repeat(40),
   tree: 'c'.repeat(40),
   summary: 'Tasks start from `remote` work. The docs say how.',
-  attention: [{ text: 'A Major finding: clearing leaves the cache in place', section: 0 }],
+  attention: [{ text: 'Clearing leaves the cache in place', section: 0, finding: 'cache' }],
   sections: [
     {
       title: 'Fetch remote work',
       explanation: 'Tasks fetch with the `merge base` and keep a reader for the snapshot.',
-      files: [SERVICE, READER, TEST].map((path) => ({ path, status: path === READER ? 'added' as const : 'modified' as const, additions: 1, deletions: 0 })),
+      files: [SERVICE, READER, TEST],
       excerpts: [{ path: SERVICE, side: 'NEW', line: 23, endLine: 25, caption: 'Fetch with the merge base' }, { path: READER, side: 'NEW', line: 2, endLine: 3 }],
       terms: [
         { text: '`merge base`', path: SERVICE, side: 'NEW', line: 23, endLine: 24 },
@@ -68,15 +68,15 @@ const walkthrough: ReviewWalkthrough = {
     {
       title: 'Document remote work',
       explanation: 'The docs say how.',
-      files: [{ path: DOCS, status: 'modified', additions: 1, deletions: 1 }],
+      files: [DOCS],
       excerpts: [{ path: DOCS, side: 'NEW', line: 2 }],
       terms: []
     },
-    { title: 'Other changes', explanation: '', files: [{ path: PACKAGE, status: 'modified', additions: 1, deletions: 1 }], excerpts: [], terms: [] }
+    { title: 'Other changes', explanation: '', files: [PACKAGE], excerpts: [], terms: [] }
   ]
 };
 const STORED: NonNullable<ReviewWorkspaceProps['walkthrough']> = {
-  state: { status: 'STORED', reviewRunId: 'review-1', artifactId: 'walkthrough-1', sectionCount: 3, droppedCount: 0 },
+  state: { status: 'STORED', reviewRunId: 'review-1', artifactId: 'walkthrough-1' },
   view: { loading: false, walkthrough, files },
   author: 'Codex'
 };

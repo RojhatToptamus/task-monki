@@ -32,6 +32,12 @@ export interface ReviewContextView {
 const NO_READS: ReadonlyMap<string, CheckoutRead> = new Map();
 const NO_REVEALS: Readonly<Record<string, ReadonlySet<number>>> = {};
 const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };
+
+/** The whole-file state of code with no checkout to read: nothing to show beyond its changes. */
+export function noWholeFile(): WholeFileState {
+  return NO_WHOLE_FILE;
+}
+
 /**
  * Each filled file as last shown, with the reveals it was shown with: a reveal
  * changes only its own block, so every other file keeps its identity and its

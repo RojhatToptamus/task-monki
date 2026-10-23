@@ -14,7 +14,6 @@ import type {
 } from '../../shared/contracts';
 import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
-import type { WholeFileState } from '../model/reviewContext';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
 import type { ReviewMode } from '../model/reviewNavigation';
@@ -51,7 +50,7 @@ import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { useNotify } from './NotifyContext';
 import { landing, linesOf, quoted, readPlace } from './reviewPlace';
 import { stopTravel, travel } from './travel';
-import { useReviewContext } from './useReviewContext';
+import { noWholeFile, useReviewContext } from './useReviewContext';
 import { useReviewScope } from './useReviewScope';
 import { useScrollSpy } from './useScrollSpy';
 import type { WalkthroughView } from './useWalkthrough';
@@ -474,28 +473,36 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     () => (guideCurrent ? shownComments : ownWalkthrough ? roundComments : NO_COMMENTS),
     [guideCurrent, ownWalkthrough, roundComments, shownComments]
   );
-  // The Guide lays its code out by what was said when the person arrived: a comment written while reading
-  // lands under its line and nothing they read moves. The next visit lays it out with the rest.
-  const [arrivedWith] = useState(() => draft.comments);
-  const guideLayoutComments = useMemo(
-    () => (guideCurrent ? (roundComments.length ? [...roundComments, ...arrivedWith] : arrivedWith) : ownWalkthrough ? roundComments : NO_COMMENTS),
-    [arrivedWith, guideCurrent, ownWalkthrough, roundComments]
-  );
   const guideFiles = walkthrough?.view.files ?? NO_FILES;
+  const guideFindings = ownWalkthrough ? findings : NO_FINDINGS;
   const guideDiscussions = props.historical ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
-  const guideFindingAnchors = useMemo(() => anchorReviewFindings(guideFiles, ownWalkthrough ? findings : NO_FINDINGS), [findings, guideFiles, ownWalkthrough]);
-  const guideDiscussionAnchors = useMemo(
-    () => anchorReviewDiscussions(guideFiles, guideDiscussions, Boolean(props.discussionsOnLines) && guideCurrent),
-    [guideCurrent, guideDiscussions, guideFiles, props.discussionsOnLines]
+  const discussionsOnGuideLines = Boolean(props.discussionsOnLines) && guideCurrent;
+  const guideAnchors = useAnchors(guideFiles, guideFindings, guideDiscussions, discussionsOnGuideLines, guideComments);
+  // The Guide lays its code out by what was said when the person arrived at its walkthrough: settling a
+  // finding, resolving a discussion or writing a comment while reading moves nothing they read, and what
+  // comes in later takes its place as it comes. The next visit lays it all out anew.
+  const arrivalKey = walkthrough?.view.walkthrough?.reviewRunId;
+  const [arrival, setArrival] = useState(() => arrivalOf(arrivalKey, guideFindings, guideDiscussions, draft.comments));
+  if (arrival.key !== arrivalKey) setArrival(arrivalOf(arrivalKey, guideFindings, guideDiscussions, draft.comments));
+  const layoutFindings = useMemo(
+    () => asArrived(guideFindings, (finding) => {
+      const state = arrival.findings.get(finding.id);
+      return state && state !== finding.state ? { ...finding, state } : finding;
+    }),
+    [arrival, guideFindings]
   );
-  const guideAnchors = useMemo<ReviewAnchors>(
-    () => ({ findings: guideFindingAnchors, discussions: guideDiscussionAnchors, comments: anchorReviewComments(guideFiles, guideComments) }),
-    [guideComments, guideDiscussionAnchors, guideFiles, guideFindingAnchors]
+  const layoutDiscussions = useMemo(
+    () => asArrived(guideDiscussions, (discussion) => {
+      const open = arrival.discussions.get(discussion.id);
+      return open !== undefined && open !== discussion.open ? { ...discussion, open } : discussion;
+    }),
+    [arrival, guideDiscussions]
   );
-  const guideLayout = useMemo<ReviewAnchors>(
-    () => ({ findings: guideFindingAnchors, discussions: guideDiscussionAnchors, comments: anchorReviewComments(guideFiles, guideLayoutComments) }),
-    [guideDiscussionAnchors, guideFiles, guideFindingAnchors, guideLayoutComments]
+  const layoutComments = useMemo(
+    () => (guideCurrent ? (roundComments.length ? [...roundComments, ...arrival.comments] : arrival.comments) : ownWalkthrough ? roundComments : NO_COMMENTS),
+    [arrival, guideCurrent, ownWalkthrough, roundComments]
   );
+  const guideLayout = useAnchors(guideFiles, layoutFindings, layoutDiscussions, discussionsOnGuideLines, layoutComments);
   const guideModel = useMemo(
     () => (walkthrough?.view.walkthrough && walkthrough.view.files ? buildGuide(walkthrough.view.walkthrough, walkthrough.view.files, guideLayout) : undefined),
     [guideLayout, walkthrough?.view.files, walkthrough?.view.walkthrough]
@@ -505,6 +512,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const guideOpen = guideModel && guideOpenState.key === guideModel.reviewRunId ? guideOpenState : NO_GUIDE_OPEN;
   const guideFeedback = useMemo(() => feedbackByFile(guideFiles, guideAnchors), [guideAnchors, guideFiles]);
   const guideSignatures = useMemo(() => new Map(guideFiles.map((file) => [file.id, diffFileSignature(file)])), [guideFiles]);
+  const guideGutterWidth = useMemo(() => reviewGutterWidth(guideFiles, false), [guideFiles]);
   const guideReading = useMemo(() => {
     if (!guideModel) {
       // Before a walkthrough, the Guide reads the Diff's files by folder, each folded to its head.
@@ -523,10 +531,10 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       anchors: guideAnchors,
       feedback: guideFeedback,
       signatures: guideSignatures,
-      gutterWidth: reviewGutterWidth(guideFiles, false),
+      gutterWidth: guideGutterWidth,
       foldedByDefault: (entry) => !guideModel.files.get(entry.file.id)?.file.shown
     });
-  }, [anchors, diffFeedback, files, folders, guideAnchors, guideFeedback, guideFiles, guideModel, guideOpen.groups, guideSignatures, gutterWidth, ordered, signatures]);
+  }, [anchors, diffFeedback, files, folders, guideAnchors, guideFeedback, guideFiles, guideGutterWidth, guideModel, guideOpen.groups, guideSignatures, gutterWidth, ordered, signatures]);
 
   // The mode the person last read this task in, else the Guide when its walkthrough is the code shown.
   const [chosenMode, setChosenMode] = useState<ReviewMode>(() => readReviewMode(props.taskId) ?? (guideCurrent ? 'guide' : 'diff'));
@@ -1175,8 +1183,40 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   };
 }
 
-const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };
+/** Where each kind of feedback sits in `files`, each kind placed again only when its own inputs change. */
+function useAnchors(
+  files: readonly DiffFile[],
+  findings: readonly ReviewFindingView[],
+  discussions: readonly DiscussionView[],
+  discussionsOnLines: boolean,
+  comments: readonly ReviewComment[]
+): ReviewAnchors {
+  const findingAnchors = useMemo(() => anchorReviewFindings(files, findings), [files, findings]);
+  const discussionAnchors = useMemo(() => anchorReviewDiscussions(files, discussions, discussionsOnLines), [discussions, discussionsOnLines, files]);
+  const commentAnchors = useMemo(() => anchorReviewComments(files, comments), [comments, files]);
+  return useMemo(
+    () => ({ findings: findingAnchors, discussions: discussionAnchors, comments: commentAnchors }),
+    [commentAnchors, discussionAnchors, findingAnchors]
+  );
+}
 
-function noWholeFile(): WholeFileState {
-  return NO_WHOLE_FILE;
+/** What was said when the person arrived at a walkthrough: each finding's state, whether each discussion was open, and the comments. */
+function arrivalOf(
+  key: string | undefined,
+  findings: readonly ReviewFindingView[],
+  discussions: readonly DiscussionView[],
+  comments: readonly ReviewComment[]
+) {
+  return {
+    key,
+    findings: new Map(findings.map((finding) => [finding.id, finding.state])),
+    discussions: new Map(discussions.map((discussion) => [discussion.id, discussion.open])),
+    comments
+  };
+}
+
+/** Each item as it was on arrival; the very list while none has changed since. */
+function asArrived<T>(items: readonly T[], arrived: (item: T) => T): readonly T[] {
+  const laid = items.map(arrived);
+  return laid.every((item, index) => item === items[index]) ? items : laid;
 }

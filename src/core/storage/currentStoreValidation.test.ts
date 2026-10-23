@@ -115,6 +115,17 @@ describe('validateCurrentStoreRecords', () => {
     expect(() => validateCurrentStoreRecords(withDecisions(Array.from({ length: 201 }, () => ({ ...accept, id: randomUUID() })))))
       .toThrow('tasks.projection contains a malformed record');
 
+    // A reply recorded before the answers named their items still loads; a later one names both its request and items.
+    const withAnswer = (requestAnswer: unknown) => {
+      const state = withDecisions([]);
+      state.tasks[0]!.projection.agentReview = { status: 'STALE', runId: reviewRunId, requestAnswer: requestAnswer as never };
+      return state;
+    };
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true }))).not.toThrow();
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true, instructionId: accept.instructionId, decisionItems: [2] }))).not.toThrow();
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true, instructionId: accept.instructionId })))
+      .toThrow('tasks.projection contains a malformed record');
+
     const eventState = createEmptyState();
     eventState.events = [{
       id: randomUUID(), type: 'REVIEW_REQUEST_ITEM_DECIDED' as const, taskId: randomUUID(),

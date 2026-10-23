@@ -4367,72 +4367,63 @@ export class SqliteTaskStore {
     });
   }
 
-  /**
-   * Records a decision on the current review's findings. `decide` runs inside the
-   * serialized mutation against the current task, so its checks and the recorded
-   * event cannot interleave with another change to the review. It throws to refuse.
-   */
+  /** Records a decision on the current review's findings. */
   async recordReviewFindingDecision(
     taskId: string,
     decide: (task: Task) => ReviewFindingDecision
   ): Promise<ReviewFindingDecision> {
-    return this.serializeMutation(async () => {
-      await this.init();
-      await this.refreshAgentRuntimeProjectionInternal();
-      const task = this.state.tasks.find((candidate) => candidate.id === taskId);
-      if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
-      const decision = decide(clone(task));
-      const review = task.projection.agentReview;
-      const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
-      if (!review || !reviewRun) throw new Error('This review is no longer current.');
-      if ((review.findingDecisions ?? []).length >= REVIEW_FINDING_DECISION_LIMIT) {
-        throw new Error('This review has reached its decision limit. Run the review again.');
-      }
-      await this.appendEventInternal(
-        createDomainEvent({
-          type: 'AGENT_REVIEW_FINDING_DECIDED',
-          taskId: task.id,
-          iterationId: reviewRun.iterationId,
-          worktreeId: reviewRun.worktreeId,
-          source: 'ui',
-          payload: { decision }
-        }),
-        false
-      );
-      await this.persistSnapshot();
-      return clone(decision);
+    return this.recordReviewDecision(taskId, {
+      type: 'AGENT_REVIEW_FINDING_DECIDED',
+      recorded: (review) => review.findingDecisions,
+      limit: REVIEW_FINDING_DECISION_LIMIT,
+      decide: (task) => decide(clone(task))
     });
   }
 
-  /**
-   * Records the person's decision on the agent's answer to a request item. `decide`
-   * runs inside the serialized mutation against the task, its messages and its
-   * runs as they are now, so its checks and the recorded event cannot interleave
-   * with a new request or a new review. It throws to refuse.
-   */
+  /** Records the person's decision on the agent's answer to a request item, against the task's messages and runs. */
   async recordReviewRequestItemDecision(
     taskId: string,
     decide: (task: Task, messages: readonly TaskInstruction[], runs: readonly RunRecord[]) => ReviewRequestItemDecision
   ): Promise<ReviewRequestItemDecision> {
+    return this.recordReviewDecision(taskId, {
+      type: 'REVIEW_REQUEST_ITEM_DECIDED',
+      recorded: (review) => review.requestItemDecisions,
+      limit: REVIEW_REQUEST_ITEM_DECISION_LIMIT,
+      decide: (task) => decide(
+        clone(task),
+        clone(this.state.taskInstructions.filter((message) => message.taskId === task.id)),
+        clone(this.state.runs.filter((run) => run.taskId === task.id))
+      )
+    });
+  }
+
+  /**
+   * Records a decision of the person's on the current review. `decide` runs
+   * inside the serialized mutation against the task as it is now, so its checks
+   * and the recorded event cannot interleave with a new request or a new review.
+   * It throws to refuse, as a review past its decision limit does.
+   */
+  private recordReviewDecision<T>(taskId: string, input: {
+    type: 'AGENT_REVIEW_FINDING_DECIDED' | 'REVIEW_REQUEST_ITEM_DECIDED';
+    recorded(review: NonNullable<Task['projection']['agentReview']>): readonly unknown[] | undefined;
+    limit: number;
+    decide(task: Task): T;
+  }): Promise<T> {
     return this.serializeMutation(async () => {
       await this.init();
       await this.refreshAgentRuntimeProjectionInternal();
       const task = this.state.tasks.find((candidate) => candidate.id === taskId);
       if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
-      const decision = decide(
-        clone(task),
-        clone(this.state.taskInstructions.filter((message) => message.taskId === task.id)),
-        clone(this.state.runs.filter((run) => run.taskId === task.id))
-      );
+      const decision = input.decide(task);
       const review = task.projection.agentReview;
       const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
       if (!review || !reviewRun) throw new Error('This review is no longer current.');
-      if ((review.requestItemDecisions ?? []).length >= REVIEW_REQUEST_ITEM_DECISION_LIMIT) {
+      if ((input.recorded(review) ?? []).length >= input.limit) {
         throw new Error('This review has reached its decision limit. Run the review again.');
       }
       await this.appendEventInternal(
         createDomainEvent({
-          type: 'REVIEW_REQUEST_ITEM_DECIDED',
+          type: input.type,
           taskId: task.id,
           iterationId: reviewRun.iterationId,
           worktreeId: reviewRun.worktreeId,

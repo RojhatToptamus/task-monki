@@ -45,11 +45,18 @@ export function selectionRange(block: Pick<DiffBlock, 'lines'>, chosen: { start:
  * `data-line-anchor`: a removed line its old number, any other its new one.
  */
 export function lineAnchor(path: string, side: 'NEW' | 'OLD', line: number): string {
-  return `${normalizeReviewPath(path)}:${side === 'OLD' ? 'o' : 'n'}${line}`;
+  return fileLineAnchor(path)(side, line);
 }
 
+/** `lineAnchor` for the lines of one file, its path read once. */
+export function fileLineAnchor(path: string): (side: 'NEW' | 'OLD', line: number) => string {
+  const prefix = `${normalizeReviewPath(path)}:`;
+  return (side, line) => `${prefix}${side === 'OLD' ? 'o' : 'n'}${line}`;
+}
+
+/** A path as the diff writes it, whichever separators and leading "./" it came with. */
 export function normalizeReviewPath(path: string): string {
-  return path.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[ab]\//, '');
+  return path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
 /**
@@ -79,7 +86,10 @@ export function anchorReviewFindings(
   };
 
   for (const finding of findings) {
-    const file = finding.path ? filesByPath.get(normalizeReviewPath(finding.path)) : undefined;
+    // The agent writes a finding's path, at times as a diff header names it ("b/src/a.ts"); a real
+    // directory named a or b wins over that reading.
+    const path = finding.path ? normalizeReviewPath(finding.path) : undefined;
+    const file = path ? filesByPath.get(path) ?? filesByPath.get(path.replace(/^[ab]\//u, '')) : undefined;
     if (!file) {
       general.push(finding);
       continue;
