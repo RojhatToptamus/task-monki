@@ -4,6 +4,7 @@ import { isBlockingFinding, type WorktreeRecord } from '../../shared/contracts';
 import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import { discussionAuthor, discussionSummary, type DiscussionView } from '../model/pullRequestFeedback';
 import type { WholeFileState } from '../model/reviewContext';
+import type { ReviewAnchors } from '../model/reviewReading';
 import { buildReviewDiffRows, lineAnchorKey, reviewRowRange, selectionRange, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
 import { DiffStat } from './DiffStat';
@@ -15,7 +16,7 @@ import { ReviewGap } from './ReviewGap';
 import { ReviewLine } from './ReviewLine';
 import { Tooltip } from './Tooltip';
 import { useDiffSyntax } from './useSyntaxLines';
-import { useReviewActions, type LineSelection, type ReviewAnchors } from './useReviewModel';
+import { useReviewActions, type LineSelection } from './useReviewModel';
 
 /** A run of one block's rows shown on its own, by line identity (`diffLineId`), under its caption. */
 export interface ReviewFileSegment {

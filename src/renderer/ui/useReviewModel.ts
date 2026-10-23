@@ -17,7 +17,7 @@ import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
 import type { WholeFileState } from '../model/reviewContext';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
-import { feedbackOrder, type FeedbackRef, type ReviewMode } from '../model/reviewNavigation';
+import type { ReviewMode } from '../model/reviewNavigation';
 import { orderReviewFiles, reviewFileRole, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import {
   readBriefFolded,
@@ -29,12 +29,12 @@ import {
   writeReviewMode,
   writeViewedFiles
 } from '../model/reviewPreferences';
+import { NO_GUIDE_OPEN, feedbackByFile, openInGuide, readingOf, type GuideOpen, type ReviewAnchors, type ReviewReading } from '../model/reviewReading';
 import { buildGuide, filesByFolder, guideReadingOrder, guideReveal, walkthroughUnavailableWords, type GuideModel } from '../model/reviewWalkthrough';
 import {
   anchorReviewComments,
   anchorReviewDiscussions,
   anchorReviewFindings,
-  buildReviewIndex,
   diffFileSignature,
   diffLineId,
   filesChangedSinceReview,
@@ -43,16 +43,14 @@ import {
   normalizeReviewPath,
   reviewGutterWidth,
   selectionRange,
-  type AnchoredComments,
-  type AnchoredDiscussions,
-  type AnchoredFindings,
   type ReviewFindingView
 } from '../model/reviewWorkspace';
 import type { ReviewBriefContent } from './ReviewBrief';
 import type { ReviewFinishAction, ReviewRequestAction } from './ReviewRequest';
 import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { useNotify } from './NotifyContext';
-import { scrollTopFor, stopTravel, travel } from './travel';
+import { landing, linesOf, quoted, readPlace } from './reviewPlace';
+import { stopTravel, travel } from './travel';
 import { useDiffArtifact } from './useDiffArtifact';
 import { useReviewChanges } from './useReviewChanges';
 import { useReviewContext } from './useReviewContext';
@@ -182,13 +180,6 @@ export interface CommentDraft {
   line?: number;
   endLine?: number;
   editingId?: string;
-}
-
-/** Where each kind of feedback sits in the files. */
-export interface ReviewAnchors {
-  findings: AnchoredFindings;
-  discussions: AnchoredDiscussions<DiscussionView>;
-  comments: AnchoredComments;
 }
 
 /** What a band reflects: what has focus, what is in the request, what is being written. */
@@ -356,51 +347,19 @@ export interface GuideView {
   outside: { findings: readonly ReviewFindingView[]; discussions: readonly DiscussionView[] };
 }
 
-/**
- * The files one mode reads, where its feedback sits, and the order its keys go:
- * the Diff's captured files, or the walkthrough's (the code the review read).
- */
-interface ReviewReading {
-  files: DiffFile[];
-  filesById: ReadonlyMap<string, DiffFile>;
-  /** Every file, in the mode's reading order. */
-  ordered: OrderedReviewFile[];
-  /** The files J and K step through. */
-  fileIds: string[];
-  anchors: ReviewAnchors;
-  findingsByFile: ReadonlyMap<string, ReviewFindingView[]>;
-  discussionsByFile: ReadonlyMap<string, DiscussionView[]>;
-  openFindingsByFile: ReadonlyMap<string, ReviewFindingView[]>;
-  openDiscussionsByFile: ReadonlyMap<string, DiscussionView[]>;
-  /** N and P. */
-  feedback: FeedbackRef[];
-  /** Each file's change as this mode reads it (`diffFileSignature`). */
-  signatures: ReadonlyMap<string, string>;
-  /** Folded until the person opens it, besides a viewed file. */
-  foldedByDefault(entry: OrderedReviewFile): boolean;
-  gutterWidth: number;
-}
-
 /** A filter the Diff takes from a stage: its files only. */
 interface DiffFilter { title: string; fileIds: ReadonlySet<string> }
-
-interface GuideOpen { key?: string; groups: ReadonlySet<number>; more: ReadonlySet<string> }
 
 const NO_FINDINGS: ReviewFindingView[] = [];
 const NO_DISCUSSIONS: DiscussionView[] = [];
 const NO_COMMENTS: ReviewComment[] = [];
 const NO_FILES: DiffFile[] = [];
-const NO_GUIDE_OPEN: GuideOpen = { groups: new Set(), more: new Set() };
 /** A file shown alone moves to the top of the column, and back to its place. */
 const FILE_MOTION: ExpandMotion = { duration: '--motion-move', easing: '--ease-in-out' };
 /** The file being read is the topmost one in the scroller's top 30%. */
 const READING_BAND = (scroller: HTMLElement) => scroller.clientHeight * 0.3;
 /** The stage being read is the one at the scroller's top. */
 const STAGE_BAND = () => 40;
-/** About six lines of the code a band is about stay above it when it is moved to. */
-const BAND_CONTEXT = 120;
-/** Lines moved to keep three lines above them. */
-const LINE_CONTEXT = 60;
 /** A file viewed keeps the signatures of its last few changes. */
 const VIEWED_SIGNATURES = 4;
 
@@ -410,108 +369,6 @@ export const SCOPE_LABELS: Record<ReviewScope, string> = {
   uncommitted: 'Uncommitted',
   'since-review': 'Since the review'
 };
-
-/**
- * Where travel to an element leaves it: a file's head at the sticky line; a
- * stage just past its seam, so the seam never doubles the bar's line; a band or
- * lines under their file's stuck head, with code above them, never above the
- * file's own head.
- */
-function landing(scroller: HTMLElement, element: HTMLElement): number {
-  if (element.hasAttribute('data-stage')) return scrollTopFor(scroller, element) + 1;
-  const file = element.closest<HTMLElement>('[data-file-id]');
-  if (file === element) return scrollTopFor(scroller, element);
-  const context = element.hasAttribute('data-line-anchor') ? LINE_CONTEXT : BAND_CONTEXT;
-  if (!file) return scrollTopFor(scroller, element, context);
-  const head = file.querySelector('.tm-review-file__head')?.getBoundingClientRect().height ?? 0;
-  return Math.max(scrollTopFor(scroller, file), scrollTopFor(scroller, element, head + context));
-}
-
-/** An attribute value inside a selector's quotes. */
-function quoted(value: string): string {
-  return `"${value.replace(/["\\]/g, '\\$&')}"`;
-}
-
-/** Rows of a file by their place (`lineAnchor`): every block's, latest last. */
-function linesOf(scope: ParentNode, anchors: readonly string[]): HTMLElement[] {
-  return anchors.flatMap((anchor) => [...scope.querySelectorAll<HTMLElement>(`[data-line-anchor=${quoted(anchor)}]`)]);
-}
-
-/**
- * The place being read in a scroller: the file under way, and the first of its
- * lines under its head, with how far from the scroller's top it is; a mode
- * switch puts the same line at the same height. Above the files, such as on
- * the overview or the brief, no file is under way, whichever was read last.
- */
-function readPlace(scroller: HTMLElement, fileId: string | undefined): { fileId: string; lineAnchor?: string; offset: number } | undefined {
-  const file = fileId ? [...scroller.querySelectorAll<HTMLElement>(`[data-file-id=${quoted(fileId)}]`)].find((element) => !element.hidden) : undefined;
-  if (!fileId || !file) return undefined;
-  const top = scroller.getBoundingClientRect().top + scroller.clientTop;
-  const bottom = top + scroller.clientHeight;
-  const line = Math.max(top, file.querySelector('.tm-review-file__head')?.getBoundingClientRect().bottom ?? top);
-  const row = [...file.querySelectorAll<HTMLElement>('[data-line-anchor]')].find((candidate) => {
-    const box = candidate.getBoundingClientRect();
-    return box.bottom > line + 1 && box.top < bottom;
-  });
-  if (row?.dataset.lineAnchor) return { fileId, lineAnchor: row.dataset.lineAnchor, offset: row.getBoundingClientRect().top - top };
-  const box = file.getBoundingClientRect();
-  return box.bottom > top && box.top < bottom ? { fileId, offset: Math.max(0, box.top - top) } : undefined;
-}
-
-/** What each file holds of the feedback anchored in the files, and what of it still asks for something. */
-function feedbackByFile(files: readonly DiffFile[], anchors: ReviewAnchors) {
-  const findingsByFile = new Map(buildReviewIndex(files, anchors.findings).map((entry) => [entry.file.id, entry.findings]));
-  const discussionsByFile = new Map(files.map((file) => [file.id, [
-    ...(anchors.discussions.byFile.get(file.id) ?? []),
-    ...file.blocks.flatMap((block) => block.lines.flatMap((line, index) => anchors.discussions.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []))
-  ]]));
-  return {
-    findingsByFile,
-    discussionsByFile,
-    // A file's head says what still asks for something, and a folded file keeps a row for each.
-    openFindingsByFile: new Map([...findingsByFile].map(([fileId, list]) => [fileId, list.filter((finding) => finding.state === 'OPEN')])),
-    openDiscussionsByFile: new Map([...discussionsByFile].map(([fileId, list]) => [fileId, list.filter((discussion) => discussion.open)]))
-  };
-}
-
-function readingOf({ files, ordered, fileIds, anchors, feedback, signatures, gutterWidth, foldedByDefault }: {
-  files: DiffFile[];
-  ordered: OrderedReviewFile[];
-  fileIds?: string[];
-  anchors: ReviewAnchors;
-  feedback: ReturnType<typeof feedbackByFile>;
-  signatures: ReadonlyMap<string, string>;
-  gutterWidth: number;
-  foldedByDefault(entry: OrderedReviewFile): boolean;
-}): ReviewReading {
-  const order = ordered.map((entry) => entry.file.id);
-  return {
-    files,
-    filesById: new Map(files.map((file) => [file.id, file])),
-    ordered,
-    fileIds: fileIds ?? order,
-    anchors,
-    ...feedback,
-    // N and P step through what still asks for something, in reading order.
-    feedback: feedbackOrder({
-      general: { findings: anchors.findings.general, discussions: anchors.discussions.general },
-      files: order,
-      findingsByFile: feedback.findingsByFile,
-      discussionsByFile: feedback.discussionsByFile
-    }),
-    signatures,
-    foldedByDefault,
-    gutterWidth
-  };
-}
-
-/** Opens a stage's other files, or a file's other changes, in the Guide state kept for one walkthrough. */
-function openInGuide(state: GuideOpen, key: string, open: { group?: number; more?: string }): GuideOpen {
-  const current = state.key === key ? state : { ...NO_GUIDE_OPEN, key };
-  const groups = open.group === undefined || current.groups.has(open.group) ? current.groups : new Set([...current.groups, open.group]);
-  const more = open.more === undefined || current.more.has(open.more) ? current.more : new Set([...current.more, open.more]);
-  return groups === current.groups && more === current.more && state.key === key ? state : { key, groups, more };
-}
 
 interface PendingTravel {
   /** What to move to; none moves to the top. */
