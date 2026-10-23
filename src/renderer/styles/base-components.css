@@ -1021,6 +1021,12 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .tm-action-menu__meta { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: var(--t-meta); white-space: nowrap; }
 .tm-action-menu__meta[data-tone='blocked'] { color: var(--blocked-ink); }
 .tm-action-menu__item[data-disabled] .tm-action-menu__meta { color: var(--text-disabled); }
+/* A row's lead, such as a stage's number, on its first line; the row where the person is now is selected. */
+.tm-action-menu__lead { flex: 0 0 auto; align-self: flex-start; min-width: 2ch; color: var(--faint); font-variant-numeric: tabular-nums; text-align: right; }
+.tm-action-menu__item[aria-current='true'] { background: var(--sel); }
+/* The widest menu: a long label wraps to a second line rather than being cut. */
+.tm-action-menu__popover--wide { width: 280px; }
+.tm-action-menu__popover--wide .tm-action-menu__line > span:first-child { display: -webkit-box; overflow: hidden; white-space: normal; text-wrap: pretty; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .tm-action-menu__separator { height: 1px; margin: 4px 2px; background: var(--hair); }
 .tm-action-menu__note { margin: 0; padding: 5px 8px 4px; color: var(--muted); font-size: var(--t-meta); line-height: 1.4; }
 /* A submenu row: its chevron sits where a check would, and the row stays lit while its submenu is open. */
@@ -1102,12 +1108,13 @@ input[type='checkbox']:not(.tm-visually-hidden):checked:disabled {
 .app-shell .tm-listrail__search input:focus { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font: var(--t-help) var(--font-ui); }
 .tm-listrail__filter { margin: 0 8px 12px; }
 .tm-listrail__list { min-height: 0; flex: 1; overflow-y: auto; padding: 0 0 12px 8px; scrollbar-gutter: stable; }
-.tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: var(--h-row-tall); margin: 1px 0; padding: 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
+/* Two whole-pixel lines and the gap between them fill the 48px row exactly: 6 + 16 + 4 + 16 + 6. */
+.tm-listrail__item { display: grid; gap: 4px; width: 100%; min-height: var(--h-row-tall); margin: 1px 0; padding: 6px 8px; border: 0; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; }
 .tm-listrail__item:hover { background-color: var(--hover); }
 .tm-listrail__item--active,
 .tm-listrail__item--active:hover { background: var(--sel); color: var(--text); }
 .tm-listrail__item-title { min-width: 0; overflow: hidden; font-size: var(--t-help); font-weight: var(--w-medium); line-height: var(--lh-meta); text-overflow: ellipsis; white-space: nowrap; }
-.tm-listrail__item-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--t-meta); }
+.tm-listrail__item-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--t-meta); line-height: var(--lh-meta); }
 .tm-listrail__item-meta time { margin-left: auto; font-variant-numeric: tabular-nums; }
 .tm-listrail__item-meta [data-tone='working'] { color: var(--accent-ink); }
 .tm-listrail__item-meta [data-tone='waiting'] { color: var(--waiting-ink); }

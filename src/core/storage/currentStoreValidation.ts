@@ -7,6 +7,8 @@ import {
   REVIEW_FINDING_DECISION_LIMIT,
   REVIEW_FINDING_DISMISS_REASONS,
   REVIEW_FINDING_TEXT_MAX_LENGTH,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   isTaskCreationToken,
   reviewDraftProblem
@@ -15,6 +17,7 @@ import type { AgentRunMode, AgentSessionRole } from '../../shared/agent';
 import { PULL_REQUEST_FEEDBACK_LIMITS, PULL_REQUEST_REVIEWER_STATES } from '../../shared/pullRequestFeedback';
 import { parseRemoteRepositoryUrl } from '../../shared/remoteWork';
 import { assertReviewRequestRecord } from '../../shared/reviewRounds';
+import { REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS } from '../../shared/reviewWalkthrough';
 import type { StoreState } from '../projection/reducer';
 
 const WORKFLOW_PHASES = [
@@ -1113,6 +1116,9 @@ function validateEvents(state: StoreState): void {
     if (event.type === 'AGENT_REVIEW_FINDING_DECIDED') {
       validateReviewFindingDecision(persistedRecord(event.payload, 'events').decision, 'events');
     }
+    if (event.type === 'REVIEW_REQUEST_ITEM_DECIDED') {
+      validateReviewRequestItemDecision(persistedRecord(event.payload, 'events').decision, 'events');
+    }
   });
 }
 
@@ -1319,9 +1325,19 @@ function projection(value: unknown): void {
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
     if (review.requestAnswer !== undefined) {
-      booleanField(persistedRecord(review.requestAnswer, 'tasks.projection'), 'awaitingDecision', 'tasks.projection');
+      const answer = persistedRecord(review.requestAnswer, 'tasks.projection');
+      booleanField(answer, 'awaitingDecision', 'tasks.projection');
+      // A reply recorded before migration 14 holds neither; a later one, both.
+      if (answer.instructionId !== undefined || answer.decisionItems !== undefined) {
+        uuidField(answer, 'instructionId', 'tasks.projection');
+        if (!Array.isArray(answer.decisionItems) ||
+          answer.decisionItems.some((item) => !Number.isSafeInteger(item) || (item as number) < 1 || (item as number) > REVIEW_REQUEST_ITEM_LIMIT)) {
+          invalid('tasks.projection');
+        }
+      }
     }
     if (review.result !== undefined) reviewResult(review.result);
+    if (review.walkthrough !== undefined) reviewWalkthrough(review.walkthrough);
     if (review.findingDecisions !== undefined) {
       if (
         !Array.isArray(review.findingDecisions) ||
@@ -1329,6 +1345,15 @@ function projection(value: unknown): void {
       ) invalid('tasks.projection');
       for (const decision of review.findingDecisions) {
         validateReviewFindingDecision(decision, 'tasks.projection');
+      }
+    }
+    if (review.requestItemDecisions !== undefined) {
+      if (
+        !Array.isArray(review.requestItemDecisions) ||
+        review.requestItemDecisions.length > REVIEW_REQUEST_ITEM_DECISION_LIMIT
+      ) invalid('tasks.projection');
+      for (const decision of review.requestItemDecisions) {
+        validateReviewRequestItemDecision(decision, 'tasks.projection');
       }
     }
   }
@@ -1363,6 +1388,20 @@ function reviewResult(value: unknown): void {
   }
 }
 
+/** A stored walkthrough names its review run, artifact and counts; an unavailable one, only why. */
+function reviewWalkthrough(value: unknown): void {
+  const collection = 'tasks.projection';
+  const walkthrough = persistedRecord(value, collection);
+  enumField(walkthrough, 'status', ['STORED', 'UNAVAILABLE'] as const, collection);
+  if (walkthrough.status === 'UNAVAILABLE') {
+    enumField(walkthrough, 'reason', REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS, collection);
+    if (Object.keys(walkthrough).some((key) => !['status', 'reason'].includes(key))) invalid(collection);
+    return;
+  }
+  uuidFields(walkthrough, collection, ['reviewRunId', 'artifactId']);
+  if (Object.keys(walkthrough).some((key) => !['status', 'reviewRunId', 'artifactId'].includes(key))) invalid(collection);
+}
+
 /** A dismissal carries its reason and, optionally, a note; a restore carries neither. */
 function validateReviewFindingDecision(value: unknown, collection: string): void {
   const decision = persistedRecord(value, collection);
@@ -1379,6 +1418,19 @@ function validateReviewFindingDecision(value: unknown, collection: string): void
     stringField(decision, 'note', collection);
     if ((decision.note as string).length > REVIEW_FINDING_TEXT_MAX_LENGTH) invalid(collection);
   }
+}
+
+/** A decision on an answer names its review, the message that carried the request, and the item's number. */
+function validateReviewRequestItemDecision(value: unknown, collection: string): void {
+  const decision = persistedRecord(value, collection);
+  if (Object.keys(decision).some((key) => !['id', 'reviewRunId', 'instructionId', 'item', 'kind', 'createdAt'].includes(key))) {
+    invalid(collection);
+  }
+  uuidFields(decision, collection, ['id', 'reviewRunId', 'instructionId']);
+  integer(decision, 'item', collection, 1);
+  if ((decision.item as number) > REVIEW_REQUEST_ITEM_LIMIT) invalid(collection);
+  enumField(decision, 'kind', ['ACCEPT', 'REOPEN'] as const, collection);
+  timestamp(decision, 'createdAt', collection);
 }
 
 /**
@@ -1414,23 +1466,44 @@ export function validateTaskInstructionConversation(instruction: Record<string, 
   }
 }
 
-/** An Ask subject: a finding of a review, or a line range of the diff. */
+/**
+ * An Ask subject: a finding of a review, a line range of the diff, a section of
+ * a review's walkthrough, a changed file, or a thread of the pull request.
+ */
 function askSubject(value: unknown): void {
   const collection = 'taskInstructions';
   const subject = persistedRecord(value, collection);
-  enumField(subject, 'kind', ['FINDING', 'LINES'] as const, collection);
-  if (subject.kind === 'FINDING') {
-    uuidField(subject, 'reviewRunId', collection);
-    stringField(subject, 'findingId', collection);
-    if (Object.keys(subject).some((key) => !['kind', 'reviewRunId', 'findingId'].includes(key))) invalid(collection);
-    return;
+  enumField(subject, 'kind', ['FINDING', 'LINES', 'STAGE', 'FILE', 'THREAD'] as const, collection);
+  const keys: Record<string, readonly string[]> = {
+    FINDING: ['kind', 'reviewRunId', 'findingId'],
+    LINES: ['kind', 'path', 'side', 'line', 'endLine'],
+    STAGE: ['kind', 'reviewRunId', 'section'],
+    FILE: ['kind', 'path'],
+    THREAD: ['kind', 'discussionId']
+  };
+  if (Object.keys(subject).some((key) => !keys[subject.kind as string]!.includes(key))) invalid(collection);
+  switch (subject.kind) {
+    case 'FINDING':
+      uuidField(subject, 'reviewRunId', collection);
+      stringField(subject, 'findingId', collection);
+      return;
+    case 'LINES':
+      stringField(subject, 'path', collection);
+      enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
+      integer(subject, 'line', collection, 1);
+      optionalInteger(subject, 'endLine', collection, 1);
+      if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
+      return;
+    case 'STAGE':
+      uuidField(subject, 'reviewRunId', collection);
+      integer(subject, 'section', collection, 0);
+      return;
+    case 'FILE':
+      stringField(subject, 'path', collection);
+      return;
+    case 'THREAD':
+      stringField(subject, 'discussionId', collection);
   }
-  stringField(subject, 'path', collection);
-  enumField(subject, 'side', ['NEW', 'OLD'] as const, collection);
-  integer(subject, 'line', collection, 1);
-  optionalInteger(subject, 'endLine', collection, 1);
-  if (subject.endLine !== undefined && (subject.endLine as number) <= (subject.line as number)) invalid(collection);
-  if (Object.keys(subject).some((key) => !['kind', 'path', 'side', 'line', 'endLine'].includes(key))) invalid(collection);
 }
 
 /** A task's issue or pull request, checked before the task is stored. */

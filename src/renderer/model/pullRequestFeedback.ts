@@ -1,8 +1,9 @@
 import {
+  discussionCommentText,
   discussionSummary,
+  discussionTranscript,
   isOpenDiscussion,
   type DomainEvent,
-  type RemoteWorkComment,
   type PullRequestDiscussion,
   type PullRequestFeedback,
   type PullRequestFeedbackSummary,
@@ -12,20 +13,25 @@ import {
   type ReviewResponseAnswer,
   type ReviewResponseOutcome
 } from '../../shared/contracts';
-import { INVISIBLE_CHARACTERS, displayPlatformText } from '../../shared/remoteWork';
+import { INVISIBLE_CHARACTERS } from '../../shared/remoteWork';
+import type { DiffFile } from './diffEvidence';
 import { formatCommentLocation, listNames } from './formatting';
+import { normalizeReviewPath } from './reviewWorkspace';
 
-/** A discussion's one-line summary sits with the feedback contract; the Review tab's rows read it from here. */
-export { discussionSummary };
+/** A discussion's summary, a comment's text and its transcript sit with the feedback contract; the Review tab reads them from here. */
+export { discussionCommentText, discussionSummary, discussionTranscript };
 
 /** What became of a discussion the person sent to the agent. */
 interface DiscussionSent {
   at: string;
+  /** The review the request followed. */
+  reviewRunId?: string;
   /** Its latest comment when sent, in the platform's clock. */
   seenAt?: string;
-  /** The agent's answer, once its reply gave one. */
+  /** The agent's answer, once its reply gave one, and when the reply finished. */
   outcome?: ReviewResponseOutcome;
   note?: string;
+  answeredAt?: string;
 }
 
 /** A pull request discussion as the Review tab shows it. */
@@ -41,13 +47,17 @@ export interface DiscussionView extends PullRequestDiscussion {
 
 /** A request the person sent and the agent's answers to it. */
 export interface ReviewRequestRound {
+  /** The message that carried it. */
+  instructionId: string;
   at: string;
   request: ReviewRequestRecord;
   answers: readonly ReviewResponseAnswer[];
+  /** When the agent's reply finished; absent while it runs. */
+  answeredAt?: string;
 }
 
 /** The discussions each request sent; a later request supersedes an earlier one. */
-export function sentDiscussions(rounds: readonly ReviewRequestRound[]): Map<string, DiscussionSent> {
+export function sentDiscussions(rounds: readonly Omit<ReviewRequestRound, 'instructionId'>[]): Map<string, DiscussionSent> {
   const sent = new Map<string, DiscussionSent>();
   for (const round of [...rounds].sort((left, right) => time(left.at) - time(right.at))) {
     const answers = new Map(round.answers.map((answer) => [answer.item, answer]));
@@ -56,8 +66,13 @@ export function sentDiscussions(rounds: readonly ReviewRequestRound[]): Map<stri
       const answer = answers.get(item.number);
       sent.set(item.discussionId, {
         at: round.at,
+        ...(round.request.reviewRunId ? { reviewRunId: round.request.reviewRunId } : {}),
         ...(item.seenAt ? { seenAt: item.seenAt } : {}),
-        ...(answer ? { outcome: answer.outcome, ...(answer.note ? { note: answer.note } : {}) } : {})
+        ...(answer ? {
+          outcome: answer.outcome,
+          ...(answer.note ? { note: answer.note } : {}),
+          ...(round.answeredAt ? { answeredAt: round.answeredAt } : {})
+        } : {})
       });
     }
   }
@@ -99,7 +114,7 @@ export function buildDiscussionViews(
   });
 }
 
-/** An answer to a discussion, ready for the person to post where the discussion lives. */
+/** A discussion the agent answered, for the person to reply to where the discussion lives. */
 export interface ReplyDraft {
   discussionId: string;
   kind: PullRequestDiscussion['kind'];
@@ -108,10 +123,28 @@ export interface ReplyDraft {
   summary: string;
   location?: string;
   outcome: 'FIXED' | 'NOT_CHANGED';
-  /** Written from the agent's answer; the person edits it before anything is posted. */
+  /** The agent's note on its answer, and when it answered: shown to the person, never posted. */
+  note?: string;
+  answeredAt?: string;
+  /**
+   * Where the person's reply starts: the fact "Changed in <head>." when the agent
+   * answered Fixed and the discussion's file changed since the review, otherwise
+   * nothing. The person writes the rest before anything is posted.
+   */
   body: string;
   /** A thread the reply can resolve. */
   resolvable: boolean;
+}
+
+/** The files changed since a review, by normalized path: what the replies to its request may say changed. */
+export interface ChangedSinceReview {
+  reviewRunId: string;
+  paths: ReadonlySet<string>;
+}
+
+/** The paths a diff changes, normalized; a renamed file under both its names. */
+export function changedPaths(files: readonly Pick<DiffFile, 'path' | 'oldPath'>[]): Set<string> {
+  return new Set(files.flatMap((file) => [file.path, ...(file.oldPath ? [file.oldPath] : [])].map(normalizeReviewPath)));
 }
 
 /**
@@ -133,15 +166,18 @@ export function repliedDiscussions(events: readonly DomainEvent[]): Map<string, 
 
 /**
  * Discussions the agent answered that no one has replied to on the platform
- * since: each answer becomes a reply the person can post. A fix names the head
- * it is in; a decision the agent left to the person is the person's to answer.
+ * since: each is a reply for the person to write. A public reply never repeats
+ * the agent: it starts from the one fact Task Monki observed, that a file the
+ * agent said it fixed changed since the review, named by the head that holds
+ * it. A decision the agent left to the person is the person's to answer.
  */
 export function buildReplyDrafts(
   discussions: readonly DiscussionView[],
   viewer: string | undefined,
   headSha: string | undefined,
   /** When the person answered each discussion from Task Monki, in this clock. */
-  replied: ReadonlyMap<string, string> = new Map()
+  replied: ReadonlyMap<string, string> = new Map(),
+  changed?: ChangedSinceReview
 ): ReplyDraft[] {
   return discussions.flatMap((discussion): ReplyDraft[] => {
     const sent = discussion.sent;
@@ -150,10 +186,8 @@ export function buildReplyDrafts(
     if (time(replied.get(discussion.id) ?? '') > time(sent.at)) return [];
     const since = time(sent.seenAt ?? sent.at);
     if (viewer && discussion.comments.some((comment) => comment.author === viewer && time(comment.createdAt) > since)) return [];
-    const note = sent.note?.trim();
-    const body = sent.outcome === 'FIXED'
-      ? [headSha ? `Fixed in ${headSha.slice(0, 7)}.` : 'Fixed.', note].filter(Boolean).join(' ')
-      : note ? `Not changed. ${note}` : 'Not changed.';
+    const fileChanged = Boolean(discussion.path && changed && sent.reviewRunId === changed.reviewRunId &&
+      changed.paths.has(normalizeReviewPath(discussion.path)));
     const location = formatDiscussionLocation(discussion);
     const author = discussionAuthor(discussion);
     return [{
@@ -163,7 +197,9 @@ export function buildReplyDrafts(
       summary: discussionSummary(discussion),
       ...(location ? { location } : {}),
       outcome: sent.outcome,
-      body,
+      ...(sent.note ? { note: sent.note } : {}),
+      ...(sent.answeredAt ? { answeredAt: sent.answeredAt } : {}),
+      body: sent.outcome === 'FIXED' && fileChanged && headSha ? `Changed in ${headSha.slice(0, 7)}.` : '',
       resolvable: discussion.resolvable && !discussion.resolved
     }];
   });
@@ -181,11 +217,6 @@ export function unaddressedDiscussions(discussions: readonly DiscussionView[]): 
 /** Who started a discussion. */
 export function discussionAuthor(discussion: Pick<PullRequestDiscussion, 'comments'>): string | undefined {
   return discussion.comments[0]?.author;
-}
-
-/** A comment as the person reads it in Task Monki, and so as an agent is sent it; never empty. */
-export function discussionCommentText(body: string): string {
-  return displayPlatformText(body) || '(No text: an image or other content only.)';
 }
 
 /** A comment's prose, and each change it suggests with the lines around its own that it also replaces. */
@@ -264,56 +295,6 @@ export function reviewWaitingLine(summary: Pick<PullRequestFeedbackSummary, 'rev
 
 function joinNames(names: readonly string[], verb: string): string | undefined {
   return names.length ? `${listNames(names)} ${verb}` : undefined;
-}
-
-const INSTRUCTION_DISCUSSION_LIMIT = 4_000;
-
-/**
- * A discussion as the agent reads it: who said what, oldest first, bounded.
- * Every comment is attributed; none is Task Monki's or the person's word.
- */
-export function discussionTranscript(
-  discussion: Pick<PullRequestDiscussion, 'comments' | 'commentCount'>,
-  /** The signed-in account: the person who sends the request. */
-  viewer?: string
-): string[] {
-  const lines: string[] = [];
-  const shown = discussion.comments.map((comment) => discussionCommentText(comment.body));
-  const allowed = fairShares(shown.map((text) => text.length), INSTRUCTION_DISCUSSION_LIMIT);
-  discussion.comments.forEach((comment: RemoteWorkComment, index) => {
-    const body = shown[index]!.slice(0, allowed[index]);
-    const cut = body.length < shown[index]!.length || comment.truncated;
-    const who = `@${comment.author ?? 'unknown'}${viewer && comment.author === viewer ? ', the person sending this request' : ''}`;
-    lines.push(`   ${index === 0 ? '' : 'Reply from '}${who}:`);
-    for (const line of body.split('\n')) lines.push(`   ${line}`);
-    if (cut) lines.push('   (The comment continues on the platform.)');
-    // The replies between the first comment and the latest ones were not read.
-    if (index === 0 && discussion.commentCount > discussion.comments.length) {
-      lines.push(`   (${discussion.commentCount - discussion.comments.length} replies in between are on the platform.)`);
-    }
-  });
-  return lines;
-}
-
-/**
- * A bound shared by several texts: a short one keeps all of it and the long ones
- * split the rest, so every text keeps at least an even share. The latest reply of
- * a long thread, where it ended, is never crowded out by its first comment.
- */
-function fairShares(lengths: readonly number[], limit: number): number[] {
-  const shares = lengths.map(() => 0);
-  let remaining = limit;
-  let open = lengths.map((_, index) => index).filter((index) => lengths[index]! > 0);
-  while (open.length > 0 && remaining >= open.length) {
-    const share = Math.floor(remaining / open.length);
-    for (const index of open) {
-      const take = Math.min(lengths[index]! - shares[index]!, share);
-      shares[index]! += take;
-      remaining -= take;
-    }
-    open = open.filter((index) => shares[index]! < lengths[index]!);
-  }
-  return shares;
 }
 
 function time(value: string | undefined): number {

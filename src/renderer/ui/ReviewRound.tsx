@@ -1,8 +1,18 @@
-import type { ReactNode } from 'react';
-import { remoteProviderName, type ReviewRequestItem, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/contracts';
+import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { Undo2 } from 'lucide-react';
+import {
+  remoteProviderName,
+  type ReviewRequestItem,
+  type ReviewRequestItemDecisionKind,
+  type ReviewRequestRecord,
+  type ReviewResponseAnswer,
+  type ReviewResponseOutcome
+} from '../../shared/contracts';
 import { findingLevel } from '../model/findings';
 import { REVIEW_OUTCOME_LABELS, requestItemLocation, requestItemText } from '../model/reviewRounds';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
+import { BAND } from './reviewPlace';
+import { AgentMark } from './UiIcons';
 
 /** A request sent from the Review tab, as it reads in the conversation: item by item, then the note. */
 export function ReviewRequestCard({ request, time }: { request: ReviewRequestRecord; time: string }) {
@@ -25,10 +35,15 @@ export function ReviewRequestCard({ request, time }: { request: ReviewRequestRec
   );
 }
 
-/** The agent's answer to each item of a request; an item it left out reads as unanswered. */
-export function ReviewAnswers({ request, answers, onShowItem }: {
+/**
+ * The agent's answer to each item of a request; an item it left out reads as
+ * unanswered, and one whose answer the person accepted reads as accepted.
+ */
+export function ReviewAnswers({ request, answers, accepted, onShowItem }: {
   request: ReviewRequestRecord;
   answers: readonly ReviewResponseAnswer[];
+  /** Items whose answer the person accepted. */
+  accepted?: ReadonlySet<number>;
   /** Shows the item where it is in the diff, on the Review tab. */
   onShowItem?(item: ReviewRequestItem): void;
 }) {
@@ -37,9 +52,10 @@ export function ReviewAnswers({ request, answers, onShowItem }: {
     <ol className="tm-round__items tm-round__answers" aria-label="Answers to the review request">
       {request.items.map((item) => {
         const answer = byItem.get(item.number);
+        const settled = Boolean(answer && accepted?.has(item.number));
         return (
-          <RoundItem key={item.number} item={item} outcome={answer?.outcome ?? 'NONE'} onShow={onShowItem}
-            lead={<span className="tm-round__outcome">{answer ? REVIEW_OUTCOME_LABELS[answer.outcome] : 'No answer'}</span>}>
+          <RoundItem key={item.number} item={item} outcome={settled ? 'ACCEPTED' : answer?.outcome ?? 'NONE'} onShow={onShowItem}
+            lead={<span className="tm-round__outcome">{settled ? 'Accepted' : answer ? REVIEW_OUTCOME_LABELS[answer.outcome] : 'No answer'}</span>}>
             {answer?.note ? <span className="tm-round__answer">{answer.note}</span> : null}
           </RoundItem>
         );
@@ -67,5 +83,105 @@ function RoundItem({ item, lead, outcome, onShow, children }: {
         {children}
       </span>
     </li>
+  );
+}
+
+/** The agent's answer to an item of the person's request, as the item's band shows it. */
+export interface ItemAnswer {
+  outcome: ReviewResponseOutcome;
+  note?: string;
+  /** Who answered, and when its reply finished. */
+  agent?: string;
+  at?: string;
+  /** The person accepted it, which settles the item. */
+  accepted: boolean;
+  /** Records the person's decision; absent when the answer takes none, such as one to an earlier request. */
+  onDecide?(kind: ReviewRequestItemDecisionKind): Promise<void>;
+  /** Puts the item in the person's request again, in their own words. */
+  onRequestAgain?(): void;
+}
+
+/** An item's state on its band's head: the agent's answer under its mark, or Accepted once the person settled it. */
+export function AnswerState({ answer }: { answer: Pick<ItemAnswer, 'outcome' | 'accepted'> }) {
+  return answer.accepted
+    ? <span className="tm-review-thread__round">Accepted</span>
+    : <span className="tm-review-thread__round tm-review-answer__state"><AgentMark />{REVIEW_OUTCOME_LABELS[answer.outcome]}</span>;
+}
+
+/** The agent's own words on an answer, quoted under its name and the time it answered. */
+export function AnswerQuote({ agent, at, note }: Pick<ItemAnswer, 'agent' | 'at'> & { note: string }) {
+  return (
+    <figure className="tm-review-answer__quote">
+      {agent || at ? (
+        <figcaption className="tm-review-answer__by">
+          {agent ? <span className="tm-review-answer__agent">{agent}</span> : null}
+          {at ? <MessageTime value={at} /> : null}
+        </figcaption>
+      ) : null}
+      <blockquote>{note}</blockquote>
+    </figure>
+  );
+}
+
+/**
+ * The person's decision on an answer: pending on its own control until it lands; the shell reports a failure.
+ * The control goes with the decision, as the item folds or opens, so the item's band takes the keys first.
+ */
+function useAnswerDecision(answer: ItemAnswer) {
+  const [pending, setPending] = useState(false);
+  const decide = async (kind: ReviewRequestItemDecisionKind, event: ReactMouseEvent<HTMLElement>) => {
+    if (!answer.onDecide || pending) return;
+    event.currentTarget.closest<HTMLElement>(BAND)?.focus({ preventScroll: true });
+    setPending(true);
+    try {
+      await answer.onDecide(kind);
+    } catch {
+      // The choice stays for another try.
+    } finally {
+      setPending(false);
+    }
+  };
+  return { pending, decide };
+}
+
+/**
+ * Under the item on its band: the agent's note, quoted, then the person's
+ * choices. The agent's word never settles an item, even Fixed: Accept answer
+ * does, and Reopen at the row's end takes it back. Add to request sends the
+ * item again.
+ */
+export function RequestItemAnswer({ answer }: { answer: ItemAnswer }) {
+  const { pending, decide } = useAnswerDecision(answer);
+  const choices = answer.accepted ? Boolean(answer.onDecide) : Boolean(answer.onDecide || answer.onRequestAgain);
+  if (!answer.note && !choices) return null;
+  return (
+    <div className="tm-review-answer">
+      {answer.note ? <AnswerQuote agent={answer.agent} at={answer.at} note={answer.note} /> : null}
+      {choices ? (
+        <div className="tm-review-answer__actions">
+          {answer.accepted ? <ReopenAnswer answer={answer} /> : (
+            <>
+              {answer.onDecide ? (
+                <button type="button" className="ghost-button button--sm" disabled={pending} onClick={(event) => void decide('ACCEPT', event)}>Accept answer</button>
+              ) : null}
+              {answer.onRequestAgain ? (
+                <button type="button" className="ghost-button button--sm" onClick={answer.onRequestAgain}>Add to request</button>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A settled item's way back, at the end of its row, where Restore sits on a dismissed finding. */
+export function ReopenAnswer({ answer }: { answer: ItemAnswer }) {
+  const { pending, decide } = useAnswerDecision(answer);
+  if (!answer.onDecide) return null;
+  return (
+    <button type="button" className="ghost-button tm-review-thread__undo" disabled={pending} onClick={(event) => void decide('REOPEN', event)}>
+      <Undo2 size={13} aria-hidden="true" />Reopen
+    </button>
   );
 }

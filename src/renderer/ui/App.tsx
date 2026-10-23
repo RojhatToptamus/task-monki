@@ -16,6 +16,7 @@ import {
   remoteWorkNoun,
   type CreateTaskRequest,
   type DecideReviewFindingRequest,
+  type DecideReviewRequestItemRequest,
   type ImportTaskRequest,
   type OpenPullRequestRequest,
   type CreateBoardRequest,
@@ -2416,6 +2417,18 @@ export function App() {
     }
   };
 
+  // Accepting the agent's answer to a request item, or reopening it, records the person's decision.
+  const decideReviewRequestItem = async (input: DecideReviewRequestItemRequest) => {
+    if (!selectedTask) return;
+    try {
+      await taskManagerApi.decideReviewRequestItem(input);
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, input.kind === 'ACCEPT' ? 'Could not accept the answer.' : 'Could not reopen the answer.');
+      throw caught;
+    }
+  };
+
   const startReview = async (runId?: string) => {
     setError(undefined);
     try {
@@ -3013,6 +3026,7 @@ export function App() {
             onRetry={retryRun}
             onReview={startReview}
             onDecideReviewFinding={decideReviewFinding}
+            onDecideReviewRequestItem={decideReviewRequestItem}
             onSyncAgentGoal={syncAgentGoal}
             onUpdateAgentNativeSession={updateAgentNativeSession}
             onRespondToInteraction={respondToInteraction}

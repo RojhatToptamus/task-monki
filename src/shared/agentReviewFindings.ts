@@ -1,3 +1,5 @@
+import type { ReviewWalkthroughState } from './reviewWalkthrough';
+
 /**
  * The agent review gate contract and the decisions recorded on its findings.
  *
@@ -46,7 +48,7 @@ export interface AgentReviewResolvedFinding {
 }
 
 export interface AgentReviewResult {
-  /** Durable schema-13 wire value for provider-neutral review artifacts. */
+  /** The stored result's shape, unchanged since schema 13; the walkthrough written with it is kept apart. */
   schemaVersion: 'agent-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
@@ -77,7 +79,18 @@ export interface AgentReviewGateProjection {
    * review, and whether an item waits on the person's decision. Cleared when the next
    * turn starts.
    */
-  requestAnswer?: { awaitingDecision: boolean };
+  requestAnswer?: ReviewRequestAnswerState;
+  /**
+   * The person's decisions on the agent's answers to their requests after this
+   * review, in the order they were made; absent before the first.
+   */
+  requestItemDecisions?: ReviewRequestItemDecision[];
+  /**
+   * The walkthrough the review wrote with its findings. A new review keeps a
+   * stored one, which names its own review, as earlier context until its own
+   * outcome replaces it.
+   */
+  walkthrough?: ReviewWalkthroughState;
   updatedAt?: string;
 }
 
@@ -110,6 +123,73 @@ export type ReviewFindingDecision =
     note?: string;
   })
   | (ReviewFindingDecisionBase & { kind: 'RESTORE' });
+
+/**
+ * The agent's reply to the person's latest request after a review: which items
+ * it left to them (`decisionItems`, of the request `instructionId`), and whether
+ * any of those still waits on them. Accepting each of those answers settles the
+ * wait (`awaitsDecision`). A reply recorded before SQLite migration 14 holds
+ * only whether it waits.
+ */
+export interface ReviewRequestAnswerState {
+  awaitingDecision: boolean;
+  instructionId?: string;
+  decisionItems?: number[];
+}
+
+/** Decisions on answers kept per review; a review that reaches it must be run again. */
+export const REVIEW_REQUEST_ITEM_DECISION_LIMIT = 200;
+
+export type ReviewRequestItemDecisionKind = 'ACCEPT' | 'REOPEN';
+
+/**
+ * The person's decision on the agent's answer to one item of a request they
+ * sent after a review. The agent's own answer, even Fixed, never settles an
+ * item: accepting it does, and reopening takes that back. Only the latest
+ * request after the review takes decisions.
+ */
+export interface ReviewRequestItemDecision {
+  id: string;
+  /** The review the request followed. */
+  reviewRunId: string;
+  /** The message that carried the request. */
+  instructionId: string;
+  /** The item's number in that request. */
+  item: number;
+  kind: ReviewRequestItemDecisionKind;
+  createdAt: string;
+}
+
+export interface DecideReviewRequestItemRequest {
+  taskId: string;
+  reviewRunId: string;
+  instructionId: string;
+  item: number;
+  kind: ReviewRequestItemDecisionKind;
+}
+
+/** The items of one request whose answer the person accepted, once every decision on it applies in order. */
+export function acceptedRequestItems(
+  decisions: readonly ReviewRequestItemDecision[],
+  instructionId: string
+): Set<number> {
+  const accepted = new Set<number>();
+  for (const decision of decisions) {
+    if (decision.instructionId !== instructionId) continue;
+    if (decision.kind === 'ACCEPT') accepted.add(decision.item);
+    else accepted.delete(decision.item);
+  }
+  return accepted;
+}
+
+/** An answer the agent left to the person is not accepted yet, by the decisions recorded so far, whenever they came. */
+export function awaitsDecision(
+  answer: Required<Pick<ReviewRequestAnswerState, 'instructionId' | 'decisionItems'>>,
+  decisions: readonly ReviewRequestItemDecision[]
+): boolean {
+  const accepted = acceptedRequestItems(decisions, answer.instructionId);
+  return answer.decisionItems.some((item) => !accepted.has(item));
+}
 
 export type ReviewFindingState = 'OPEN' | 'DISMISSED';
 

@@ -1,8 +1,12 @@
 import {
+  acceptedRequestItems,
   discussionSummary,
+  latestReviewRequest,
+  reviewRequestSent,
   type AgentItemRecord,
+  type AgentReviewGateProjection,
+  type ReviewComment,
   type ReviewRequestItem,
-  type ReviewRequestRecord,
   type ReviewResponseAnswer,
   type ReviewResponseOutcome,
   type RunRecord,
@@ -43,15 +47,18 @@ export function requestItemLocation(item: ReviewRequestItem): string | undefined
   return `${item.path}:${item.line}${item.endLine && item.endLine > item.line ? `-${item.endLine}` : ''}`;
 }
 
-/** A finished turn that answered a review request: the request and the agent's answers, if it gave them. */
-export function answeredReviewRound(turn: SessionTurn | undefined): { key: string; request: ReviewRequestRecord; answers: ReviewResponseAnswer[] } | undefined {
-  if (turn?.state !== 'completed' || turn.opener?.kind !== 'prompt' || !turn.opener.reviewRequest) return undefined;
-  const reply = [...turn.entries].reverse().find((entry) => entry.kind === 'message' && entry.answers);
-  return { key: turn.opener.key, request: turn.opener.reviewRequest, answers: reply?.kind === 'message' ? reply.answers ?? [] : [] };
+/** An answered item the person sends again starts their words with what it said, quoted, so the agent knows which one. */
+export function requestItemQuote(item: ReviewRequestItem): string {
+  const line = requestItemText(item).split('\n').map((value) => value.trim()).find(Boolean) ?? '';
+  return `> ${line.length > 160 ? `${line.slice(0, 159)}…` : line}`;
 }
 
-/** A request that reached the agent, or is on its way; a failed or held one did not. */
-const SENT_STATUSES = new Set<TaskInstruction['status']>(['SENDING', 'SUBMITTED', 'UNCERTAIN']);
+/** The agent's answers in a finished turn that answered a review request; none while it runs. */
+function turnAnswers(turn: SessionTurn): ReviewResponseAnswer[] {
+  if (turn.state !== 'completed' || turn.opener?.kind !== 'prompt' || !turn.opener.reviewRequest) return [];
+  const reply = [...turn.entries].reverse().find((entry) => entry.kind === 'message' && entry.answers);
+  return reply?.kind === 'message' ? reply.answers ?? [] : [];
+}
 
 /**
  * Every request sent from the Review tab, with the agent's answers once its turn
@@ -65,17 +72,92 @@ export function reviewRequestRounds(
   cache: Map<string, { fingerprint: string; answers: ReviewResponseAnswer[] }> = new Map()
 ): ReviewRequestRound[] {
   const all = [...instructions];
-  return instructions.flatMap((instruction) => {
-    if (!instruction.reviewRequest || !SENT_STATUSES.has(instruction.status)) return [];
+  return instructions.flatMap((instruction): ReviewRequestRound[] => {
+    if (!instruction.reviewRequest || !reviewRequestSent(instruction)) return [];
     const run = instruction.runId ? runs.find((candidate) => candidate.id === instruction.runId) : undefined;
-    let answers: ReviewResponseAnswer[] = [];
-    if (run?.status === 'COMPLETED') {
-      const fingerprint = `${run.endedAt}:${run.lastEventAt}:${run.eventCount}:${instruction.updatedAt}`;
-      const cached = cache.get(instruction.id);
-      answers = cached?.fingerprint === fingerprint ? cached.answers
-        : answeredReviewRound(sessionTurn(run, items, all))?.answers ?? [];
-      cache.set(instruction.id, { fingerprint, answers });
+    if (run?.status !== 'COMPLETED') {
+      return [{ instructionId: instruction.id, at: instruction.createdAt, request: instruction.reviewRequest, answers: [] }];
     }
-    return [{ at: instruction.createdAt, request: instruction.reviewRequest, answers }];
+    const fingerprint = `${run.endedAt}:${run.lastEventAt}:${run.eventCount}:${instruction.updatedAt}`;
+    const cached = cache.get(instruction.id);
+    const answers = cached?.fingerprint === fingerprint ? cached.answers : turnAnswers(sessionTurn(run, items, all));
+    cache.set(instruction.id, { fingerprint, answers });
+    return [{
+      instructionId: instruction.id,
+      at: instruction.createdAt,
+      request: instruction.reviewRequest,
+      answers,
+      answeredAt: run.endedAt ?? run.lastEventAt ?? run.startedAt
+    }];
   });
+}
+
+/**
+ * The person's latest request after the gate's review, once the agent's reply to
+ * it finished: the round the brief and the bands show answers for, and the items
+ * whose answer the person accepted. An earlier request, or one whose reply still
+ * runs, takes no decisions, so it has none.
+ */
+export interface ReviewRoundView extends ReviewRequestRound {
+  reviewRunId: string;
+  answeredAt: string;
+  accepted: ReadonlySet<number>;
+}
+
+export function currentReviewRound(
+  messages: readonly Pick<TaskInstruction, 'id' | 'reviewRequest' | 'status' | 'order'>[],
+  rounds: readonly ReviewRequestRound[],
+  gate: Pick<AgentReviewGateProjection, 'runId' | 'requestItemDecisions'> | undefined
+): ReviewRoundView | undefined {
+  if (!gate?.runId) return undefined;
+  const latest = latestReviewRequest(messages, gate.runId);
+  const round = latest ? rounds.find((candidate) => candidate.instructionId === latest.id) : undefined;
+  if (!round?.answeredAt) return undefined;
+  return {
+    ...round,
+    reviewRunId: gate.runId,
+    answeredAt: round.answeredAt,
+    accepted: acceptedRequestItems(gate.requestItemDecisions ?? [], round.instructionId)
+  };
+}
+
+/** The agent's answer to one item, on the item's band, and whether the person accepted it. */
+export interface BandAnswer {
+  item: ReviewRequestItem;
+  outcome: ReviewResponseOutcome;
+  note?: string;
+  accepted: boolean;
+}
+
+/**
+ * The current round's answered items by what they are about. The person's own
+ * comments left the draft when the request went, so each comes back as the
+ * comment it was, to sit where it was written.
+ */
+export interface ReviewBandAnswers {
+  answeredAt: string;
+  findings: ReadonlyMap<string, BandAnswer>;
+  discussions: ReadonlyMap<string, BandAnswer>;
+  comments: ReadonlyMap<string, BandAnswer & { comment: ReviewComment }>;
+}
+
+export function reviewBandAnswers(round: ReviewRoundView): ReviewBandAnswers {
+  const answers = new Map(round.answers.map((answer) => [answer.item, answer]));
+  const findings = new Map<string, BandAnswer>();
+  const discussions = new Map<string, BandAnswer>();
+  const comments = new Map<string, BandAnswer & { comment: ReviewComment }>();
+  for (const item of round.request.items) {
+    const answer = answers.get(item.number);
+    if (!answer) continue;
+    const band: BandAnswer = { item, outcome: answer.outcome, ...(answer.note ? { note: answer.note } : {}), accepted: round.accepted.has(item.number) };
+    if (item.kind === 'FINDING') findings.set(item.findingId, band);
+    else if (item.kind === 'DISCUSSION') discussions.set(item.discussionId, band);
+    else {
+      // The comment as it was sent, on the lines it is about.
+      const id = `request:${round.instructionId}:${item.number}`;
+      const { path, side, line, endLine, text } = item;
+      comments.set(id, { ...band, comment: { id, path, side, ...(line ? { line } : {}), ...(line && endLine && endLine > line ? { endLine } : {}), text } });
+    }
+  }
+  return { answeredAt: round.answeredAt, findings, discussions, comments };
 }

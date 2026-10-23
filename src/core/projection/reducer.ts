@@ -4,6 +4,8 @@ import type {
   AgentReviewResolvedFinding,
   AgentReviewResult,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
+  ReviewWalkthroughState,
   Finding,
   HealthStatus,
   RunRecord,
@@ -14,7 +16,10 @@ import type {
 } from '../../shared/contracts';
 import {
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
+  REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS,
   TASK_STORE_SCHEMA_VERSION,
+  awaitsDecision,
   createInitialProjection,
   isDetachedRunMode,
   isImplementationRunMode,
@@ -814,6 +819,7 @@ export function reduceProjection(
         updatedAt: event.receivedAt
       };
     case 'AGENT_REVIEW_FINDING_DECIDED':
+    case 'REVIEW_REQUEST_ITEM_DECIDED':
       return {
         ...base,
         agentReview: reduceAgentReview(base.agentReview, event, run),
@@ -1010,6 +1016,8 @@ function reduceAgentReview(
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
           summary: 'An agent is reviewing the current diff.',
           findingDecisions: [],
+          // A stored walkthrough stays as earlier context until this review's own outcome.
+          ...(base.walkthrough?.status === 'STORED' ? { walkthrough: base.walkthrough } : {}),
           updatedAt: event.receivedAt
         };
       }
@@ -1039,6 +1047,7 @@ function reduceAgentReview(
         return base;
       }
       const result = getAgentReviewResult(event.payload);
+      const walkthrough = getReviewWalkthroughState(event.payload);
       return {
         ...base,
         status:
@@ -1050,6 +1059,7 @@ function reduceAgentReview(
         summary:
           result?.summary ??
           'Agent review completed, but no structured pass/fail verdict was provided.',
+        ...(walkthrough ? { walkthrough } : {}),
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_FAILED':
@@ -1137,17 +1147,50 @@ function reduceAgentReview(
       }
       return { ...base, findingDecisions: [...decisions, decision] };
     }
+    // A decision on an answer belongs to the review its request followed; one for another review changes nothing.
+    case 'REVIEW_REQUEST_ITEM_DECIDED': {
+      const decision = getReviewRequestItemDecision(event.payload);
+      const decisions = base.requestItemDecisions ?? [];
+      if (
+        !decision ||
+        !base.runId ||
+        decision.reviewRunId !== base.runId ||
+        decisions.length >= REVIEW_REQUEST_ITEM_DECISION_LIMIT ||
+        decisions.some((candidate) => candidate.id === decision.id)
+      ) {
+        return base;
+      }
+      const requestItemDecisions = [...decisions, decision];
+      // The reply waits on the person while an answer it left to them is not accepted.
+      const answer = base.requestAnswer;
+      return {
+        ...base,
+        requestItemDecisions,
+        ...(answer?.instructionId === decision.instructionId && answer.decisionItems
+          ? { requestAnswer: { ...answer, awaitingDecision: awaitsDecision({ instructionId: answer.instructionId, decisionItems: answer.decisionItems }, requestItemDecisions) } }
+          : {})
+      };
+    }
     // The exact code the review read was kept.
     case 'REVIEW_SNAPSHOT_RECORDED': {
       const tree = getString(event.payload, 'tree');
       if (!tree || !base.runId || base.runId !== event.runId) return base;
       return { ...base, reviewedTreeSha: tree };
     }
-    // The agent's reply to the request after this review settled.
+    // The agent's reply to the request after this review settled. The person may have accepted an answer
+    // already, while the reply's evidence was still being captured: the wait counts every decision recorded.
+    // `needsDecision`, the count of the items, is for the task's activity.
     case 'REVIEW_REQUEST_ANSWERED': {
-      const needsDecision = getNumber(event.payload, 'needsDecision');
-      if (base.runId !== getString(event.payload, 'reviewRunId') || needsDecision === undefined) return base;
-      return { ...base, requestAnswer: { awaitingDecision: needsDecision > 0 }, updatedAt: event.receivedAt };
+      const instructionId = getString(event.payload, 'instructionId');
+      const items = (event.payload as Record<string, unknown>).decisionItems;
+      if (base.runId !== getString(event.payload, 'reviewRunId') || !instructionId || !Array.isArray(items) ||
+        !items.every((item) => Number.isSafeInteger(item) && item > 0)) return base;
+      const answer = { instructionId, decisionItems: items as number[] };
+      return {
+        ...base,
+        requestAnswer: { ...answer, awaitingDecision: awaitsDecision(answer, base.requestItemDecisions ?? []) },
+        updatedAt: event.receivedAt
+      };
     }
     // Committing the reviewed changes moves the reviewed state to the new commit;
     // the clean tree's fingerprint keeps edits made after it counting.
@@ -1259,6 +1302,20 @@ function getReviewFindingDecision(payload: unknown): ReviewFindingDecision | und
     : undefined;
 }
 
+function getReviewRequestItemDecision(payload: unknown): ReviewRequestItemDecision | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).decision;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const decision = value as ReviewRequestItemDecision;
+  return typeof decision.id === 'string' &&
+    typeof decision.reviewRunId === 'string' &&
+    typeof decision.instructionId === 'string' &&
+    Number.isInteger(decision.item) &&
+    (decision.kind === 'ACCEPT' || decision.kind === 'REOPEN')
+    ? structuredClone(decision)
+    : undefined;
+}
+
 function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {
   if (!payload || typeof payload !== 'object') {
     return undefined;
@@ -1330,6 +1387,20 @@ function getResolvedFinding(value: unknown): AgentReviewResolvedFinding | undefi
   if (!previousFindingId || !title) return undefined;
   const note = getString(value, 'note');
   return { previousFindingId, title, ...(note ? { note } : {}) };
+}
+
+/** The walkthrough a review outcome carries, only in a shape the store loads. */
+function getReviewWalkthroughState(payload: unknown): ReviewWalkthroughState | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as Record<string, unknown>).agentReviewWalkthrough;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (getString(value, 'status') === 'UNAVAILABLE') {
+    const reason = isOneOf(getString(value, 'reason'), REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS);
+    return reason ? { status: 'UNAVAILABLE', reason } : undefined;
+  }
+  const reviewRunId = getString(value, 'reviewRunId');
+  const artifactId = getString(value, 'artifactId');
+  return getString(value, 'status') === 'STORED' && reviewRunId && artifactId ? { status: 'STORED', reviewRunId, artifactId } : undefined;
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {

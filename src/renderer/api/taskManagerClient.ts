@@ -2,9 +2,15 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   ReviewChangesResult,
+  TaskCommitDiffResult,
+  TaskCommitsResult,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -526,8 +532,12 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/review', input),
     decideReviewFinding: (input: DecideReviewFindingRequest) =>
       post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+      post<ReviewRequestItemDecision>(baseUrl, '/api/review/decide-answer', input),
     readReviewChanges: (input: ReadReviewChangesRequest) =>
       post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
+    readReviewedDiff: (input: ReadReviewChangesRequest) =>
+      post<ReviewChangesResult>(baseUrl, '/api/review/reviewed-diff', input),
     askSideQuestion: (input: AskSideQuestionRequest) =>
       post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
     stopSideQuestion: (input: StopSideQuestionRequest) =>
@@ -543,6 +553,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
     createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/git/delivery-commit', input),
+    listTaskCommits: (input: ReadTaskCommitsRequest) =>
+      post<TaskCommitsResult>(baseUrl, '/api/git/task-commits', input),
+    readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+      post<TaskCommitDiffResult>(baseUrl, '/api/git/task-commit-diff', input),
     preflightGitHub: (input: GitHubPreflightRequest) =>
       post<GitHubRepositoryRecord>(baseUrl, '/api/github/preflight', input),
     publishBranch: (input: PublishBranchRequest) =>

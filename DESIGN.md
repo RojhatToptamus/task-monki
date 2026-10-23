@@ -17,8 +17,8 @@ Every value here is a token; the cited section owns the details.
 | Need | Value |
 |---|---|
 | Faces | Instrument Sans (`--font-ui`) for the interface; Geist Mono (`--font-mono`) only for strings the user copies: paths, hashes, branches, commands, payloads (§8) |
-| Type | 22 page title, 15 heading, 13 body and labels, 12 help and group labels, 11.5 metadata (`--t-*`); weights 400 and 500 only (`--w-*`) |
-| Line boxes | 16, 18, 20 and 28 (`--lh-*`); the 1.55 factor only for multi-line prose |
+| Type | 22 page title, 17 a walkthrough's chapter, 15 heading, 13 body and labels, 12 help and group labels, 11.5 metadata (`--t-*`); weights 400 and 500 only (`--w-*`) |
+| Line boxes | 16, 18, 20, 24 and 28 (`--lh-*`); the 1.55 factor only for multi-line prose |
 | Heights | 32 decision controls, 28 toolbar controls and icon buttons, 24 controls inside a row, 20 badges and avatars, 28 dense rows, 36 rows and file heads, 40 a toolbar under a head, 48 heads and two-line rows (`--h-*`, §3) |
 | Radii | 4 marks and keys, 6 rows and badges, 8 controls and anything shorter than 40px, 10 menus, 12 cards, sheets and tables, 14 modals (`--r-*`, §9) |
 | Spacing | 2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48 (§9) |
@@ -143,13 +143,14 @@ surface beside it is built at this table, not at the mock.
 - **A disclosure is its row.** A file or section toggle is the 13px chevron and
   its label at the row's own height, never a separate large button.
 - **Type is 13 for what is read, 12 for what is scanned, 11.5 for metadata.**
-  Nothing in a dense surface is larger than 13 except a page title or a section
-  heading. Weight is 400; 500 marks titles, labels and the one emphasised word in
-  a row.
+  Nothing in a dense surface is larger than 13 except a page title, a section
+  heading or a walkthrough's chapter. Weight is 400; 500 marks titles, labels and
+  the one emphasised word in a row.
 - **Heights are tokens.** `height: 36px` is the same error as a hex colour; use
   `--h-row`.
-- **Check against the neighbour.** At 100% zoom, beside the closest shipped
-  element, a new one must not read bigger, heavier or louder.
+- **Check against the neighbour.** At the app's default zoom (125%), beside
+  the closest shipped element, a new one must not read bigger, heavier or
+  louder.
 
 | Don't | Do |
 |---|---|
@@ -356,6 +357,13 @@ a state on its own. When two surfaces disagree, fix the selector, not the copy.
   colours — a check for done, a dot for the current step, a ring for what is
   left. A word appears only on the step where a run failed or stopped. The plan
   never moves; the live words below it carry the motion.
+- **A changed file is read by its mark.** Every list and head that names a
+  changed file leads with one 13px mark (`FileMark`): a new file's is a file
+  with a plus, a deleted file's a file with a minus, in the diff's own
+  `--verified-ink` and `--blocked-ink`; any other file shows what it is (code,
+  text, data, an image, a script, a lockfile, configuration) in its row's ink.
+  The shape carries the fact, and the hue only repeats the diff's own; a rename
+  says its old path in words where there is room for them, on the file's head.
 - **One tone per unit, carried by one element.** Never tint the mark, the heading
   and the border of the same card. The badge or the status word carries it: the
   waiting tone when the user owes a step, the blocked tone when something
@@ -616,6 +624,25 @@ stripe beside a pill — while the distinctions that were asked about, like *can
 type here*, went unfunded. The remedy is not more contrast. It is fewer, larger,
 better-aimed steps.
 
+### 7.9 Syntax colour (`--syn-*`)
+
+Code in the Guide and the Diff is coloured by kind, so its shape reads before
+its words. Three hues and a comment ink, quiet by rule:
+
+- `--syn-keyword`, structure: keywords, and the attributes and keys that name a
+  value (`--syn-attribute`);
+- `--syn-string`, values: strings, numbers and constants (`--syn-number`);
+- `--syn-function`, names: functions, types and markup tags (`--syn-type`,
+  `--syn-tag`);
+- `--syn-comment`, comments: the theme's ink at the 4.5:1 floor, upright,
+  never italic.
+
+Plain identifiers and punctuation are `--text`. The hues are the same in every
+theme and stay clear of the status hues, so a coloured token never reads as a
+state and a changed line's tint keeps its meaning; their lightness is solved on
+the code planes and the diff tints (`docs/design/THEMES.md`). Code takes these
+inks through `SyntaxCode` and its `tm-syn-*` classes, never a colour of its own.
+
 ---
 
 ## 8. Type and icons
@@ -643,6 +670,7 @@ Interface type is one sans; machine values are one mono. No third family.
 | Role | Token | Size / weight |
 |---|---|---|
 | Page title | `--t-title` | 22 / 500 · `-0.02em` |
+| Chapter: an intent of a walkthrough, read in order as a document | `--t-chapter` | 17 / 500 · `-0.01em` |
 | Section heading | `--t-heading` | 15 / 500 |
 | Panel title, control label | `--t-label` | 13 / 500 |
 | Body, prose | `--t-body` | 13 / 400 — the body's own size, so text with no size of its own is 13, never the browser's 16 |
@@ -652,8 +680,8 @@ Interface type is one sans; machine values are one mono. No third family.
 
 Line boxes are whole pixels in single-line controls, rows, headings and code:
 `--lh-meta` 16, `--lh-ui` 18, `--lh-body` 20 (13px text in a control or row, a
-15px heading, and 12px code, so a diff row is exactly 20), and `--lh-title` 28
-for a page title. Only multi-line
+15px heading, and 12px code, so a diff row is exactly 20), `--lh-chapter` 24
+for a chapter, and `--lh-title` 28 for a page title. Only multi-line
 reading text uses the `--lh-prose` factor (1.55). A single-line control's height
 comes from its height token, never from a line-height times a size plus padding.
 The regular weight is `--w-regular` (400), never a literal.
@@ -662,10 +690,13 @@ Every label is sentence case. Nothing is set in capitals with added tracking: an
 eyebrow in caps reads as a web template, and a group label is quiet because it is
 small and `--muted`, not because it shouts.
 
-**Seven sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
+**Eight sizes, and they are tokens.** A component sets `font-size: var(--t-label)`
 and never a literal. A size that is not on this list does not exist: the reason
 to name them is that an unnamed scale is not a scale, and the renderer had
-drifted to 22 distinct sizes against these seven.
+drifted to 22 distinct sizes against a scale of seven. The chapter is the one
+size added since, for the one surface read as a document: an intent heads a
+stage of the walkthrough, and at the section heading's 15 it did not stand
+apart from the 13px account under it.
 
 **Times follow the system clock format everywhere** — "5:29 PM" or "17:29"
 as the OS says, never a forced 24-hour clock or a zero-padded hour; a date is
@@ -810,7 +841,7 @@ These are settled. Use the value, don't re-derive it.
 | Modal | 440 confirm · 560 form · 640 creation (880 and the modal's full height when New task is expanded; remembered) · 720 payload |
 | Side panel | 380 docked, resizable 320–560; floats over the content below a 560px content floor |
 | Settings section list | 212 |
-| Review index | 248 (208 below 1100) |
+| Review index | 248 (208 when the task page is 1036 or narrower: the minimum window, or a docked side panel) |
 
 Widths are the design intent, not a hard cap: a panel may be resized by the user,
 but it opens at these values and never below the minimum.
@@ -1145,8 +1176,15 @@ opacity and transform move. Anything entering or
 responding eases out. Something already on screen moving to a new place uses
 `--ease-in-out`. Never `ease-in`, `ease` or `linear` (the shimmer is the one
 linear loop). Leave faster than you arrive. Keyboard actions, tab switches and
-anything done many times an hour are instant. Nothing loops unless work is
-actually running. Durations and curves are tokens.
+anything done many times an hour are instant, with one exception: a move to
+another place in code travels, from a key or a pointer alike, because a jump of
+a whole file loses the reader's place. It is one function (`travel.ts`): the
+scroller eases from where it is on `--motion-move` and `--ease-in-out`; a target
+more than a viewport away is first jumped to from one viewport short of it, so
+every travel is short; a new move takes over mid-flight; wheel, touch, a press
+or a key hands the scroller back. A key held down, and reduced motion, arrive at
+once. Nothing loops unless work is actually running. Durations and curves are
+tokens.
 
 | Element | From | Duration | Easing token |
 |---|---|---|---|
@@ -1163,6 +1201,8 @@ actually running. Durations and curves are tokens.
 | Jump to latest | 4px up; leaves at 120ms; stays mounted | `--motion-standard` 180ms | `--ease-out` |
 | Toast | 8px up; leaves 4px down at 120ms | `--motion-toast` 240ms | `--ease-out` |
 | Something moving on screen | its current position | `--motion-move` (200ms) | `--ease-in-out` |
+| Travel to a place in code: a file row, a term, an attention line, a menu choice, J/K, N/P, [ ] | where the scroller is; from one viewport short of a far target | `--motion-move` 200ms | `--ease-in-out` |
+| A list's current-row plane (`--sel`) | the previous row; still when rows move under it or it first appears | `--motion-move` 200ms | `--ease-in-out` |
 | Expanding or collapsing a surface (a side panel, New task) | its old box, its children held at their size | `--motion-slow` 280ms | `--ease-drawer` |
 | A Review file shown full screen, and back | its place in the list | `--motion-move` 200ms | `--ease-in-out` |
 
@@ -1263,10 +1303,10 @@ was checked.
    focus, disabled with its reason, pending, empty, error, stale, and the longest
    real content (a 120-character title, a four-digit count, 500 rows).
 3. **Both modes**, in Graphite and in one warm theme.
-4. **Two windows**: the minimum, 1100 × 720, and a wide one, each with and
-   without a docked side panel.
-5. **At 100% zoom, beside the closest shipped surface.** If the new one reads
-   bigger, heavier, busier or wordier, fix it.
+4. **Two windows**: the minimum, 1100 × 720 (880 × 576 CSS px at the default
+   zoom), and a wide one, each with and without a docked side panel.
+5. **At the default zoom, 125%, beside the closest shipped surface.** If the
+   new one reads bigger, heavier, busier or wordier, fix it.
 6. **Measured.** Read the computed height, font size, family, weight,
    line-height, radius and icon box of each new element and compare them with
    §3 and §9. Run `tools/design-audit.js` on the screen (see its header) and
@@ -1352,6 +1392,11 @@ correct answer far more often than a border is).
 | Link, rest | `--accent-ink` |
 | Link, hover | `--accent` |
 | Machine values (paths, hashes, branches) | `--muted`, or `--faint` when secondary |
+| Code: plain identifiers and punctuation | `--text` |
+| Code: keywords; attributes and keys | `--syn-keyword`; `--syn-attribute` |
+| Code: strings; numbers and constants | `--syn-string`; `--syn-number` |
+| Code: functions; types; markup tags | `--syn-function`; `--syn-type`; `--syn-tag` |
+| Code: comments (upright) | `--syn-comment` |
 | Text on a primary button | `--on-primary` |
 | Error message under a field | `--blocked-ink` |
 | Text selection highlight | `--sel` |
@@ -1470,7 +1515,7 @@ inside it reads as a second fact.
 | History row | — | title `--text`, source `--text-soft`, time `--muted`; no mark |
 | Stale ribbon | `--waiting-bg` | `--waiting-ink` |
 | Skeleton / loading placeholder | `--field-disabled` | — |
-| Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |
+| Diff added / removed | `--diff-added-bg` / `--diff-removed-bg` (`--verified` / `--blocked` at 10%) | number and marker `--verified-ink` / `--blocked-ink`; code in its syntax inks (A.2) |
 | Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
 | Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§7.7) | label stays `--text` / `--muted` |
 | Avatar fallback (initials; a person glyph when the account is unknown) | `--field` | `--muted` |
@@ -1614,54 +1659,81 @@ once per day, then what happened with its time on the right and who recorded it
 beneath, with each entry's evidence left to the full ledger in Debug. An empty section is never
 rendered: the Now panel offers what has not happened yet.
 
-**The Review tab.** The change is read in the order that matters, with the
-reviewer's findings, what people said on the pull request, and the person's own
-comments on the code they are about.
+**The Review tab.** The change is read in two modes: the Guide, the review's
+walkthrough of the change intent by intent (below), and the Diff, the complete
+change in the order that matters, with the reviewer's findings, what people said
+on the pull request, and the person's own comments on the code they are about.
+Both read the code in the same file units, rows, gaps and bands.
 Like every working tab, Review has no page head: the title row sits in the
 window's top bar and the code gets the room. Nothing on the tab explains itself in words a
 control's icon, state or tooltip already carries.
 
-- *Toolbar* (40px). The navigator's switch (Files, with viewed progress as
-  "2/7", and Feedback) sits over the navigator; then the review in one phrase in
+- *Toolbar* (40px). The mode control (Guide, Diff; G switches) leads; then the
+  review in one phrase in
   its tone's ink and its time (No agent review, not Not reviewed, once people
   reviewed the pull request; Fixing review feedback while the agent takes a
   turn after the review; the agent's request, such as "Codex asked a question",
   with Go to request while it waits on the person; a turn that stopped, such as
-  "Recovery required", with Go to agent); then Compare (All changes,
-  Committed, Uncommitted, and the round: Since the review once an out-of-date
+  "Recovery required", with Go to agent); then Compare, the menu of what the
+  Diff shows: All changes; the round, Since the review once an out-of-date
   review has changes since it, which it then leads with, or Since the last review
-  once a re-review is current; each is exactly what changed from the code that
+  once a re-review is current (each exactly what changed from the code that
   review read, kept when it started, so an out-of-date review's findings sit on
-  the lines it read, on the old side; never an empty scope), a View icon (By
-  importance, By path; expand or collapse every file), and the review action.
-  A stale review keeps Run review again as the primary there; a finished,
-  current one offers it as an icon beside its time.
-- *Navigator* (248px on `--panel`). Files by importance: files with an open
+  the lines it read, on the old side); then the branch's history in order, after
+  a `--hair`: All commits while work beside them is uncommitted, each commit by
+  its number, subject and age, and Uncommitted. It never offers an empty scope,
+  or one that shows what another does: one commit alone is the whole change.
+  While a commit is read, Previous and Next commit sit after the menu, so they
+  never move as its subject changes. Then a View icon (By importance, By path;
+  expand or collapse every file); all of these in the Diff alone; and the review
+  action. A stale review keeps Run review again as the primary
+  there, in both modes; a finished, current one offers it as an icon beside its
+  time. When the Guide has no walkthrough to show, its step sits where the
+  walkthrough would be instead.
+- *Navigator* (248px on `--panel`, in the Diff). Its switch (Files, with viewed
+  progress as "2/7", and Feedback) sits at its top. Files: the shared file
+  filter (every word typed is in the path, in any case; Enter goes to the first
+  file it keeps, Escape clears it and then gives the keys back; / finds it),
+  then the files by importance: files with an open
   Blocker or Major, then code with each test right after the code it covers,
   then styles and markup, configuration, documentation, and generated files,
-  collapsed. One 28px row each: the name in mono, its folder muted, a comment
-  count when it has feedback, then the counts or the viewed check. Feedback
-  lists every finding and comment by what happens to it: To send, Suggestions,
-  On GitHub (the pull request's discussions not added: unsent ones that still
-  ask for something, then sent ones, then remarks), Settled, after a re-review
-  Resolved (a check and the reviewer's note; it has no place in the code to go
-  to), and Resolved on GitHub. A discussion's row leads with its author, then its
-  first line, with its state and place beneath; on GitLab the words are GitLab's.
-  When the platform has more discussions than were read, More on GitHub ends
-  the list.
+  collapsed. One 28px row each: the file's mark, the name in mono, its folder
+  muted, a comment count when it has feedback, then the counts or the viewed
+  check; "No files match" when the filter keeps none. The file
+  being read, followed as the person scrolls and set by every move, sits on
+  `--sel`: one plane under the rows that slides to the current row, with
+  `--hover` laid over it while the pointer is there. Feedback
+  lists every finding and comment by what happens to it, each group's label
+  with its count: To send, Suggestions, On GitHub (the pull request's
+  discussions not added: unsent ones that still ask for something, then sent
+  ones, then remarks), or for an out-of-date review From the earlier review;
+  then what is settled (dismissed or accepted findings, those a re-review
+  resolved, threads resolved on GitHub) as one last group, Settled, folded until
+  opened. Each row is a list rail's row: what was said, then who said it (a
+  finding's severity, blocker and major in `--blocked-ink`), its state, and its
+  place as the file and line (the whole path in its title); the author gives way
+  first when the line is short. On GitLab the words are GitLab's. When the
+  platform has more discussions than were read, More on GitHub ends its group.
 - *Brief.* Facts before opinions: the request, what the agent reported (quoted),
   then the review's summary. After the agent answers a request, its answer to
   each item spans the brief under them (Fixed, Not changed, Needs your decision,
-  or No answer, then its note; the location goes to the finding or file), with
-  Reply when an item waits on the person, until the next review reads them. Open
+  or No answer, then its note; Accepted once the person accepts it; the location
+  goes to the finding or file), with Reply when an item waits on the person,
+  until the next review reads them. Open
   on the first visit to a review run and again when new answers arrive; folded,
-  it is the request's first line.
+  it is the request's first line. While the Diff reads a commit, the commit's
+  own brief stands in its place (*Commits*).
 - *Files.* Each file is a 1px `--edge-raised` border (`--r-sm`; it collapses to
   its 36px head) with a sticky head at table-row scale and no edge of its own,
-  only a `--hair` seam under it while open: the chevron and path as one toggle (⌥: every file),
-  the directory muted before the name, a word only for New, Deleted or a rename,
-  the open findings in words, the counts, the shared checkbox for viewed (no
-  label), ⋯ (Comment on file, Show whole file, then where it opens), then Full
+  only a `--hair` seam under it while open: the chevron, the file's mark and
+  its path as one toggle (⌥: every file), the directory muted before the name,
+  "from" and the old path for a rename,
+  "Invisible characters" in `--waiting-ink` when an added line holds a
+  character no reader sees that changes how code reads (a direction control,
+  a zero-width space, a byte-order mark past the file's start; never the
+  joiners emoji need), the open findings in words, the counts, the shared
+  checkbox for viewed (no label; none on a commit), ⋯ (Comment on file, Show whole file, Ask about
+  this file, then where it opens), then Full
   screen: the file takes the whole page, its head the sheet's 48px first line,
   while the tab bar, toolbar, navigator, brief and foot step aside; J/K and N/P
   move it to the next file or finding, and Escape or the same control returns. A viewed or generated
@@ -1669,22 +1741,38 @@ control's icon, state or tooltip already carries.
   hides a finding.
 - *Rows.* The gutter is the line number (the old side's on a removed line),
   one width for the whole review so the comment "+" (16px, `--r-2xs`, its
-  glyph centered) fits beside the largest number and code starts on one column; the "+"
+  glyph centered) fits beside the largest number and code starts on one column;
+  while the checkout can fill files it holds four digits, so revealed lines never
+  widen it. The "+"
   shows on the row under the pointer and fills when the pointer is on the
   number. Pressing a number, or dragging across several, opens one comment for
-  that line or range. Then the marker and code that wraps; the gutter takes the
-  row's tint.
+  that line or range, and Shift on another number widens it; its lines keep
+  `--sel` and accent ink in the gutter on every kind of line while it is
+  written. Then the marker and code that wraps, in its syntax colour (§7.9);
+  the gutter takes the row's tint.
 - *Threads.* What is said about the code is part of the file, not a card on
   it: under the last line of its range, a band across the file on `--card`
   with a `--hair` seam where it meets code (bands in a row share one), no ring,
   radius or shadow. Its words keep one reading column from the code column,
-  720px at most, and each author's mark (a 20px avatar: initials on `--field`
-  in `--muted`, or a person glyph when the account is unknown) hangs in the
-  gutter beside their name, so a comment and the code it is about start on one
-  column. Nothing inside a band is a box of its own: a suggested change is a
-  `--well` with the diff's tints on its lines, the label above it; folded, a
-  thread is a 28px row on `--panel` like a gap. Feedback without a place in
-  the files sits above them, framed as a file is.
+  720px at most, and each author's mark (a 24px avatar: initials on `--edge`,
+  which holds on the band's `--card`, in `--text-soft`, or a person glyph when
+  the account is unknown) hangs in the gutter beside their name, so a comment and the code it is about start on one
+  column. A band says the lines it is about only where its place does not:
+  under its row only a range ("Lines 3–5"), at its file's top any line ("Line
+  19"; the person's own on the old side are "Removed", the platform's "Old"),
+  in muted 12px on its head after the author and age, or after a finding's
+  title; above the files, its file and lines in mono under its head. A head
+  reads as its facts first (who, when, which lines, its state) and its
+  controls last, at the right end. Every
+  comment's words read the same, the person's own and other people's: rendered
+  markdown in `--text-soft`, clamped until Show full comment. Nothing inside a
+  band is a box of its own: a suggested change is a `--well` with the diff's
+  tints on its lines, the label above it; folded, a thread is a 28px row on
+  `--panel` like a gap, who or what it is first in `--muted`, its line cut short
+  with all of it in its tooltip, and its way back (Restore, Reopen) at the end.
+  A control that goes away when pressed, folding or opening its band, leaves
+  the keys on the band. Feedback without a place in the files sits above them,
+  framed as a file is.
 - *Gaps.* The unchanged lines between hunks are one 28px row on `--panel`: the
   count in words at the code column ("19 unchanged lines") and the enclosing
   symbol in mono `--faint`. When the checkout still holds the captured file
@@ -1701,46 +1789,69 @@ control's icon, state or tooltip already carries.
   review holds only changed files; any other file opens in the editor from ⋯.
 - *Findings.* A thread band with no mark in the gutter (the severity says it is
   the review's), its severity as a word (blocker and major in
-  `--blocked-ink`), in a re-review "Still open" or "New" beside it, and its
-  actions on the title line: Add to request on a Minor or Nit (Blocker and Major
-  are in by default), Ask (opens Ask about this finding), and Dismiss, a menu of
+  `--blocked-ink`), in a re-review "Still open" or "New" beside it, its lines
+  after the title where its place does not say them and the agent's answer
+  once there is one, then its actions at the end of the title line: Add to
+  request on a Minor or Nit (Blocker and Major are in by default), Ask (opens
+  Ask about this finding), and Dismiss, a menu of
   reasons (Incorrect, Intentional, Won't fix now, With a note…). The next review
   never raises an Incorrect finding again, raises an Intentional one only when
   the code around it changed, and leaves a deferred one alone. A dismissed
   finding folds to one line with its reason and Restore.
 - *Pull request discussions* are other people's words in the same band as a
   finding: the author at 500 beside their mark, a review's verdict and the
-  comment's age muted, its state at the end of the head (Resolved, Replied once
-  the person wrote last, Sent, the agent's answer, or Outdated), then Add to
-  request, a check that resolves the thread (pressed, in `--verified-ink`, once
-  resolved, and pressing it reopens it), and Open on GitHub. Each comment is
-  rendered markdown under its author, replies under a `--hair` from the code
-  column, HTML the platform renders reads as its words, and a long comment is
-  clamped until Show full comment; past three replies, all but the latest fold
+  comment's age muted, its lines where its place does not say them and its
+  state (Resolved, Replied once the person wrote last, Sent, the agent's
+  answer, or Outdated), then at the end of the head Add to request, Ask
+  (opens Ask about this discussion), a check that resolves the
+  thread (pressed, in `--verified-ink`, once resolved, and pressing it reopens
+  it), and Open on GitHub. Each comment sits under its author, replies under a
+  `--hair` from the code column, and HTML the platform renders reads as its
+  words; past three replies, all but the latest fold
   behind a count, and replies the platform has beyond those read say so with a
   link. A suggested change reads as a diff: the lines it replaces, when the
   diff shows the thread's own lines, then the lines it suggests. The last row of
   an open thread is the reply row: the person's mark and a 28px Reply field
   that grows into the composer when they write, with Resolve thread and
   Cancel and Reply under it (⌘↵ posts, Escape leaves it). R puts the caret
-  there; an agent's answer to the thread is where the reply starts, and Resolve
-  thread starts checked when the answer is Fixed. Nothing posts until the
+  there. Once the agent answered the thread, its note is quoted above the reply
+  row for the person alone, and the reply starts from the one fact Task Monki
+  observed, "Changed in <hash>.", only when the answer is Fixed and the
+  thread's file changed since the review; otherwise it starts empty. Resolve
+  thread starts unchecked: resolving is the person's call. Nothing posts until the
   person posts it, and posting keeps the place in the diff. Once the pull
   request is merged or closed, none asks for anything and none can be answered
   here. A thread
   sits under the last line of its range while the diff shown is the head the
   platform read it on; otherwise, or once its lines changed, it sits at its
-  file's top and says its line, and one about the whole change sits above the
+  file's top, and one about the whole change sits above the
   files. A resolved thread, or a remark that asks for nothing, folds to one line
   that opens it. None goes to the agent unless added; N and P step through open
   discussions after the findings.
-- *Comments* are the person's own, in the same band: their mark and You, the
-  lines they are about when the row does not say it, and icon-only Edit and
-  Delete on the head while the pointer or the keys are on it. They can be
-  written any time the current diff is shown and are saved with the task as
-  written. The line composer is the reply row's: the field on the code column,
-  then Ask at its left, which hands the lines and the text to Ask instead of
-  the request, and Cancel and Comment.
+- *Comments* are the person's own, in the same band: their mark and You, and
+  icon-only Edit and Delete on the head while the pointer or the keys are on
+  it. They can be written any time the current diff is shown and are saved
+  with the task as written. One is written at a time, and its composer is the
+  comment it becomes: the same head, the field on the code column, then Ask at
+  its left (it hands the lines and the text to Ask instead of the request),
+  Cancel and Comment; Edit turns the words into the field in place. Choosing
+  other lines moves it with its words. ⌘↵ saves, and the saved comment takes
+  the keys; Escape closes it when nothing typed would be lost, and otherwise
+  leaves it open with its words, where C returns; Cancel discards. Delete
+  folds a comment to a line with Restore, which brings it back where it was
+  until the request goes or the tab closes.
+- *Answers.* Once the agent answered the person's latest request after the
+  review, each answered item's own band, a finding, a thread or a comment, says
+  the answer: its outcome under the agent's mark among the head's facts
+  (Fixed, Not changed, Needs your decision), its note quoted under the agent's
+  name and time, then Accept answer and Add to request. The agent's word never
+  settles an item, even Fixed; accepting does, and folds a finding or a
+  comment to one line with Accepted and Reopen. The items sit on the lines of
+  the code the review read: in what changed since the review, on the old side,
+  as the review's findings do. Add to request opens a comment that starts from
+  a quote of the item, on the row its band sits under as the diff shown
+  numbers it, or on its file when that row takes no comment (a removed line in
+  what changed since the review).
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   GitHub comments, 1 comment"), which opens the request sheet; a note that grows
   to four lines; and one primary: Request changes when something is queued
@@ -1759,13 +1870,113 @@ control's icon, state or tooltip already carries.
   changes nothing leaves it current, and a diff back to exactly what was
   reviewed makes it current again. Any other turn (analysis, compaction) leaves
   it with no implementation run to belong to, so it becomes earlier context. An
-  out-of-date review keeps its threads as earlier context, without Ask or
-  Dismiss; its findings are never sent, the person's comments still are.
-- *Keys.* J/K files, N/P open findings, V viewed and on to the next unviewed
-  file, D dismiss, A ask, F add or take out a suggestion or discussion, R reply
-  to the discussion, C comment on the chosen lines, ⌘↵ the request sheet and
-  then send, ⌘⇧F the file being read
-  full screen and back (Escape returns).
+  out-of-date review keeps its threads as earlier context, on `--panel` and
+  without Ask or Dismiss; the bar says the review is out of date, so no band
+  repeats it. Its findings are never sent, the person's comments still are.
+- *Commits.* A commit is read as history: its change against its first parent,
+  its own brief where the change's stands (Commit 2 of 3, its short hash, author
+  and age, then its subject and the rest of its message, kept to three lines
+  until asked for), then its files. Its lines may no longer be the code's, so
+  what was said about its files sits at each file's top with its lines, what was
+  said about other files does not show (a move to it opens All changes), and
+  nothing is written, asked or marked viewed on it: comments, Ask and Viewed
+  belong to the code now. The Diff moves to a commit, at its top, once its
+  change is read, never through an empty state. The commits
+  are the branch's own, first parents only (a merge of the base branch is one
+  commit), at most its latest 100, numbered in its whole history.
+- *Keys.* G the other mode, J/K files, [ and ] intents in the Guide and commits
+  in the Diff (from any other scope, the first or the last), / the file filter,
+  N/P open findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
+  or take out a suggestion or discussion, R reply to the discussion, C back to
+  the comment being written, ⌘↵ the request sheet and then send, ⌘⇧F the file being
+  read full screen and back in the Diff (Escape returns). Every move of the
+  code is the one travel (§12).
+
+**The Guide.** The review's walkthrough of the change, intent by intent. The
+review agent writes it with its findings, from the same code; Task Monki checks
+it against that code before keeping any of it: every changed file sits in one
+intent, with files no intent claims under a last Other changes, and every
+excerpt and term points at changed lines. One scroll of stages, the overview
+first; each stage is a sticky column beside its code, and the code is read in
+the Diff's own file units. Its code is the change the review read, from the
+base to that code, so a worktree that moved since keeps one set of line numbers.
+
+- *Overview.* The column: Walkthrough by and the agent with its mark, said once
+  for the whole Guide; the summary quoted under a 2px `--edge-raised` rule; at
+  most three attention lines, each a button to where it lands: an open finding,
+  led by its severity word with its file and line under it, a file it names,
+  or its intent. The code column holds the map: one row per intent, its number
+  `--faint`, title at 500, first sentence `--text-soft`, and its files viewed
+  ("4/29"); an intent whose files are all viewed mutes. Feedback with no place
+  in the change sits under Outside the change, framed as the Diff frames it.
+- *Stage column.* 360 wide (320 when the code area is under 1180), 32 from the
+  code, resting where it sticks while its code passes; the next stage's seam
+  pushes it away, so the scroll is the transition. The title is the intent's
+  chapter, at `--t-chapter` on `--lh-chapter` and centred on the line of the
+  first file's head, with Ask about this intent beside it while the pointer or
+  the keys are on the column; a 20px meta row: the counter "2/3", which opens
+  the menu of stages (an `ActionMenu` 280 wide: Overview, then each intent with
+  its number, a title wrapping to two lines and its files viewed, the current
+  one on `--sel`); the explanation at `--t-body` on `--lh-prose`
+  with its terms; at most two attention lines; then the intent's files as the
+  navigator's rows, those its code shows first, at most ten, then one row for
+  the rest. The file being read takes the sliding `--sel` plane. A column
+  taller than the code area scrolls within itself.
+- *Code.* The files that hold a key change or open feedback: the key change
+  first under the walkthrough's caption (12/500 `--text-soft`, with the symbol
+  it sits in in mono `--faint`), the lines open feedback is about, then one
+  gap-style row for the rest ("3 more changes", or "211 more lines" for a new
+  file) that opens below them, so nothing above moves. A new file reads as
+  plain code, with no added fill or marker: its head's mark says it. The
+  intent's other files (tests, fixtures, docs and generated files, unless they
+  hold its key change) are one row at the code column's edge, "N more files",
+  that opens them folded. The code is laid out by what was said when the
+  person arrived: a comment they write while reading lands under its line
+  where the code already is, a finding they settle or a discussion resolved
+  keeps its lines and its place, and nothing moves; the next visit lays it out
+  anew.
+- *Terms* are phrases of the explanation tied to the lines that implement them,
+  a 1px dotted `--faint` underline at rest. Under the pointer or the keys their
+  lines take `--hover` where they are in view, with no row rendering again, and
+  the tooltip names the file and lines; pressed, a term opens whatever hides
+  them, travels there and marks them in the gutter on `--sel` until the next
+  move.
+- *Moving.* A file row, a term, an attention line, a menu choice, J/K (across
+  intents), [ and ], N/P and V all move the code with the one travel; the layout
+  never moves. With no file under way, as in an intent whose code shows no
+  file, J and K go on from the intent being read, and V marks nothing.
+  Feedback the Guide does not show opens in the Diff's All changes. G opens the Diff at the same file and line, at the same height,
+  and back; it is the one way between the modes, so the Diff is never narrowed
+  to an intent. While the walkthrough is of earlier code, or the Diff reads a
+  commit, the line numbers no longer match, so G keeps the file alone; on an
+  earlier walkthrough the Diff leads with what changed since the review.
+- *Stacked.* Under 1000 of code width (the minimum window with a docked side
+  panel), each column becomes a block above its code: the title, the meta row
+  with the intent's files as a menu ("File 2 of 4"), and the explanation
+  clamped to three lines until Show more. Once the block has scrolled away, a
+  28px line holds the intent's title, its place and the file being read; it
+  takes no room in the flow, comes in 6px up as it fades, and file heads stick
+  under it.
+- *States.* Before a walkthrough: the whole change's files by folder, whatever
+  the Diff shows, each folded to its head, after any feedback with no place in
+  them; the column holds the walkthrough's place: its byline, "Not written
+  yet", the change's file count and lines (or why there are none: still read,
+  unreadable, empty), and Run review, which says "Starting…" on itself until
+  the review runs; on someone else's pull request nothing runs until the
+  person asks. While the review writes it: "Arrives with the review", the
+  review's latest step as one muted line, and Stop review; the bar's Reviewing
+  counts the time. While a stored one is read: its byline, and still
+  `--field-disabled` bars where its title, summary and first files go. When
+  none could be kept: why, in a few words, and the review action. A walkthrough of earlier
+  code stays as context under the bar's Review out of date and its Run review
+  again, one state word and one step for the tab; the answers to the request
+  sent on its code sit on their lines, and nothing new is written on it.
+- *One intent.* A change with one intent has no overview, map, counter or list
+  of one file: one stage whose column is the account, the byline, the summary,
+  then attention.
+- *Progress* is the per-file viewed check, one mark for both modes: a file
+  viewed in one reads as viewed in the other while both read one code, and
+  reads as new again once its change changes.
 
 **Side panels.** An assistant panel (Ask on Overview, Agent and Review, the
 Preview agent on Preview) is its own sheet beside the task page, 380px by default and resizable

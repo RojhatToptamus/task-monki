@@ -4,11 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
 import type { DiscussionView } from '../model/pullRequestFeedback';
 import { planReviewRequest } from '../model/reviewFollowUp';
-import type { ReviewFindingView } from '../model/reviewWorkspace';
+import type { ReviewRoundView } from '../model/reviewRounds';
+import { lineAnchor, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
 
-const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn() }));
-vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: { readArtifact: api.readArtifact, readReviewChanges: api.readReviewChanges } }));
+const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn(), listTaskCommits: vi.fn(), readTaskCommitDiff: vi.fn() }));
+vi.mock('../api/taskManagerClient', () => ({ taskManagerApi: api }));
 
 function artifact(id = 'diff-1'): ArtifactRecord {
   return { id, taskId: 'task-1', kind: 'diff', path: `/tmp/${id}.md`, byteCount: 256, createdAt: '2026-07-07T10:10:00.000Z', updatedAt: '2026-07-07T10:10:00.000Z' };
@@ -103,6 +104,14 @@ describe('ReviewWorkspace captured diff states', () => {
     expect(screen.getByText((_, element) => element?.tagName === 'CODE' && element.textContent === 'Added: new')).toBeDefined();
   });
 
+  it('says on a file’s head when its added lines hide characters no reader sees', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/access.ts', "const role = 'user‮';"));
+    render(<Harness findings={[]} />);
+
+    const file = await screen.findByRole('region', { name: 'src/access.ts' });
+    expect(within(file).getByText('Invisible characters')).toBeDefined();
+  });
+
   it('labels an earlier capture and leaves findings, comments and requests out of it', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     const onBack = vi.fn();
@@ -154,8 +163,12 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     const thread = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
     expect(within(thread).getByText('Still open')).toBeDefined();
     expect(within(screen.getByRole('article', { name: 'Minor finding: Name the limit' })).getByText('New')).toBeDefined();
+    // What the re-review resolved is settled: folded at the end of the Feedback list until opened.
     fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
-    expect(within(screen.getByRole('navigation', { name: 'Feedback' })).getByText('Unclear name')).toBeDefined();
+    const settled = within(screen.getByRole('navigation', { name: 'Feedback' })).getByRole('region', { name: 'Settled' });
+    expect(within(settled).queryByText('Unclear name')).toBeNull();
+    fireEvent.click(within(settled).getByRole('button', { name: /Settled/ }));
+    expect(within(settled).getByText('Unclear name').closest('.tm-review__feedback')?.textContent).toContain('Resolved');
   });
 
   it('shows a finding under its line and dismisses it with a reason, or a reason and a note', async () => {
@@ -224,7 +237,6 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     render(<Harness findings={[]} onSubmit={onSubmit} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on removed line 1' }));
-    expect(screen.getByText('Removed line 1')).toBeDefined();
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Why was this removed?' } });
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
 
@@ -255,6 +267,80 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getAllByLabelText('Comment')).toHaveLength(1);
   });
 
+  it('never loses what the person writes: Escape leaves written words and C returns to them, a wider range keeps them, and an empty comment closes', async () => {
+    api.readArtifact.mockResolvedValueOnce(`# Git diff evidence\n\n${section('Unstaged diff', fileDiff('src/a.ts', '@@ -1,2 +1,3 @@\n-gone\n+one\n+two\n+three'))}`);
+    render(<Harness findings={[]} />);
+    await screen.findByRole('region', { name: 'src/a.ts' });
+    const number = (value: string) => [...document.querySelectorAll<HTMLElement>('.tm-diffline--addition .tm-diffline__num')]
+      .find((element) => element.textContent === value)!;
+    // jsdom has no PointerEvent, so a mouse event of the pointer's type carries the press and its Shift.
+    const press = (value: string, shiftKey = false) => {
+      fireEvent(number(value), new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, shiftKey }));
+      fireEvent.pointerUp(window);
+    };
+
+    // Pressing a number puts the caret in a comment on its line; with nothing written, Escape closes it.
+    press('1');
+    let field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    expect(document.activeElement).toBe(field);
+    fireEvent.keyDown(field, { key: 'Escape' });
+    expect(screen.queryByLabelText('Comment')).toBeNull();
+
+    // Once something is written, Escape keeps it and hands the keys back to the review; C returns the caret.
+    press('1');
+    field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: 'Collapse these.' } });
+    fireEvent.keyDown(field, { key: 'Escape' });
+    const composer = field.closest('form')!;
+    expect((screen.getByLabelText('Comment') as HTMLTextAreaElement).value).toBe('Collapse these.');
+    expect(document.activeElement).toBe(composer);
+    fireEvent.keyDown(composer, { key: 'c' });
+    expect(document.activeElement).toBe(field);
+
+    // Shift on another number widens the lines the comment is about, and its words come along.
+    press('3', true);
+    expect(screen.getByText('Lines 1–3')).toBeDefined();
+    expect((screen.getByLabelText('Comment') as HTMLTextAreaElement).value).toBe('Collapse these.');
+
+    // Cancelled, it goes, and the keys go back to the line it was under.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Comment')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Comment on line 3' }));
+  });
+
+  it('gives the keys to a saved comment, and deletes one with a way back where it was', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[]} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Comment on line 1' }));
+    const field = screen.getByLabelText('Comment');
+    fireEvent.change(field, { target: { value: 'Return seconds here.' } });
+    fireEvent.keyDown(field, { key: 'Enter', metaKey: true });
+    // Saved, it holds the keys where it was written.
+    const band = document.querySelector<HTMLElement>('[data-comment-id]')!;
+    expect(document.activeElement).toBe(band);
+    expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
+
+    // Deleted, it leaves the request and folds to a line whose Restore takes the keys; restored, it is back.
+    fireEvent.click(within(band).getByRole('button', { name: 'Delete comment' }));
+    expect(screen.queryByRole('button', { name: /^1 comment/ })).toBeNull();
+    const restore = screen.getByRole('button', { name: 'Restore' });
+    expect(document.activeElement).toBe(restore);
+    fireEvent.click(restore);
+    expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
+    expect(document.activeElement?.textContent).toContain('Return seconds here.');
+  });
+
+  it('reads the person’s comment as every comment reads, and says its line once that line is not shown', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[]} draft={{ ...EMPTY_REVIEW_DRAFT, comments: [{ id: 'far', path: 'src/rateLimit.ts', side: 'NEW', line: 40, text: 'Cap the `burst`.' }] }} />);
+
+    await screen.findByRole('region', { name: 'src/rateLimit.ts' });
+    const band = within(document.querySelector<HTMLElement>('[data-comment-id="far"]')!);
+    expect(band.getByText('Line 40')).toBeDefined();
+    expect(band.getByText('burst').tagName).toBe('CODE');
+  });
+
   it('collapses a viewed file but keeps its open findings in view', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     render(<Harness />);
@@ -262,7 +348,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Viewed' }));
     expect(screen.queryByText((_, element) => element?.tagName === 'CODE' && element.textContent === 'Added: new')).toBeNull();
     const file = screen.getByRole('region', { name: 'src/rateLimit.ts' });
-    expect(screen.getByLabelText('1 of 1 viewed')).toBeDefined();
+    expect(screen.getByRole('button', { name: /1 of 1 viewed/ })).toBeDefined();
 
     fireEvent.click(within(file).getByRole('button', { name: /Limiter state is per process/ }));
     expect(await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
@@ -290,7 +376,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
 
     const thread = await screen.findByRole('article', { name: /Limiter state is per process/ });
     expect(within(thread).queryByRole('button', { name: 'Dismiss this finding' })).toBeNull();
-    expect(within(thread).getByText('From the earlier review')).toBeDefined();
+    expect(within(thread).queryByRole('button', { name: 'Ask about this finding' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^1 fix/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull();
 
@@ -300,6 +386,67 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('settles an answered item only when the person accepts its answer, and sends one again as their own comment', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const round: Omit<ReviewRoundView, 'accepted'> = {
+      instructionId: 'request-1', reviewRunId: 'review-1', at: '2026-07-07T10:00:00.000Z', answeredAt: '2026-07-07T10:20:00.000Z',
+      request: { reviewRunId: 'review-1', items: [
+        { number: 1, kind: 'FINDING', findingId: 'f1', severity: 'MAJOR', title: 'Limiter state is per process', path: 'src/rateLimit.ts', line: 1 },
+        { number: 2, kind: 'COMMENT', path: 'src/rateLimit.ts', side: 'NEW', line: 1, text: 'Which window?' }
+      ] },
+      answers: [{ item: 1, outcome: 'FIXED', note: 'Moved to Redis.' }, { item: 2, outcome: 'NOT_CHANGED', note: 'One minute stays.' }]
+    };
+    const decided: Array<[number, string]> = [];
+    const onSubmit = vi.fn();
+    function Answered() {
+      const [accepted, setAccepted] = useState<ReadonlySet<number>>(new Set());
+      const onDecide = async (item: number, kind: 'ACCEPT' | 'REOPEN') => {
+        decided.push([item, kind]);
+        setAccepted((current) => new Set(kind === 'ACCEPT' ? [...current, item] : [...current].filter((number) => number !== item)));
+      };
+      return <Harness review={{ status: 'STALE', runId: 'review-1' }} onSubmit={onSubmit} answers={{ agent: 'Codex', round: { ...round, accepted }, onDecide }}
+        brief={{ round: { key: round.instructionId, request: round.request, answers: round.answers, accepted } }} />;
+    }
+    render(<Answered />);
+
+    // The agent's answer is the band's state under its mark, and its note is quoted under its name.
+    const finding = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
+    expect(within(finding).getByText('Fixed')).toBeDefined();
+    expect(within(finding).getByText('Moved to Redis.').closest('figure')?.textContent).toContain('Codex');
+    // The person's comment went with the request, so it is back on its line with its own answer.
+    const comment = document.querySelector<HTMLElement>('[data-comment-id="request:request-1:2"]')!;
+    expect(within(comment).getByText('Which window?')).toBeDefined();
+    expect(within(comment).getByText('Not changed')).toBeDefined();
+    expect(within(comment).queryByRole('button', { name: 'Edit comment' })).toBeNull();
+
+    // The agent's Fixed settles nothing; accepting it does, and folds the finding to a line the brief agrees with.
+    fireEvent.click(within(finding).getByRole('button', { name: 'Accept answer' }));
+    await waitFor(() => expect(document.querySelector('[data-finding-id="f1"]')?.textContent).toContain('Accepted'));
+    expect(decided).toEqual([[1, 'ACCEPT']]);
+    // The control went with the fold; the finding kept the keys.
+    expect(document.activeElement).toBe(document.querySelector('[data-finding-id="f1"]'));
+    const answers = screen.getByRole('list', { name: 'Answers to the review request' });
+    expect(within(answers).getByText('Accepted')).toBeDefined();
+    expect(within(answers).getByText('Not changed')).toBeDefined();
+    fireEvent.click(within(document.querySelector<HTMLElement>('[data-finding-id="f1"]')!).getByRole('button', { name: 'Reopen' }));
+    await waitFor(() => expect(screen.getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined());
+    expect(decided).toEqual([[1, 'ACCEPT'], [1, 'REOPEN']]);
+
+    // Sent again, an answered item is the person's comment on its lines, starting from a quote of it; an out-of-date
+    // review's finding never goes as a finding again.
+    fireEvent.click(within(screen.getByRole('article', { name: 'Major finding: Limiter state is per process' })).getByRole('button', { name: 'Add to request' }));
+    const field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    expect(field.value).toBe('> Limiter state is per process\n\n');
+    expect(field.selectionStart).toBe(field.value.length);
+    fireEvent.change(field, { target: { value: `${field.value}Still one bucket per replica.` } });
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      includedFindingIds: [],
+      comments: [expect.objectContaining({ path: 'src/rateLimit.ts', side: 'NEW', line: 1, text: '> Limiter state is per process\n\nStill one bucket per replica.' })]
+    }));
   });
 
   it('shows every change for an out-of-date review when nothing changed since it, never an empty scope', async () => {
@@ -348,6 +495,14 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(within(file).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
     expect(within(file).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
     expect(api.readReviewChanges).toHaveBeenCalledWith({ taskId: expect.any(String), reviewRunId: 'review-1' });
+    // Before a walkthrough the Guide reads the whole change as the code is now, whatever the Diff shows.
+    fireEvent.click(screen.getByRole('button', { name: 'Guide' }));
+    expect(screen.getByRole('region', { name: 'src/other.ts' })).toBeDefined();
+    const facts = screen.getByRole('region', { name: 'src/rateLimit.ts' });
+    fireEvent.click(within(facts).getByRole('button', { name: 'Expand src/rateLimit.ts' }));
+    expect([...facts.querySelectorAll('code')].map((code) => code.textContent)).toEqual(expect.arrayContaining(['Removed: old', 'Added: newer']));
+    expect(within(facts).getByRole('button', { name: 'Comment on removed line 1' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Diff' }));
 
     // Once a re-review is current, the previous round is offered, not led with.
     rerender(<Harness
@@ -356,6 +511,61 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     />);
     expect(await screen.findByRole('region', { name: 'src/other.ts' })).toBeDefined();
     expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('All changes');
+  });
+
+  it('puts an answered comment on the line of the reviewed code it was written on, and sends one again on the row the diff shows', async () => {
+    api.readArtifact.mockImplementation(async () => `# Git diff evidence\n\n${section('Committed diff', fileDiff('src/cli.js', '@@ -0,0 +1,5 @@\n+const usage = \'Usage\';\n+\n+const name = process.argv[2];\n+console.log(name ? greet(name) : usage);\n+export {};'))}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    // The agent put two lines above the ones the person commented on: lines 1 and 2 of the reviewed code are now 3 and 4.
+    api.readReviewChanges.mockResolvedValue({
+      status: 'READY', reviewRunId: 'review-1', tree: 'tree-1',
+      diff: fileDiff('src/cli.js', "@@ -1,3 +1,5 @@\n+const usage = 'Usage';\n+\n const name = process.argv[2];\n-console.log(greet(name));\n+console.log(name ? greet(name) : usage);\n export {};")
+    });
+    const round: ReviewRoundView = {
+      instructionId: 'request-1',
+      at: '2026-07-07T10:20:00.000Z',
+      request: { reviewRunId: 'review-1', items: [
+        { number: 1, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 2, text: 'Print the usage without a name.' },
+        { number: 2, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 1, text: 'Read the name once.' }
+      ] },
+      answers: [{ item: 1, outcome: 'FIXED', note: 'It prints the usage now.' }, { item: 2, outcome: 'NOT_CHANGED', note: 'It is read once.' }],
+      answeredAt: '2026-07-07T10:25:00.000Z',
+      reviewRunId: 'review-1',
+      accepted: new Set()
+    };
+    const onSubmit = vi.fn();
+    // One task throughout, so what changed since the review is read once, as on a task page.
+    render(<Harness
+      taskId="task-cli"
+      findings={[]}
+      review={{ status: 'STALE', runId: 'review-1' }}
+      changesSince={{ reviewRunId: 'review-1', label: 'Since the review', refreshKey: 'git-2' }}
+      answers={{ agent: 'Codex', round }}
+      onSubmit={onSubmit}
+    />);
+
+    const file = await screen.findByRole('region', { name: 'src/cli.js' });
+    const band = (text: string) => within(file).getByText(text).closest<HTMLElement>('[data-comment-id]')!;
+    await within(file).findByText('Print the usage without a name.');
+    expect(band('Print the usage without a name.').closest('.tm-review-line-group')!.querySelector('code')!.textContent).toBe('Removed: console.log(greet(name));');
+
+    // Sent again, a comment is on the row its band sits under, as the diff shows it: line 3 now, never the 1 the review read.
+    const write = (words: string) => {
+      const field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+      fireEvent.change(field, { target: { value: `${field.value}${words}` } });
+      fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    };
+    // A comment opened elsewhere and left empty moves to the item, and starts from its quote all the same.
+    fireEvent.click(within(file).getByRole('button', { name: 'Comment on line 5' }));
+    fireEvent.click(within(band('Read the name once.')).getByRole('button', { name: 'Add to request' }));
+    write('Still twice.');
+    // A removed line takes no comment here, so one about it goes on its file.
+    fireEvent.click(within(band('Print the usage without a name.')).getByRole('button', { name: 'Add to request' }));
+    write('Check the empty name too.');
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    const [comment, onFile] = onSubmit.mock.calls[0]![0].comments;
+    expect(comment).toEqual(expect.objectContaining({ path: 'src/cli.js', side: 'NEW', line: 3, text: '> Read the name once.\n\nStill twice.' }));
+    expect(onFile).toEqual(expect.objectContaining({ path: 'src/cli.js', side: 'NEW', text: '> Print the usage without a name.\n\nCheck the empty name too.' }));
+    expect(onFile.line).toBeUndefined();
   });
 
   it('says when the agent is waiting on the person instead of the review’s verdict', async () => {
@@ -423,16 +633,17 @@ describe('ReviewWorkspace pull request discussions', () => {
     expect(within(opened).queryByRole('button', { name: 'Add to request' })).toBeNull();
   });
 
-  it('answers a thread where it is read: a reply starts from the agent\'s answer and posts with the resolving chosen', async () => {
+  it('answers a thread where it is read: a reply starts from the change seen, quotes the agent for the person alone, and resolves only when asked', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts', 'const window = 60;'));
     const onReplyToDiscussion = vi.fn(async () => undefined);
     const onResolveDiscussion = vi.fn(async () => undefined);
     const suggestion = discussion('suggest', { commentCount: 1, comments: [
       { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Name it:\n\n```suggestion\nconst windowSeconds = 60;\n```', truncated: false }
     ] });
+    const answered = discussion('open', { sent: { at: '2026-07-07T10:00:00.000Z', outcome: 'FIXED', note: 'Returns seconds now.', answeredAt: '2026-07-07T10:20:00.000Z' } });
     const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
-      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
-    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), suggestion]} discussionsOnLines
+      outcome: 'FIXED' as const, note: 'Returns seconds now.', body: 'Changed in 1a2b3c4.', resolvable: true }]]);
+    render(<Harness findings={[]} review={undefined} discussions={[answered, suggestion]} discussionsOnLines answers={{ agent: 'Codex' }}
       replyDrafts={drafts} onReplyToDiscussion={onReplyToDiscussion} onResolveDiscussion={onResolveDiscussion} />);
     await screen.findAllByRole('article', { name: 'GitHub comment by alice' });
     const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
@@ -442,7 +653,10 @@ describe('ReviewWorkspace pull request discussions', () => {
     expect(within(figure).getByText('const window = 60;')).toBeDefined();
     expect(within(figure).getByText('const windowSeconds = 60;')).toBeDefined();
 
-    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the agent's answer.
+    // The agent's answer is the thread's state, and its words are quoted above the reply row under its name, for the person alone.
+    expect(within(thread('open')).getByText('Fixed')).toBeDefined();
+    expect(within(thread('open')).getByText('Returns seconds now.').closest('figure')?.textContent).toContain('Codex');
+    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the change Task Monki saw.
     const input = within(thread('open')).getByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
     expect(input.value).toBe('');
     expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
@@ -450,14 +664,14 @@ describe('ReviewWorkspace pull request discussions', () => {
     fireEvent.keyDown(thread('open'), { key: 'r' });
     expect(document.activeElement).toBe(input);
     fireEvent.focusIn(input);
-    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
-    // Resolving stays the person's call.
+    expect(input.value).toBe('Changed in 1a2b3c4.');
+    // Resolving is the person's call, even on Fixed.
     const resolve = within(thread('open')).getByRole('checkbox', { name: 'Resolve thread' });
-    expect((resolve as HTMLInputElement).checked).toBe(true);
+    expect((resolve as HTMLInputElement).checked).toBe(false);
     fireEvent.click(resolve);
-    fireEvent.change(input, { target: { value: 'Returns seconds now.' } });
+    fireEvent.change(input, { target: { value: 'Changed in 1a2b3c4. Seconds now.' } });
     fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Returns seconds now.', false));
+    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Changed in 1a2b3c4. Seconds now.', true));
     // Posted, the row is empty again and folds back to its field.
     await waitFor(() => expect(input.value).toBe(''));
     expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
@@ -478,13 +692,13 @@ describe('ReviewWorkspace pull request discussions', () => {
       else typed.set(discussionId, text);
     };
     const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
-      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+      outcome: 'FIXED' as const, body: 'Changed in 1a2b3c4.', resolvable: true }]]);
     const shared = { findings: [], review: undefined, discussionsOnLines: true, replyTexts: typed, onReplyTextChange,
       onReplyToDiscussion: vi.fn(async () => undefined) };
     const first = render(<Harness {...shared} discussions={[discussion('open')]} replyDrafts={drafts} />);
     const input = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
     fireEvent.focusIn(input);
-    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    expect(input.value).toBe('Changed in 1a2b3c4.');
     first.unmount();
 
     // Posted from the Overview's dialog, the answer leaves the drafts and the thread waits on alice.
@@ -556,12 +770,165 @@ describe('ReviewWorkspace pull request discussions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
     const rail = screen.getByRole('navigation', { name: 'Feedback' });
-    const onGitHub = within(rail).getByText('On GitHub').parentElement!;
-    // What still needs a decision comes before what was sent.
+    const onGitHub = within(rail).getByRole('region', { name: 'On GitHub' });
+    // What still needs a decision comes before what was sent; each row says what was said, then who said it.
     expect(within(onGitHub).getAllByRole('button').map((row) => row.textContent)).toEqual([
       expect.stringContaining('alice'), expect.stringContaining('dave')
     ]);
-    expect(within(within(rail).getByText('Resolved on GitHub').parentElement!).getByText('Rename the limiter.')).toBeDefined();
+    expect(within(onGitHub).getAllByRole('button')[1]!.textContent).toMatch(/^Cap the burst\.dave\s*Fixed/u);
+    // A resolved thread is settled, at the end and folded.
+    const settled = within(rail).getByRole('region', { name: 'Settled' });
+    fireEvent.click(within(settled).getByRole('button', { name: /Settled/ }));
+    expect(within(settled).getByText('Rename the limiter.')).toBeDefined();
+  });
+});
+
+describe('ReviewWorkspace commits and files', () => {
+  const sha = (letter: string) => letter.repeat(40);
+  const commits = [
+    { sha: sha('a'), subject: 'Raise the limit', body: 'The old one throttled imports.', author: 'Ana', authoredAt: '2026-07-07T09:00:00.000Z' },
+    { sha: sha('b'), subject: 'Rename the limiter', author: 'Ana', authoredAt: '2026-07-07T10:00:00.000Z' }
+  ];
+  const own = `# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20')}\n${fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`;
+
+  beforeEach(() => {
+    api.readArtifact.mockReset().mockResolvedValue(own);
+    api.listTaskCommits.mockReset().mockResolvedValue({ status: 'READY', commits, total: 2 });
+    api.readTaskCommitDiff.mockReset().mockImplementation(async ({ sha: chosen }: { sha: string }) => ({
+      status: 'READY',
+      sha: chosen,
+      diff: chosen === sha('a') ? fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20') : fileDiff('src/rateLimit.ts', '@@ -1 +1 @@\n-old\n+new')
+    }));
+    window.localStorage.clear();
+  });
+
+  const files = () => within(screen.getByRole('navigation', { name: 'Files' })).getAllByRole('button').map((row) => row.querySelector('.tm-review__index-name')?.textContent);
+
+  it('reads the branch commit by commit as history, from the menu and with [ and ], and back to the whole change', async () => {
+    render(<Harness gitSnapshotId="snapshot-1" />);
+    const scope = await screen.findByRole('button', { name: 'Changes to show' });
+    await waitFor(() => expect(api.listTaskCommits).toHaveBeenCalledWith({ taskId: expect.any(String), gitSnapshotId: 'snapshot-1' }));
+    scope.focus();
+    fireEvent.keyDown(scope, { key: 'ArrowDown' });
+    const menu = await screen.findByRole('menu', { name: 'Changes to show' });
+    expect(within(menu).getAllByRole('menuitemradio').map((item) => item.getAttribute('aria-label'))).toEqual(['All changes', 'Raise the limit', 'Rename the limiter']);
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'Raise the limit' }));
+
+    // The commit's own message stands where the brief does, over its own files; nothing is marked viewed or written on history.
+    const brief = await screen.findByRole('region', { name: 'Commit' });
+    expect(brief.textContent).toContain('Commit 1 of 2');
+    expect(within(brief).getByText('The old one throttled imports.')).toBeDefined();
+    expect(files()).toEqual(['limit.ts']);
+    expect(screen.queryByRole('checkbox', { name: 'Viewed' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Comment on line/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Previous commit' }).hasAttribute('disabled')).toBe(true);
+
+    // ] moves on once the next commit is read; the finding on its file sits at the file's top, not on a line that may since have changed.
+    fireEvent.keyDown(screen.getByRole('region', { name: 'src/limit.ts' }), { key: ']' });
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Commit' }).textContent).toContain('Commit 2 of 2'));
+    expect(files()).toEqual(['rateLimit.ts']);
+    expect(within(screen.getByRole('region', { name: 'src/rateLimit.ts' })).getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Next commit' }).hasAttribute('disabled')).toBe(true);
+
+    scope.focus();
+    fireEvent.keyDown(scope, { key: 'ArrowDown' });
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Changes to show' })).getByRole('menuitemradio', { name: 'All changes' }));
+    expect(screen.queryByRole('region', { name: 'Commit' })).toBeNull();
+    expect(files()).toHaveLength(2);
+    expect(screen.getAllByRole('checkbox', { name: 'Viewed' })).toHaveLength(2);
+  });
+
+  it('starts a commit at its top once it shows, and shows feedback outside it in the whole change', async () => {
+    let release: (() => void) | undefined;
+    api.readTaskCommitDiff.mockImplementation(({ sha: chosen }: { sha: string }) => new Promise((resolve) => {
+      release = () => resolve({ status: 'READY', sha: chosen, diff: fileDiff('src/limit.ts', '@@ -1 +1 @@\n-10\n+20') });
+    }));
+    render(<Harness taskId="task-commits" gitSnapshotId="snapshot-1" />);
+    await screen.findByRole('region', { name: 'src/limit.ts' });
+    await waitFor(() => expect(api.listTaskCommits).toHaveBeenCalled());
+    await act(async () => undefined);
+    const scroller = document.querySelector<HTMLElement>('.tm-review__scroller')!;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 5000 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
+    scroller.scrollTop = 900;
+
+    // While the commit is read, the whole change stays where the person was reading it.
+    fireEvent.keyDown(scroller, { key: ']' });
+    expect(scroller.scrollTop).toBe(900);
+    await act(async () => { release?.(); });
+    expect(await screen.findByRole('region', { name: 'Commit' })).toBeDefined();
+    expect(scroller.scrollTop).toBe(0);
+
+    // The finding is about a file the commit leaves alone: the whole change shows it.
+    fireEvent.click(screen.getByRole('button', { name: /^Feedback/ }));
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Feedback' })).getByRole('button', { name: /Limiter state is per process/ }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Commit' })).toBeNull());
+    expect(screen.getByRole('button', { name: 'Changes to show' }).textContent).toContain('All changes');
+    expect(within(screen.getByRole('region', { name: 'src/rateLimit.ts' })).getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined();
+  });
+
+  it('filters the files by every word typed, goes to the first with Enter, and finds the filter with /', async () => {
+    render(<Harness findings={[]} />);
+    await screen.findByRole('region', { name: 'src/limit.ts' });
+    fireEvent.keyDown(screen.getByRole('region', { name: 'src/limit.ts' }), { key: '/' });
+    const filter = screen.getByRole('searchbox', { name: 'Filter files' });
+    expect(document.activeElement).toBe(filter);
+
+    fireEvent.change(filter, { target: { value: 'RATE src' } });
+    expect(files()).toEqual(['rateLimit.ts']);
+    fireEvent.keyDown(filter, { key: 'Enter' });
+    expect(within(screen.getByRole('navigation', { name: 'Files' })).getByRole('button', { name: /rateLimit\.ts/ }).getAttribute('aria-current')).toBe('true');
+    fireEvent.change(filter, { target: { value: 'nothing here' } });
+    expect(screen.getByText('No files match')).toBeDefined();
+    // Escape clears the filter before it gives the keys back.
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    expect(files()).toHaveLength(2);
+  });
+});
+
+describe('ReviewWorkspace reading position', () => {
+  beforeEach(() => {
+    api.readArtifact.mockReset().mockResolvedValueOnce(`# Git diff evidence\n\n${section('Committed diff', `${fileDiff('src/a.ts', '@@ -1 +1 @@\n-a\n+b')}\n${fileDiff('src/b.ts', '@@ -1 +1 @@\n-c\n+d')}`)}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    window.localStorage.clear();
+  });
+
+  it('marks the file being read in the navigator, and moves the mark with K and V', async () => {
+    render(<Harness findings={[]} />);
+    const sections = [await screen.findByRole('region', { name: 'src/a.ts' }), screen.getByRole('region', { name: 'src/b.ts' })];
+    const scroller = sections[0]!.closest<HTMLElement>('.tm-review__scroller')!;
+    const navigator = screen.getByRole('navigation', { name: 'Files' });
+    const rows = within(navigator).getAllByRole('button');
+    // The scroller's top is at 100 and it is 600 tall, so its reading band runs to 280.
+    scroller.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect;
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
+    const scrollTo = (tops: number[]) => {
+      sections.forEach((element, index) => { element.getBoundingClientRect = () => ({ top: tops[index]!, bottom: tops[index]! + 400 }) as DOMRect; });
+      fireEvent.scroll(scroller);
+    };
+
+    scrollTo([112, 522]);
+    expect(rows[0]!.getAttribute('aria-current')).toBe('true');
+
+    // Read on until the first file has left the top: the second is read.
+    scrollTo([-300, 110]);
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true');
+    expect(rows[0]!.hasAttribute('aria-current')).toBe(false);
+
+    // K goes back a file; V marks it viewed and moves on to the next file not viewed.
+    fireEvent.keyDown(scroller, { key: 'k' });
+    expect(rows[0]!.getAttribute('aria-current')).toBe('true');
+    fireEvent.keyDown(scroller, { key: 'v' });
+    expect((within(sections[0]!).getByRole('checkbox', { name: 'Viewed' }) as HTMLInputElement).checked).toBe(true);
+    expect(rows[1]!.getAttribute('aria-current')).toBe('true');
+  });
+
+  it('marks each row with the place a walkthrough and G point at, whatever form the path comes in', async () => {
+    render(<Harness findings={[]} />);
+    const file = await screen.findByRole('region', { name: 'src/a.ts' });
+    // A removed line and an added one with the same number are two places.
+    const anchored = (side: 'NEW' | 'OLD') => file.querySelector(`[data-line-anchor="${lineAnchor('./src/a.ts', side, 1)}"]`);
+    expect(anchored('OLD')?.querySelector('code')?.textContent).toBe('Removed: a');
+    expect(anchored('NEW')?.querySelector('code')?.textContent).toBe('Added: b');
   });
 });
 

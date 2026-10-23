@@ -14,6 +14,7 @@ import type {
   DomainEvent,
   InteractionRequestRecord,
   RespondToInteractionRequest,
+  ReviewWalkthroughState,
   RunRecord,
   Task,
   TaskIteration,
@@ -78,7 +79,7 @@ import {
   createAgentSessionAccessEpoch
 } from './AgentRuntimeOwnership';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
-import { parseAgentReviewResult } from '../review/AgentReviewContract';
+import { parseAgentReviewOutput, type AgentReviewOutput } from '../review/AgentReviewContract';
 import { clientToolSetForMode } from './clientTools/ClientToolSets';
 
 const MAX_CONCURRENT_TURNS = 2;
@@ -292,6 +293,8 @@ function assertSessionPostcondition(
 }
 
 export interface StartOrchestratedReview {
+  /** Reserved by a caller that keeps the reviewed code under the run before it starts. */
+  runId?: string;
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
@@ -302,6 +305,11 @@ export interface StartOrchestratedReview {
   beforeGitSnapshotId?: string;
   /** The earlier review's findings and decisions, so the new review does not re-raise settled ones without reason. */
   previousReview?: PreviousReviewContext;
+  /**
+   * The code the review reads, kept under `runId`: its tree, recorded with the
+   * run's start, and the change it holds, listed in the prompt for the walkthrough.
+   */
+  reviewedCode?: { tree: string; changeIndex?: string };
 }
 
 export interface StartOrchestratedSideQuestion {
@@ -347,6 +355,12 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       allowCandidateDesignModels?: boolean;
       /** Whether a path is one of this profile's read-only snapshots; side questions read only those. */
       ownsReadOnlySnapshot?: (candidate: string) => boolean;
+      /**
+       * Checks the walkthrough a completed review wrote against the code it read
+       * and the findings it wrote with it, and keeps what holds, idempotently by
+       * run; resolves to what the review gate records with the outcome.
+       */
+      reviewWalkthrough?: (run: RunRecord, review: AgentReviewOutput) => Promise<ReviewWalkthroughState>;
     } = {}
   ) {
     this.runtimes =
@@ -1338,11 +1352,15 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     if (side) {
       outcome = { mode: 'SIDE_QUESTION' };
     } else {
-      const reviewResult =
-        event.status === 'completed' ? parseAgentReviewResult(output) : undefined;
+      const review = event.status === 'completed' ? parseAgentReviewOutput(output) : undefined;
+      // The walkthrough is checked and kept before the outcome is recorded, so both land together.
+      const walkthrough = review && this.options.reviewWalkthrough
+        ? await this.options.reviewWalkthrough(run, review)
+        : undefined;
       outcome = {
-        agentReviewStatus: reviewGateStatusFromResult(reviewResult),
-        agentReviewResult: reviewResult
+        agentReviewStatus: reviewGateStatusFromResult(review?.result),
+        agentReviewResult: review?.result,
+        ...(walkthrough ? { agentReviewWalkthrough: walkthrough } : {})
       };
     }
     await this.taskRuntime.applyTaskRuntimeEvent(
@@ -2208,7 +2226,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       task: input.task,
       worktree: input.worktree,
       target: input.target,
-      previousReview: input.previousReview
+      previousReview: input.previousReview,
+      changeIndex: input.reviewedCode?.changeIndex
     });
     const executionContext = await this.buildReadOnlyCheckoutContext(reviewRuntimeId, {
       sessionId: reviewSessionId,
@@ -2217,7 +2236,7 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       clientOperationId: reviewSessionOperationId,
       attachments: preflightAttachments
     });
-    const runId = randomUUID();
+    const runId = input.runId ?? randomUUID();
     const prepared = await this.prepareTurn({
       sessionId: reviewSessionId,
       runId,
@@ -2252,9 +2271,26 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
       taskReviewTarget: input.target,
       attachmentSelection: toAgentAttachmentSelection(preflightAttachments)
     });
+    const reviewedTree = input.reviewedCode?.tree;
     return this.startPreparedTaskReadOnlyTurn(prepared, {
       startOperationId: `review-start:${prepared.run.id}`,
       unconfirmedReason: 'Task Monki could not confirm whether the review started.',
+      // Recorded before the provider is asked, so even a review that ends at once finds the code it read.
+      ...(reviewedTree
+        ? {
+            recordStart: (run: RunRecord) => this.store.appendEvent(
+              createDomainEvent({
+                type: 'REVIEW_SNAPSHOT_RECORDED',
+                taskId: run.taskId,
+                iterationId: run.iterationId,
+                runId: run.id,
+                worktreeId: run.worktreeId,
+                source: 'git',
+                payload: { reviewRunId: run.id, tree: reviewedTree }
+              })
+            )
+          }
+        : {}),
       attachments: async () => toAgentTurnAttachments(
         await this.store.prepareRunAttachments(prepared.run.id, input.task.id)
       )
@@ -2353,6 +2389,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     options: {
       startOperationId: string;
       unconfirmedReason: string;
+      /** Task facts recorded with the run's start, before the provider is asked. */
+      recordStart?: (run: RunRecord) => Promise<void>;
       attachments: () => Promise<AgentTurnAttachment[]>;
     }
   ): Promise<RunRecord> {
@@ -2364,6 +2402,8 @@ export class AgentOrchestrator implements AgentRuntimeCoordinator {
     await this.store.recordAgentSessionCreated(session);
     await this.store.recordAgentRunStarted(run);
     try {
+      // Inside the start, so a fact that cannot be recorded fails the start like its attachments.
+      await options.recordStart?.(run);
       await this.startPreparedTurnNow(
         prepared.queueEntry.id,
         options.startOperationId,

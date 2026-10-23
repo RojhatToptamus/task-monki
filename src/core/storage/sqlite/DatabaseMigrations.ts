@@ -1551,6 +1551,14 @@ CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_
       SET settings_json = json_set(json_remove(settings_json, '$.sidebarCollapsed', '$.showMascot'), '$.schemaVersion', 15),
           record_revision = record_revision + 1
       WHERE json_extract(settings_json, '$.schemaVersion') = 14;`
+  },
+  {
+    version: 14,
+    name: 'review-walkthroughs',
+    // Task payloads carry review walkthroughs, decisions on a request's answers
+    // and Ask subjects of a walkthrough's stage, a file or a discussion. The
+    // version prevents older clients from opening them.
+    sql: 'SELECT 1;'
   }
 ] as const;
 

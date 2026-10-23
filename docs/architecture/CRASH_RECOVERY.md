@@ -114,7 +114,8 @@ settled run, such as its post-run Git snapshot, keep it. Startup identifies a
 review or side question outcome by its run: when the Task
 store already records that outcome, under whichever operation recorded it,
 startup only settles the runtime record and does not publish the result or
-capture post-run evidence again.
+capture post-run evidence again. A review outcome projected again keeps the
+walkthrough artifact its run already holds instead of writing a second.
 
 Graceful runtime shutdown first removes adapter event producers. It then drains
 events that Task Monki already accepted before it stops the adapters. Store

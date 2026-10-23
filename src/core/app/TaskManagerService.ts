@@ -58,7 +58,9 @@ import type {
   StopPreviewAgentRequest,
   GetPreviewRecipeGenerationRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   AskSideQuestionRequest,
   SideQuestionModelChoice,
   EndSideThreadRequest,
@@ -207,7 +209,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { UNTRUSTED_CHECKOUT_GIT_ENV, configureGitExecutablePath, git, gitSucceeds, isGitObjectId, type GitExecutionOptions } from '../git/gitCli';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint, type PullRequestHead } from '../git/GitSnapshotService';
-import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
+import { ReviewSnapshotStore, type ReviewChangeIndex } from '../git/ReviewSnapshotStore';
+import { isTaskCommit, listTaskCommits, readTaskCommitDiff } from '../git/TaskCommits';
+import type { ReadTaskCommitDiffRequest, ReadTaskCommitsRequest, TaskCommitDiffResult, TaskCommitsResult } from '../../shared/taskCommits';
 import { GitHubCli } from '../github/GitHubCli';
 import { GitHubService } from '../github/GitHubService';
 import { deliveryRemote, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
@@ -284,10 +288,13 @@ import {
   resolvePreviewAgentExecution
 } from '../preview/agent/PreviewAgentCoordinator';
 import { AgentReviewCoordinator } from '../review/AgentReviewCoordinator';
+import type { AgentReviewOutput } from '../review/AgentReviewContract';
+import { checkReviewWalkthrough } from '../review/ReviewWalkthrough';
 import { SideQuestionCoordinator } from '../sideQuestion/SideQuestionCoordinator';
 import { ReadOnlySnapshotService } from '../git/ReadOnlySnapshotService';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
-import { assertReviewRequestRecord, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
+import { assertReviewRequestRecord, latestReviewRequest, parseReviewResponse, type ReadReviewChangesRequest, type ReviewChangesResult, type ReviewRequestRecord, type ReviewResponseAnswer } from '../../shared/reviewRounds';
+import type { ReviewWalkthroughState } from '../../shared/reviewWalkthrough';
 import type {
   PreviewUrlHost,
   ResolvedPreviewRoute
@@ -344,6 +351,11 @@ import {
 } from '../design/DesignClientToolContract';
 import { parseInspectDesignOperation } from '../design/AgentBrowserRuntime';
 
+/** The change index a review was given, without the prompt's text: what its walkthrough is checked against. */
+type ReviewWalkthroughIndex = { status: 'READY'; files: Extract<ReviewChangeIndex, { status: 'READY' }>['files'] } | Extract<ReviewWalkthroughState, { status: 'UNAVAILABLE' }>;
+/** Reviews whose index is kept at once; more run together only past this many. */
+const MAX_KEPT_REVIEW_INDEXES = 8;
+
 type TaskManagerLifecycleState =
   | 'NEW'
   | 'INITIALIZING'
@@ -387,6 +399,12 @@ export class TaskManagerService {
   private readonly reviews: AgentReviewCoordinator;
   private readonly snapshots: ReadOnlySnapshotService;
   private readonly reviewSnapshots: ReviewSnapshotStore;
+  /**
+   * What each review this process started was given to describe, from its start, so its end checks the
+   * walkthrough without reading the diff again inside the runtime's event queue, and a review asked for
+   * none says why. A few at most; one not here (an app restarted mid-review) is read again.
+   */
+  private readonly reviewIndexes = new Map<string, { base?: string; tree?: string; index: ReviewWalkthroughIndex }>();
   private readonly sideQuestions: SideQuestionCoordinator;
   private readonly designDrafts?: DesignDraftStore;
   private readonly githubCli: GitHubCli;
@@ -604,7 +622,8 @@ export class TaskManagerService {
         allowNetworkAccess: options.allowAgentNetworkAccess,
         providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
         allowCandidateDesignModels: this.allowCandidateDesignModels,
-        ownsReadOnlySnapshot: (candidate) => this.snapshots.owns(candidate)
+        ownsReadOnlySnapshot: (candidate) => this.snapshots.owns(candidate),
+        reviewWalkthrough: (run, review) => this.keepReviewWalkthrough(run, review)
       }
     );
     this.promptRefiner = new PromptRefinementService((request) =>
@@ -3658,9 +3677,7 @@ export class TaskManagerService {
    */
   private async reviewRound(taskId: string, reviewRunId: string): Promise<{ record: ReviewRequestRecord; answers: ReviewResponseAnswer[] } | undefined> {
     const detail = await this.store.getTaskDetail(taskId);
-    const instruction = detail.taskInstructions
-      .filter((item) => item.reviewRequest?.reviewRunId === reviewRunId && item.runId)
-      .sort((left, right) => right.order - left.order)[0];
+    const instruction = latestReviewRequest(detail.taskInstructions, reviewRunId);
     if (!instruction?.reviewRequest) return undefined;
     const run = detail.runs.find((candidate) => candidate.id === instruction.runId);
     const reply = run?.status === 'COMPLETED' ? await runReplyText(run, (id) => this.agentRuntimeStore.readArtifact(id)) : '';
@@ -4128,90 +4145,208 @@ export class TaskManagerService {
                   configuredReviewSettings
                 ]
               });
-        // The exact code the review reads is kept, so later rounds can show what changed since it.
-        const reviewedTree = await this.captureReviewedTree(worktree.worktreePath, gitSnapshot);
-        await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
-        const previousReview = task.projection.agentReview;
-        const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
-        const review = await this.agents.startReview({
-          task,
-          iteration,
-          worktree,
-          sourceRun: run,
-          previousReview: previousReview?.result
-            ? {
-                verdict: previousReview.result.verdict,
-                // The reviewer's own summary; the gate's may only say the review went out of date.
-                summary: previousReview.result.summary || previousReview.summary,
-                findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? []),
-                ...(previousRequest ? { request: previousRequest } : {})
-              }
-            : undefined,
-          // Every change since the task's base: a commit made during the task stays in the review.
-          target: input.target ?? {
-            type: 'CUSTOM',
-            instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
-          },
-          settings,
-          generationKey: gitSnapshot.dirtyFingerprint,
-          beforeGitSnapshotId: gitSnapshot.id
-        });
-        if (reviewedTree) await this.recordReviewedTree(task, review, worktree, reviewedTree);
-        return review;
+        // The exact code the review reads is kept under its run before the run starts, so its
+        // walkthrough is checked against it and later rounds can show what changed since it.
+        const reviewRunId = randomUUID();
+        const reviewedTree = await this.keepReviewedTree(task.id, reviewRunId, worktree.worktreePath, gitSnapshot);
+        try {
+          const changeIndex = reviewedTree && gitSnapshot.baseSha
+            ? await this.reviewSnapshots.changeIndex(worktree.worktreePath, gitSnapshot.baseSha, reviewedTree)
+            : undefined;
+          this.keepReviewIndex(reviewRunId, {
+            base: gitSnapshot.baseSha,
+            tree: reviewedTree,
+            index: changeIndex?.status === 'READY' ? { status: 'READY', files: changeIndex.files } : changeIndex ?? { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' }
+          });
+          await this.holdTaskQueue(task.id, 'Agent review started. Review the remaining instructions.');
+          const previousReview = task.projection.agentReview;
+          const previousRequest = previousReview?.runId ? await this.reviewRound(task.id, previousReview.runId) : undefined;
+          return await this.agents.startReview({
+            runId: reviewRunId,
+            task,
+            iteration,
+            worktree,
+            sourceRun: run,
+            previousReview: previousReview?.result
+              ? {
+                  verdict: previousReview.result.verdict,
+                  // The reviewer's own summary; the gate's may only say the review went out of date.
+                  summary: previousReview.result.summary || previousReview.summary,
+                  findings: effectiveReviewFindings(previousReview.result, previousReview.findingDecisions ?? []),
+                  ...(previousRequest ? { request: previousRequest } : {})
+                }
+              : undefined,
+            // Every change since the task's base: a commit made during the task stays in the review.
+            target: input.target ?? {
+              type: 'CUSTOM',
+              instructions: `Review all committed changes from ${worktree.baseSha} to HEAD. Also review staged, unstaged, and untracked changes.`
+            },
+            settings,
+            generationKey: gitSnapshot.dirtyFingerprint,
+            beforeGitSnapshotId: gitSnapshot.id,
+            ...(reviewedTree
+              ? { reviewedCode: { tree: reviewedTree, ...(changeIndex?.status === 'READY' ? { changeIndex: changeIndex.text } : {}) } }
+              : {})
+          });
+        } catch (error) {
+          // A review that never started keeps no code: its pin would hold the tree from every prune.
+          this.reviewIndexes.delete(reviewRunId);
+          if (reviewedTree && !(await this.store.getRun(reviewRunId))) {
+            await this.reviewSnapshots.unpin(worktree.worktreePath, task.id, reviewRunId).catch(() => undefined);
+          }
+          throw error;
+        }
       })
     );
   }
 
   /**
-   * The worktree's content as the review will read it. A capture that does not
-   * match the Git snapshot the review starts from is dropped: a review is only
-   * ever linked to code it read.
+   * Keeps the worktree's content, as the review will read it, under the review's
+   * run. A capture that does not match the Git snapshot the review starts from
+   * is dropped: a review is only ever linked to code it read.
    */
-  private async captureReviewedTree(worktreePath: string, gitSnapshot: GitSnapshotRecord): Promise<string | undefined> {
+  private async keepReviewedTree(
+    taskId: string,
+    reviewRunId: string,
+    worktreePath: string,
+    gitSnapshot: GitSnapshotRecord
+  ): Promise<string | undefined> {
     try {
       const tree = await this.reviewSnapshots.capture(worktreePath);
-      return (await inspectGitWorkingTreeFingerprint(worktreePath)) === gitSnapshot.dirtyFingerprint ? tree : undefined;
+      if ((await inspectGitWorkingTreeFingerprint(worktreePath)) !== gitSnapshot.dirtyFingerprint) return undefined;
+      await this.reviewSnapshots.pin(worktreePath, taskId, reviewRunId, tree);
+      return tree;
     } catch {
       return undefined;
     }
   }
 
-  private async recordReviewedTree(task: Task, review: RunRecord, worktree: WorktreeRecord, tree: string): Promise<void> {
+  /**
+   * Checks the walkthrough a completed review wrote against the change it read,
+   * from the base of the Git snapshot it started from to the tree it read, and
+   * against the findings it wrote with it, and keeps what holds as the review
+   * run's artifact. Runs inside the review's outcome, so both are recorded
+   * together; a restart that projects the outcome again gets the same artifact
+   * back. A walkthrough that cannot be kept never holds back the outcome.
+   */
+  private async keepReviewWalkthrough(run: RunRecord, review: AgentReviewOutput): Promise<ReviewWalkthroughState> {
+    // It runs inside the task runtime's event queue, so it reads no diff its start already read.
+    const given = this.reviewIndexes.get(run.id);
+    this.reviewIndexes.delete(run.id);
+    const value = review.walkthrough;
+    // A review given nothing to describe (its code not kept, or too large to list) was asked for none.
+    if (value === undefined) return given?.index.status === 'UNAVAILABLE' ? given.index : { status: 'UNAVAILABLE', reason: 'NOT_WRITTEN' };
     try {
-      await this.reviewSnapshots.pin(worktree.worktreePath, task.id, review.id, tree);
+      const gate = (await this.store.getTask(run.taskId))?.projection.agentReview;
+      // Only an outcome the gate takes keeps one: its own review, not out of date.
+      const tree = gate?.runId === run.id && gate.status !== 'STALE' ? gate.reviewedTreeSha : undefined;
+      const base = await this.reviewBase(run);
+      const worktree = await this.store.getWorktree(run.worktreeId);
+      if (!tree || !base || !worktree) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
+      const index = given?.base === base && given.tree === tree && given.index.status === 'READY'
+        ? given.index
+        : await this.reviewSnapshots.changeIndex(worktree.worktreePath, base, tree);
+      if (index.status === 'UNAVAILABLE') return index;
+      const findingIds = new Set(review.result?.findings.map((finding) => finding.id));
+      const checked = checkReviewWalkthrough(value, { reviewRunId: run.id, base, tree, files: index.files }, findingIds);
+      if (checked.status === 'UNAVAILABLE') return checked;
+      const artifact = await this.store.recordReviewWalkthrough(run.id, JSON.stringify(checked.walkthrough));
+      if (!artifact) return { status: 'UNAVAILABLE', reason: 'TOO_LARGE' };
+      return { status: 'STORED', reviewRunId: run.id, artifactId: artifact.id };
     } catch {
-      return;
+      return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
     }
-    await this.store.appendEvent(
-      createDomainEvent({
-        type: 'REVIEW_SNAPSHOT_RECORDED',
-        taskId: task.id,
-        iterationId: review.iterationId,
-        runId: review.id,
-        worktreeId: review.worktreeId,
-        source: 'git',
-        payload: { reviewRunId: review.id, tree }
-      })
-    );
+  }
+
+  private keepReviewIndex(reviewRunId: string, given: { base?: string; tree?: string; index: ReviewWalkthroughIndex }): void {
+    this.reviewIndexes.set(reviewRunId, given);
+    for (const oldest of this.reviewIndexes.keys()) {
+      if (this.reviewIndexes.size <= MAX_KEPT_REVIEW_INDEXES) break;
+      this.reviewIndexes.delete(oldest);
+    }
   }
 
   /** What changed from the code a review of this task read to the worktree now. */
   async readReviewChanges(input: ReadReviewChangesRequest): Promise<ReviewChangesResult> {
-    const task = await this.requireNormalTask(input.taskId, 'Review changes');
+    const { task, review, worktree, recordedTree } = await this.requireReviewOfTask(input, 'Review changes');
+    if (!worktree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    return this.reviewSnapshots.changesSince(worktree.worktreePath, task.id, review.id, recordedTree);
+  }
+
+  /** The change a review of this task read: from the base of the Git snapshot it started from to the code it read. */
+  async readReviewedDiff(input: ReadReviewChangesRequest): Promise<ReviewChangesResult> {
+    const { task, review, worktree, recordedTree } = await this.requireReviewOfTask(input, 'Reviewed changes');
+    if (!worktree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    const base = await this.reviewBase(review);
+    if (!base) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
+    return this.reviewSnapshots.reviewedDiff(worktree.worktreePath, task.id, review.id, base, recordedTree);
+  }
+
+  /** The commits of a capture of the task, from the base it compares against to the head it captured. */
+  async listTaskCommits(input: ReadTaskCommitsRequest): Promise<TaskCommitsResult> {
+    const capture = await this.requireCaptureOfTask(input, 'Commits');
+    if (!capture) return { status: 'UNAVAILABLE' };
+    return listTaskCommits(capture.worktreePath, capture.base, capture.head)
+      .then((listed): TaskCommitsResult => ({ status: 'READY', ...listed }), (): TaskCommitsResult => ({ status: 'UNAVAILABLE' }));
+  }
+
+  /** One commit's change, read only for one of the capture's own commits. */
+  async readTaskCommitDiff(input: ReadTaskCommitDiffRequest): Promise<TaskCommitDiffResult> {
+    const capture = await this.requireCaptureOfTask(input, 'Commit changes');
+    const own = capture && await isTaskCommit(capture.worktreePath, capture.base, capture.head, input.sha).catch(() => undefined);
+    if (!capture || own === undefined) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    if (!own) throw new Error('This commit is not part of the task.');
+    return readTaskCommitDiff(capture.worktreePath, input.sha);
+  }
+
+  /**
+   * The base a review compared against: that of the Git snapshot it started from.
+   * Its walkthrough is checked, and its Guide read, from this base to the code it read.
+   */
+  private async reviewBase(review: Pick<RunRecord, 'taskId' | 'beforeGitSnapshotId'>): Promise<string | undefined> {
+    return review.beforeGitSnapshotId ? (await this.store.getGitSnapshot(review.taskId, review.beforeGitSnapshotId))?.baseSha : undefined;
+  }
+
+  /** A capture of the task with its base, its head and the worktree it was taken in, while that worktree is present. */
+  private async requireCaptureOfTask(input: ReadTaskCommitsRequest, action: string) {
+    const task = await this.requireNormalTask(input.taskId, action);
+    const snapshot = typeof input.gitSnapshotId === 'string' ? await this.store.getGitSnapshot(task.id, input.gitSnapshotId) : undefined;
+    if (!snapshot) throw new Error('This capture is not part of the task.');
+    const worktree = await this.store.getWorktree(snapshot.worktreeId);
+    return worktree?.status === 'PRESENT' && snapshot.baseSha && snapshot.headSha
+      ? { worktreePath: worktree.worktreePath, base: snapshot.baseSha, head: snapshot.headSha }
+      : undefined;
+  }
+
+  /**
+   * A review run of the task, with its worktree when it is present, and the tree
+   * the review gate recorded for it while the review is the gate's.
+   */
+  private async requireReviewOfTask(input: ReadReviewChangesRequest, action: string) {
+    const task = await this.requireNormalTask(input.taskId, action);
     const review = typeof input.reviewRunId === 'string' ? await this.store.getRun(input.reviewRunId) : undefined;
     if (!review || review.taskId !== task.id || review.mode !== 'REVIEW') throw new Error('This review is not part of the task.');
     const worktree = await this.store.getWorktree(review.worktreeId);
-    if (!worktree || worktree.status !== 'PRESENT') return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
     const gate = task.projection.agentReview;
-    return this.reviewSnapshots.changesSince(
-      worktree.worktreePath, task.id, review.id, gate?.runId === review.id ? gate.reviewedTreeSha : undefined
-    );
+    return {
+      task,
+      review,
+      worktree: worktree?.status === 'PRESENT' ? worktree : undefined,
+      recordedTree: gate?.runId === review.id ? gate.reviewedTreeSha : undefined
+    };
   }
 
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision> {
     return this.withTaskAction(input.taskId, 'Review finding decision', async () => {
       await this.requireNormalTask(input.taskId, 'Review finding decision');
       return this.reviews.decide(input);
+    });
+  }
+
+  decideReviewRequestItem(input: DecideReviewRequestItemRequest): Promise<ReviewRequestItemDecision> {
+    return this.withTaskAction(input.taskId, 'Review answer decision', async () => {
+      await this.requireNormalTask(input.taskId, 'Review answer decision');
+      return this.reviews.decideRequestItem(input);
     });
   }
 
@@ -5792,11 +5927,12 @@ export class TaskManagerService {
     }
   }
 
-  /** A finished reply to a review request: how many items the agent answered, and how many wait on the person. */
+  /** A finished reply to a review request, with the items whose answer the agent left to the person. */
   private async recordReviewRequestAnswer(run: RunRecord): Promise<void> {
     const detail = await this.store.getTaskDetail(run.taskId);
-    const request = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest)?.reviewRequest;
-    if (!request?.reviewRunId) return;
+    const instruction = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest);
+    const request = instruction?.reviewRequest;
+    if (!instruction || !request?.reviewRunId) return;
     const completed = detail.runs.find((candidate) => candidate.id === run.id) ?? run;
     const reply = await runReplyText(completed, (id) => this.agentRuntimeStore.readArtifact(id));
     const { answers } = parseReviewResponse(reply, request);
@@ -5811,7 +5947,9 @@ export class TaskManagerService {
         source: 'provider',
         payload: {
           reviewRunId: request.reviewRunId,
-          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length
+          instructionId: instruction.id,
+          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length,
+          decisionItems: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').map((answer) => answer.item)
         }
       })
     );

@@ -3,7 +3,10 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -336,8 +339,12 @@ const api: TaskManagerApi = {
     invokeIpc('agent:startReview', input),
   decideReviewFinding: (input: DecideReviewFindingRequest) =>
     invokeIpc('agent:decideReviewFinding', input),
+  decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+    invokeIpc('agent:decideReviewRequestItem', input),
   readReviewChanges: (input: ReadReviewChangesRequest) =>
     invokeIpc('agent:readReviewChanges', input),
+  readReviewedDiff: (input: ReadReviewChangesRequest) =>
+    invokeIpc('agent:readReviewedDiff', input),
   askSideQuestion: (input: AskSideQuestionRequest) => invokeIpc('agent:askSideQuestion', input),
   stopSideQuestion: (input: StopSideQuestionRequest) =>
     invokeIpc('agent:stopSideQuestion', input),
@@ -350,6 +357,10 @@ const api: TaskManagerApi = {
   refreshEvidence: (input: RefreshEvidenceRequest) => invokeIpc('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
     invokeIpc('git:deliveryCommit', input),
+  listTaskCommits: (input: ReadTaskCommitsRequest) =>
+    invokeIpc('git:listTaskCommits', input),
+  readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+    invokeIpc('git:readTaskCommitDiff', input),
   preflightGitHub: (input: GitHubPreflightRequest) => invokeIpc('github:preflight', input),
   publishBranch: (input: PublishBranchRequest) => invokeIpc('github:publish', input),
   createPullRequest: (input: CreatePullRequestRequest) =>

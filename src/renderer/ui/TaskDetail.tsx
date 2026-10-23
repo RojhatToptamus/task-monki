@@ -24,6 +24,7 @@ import {
   REVIEW_REQUEST_ITEM_LIMIT,
   type AskSubject,
   type DecideReviewFindingRequest,
+  type DecideReviewRequestItemRequest,
   type ReviewRequestRecord,
   type ReviewResponseAnswer,
   type TaskReviewDraft
@@ -81,7 +82,7 @@ import { PreRunSetup } from './PreRunSetup';
 import { ReviewWorkspace } from './ReviewWorkspace';
 import { AgentMark } from './UiIcons';
 import { AskPanel, type AskConversation } from './AskPanel';
-import { appendToDraft } from '../model/sideQuestions';
+import { appendToDraft, discussionSubjectName, type AskSubjectNames } from '../model/sideQuestions';
 import { persistPreviewAgentOpen, previewAgentOpen as storedPreviewAgentOpen } from '../model/workspaceLayout';
 import { runHoldsTaskWorktree } from '../../shared/sideQuestions';
 import { DockedSidePanel, FloatingSidePanel, useTaskSidePanelLayout } from './TaskSidePanel';
@@ -93,12 +94,12 @@ import { TaskActionsMenu } from './TaskActionsMenu';
 import { TaskLifecycleTrack } from './TaskLifecycleTrack';
 import { FindingRow } from './Findings';
 import { buildReviewRequestInstruction, buildReviewRequestRecord, planReviewRequest, type ReviewRequestInput } from '../model/reviewFollowUp';
-import { buildDiscussionViews, buildReplyDrafts, repliedDiscussions, sentDiscussions, unaddressedDiscussions, type DiscussionView } from '../model/pullRequestFeedback';
+import { buildDiscussionViews, buildReplyDrafts, changedPaths, repliedDiscussions, sentDiscussions, unaddressedDiscussions, type DiscussionView } from '../model/pullRequestFeedback';
 import { buildPullRequestRecord, rerunnableCheck, type PullRequestRecordCheckRow } from '../model/pullRequestRecord';
 import { baseMovedLine } from '../model/formatting';
 import { AskedComments, FailingChecks, PullRequestRecord, PullRequestRefresh } from './PullRequestRecord';
 import { MergePullRequestModal, ReplyToReviewersModal } from './PullRequestDialogs';
-import { answeredReviewRound, reviewRequestRounds } from '../model/reviewRounds';
+import { currentReviewRound, reviewRequestRounds } from '../model/reviewRounds';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import {
   findCompletedCurrentImplementationRun,
@@ -184,6 +185,8 @@ import {
 } from './TaskDetailModals';
 import { ReportedQuote } from './ReportedQuote';
 import { useArtifactReading } from './useArtifactReading';
+import { useWalkthrough } from './useWalkthrough';
+import { useReviewChanges } from './useReviewChanges';
 import { remoteSourceView } from '../model/remoteWork';
 import { deliveryNoun, deliveryProvider } from '../model/deliveryWords';
 import { buildMergeConflictPromptTemplate, startsFromExistingWork } from '../../shared/promptTemplates';
@@ -271,6 +274,7 @@ interface TaskDetailProps {
   onRetry: AgentSessionProps['onRetry'];
   onReview(runId?: string): Promise<void>;
   onDecideReviewFinding?(input: DecideReviewFindingRequest): Promise<void>;
+  onDecideReviewRequestItem?(input: DecideReviewRequestItemRequest): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
   onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
@@ -375,13 +379,6 @@ export function TaskDetail(props: TaskDetailProps) {
     () => buildDiscussionViews(pullRequestFeedback, sentDiscussions(requestRounds), pullRequestOpen),
     [pullRequestFeedback, requestRounds, pullRequestOpen]
   );
-  // The agent's answers no one has posted where the discussion lives yet.
-  const repliedAt = useMemo(() => repliedDiscussions(props.events), [props.events]);
-  const replyDrafts = useMemo(
-    () => buildReplyDrafts(discussionViews, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt),
-    [discussionViews, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt]
-  );
-  const replyDraftsById = useMemo(() => new Map(replyDrafts.map((draft) => [draft.discussionId, draft])), [replyDrafts]);
   const [tab, setTab] = useState<DetailTab>(props.initialTab ?? 'overview');
   const [agentAttentionRequest, setAgentAttentionRequest] = useState(0);
   const [existingWorkModal, setExistingWorkModal] = useState<'instruction' | 'comparison' | 'reconnect'>();
@@ -479,6 +476,22 @@ export function TaskDetail(props: TaskDetailProps) {
     () => effectiveReviewFindings(reviewGate?.result, reviewGate?.findingDecisions ?? []),
     [reviewGate?.result, reviewGate?.findingDecisions]
   );
+  // The review's walkthrough with the code it describes, read while the Review tab or Ask can show it.
+  const walkthroughView = useWalkthrough(task?.id ?? '', tab === 'review' || askThread ? reviewGate?.walkthrough : undefined);
+  // What Ask names its subjects by, read again only when they change, not on every event the page renders for.
+  const askSubjectNames = useMemo<AskSubjectNames>(() => ({
+    findings: new Map(reviewFindingViews.map((finding) => [finding.id, finding.title])),
+    ...(walkthroughView.walkthrough ? {
+      walkthrough: { reviewRunId: walkthroughView.walkthrough.reviewRunId, titles: walkthroughView.walkthrough.sections.map((section) => section.title) }
+    } : {}),
+    discussions: new Map(discussionViews.map((discussion) => [discussion.id, discussionSubjectName(discussion)]))
+  }), [discussionViews, reviewFindingViews, walkthroughView.walkthrough]);
+  // The latest request after the review, once the agent answered it: the brief and the bands show
+  // its answers, and the person settles each one.
+  const reviewRound = useMemo(
+    () => currentReviewRound(props.agentInstructions, requestRounds, { runId: reviewGate?.runId, requestItemDecisions: reviewGate?.requestItemDecisions }),
+    [props.agentInstructions, requestRounds, reviewGate?.runId, reviewGate?.requestItemDecisions]
+  );
   const reviewPending = reviewStartPending && !reviewIsRunning;
   const provider = task ? deliveryProvider(task, props.repository) : 'GITHUB';
   const prNoun = deliveryNoun(provider);
@@ -498,8 +511,21 @@ export function TaskDetail(props: TaskDetailProps) {
       })
     : undefined;
   // The agent's answers wait until the fixes they name are on the pull request: a reply says
-  // "Fixed in <head>", so it is offered only while the pull request holds the worktree's work.
+  // "Changed in <head>", so it is offered only while the pull request holds the worktree's work.
   const pullRequestHoldsWork = Boolean(prStatus && !isFreshnessProblem(prStatus.kind));
+  // A reply says a thread's file changed only when it did since the review the agent's Fixed followed:
+  // the exact changes from the code that review read.
+  const fixesReviewRunId = pullRequestHoldsWork && reviewGate?.runId && discussionViews.some((discussion) =>
+    discussion.sent?.outcome === 'FIXED' && discussion.sent.reviewRunId === reviewGate.runId) ? reviewGate.runId : undefined;
+  const changesSinceFixes = useReviewChanges(task?.id ?? '', fixesReviewRunId, gitSnapshot?.id);
+  // The agent's answers no one has posted where the discussion lives yet.
+  const repliedAt = useMemo(() => repliedDiscussions(props.events), [props.events]);
+  const replyDrafts = useMemo(
+    () => buildReplyDrafts(discussionViews, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt,
+      fixesReviewRunId && changesSinceFixes.files ? { reviewRunId: fixesReviewRunId, paths: changedPaths(changesSinceFixes.files) } : undefined),
+    [changesSinceFixes.files, discussionViews, fixesReviewRunId, pullRequestFeedback?.viewer, pullRequest?.headRefOid, repliedAt]
+  );
+  const replyDraftsById = useMemo(() => new Map(replyDrafts.map((draft) => [draft.discussionId, draft])), [replyDrafts]);
   // The status word reads what PR Status read from the records, as the board summary does,
   // including whose move a review that requested changes waits on.
   const turn = reviewRollup?.status === 'CHANGES_REQUESTED' && reviewRollup.feedback ? reviewTurn(reviewRollup.feedback) : undefined;
@@ -721,7 +747,6 @@ export function TaskDetail(props: TaskDetailProps) {
   });
   const overviewPreview = progressTurn ? conversationPreview(progressTurn) : undefined;
   const resultReport = progressTurn ? conversationAnswer(progressTurn) : undefined;
-  const reviewRound = answeredReviewRound(progressTurn);
   const evidenceGitSnapshot = evidenceGitSnapshotId
     ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId)
     : gitSnapshot;
@@ -1538,10 +1563,10 @@ export function TaskDetail(props: TaskDetailProps) {
           onClick: delivery(() => props.onRerunPullRequestChecks(task.id)) } } : undefined,
       // What reviewers asked is listed under the step, so it is read before it is sent.
       canAddressComments ? { action: { label: 'Address comments', onClick: addressComments }, comments: unaddressed, fact: prStatus.feedbackLine } : undefined,
-      // Replies wait until the fixes they name are on the pull request.
+      // Replies wait until the fixes they name are on the pull request; each is the person's to write.
       replyDrafts.length > 0 && pullRequestHoldsWork
         ? { action: { label: `Reply on ${remoteProviderName(provider)}`, disabled: Boolean(pause), reason: pause, onClick: () => setReplyModalOpen(true) },
-          fact: `${replyDrafts.length} ${replyDrafts.length === 1 ? 'answer' : 'answers'} ready to post` } : undefined,
+          fact: `${runtimeName} answered ${replyDrafts.length} ${replyDrafts.length === 1 ? 'comment' : 'comments'}` } : undefined,
       // "Ready for review" is the task's own state; marking a draft ready is a step on the pull request.
       prStatus.canMarkReady
         ? { action: { label: 'Mark as ready', disabled: Boolean(pause), reason: pause, onClick: markPullRequestReady } } : undefined,
@@ -1757,6 +1782,8 @@ export function TaskDetail(props: TaskDetailProps) {
   // every tab but Preview, which has its own agent, and keeps its thread across them.
   const askAvailable = Boolean(props.ask && worktree && run);
   const askOpensHere = tab === 'overview' || tab === 'agent' || tab === 'review';
+  // A question about an intent names the walkthrough the gate keeps.
+  const storedWalkthrough = reviewGate.walkthrough?.status === 'STORED' ? reviewGate.walkthrough : undefined;
   const openAsk = (subject?: AskSubject, text?: string) => {
     if (!props.ask || !askAvailable) return;
     if (!askThreadRef.current) {
@@ -1768,7 +1795,7 @@ export function TaskDetail(props: TaskDetailProps) {
     if (text?.trim()) setAskDraft((current) => appendToDraft(current, text.trim()));
     setAskFocusToken((value) => value + 1);
   };
-  const reviewFindingTitles = new Map(reviewFindingViews.map((finding) => [finding.id, finding.title]));
+  // What a question names its subject by: a finding's title, an intent's title, a discussion's author and first line.
   const askPanel = askOpensHere && askThread && askAvailable && props.ask ? (
     <AskPanel
       conversation={props.ask}
@@ -1789,7 +1816,7 @@ export function TaskDetail(props: TaskDetailProps) {
       onDraftChange={setAskDraft}
       subject={askSubject}
       onSubjectChange={setAskSubject}
-      findingTitles={reviewFindingTitles}
+      subjectNames={askSubjectNames}
       // On Review an answer joins the request being written; elsewhere it starts a follow-up.
       answerAction={tab === 'review' && hasActionableReviewSource ? {
         label: 'Add to request',
@@ -2118,9 +2145,14 @@ export function TaskDetail(props: TaskDetailProps) {
             taskId={task.id}
             onFullScreenChange={setReviewFullScreen}
             changesSince={reviewChangesSince}
-            review={reviewGate.status === 'NOT_RUN' ? undefined : { status: effectiveReviewGateStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId, working: Boolean(activeImplementationRun) }}
+            review={reviewGate.status === 'NOT_RUN' ? undefined : {
+              status: effectiveReviewGateStatus(reviewGate), reviewedAt: reviewRun?.endedAt ?? reviewGate.updatedAt, runId: reviewGate.runId,
+              reviewedTreeSha: reviewGate.reviewedTreeSha, working: Boolean(activeImplementationRun)
+            }}
+            walkthrough={reviewGate.walkthrough ? { state: reviewGate.walkthrough, view: walkthroughView, author: reviewerName } : undefined}
             findings={reviewFindingViews}
             currentDiffArtifactId={evidenceGitSnapshot?.diffArtifactId}
+            gitSnapshotId={evidenceGitSnapshot?.id}
             reviewedDiffArtifactId={reviewGate.status === 'STALE'
               ? gitSnapshots.find((candidate) => candidate.id === reviewGate.reviewedGitSnapshotId)?.diffArtifactId
               : undefined}
@@ -2144,11 +2176,14 @@ export function TaskDetail(props: TaskDetailProps) {
                 summary: reviewGate.result?.summary ?? reviewGate.summary
               } : undefined,
               // The answers to the last request stay until the next review reads them.
-              round: reviewRound && reviewRound.request.reviewRunId === reviewGate.runId ? {
-                key: reviewRound.key,
+              round: reviewRound ? {
+                key: reviewRound.instructionId,
                 request: reviewRound.request,
                 answers: reviewRound.answers,
-                onReply: reviewRound.answers.some((answer) => answer.outcome === 'NEEDS_DECISION') ? focusAgentDraft : undefined
+                accepted: reviewRound.accepted,
+                // A question the agent asked waits on the person until they reply, or accept it as settled.
+                onReply: reviewGate.requestAnswer?.awaitingDecision && reviewRound.answers.some((answer) =>
+                  answer.outcome === 'NEEDS_DECISION' && !reviewRound.accepted.has(answer.item)) ? focusAgentDraft : undefined
               } : undefined
             }}
             draft={props.reviewDraft}
@@ -2188,6 +2223,13 @@ export function TaskDetail(props: TaskDetailProps) {
             }}
             discussions={discussionViews}
             viewer={pullRequestFeedback?.viewer}
+            answers={{
+              agent: runtimeName,
+              round: reviewRound,
+              onDecide: props.onDecideReviewRequestItem && reviewRound ? (item, kind) => props.onDecideReviewRequestItem!({
+                taskId: task.id, reviewRunId: reviewRound.reviewRunId, instructionId: reviewRound.instructionId, item, kind
+              }) : undefined
+            }}
             moreDiscussionsUrl={pullRequestFeedback?.truncated ? pullRequest?.url : undefined}
             discussionsOnLines={Boolean(pullRequestFeedback?.headSha && gitSnapshot?.headSha === pullRequestFeedback.headSha &&
               !gitSnapshot.stagedCount && !gitSnapshot.unstagedCount && !gitSnapshot.untrackedCount)}
@@ -2208,12 +2250,23 @@ export function TaskDetail(props: TaskDetailProps) {
             }) : undefined}
             onAskAboutFinding={askAvailable && reviewGate.runId ? (findingId) => openAsk({ kind: 'FINDING', reviewRunId: reviewGate.runId!, findingId }) : undefined}
             onAskAboutLines={askAvailable ? (lines, text) => openAsk({ kind: 'LINES', ...lines }, text) : undefined}
+            onAskAboutStage={askAvailable && storedWalkthrough ? (section) => openAsk({ kind: 'STAGE', reviewRunId: storedWalkthrough.reviewRunId, section }) : undefined}
+            onAskAboutFile={askAvailable ? (path) => openAsk({ kind: 'FILE', path }) : undefined}
+            onAskAboutDiscussion={askAvailable ? (discussionId) => openAsk({ kind: 'THREAD', discussionId }) : undefined}
             resolvedFindings={reviewIsCurrent ? reviewGate.result?.resolvedFindings : undefined}
             runReview={hasActionableReviewSource && reviewGate.status !== 'RUNNING' ? {
               label: reviewGate.status === 'NOT_RUN' ? 'Run review' : 'Run review again',
               disabledReason: reviewActionsPaused ? reviewActionPauseTitle : undefined,
               busy: reviewActionBusy || reviewPending,
+              starting: reviewPending,
               onRun: () => void runReview(actionableReviewSourceRun?.id)
+            } : undefined}
+            reviewing={reviewIsRunning ? {
+              agent: reviewerName,
+              startedAt: reviewRun?.startedAt,
+              activity: reviewActivity?.label,
+              stopping: reviewActionBusy,
+              onStop: reviewRun ? () => void stopReview(reviewRun.id) : undefined
             } : undefined}
           />
         ) : null}
@@ -2329,6 +2382,7 @@ export function TaskDetail(props: TaskDetailProps) {
       {replyModalOpen ? (
         <ReplyToReviewersModal
           platform={remoteProviderName(provider)}
+          agent={runtimeName}
           drafts={replyDrafts}
           // An app reviews on its own: GitHub takes no review request for one.
           reviewers={provider === 'GITHUB'

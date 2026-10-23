@@ -490,6 +490,16 @@ Rules:
   actions.
 - Delivery actions are paused while review-derived follow-up work is running.
 - After follow-up completes, the task returns to Review and needs a fresh review.
+- An agent review also writes a walkthrough of the change, intent by intent,
+  which Task Monki checks against the code the review read before keeping it.
+  The Review tab reads the change in two modes: the Guide (the walkthrough,
+  each intent beside its code) and the Diff (the complete change). A
+  walkthrough of earlier code stays as context, never as current; on someone
+  else's pull request, none is written until the person asks.
+- The Diff can also read the branch commit by commit: each commit's change
+  against its first parent, with its message. A commit is history: feedback
+  shows at its files' tops, and comments and viewed marks belong to the change
+  as a whole, never to a commit.
 
 The detailed source of truth is
 `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
@@ -643,11 +653,20 @@ In Review:
   GitHub state update.
 - The person's writes to the platform are explicit steps: `Mark as ready`,
   `Merge` (the head they saw, through a dialog with the repository's methods
-  and Delete branch), and `Reply on GitHub` (the agent's answers as editable
-  replies, Resolve thread, and asking reviewers again). In the Review tab each
-  open thread can be answered in place, and resolved or reopened from its
-  head, and a reviewer can be asked again from the pull request's record.
-  Nothing posts on its own or on an agent's behalf.
+  and Delete branch), and `Reply on GitHub` (a reply to each discussion the
+  agent answered, Resolve thread, and asking reviewers again). A reply is in
+  the person's voice: it starts as "Changed in <head>." only when the agent
+  answered Fixed and the thread's file changed since the review, otherwise
+  empty, with the agent's own words quoted above it for the person alone and
+  Resolve thread unchecked. In the Review tab each open thread can be answered
+  in place, and resolved or reopened from its head, and a reviewer can be
+  asked again from the pull request's record. Nothing posts on its own or on
+  an agent's behalf, and an agent's answer is never posted as the person's.
+- On the Review tab, the agent's answer to each item of the person's latest
+  request after the review sits on the item's own band, and the item stays
+  the person's until they accept the answer: an agent's Fixed never settles
+  it. Add to request sends an answered item again as the person's comment on
+  its lines, quoting it.
 - A branch that moved beside the worktree (`Pull changes`) or a base that moved
   ahead (`Update with <base>`) is merged by Task Monki, which commits
   uncommitted work first. A clean merge waits for `Push update`; when Git stops

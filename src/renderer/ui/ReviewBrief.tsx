@@ -1,6 +1,8 @@
 import { useId, useRef, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
-import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer } from '../../shared/contracts';
+import type { ReviewRequestItem, ReviewRequestRecord, ReviewResponseAnswer, TaskCommit } from '../../shared/contracts';
+import { shortSha } from '../model/formatting';
+import { formatShortAge } from '../model/timeAgo';
 import { ReviewAnswers } from './ReviewRound';
 import { useClampOverflow } from './useClampOverflow';
 
@@ -15,6 +17,8 @@ export interface ReviewBriefContent {
   round?: {
     request: ReviewRequestRecord;
     answers: readonly ReviewResponseAnswer[];
+    /** Items whose answer the person accepted. */
+    accepted?: ReadonlySet<number>;
     onShowItem?(item: ReviewRequestItem): void;
     /** Present when an answer waits on the person's decision. */
     onReply?(): void;
@@ -69,11 +73,34 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
                 Answers to your request
                 {round.onReply ? <button type="button" className="ghost-button button--sm" onClick={round.onReply}>Reply</button> : null}
               </h3>
-              <ReviewAnswers request={round.request} answers={round.answers} onShowItem={round.onShowItem} />
+              <ReviewAnswers request={round.request} answers={round.answers} accepted={round.accepted} onShowItem={round.onShowItem} />
             </div>
           ) : null}
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * A commit's brief, where the change's stands while the Diff reads one commit:
+ * its number among the branch's commits, its hash, author and age, then its
+ * message, the body kept to three lines until asked for.
+ */
+export function ReviewCommitBrief({ commit, number, total }: { commit: TaskCommit; number: number; total: number }) {
+  const age = formatShortAge(commit.authoredAt);
+  return (
+    <section className="tm-review-brief tm-review-brief--commit" aria-label="Commit">
+      <div className="tm-review-brief__block">
+        <h3 className="tm-review-brief__label">
+          Commit {number} of {total}
+          <span><code>{shortSha(commit.sha)}</code></span>
+          {commit.author ? <span>{commit.author}</span> : null}
+          {age ? <span title={new Date(commit.authoredAt).toLocaleString()}>{age}</span> : null}
+        </h3>
+        <p className="tm-review-brief__text tm-review-brief__subject">{commit.subject}</p>
+        {commit.body ? <ClampedText lines={3} className="tm-review-brief__body">{commit.body}</ClampedText> : null}
+      </div>
     </section>
   );
 }

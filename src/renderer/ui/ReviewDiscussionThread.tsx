@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Check, CircleCheck, ExternalLink } from 'lucide-react';
 import { remoteProviderName, type RemoteWorkComment } from '../../shared/contracts';
 import { commentParts, discussionAuthor, discussionCommentText, discussionSummary, reviewVerdictWords, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
@@ -7,7 +7,9 @@ import { formatShortAge } from '../model/timeAgo';
 import { Avatar } from './Avatar';
 import { DisclosureChevron } from './DisclosureChevron';
 import { MessageMarkdown } from './MessageMarkdown';
+import { AnswerState, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
+import { AgentMark } from './UiIcons';
 import { useClampOverflow } from './useClampOverflow';
 
 /** Replies shown before the rest fold behind a count. */
@@ -17,7 +19,7 @@ const REPLIES_SHOWN = 3;
 interface DiscussionReply {
   /** What the person typed and did not post. */
   text?: string;
-  /** The agent's answer to it, drafted as a reply. */
+  /** The agent answered it: where the person's reply starts. */
   draft?: ReplyDraft;
   /** Who replies: the person's account on the platform. */
   viewer?: string;
@@ -35,14 +37,17 @@ interface DiscussionReply {
  * the file under the line it is about, each comment under its author with their
  * mark in the gutter, its state on the platform, and a reply row under the
  * conversation. Add to request puts it in what the agent receives; nothing goes
- * unless added. A resolved thread, or a remark that asks for nothing, folds to
- * one line that opens it.
+ * unless added. Once the agent answered it, its state is the answer, quoted for
+ * the person alone above the reply row. A resolved thread, or a remark that asks
+ * for nothing, folds to one line that opens it.
  */
-export function ReviewDiscussionThread({ discussion, location, about, folded: foldedByDefault, focused, inRequest, onFocus, onToggleInclude, reply, onResolve, codeLines }: {
+export function ReviewDiscussionThread({ discussion, answer, location, about, folded: foldedByDefault, focused, inRequest, onFocus, onToggleInclude, onAsk, reply, onResolve, codeLines }: {
   discussion: DiscussionView;
+  /** The agent's answer to it, while nothing was said on it since. */
+  answer?: ItemAnswer;
   /** Its file and lines, above the files where no row says it. */
   location?: string;
-  /** Its lines in words, at its file's top or under a range: "Line 12", "Lines 4–9". */
+  /** Its lines in words on its head, where its place does not say them: "Line 12", "Lines 4–9". */
   about?: string;
   /** It starts as one line. */
   folded: boolean;
@@ -50,6 +55,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   inRequest: boolean;
   onFocus(): void;
   onToggleInclude?(discussionId: string): void;
+  /** Opens Ask about it. */
+  onAsk?(): void;
   /** Answering it on the platform, while the pull request is open. */
   reply?: DiscussionReply;
   /** Resolves the thread, or reopens it; rejects with the platform's reason. */
@@ -82,6 +89,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   const platform = remoteProviderName(discussion.provider);
   const author = discussionAuthor(discussion) ?? 'Unknown';
   const state = discussionStateWord(discussion);
+  // What happened on the platform since outranks the agent's answer: resolved, or the person replied there.
+  const answered = answer && !discussion.resolved && !discussion.replied ? answer : undefined;
   const verdict = discussion.kind === 'REVIEW' ? reviewVerdictWords(discussion.reviewState) : undefined;
   const openLink = discussion.url ? (
     <Tooltip label={`Open on ${platform}`}>
@@ -126,10 +135,12 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           <span className="tm-review-thread__author">{author}</span>
           {verdict ? <span className="tm-review-thread__round">{verdict}</span> : null}
           <CommentAge comment={first} />
+          {about ? <span className="tm-review-thread__about">{about}</span> : null}
+          {answered ? <AnswerState answer={answered} /> : state ? <span className="tm-review-thread__round">{state}</span> : null}
           <span className="tm-review-thread__spacer" />
-          {state ? <span className="tm-review-thread__round">{state}</span> : null}
           <span className="tm-review-thread__actions">
-            {onToggleInclude && !discussion.resolved ? (
+            {/* An answered thread goes in the request again from under the answer, in the person's words. */}
+            {onToggleInclude && !discussion.resolved && (!answered?.onRequestAgain || inRequest) ? (
               <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
                 <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => {
                   onToggleInclude(discussion.id);
@@ -137,6 +148,13 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
                   if (inRequest && foldedByDefault && !opened) keepKeys();
                 }}>
                   {inRequest ? <><Check size={13} aria-hidden="true" />In request</> : 'Add to request'}
+                </button>
+              </Tooltip>
+            ) : null}
+            {onAsk ? (
+              <Tooltip label="Ask about this discussion">
+                <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Ask about this discussion" onClick={onAsk}>
+                  <AgentMark />
                 </button>
               </Tooltip>
             ) : null}
@@ -167,7 +185,6 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           </span>
         </header>
         {location ? <span className="tm-review-thread__location">{location}</span> : null}
-        {about ? <span className="tm-review-comment__about">{about}</span> : null}
         {first ? <CommentBody comment={first} platform={platform} replaced={replaced} /> : null}
       </div>
       {replies.length ? (
@@ -191,6 +208,7 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           ))}
         </div>
       ) : null}
+      {answered ? <RequestItemAnswer answer={answered} /> : null}
       {resolveError ? <p className="form-error tm-review-thread__error" role="alert">{resolveError}</p> : null}
       {/* Answering is the conversation's last row, as on the platform. */}
       {reply && !discussion.resolved ? (
@@ -203,9 +221,11 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
 
 /**
  * The reply row under a discussion: the person's mark and a field that grows
- * into the composer when they write. The agent's answer, when it has one, is
- * where the reply starts; resolving is the person's choice beside Reply.
- * Nothing posts until they post it.
+ * into the composer when they write. Once the agent answered, the reply starts
+ * from the fact Task Monki observed, "Changed in <head>.", or from nothing; the
+ * agent's own words stay quoted above, for the person alone. Resolving is the
+ * person's choice beside Reply, unchecked until they check it. Nothing posts
+ * until they post it.
  */
 function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
   reply: DiscussionReply;
@@ -220,7 +240,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
   const [text, setText] = useState(reply.text ?? '');
   const [resolve, setResolve] = useState(false);
   const [focused, setFocused] = useState(false);
-  // The agent's answer starts the reply once, the first time the person opens it.
+  // The drafted fact starts the reply once, the first time the person opens it.
   const [started, setStarted] = useState(Boolean(reply.text));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -246,10 +266,15 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
       const warning = await reply.onPost(text.trim(), resolvable && resolve);
       write('');
       setResolve(false);
+      // Posted, the row folds back to its field, wherever the keys were: a control disabled while posting
+      // drops its focus without a blur.
+      setFocused(false);
       leave();
       if (warning) onWarning(warning);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : `Could not post the reply on ${platform}.`);
+      // The words stay for another try, with the caret in them.
+      formRef.current?.querySelector('textarea')?.focus();
     } finally {
       setBusy(false);
     }
@@ -263,11 +288,8 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         setFocused(true);
         if (started) return;
         setStarted(true);
-        if (!text && reply.draft) {
-          // The agent's answer is only in the field: what is kept for the task is what the person typed.
-          setText(reply.draft.body);
-          setResolve(resolvable && reply.draft.outcome === 'FIXED');
-        }
+        // The drafted fact is only in the field: what is kept for the task is what the person typed.
+        if (!text && reply.draft?.body) setText(reply.draft.body);
       }}
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false); }}
     >
@@ -278,7 +300,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         className="tm-review-thread__reply-input"
         rows={1}
         value={text}
-        disabled={busy}
+        readOnly={busy}
         placeholder="Reply"
         onChange={(event) => write(event.target.value)}
         onKeyDown={(event) => {
@@ -323,17 +345,35 @@ function suggestionTarget(
   return (above, below) => codeLines(start - above, end + below);
 }
 
-/** A comment's text, clamped when long until asked for in full, as the Overview's request is. */
+/** A platform comment's words under its author; one the platform cut short says where the rest is. */
 function CommentBody({ comment, platform, replaced }: {
   comment: RemoteWorkComment;
   platform: string;
   /** The lines a suggestion in it replaces, when the diff shows them. */
   replaced?(above: number, below: number): string[] | undefined;
 }) {
+  return (
+    <CommentText text={discussionCommentText(comment.body)} replaced={replaced}>
+      {comment.truncated ? <p className="tm-review-thread__earlier">Continues on {platform}</p> : null}
+    </CommentText>
+  );
+}
+
+/**
+ * The words of any comment in a band, the person's own and other people's
+ * alike: rendered markdown with its suggested changes, clamped when long until
+ * asked for in full, as the Overview's request is.
+ */
+export function CommentText({ text, replaced, children }: {
+  text: string;
+  /** The lines a suggestion in it replaces, when the diff shows them. */
+  replaced?(above: number, below: number): string[] | undefined;
+  /** What follows the words, such as where the rest of a cut comment is. */
+  children?: ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
   const textRef = useRef<HTMLDivElement>(null);
   const textId = useId();
-  const text = discussionCommentText(comment.body);
   const overflowing = useClampOverflow(textRef, expanded, text);
   return (
     <div className="tm-review-thread__body">
@@ -347,7 +387,7 @@ function CommentBody({ comment, platform, replaced }: {
           {expanded ? 'Show less' : 'Show full comment'}
         </button>
       ) : null}
-      {comment.truncated ? <p className="tm-review-thread__earlier">Continues on {platform}</p> : null}
+      {children}
     </div>
   );
 }

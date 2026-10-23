@@ -4,10 +4,13 @@ import type {
   AgentReviewGateProjection,
   AgentReviewGateStatus,
   DecideReviewFindingRequest,
-  ReviewFindingDecision
+  DecideReviewRequestItemRequest,
+  ReviewFindingDecision,
+  ReviewRequestItemDecision
 } from './agentReviewFindings';
 import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
 import type { ReviewRequestRecord } from './reviewRounds';
+import type { ReadTaskCommitDiffRequest, ReadTaskCommitsRequest, TaskCommitDiffResult, TaskCommitsResult } from './taskCommits';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -68,6 +71,8 @@ export * from './agent';
 export * from './agentReviewFindings';
 export * from './reviewDraft';
 export * from './reviewRounds';
+export * from './reviewWalkthrough';
+export * from './taskCommits';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -309,6 +314,7 @@ export const DOMAIN_EVENT_TYPES = [
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
   'REVIEW_REQUEST_ANSWERED',
+  'REVIEW_REQUEST_ITEM_DECIDED',
   'REVIEW_SNAPSHOT_RECORDED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
@@ -376,6 +382,7 @@ export const ARTIFACT_KINDS = [
   'pr-body',
   'remote-source',
   'pull-request-feedback',
+  'review-walkthrough',
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -968,7 +975,7 @@ export interface BoardAgentReviewSummary {
   /** `effectiveReviewGateStatus` of the review: the status once every decision applies, which can differ from `status` both ways. */
   effectiveStatus: AgentReviewGateStatus;
   /** The agent answered the request after this review; true when an item waits on the person's decision. */
-  requestAnswered?: { awaitingDecision: boolean };
+  requestAnswered?: import('./agentReviewFindings').ReviewRequestAnswerState;
 }
 
 export type BoardStatusProjection = Pick<
@@ -1209,12 +1216,17 @@ export interface AskSideQuestionRequest {
 }
 
 /**
- * What an Ask question is about: a finding of the task's current review, or a line
- * range of the current diff (the old side's numbers on removed lines).
+ * What an Ask question is about: a finding of the task's current review; a line
+ * range of the current diff (the old side's numbers on removed lines); a section
+ * of the review gate's walkthrough, by its index; a changed file; or a thread
+ * of the task's pull request.
  */
 export type AskSubject =
   | { kind: 'FINDING'; reviewRunId: string; findingId: string }
-  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number };
+  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }
+  | { kind: 'STAGE'; reviewRunId: string; section: number }
+  | { kind: 'FILE'; path: string }
+  | { kind: 'THREAD'; discussionId: string };
 
 export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
   runtimeId: AgentRuntimeId;
@@ -1804,8 +1816,16 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   startReview(input: StartReviewRequest): Promise<RunRecord>;
   /** Dismisses or restores a finding of the current, completed review. */
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
+  /** Accepts the agent's answer to an item of the latest request after the review, or reopens it. */
+  decideReviewRequestItem(input: DecideReviewRequestItemRequest): Promise<ReviewRequestItemDecision>;
   /** What changed from the code a review read to the worktree now. */
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** The change a review read: from the base it compared against to the code it read. */
+  readReviewedDiff(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** A capture's commits, oldest first, from the base it compares against to the head it captured. */
+  listTaskCommits(input: ReadTaskCommitsRequest): Promise<TaskCommitsResult>;
+  /** One of a capture's commits, as its change against its first parent. */
+  readTaskCommitDiff(input: ReadTaskCommitDiffRequest): Promise<TaskCommitDiffResult>;
   /** Records a question in Ask and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;

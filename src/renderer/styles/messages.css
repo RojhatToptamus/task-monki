@@ -251,9 +251,11 @@
    app-shell.css); floating, it fills the page it floated over and becomes its
    sheet. Once covered, what is under it leaves the tab order and the
    accessibility tree; it stays in view while the sheet grows over it and from
-   the moment the sheet shrinks. */
+   the moment the sheet shrinks. The page's parts are named: a rule that
+   reached every child would restyle the whole page whenever a row is added
+   anywhere in it. */
 .tm-side-sheet--floating[data-expanded] { inset: 0; width: auto; border-radius: 0; box-shadow: none; }
-:has(> .tm-side-sheet--floating[data-expanded]:not([data-expand-motion])) > :not(.tm-side-sheet) { visibility: hidden; }
+.tm-detail:has(> .tm-side-sheet--floating[data-expanded]:not([data-expand-motion])) > :is(.tm-detail__chrome, .tm-detail__body) { visibility: hidden; }
 /* The conversation reads in the Agent tab's 760px column, its composer on the
    same 24px insets; the head keeps the sheet's full width. */
 .tm-side-sheet[data-expanded] .tm-side-conversation__thread { width: 100%; max-width: 760px; margin-inline: auto; padding-inline: 24px; }

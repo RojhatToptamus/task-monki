@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
 
 type MarkdownBlock =
   | { kind: 'paragraph' | 'quote'; text: string }
@@ -7,7 +7,8 @@ type MarkdownBlock =
   | { kind: 'code'; text: string }
   | { kind: 'table'; header: string[]; rows: string[][] };
 
-export function MessageMarkdown({ text }: { text: string }) {
+/** Parsed again only when its text changes: threads and conversations render it for every message. */
+export const MessageMarkdown = memo(function MessageMarkdown({ text }: { text: string }) {
   return (
     <div className="tm-message-markdown">
       {parseBlocks(text).map((block, index) => {
@@ -45,7 +46,7 @@ export function MessageMarkdown({ text }: { text: string }) {
       })}
     </div>
   );
-}
+});
 
 function parseBlocks(text: string): MarkdownBlock[] {
   const lines = text.replace(/\r\n?/gu, '\n').split('\n');

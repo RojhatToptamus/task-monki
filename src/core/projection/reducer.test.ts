@@ -112,9 +112,12 @@ describe('projection reducer', () => {
     }
   );
 
-  it('records finding decisions only for the current review and resets them for a new review', () => {
+  it('records decisions on findings and answers only for the current review and resets them for a new review', () => {
     const decision = (id: string, reviewRunId: string) => ({
       id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, dismissReason: 'ACCEPTED' as const, createdAt: now
+    });
+    const acceptance = (id: string, reviewRunId: string) => ({
+      id, reviewRunId, instructionId: 'request', item: 1, kind: 'ACCEPT' as const, createdAt: now
     });
     const task = createTask({
       workflowPhase: 'REVIEW',
@@ -132,7 +135,11 @@ describe('projection reducer', () => {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('first', 'review-run') }),
       id: 'decided-first', runId: undefined, receivedAt: '2026-06-20T11:00:00.000Z'
     });
-    const ignored = applyEventToState(decided, {
+    const answered = [acceptance('accepted', 'review-run'), acceptance('accepted-other', 'older-review')].reduce(
+      (current, value) => applyEventToState(current, { ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: value }), id: value.id, runId: undefined }),
+      decided
+    );
+    const ignored = applyEventToState(answered, {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('other', 'older-review') }),
       id: 'decided-other', runId: undefined
     });
@@ -140,7 +147,8 @@ describe('projection reducer', () => {
       status: 'NEEDS_CHANGES',
       runId: 'review-run',
       updatedAt: now,
-      findingDecisions: [decision('first', 'review-run')]
+      findingDecisions: [decision('first', 'review-run')],
+      requestItemDecisions: [acceptance('accepted', 'review-run')]
     });
 
     const rerun = createRun({ id: 'next-review', mode: 'REVIEW', status: 'RUNNING' });
@@ -153,6 +161,34 @@ describe('projection reducer', () => {
       runId: 'next-review',
       findingDecisions: []
     });
+    expect(restarted.tasks[0].projection.agentReview?.requestItemDecisions).toBeUndefined();
+  });
+
+  it('stops waiting on the person once every answer the agent left to them is accepted, and waits again on a reopen', () => {
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      projection: { ...createInitialProjection(now), agentReview: { status: 'STALE', runId: 'review-run', updatedAt: now } }
+    });
+    const state = { ...createEmptyState(), tasks: [task], runs: [createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })] };
+    const decide = (current: typeof state, id: string, item: number, kind: 'ACCEPT' | 'REOPEN') => applyEventToState(current, {
+      ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: { id, reviewRunId: 'review-run', instructionId: 'request', item, kind, createdAt: now } }),
+      id, runId: undefined
+    });
+    const answered = (current: typeof state) => applyEventToState(current, {
+      ...createEvent('REVIEW_REQUEST_ANSWERED', { reviewRunId: 'review-run', instructionId: 'request', needsDecision: 2, decisionItems: [2, 3] }),
+      runId: undefined
+    });
+    const waiting = answered(state);
+    const awaiting = (current: typeof state) => current.tasks[0].projection.agentReview?.requestAnswer?.awaitingDecision;
+    expect(awaiting(waiting)).toBe(true);
+    // A Fixed item accepted settles nothing the person was asked; one of two questions still waits.
+    const one = decide(decide(waiting, 'fixed', 1, 'ACCEPT'), 'second', 2, 'ACCEPT');
+    expect(awaiting(one)).toBe(true);
+    const both = decide(one, 'third', 3, 'ACCEPT');
+    expect(awaiting(both)).toBe(false);
+    expect(awaiting(decide(both, 'reopened', 3, 'REOPEN'))).toBe(true);
+    // Answers accepted while the reply's evidence was still being captured count once the reply lands.
+    expect(awaiting(answered(decide(decide(state, 'early-2', 2, 'ACCEPT'), 'early-3', 3, 'ACCEPT')))).toBe(false);
   });
 
   it('separates agent completion from process exit', () => {

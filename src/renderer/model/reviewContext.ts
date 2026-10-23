@@ -196,14 +196,26 @@ export type WholeFileState =
   /** Every line is shown, some because the person revealed them. */
   | { kind: 'whole' };
 
+/** One value per state, so a file whose state holds keeps the same one. */
+const WHOLE_FILE_STATES = {
+  tooLarge: { kind: 'unavailable', reason: 'Too large to show' },
+  differs: { kind: 'unavailable', reason: 'Differs from the checkout' },
+  none: { kind: 'none' },
+  partial: { kind: 'partial' },
+  whole: { kind: 'whole' }
+} as const satisfies Record<string, WholeFileState>;
+
+/** A file with nothing to show beyond its changes. */
+export const NO_WHOLE_FILE: WholeFileState = WHOLE_FILE_STATES.none;
+
 /** Reading a filled and revealed file whole, given its offer; reasons in the fewest words. */
 export function wholeFileState(file: DiffFile, offer: FilledFile['offer']): WholeFileState {
   switch (offer) {
-    case 'too-large': return { kind: 'unavailable', reason: 'Too large to show' };
-    case 'differs': return { kind: 'unavailable', reason: 'Differs from the checkout' };
-    case 'none': return { kind: 'none' };
+    case 'too-large': return WHOLE_FILE_STATES.tooLarge;
+    case 'differs': return WHOLE_FILE_STATES.differs;
+    case 'none': return WHOLE_FILE_STATES.none;
     case 'lines': return file.blocks.some((block) => block.lines.some((line) => line.expansion === 'hidden'))
-      ? { kind: 'partial' }
-      : { kind: 'whole' };
+      ? WHOLE_FILE_STATES.partial
+      : WHOLE_FILE_STATES.whole;
   }
 }

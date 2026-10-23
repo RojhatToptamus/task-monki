@@ -127,6 +127,34 @@ Six evenly spaced hues at one lightness and one chroma, so they read as one
 family and no single category shouts. Resolved values for all 16 themes are in
 `theme-tokens.json`; no theme hand-picks them.
 
+## Syntax inks
+
+Code is coloured by kind in three hues and a comment ink (`SYNTAX` in
+`tools/theme-derivation.mjs`):
+
+| Token | Kinds | OKLCH hue |
+|---|---|---|
+| `--syn-keyword` | keywords; `--syn-attribute`: attributes and the keys of JSON, YAML and CSS | 305° |
+| `--syn-string` | strings; `--syn-number`: numbers and constants | 195° |
+| `--syn-function` | functions; `--syn-type` and `--syn-tag`: types and markup tags | 250° |
+| `--syn-comment` | comments | the `ink` seed's |
+
+- **Hue and chroma are fixed,** the same in every theme, like the waiting hue,
+  so code reads alike everywhere: chroma 0.085 dark and 0.10 light, from a
+  designed L* of 74 dark and 42 light. Only lightness is solved.
+- **The hues sit between the status hues** (blocked ~25°, waiting ~75°,
+  verified ~150°): no token reads as a state, and a changed line's tint keeps
+  its meaning.
+- **Each ink clears 4.5:1 on every plane code sits on:** `--surface`, `--well`
+  and `--card`, and the diff tints (`--verified` and `--blocked` at 10%) over
+  `--surface` and `--well`.
+- **A comment is the theme's own ink,** its chroma offset by +0.02 (none for an
+  achromatic ink), solved outward from the sheet's lightness so it lands on the
+  4.5 floor. It recedes by lightness, never by italics.
+- A kind that needs no hue of its own is an alias, so the token layer alone
+  decides whether two kinds share a colour. Plain identifiers and punctuation
+  take the line's ink.
+
 ## Completeness and integration
 
 `tools/build-themes.mjs` is the only place theme colour is authored. It holds the
@@ -135,7 +163,7 @@ pure functions — the ladder, the ink solver and the measurement pass — so th
 be read and tested on their own. Together they emit two generated files:
 `themes.css` (what the app loads) and `theme-tokens.json` (the same data plus
 seeds, floors, ladder offsets and measurements, for tooling).
-**16 themes × 2 modes × 63 tokens**, every set complete.
+**16 themes × 2 modes × 71 tokens**, every set complete.
 
 Both files live in the repository. A derivation that exists only on one machine
 makes the committed output the de-facto rule, and the output is the one artefact
@@ -168,11 +196,13 @@ Rules that follow:
   set · a ladder that is not monotonic in either mode · a `--field` closer than
   2.5 L* to a host plane · a state step larger than the smallest structural step ·
   any ink under its floor, including a status ink on its own tint over `--card`,
-  `--well` and `--overlay` · an accent and waiting hue closer than 24° and 8 L* ·
-  a `--focus-ring` under 3:1 over any plane.
+  `--well` and `--overlay` · a syntax ink under 4.5:1 on a code plane or a diff
+  tint · an accent and waiting hue closer than 24° and 8 L* · a `--focus-ring`
+  under 3:1 over any plane.
   These are precisely the things review cannot see.
 
 Measured worst case across all 32 sets: `--text` 9.63:1, `--text-soft` 5.48,
 `--muted` and `--placeholder` 4.68, status inks 4.68 (including on their own
-tints), `--text-disabled` 3.63, `--faint` 3.13, `--idle` 3.12, `--id-*` 3.52,
-`--focus-ring` 3.00. `theme-tokens.json` records the current values.
+tints), `--syn-*` 4.67 (on the diff tints), `--text-disabled` 3.63, `--faint`
+3.13, `--idle` 3.12, `--id-*` 3.52, `--focus-ring` 3.00. `theme-tokens.json`
+records the current values.

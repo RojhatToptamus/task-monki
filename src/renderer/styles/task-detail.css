@@ -2191,7 +2191,7 @@
   box-sizing: border-box;
   width: 100%;
   min-width: 100%;
-  color: var(--text-soft);
+  color: var(--text);
   font: var(--t-help)/var(--lh-body) var(--font-mono);
 }
 

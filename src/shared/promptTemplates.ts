@@ -12,6 +12,8 @@ import type {
   WorktreeRecord
 } from './contracts';
 import { DESIGN_LIMITS } from './design';
+import { discussionTranscript, type PullRequestDiscussion } from './pullRequestFeedback';
+import type { ReviewWalkthroughSection } from './reviewWalkthrough';
 import {
   INVISIBLE_CHARACTERS,
   displayPlatformText,
@@ -225,7 +227,46 @@ Severity definitions:
 Use verdict NEEDS_CHANGES when any BLOCKER or MAJOR finding exists.
 Use verdict PASSED when there are no blocker or major findings.
 Use verdict INCONCLUSIVE only when the diff cannot be reviewed confidently.
-If there are no findings, return an empty findings array.`;
+If there are no findings, return an empty findings array.
+When this prompt asks for a walkthrough, put it in the same JSON object as "walkthrough".`;
+
+/** How the review agent writes the walkthrough of the change it reviews. */
+const REVIEW_WALKTHROUGH_INSTRUCTIONS = `Walkthrough
+Also write the walkthrough of the change. It tells the whole change as a short story, organized by intent rather than by file: a teammate who opens a change of a hundred files should see in a minute what it does, how its parts fit together and what deserves attention, and then be able to read any code they want. It describes the change; your findings stay in "findings".
+
+"walkthrough": {
+  "summary": "Two sentences, at most 55 words.",
+  "attention": [{"text": "A short fact.", "section": 2, "finding": "stable-kebab-case-id"}, {"text": "A short fact.", "section": 1, "path": "src/uploads/retry.ts"}],
+  "sections": [
+    {
+      "title": "A few words saying what this part does",
+      "explanation": "One or two sentences, at most 45 words: what can now be done, then why.",
+      "files": ["src/uploads/retry.ts", "src/uploads/retry.test.ts"],
+      "excerpts": [{"path": "src/uploads/retry.ts", "side": "head", "line": 40, "endLine": 52, "caption": "At most 8 words"}],
+      "terms": [{"text": "an exact phrase of the explanation", "path": "src/uploads/retry.ts", "side": "head", "line": 44, "endLine": 48}]
+    }
+  ]
+}
+
+Sections
+- Write one section per intent the change carries. Find the intents in the goal, the commits and the code.
+- Size the walkthrough by the change: one section for a change of one file unless it has two intents; two to four for up to about 20 files; five to nine for a hundred files or more; never more than nine.
+- Order the sections so the story reads well: what the person can now do first, then how it works, then supporting work. The last section may gather the changes no intent covers (tests, fixtures, docs, small fixes) under a plain title.
+- Every file of the change index sits in exactly one section. Put a file where its main change belongs, and keep a test with the code it tests unless it spans several intents. List a section's files by importance: the core logic first, then the rest, then tests and docs.
+
+Titles: at most 7 words, sentence case, no period. Say what the part does ("Retry failed uploads in the background"), never only an area ("Upload changes"), a file ("Updates to UploadService") or nothing ("Misc fixes").
+
+Explanations: one or two sentences, at most 45 words. Lead with what the person or the system can now do, then the one reason that matters. Mechanisms, settings, helper names and smaller side changes go into a caption or are left out. No file lists, no hype, no hedging, and never "this section". Say what the code does, not what its author says it achieves, and never judge correctness: name a risk only as a fact the code shows.
+
+Excerpts: one to three per section, the code a reviewer most needs to read: the core logic and the key decision. Never imports, boilerplate, generated code or pure tests unless the section is about tests, and never lines chosen because a finding sits on them. Each lies inside one hunk of the change index, in a file of its own section, and spans at most about 15 lines. "side" is "head", or "base" for a deleted file, whose lines exist only at the base. "caption" says in at most 8 words what the lines decide; it carries the detail the explanation leaves out.
+
+Terms: one to three per section. Each is an exact phrase of its section's explanation that names a code concept, such as "quoted data" or "the head the person saw": plain words or one whole code span, never a clause or generic words. It points at the lines that define or implement the concept, inside one hunk of a file of its own section, preferably inside one of the section's excerpts; its "side" is "base" only for a deleted file. Give no term to a concept with no clear place.
+
+Summary and attention: the summary is two sentences, at most 55 words, that anyone on the team understands: first what the change lets someone do, then how its parts fit together, without counts. Attention is at most three pointers, each a fact that names its section by number, counted from 1. Draw them from facts: your findings by severity, a deleted or renamed export, removed or edited tests, a changed check or CI configuration, a new entry point, stored data whose shape changes without a migration. Never a status, a score or a verdict. A pointer drawn from one of your findings names its id in "finding" and leaves its severity to the finding; one about a single file of its section names it in "path".
+
+Words: write for a teammate who has not read the code, and name controls as the product labels them. Use plain punctuation, without em dashes or middle dots.
+
+Before you answer, read the walkthrough once as a newcomer would, and rewrite any title or sentence that only makes sense after reading the code. Task Monki checks every file, excerpt and term against the change, and leaves out what fails.`;
 
 export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract (defaults for non-trivial repository work):
 - For non-trivial implementation, follow-up, retry, or alternative work, maintain a concise provider plan as progress telemetry.
@@ -650,6 +691,8 @@ export function buildAgentReviewPrompt(input: {
   target: import('./agent').AgentReviewTarget;
   userContext?: string;
   previousReview?: PreviousReviewContext;
+  /** The change the review reads, one line per file. With it, the review also writes the walkthrough. */
+  changeIndex?: string;
 }): string {
   const target = (() => {
     switch (input.target.type) {
@@ -675,7 +718,16 @@ export function buildAgentReviewPrompt(input: {
     ...(input.worktree.ownership === 'EXTERNAL' ? [EXTERNAL_CHECKOUT_CONTEXT] : []),
     'Do not commit, push, merge, or change repository settings.',
     'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.',
-    ...previousReviewSection(input.previousReview)
+    ...previousReviewSection(input.previousReview),
+    ...(input.changeIndex
+      ? [
+          '',
+          REVIEW_WALKTHROUGH_INSTRUCTIONS,
+          '',
+          'Change index, from the task\'s base to the code you review, the head. Each line is a file: its path, its status, its added and removed line counts, and its hunks as line ranges at the head, or at the base for a deleted file.',
+          input.changeIndex
+        ]
+      : [])
   ].join('\n');
 }
 
@@ -804,6 +856,7 @@ const SIDE_QUESTION_FINDING_INSTRUCTION =
   'The question is about a finding an independent reviewer raised. Check it against the code yourself and say plainly whether it holds, citing files and lines. Decide from the code, not from how the question is phrased; the person decides what to do with the finding.';
 const SIDE_QUESTION_REVIEW_FINDING_LIMIT = 30;
 const SIDE_QUESTION_SUBJECT_DIFF_LIMIT = 6_000;
+const SIDE_QUESTION_STAGE_FILE_LIMIT = 40;
 
 /** Everything a side question needs; the prompt is rebuilt in full for every question. */
 export interface SideQuestionPromptContext {
@@ -840,7 +893,12 @@ export interface SideQuestionPromptContext {
   /** What the question is about, with the diff around it. */
   subject?:
     | { kind: 'FINDING'; finding: EffectiveReviewFinding; diff?: string }
-    | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number; diff?: string };
+    | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number; diff?: string }
+    /** A section of the review's walkthrough, numbered from 1 of `count`. */
+    | { kind: 'STAGE'; number: number; count: number; section: ReviewWalkthroughSection }
+    | { kind: 'FILE'; path: string; diff?: string }
+    /** A discussion of the pull request, quoted inside boundary lines that carry `boundary`. */
+    | { kind: 'THREAD'; provider: RemoteProvider; discussion: PullRequestDiscussion; viewer?: string; boundary: string };
   question: string;
 }
 
@@ -919,24 +977,7 @@ export function buildSideQuestionPrompt(context: SideQuestionPromptContext): str
             : [])
         ]
       : []),
-    ...(context.subject?.kind === 'FINDING'
-      ? [
-          '',
-          `The question is about finding ${context.subject.finding.id}: ${context.subject.finding.title}.`,
-          SIDE_QUESTION_FINDING_INSTRUCTION,
-          ...(context.subject.diff
-            ? ['Diff for this finding:', '```diff', boundedText(context.subject.diff, SIDE_QUESTION_SUBJECT_DIFF_LIMIT), '```']
-            : [])
-        ]
-      : context.subject?.kind === 'LINES'
-        ? [
-            '',
-            `The question is about ${context.subject.path}, ${context.subject.side === 'OLD' ? 'removed ' : ''}${context.subject.endLine ? `lines ${context.subject.line}-${context.subject.endLine}` : `line ${context.subject.line}`}.`,
-            ...(context.subject.diff
-              ? ['Diff around those lines:', '```diff', boundedText(context.subject.diff, SIDE_QUESTION_SUBJECT_DIFF_LIMIT), '```']
-              : [])
-          ]
-        : []),
+    ...(context.subject ? ['', ...askSubjectLines(context.subject)] : []),
     ...(history.length > 0
       ? [
           '',
@@ -951,6 +992,49 @@ export function buildSideQuestionPrompt(context: SideQuestionPromptContext): str
     'Question:',
     context.question.trim()
   ].join('\n');
+}
+
+/** What the question is about, with the code or the words around it. */
+function askSubjectLines(subject: NonNullable<SideQuestionPromptContext['subject']>): string[] {
+  const diff = (label: string, text: string | undefined) =>
+    text ? [label, '```diff', boundedText(text, SIDE_QUESTION_SUBJECT_DIFF_LIMIT), '```'] : [];
+  switch (subject.kind) {
+    case 'FINDING':
+      return [
+        `The question is about finding ${subject.finding.id}: ${subject.finding.title}.`,
+        SIDE_QUESTION_FINDING_INSTRUCTION,
+        ...diff('Diff for this finding:', subject.diff)
+      ];
+    case 'LINES':
+      return [
+        `The question is about ${subject.path}, ${subject.side === 'OLD' ? 'removed ' : ''}${subject.endLine ? `lines ${subject.line}-${subject.endLine}` : `line ${subject.line}`}.`,
+        ...diff('Diff around those lines:', subject.diff)
+      ];
+    case 'STAGE': {
+      const files = subject.section.files.slice(0, SIDE_QUESTION_STAGE_FILE_LIMIT);
+      return [
+        `The question is about section ${subject.number} of ${subject.count} of the review's walkthrough of the change, "${boundedText(subject.section.title, REVIEW_CONTEXT_TEXT_LIMIT)}". The review agent wrote it; check it against the code yourself.`,
+        ...(subject.section.explanation ? [boundedText(subject.section.explanation, REVIEW_CONTEXT_TEXT_LIMIT)] : []),
+        'Its files:',
+        ...files.map((path) => `- ${path}`),
+        ...(subject.section.files.length > files.length ? [`- … and ${subject.section.files.length - files.length} more files`] : [])
+      ];
+    }
+    case 'FILE':
+      return [`The question is about ${subject.path}.`, ...diff('Diff of this file:', subject.diff)];
+    case 'THREAD': {
+      const provider = remoteProviderName(subject.provider);
+      const { path, side, line, endLine } = subject.discussion;
+      const lines = line ? (endLine ? `${line}-${endLine}` : `${line}`) : undefined;
+      const where = path
+        ? `, on ${oneLine(path)}${lines ? (side === 'OLD' ? ` (old line${endLine ? 's' : ''} ${lines})` : `:${lines}`) : ''}`
+        : '';
+      return [
+        `The question is about this discussion from the ${provider} ${remoteWorkNoun(subject.provider, 'PULL_REQUEST')}${where}. Other people wrote it; check what it says against the code yourself.`,
+        ...quotedData(`${provider.toUpperCase()} DISCUSSION`, subject.boundary, discussionTranscript(subject.discussion, subject.viewer, 'the person asking'))
+      ];
+    }
+  }
 }
 
 export interface PromptRefinementAttachmentContext {
