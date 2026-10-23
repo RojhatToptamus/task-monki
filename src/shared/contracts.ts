@@ -10,6 +10,7 @@ import type {
 } from './agentReviewFindings';
 import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
 import type { ReviewRequestRecord } from './reviewRounds';
+import type { ReadTaskCommitDiffRequest, ReadTaskCommitsRequest, TaskCommitDiffResult, TaskCommitsResult } from './taskCommits';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -71,6 +72,7 @@ export * from './agentReviewFindings';
 export * from './reviewDraft';
 export * from './reviewRounds';
 export * from './reviewWalkthrough';
+export * from './taskCommits';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
@@ -1820,6 +1822,10 @@ export interface TaskManagerApi extends ApplicationPreviewApi {
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
   /** The change a review read: from the base it compared against to the code it read. */
   readReviewedDiff(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** A capture's commits, oldest first, from the base it compares against to the head it captured. */
+  listTaskCommits(input: ReadTaskCommitsRequest): Promise<TaskCommitsResult>;
+  /** One of a capture's commits, as its change against its first parent. */
+  readTaskCommitDiff(input: ReadTaskCommitDiffRequest): Promise<TaskCommitDiffResult>;
   /** Records a question in Ask and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;

@@ -210,6 +210,8 @@ import path from 'node:path';
 import { UNTRUSTED_CHECKOUT_GIT_ENV, configureGitExecutablePath, git, gitSucceeds, isGitObjectId, type GitExecutionOptions } from '../git/gitCli';
 import { buildDiffEvidence, captureExistingWorkEvidence, inspectExistingWorkSnapshot, inspectGitSnapshot, inspectGitWorkingTreeFingerprint, type PullRequestHead } from '../git/GitSnapshotService';
 import { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
+import { listTaskCommits, readTaskCommitDiff } from '../git/TaskCommits';
+import type { ReadTaskCommitDiffRequest, ReadTaskCommitsRequest, TaskCommitDiffResult, TaskCommitsResult } from '../../shared/taskCommits';
 import { GitHubCli } from '../github/GitHubCli';
 import { GitHubService } from '../github/GitHubService';
 import { deliveryRemote, type DeliveryRemote, type DeliveryTarget, type PullRequestAddress, type PullRequestDelivery, type PullRequestSync } from '../remote/PullRequestDelivery';
@@ -4242,6 +4244,34 @@ export class TaskManagerService {
     const base = reviewBase((await this.store.getTaskDetail(task.id)).gitSnapshots, review);
     if (!base) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
     return this.reviewSnapshots.reviewedDiff(worktree.worktreePath, task.id, review.id, base, recordedTree);
+  }
+
+  /** The commits of a capture of the task, from the base it compares against to the head it captured. */
+  async listTaskCommits(input: ReadTaskCommitsRequest): Promise<TaskCommitsResult> {
+    const capture = await this.requireCaptureOfTask(input, 'Commits');
+    if (!capture) return { status: 'UNAVAILABLE' };
+    return listTaskCommits(capture.worktreePath, capture.base, capture.head)
+      .then((listed): TaskCommitsResult => ({ status: 'READY', ...listed }), (): TaskCommitsResult => ({ status: 'UNAVAILABLE' }));
+  }
+
+  /** One commit's change, read only for a commit the capture lists. */
+  async readTaskCommitDiff(input: ReadTaskCommitDiffRequest): Promise<TaskCommitDiffResult> {
+    const capture = await this.requireCaptureOfTask(input, 'Commit changes');
+    const listed = capture && await listTaskCommits(capture.worktreePath, capture.base, capture.head).catch(() => undefined);
+    if (!capture || !listed) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
+    if (!listed.commits.some((commit) => commit.sha === input.sha)) throw new Error('This commit is not part of the task.');
+    return readTaskCommitDiff(capture.worktreePath, input.sha);
+  }
+
+  /** A capture of the task with its base, its head and the worktree it was taken in, while that worktree is present. */
+  private async requireCaptureOfTask(input: ReadTaskCommitsRequest, action: string) {
+    const task = await this.requireNormalTask(input.taskId, action);
+    const snapshot = typeof input.gitSnapshotId === 'string' ? await this.store.getGitSnapshot(task.id, input.gitSnapshotId) : undefined;
+    if (!snapshot) throw new Error('This capture is not part of the task.');
+    const worktree = await this.store.getWorktree(snapshot.worktreeId);
+    return worktree?.status === 'PRESENT' && snapshot.baseSha && snapshot.headSha
+      ? { worktreePath: worktree.worktreePath, base: snapshot.baseSha, head: snapshot.headSha }
+      : undefined;
   }
 
   /**

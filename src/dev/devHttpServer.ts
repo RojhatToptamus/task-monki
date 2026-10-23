@@ -1089,6 +1089,14 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.readReviewedDiff((await readJson()) as never));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/git/task-commits') {
+        sendJson(response, requestId, 200, await options.service.listTaskCommits((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/git/task-commit-diff') {
+        sendJson(response, requestId, 200, await options.service.readTaskCommitDiff((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/review/decide-finding') {
         sendJson(
           response,

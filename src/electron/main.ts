@@ -82,6 +82,8 @@ import type {
   DecideReviewFindingRequest,
   DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -867,6 +869,10 @@ function installIpcHandlers(): void {
   handleTrustedIpc('git:deliveryCommit', async (_, input: CreateDeliveryCommitRequest) => {
     return service.createDeliveryCommit(input);
   });
+  handleTrustedIpc('git:listTaskCommits', async (_, input: ReadTaskCommitsRequest) =>
+    service.listTaskCommits(input));
+  handleTrustedIpc('git:readTaskCommitDiff', async (_, input: ReadTaskCommitDiffRequest) =>
+    service.readTaskCommitDiff(input));
 
   handleTrustedIpc('github:preflight', async (_, input: GitHubPreflightRequest) => {
     return service.preflightGitHub(input);

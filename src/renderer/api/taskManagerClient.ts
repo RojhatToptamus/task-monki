@@ -4,7 +4,11 @@ import type {
   DecideReviewFindingRequest,
   DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   ReviewChangesResult,
+  TaskCommitDiffResult,
+  TaskCommitsResult,
   ReviewFindingDecision,
   ReviewRequestItemDecision,
   AskSideQuestionRequest,
@@ -549,6 +553,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
     createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/git/delivery-commit', input),
+    listTaskCommits: (input: ReadTaskCommitsRequest) =>
+      post<TaskCommitsResult>(baseUrl, '/api/git/task-commits', input),
+    readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+      post<TaskCommitDiffResult>(baseUrl, '/api/git/task-commit-diff', input),
     preflightGitHub: (input: GitHubPreflightRequest) =>
       post<GitHubRepositoryRecord>(baseUrl, '/api/github/preflight', input),
     publishBranch: (input: PublishBranchRequest) =>

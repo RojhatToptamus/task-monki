@@ -5,6 +5,8 @@ import type {
   DecideReviewFindingRequest,
   DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -355,6 +357,10 @@ const api: TaskManagerApi = {
   refreshEvidence: (input: RefreshEvidenceRequest) => invokeIpc('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
     invokeIpc('git:deliveryCommit', input),
+  listTaskCommits: (input: ReadTaskCommitsRequest) =>
+    invokeIpc('git:listTaskCommits', input),
+  readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+    invokeIpc('git:readTaskCommitDiff', input),
   preflightGitHub: (input: GitHubPreflightRequest) => invokeIpc('github:preflight', input),
   publishBranch: (input: PublishBranchRequest) => invokeIpc('github:publish', input),
   createPullRequest: (input: CreatePullRequestRequest) =>

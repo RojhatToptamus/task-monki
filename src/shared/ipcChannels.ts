@@ -106,6 +106,8 @@ export const IPC_INVOKE_CHANNELS = [
   'discourse:wave:stop',
   'evidence:refresh',
   'git:deliveryCommit',
+  'git:listTaskCommits',
+  'git:readTaskCommitDiff',
   'github:createPullRequest',
   'github:preflight',
   'github:publish',

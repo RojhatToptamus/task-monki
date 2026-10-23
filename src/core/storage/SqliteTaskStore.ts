@@ -2007,6 +2007,12 @@ export class SqliteTaskStore {
     return clone(task ? latestGitSnapshot(this.state, task) : undefined);
   }
 
+  /** One capture of the task's Git state; none when it belongs to another task. */
+  async getGitSnapshot(taskId: string, snapshotId: string): Promise<GitSnapshotRecord | undefined> {
+    await this.init();
+    return clone(this.state.gitSnapshots.find((snapshot) => snapshot.id === snapshotId && snapshot.taskId === taskId));
+  }
+
   /** The newest check rollup recorded for a pull request's head. */
   async findCiRollup(taskId: string, pullRequestNumber: number, headSha: string | undefined): Promise<CiRollupRecord | undefined> {
     await this.init();

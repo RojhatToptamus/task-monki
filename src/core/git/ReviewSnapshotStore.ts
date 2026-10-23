@@ -5,10 +5,9 @@ import type { ReviewChangesResult } from '../../shared/contracts';
 import { changeIndexText, parseReviewedDiff, type ReviewedDiffFile } from '../review/ReviewedDiff';
 import { GIT_HOOKS_OFF_ENV, git, gitResult } from './gitCli';
 import { planUntrackedFiles } from './ReadOnlySnapshotService';
+import { boundedTreeDiff } from './treeDiff';
 
 const GIT_TIMEOUT_MS = 120_000;
-/** A diff of a review's code larger than this is not shown; the worktree's full diff still is. */
-export const REVIEW_CHANGES_MAX_BYTES = 8 * 1024 * 1024;
 
 type UnavailableReason = Extract<ReviewChangesResult, { status: 'UNAVAILABLE' }>['reason'];
 
@@ -67,7 +66,7 @@ export class ReviewSnapshotStore {
       } catch {
         return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
       }
-      const diff = await this.diff(worktreePath, store, recorded, current);
+      const diff = await boundedTreeDiff(worktreePath, recorded, current, store.env);
       return typeof diff === 'string'
         ? { status: 'READY', reviewRunId, tree: recorded, diff }
         : { status: 'UNAVAILABLE', reason: diff.reason };
@@ -84,7 +83,7 @@ export class ReviewSnapshotStore {
     return this.serialize(store.dir, async () => {
       const recorded = await this.recordedTree(store, taskId, reviewRunId, expectedTree);
       if (typeof recorded !== 'string') return recorded;
-      const diff = await this.diff(worktreePath, store, baseSha, recorded);
+      const diff = await boundedTreeDiff(worktreePath, baseSha, recorded, store.env);
       return typeof diff === 'string'
         ? { status: 'READY', reviewRunId, tree: recorded, diff }
         : { status: 'UNAVAILABLE', reason: diff.reason };
@@ -98,7 +97,7 @@ export class ReviewSnapshotStore {
   async changeIndex(worktreePath: string, baseSha: string, tree: string): Promise<ReviewChangeIndex> {
     try {
       const store = await this.storeFor(worktreePath);
-      const diff = await this.serialize(store.dir, () => this.diff(worktreePath, store, baseSha, tree));
+      const diff = await this.serialize(store.dir, () => boundedTreeDiff(worktreePath, baseSha, tree, store.env));
       if (typeof diff !== 'string') return { status: 'UNAVAILABLE', reason: diff.reason };
       const files = parseReviewedDiff(diff);
       return { status: 'READY', files, text: changeIndexText(files) };
@@ -144,29 +143,6 @@ export class ReviewSnapshotStore {
     if (!recorded) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
     if (expectedTree && recorded !== expectedTree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
     return recorded;
-  }
-
-  /**
-   * One unified diff between two trees, bounded. Paths are written as they are,
-   * so a file name in any script reads the same in the diff and in its index.
-   */
-  private async diff(
-    worktreePath: string,
-    store: SnapshotRepository,
-    from: string,
-    to: string
-  ): Promise<string | { reason: Exclude<UnavailableReason, 'NOT_RECORDED'> }> {
-    try {
-      const diff = await git(
-        worktreePath,
-        ['-c', 'core.quotePath=false', 'diff-tree', '-r', '-p', '-M', '-U3', '--no-color', '--no-ext-diff', from, to],
-        { timeout: GIT_TIMEOUT_MS, env: store.env }
-      );
-      return Buffer.byteLength(diff) > REVIEW_CHANGES_MAX_BYTES ? { reason: 'TOO_LARGE' } : diff;
-    } catch (error) {
-      // A tree whose objects the source repository has since pruned, or output past the buffer.
-      return { reason: /maxBuffer/i.test(String(error)) ? 'TOO_LARGE' : 'UNREADABLE' };
-    }
   }
 
   /** The worktree's content as a tree, staged in a private copy of its index so the worktree is untouched. */
