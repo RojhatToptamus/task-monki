@@ -147,7 +147,7 @@ import { createElectronOpenTargetHost } from './openTargetHost';
 import { buildDesktopCliPath } from './desktopCliPath';
 import { getMacDockIconPath } from './dockIcon';
 import { resolveProviderRuntimeCwd } from './providerRuntimeCwd';
-import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
+import { DEFAULT_ZOOM_FACTOR, getMacTrafficLightPosition, getMainWindowChromeOptions, getTitleBarOverlayHeight } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { SoftwareUpdateController } from './SoftwareUpdateController';
 import {
@@ -237,13 +237,17 @@ if (!ownsSingleInstanceLock) {
   });
 }
 
+/** Keeps the native window controls in the renderer's titlebar at the page's zoom. */
 function syncWindowChrome(window: BrowserWindow): void {
-  if (process.platform !== 'darwin' || window.isDestroyed()) {
+  if (window.isDestroyed()) {
     return;
   }
-  window.setWindowButtonPosition(
-    getMacTrafficLightPosition(window.webContents.getZoomFactor())
-  );
+  const zoomFactor = window.webContents.getZoomFactor();
+  if (process.platform === 'darwin') {
+    window.setWindowButtonPosition(getMacTrafficLightPosition(zoomFactor));
+  } else {
+    window.setTitleBarOverlay({ height: getTitleBarOverlayHeight(zoomFactor) });
+  }
 }
 
 function createWindow(): void {
@@ -271,7 +275,8 @@ function createWindow(): void {
       webSecurity: true,
       allowRunningInsecureContent: false,
       navigateOnDragDrop: false,
-      webviewTag: false
+      webviewTag: false,
+      zoomFactor: DEFAULT_ZOOM_FACTOR
     }
   });
   mainWindow = window;

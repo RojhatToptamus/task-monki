@@ -148,8 +148,9 @@ surface beside it is built at this table, not at the mock.
   the one emphasised word in a row.
 - **Heights are tokens.** `height: 36px` is the same error as a hex colour; use
   `--h-row`.
-- **Check against the neighbour.** At 100% zoom, beside the closest shipped
-  element, a new one must not read bigger, heavier or louder.
+- **Check against the neighbour.** At the app's default zoom (125%), beside
+  the closest shipped element, a new one must not read bigger, heavier or
+  louder.
 
 | Don't | Do |
 |---|---|
@@ -1302,10 +1303,10 @@ was checked.
    focus, disabled with its reason, pending, empty, error, stale, and the longest
    real content (a 120-character title, a four-digit count, 500 rows).
 3. **Both modes**, in Graphite and in one warm theme.
-4. **Two windows**: the minimum, 1100 × 720, and a wide one, each with and
-   without a docked side panel.
-5. **At 100% zoom, beside the closest shipped surface.** If the new one reads
-   bigger, heavier, busier or wordier, fix it.
+4. **Two windows**: the minimum, 1100 × 720 (880 × 576 CSS px at the default
+   zoom), and a wide one, each with and without a docked side panel.
+5. **At the default zoom, 125%, beside the closest shipped surface.** If the
+   new one reads bigger, heavier, busier or wordier, fix it.
 6. **Measured.** Read the computed height, font size, family, weight,
    line-height, radius and icon box of each new element and compare them with
    §3 and §9. Run `tools/design-audit.js` on the screen (see its header) and
