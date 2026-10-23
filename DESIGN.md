@@ -616,6 +616,25 @@ stripe beside a pill — while the distinctions that were asked about, like *can
 type here*, went unfunded. The remedy is not more contrast. It is fewer, larger,
 better-aimed steps.
 
+### 7.9 Syntax colour (`--syn-*`)
+
+Code in the Guide and the Diff is coloured by kind, so its shape reads before
+its words. Three hues and a comment ink, quiet by rule:
+
+- `--syn-keyword`, structure: keywords, and the attributes and keys that name a
+  value (`--syn-attribute`);
+- `--syn-string`, values: strings, numbers and constants (`--syn-number`);
+- `--syn-function`, names: functions, types and markup tags (`--syn-type`,
+  `--syn-tag`);
+- `--syn-comment`, comments: the theme's ink at the 4.5:1 floor, upright,
+  never italic.
+
+Plain identifiers and punctuation are `--text`. The hues are the same in every
+theme and stay clear of the status hues, so a coloured token never reads as a
+state and a changed line's tint keeps its meaning; their lightness is solved on
+the code planes and the diff tints (`docs/design/THEMES.md`). Code takes these
+inks through `SyntaxCode` and its `tm-syn-*` classes, never a colour of its own.
+
 ---
 
 ## 8. Type and icons
@@ -1352,6 +1371,11 @@ correct answer far more often than a border is).
 | Link, rest | `--accent-ink` |
 | Link, hover | `--accent` |
 | Machine values (paths, hashes, branches) | `--muted`, or `--faint` when secondary |
+| Code: plain identifiers and punctuation | `--text` |
+| Code: keywords; attributes and keys | `--syn-keyword`; `--syn-attribute` |
+| Code: strings; numbers and constants | `--syn-string`; `--syn-number` |
+| Code: functions; types; markup tags | `--syn-function`; `--syn-type`; `--syn-tag` |
+| Code: comments (upright) | `--syn-comment` |
 | Text on a primary button | `--on-primary` |
 | Error message under a field | `--blocked-ink` |
 | Text selection highlight | `--sel` |
@@ -1470,7 +1494,7 @@ inside it reads as a second fact.
 | History row | — | title `--text`, source `--text-soft`, time `--muted`; no mark |
 | Stale ribbon | `--waiting-bg` | `--waiting-ink` |
 | Skeleton / loading placeholder | `--field-disabled` | — |
-| Diff added / removed | `--verified` at 10% / `--blocked` at 10% | `--verified-ink` / `--blocked-ink` |
+| Diff added / removed | `--diff-added-bg` / `--diff-removed-bg` (`--verified` / `--blocked` at 10%) | number and marker `--verified-ink` / `--blocked-ink`; code in its syntax inks (A.2) |
 | Accent-tinted surface (selected filter, active pill, `@`-mention chip) | `--accent-soft` | `--accent-ink` |
 | Categorical dot / bar (repo, agent, saved view) | `--id-1` … `--id-6` (§7.7) | label stays `--text` / `--muted` |
 | Avatar fallback (initials; a person glyph when the account is unknown) | `--field` | `--muted` |

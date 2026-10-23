@@ -226,8 +226,38 @@ export const INK_FLOORS = {
   '--waiting-ink': 4.5,
   '--blocked-ink': 4.5,
   '--verified-ink': 4.5,
-  '--id-*': 3
+  '--id-*': 3,
+  '--syn-*': 4.5
 };
+
+/* A changed line in a diff is its status hue at this percentage over its plane. */
+export const DIFF_TINT = 10;
+
+/* Syntax inks: three OKLCH hues, the same in every theme so code reads alike
+ * everywhere: structure (keywords, and the keys and attributes that name a
+ * value), values (strings, numbers, constants) and names (functions, types,
+ * tags). They sit in the gaps between the status hues (blocked ~25°, waiting
+ * ~75°, verified ~150°), so no token reads as a state and a changed line keeps
+ * its meaning. One low chroma and one designed lightness per mode keep any kind
+ * from shouting; only the lightness is solved, on the planes code sits on and
+ * the diff tints over them. A comment is the theme's own ink, a little chroma
+ * off grey, solved out to the floor, so it recedes without italics. */
+export const SYNTAX = {
+  hues: { keyword: 305, string: 195, function: 250 },
+  chroma: { dark: 0.085, light: 0.1 },
+  lstar: { dark: 74, light: 42 },
+  commentChroma: 0.02
+};
+export const SYNTAX_TOKENS = [
+  '--syn-keyword',
+  '--syn-string',
+  '--syn-function',
+  '--syn-comment',
+  '--syn-number',
+  '--syn-type',
+  '--syn-tag',
+  '--syn-attribute'
+];
 
 /* Solve with a little headroom so a later seed nudge does not break CI. */
 const MARGIN = 1.045;
@@ -473,6 +503,27 @@ export function deriveVariant(seeds, mode) {
   /* Idle is a graphic hue (dot, bar), never prose: 3:1 like --faint. */
   const idle = solveInk({ C: inkOk.C * 0.6, h: inkOk.h }, planes, INK_FLOORS['--idle'], mode, T.idle);
 
+  /* ---- syntax ---- */
+  /* Code sits on the sheet, in a well and on a card, and a changed line lays a
+   * diff tint over the sheet or the well. */
+  const codeHosts = [
+    surface,
+    well,
+    card,
+    ...[verified, blocked].flatMap((hue) => [surface, well].map((p) => over([...hue.slice(0, 3), DIFF_TINT / 100], p)))
+  ];
+  const syntaxInk = (h) =>
+    solveInk({ C: SYNTAX.chroma[mode], h }, codeHosts, INK_FLOORS['--syn-*'], mode, SYNTAX.lstar[mode]);
+  /* Solved outward from the sheet's own lightness, a comment stops at the floor.
+   * An achromatic ink has no hue to lean on, so its comments stay grey. */
+  const comment = solveInk(
+    { C: inkOk.C < ACHROMATIC ? 0 : inkOk.C + SYNTAX.commentChroma, h: inkOk.h },
+    codeHosts,
+    INK_FLOORS['--syn-*'],
+    mode,
+    lstar(surface)
+  );
+
   /* ---- primary ---- */
   /* The primary action is the ink extreme, so it carries the ink's cast rather
    * than the surface's: a cool theme keeps a cool near-black button. */
@@ -582,9 +633,19 @@ export function deriveVariant(seeds, mode) {
     '--verified-bg': tint('--verified', dark ? 14 : 12),
     '--idle': rgbToHex(idle),
     '--idle-bg': 'var(--field)',
-    '--diff-added-bg': tint('--verified', 10),
-    '--diff-removed-bg': tint('--blocked', 10),
+    '--diff-added-bg': tint('--verified', DIFF_TINT),
+    '--diff-removed-bg': tint('--blocked', DIFF_TINT),
     '--scrim': `color-mix(in srgb, var(--ground) ${dark ? 68 : 60}%, transparent)`,
+
+    /* syntax; each kind after the comment shares a hue named above it */
+    '--syn-keyword': rgbToHex(syntaxInk(SYNTAX.hues.keyword)),
+    '--syn-string': rgbToHex(syntaxInk(SYNTAX.hues.string)),
+    '--syn-function': rgbToHex(syntaxInk(SYNTAX.hues.function)),
+    '--syn-comment': rgbToHex(comment),
+    '--syn-number': 'var(--syn-string)',
+    '--syn-type': 'var(--syn-function)',
+    '--syn-tag': 'var(--syn-function)',
+    '--syn-attribute': 'var(--syn-keyword)',
 
     /* categorical */
     ...Object.fromEntries(ids.map((rgb, i) => [`--id-${i + 1}`, rgbToHex(rgb)])),
@@ -716,6 +777,26 @@ export function measureVariant(tokens) {
         pass: contrast(inkRgb, bg) >= 4.5
       });
     }
+  }
+
+  /* Syntax ink must clear its floor wherever code sits: the sheet, a well, a
+   * card, and a changed line's tint over the sheet or the well. */
+  const codeHosts = [
+    ...['--surface', '--well', '--card'].map((host) => [host, resolve(host)]),
+    ...['--verified', '--blocked'].flatMap((hue) =>
+      ['--surface', '--well'].map((host) => [`${hue} tint over ${host}`, over([...resolve(hue), DIFF_TINT / 100], resolve(host))])
+    )
+  ];
+  for (const token of SYNTAX_TOKENS) {
+    const ink = resolve(token);
+    const worst = codeHosts.reduce(
+      (acc, [plane, rgb]) => {
+        const ratio = contrast(ink, rgb);
+        return ratio < acc.ratio ? { ratio, plane } : acc;
+      },
+      { ratio: Infinity, plane: '' }
+    );
+    results.push({ token, floor: INK_FLOORS['--syn-*'], ...worst, pass: worst.ratio >= INK_FLOORS['--syn-*'] });
   }
 
   /* The ladder itself: monotonic in elevation, and every state step smaller

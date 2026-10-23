@@ -21,6 +21,7 @@ import {
   PLANE_CHROMA_LIFT,
   PLANE_TOKENS,
   SURFACE_PLANE_TOKENS,
+  SYNTAX_TOKENS,
   LADDER
 } from './theme-derivation.mjs';
 
@@ -113,6 +114,7 @@ export const SECTIONS = [
   ['accent — the interactive and "working" hue', ['--accent', '--accent-ink', '--accent-soft']],
   ['status', ['--waiting', '--waiting-ink', '--waiting-bg', '--blocked', '--blocked-ink', '--blocked-bg', '--blocked-bg-hover', '--verified', '--verified-ink', '--verified-bg', '--idle', '--idle-bg', '--diff-added-bg', '--diff-removed-bg', '--scrim']],
   ['categorical — derived from the skill seed, graphic use only', ['--id-1', '--id-2', '--id-3', '--id-4', '--id-5', '--id-6']],
+  ['syntax — fixed hues, lightness solved on the code planes and the diff tints', SYNTAX_TOKENS],
   ['elevation', ['--shadow-card', '--shadow-card-hover', '--shadow-panel', '--shadow-pop', '--shadow-modal']]
 ];
 

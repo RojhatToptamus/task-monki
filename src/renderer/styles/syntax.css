@@ -1,0 +1,10 @@
+/* Syntax colour (DESIGN.md §7.9): a run of code takes its kind's ink, from
+   SyntaxCode; the text between runs keeps the line's own ink. Comments stay upright. */
+.tm-syn-keyword { color: var(--syn-keyword); }
+.tm-syn-string { color: var(--syn-string); }
+.tm-syn-number { color: var(--syn-number); }
+.tm-syn-comment { color: var(--syn-comment); }
+.tm-syn-function { color: var(--syn-function); }
+.tm-syn-type { color: var(--syn-type); }
+.tm-syn-tag { color: var(--syn-tag); }
+.tm-syn-attribute { color: var(--syn-attribute); }
