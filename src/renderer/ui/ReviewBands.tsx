@@ -2,27 +2,32 @@ import { useCallback, useId, useState } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
-import { formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
+import { formatFindingLocation } from '../model/findings';
+import { discussionSummary, formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
 import type { BandAnswer } from '../model/reviewRounds';
 import { sideLines, type ReviewFindingView } from '../model/reviewWorkspace';
 import { Avatar } from './Avatar';
-import { ReviewDiscussionThread } from './ReviewDiscussionThread';
+import { CommentText, ReviewDiscussionThread } from './ReviewDiscussionThread';
 import { ReviewFindingThread } from './ReviewFindingThread';
 import { AnswerState, ReopenAnswer, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useReviewActions, useReviewBands, type CommentDraft } from './useReviewModel';
 
+/** Where a band sits: under the last line it is about, at its file's top, or above the files. */
+type BandPlace = 'line' | 'file' | 'general';
+
 /**
  * What is said about the code at one place: under a line, at a file's top, or
  * above the files. The reviewer's findings, then people's discussions, then the
- * person's own comments, then the composer when it opens here (`at`). A
- * discussion on its line says nothing more of its place; at its file's top or
- * above the files, it says where it points. Whatever the agent answered in the
- * person's latest request says the answer, and takes the person's decision on it.
+ * person's own comments, then the composer when it opens here (`at`). A band
+ * says the lines it is about only where its place does not: under a range, or
+ * at its file's top; above the files, it says where it points. Whatever the
+ * agent answered in the person's latest request says the answer, and takes the
+ * person's decision on it.
  */
 export function ReviewBands({ place, at, file, findings, discussions, comments }: {
-  place: 'line' | 'file' | 'general';
+  place: BandPlace;
   /** The place's key (`lineAnchorKey`, or `file:<id>`): the composer opens here when it is this one. */
   at?: string;
   /** Under a line, its file: what a suggested change replaces is read from it. */
@@ -57,6 +62,8 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
         <ReviewFindingThread
           key={finding.id}
           finding={finding}
+          location={place === 'general' && finding.path ? formatFindingLocation(finding) : undefined}
+          about={linesWords(finding, place)}
           round={finding.previousFindingId ? 'STILL_OPEN' : state.reReview ? 'NEW' : undefined}
           answer={itemAnswer(state.answers?.findings.get(finding.id))}
           focused={state.focusedFindingId === finding.id}
@@ -79,8 +86,8 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
             discussion={discussion}
             answer={discussionAnswer(discussion)}
             location={place === 'general' ? formatDiscussionLocation(discussion) : undefined}
-            about={place === 'file' ? (discussion.line ? commentAbout(lines) : undefined)
-              : place === 'line' && commentNeedsAbout(lines) ? commentAbout(lines) : undefined}
+            // A platform's old side is the base file, unchanged lines included, not only removed ones.
+            about={linesWords(lines, place, 'Old')}
             folded={discussion.resolved || (!discussion.open && !discussion.path)}
             focused={state.focusedDiscussionId === discussion.id}
             inRequest={state.includedDiscussions.has(discussion.id)}
@@ -102,27 +109,28 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
       })}
       {/* A comment being edited gives its place to the composer. */}
       {comments?.map((comment) => (draft?.editingId === comment.id
-        ? <CommentComposer key={comment.id} draft={draft} />
-        : <ReviewCommentBand key={comment.id} comment={comment} answer={itemAnswer(state.answers?.comments.get(comment.id))} />))}
-      {draft && !draft.editingId && draft.key === at ? <CommentComposer key="composer" draft={draft} /> : null}
+        ? <CommentComposer key={comment.id} draft={draft} about={linesWords(comment, place)} />
+        : <ReviewCommentBand key={comment.id} comment={comment} about={linesWords(comment, place)}
+          answer={itemAnswer(state.answers?.comments.get(comment.id))} />))}
+      {draft && !draft.editingId && draft.key === at ? <CommentComposer key="composer" draft={draft} about={linesWords(draft, place)} /> : null}
     </>
   );
 }
 
 /**
- * The person's own comment reads as theirs: their mark and You, with Edit and
+ * The person's own comment reads as everyone's does: their mark and You, the
+ * lines when its place does not say them, its words as markdown, and Edit and
  * Delete on its head. One they sent that the agent answered says the answer
  * instead, quotes it, and folds to a line once they accept it.
  */
-function ReviewCommentBand({ comment, answer }: { comment: ReviewComment; answer?: ItemAnswer }) {
+function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment; about?: string; answer?: ItemAnswer }) {
   const actions = useReviewActions();
   const { viewer, canComment } = useReviewBands();
   if (answer?.accepted) {
-    const line = comment.text.split('\n').map((value) => value.trim()).find(Boolean) ?? '';
     return (
       <div className="tm-review-thread tm-review-thread--folded" data-comment-id={comment.id} tabIndex={-1}>
         <span className="tm-review-thread__author">You</span>
-        <span className="tm-review-answer__settled" title={comment.text}>{line}</span>
+        <span className="tm-review-answer__settled" title={comment.text}>{commentLine(comment)}</span>
         <span>Accepted</span>
         <ReopenAnswer answer={answer} />
       </div>
@@ -134,7 +142,7 @@ function ReviewCommentBand({ comment, answer }: { comment: ReviewComment; answer
         <Avatar name={viewer} className="tm-review-thread__avatar" />
         <header className="tm-review-thread__head">
           <span className="tm-review-thread__author">You</span>
-          {commentNeedsAbout(comment) ? <span className="tm-review-comment__about">{commentAbout(comment)}</span> : null}
+          {about ? <span className="tm-review-thread__about">{about}</span> : null}
           <span className="tm-review-thread__spacer" />
           {answer ? <AnswerState answer={answer} /> : canComment ? (
             <span className="tm-review-thread__actions tm-review-comment__actions">
@@ -151,9 +159,7 @@ function ReviewCommentBand({ comment, answer }: { comment: ReviewComment; answer
             </span>
           ) : null}
         </header>
-        <div className="tm-review-comment__body">
-          <p>{comment.text}</p>
-        </div>
+        <CommentText text={comment.text} />
       </div>
       {answer ? <RequestItemAnswer answer={answer} /> : null}
     </div>
@@ -165,7 +171,7 @@ function ReviewCommentBand({ comment, answer }: { comment: ReviewComment; answer
  * or range it is about, its choices under it. What is typed stays its own, so a
  * keystroke renders the composer alone; it is kept while the file folds.
  */
-function CommentComposer({ draft }: { draft: CommentDraft }) {
+function CommentComposer({ draft, about }: { draft: CommentDraft; about?: string }) {
   const actions = useReviewActions();
   const { viewer, canAskAboutLines } = useReviewBands();
   const [text, setText] = useState(actions.commentText);
@@ -182,7 +188,7 @@ function CommentComposer({ draft }: { draft: CommentDraft }) {
     <form className="tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); actions.saveComment(); }}>
       <div className="tm-review-thread__reply-row tm-review-thread__reply-row--open">
         <Avatar name={viewer} className="tm-review-thread__avatar" />
-        {commentNeedsAbout(draft) ? <span className="tm-review-comment__about">{commentAbout(draft)}</span> : null}
+        {about ? <span className="tm-review-thread__about">{about}</span> : null}
         <label className="tm-visually-hidden" htmlFor={id}>Comment</label>
         <textarea
           ref={caretAtEnd}
@@ -219,14 +225,26 @@ function CommentComposer({ draft }: { draft: CommentDraft }) {
   );
 }
 
-/** A range, a removed line or the whole file needs saying; a single line is the row above. */
-function commentNeedsAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>): boolean {
-  return !comment.line || Boolean(comment.endLine) || comment.side === 'OLD';
+/** A comment as one line, as its request lists it. */
+function commentLine(comment: Pick<ReviewComment, 'text'>): string {
+  return discussionSummary({ comments: [{ body: comment.text, truncated: false }] });
 }
 
-/** What a comment is about, when its row does not already say it. */
-function commentAbout(comment: Pick<ReviewComment, 'side' | 'line' | 'endLine'>): string {
-  if (!comment.line) return 'Whole file';
-  const lines = comment.endLine ? `Lines ${comment.line}–${comment.endLine}` : `Line ${comment.line}`;
-  return comment.side === 'OLD' ? `Removed ${lines.toLowerCase()}` : lines;
+/**
+ * The lines a band is about, in words, where its place does not say them:
+ * under its row only a range needs saying, at its file's top any line does, and
+ * a band about the whole file needs nothing. On the old side, the person's
+ * comments are on removed lines; a platform's threads may be on any line of the
+ * base file (`Old`).
+ */
+function linesWords(
+  lines: { side?: 'NEW' | 'OLD'; line?: number; endLine?: number },
+  place: BandPlace,
+  oldSide: 'Removed' | 'Old' = 'Removed'
+): string | undefined {
+  if (place === 'general' || !lines.line) return undefined;
+  const range = Boolean(lines.endLine && lines.endLine > lines.line);
+  if (place === 'line' && !range) return undefined;
+  const numbers = range ? `${lines.line}–${lines.endLine}` : `${lines.line}`;
+  return lines.side === 'OLD' ? `${oldSide} ${range ? 'lines' : 'line'} ${numbers}` : `${range ? 'Lines' : 'Line'} ${numbers}`;
 }

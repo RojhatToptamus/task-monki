@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Check, CircleCheck, ExternalLink } from 'lucide-react';
 import { remoteProviderName, type RemoteWorkComment } from '../../shared/contracts';
 import { commentParts, discussionAuthor, discussionCommentText, discussionSummary, reviewVerdictWords, type DiscussionView, type ReplyDraft } from '../model/pullRequestFeedback';
@@ -47,7 +47,7 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
   answer?: ItemAnswer;
   /** Its file and lines, above the files where no row says it. */
   location?: string;
-  /** Its lines in words, at its file's top or under a range: "Line 12", "Lines 4–9". */
+  /** Its lines in words on its head, where its place does not say them: "Line 12", "Lines 4–9". */
   about?: string;
   /** It starts as one line. */
   folded: boolean;
@@ -135,6 +135,7 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
           <span className="tm-review-thread__author">{author}</span>
           {verdict ? <span className="tm-review-thread__round">{verdict}</span> : null}
           <CommentAge comment={first} />
+          {about ? <span className="tm-review-thread__about">{about}</span> : null}
           <span className="tm-review-thread__spacer" />
           {answered ? <AnswerState answer={answered} /> : state ? <span className="tm-review-thread__round">{state}</span> : null}
           <span className="tm-review-thread__actions">
@@ -184,7 +185,6 @@ export function ReviewDiscussionThread({ discussion, answer, location, about, fo
           </span>
         </header>
         {location ? <span className="tm-review-thread__location">{location}</span> : null}
-        {about ? <span className="tm-review-comment__about">{about}</span> : null}
         {first ? <CommentBody comment={first} platform={platform} replaced={replaced} /> : null}
       </div>
       {replies.length ? (
@@ -340,17 +340,35 @@ function suggestionTarget(
   return (above, below) => codeLines(start - above, end + below);
 }
 
-/** A comment's text, clamped when long until asked for in full, as the Overview's request is. */
+/** A platform comment's words under its author; one the platform cut short says where the rest is. */
 function CommentBody({ comment, platform, replaced }: {
   comment: RemoteWorkComment;
   platform: string;
   /** The lines a suggestion in it replaces, when the diff shows them. */
   replaced?(above: number, below: number): string[] | undefined;
 }) {
+  return (
+    <CommentText text={discussionCommentText(comment.body)} replaced={replaced}>
+      {comment.truncated ? <p className="tm-review-thread__earlier">Continues on {platform}</p> : null}
+    </CommentText>
+  );
+}
+
+/**
+ * The words of any comment in a band, the person's own and other people's
+ * alike: rendered markdown with its suggested changes, clamped when long until
+ * asked for in full, as the Overview's request is.
+ */
+export function CommentText({ text, replaced, children }: {
+  text: string;
+  /** The lines a suggestion in it replaces, when the diff shows them. */
+  replaced?(above: number, below: number): string[] | undefined;
+  /** What follows the words, such as where the rest of a cut comment is. */
+  children?: ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
   const textRef = useRef<HTMLDivElement>(null);
   const textId = useId();
-  const text = discussionCommentText(comment.body);
   const overflowing = useClampOverflow(textRef, expanded, text);
   return (
     <div className="tm-review-thread__body">
@@ -364,7 +382,7 @@ function CommentBody({ comment, platform, replaced }: {
           {expanded ? 'Show less' : 'Show full comment'}
         </button>
       ) : null}
-      {comment.truncated ? <p className="tm-review-thread__earlier">Continues on {platform}</p> : null}
+      {children}
     </div>
   );
 }

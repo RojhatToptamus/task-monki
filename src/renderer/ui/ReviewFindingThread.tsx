@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import { Check, Undo2, X } from 'lucide-react';
 import type { ReviewFindingDismissReason } from '../../shared/contracts';
-import { findingLevel, formatFindingLocation } from '../model/findings';
+import { findingLevel } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
@@ -42,9 +42,13 @@ export function settledLabel(finding: ReviewFindingView): string {
  * the answer folds it to a line too.
  */
 export function ReviewFindingThread({
-  finding, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
+  finding, location, about, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
 }: {
   finding: ReviewFindingView;
+  /** Its file and lines, above the files where no row says them. */
+  location?: string;
+  /** Its lines in words on its title line, where its place does not say them: "Line 12", "Lines 4–9". */
+  about?: string;
   /** In a re-review: an earlier finding still open, or one the earlier review did not raise. */
   round?: 'STILL_OPEN' | 'NEW';
   /** The agent's answer to it in the person's latest request. */
@@ -82,7 +86,7 @@ export function ReviewFindingThread({
     return (
       <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
-        <span className="tm-review-thread__struck">{finding.title}</span>
+        <span className="tm-review-thread__struck" title={finding.title}>{finding.title}</span>
         <span>{settledLabel(finding)}</span>
         {finding.state === 'DISMISSED' && actionable && onRestore ? (
           <button type="button" className="ghost-button tm-review-thread__undo" disabled={busy} onClick={() => void run(() => onRestore(finding.id))}>
@@ -123,6 +127,8 @@ export function ReviewFindingThread({
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         {round ? <span className="tm-review-thread__round">{round === 'STILL_OPEN' ? 'Still open' : 'New'}</span> : null}
         <strong>{finding.title}</strong>
+        {about ? <span className="tm-review-thread__about">{about}</span> : null}
+        <span className="tm-review-thread__spacer" />
         {answer ? <AnswerState answer={answer} /> : null}
         {actionable ? (
           <span className="tm-review-thread__actions">
@@ -154,7 +160,7 @@ export function ReviewFindingThread({
           </span>
         ) : null}
       </header>
-      {finding.path && !finding.line ? <span className="tm-review-thread__location">{formatFindingLocation(finding)}</span> : null}
+      {location ? <span className="tm-review-thread__location">{location}</span> : null}
       <p className="tm-review-thread__why">{finding.explanation}</p>
       {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
       {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}

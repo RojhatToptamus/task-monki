@@ -233,7 +233,6 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     render(<Harness findings={[]} onSubmit={onSubmit} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on removed line 1' }));
-    expect(screen.getByText('Removed line 1')).toBeDefined();
     fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'Why was this removed?' } });
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
 
@@ -262,6 +261,16 @@ describe('ReviewWorkspace findings, comments and the request', () => {
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Comment on line 1' }))[0]!);
     expect(screen.getAllByLabelText('Comment')).toHaveLength(1);
+  });
+
+  it('reads the person’s comment as every comment reads, and says its line once that line is not shown', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[]} draft={{ ...EMPTY_REVIEW_DRAFT, comments: [{ id: 'far', path: 'src/rateLimit.ts', side: 'NEW', line: 40, text: 'Cap the `burst`.' }] }} />);
+
+    await screen.findByRole('region', { name: 'src/rateLimit.ts' });
+    const band = within(document.querySelector<HTMLElement>('[data-comment-id="far"]')!);
+    expect(band.getByText('Line 40')).toBeDefined();
+    expect(band.getByText('burst').tagName).toBe('CODE');
   });
 
   it('collapses a viewed file but keeps its open findings in view', async () => {
