@@ -803,11 +803,17 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         if (whole) openIfCollapsed(entry);
         now().setWholeFile(fileId, whole);
       },
-      setScope: (next) => now().chooseScope(next),
+      // Another change to read starts at its top.
+      setScope: (next) => {
+        now().chooseScope(next);
+        go({ instant: true, focus: false });
+      },
       stepCommit: (direction) => {
         const { scopeChoice, steppedCommits, chooseScope } = now();
         const next = stepCommit(steppedCommits, scopeChoice, direction);
-        if (next) chooseScope(next);
+        if (!next) return;
+        chooseScope(next);
+        go({ instant: true, focus: false });
       },
       setOrder: (next) => { setOrder(next); writeReviewFileOrder(next); },
       foldBrief: (folded) => {
