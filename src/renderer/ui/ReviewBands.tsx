@@ -26,12 +26,14 @@ type BandPlace = 'line' | 'file' | 'general';
  * agent answered in the person's latest request says the answer, and takes the
  * person's decision on it.
  */
-export function ReviewBands({ place, at, file, findings, discussions, comments }: {
+export function ReviewBands({ place, at, file, row, findings, discussions, comments }: {
   place: BandPlace;
   /** The place's key (`lineAnchorKey`, or `file:<id>`): the composer opens here when it is this one. */
   at?: string;
-  /** Under a line, its file: what a suggested change replaces is read from it. */
+  /** Its file, under a line or at its top: what a suggested change replaces is read from it. */
   file?: DiffFile;
+  /** Under a line, that row of the diff shown, and whether it takes comments. */
+  row?: { blockId: string; index: number; commentable: boolean };
   findings?: readonly ReviewFindingView[];
   discussions?: readonly DiscussionView[];
   comments?: readonly ReviewComment[];
@@ -39,6 +41,9 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
   const actions = useReviewActions();
   const state = useReviewBands();
   const draft = state.commentDraft;
+  // Sent again, an item is a comment on the row its band sits under, read from the diff shown, when that row
+  // takes comments; otherwise on its file; one with no file is quoted in the note.
+  const again = file ? (row?.commentable ? { fileId: file.id, blockId: row.blockId, index: row.index } : { fileId: file.id }) : undefined;
   // An answer of the latest request takes the person's decision, and goes in the request again from here.
   const itemAnswer = (band: BandAnswer | undefined): ItemAnswer | undefined => band && {
     outcome: band.outcome,
@@ -47,7 +52,7 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
     at: state.answers?.answeredAt,
     accepted: band.accepted,
     ...(state.canDecideAnswers ? { onDecide: (kind) => actions.decideAnswer(band.item.number, kind) } : {}),
-    ...(state.canComment ? { onRequestAgain: () => actions.requestAgain(band.item, at) } : {})
+    ...(state.canComment ? { onRequestAgain: () => actions.requestAgain(band.item, again) } : {})
   };
   // One sent in an earlier request still says what the agent answered, for the person alone.
   const discussionAnswer = (discussion: DiscussionView): ItemAnswer | undefined => {

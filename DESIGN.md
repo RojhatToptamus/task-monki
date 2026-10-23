@@ -1817,10 +1817,12 @@ control's icon, state or tooltip already carries.
   (Fixed, Not changed, Needs your decision), its note quoted under the agent's
   name and time, then Accept answer and Add to request. The agent's word never
   settles an item, even Fixed; accepting does, and folds a finding or a
-  comment to one line with Accepted and Reopen. Add to request opens a comment
-  on the item's lines that starts from a quote of it. Those lines are the
-  reviewed code's: in what changed since the review they sit on the old side,
-  as the review's findings do.
+  comment to one line with Accepted and Reopen. The items sit on the lines of
+  the code the review read: in what changed since the review, on the old side,
+  as the review's findings do. Add to request opens a comment that starts from
+  a quote of the item, on the row its band sits under as the diff shown
+  numbers it, or on its file when that row takes no comment (a removed line in
+  what changed since the review).
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   GitHub comments, 1 comment"), which opens the request sheet; a note that grows
   to four lines; and one primary: Request changes when something is queued

@@ -16,7 +16,7 @@ import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEviden
 import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
 import type { WholeFileState } from '../model/reviewContext';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
-import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
+import { requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
 import type { ReviewMode } from '../model/reviewNavigation';
 import { orderReviewFiles, reviewFileRole, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import {
@@ -278,11 +278,13 @@ export interface ReviewActions {
   /** Accepts the agent's answer to an item of the latest request, or reopens it. */
   decideAnswer(item: number, kind: ReviewRequestItemDecisionKind): Promise<void>;
   /**
-   * Sends an answered item again in the person's words: a comment on its lines,
-   * starting from a quote of it, opened under its band (`at`); one with no
-   * place in the files is quoted in the note.
+   * Sends an answered item again in the person's words: a comment that starts
+   * from a quote of it, on the row of the diff shown that its band sits under
+   * (`where`), so its side and number are that row's; on its file when the row
+   * takes no comments or the band is at the file's top; one with no place in the
+   * files is quoted in the note.
    */
-  requestAgain(item: ReviewRequestItem, at?: string): void;
+  requestAgain(item: ReviewRequestItem, where?: { fileId: string; blockId?: string; index?: number }): void;
 
   /**
    * The gutter: pressing a number, dragging across several, Shift extending the
@@ -765,20 +767,31 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       setCommentDraft(next);
       setPendingFocus({ to: 'composer' });
     };
-    const openComposer = (file: DiffFile, block: DiffBlock, chosen: Pick<LineSelection, 'start' | 'end' | 'anchor'>) => {
+    const openComposer = (file: DiffFile, block: DiffBlock, chosen: Pick<LineSelection, 'start' | 'end' | 'anchor'>, start = '') => {
       const range = selectionRange(block, chosen);
       if (!range) return;
-      const anchorLine = block.lines[range.anchor]!;
-      const side: ReviewComment['side'] = anchorLine.kind === 'deletion' ? 'OLD' : 'NEW';
-      const numbers = block.lines.slice(range.start, range.end + 1)
-        .map((line) => (side === 'OLD' ? (line.kind === 'deletion' ? line.oldLine : undefined) : line.newLine))
-        .filter((value): value is number => value !== undefined);
-      if (!numbers.length) return;
-      const line = Math.min(...numbers);
-      const last = Math.max(...numbers);
+      const side: ReviewComment['side'] = block.lines[range.anchor]!.kind === 'deletion' ? 'OLD' : 'NEW';
+      // A block's rows run in file order, so the first and the last numbered row on the side are its lines,
+      // however many there are.
+      let line: number | undefined;
+      let last: number | undefined;
+      for (let index = range.start; index <= range.end; index += 1) {
+        const row = block.lines[index]!;
+        const number = side === 'OLD' ? (row.kind === 'deletion' ? row.oldLine : undefined) : row.newLine;
+        if (number === undefined) continue;
+        line ??= number;
+        last = number;
+      }
+      if (line === undefined || last === undefined) return;
       // The lines it is about stay chosen in the gutter while it is written, however it opened.
       applySelection({ fileId: file.id, blockId: block.id, start: chosen.start, end: chosen.end, anchor: chosen.anchor });
-      showComposer({ key: lineAnchorKey(file.id, block.id, block.lines[range.end]!, range.end), fileId: file.id, path: file.path, side, line, endLine: last > line ? last : undefined });
+      showComposer({ key: lineAnchorKey(file.id, block.id, block.lines[range.end]!, range.end), fileId: file.id, path: file.path, side, line, endLine: last > line ? last : undefined }, start);
+    };
+    // A comment on a whole file opens at its top.
+    const openFileComposer = (file: DiffFile, start = '') => {
+      openIfCollapsed(entryOf(file.id));
+      applySelection(undefined);
+      showComposer({ key: `file:${file.id}`, fileId: file.id, path: file.path, side: 'NEW' }, start);
     };
     const endComposer = () => { commentText.current = ''; commentStart.current = ''; setCommentDraft(undefined); applySelection(undefined); };
     // Cancelled, the keys go back to where the comment was written: the comment an edit was of; else what sits just
@@ -954,21 +967,28 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         return Boolean(field);
       },
       decideAnswer: (item, kind) => now().props.answers?.onDecide?.(item, kind) ?? Promise.resolve(),
-      requestAgain: (item, at) => {
+      requestAgain: (item, where) => {
         const quote = requestItemQuote(item);
-        const place = requestItemPlace(item);
-        const entry = at && place ? entryOfPath(place.path) : undefined;
-        if (!at || !place || !entry) {
+        const file = where ? now().filesById.get(where.fileId) : undefined;
+        if (!where || !file) {
           const note = now().props.draft.note.trimEnd();
           updateDraft({ note: note ? `${note}\n\n${quote}\n` : `${quote}\n` });
           return;
         }
+        // The item's own numbers are on the code the review read; the row its band sits under is in the diff shown.
+        const found = where.blockId !== undefined && where.index !== undefined ? blockOf(file.id, where.blockId) : undefined;
+        const row = found && where.index !== undefined ? found.block.lines[where.index] : undefined;
+        const key = found && row && where.index !== undefined ? lineAnchorKey(file.id, found.block.id, row, where.index) : `file:${file.id}`;
         // Already being written there, it takes the caret; words being written elsewhere come along after the quote.
         const open = now().commentDraft;
-        if (open && !open.editingId && open.key === at) { setPendingFocus({ to: 'composer' }); return; }
+        if (open && !open.editingId && open.key === key) { setPendingFocus({ to: 'composer' }); return; }
         const kept = open && !open.editingId ? commentText.current.trim() : '';
-        applySelection(undefined);
-        showComposer({ key: at, fileId: entry.file.id, ...place, path: entry.file.path }, `${quote}\n\n`);
+        if (found && row && where.index !== undefined) {
+          const id = diffLineId(row, where.index);
+          openComposer(file, found.block, { start: id, end: id, anchor: id }, `${quote}\n\n`);
+        } else {
+          openFileComposer(file, `${quote}\n\n`);
+        }
         if (kept) commentText.current = `${quote}\n\n${kept}`;
       },
 
@@ -1016,11 +1036,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         setPendingFocus({ to: 'composer' });
       },
       commentOnFile: (fileId) => {
-        const entry = entryOf(fileId);
-        if (!entry) return;
-        openIfCollapsed(entry);
-        applySelection(undefined);
-        showComposer({ key: `file:${fileId}`, fileId, path: entry.file.path, side: 'NEW' });
+        const file = now().filesById.get(fileId);
+        if (file) openFileComposer(file);
       },
       editComment: (comment) => {
         applySelection(undefined);

@@ -162,7 +162,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
         </>
       ) : (
         <>
-          {top.findings || top.discussions || top.comments || composer === fileKey ? <ReviewBands place="file" at={fileKey} {...top} /> : null}
+          {top.findings || top.discussions || top.comments || composer === fileKey ? <ReviewBands place="file" at={fileKey} file={file} {...top} /> : null}
           {props.segments ? props.segments.map((segment) => {
             const block = file.blocks.find((candidate) => candidate.id === segment.blockId);
             return block ? (
@@ -223,6 +223,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
     const discussions = anchors.discussions.byLine.get(key);
     const comments = anchors.comments.byLine.get(key);
     const number = line.kind === 'deletion' ? line.oldLine : line.newLine;
+    const commentable = canComment && number !== undefined && !(exactChanges && line.kind === 'deletion');
     return (
       <div key={key} className="tm-review-line-group">
         <ReviewLine
@@ -232,12 +233,13 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
           line={line}
           index={index}
           selected={Boolean(chosen && index >= chosen.start && index <= chosen.end)}
-          commentable={canComment && number !== undefined && !(exactChanges && line.kind === 'deletion')}
+          commentable={commentable}
           plain={plain}
           tokens={syntax[index]}
         />
         {findings || discussions || comments || composer === key
-          ? <ReviewBands place="line" at={key} file={file} findings={findings} discussions={discussions} comments={comments} />
+          ? <ReviewBands place="line" at={key} file={file} row={{ blockId: block.id, index, commentable }}
+            findings={findings} discussions={discussions} comments={comments} />
           : null}
       </div>
     );

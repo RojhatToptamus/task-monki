@@ -508,9 +508,9 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('All changes');
   });
 
-  it('puts an answered comment on the line of the reviewed code it was written on, even after the agent moved the lines', async () => {
+  it('puts an answered comment on the line of the reviewed code it was written on, and sends one again on the row the diff shows', async () => {
     api.readArtifact.mockImplementation(async () => `# Git diff evidence\n\n${section('Committed diff', fileDiff('src/cli.js', '@@ -0,0 +1,5 @@\n+const usage = \'Usage\';\n+\n+const name = process.argv[2];\n+console.log(name ? greet(name) : usage);\n+export {};'))}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
-    // The agent put two lines above the one the person commented on: line 2 of the reviewed code is now line 4.
+    // The agent put two lines above the ones the person commented on: lines 1 and 2 of the reviewed code are now 3 and 4.
     api.readReviewChanges.mockResolvedValue({
       status: 'READY', reviewRunId: 'review-1', tree: 'tree-1',
       diff: fileDiff('src/cli.js', "@@ -1,3 +1,5 @@\n+const usage = 'Usage';\n+\n const name = process.argv[2];\n-console.log(greet(name));\n+console.log(name ? greet(name) : usage);\n export {};")
@@ -518,23 +518,47 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     const round: ReviewRoundView = {
       instructionId: 'request-1',
       at: '2026-07-07T10:20:00.000Z',
-      request: { reviewRunId: 'review-1', items: [{ number: 1, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 2, text: 'Print the usage without a name.' }] },
-      answers: [{ item: 1, outcome: 'FIXED', note: 'It prints the usage now.' }],
+      request: { reviewRunId: 'review-1', items: [
+        { number: 1, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 2, text: 'Print the usage without a name.' },
+        { number: 2, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 1, text: 'Read the name once.' }
+      ] },
+      answers: [{ item: 1, outcome: 'FIXED', note: 'It prints the usage now.' }, { item: 2, outcome: 'NOT_CHANGED', note: 'It is read once.' }],
       answeredAt: '2026-07-07T10:25:00.000Z',
       reviewRunId: 'review-1',
       accepted: new Set()
     };
+    const onSubmit = vi.fn();
+    // One task throughout, so what changed since the review is read once, as on a task page.
     render(<Harness
+      taskId="task-cli"
       findings={[]}
       review={{ status: 'STALE', runId: 'review-1' }}
       changesSince={{ reviewRunId: 'review-1', label: 'Since the review', refreshKey: 'git-2' }}
       answers={{ agent: 'Codex', round }}
+      onSubmit={onSubmit}
     />);
 
     const file = await screen.findByRole('region', { name: 'src/cli.js' });
-    const band = await within(file).findByText('Print the usage without a name.');
-    const row = band.closest('.tm-review-line-group')!.querySelector('code')!.textContent;
-    expect(row).toBe('Removed: console.log(greet(name));');
+    const band = (text: string) => within(file).getByText(text).closest<HTMLElement>('[data-comment-id]')!;
+    await within(file).findByText('Print the usage without a name.');
+    expect(band('Print the usage without a name.').closest('.tm-review-line-group')!.querySelector('code')!.textContent).toBe('Removed: console.log(greet(name));');
+
+    // Sent again, a comment is on the row its band sits under, as the diff shows it: line 3 now, never the 1 the review read.
+    const write = (words: string) => {
+      const field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+      fireEvent.change(field, { target: { value: `${field.value}${words}` } });
+      fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    };
+    fireEvent.click(within(band('Read the name once.')).getByRole('button', { name: 'Add to request' }));
+    write('Still twice.');
+    // A removed line takes no comment here, so one about it goes on its file.
+    fireEvent.click(within(band('Print the usage without a name.')).getByRole('button', { name: 'Add to request' }));
+    write('Check the empty name too.');
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    const [comment, onFile] = onSubmit.mock.calls[0]![0].comments;
+    expect(comment).toEqual(expect.objectContaining({ path: 'src/cli.js', side: 'NEW', line: 3, text: '> Read the name once.\n\nStill twice.' }));
+    expect(onFile).toEqual(expect.objectContaining({ path: 'src/cli.js', side: 'NEW', text: '> Print the usage without a name.\n\nCheck the empty name too.' }));
+    expect(onFile.line).toBeUndefined();
   });
 
   it('says when the agent is waiting on the person instead of the review’s verdict', async () => {
