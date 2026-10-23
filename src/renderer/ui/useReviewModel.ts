@@ -15,7 +15,7 @@ import type {
 import type { DiffBlock, DiffFile } from '../model/diffEvidence';
 import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
-import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
+import { requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
 import type { ReviewMode } from '../model/reviewNavigation';
 import { orderReviewFiles, reviewFileRole, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
 import { stepCommit, type ReviewScope } from '../model/reviewScope';
@@ -48,8 +48,8 @@ import type { ReviewBriefContent } from './ReviewBrief';
 import type { ReviewFinishAction, ReviewRequestAction } from './ReviewRequest';
 import { changeWithMotion, type ExpandMotion } from './expandMotion';
 import { useNotify } from './NotifyContext';
-import { landing, linesOf, quoted, readPlace } from './reviewPlace';
-import { stopTravel, travel } from './travel';
+import { BAND, landing, linesOf, quoted, readPlace } from './reviewPlace';
+import { keepInView, stopTravel, travel } from './travel';
 import { noWholeFile, useReviewContext } from './useReviewContext';
 import { useReviewScope } from './useReviewScope';
 import { useScrollSpy } from './useScrollSpy';
@@ -195,6 +195,8 @@ export interface ReviewBandsState {
   reReview: boolean;
   viewer?: string;
   commentDraft?: CommentDraft;
+  /** The person's comments deleted since the tab opened: each folds to a line with Restore until the request goes. */
+  deletedCommentIds: ReadonlySet<string>;
   replyTexts?: ReadonlyMap<string, string>;
   replyDrafts?: ReadonlyMap<string, ReplyDraft>;
   canDismiss: boolean;
@@ -274,26 +276,38 @@ export interface ReviewActions {
   /** Accepts the agent's answer to an item of the latest request, or reopens it. */
   decideAnswer(item: number, kind: ReviewRequestItemDecisionKind): Promise<void>;
   /**
-   * Sends an answered item again in the person's words: a comment on its lines,
-   * starting from a quote of it, opened under its band (`at`); one with no
-   * place in the files is quoted in the note.
+   * Sends an answered item again in the person's words: a comment that starts
+   * from a quote of it, on the row of the diff shown that its band sits under
+   * (`where`), so its side and number are that row's; on its file when the row
+   * takes no comments or the band is at the file's top; one with no place in the
+   * files is quoted in the note.
    */
-  requestAgain(item: ReviewRequestItem, at?: string): void;
+  requestAgain(item: ReviewRequestItem, where?: { fileId: string; blockId?: string; index?: number }): void;
 
-  /** The gutter: pressing a number, dragging across several, Shift extending the last choice. */
+  /**
+   * The gutter: pressing a number, dragging across several, Shift extending the
+   * last choice. The comment being written follows the lines chosen, its words kept.
+   */
   beginSelect(fileId: string, blockId: string, index: number, event: ReactPointerEvent): void;
   extendSelect(fileId: string, blockId: string, index: number): void;
   clearSelection(): void;
   commentOnLine(fileId: string, blockId: string, index: number): void;
-  commentOnSelection(): void;
+  /** C: the caret back in the comment being written, its file opened if folded. */
+  writeComment(): void;
   commentOnFile(fileId: string): void;
   editComment(comment: ReviewComment): void;
-  deleteComment(commentId: string): void;
+  /** Takes a comment out of the draft; it folds to a line with Restore. `focus` hands the keys to that Restore. */
+  deleteComment(commentId: string, options?: { focus?: boolean }): void;
+  restoreComment(commentId: string): void;
   /** What the open composer holds, kept while its file folds and opens again. */
   commentText(): string;
   setCommentText(text: string): void;
+  /** Saves what the composer holds, when it holds anything; the comment takes the keys where it now reads. */
   saveComment(): void;
+  /** Cancel: the composer closes, and the keys go back to where the comment was being written. */
   closeComposer(): void;
+  /** Escape: the composer closes when nothing typed would be lost, and otherwise keeps its words and hands back the keys. */
+  leaveComposer(): void;
   askAboutLines(): void;
 
   setSheetOpen(open: boolean): void;
@@ -374,6 +388,20 @@ interface PendingTravel {
   focus: boolean;
 }
 
+/**
+ * Where the keys go once a change to the person's comments has rendered, so
+ * they never fall out of the tab: the composer's field, a comment (or its
+ * Restore once deleted), or a control kept from before, such as the "+" of the
+ * line a cancelled comment was under.
+ */
+type PendingFocus =
+  | { to: 'composer' }
+  | { to: 'comment'; id: string; restore?: boolean }
+  | { to: 'control'; element: Element | null | undefined };
+
+/** A comment taken out of the draft, and where it was, while it can be restored. */
+interface DeletedComment { comment: ReviewComment; index: number }
+
 export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObject<HTMLElement | null>) {
   const { review, findings, draft, plan } = props;
   const scoped = useReviewScope({
@@ -425,7 +453,10 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     () => (bandAnswers?.comments.size ? [...bandAnswers.comments.values()].map((sent) => sent.comment) : NO_COMMENTS),
     [bandAnswers]
   );
-  const shownComments = useMemo(() => (roundComments.length ? [...roundComments, ...draft.comments] : draft.comments), [draft.comments, roundComments]);
+  // A comment the person deleted keeps its place, folded with Restore, until the request goes.
+  const [deletedComments, setDeletedComments] = useState<readonly DeletedComment[]>([]);
+  const writtenComments = useMemo(() => withDeleted(draft.comments, deletedComments), [deletedComments, draft.comments]);
+  const shownComments = useMemo(() => (roundComments.length ? [...roundComments, ...writtenComments] : writtenComments), [roundComments, writtenComments]);
   // The latest request's comments were written on the code the review read: measured from that code, their lines are on the old side, as its findings' are.
   const anchoredComments = useMemo(() => anchorReviewComments(files, shownComments, (comment) =>
     (findingSide === 'REVIEWED' && comment.side === 'NEW' && bandAnswers?.comments.has(comment.id) ? 'REVIEWED' : comment.side), !history), [bandAnswers, files, findingSide, history, shownComments]);
@@ -586,6 +617,9 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   const dragging = useRef(false);
   const [commentDraft, setCommentDraft] = useState<CommentDraft>();
   const commentText = useRef('');
+  // What the composer held when it opened: Escape closes it while it still holds just that.
+  const commentStart = useRef('');
+  const [pendingFocus, setPendingFocus] = useState<PendingFocus>();
   const [sheetOpen, setSheetOpen] = useState(false);
   // The brief's fold is kept per review, and opens again when new answers arrive.
   const briefRound = `${review?.runId ?? 'none'}${props.brief?.round ? `:${props.brief.round.key}` : ''}`;
@@ -602,7 +636,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   // The actions read what is current when they run, never what was current when the tab first rendered.
   const latest = {
     props, mode, ordered: readingOrdered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, collapsedIn, focusedFile,
-    selection, commentDraft, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
+    selection, commentDraft, deletedComments, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
     included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile,
     history, scopeChoice: scoped.choice, steppedCommits: scoped.commits, chooseScope: scoped.choose
   };
@@ -727,21 +761,57 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       const block = file?.blocks.find((candidate) => candidate.id === blockId);
       return file && block ? { file, block } : undefined;
     };
-    const openComposer = (file: DiffFile, block: DiffBlock, chosen: Pick<LineSelection, 'start' | 'end' | 'anchor'>) => {
+    // One comment is written at a time. It opens, or moves, where the person chose and takes the caret; a new
+    // one keeps its words as it moves, so choosing other lines never costs them, and an edit ends unsaved.
+    const showComposer = (next: CommentDraft, start = '') => {
+      const open = now().commentDraft;
+      if (!open || open.editingId || next.editingId) {
+        commentText.current = start;
+        commentStart.current = start;
+      }
+      setCommentDraft(next);
+      setPendingFocus({ to: 'composer' });
+    };
+    const openComposer = (file: DiffFile, block: DiffBlock, chosen: Pick<LineSelection, 'start' | 'end' | 'anchor'>, start = '') => {
       const range = selectionRange(block, chosen);
       if (!range) return;
-      const anchorLine = block.lines[range.anchor]!;
-      const side: ReviewComment['side'] = anchorLine.kind === 'deletion' ? 'OLD' : 'NEW';
-      const numbers = block.lines.slice(range.start, range.end + 1)
-        .map((line) => (side === 'OLD' ? (line.kind === 'deletion' ? line.oldLine : undefined) : line.newLine))
-        .filter((value): value is number => value !== undefined);
-      if (!numbers.length) return;
-      const line = Math.min(...numbers);
-      const last = Math.max(...numbers);
-      commentText.current = '';
-      setCommentDraft({ key: lineAnchorKey(file.id, block.id, block.lines[range.end]!, range.end), fileId: file.id, path: file.path, side, line, endLine: last > line ? last : undefined });
+      const side: ReviewComment['side'] = block.lines[range.anchor]!.kind === 'deletion' ? 'OLD' : 'NEW';
+      // A block's rows run in file order, so the first and the last numbered row on the side are its lines,
+      // however many there are.
+      let line: number | undefined;
+      let last: number | undefined;
+      for (let index = range.start; index <= range.end; index += 1) {
+        const row = block.lines[index]!;
+        const number = side === 'OLD' ? (row.kind === 'deletion' ? row.oldLine : undefined) : row.newLine;
+        if (number === undefined) continue;
+        line ??= number;
+        last = number;
+      }
+      if (line === undefined || last === undefined) return;
+      // The lines it is about stay chosen in the gutter while it is written, however it opened.
+      applySelection({ fileId: file.id, blockId: block.id, start: chosen.start, end: chosen.end, anchor: chosen.anchor });
+      showComposer({ key: lineAnchorKey(file.id, block.id, block.lines[range.end]!, range.end), fileId: file.id, path: file.path, side, line, endLine: last > line ? last : undefined }, start);
     };
-    const closeComposer = () => { commentText.current = ''; setCommentDraft(undefined); applySelection(undefined); };
+    // A comment on a whole file opens at its top.
+    const openFileComposer = (file: DiffFile, start = '') => {
+      openIfCollapsed(entryOf(file.id));
+      applySelection(undefined);
+      showComposer({ key: `file:${file.id}`, fileId: file.id, path: file.path, side: 'NEW' }, start);
+    };
+    const endComposer = () => { commentText.current = ''; commentStart.current = ''; setCommentDraft(undefined); applySelection(undefined); };
+    // Cancelled, the keys go back to where the comment was written: the comment an edit was of; else what sits just
+    // above the composer, read before it goes: its line's "+", the band before it at a file's top, or the file's menu.
+    const closeComposer = () => {
+      const open = now().commentDraft;
+      const form = scrollerRef.current?.querySelector('.tm-review-comment-composer');
+      const before = form?.previousElementSibling;
+      setPendingFocus(open?.editingId ? { to: 'comment', id: open.editingId } : {
+        to: 'control',
+        element: form?.closest('.tm-review-line-group')?.querySelector('.tm-review-line__comment')
+          ?? (before?.matches(BAND) ? before : form?.closest('[data-file-id]')?.querySelector('.tm-review-file__menu__trigger'))
+      });
+      endComposer();
+    };
     const setIncluded = (findingId: string, include: boolean) => {
       const { props: current } = now();
       const runId = current.review?.runId;
@@ -767,7 +837,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
           follow(entry.file.id);
         }
         openIfCollapsed(entry);
-        go({ attribute: 'data-comment-id', value: commentId, instant: false, focus: false });
+        // Landed on, the comment takes the keys and its mark, as a finding or a discussion does.
+        go({ attribute: 'data-comment-id', value: commentId, instant: false, focus: true });
       },
       showRequestItem: (item) => {
         if (item.kind === 'FINDING' && now().props.findings.some((finding) => finding.id === item.findingId)) { showFinding(item.findingId); return; }
@@ -901,17 +972,31 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         return Boolean(field);
       },
       decideAnswer: (item, kind) => now().props.answers?.onDecide?.(item, kind) ?? Promise.resolve(),
-      requestAgain: (item, at) => {
+      requestAgain: (item, where) => {
         const quote = requestItemQuote(item);
-        const place = requestItemPlace(item);
-        const entry = at && place ? entryOfPath(place.path) : undefined;
-        if (!at || !place || !entry) {
+        const file = where ? now().filesById.get(where.fileId) : undefined;
+        if (!where || !file) {
           const note = now().props.draft.note.trimEnd();
           updateDraft({ note: note ? `${note}\n\n${quote}\n` : `${quote}\n` });
           return;
         }
-        commentText.current = `${quote}\n\n`;
-        setCommentDraft({ key: at, fileId: entry.file.id, ...place, path: entry.file.path });
+        // The item's own numbers are on the code the review read; the row its band sits under is in the diff shown.
+        const found = where.blockId !== undefined && where.index !== undefined ? blockOf(file.id, where.blockId) : undefined;
+        const row = found && where.index !== undefined ? found.block.lines[where.index] : undefined;
+        // Words being written for a new comment come along after the quote, which is never repeated.
+        const open = now().commentDraft;
+        const written = open && !open.editingId ? commentText.current.trim() : '';
+        const words = written.startsWith(quote) ? written.slice(quote.length).trim() : written;
+        const text = `${quote}\n\n${words}`;
+        if (found && row && where.index !== undefined) {
+          const id = diffLineId(row, where.index);
+          openComposer(file, found.block, { start: id, end: id, anchor: id }, text);
+        } else {
+          openFileComposer(file, text);
+        }
+        // An open composer keeps its words as it moves; these take their place, and Escape keeps any the person wrote.
+        commentText.current = text;
+        if (!words) commentStart.current = text;
       },
 
       beginSelect: (fileId, blockId, index, event) => {
@@ -948,34 +1033,53 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         const id = diffLineId(found.block.lines[index]!, index);
         openComposer(found.file, found.block, { start: id, end: id, anchor: id });
       },
-      commentOnSelection: () => {
-        const current = now().selection;
-        const found = current ? blockOf(current.fileId, current.blockId) : undefined;
-        if (current && found) openComposer(found.file, found.block, current);
+      writeComment: () => {
+        const open = now().commentDraft;
+        if (!open) return;
+        // The caret goes back where the person left it, as R does in a reply.
+        const field = scrollerRef.current?.querySelector<HTMLTextAreaElement>('.tm-review-comment-composer textarea');
+        if (field) { field.focus(); return; }
+        openIfCollapsed(open.fileId ? entryOf(open.fileId) : entryOfPath(open.path));
+        setPendingFocus({ to: 'composer' });
       },
       commentOnFile: (fileId) => {
-        const entry = entryOf(fileId);
-        if (!entry) return;
-        openIfCollapsed(entry);
-        commentText.current = '';
-        setCommentDraft({ key: `file:${fileId}`, fileId, path: entry.file.path, side: 'NEW' });
+        const file = now().filesById.get(fileId);
+        if (file) openFileComposer(file);
       },
       editComment: (comment) => {
-        commentText.current = comment.text;
-        setCommentDraft({ key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, editingId: comment.id });
+        applySelection(undefined);
+        showComposer({ key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, editingId: comment.id }, comment.text);
       },
-      deleteComment: (commentId) => updateDraft({ comments: now().props.draft.comments.filter((comment) => comment.id !== commentId) }),
+      deleteComment: (commentId, { focus = false } = {}) => {
+        const { props: current, commentDraft: open } = now();
+        const index = current.draft.comments.findIndex((comment) => comment.id === commentId);
+        if (index < 0) return;
+        if (open?.editingId === commentId) endComposer();
+        setDeletedComments((deleted) => [...deleted, { comment: current.draft.comments[index]!, index }]);
+        updateDraft({ comments: current.draft.comments.filter((comment) => comment.id !== commentId) });
+        if (focus) setPendingFocus({ to: 'comment', id: commentId, restore: true });
+      },
+      restoreComment: (commentId) => {
+        const { props: current, deletedComments: deleted } = now();
+        const entry = deleted.find((candidate) => candidate.comment.id === commentId);
+        if (!entry) return;
+        const comments = current.draft.comments;
+        updateDraft({ comments: [...comments.slice(0, entry.index), entry.comment, ...comments.slice(entry.index)] });
+        setDeletedComments((list) => list.filter((candidate) => candidate.comment.id !== commentId));
+        setPendingFocus({ to: 'comment', id: commentId });
+      },
       commentText: () => commentText.current,
       setCommentText: (text) => { commentText.current = text; },
       saveComment: () => {
         const { commentDraft: open, props: current } = now();
         const text = commentText.current.trim();
-        if (!open || !text) { closeComposer(); return; }
+        if (!open || !text) return;
+        const id = open.editingId ?? crypto.randomUUID();
         updateDraft({
           comments: open.editingId
             ? current.draft.comments.map((comment) => (comment.id === open.editingId ? { ...comment, text } : comment))
             : [...current.draft.comments, {
-              id: crypto.randomUUID(),
+              id,
               path: open.path,
               side: open.side,
               ...(open.line ? { line: open.line } : {}),
@@ -983,9 +1087,15 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
               text
             }]
         });
-        closeComposer();
+        setPendingFocus({ to: 'comment', id });
+        endComposer();
       },
       closeComposer,
+      leaveComposer: () => {
+        const text = commentText.current;
+        if (!text.trim() || text === commentStart.current) { closeComposer(); return; }
+        scrollerRef.current?.querySelector<HTMLElement>('.tm-review-comment-composer')?.focus({ preventScroll: true });
+      },
       askAboutLines: () => {
         const { commentDraft: open, props: current } = now();
         if (!open?.line || open.editingId || !current.onAskAboutLines) return;
@@ -995,12 +1105,14 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
           line: open.line,
           ...(open.endLine && open.endLine > open.line ? { endLine: open.endLine } : {})
         }, commentText.current);
-        closeComposer();
+        // Ask takes the caret.
+        endComposer();
       },
 
       setSheetOpen,
       // Sending answers the sheet, so it closes; a send that fails keeps the draft, and the summary opens it again.
-      submitRequest: () => { setSheetOpen(false); now().props.requestChanges?.onSubmit(); },
+      // What was deleted can no longer come back once the request goes.
+      submitRequest: () => { setSheetOpen(false); setDeletedComments([]); now().props.requestChanges?.onSubmit(); },
       setNote: (note) => updateDraft({ note }),
       openPathMenu: (path, event, line) => {
         const { worktree, historical } = now().props;
@@ -1018,6 +1130,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   }, [scrollerRef, setActiveFileId, setActiveStage]);
 
   const canDecideAnswers = Boolean(props.answers?.onDecide);
+  const deletedCommentIds = useMemo(() => new Set(deletedComments.map((deleted) => deleted.comment.id)), [deletedComments]);
   const bands = useMemo<ReviewBandsState>(() => ({
     focusedFindingId,
     focusedDiscussionId,
@@ -1030,6 +1143,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     reReview,
     viewer: props.viewer,
     commentDraft,
+    deletedCommentIds,
     replyTexts: props.replyTexts,
     replyDrafts: props.replyDrafts,
     canDismiss: Boolean(props.onDismissFinding),
@@ -1043,8 +1157,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     answers: bandAnswers,
     canDecideAnswers
   }), [
-    bandAnswers, canComment, canDecideAnswers, commentDraft, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId, included,
-    includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
+    bandAnswers, canComment, canDecideAnswers, commentDraft, deletedCommentIds, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId,
+    included, includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
     props.onDismissFinding, props.onReplyToDiscussion, props.onResolveDiscussion, props.onRestoreFinding, props.replyDrafts, props.replyTexts,
     props.viewer, reReview
   ]);
@@ -1078,6 +1192,27 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     if (mark && file) for (const row of linesOf(file, mark)) row.setAttribute('data-marked', '');
     if (focus) element.focus({ preventScroll: true });
   }, [pendingTravel, scrollerRef]);
+
+  // The keys go where a change to the comments left them, once it has rendered. The composer's field takes
+  // the caret at the end of what it holds, with all of it shown; anything gone falls back to the scroller.
+  useLayoutEffect(() => {
+    if (!pendingFocus) return;
+    setPendingFocus(undefined);
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    if (pendingFocus.to === 'composer') {
+      const form = scroller.querySelector<HTMLElement>('.tm-review-comment-composer');
+      const field = form?.querySelector('textarea');
+      if (!form || !field) return;
+      field.focus({ preventScroll: true });
+      field.setSelectionRange(field.value.length, field.value.length);
+      keepInView(scroller, form);
+      return;
+    }
+    const target = pendingFocus.to === 'control' ? pendingFocus.element
+      : scroller.querySelector(`[data-comment-id=${quoted(pendingFocus.id)}]${pendingFocus.restore ? ' .tm-review-thread__undo' : ''}`);
+    (target instanceof HTMLElement && target.isConnected ? target : scroller).focus({ preventScroll: true });
+  }, [pendingFocus, scrollerRef]);
 
   // The page hides its tab bar while a file is full screen, and gets it back when the tab closes.
   const onFullScreenChange = props.onFullScreenChange;
@@ -1219,4 +1354,12 @@ function arrivalOf(
 function asArrived<T>(items: readonly T[], arrived: (item: T) => T): readonly T[] {
   const laid = items.map(arrived);
   return laid.every((item, index) => item === items[index]) ? items : laid;
+}
+
+/** The draft's comments with the deleted ones back where they were: the latest deleted goes in first, so each lands where it left. */
+function withDeleted(comments: ReviewComment[], deleted: readonly DeletedComment[]): ReviewComment[] {
+  if (!deleted.length) return comments;
+  const all = [...comments];
+  for (const { comment, index } of [...deleted].reverse()) all.splice(Math.min(index, all.length), 0, comment);
+  return all;
 }

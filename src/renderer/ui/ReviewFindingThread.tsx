@@ -1,7 +1,7 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Check, Undo2, X } from 'lucide-react';
 import type { ReviewFindingDismissReason } from '../../shared/contracts';
-import { findingLevel, formatFindingLocation } from '../model/findings';
+import { findingLevel } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
@@ -39,12 +39,17 @@ export function settledLabel(finding: ReviewFindingView): string {
  * or not now), optionally with a note; the next review honours the reason. A
  * dismissed finding folds to a line that keeps the reason. Once the agent
  * answered it in the person's request, its state is the answer, and accepting
- * the answer folds it to a line too.
+ * the answer folds it to a line too. Folded or open, it is one element, so the
+ * keys stay on it when it folds or opens.
  */
 export function ReviewFindingThread({
-  finding, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
+  finding, location, about, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
 }: {
   finding: ReviewFindingView;
+  /** Its file and lines, above the files where no row says them. */
+  location?: string;
+  /** Its lines in words on its title line, where its place does not say them: "Line 12", "Lines 4–9". */
+  about?: string;
   /** In a re-review: an earlier finding still open, or one the earlier review did not raise. */
   round?: 'STILL_OPEN' | 'NEW';
   /** The agent's answer to it in the person's latest request. */
@@ -64,6 +69,7 @@ export function ReviewFindingThread({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const noteId = useId();
+  const rootRef = useRef<HTMLElement>(null);
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -71,6 +77,8 @@ export function ReviewFindingThread({
       await action();
       onDismissingChange(false);
       setNote('');
+      // What was pressed went with the fold, or with the opening: the finding keeps the keys.
+      rootRef.current?.focus({ preventScroll: true });
     } catch {
       // The shell reports the error; the thread keeps its input for a retry.
     } finally {
@@ -80,27 +88,27 @@ export function ReviewFindingThread({
 
   if (finding.state !== 'OPEN') {
     return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
+      <article ref={rootRef} className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
-        <span className="tm-review-thread__struck">{finding.title}</span>
+        <span className="tm-review-thread__struck" title={finding.title}>{finding.title}</span>
         <span>{settledLabel(finding)}</span>
         {finding.state === 'DISMISSED' && actionable && onRestore ? (
           <button type="button" className="ghost-button tm-review-thread__undo" disabled={busy} onClick={() => void run(() => onRestore(finding.id))}>
             <Undo2 size={13} aria-hidden="true" />Restore
           </button>
         ) : null}
-      </div>
+      </article>
     );
   }
 
   if (answer?.accepted) {
     return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
+      <article ref={rootRef} className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         <span className="tm-review-answer__settled" title={finding.title}>{finding.title}</span>
         <span>Accepted</span>
         <ReopenAnswer answer={answer} />
-      </div>
+      </article>
     );
   }
 
@@ -113,6 +121,7 @@ export function ReviewFindingThread({
   ];
   return (
     <article
+      ref={rootRef}
       className={`tm-review-thread${focused ? ' tm-review-thread--focused' : ''}${actionable ? '' : ' tm-review-thread--earlier'}`}
       data-finding-id={finding.id}
       tabIndex={-1}
@@ -123,7 +132,9 @@ export function ReviewFindingThread({
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         {round ? <span className="tm-review-thread__round">{round === 'STILL_OPEN' ? 'Still open' : 'New'}</span> : null}
         <strong>{finding.title}</strong>
+        {about ? <span className="tm-review-thread__about">{about}</span> : null}
         {answer ? <AnswerState answer={answer} /> : null}
+        <span className="tm-review-thread__spacer" />
         {actionable ? (
           <span className="tm-review-thread__actions">
             {/* Blocker and Major are in the request already; a suggestion is added here, or under the agent's answer once it has one. */}
@@ -154,10 +165,9 @@ export function ReviewFindingThread({
           </span>
         ) : null}
       </header>
-      {finding.path && !finding.line ? <span className="tm-review-thread__location">{formatFindingLocation(finding)}</span> : null}
+      {location ? <span className="tm-review-thread__location">{location}</span> : null}
       <p className="tm-review-thread__why">{finding.explanation}</p>
       {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
-      {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
       {answer ? <RequestItemAnswer answer={answer} /> : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>

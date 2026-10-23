@@ -10,6 +10,9 @@ const BAND_CONTEXT = 120;
 /** Lines moved to keep three lines above them. */
 const LINE_CONTEXT = 60;
 
+/** A band of a file: a finding, a discussion or a comment, each one element that takes the keys, folded or open. */
+export const BAND = '[data-finding-id], [data-discussion-id], [data-comment-id]';
+
 /** An attribute value inside a selector's quotes. */
 export function quoted(value: string): string {
   return `"${value.replace(/["\\]/g, '\\$&')}"`;

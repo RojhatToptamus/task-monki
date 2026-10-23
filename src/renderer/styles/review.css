@@ -186,7 +186,8 @@
 .tm-diffline--annotated .tm-diffline__num { position: relative; background: transparent; box-shadow: none; color: var(--faint); user-select: none; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-diffline--annotated.tm-diffline--addition .tm-diffline__num { color: var(--verified-ink); }
 .tm-diffline--annotated.tm-diffline--deletion .tm-diffline__num { color: var(--blocked-ink); }
-.tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
+/* The lines a comment is being written about read the same on every kind of line. */
+.tm-diffline--annotated.tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
 .tm-review-line-group { position: relative; }
 .tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 /* The "+" shows on the row under the pointer, and fills when the pointer is on the number itself.
@@ -207,9 +208,11 @@
 .tm-review-general > :first-child { border-top: 0; }
 .tm-review-block:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
 .tm-review-general > :last-child { border-bottom: 0; }
-/* The thread jumped to, or the one the keys act on: a mark down its left edge, along the file's own. */
+/* The thread jumped to or the one the keys act on, a comment the keys are in, and a comment being written
+   while the keys are back on its band: a mark down its left edge, along the file's own. */
 .tm-review-thread--focused,
-:is(.tm-review-thread, .tm-review-comment):focus-visible { box-shadow: inset 2px 0 var(--focus-ring); }
+:is(.tm-review-thread, .tm-review-comment-composer):focus-visible,
+.tm-review-comment:focus-within { box-shadow: inset 2px 0 var(--focus-ring); }
 
 /* Each author's mark hangs in the gutter beside their name, so every comment's words start on the code column. */
 .tm-review-thread__comment { position: relative; display: grid; gap: 2px; min-width: 0; }
@@ -218,7 +221,7 @@
 /* A finding: its severity, title and actions on one line, the reasoning under it. */
 .tm-review-thread { display: flex; flex-direction: column; gap: 2px; }
 .tm-review-thread__head { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); }
-.tm-review-thread__head strong { flex: 1; min-width: 0; color: var(--text); font-weight: var(--w-medium); }
+.tm-review-thread__head strong { flex: 0 1 auto; min-width: 0; color: var(--text); font-weight: var(--w-medium); }
 .tm-review-thread__actions { display: inline-flex; align-items: center; gap: 2px; }
 .tm-review__mini { width: var(--h-compact); height: var(--h-compact); border-radius: var(--r-xs); }
 .tm-review-thread__dismiss-menu__trigger.tm-action-menu__trigger { width: var(--h-compact); min-width: var(--h-compact); height: var(--h-compact); padding: 0; border-radius: var(--r-xs); }
@@ -235,11 +238,13 @@
 .tm-review-thread__dismiss input { flex: 1 1 160px; min-width: 0; height: var(--h-toolbar); padding: 0 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font-size: var(--t-help); }
 .tm-review-thread__error { margin: 4px 0 0; }
 
-/* Folded, a thread is a dense row like a gap's: the panel plane, its words on the code column. */
-.tm-review-thread--folded { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-height: var(--h-row-dense); padding-block: 2px; background: var(--panel); color: var(--faint); font-size: var(--t-help); }
+/* Folded, a thread is a dense row like a gap's: the panel plane, its words on the code column, its one long
+   text cut short with all of it in its tooltip, and its way back at the end. */
+.tm-review-thread--folded { flex-direction: row; align-items: center; gap: 8px; min-height: var(--h-row-dense); padding-block: 2px; background: var(--panel); color: var(--faint); font-size: var(--t-help); }
 .tm-review-thread--folded .tm-review__severity { color: var(--faint); }
+.tm-review-thread--folded > .tm-review-thread__author { color: var(--muted); }
 .tm-review-thread__struck { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--edge); }
-.tm-review-thread__undo { margin-left: auto; height: var(--h-compact); }
+.tm-review-thread__undo { margin-left: auto; height: var(--h-compact); border-radius: var(--r-xs); }
 
 /* A pull request discussion: other people's words, each comment under its author
    and their mark, replies under a hairline, and the reply row last. Resolved
@@ -255,13 +260,14 @@
 .tm-review-thread__reply { padding-top: 8px; border-top: 1px solid var(--hair); }
 .tm-review-thread__reply > .tm-review-thread__avatar { top: 10px; }
 .tm-review-thread__reply-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: var(--h-compact); }
-.tm-review-thread__more { display: inline-flex; align-items: center; gap: 4px; justify-self: start; height: var(--h-compact); padding: 0 6px 0 2px; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-help); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
+/* Its 2px of padding hangs in the gutter, so its words or chevron start on the code column. */
+.tm-review-thread__more { display: inline-flex; align-items: center; gap: 4px; justify-self: start; height: var(--h-compact); margin-left: -2px; padding: 0 6px 0 2px; border: 0; border-radius: var(--r-xs); background: none; color: var(--muted); font-size: var(--t-help); transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review-thread__more:hover { background-color: var(--hover); color: var(--text-soft); }
 .tm-review-thread__fold-toggle .tm-disclosure__chevron { transform: rotate(90deg); }
 /* Resolved, the check is pressed and carries the verified ink. */
 .tm-review-thread__resolve-toggle[aria-pressed='true'] { color: var(--verified-ink); }
 /* The folded row's label takes 8px of the gutter, so its hover clears the words while they stay on the code column. */
-.tm-review-thread--discussion.tm-review-thread--folded { flex-wrap: nowrap; gap: 8px; padding: 2px var(--thread-end) 2px calc(var(--review-code-inset) - 8px); }
+.tm-review-thread--discussion.tm-review-thread--folded { padding: 2px var(--thread-end) 2px calc(var(--review-code-inset) - 8px); }
 .tm-review-thread__fold { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: var(--h-compact); padding: 0 8px; border: 0; border-radius: var(--r-xs); background: none; color: inherit; font: inherit; text-align: left; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-review-thread__fold:hover { background-color: var(--hover); }
 .tm-review-thread__fold .tm-review-thread__author { color: var(--muted); }
@@ -270,11 +276,11 @@
 .tm-review-thread--folded > span { flex: 0 0 auto; white-space: nowrap; }
 .tm-review-checkpoint__who { flex: 0 1 auto; max-width: 128px; overflow: hidden; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
 
+/* The lines a band is about, where its place does not say them, on its head after its byline or title. */
+.tm-review-thread__about { color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* The person's own comment reads as a comment like the others, under their mark
    and You, with Edit and Delete on its head while the pointer or the keys are on it. */
-.tm-review-comment__about { color: var(--muted); font-size: var(--t-help); }
-.tm-review-comment__body { display: grid; gap: 2px; min-width: 0; }
-.tm-review-comment__body p { margin: 0; color: var(--text); line-height: var(--lh-prose); white-space: pre-wrap; }
 .tm-review-comment__actions { opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
@@ -284,7 +290,8 @@
    attributed above), then the person's choices. Accepted, a finding or a comment
    folds to a line, its words cut short where the line ends. */
 .tm-review-answer__state { display: inline-flex; align-items: center; gap: 6px; }
-.tm-review-answer { display: grid; gap: 4px; margin-top: 6px; }
+/* Another voice than the words above it, so it stands further from them than their paragraphs stand apart. */
+.tm-review-answer { display: grid; gap: 4px; margin-top: 12px; }
 .tm-review-answer__quote { display: grid; gap: 2px; margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); }
 .tm-review-answer__by { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
 .tm-review-answer__agent { color: var(--text); font-weight: var(--w-medium); }
@@ -292,19 +299,21 @@
 /* The buttons' own padding sits in the gutter, so their words start on the code column (8px, a ghost button's side padding). */
 .tm-review-answer__actions { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
 .tm-review-answer__settled { color: var(--muted); }
-.tm-review-thread--folded > .tm-review-answer__settled { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tm-review-thread--folded > :is(.tm-review-answer__settled, .tm-review-thread__struck) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tm-reply > .tm-review-answer__quote { margin-left: 24px; }
 
-/* Writing in the diff, a comment or a reply, is a field on the code column that
-   grows into a composer: the field, then its choices and the primary under it. */
+/* Writing in the diff is a field on the code column, then its choices and the primary under it. A reply
+   is the thread's last row, a field that grows into a composer; a comment being written is the comment it
+   becomes, the person's head over its field. */
 .tm-review-thread__reply-row { position: relative; display: grid; gap: 6px; margin-top: 8px; }
 .tm-review-thread__reply-row > .tm-review-thread__avatar { top: 4px; }
+.tm-review-comment-composer > .tm-review-thread__comment { gap: 6px; }
 .tm-review-thread__reply-input { display: block; width: 100%; min-height: var(--h-toolbar); max-height: min(200px, 24vh); padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
-.tm-review-thread__reply-input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
-.tm-review-thread__reply-row--open .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
+:is(.tm-review-thread__reply-row--open, .tm-review-comment-composer) .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
 .tm-review-thread__reply-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* A choice leading the row hangs its padding in the gutter, so its mark starts on the code column. */
+.tm-review-thread__reply-tools > .ghost-button:first-child { margin-left: -8px; }
 .tm-resolve-check { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
-.tm-review-comment-composer > .tm-review-thread__reply-row { margin-top: 0; }
 .tm-review-comment-composer__spacer { flex: 1; }
 
 /* A suggested change reads as a diff in a well: the lines it replaces, then the lines it suggests. */

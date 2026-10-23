@@ -1745,8 +1745,10 @@ control's icon, state or tooltip already carries.
   widen it. The "+"
   shows on the row under the pointer and fills when the pointer is on the
   number. Pressing a number, or dragging across several, opens one comment for
-  that line or range. Then the marker and code that wraps, in its syntax colour
-  (§7.9); the gutter takes the row's tint.
+  that line or range, and Shift on another number widens it; its lines keep
+  `--sel` and accent ink in the gutter on every kind of line while it is
+  written. Then the marker and code that wraps, in its syntax colour (§7.9);
+  the gutter takes the row's tint.
 - *Threads.* What is said about the code is part of the file, not a card on
   it: under the last line of its range, a band across the file on `--card`
   with a `--hair` seam where it meets code (bands in a row share one), no ring,
@@ -1754,10 +1756,22 @@ control's icon, state or tooltip already carries.
   720px at most, and each author's mark (a 20px avatar: initials on `--field`
   in `--muted`, or a person glyph when the account is unknown) hangs in the
   gutter beside their name, so a comment and the code it is about start on one
-  column. Nothing inside a band is a box of its own: a suggested change is a
-  `--well` with the diff's tints on its lines, the label above it; folded, a
-  thread is a 28px row on `--panel` like a gap. Feedback without a place in
-  the files sits above them, framed as a file is.
+  column. A band says the lines it is about only where its place does not:
+  under its row only a range ("Lines 3–5"), at its file's top any line ("Line
+  19"; the person's own on the old side are "Removed", the platform's "Old"),
+  in muted 12px on its head after the author and age, or after a finding's
+  title; above the files, its file and lines in mono under its head. A head
+  reads as its facts first (who, when, which lines, its state) and its
+  controls last, at the right end. Every
+  comment's words read the same, the person's own and other people's: rendered
+  markdown in `--text-soft`, clamped until Show full comment. Nothing inside a
+  band is a box of its own: a suggested change is a `--well` with the diff's
+  tints on its lines, the label above it; folded, a thread is a 28px row on
+  `--panel` like a gap, who or what it is first in `--muted`, its line cut short
+  with all of it in its tooltip, and its way back (Restore, Reopen) at the end.
+  A control that goes away when pressed, folding or opening its band, leaves
+  the keys on the band. Feedback without a place in the files sits above them,
+  framed as a file is.
 - *Gaps.* The unchanged lines between hunks are one 28px row on `--panel`: the
   count in words at the code column ("19 unchanged lines") and the enclosing
   symbol in mono `--faint`. When the checkout still holds the captured file
@@ -1774,23 +1788,25 @@ control's icon, state or tooltip already carries.
   review holds only changed files; any other file opens in the editor from ⋯.
 - *Findings.* A thread band with no mark in the gutter (the severity says it is
   the review's), its severity as a word (blocker and major in
-  `--blocked-ink`), in a re-review "Still open" or "New" beside it, and its
-  actions on the title line: Add to request on a Minor or Nit (Blocker and Major
-  are in by default), Ask (opens Ask about this finding), and Dismiss, a menu of
+  `--blocked-ink`), in a re-review "Still open" or "New" beside it, its lines
+  after the title where its place does not say them and the agent's answer
+  once there is one, then its actions at the end of the title line: Add to
+  request on a Minor or Nit (Blocker and Major are in by default), Ask (opens
+  Ask about this finding), and Dismiss, a menu of
   reasons (Incorrect, Intentional, Won't fix now, With a note…). The next review
   never raises an Incorrect finding again, raises an Intentional one only when
   the code around it changed, and leaves a deferred one alone. A dismissed
   finding folds to one line with its reason and Restore.
 - *Pull request discussions* are other people's words in the same band as a
   finding: the author at 500 beside their mark, a review's verdict and the
-  comment's age muted, its state at the end of the head (Resolved, Replied once
-  the person wrote last, Sent, the agent's answer, or Outdated), then Add to
-  request, Ask (opens Ask about this discussion), a check that resolves the
+  comment's age muted, its lines where its place does not say them and its
+  state (Resolved, Replied once the person wrote last, Sent, the agent's
+  answer, or Outdated), then at the end of the head Add to request, Ask
+  (opens Ask about this discussion), a check that resolves the
   thread (pressed, in `--verified-ink`, once resolved, and pressing it reopens
-  it), and Open on GitHub. Each comment is
-  rendered markdown under its author, replies under a `--hair` from the code
-  column, HTML the platform renders reads as its words, and a long comment is
-  clamped until Show full comment; past three replies, all but the latest fold
+  it), and Open on GitHub. Each comment sits under its author, replies under a
+  `--hair` from the code column, and HTML the platform renders reads as its
+  words; past three replies, all but the latest fold
   behind a count, and replies the platform has beyond those read say so with a
   link. A suggested change reads as a diff: the lines it replaces, when the
   diff shows the thread's own lines, then the lines it suggests. The last row of
@@ -1807,27 +1823,34 @@ control's icon, state or tooltip already carries.
   here. A thread
   sits under the last line of its range while the diff shown is the head the
   platform read it on; otherwise, or once its lines changed, it sits at its
-  file's top and says its line, and one about the whole change sits above the
+  file's top, and one about the whole change sits above the
   files. A resolved thread, or a remark that asks for nothing, folds to one line
   that opens it. None goes to the agent unless added; N and P step through open
   discussions after the findings.
-- *Comments* are the person's own, in the same band: their mark and You, the
-  lines they are about when the row does not say it, and icon-only Edit and
-  Delete on the head while the pointer or the keys are on it. They can be
-  written any time the current diff is shown and are saved with the task as
-  written. The line composer is the reply row's: the field on the code column,
-  then Ask at its left, which hands the lines and the text to Ask instead of
-  the request, and Cancel and Comment.
+- *Comments* are the person's own, in the same band: their mark and You, and
+  icon-only Edit and Delete on the head while the pointer or the keys are on
+  it. They can be written any time the current diff is shown and are saved
+  with the task as written. One is written at a time, and its composer is the
+  comment it becomes: the same head, the field on the code column, then Ask at
+  its left (it hands the lines and the text to Ask instead of the request),
+  Cancel and Comment; Edit turns the words into the field in place. Choosing
+  other lines moves it with its words. ⌘↵ saves, and the saved comment takes
+  the keys; Escape closes it when nothing typed would be lost, and otherwise
+  leaves it open with its words, where C returns; Cancel discards. Delete
+  folds a comment to a line with Restore, which brings it back where it was
+  until the request goes or the tab closes.
 - *Answers.* Once the agent answered the person's latest request after the
   review, each answered item's own band, a finding, a thread or a comment, says
-  the answer: its outcome under the agent's mark at the end of the head
+  the answer: its outcome under the agent's mark among the head's facts
   (Fixed, Not changed, Needs your decision), its note quoted under the agent's
   name and time, then Accept answer and Add to request. The agent's word never
   settles an item, even Fixed; accepting does, and folds a finding or a
-  comment to one line with Accepted and Reopen. Add to request opens a comment
-  on the item's lines that starts from a quote of it. Those lines are the
-  reviewed code's: in what changed since the review they sit on the old side,
-  as the review's findings do.
+  comment to one line with Accepted and Reopen. The items sit on the lines of
+  the code the review read: in what changed since the review, on the old side,
+  as the review's findings do. Add to request opens a comment that starts from
+  a quote of the item, on the row its band sits under as the diff shown
+  numbers it, or on its file when that row takes no comment (a removed line in
+  what changed since the review).
 - *Foot.* Always present: when something is queued, its summary ("1 fix, 2
   GitHub comments, 1 comment"), which opens the request sheet; a note that grows
   to four lines; and one primary: Request changes when something is queued
@@ -1846,23 +1869,24 @@ control's icon, state or tooltip already carries.
   changes nothing leaves it current, and a diff back to exactly what was
   reviewed makes it current again. Any other turn (analysis, compaction) leaves
   it with no implementation run to belong to, so it becomes earlier context. An
-  out-of-date review keeps its threads as earlier context, without Ask or
-  Dismiss; its findings are never sent, the person's comments still are.
+  out-of-date review keeps its threads as earlier context, on `--panel` and
+  without Ask or Dismiss; the bar says the review is out of date, so no band
+  repeats it. Its findings are never sent, the person's comments still are.
 - *Commits.* A commit is read as history: its change against its first parent,
   its own brief where the change's stands (Commit 2 of 3, its short hash, author
   and age, then its subject and the rest of its message, kept to three lines
   until asked for), then its files. Its lines may no longer be the code's, so
   what was said about its files sits at each file's top with its lines, what was
-  said about other files does not show, and nothing is written or marked viewed
-  on it: comments and Viewed belong to the change. The Diff moves to a commit
-  once its change is read, never through an empty state. The commits are the
-  branch's own, first parents only (a merge of the base branch is one commit),
-  at most its latest 100, numbered in its whole history.
+  said about other files does not show, and nothing is written, asked or marked
+  viewed on it: comments, Ask and Viewed belong to the code now. The Diff moves
+  to a commit once its change is read, never through an empty state. The commits
+  are the branch's own, first parents only (a merge of the base branch is one
+  commit), at most its latest 100, numbered in its whole history.
 - *Keys.* G the other mode, J/K files, [ and ] intents in the Guide and commits
   in the Diff (from any other scope, the first or the last), / the file filter,
   N/P open findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
-  or take out a suggestion or discussion, R reply to the discussion, C comment
-  on the chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being
+  or take out a suggestion or discussion, R reply to the discussion, C back to
+  the comment being written, ⌘↵ the request sheet and then send, ⌘⇧F the file being
   read full screen and back in the Diff (Escape returns). Every move of the
   code is the one travel (§12).
 
