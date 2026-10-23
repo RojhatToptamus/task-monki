@@ -1,10 +1,76 @@
 import { describe, expect, it } from 'vitest';
 import { reviewGateStatusFromResult } from '../../shared/contracts';
-import { parseAgentReviewResult } from './AgentReviewContract';
+import { parseAgentReviewOutput } from './AgentReviewContract';
 
 describe('AgentReviewContract', () => {
+  it('reads the result and the walkthrough from the last json block, after prose that quotes JSON', () => {
+    const walkthrough = { summary: 'Uploads retry.', attention: [], sections: [{ title: 'Retry uploads', explanation: 'Uploads retry.', files: ['src/retry.ts'] }] };
+    const output = parseAgentReviewOutput([
+      'The handler used to return this shape:',
+      '```json',
+      '{"verdict": "PASSED", "summary": "An example in the prose.", "findings": []}',
+      '```',
+      'One finding.',
+      '```json',
+      JSON.stringify({
+        schemaVersion: 'agent-review/v1',
+        verdict: 'NEEDS_CHANGES',
+        summary: 'One finding.',
+        findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'It is never removed.', path: 'src/retry.ts', line: 4 }],
+        walkthrough
+      }),
+      '```'
+    ].join('\n'));
+
+    // Findings keep the stored v1 shape; the walkthrough comes back as written, for the check.
+    expect(output.result).toEqual({
+      schemaVersion: 'agent-review/v1',
+      verdict: 'NEEDS_CHANGES',
+      summary: 'One finding.',
+      findings: [{ id: 'leak', severity: 'MAJOR', title: 'Listener leaks', explanation: 'It is never removed.', path: 'src/retry.ts', line: 4, endLine: undefined, recommendation: undefined }]
+    });
+    expect(output.walkthrough).toEqual(walkthrough);
+    expect(parseAgentReviewOutput('```json\n{"verdict": "PASSED", "summary": "Fine.", "findings": []}\n```')).not.toHaveProperty('walkthrough');
+  });
+
+  it('reads a result in a fence without a language, after prose and code that are not one', () => {
+    const output = parseAgentReviewOutput([
+      'The guard reads `function limit() { return 3; }` now.',
+      '```ts',
+      'const limit = 3;',
+      '```',
+      '```',
+      '{"verdict": "PASSED", "summary": "Fine.", "findings": []}',
+      '```',
+      '```',
+      'npm test',
+      '```'
+    ].join('\n'));
+    expect(output.result).toMatchObject({ verdict: 'PASSED', summary: 'Fine.' });
+  });
+
+  it('reads a result block nested, indented, under a list item', () => {
+    const output = parseAgentReviewOutput(['Review:', '- Result:', '  ```json', '  {"verdict": "PASSED", "summary": "Fine.", "findings": []}', '  ```'].join('\n'));
+    expect(output.result).toMatchObject({ verdict: 'PASSED', summary: 'Fine.' });
+  });
+
+  it('keeps a result whose text quotes a fenced block, since only a fence on its own line closes the JSON', () => {
+    const output = parseAgentReviewOutput([
+      'One finding.',
+      '```json',
+      JSON.stringify({
+        verdict: 'NEEDS_CHANGES',
+        summary: 'One finding.',
+        findings: [{ id: 'fence', severity: 'MINOR', title: 'Document the flag', explanation: 'Add ```--shout``` to the usage block.' }]
+      }),
+      '```'
+    ].join('\n'));
+
+    expect(output.result).toMatchObject({ verdict: 'NEEDS_CHANGES', findings: [{ id: 'fence', explanation: 'Add ```--shout``` to the usage block.' }] });
+  });
+
   it('parses the fenced structured review result', () => {
-    const result = parseAgentReviewResult(`
+    const { result } = parseAgentReviewOutput(`
 Review found one blocker.
 
 \`\`\`json
@@ -34,7 +100,7 @@ Review found one blocker.
   });
 
   it('derives needs-changes from blocker or major findings even with a passing verdict', () => {
-    const result = parseAgentReviewResult(`{
+    const { result } = parseAgentReviewOutput(`{
       "verdict": "PASSED",
       "summary": "Provider verdict is inconsistent with findings.",
       "findings": [
@@ -51,7 +117,7 @@ Review found one blocker.
   });
 
   it('parses native Codex review comments when no JSON result is returned', () => {
-    const result = parseAgentReviewResult(`
+    const { result } = parseAgentReviewOutput(`
 The patch introduces review-flow regressions that can bypass the review gate.
 
 Full review comments:

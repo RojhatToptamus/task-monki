@@ -8,19 +8,33 @@ import {
 
 export const AGENT_REVIEW_RESULT_SCHEMA_VERSION = 'agent-review/v1' as const;
 
-export function parseAgentReviewResult(text: string | undefined): AgentReviewResult | undefined {
+/** What a review's output holds: its result, and the walkthrough it wrote. */
+export interface AgentReviewOutput {
+  result?: AgentReviewResult;
+  /** As the agent wrote it; Task Monki checks it against the change it read before keeping any of it. */
+  walkthrough?: unknown;
+}
+
+/**
+ * Reads a review's output: its last fenced JSON block holds the result and the
+ * walkthrough, after prose that may quote code. Output without one is read as
+ * bare JSON, then as native review comments.
+ */
+export function parseAgentReviewOutput(text: string | undefined): AgentReviewOutput {
   if (!text?.trim()) {
-    return undefined;
+    return {};
   }
-  const jsonText = extractJsonBlock(text) ?? extractBareJson(text);
-  if (!jsonText) {
-    return parseNativeAgentReviewResult(text);
+  const value = lastJsonObject(text) ?? parseJson(extractBareJson(text));
+  if (value === undefined) {
+    const result = parseNativeAgentReviewResult(text);
+    return result ? { result } : {};
   }
-  try {
-    return normalizeReviewResult(JSON.parse(jsonText));
-  } catch {
-    return parseNativeAgentReviewResult(text);
-  }
+  const result = normalizeReviewResult(value);
+  const walkthrough = isRecord(value) ? value.walkthrough : undefined;
+  return {
+    ...(result ? { result } : {}),
+    ...(walkthrough !== undefined ? { walkthrough } : {})
+  };
 }
 
 export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {
@@ -57,9 +71,41 @@ function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | 
   return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
-function extractJsonBlock(text: string): string | undefined {
-  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return match?.[1]?.trim();
+/**
+ * The last fenced block, tagged json or not, that holds a JSON object. Fences
+ * sit on lines of their own, indented or not, and pair in order, so a block of
+ * other code before it never swallows its opening fence; a JSON string holds no
+ * line break, so its backticks never close the block.
+ */
+function lastJsonObject(text: string): Record<string, unknown> | undefined {
+  const blocks: Array<{ tag: string; lines: string[] }> = [];
+  let open: { tag: string; lines: string[] } | undefined;
+  for (const line of text.split(/\r?\n/u)) {
+    const fence = /^[ \t]*```([\w-]*)[ \t]*$/u.exec(line);
+    if (!open) {
+      if (fence) open = { tag: fence[1]!.toLowerCase(), lines: [] };
+    } else if (fence && !fence[1]) {
+      blocks.push(open);
+      open = undefined;
+    } else {
+      open.lines.push(line);
+    }
+  }
+  for (const block of blocks.reverse()) {
+    if (block.tag && block.tag !== 'json') continue;
+    const value = parseJson(block.lines.join('\n').trim());
+    if (isRecord(value)) return value;
+  }
+  return undefined;
+}
+
+function parseJson(text: string | undefined): unknown {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 function extractBareJson(text: string): string | undefined {

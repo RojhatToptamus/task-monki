@@ -16,8 +16,10 @@ Install these before using Task Monki:
   - OpenCode with the native `opencode serve` API and one or more configured
     model providers;
   - an ACP profile: Grok Build, Cursor Agent, or `claude-agent-acp`;
-- Optional: GitHub CLI, installed and authenticated, for branch publishing and
-  draft pull-request features
+- Optional: GitHub CLI (`gh`), installed and authenticated, for GitHub issues,
+  pull requests, branch publishing and draft pull-request features
+- Optional: GitLab CLI (`glab`), installed and authenticated, for the same
+  features on gitlab.com with merge requests
 - Optional: Docker Desktop for managed-data and existing-Compose previews.
   Compose previews require a Compose CLI that exposes
   `docker compose config --no-env-resolution`; Task Monki feature-probes this
@@ -27,12 +29,12 @@ See the [Preview Guide](PREVIEW_GUIDE.md) for recipe setup, private-input
 platform requirements, supported native and Compose behavior, and current
 limitations.
 
-Task Monki does not bundle Git, agent runtimes, or GitHub CLI. Packaged desktop
+Task Monki does not bundle Git, agent runtimes, GitHub CLI or GitLab CLI. Packaged desktop
 apps probe each registered runtime independently. One unavailable runtime does
 not prevent another from working. Authentication and upstream model-provider
 configuration remain owned by the selected runtime.
 
-Settings provides custom executable paths for Git, GitHub CLI, Codex CLI,
+Settings provides custom executable paths for Git, GitHub CLI, GitLab CLI, Codex CLI,
 OpenCode, and every registered ACP runtime. Use Auto-detect to
 return a saved path to environment-override and then PATH-based discovery.
 On macOS, the packaged app also checks common user CLI locations because apps
@@ -49,11 +51,15 @@ TASK_MONKI_GROK_ACP_BIN=/path/to/grok
 TASK_MONKI_CURSOR_AGENT_ACP_BIN=/path/to/cursor-agent
 TASK_MONKI_CLAUDE_AGENT_ACP_BIN=/path/to/claude-agent-acp
 TASK_MANAGER_GH_PATH=/path/to/gh
+TASK_MANAGER_GLAB_PATH=/path/to/glab
 ```
 
-Git and one ready agent runtime are required to run a task. GitHub CLI is
-optional; GitHub delivery features report it as unavailable when `gh` cannot
-be resolved.
+Git and one ready agent runtime are required to run a task. GitHub CLI and
+GitLab CLI are optional; their features report the CLI as unavailable when it
+cannot be resolved. Task Monki uses each CLI's signed-in account for the host
+and never stores its token; switch accounts with `gh auth switch` or
+`glab auth login`. GitHub Enterprise and self-managed GitLab hosts are not
+supported yet.
 
 Codex and OpenCode are native server integrations. ACP profiles
 remain distinct integrations, not interchangeable model-provider shims. The

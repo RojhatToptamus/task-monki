@@ -1,12 +1,14 @@
-import type { ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
 
 type MarkdownBlock =
   | { kind: 'paragraph' | 'quote'; text: string }
   | { kind: 'heading'; level: number; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
-  | { kind: 'code'; text: string };
+  | { kind: 'code'; text: string }
+  | { kind: 'table'; header: string[]; rows: string[][] };
 
-export function MessageMarkdown({ text }: { text: string }) {
+/** Parsed again only when its text changes: threads and conversations render it for every message. */
+export const MessageMarkdown = memo(function MessageMarkdown({ text }: { text: string }) {
   return (
     <div className="tm-message-markdown">
       {parseBlocks(text).map((block, index) => {
@@ -26,11 +28,25 @@ export function MessageMarkdown({ text }: { text: string }) {
             return <pre key={key}><code>{block.text}</code></pre>;
           case 'paragraph':
             return <p key={key}>{renderInline(block.text)}</p>;
+          case 'table':
+            // A wide table scrolls inside its own frame rather than widening the message.
+            return (
+              <div key={key} className="tm-message-markdown__table">
+                <table>
+                  <thead><tr>{block.header.map((cell, cellIndex) => <th key={cellIndex}>{renderInline(cell)}</th>)}</tr></thead>
+                  <tbody>
+                    {block.rows.map((row, rowIndex) => (
+                      <tr key={rowIndex}>{block.header.map((_cell, cellIndex) => <td key={cellIndex}>{renderInline(row[cellIndex] ?? '')}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
         }
       })}
     </div>
   );
-}
+});
 
 function parseBlocks(text: string): MarkdownBlock[] {
   const lines = text.replace(/\r\n?/gu, '\n').split('\n');
@@ -51,6 +67,18 @@ function parseBlocks(text: string): MarkdownBlock[] {
       }
       if (index < lines.length) index += 1;
       blocks.push({ kind: 'code', text: code.join('\n') });
+      continue;
+    }
+    // A GitHub table: a row of cells, then its separator row.
+    if (isTableRow(line) && isTableSeparator(lines[index + 1] ?? '')) {
+      const header = tableCells(line);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && isTableRow(lines[index]!)) {
+        rows.push(tableCells(lines[index]!));
+        index += 1;
+      }
+      blocks.push({ kind: 'table', header, rows });
       continue;
     }
     const heading = /^(#{1,4})\s+(.+)$/u.exec(line);
@@ -100,8 +128,24 @@ function parseBlocks(text: string): MarkdownBlock[] {
   return blocks;
 }
 
+function isTableRow(line: string): boolean {
+  return /^\s*\|.*\|\s*$/u.test(line);
+}
+
+function isTableSeparator(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/u.test(line);
+}
+
+/** A row's cells, an escaped pipe kept as text. */
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/u, '').replace(/\|$/u, '')
+    .split(/(?<!\\)\|/u)
+    .map((cell) => cell.replace(/\\\|/gu, '|').trim());
+}
+
 function startsBlock(line: string): boolean {
   return /^```/u.test(line.trimStart()) ||
+    isTableRow(line) ||
     /^(#{1,4})\s+/u.test(line) ||
     /^>\s?/u.test(line) ||
     /^[-*+]\s+/u.test(line) ||

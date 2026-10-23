@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import {
   canonicalPath,
@@ -10,7 +9,7 @@ import {
 } from '../filesystem/secureFilesystem';
 import { listGitWorktrees } from '../worktree/WorktreeService';
 import { inspectGitWorkingTreeFingerprint } from './GitSnapshotService';
-import { git } from './gitCli';
+import { UNTRUSTED_CHECKOUT_GIT_ENV, git } from './gitCli';
 
 export type ReadOnlySnapshotOmissionReason =
   | 'LARGER_THAN_FILE_LIMIT'
@@ -54,14 +53,6 @@ interface SnapshotEntry extends ReadOnlySnapshot {
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const GIT_TIMEOUT_MS = 120_000;
 const FILE_CONCURRENCY = 32;
-// Snapshot checkouts must not run repository hooks or download LFS objects. A
-// skipped smudge leaves LFS pointers, which match the pointers in `git diff`.
-const SNAPSHOT_GIT_ENV: NodeJS.ProcessEnv = {
-  GIT_CONFIG_COUNT: '1',
-  GIT_CONFIG_KEY_0: 'core.hooksPath',
-  GIT_CONFIG_VALUE_0: os.devNull,
-  GIT_LFS_SKIP_SMUDGE: '1'
-};
 const DIFF_ARGS = [
   '--binary',
   '--full-index',
@@ -256,28 +247,30 @@ export class ReadOnlySnapshotService {
       await git(live, ['diff', ...DIFF_ARGS, `--output=${patches.working}`, headSha, '--'], GIT_TIMEOUT_MS);
       const untracked = await planUntrackedFiles(live, { maxFileBytes: this.maxFileBytes, maxTotalBytes: this.maxTotalBytes });
       this.repositories.add(live);
+      // Snapshot checkouts run no repository hook and download no LFS object: a
+      // skipped smudge leaves LFS pointers, which match the pointers in `git diff`.
       if (refresh) {
         await setWritable(target, true);
-        await git(target, ['reset', '-q', '--hard', headSha], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV });
-        await git(target, ['clean', '-ffdxq'], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV });
+        await git(target, ['reset', '-q', '--hard', headSha], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV });
+        await git(target, ['clean', '-ffdxq'], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV });
       } else {
-        await git(live, ['worktree', 'add', '--detach', target, headSha], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV });
+        await git(live, ['worktree', 'add', '--detach', target, headSha], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV });
         const repositoryPath = await gitRepositoryOf(target);
         if (repositoryPath) this.repositories.add(repositoryPath);
         await enforcePosixMode(target, 0o700);
       }
       // Staged changes go to the snapshot index only; all working changes go to its files.
       if (await hasContent(patches.staged)) {
-        await git(target, ['apply', '--cached', '--binary', '--whitespace=nowarn', patches.staged], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV });
+        await git(target, ['apply', '--cached', '--binary', '--whitespace=nowarn', patches.staged], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV });
       }
       if (await hasContent(patches.working)) {
-        await git(target, ['apply', '--binary', '--whitespace=nowarn', patches.working], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV });
+        await git(target, ['apply', '--binary', '--whitespace=nowarn', patches.working], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV });
       }
       const omitted = await this.copyUntracked(live, target, untracked);
       await setWritable(target, false);
       // Permission changes alter file ctimes. Refresh the snapshot index once so later
       // status checks, such as the read-only comparison, need not rehash those files.
-      await git(target, ['update-index', '-q', '--refresh'], { timeout: GIT_TIMEOUT_MS, env: SNAPSHOT_GIT_ENV })
+      await git(target, ['update-index', '-q', '--refresh'], { timeout: GIT_TIMEOUT_MS, env: UNTRUSTED_CHECKOUT_GIT_ENV })
         .catch(() => undefined);
       return { taskId, threadId, path: target, headSha, fingerprint, takenAt, omitted, liveWorktreePath: live };
     } catch (error) {

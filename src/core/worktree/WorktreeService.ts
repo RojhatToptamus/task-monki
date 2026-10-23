@@ -55,7 +55,15 @@ export class WorktreeService {
     };
   }
 
-  async create(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+  /**
+   * `env` applies to the checkout itself. A pull request's code is untrusted,
+   * so its checkout runs with the repository's hooks turned off.
+   */
+  async create(
+    record: WorktreeRecord,
+    repositoryPath: string,
+    options: { env?: NodeJS.ProcessEnv } = {}
+  ): Promise<WorktreeRecord> {
     requireFullObjectId(record.baseSha, 'recorded base');
     if (record.headSha) requireFullObjectId(record.headSha, 'last verified head');
     this.assertManaged(record);
@@ -108,12 +116,13 @@ export class WorktreeService {
       }
       // Git retains registration after a temporary checkout disappears. Force only
       // that absent, unlocked registration; never prune other worktrees.
-      await git(repositoryPath, ['worktree', 'add', ...(missing ? ['--force'] : []), record.worktreePath, record.branchName], 60_000);
+      await git(repositoryPath, ['worktree', 'add', ...(missing ? ['--force'] : []), record.worktreePath, record.branchName],
+        { timeout: 60_000, env: options.env });
     } else {
       await git(
         repositoryPath,
         ['worktree', 'add', '-b', record.branchName, record.worktreePath, expectedHeadSha],
-        60_000
+        { timeout: 60_000, env: options.env }
       );
     }
 

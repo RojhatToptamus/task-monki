@@ -322,6 +322,15 @@ function SetupToolList({
       detail: describeToolStatusDetail(externalToolStatus?.tools.gh),
       detailIsValue: externalToolStatus?.tools.gh.status === 'ok',
       detailTitle: externalToolStatus?.tools.gh.version ?? undefined
+    },
+    {
+      key: 'glab',
+      label: 'GitLab CLI',
+      hint: 'Optional for MR delivery',
+      state: describeExternalToolAvailability(externalToolStatus?.tools.glab).label,
+      detail: describeToolStatusDetail(externalToolStatus?.tools.glab),
+      detailIsValue: externalToolStatus?.tools.glab.status === 'ok',
+      detailTitle: externalToolStatus?.tools.glab.version ?? undefined
     }
   ];
 

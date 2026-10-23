@@ -113,6 +113,11 @@ export function normalizeCredentialFieldName(value: string): string {
  * text. Runtime adapters pass the exact values inherited by their child
  * process so opaque credentials are covered even when their shape carries no
  * recognizable credential marker.
+ *
+ * Every pattern runs in time linear in the text, which can be a large log a
+ * repository controls: a credential name's prefix repeats only over `_`
+ * segments, since a match can start after any `-`, and a JWT starts where a
+ * run of its characters starts, or after a `-` with a header that holds none.
  */
 export function redactCredentialText(
   value: string,
@@ -133,12 +138,12 @@ export function redactCredentialText(
       (_match, label: string) => `${label}${REDACTED_CREDENTIAL}`
     )
     .replace(
-      /\b((?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|auth[_-]?token|oauth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|personal[_-]?access[_-]?token|client[_-]?secret|secret[_-]?access[_-]?key|private[_-]?key|password|passwd|credentials?|secret|token))["']?\s*[:=]\s*)(["']?)([^\s,;&"']+)\2/giu,
+      /\b((?:(?:[a-z0-9]+_)*(?:api[_-]?key|auth[_-]?token|oauth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|personal[_-]?access[_-]?token|client[_-]?secret|secret[_-]?access[_-]?key|private[_-]?key|password|passwd|credentials?|secret|token))["']?\s*[:=]\s*)(["']?)([^\s,;&"']+)\2/giu,
       (_match, label: string, quote: string) =>
         `${label}${quote}${REDACTED_CREDENTIAL}${quote}`
     )
     .replace(
-      /\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[oprsu]_[A-Za-z0-9_]{12,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gu,
+      /\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[oprsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,}|gl(?:pat|oas|dt|rt|ptt|soat|ft|imt|cbt)-[A-Za-z0-9_.-]{16,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{12,}|(?:(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+|(?<=-)eyJ[A-Za-z0-9_]+)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gu,
       REDACTED_CREDENTIAL
     );
   for (const sensitive of normalizedSensitiveValues(sensitiveValues)) {

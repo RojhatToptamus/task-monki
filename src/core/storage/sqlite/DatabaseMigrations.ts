@@ -1554,11 +1554,21 @@ CREATE INDEX preview_generations_key_routing_idx ON preview_generations(preview_
   },
   {
     version: 14,
+    name: 'review-walkthroughs',
+    // Task payloads carry review walkthroughs, decisions on a request's answers
+    // and Ask subjects of a walkthrough's stage, a file or a discussion. The
+    // version prevents older clients from opening them.
+    sql: 'SELECT 1;'
+  },
+  {
+    version: 15,
     name: 'bug-replay-records',
     // Bug Replay captures, versioned cases, expectation decisions, replay runs and their
     // evidence files. Task payloads also carry the bug's gate projection and BUG_ events, so
     // the version keeps older clients from opening them. Rows reference their task without a
     // cascade: task deletion removes them through the store so their bytes are collected too.
+    // Every statement tolerates tables that already exist: a development build numbered these
+    // migrations 14 and 15, so a profile it upgraded holds them and skips straight to 16.
     sql: `
 CREATE TABLE IF NOT EXISTS bug_captures (
   id TEXT PRIMARY KEY,
@@ -1637,7 +1647,7 @@ CREATE INDEX IF NOT EXISTS bug_replay_files_task_idx ON bug_replay_files(task_id
 `
   },
   {
-    version: 15,
+    version: 16,
     name: 'bug-replay-kept-approvals',
     // Replay approvals the person kept for a repository, one row per recipe they read and
     // approved. They go with their repository; revoking one deletes its row. Like the tables

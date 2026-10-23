@@ -33,6 +33,17 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  ReadPullRequestMergeOptionsRequest,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReadPullRequestCheckLogsRequest,
+  MergePullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -69,7 +80,10 @@ import type {
   StartRunRequest,
   StartReviewRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -133,7 +147,7 @@ import { createElectronOpenTargetHost } from './openTargetHost';
 import { buildDesktopCliPath } from './desktopCliPath';
 import { getMacDockIconPath } from './dockIcon';
 import { resolveProviderRuntimeCwd } from './providerRuntimeCwd';
-import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
+import { DEFAULT_ZOOM_FACTOR, getMacTrafficLightPosition, getMainWindowChromeOptions, getTitleBarOverlayHeight } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 import { SoftwareUpdateController } from './SoftwareUpdateController';
 import {
@@ -227,13 +241,17 @@ if (!ownsSingleInstanceLock) {
   });
 }
 
+/** Keeps the native window controls in the renderer's titlebar at the page's zoom. */
 function syncWindowChrome(window: BrowserWindow): void {
-  if (process.platform !== 'darwin' || window.isDestroyed()) {
+  if (window.isDestroyed()) {
     return;
   }
-  window.setWindowButtonPosition(
-    getMacTrafficLightPosition(window.webContents.getZoomFactor())
-  );
+  const zoomFactor = window.webContents.getZoomFactor();
+  if (process.platform === 'darwin') {
+    window.setWindowButtonPosition(getMacTrafficLightPosition(zoomFactor));
+  } else {
+    window.setTitleBarOverlay({ height: getTitleBarOverlayHeight(zoomFactor) });
+  }
 }
 
 function createWindow(): void {
@@ -261,7 +279,8 @@ function createWindow(): void {
       webSecurity: true,
       allowRunningInsecureContent: false,
       navigateOnDragDrop: false,
-      webviewTag: false
+      webviewTag: false,
+      zoomFactor: DEFAULT_ZOOM_FACTOR
     }
   });
   mainWindow = window;
@@ -792,6 +811,17 @@ function installIpcHandlers(): void {
     return task;
   });
   handleTrustedIpc('task:import', (_, input: ImportTaskRequest) => service.importTask(input));
+  handleTrustedIpc('remote:list', (_, input: ListRemoteWorkRequest) => service.listRemoteWork(input));
+  handleTrustedIpc('remote:openPullRequest', (_, input: OpenPullRequestRequest) => service.openPullRequest(input));
+  handleTrustedIpc('remote:syncPullRequest', (_, input: SyncPullRequestRequest) => service.syncPullRequest(input));
+  handleTrustedIpc('remote:markPullRequestReady', (_, input: MarkPullRequestReadyRequest) => service.markPullRequestReady(input));
+  handleTrustedIpc('remote:resolvePullRequestDiscussion', (_, input: ResolvePullRequestDiscussionRequest) => service.resolvePullRequestDiscussion(input));
+  handleTrustedIpc('remote:rerunPullRequestChecks', (_, input: RerunPullRequestChecksRequest) => service.rerunPullRequestChecks(input));
+  handleTrustedIpc('remote:readPullRequestMergeOptions', (_, input: ReadPullRequestMergeOptionsRequest) => service.readPullRequestMergeOptions(input));
+  handleTrustedIpc('remote:mergePullRequest', (_, input: MergePullRequestRequest) => service.mergePullRequest(input));
+  handleTrustedIpc('remote:replyToPullRequest', (_, input: ReplyToPullRequestRequest) => service.replyToPullRequest(input));
+  handleTrustedIpc('remote:readPullRequestCheckLogs', (_, input: ReadPullRequestCheckLogsRequest) => service.readPullRequestCheckLogs(input));
+  handleTrustedIpc('remote:mergePullRequestUpdate', (_, input: MergePullRequestUpdateRequest) => service.mergePullRequestUpdate(input));
   handleTrustedIpc('task:importPreview', (_, input: PreviewImportRequest) => service.previewImport(input));
   handleTrustedIpc('worktree:list', (_, repositoryId: string) => service.listExistingWorktrees(repositoryId));
   handleTrustedIpc('worktree:reconnect', (_, input: ReconnectWorktreeRequest) => service.reconnectWorktree(input));
@@ -848,8 +878,12 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('agent:decideReviewFinding', async (_, input: DecideReviewFindingRequest) =>
     service.decideReviewFinding(input));
+  handleTrustedIpc('agent:decideReviewRequestItem', async (_, input: DecideReviewRequestItemRequest) =>
+    service.decideReviewRequestItem(input));
   handleTrustedIpc('agent:readReviewChanges', async (_, input: ReadReviewChangesRequest) =>
     service.readReviewChanges(input));
+  handleTrustedIpc('agent:readReviewedDiff', async (_, input: ReadReviewChangesRequest) =>
+    service.readReviewedDiff(input));
 
   handleTrustedIpc('agent:askSideQuestion', async (_, input: AskSideQuestionRequest) =>
     service.askSideQuestion(input));
@@ -882,6 +916,10 @@ function installIpcHandlers(): void {
   handleTrustedIpc('git:deliveryCommit', async (_, input: CreateDeliveryCommitRequest) => {
     return service.createDeliveryCommit(input);
   });
+  handleTrustedIpc('git:listTaskCommits', async (_, input: ReadTaskCommitsRequest) =>
+    service.listTaskCommits(input));
+  handleTrustedIpc('git:readTaskCommitDiff', async (_, input: ReadTaskCommitDiffRequest) =>
+    service.readTaskCommitDiff(input));
 
   handleTrustedIpc('github:preflight', async (_, input: GitHubPreflightRequest) => {
     return service.preflightGitHub(input);

@@ -9,12 +9,14 @@ export const IPC_INVOKE_CHANNELS = [
   'agent:cancelRun',
   'agent:continueRun',
   'agent:decideReviewFinding',
+  'agent:decideReviewRequestItem',
   'agent:discoverRuntimeModels',
   'agent:editTaskInstruction',
   'agent:endSideThread',
   'agent:queueTaskInstruction',
   'agent:readProtocolMessage',
   'agent:readReviewChanges',
+  'agent:readReviewedDiff',
   'agent:respondToInteraction',
   'agent:retryRun',
   'agent:runtimeCatalog',
@@ -132,6 +134,8 @@ export const IPC_INVOKE_CHANNELS = [
   'discourse:wave:stop',
   'evidence:refresh',
   'git:deliveryCommit',
+  'git:listTaskCommits',
+  'git:readTaskCommitDiff',
   'github:createPullRequest',
   'github:preflight',
   'github:publish',
@@ -148,6 +152,17 @@ export const IPC_INVOKE_CHANNELS = [
   'profile:save',
   'prompt:refine',
   'prompt:refine:cancel',
+  'remote:list',
+  'remote:markPullRequestReady',
+  'remote:mergePullRequest',
+  'remote:mergePullRequestUpdate',
+  'remote:openPullRequest',
+  'remote:readPullRequestCheckLogs',
+  'remote:readPullRequestMergeOptions',
+  'remote:replyToPullRequest',
+  'remote:rerunPullRequestChecks',
+  'remote:resolvePullRequestDiscussion',
+  'remote:syncPullRequest',
   'repository:add',
   'repository:chooseFolder',
   'repository:disconnect',
@@ -193,11 +208,3 @@ export type IpcInvokeChannel = (typeof IPC_INVOKE_CHANNELS)[number];
 export const IPC_UPDATE_CHANNEL = 'app:update' as const;
 export const IPC_SOFTWARE_UPDATE_CHANNEL = 'softwareUpdate:state' as const;
 export const IPC_WINDOW_CHROME_CHANNEL = 'windowChrome:sync' as const;
-
-/**
- * The main process's own words from a failed IPC call: Electron puts the channel and the error's
- * class in front of them, which a person should never read.
- */
-export function ipcErrorMessage(message: string): string {
-  return message.replace(/^Error invoking remote method '[^']+': (?:\w*Error: )?/u, '');
-}

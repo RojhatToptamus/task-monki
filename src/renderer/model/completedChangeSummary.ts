@@ -84,6 +84,18 @@ export function selectCompletedRunChangeSnapshot(
   );
 }
 
+/**
+ * A run that left the worktree as it found it: the same head and the same
+ * uncommitted changes. What its captured diff lists against the base was there
+ * before it, such as an opened pull request's own changes.
+ */
+export function runChangedNothing(run: RunRecord | undefined, gitSnapshots: readonly GitSnapshotRecord[]): boolean {
+  if (!run?.beforeGitSnapshotId || !run.afterGitSnapshotId) return false;
+  const before = gitSnapshots.find((snapshot) => snapshot.id === run.beforeGitSnapshotId);
+  const after = gitSnapshots.find((snapshot) => snapshot.id === run.afterGitSnapshotId);
+  return Boolean(before && after && before.headSha === after.headSha && before.dirtyFingerprint === after.dirtyFingerprint);
+}
+
 /** Read-only follow-ups must not appear to have produced the same files again. */
 export function conversationCaptureRunIds(
   runs: RunRecord[],

@@ -21,7 +21,8 @@ what happened:
 - Preview's authenticated launcher or container labels own live Preview
   resource identity.
 - the Git remote owns the published branch ref.
-- GitHub owns pull requests, checks, reviews, and merge state.
+- GitHub and GitLab own issues, pull and merge requests, checks, reviews, and
+  merge state.
 
 Recovery may adopt a proven active or completed result, mark an interrupted
 operation honestly, or expose an explicit retry or cleanup action. It never
@@ -114,7 +115,8 @@ settled run, such as its post-run Git snapshot, keep it. Startup identifies a
 review or side question outcome by its run: when the Task
 store already records that outcome, under whichever operation recorded it,
 startup only settles the runtime record and does not publish the result or
-capture post-run evidence again.
+capture post-run evidence again. A review outcome projected again keeps the
+walkthrough artifact its run already holds instead of writing a second.
 
 Graceful runtime shutdown first removes adapter event producers. It then drains
 events that Task Monki already accepted before it stops the adapters. Store
@@ -197,6 +199,53 @@ searches for an existing open PR on the task branch. It adopts a match and
 never invokes PR creation. The normal explicit creation path also searches
 before creating. A failed recovery lookup records `GITHUB_SYNC_FAILED` so the
 task exposes the failed observation and retains an explicit retry path.
+
+A push to an opened pull request's own branch records the branch and the head
+Task Monki last observed for it, and is leased on that head. Finding the branch
+still at that head proves the push did not land: the record becomes FAILED and
+a retry is safe. A lease the remote refuses is FAILED as well, with nothing
+changed. A different unexpected head stays AMBIGUOUS. Sync branch refuses while
+that push is unresolved, and never moves off a commit the task pushed.
+
+Opening a pull request fetches objects only, then records the task, iteration
+and worktree in one transaction before the checkout. An interrupted checkout
+leaves a CREATING or failed worktree that Recover recreates at the recorded
+head, fetching it again when the objects are gone; a head the platform no
+longer has requires opening the pull request in a new task. Sync branch first
+records a base both the old and the new head descend from when the pull
+request was rewritten, so an interruption leaves a worktree that verifies.
+
+Marking a pull request ready, merging it, replying on it, resolving or
+reopening its threads, asking a reviewer again and running its failed checks
+again are the person's explicit writes, and nothing repeats them. Before a merge Task Monki records
+`PR_MERGE_REQUESTED` with the head and the method; the merge itself is pinned
+to that head (`sha`), so a retry can never merge a different commit, and after
+a crash the next refresh reads whether the platform merged. Marking ready is
+idempotent on the platform. Replies post one at a time and are recorded as
+`PR_REPLIES_POSTED` once they land, naming the discussions answered; a thread's
+reply also shows in the thread itself, so after a crash Reply offers only the
+discussions the person has not answered since the agent did. A review's answer
+is a comment of its own, so a crash after it lands and before the record is
+written leaves Reply offering it once more; the comment is on the platform to
+see. Resolving or reopening a thread, and asking a reviewer again, are
+idempotent on the platform; each is recorded once it lands, and after a crash
+the next reading shows the thread's or the reviewer's state. Running failed
+checks again is recorded as `PR_CHECKS_RERUN_REQUESTED` after the platform
+accepts it, and nothing repeats it: a crash before the record leaves the runs
+started, which the next reading shows as pending checks. Merging observes the
+worktree before the write, so a crash cannot leave local work behind a merge
+Task Monki made. Refresh of a task opened from a pull request reads the
+worktree before it records the platform's reading, so a merge made on the
+platform completes the task only when the worktree holds nothing the pull
+request lacks.
+
+A branch update (Pull changes or Update with <base>) fetches objects only, then
+records `BRANCH_UPDATE_REQUESTED` before Task Monki's own `git merge` in the
+worktree; Pull changes also records the base branch's tip it read. Git owns
+the result, and nothing repeats the merge: a merge Git stopped on stays in
+progress until Push update commits it. The merged base becomes the task's base
+once the branch holds it, moving forward to where the branch meets the recorded
+tip; after an interruption, the next Push update adopts it.
 
 GitHub refresh is read-only and has no durable in-progress state. If it is
 interrupted, the last complete snapshot remains current until the user retries

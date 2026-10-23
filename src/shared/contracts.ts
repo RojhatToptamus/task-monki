@@ -5,10 +5,13 @@ import type {
   AgentReviewGateProjection,
   AgentReviewGateStatus,
   DecideReviewFindingRequest,
-  ReviewFindingDecision
+  DecideReviewRequestItemRequest,
+  ReviewFindingDecision,
+  ReviewRequestItemDecision
 } from './agentReviewFindings';
 import type { SaveTaskReviewDraftRequest, TaskReviewDraft } from './reviewDraft';
 import type { ReviewRequestRecord } from './reviewRounds';
+import type { ReadTaskCommitDiffRequest, ReadTaskCommitsRequest, TaskCommitDiffResult, TaskCommitsResult } from './taskCommits';
 import type {
   AgentExecutionSettings,
   AgentGoalSnapshotRecord,
@@ -69,11 +72,16 @@ export * from './agent';
 export * from './agentReviewFindings';
 export * from './reviewDraft';
 export * from './reviewRounds';
+export * from './reviewWalkthrough';
+export * from './taskCommits';
 export * from './agentRuntime';
 export * from './attachments';
 export * from './discourse';
 export * from './design';
 export * from './preview';
+export * from './remoteWork';
+export * from './pullRequestFeedback';
+export * from './pullRequestActions';
 
 export interface DesignRepositoryInspection {
   repository: Repository;
@@ -307,14 +315,19 @@ export const DOMAIN_EVENT_TYPES = [
   'GIT_SNAPSHOT_CAPTURED',
   'DELIVERY_COMMIT_CREATED',
   'REVIEW_REQUEST_ANSWERED',
+  'REVIEW_REQUEST_ITEM_DECIDED',
   'REVIEW_SNAPSHOT_RECORDED',
   'DIFF_ARTIFACT_CREATED',
   'PROMPT_REFINED',
   'GITHUB_PREFLIGHT_COMPLETED',
+  'BRANCH_UPDATE_REQUESTED',
   'BRANCH_PUBLISH_REQUESTED',
   'BRANCH_PUBLISHED',
   'BRANCH_PUBLISH_FAILED',
   'PR_CREATE_REQUESTED',
+  'PR_MERGE_REQUESTED',
+  'PR_REPLIES_POSTED',
+  'PR_CHECKS_RERUN_REQUESTED',
   'PR_BODY_ARTIFACT_CREATED',
   'PR_SNAPSHOT_CAPTURED',
   'CI_ROLLUP_CAPTURED',
@@ -374,6 +387,9 @@ export const ARTIFACT_KINDS = [
   'diff',
   'git-snapshot',
   'pr-body',
+  'remote-source',
+  'pull-request-feedback',
+  'review-walkthrough',
 ] as const;
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
@@ -550,6 +566,8 @@ export interface Task {
   sourceDesignRevisionId?: string;
   designPreviewTarget?: import('./design').DesignPreviewTarget;
   acceptedWorkspaceSnapshotId?: string;
+  /** The GitHub or GitLab issue or pull request the task was opened from. Immutable. */
+  remoteSource?: import('./remoteWork').TaskRemoteSource;
   agentSettings: AgentExecutionSettings;
   createdAt: string;
   updatedAt: string;
@@ -682,11 +700,16 @@ export interface BranchPublicationRecord {
   iterationId: string;
   worktreeId: string;
   remoteName: string;
-  /** Exact destination of an external-checkout push, retained for recovery. */
+  /** Destination of an external-checkout push, without the user and password an https URL can carry, retained for recovery. */
   remoteUrl?: string;
   branchName: string;
   remoteRef: string;
   headSha?: string;
+  /**
+   * An opened pull request's branch head when the push was requested. The push
+   * is leased on it, and finding the branch still there proves the push did not land.
+   */
+  previousRemoteSha?: string;
   status: BranchPublicationStatus;
   error?: string;
   requestedAt: string;
@@ -742,6 +765,8 @@ export interface ReviewRollupRecord {
   headSha?: string;
   status: ReviewStatus;
   reviewDecision?: string;
+  /** What people said on the pull request, as last read; kept from the previous observation when a read fails. */
+  feedback?: import('./pullRequestFeedback').PullRequestFeedbackSummary;
   observedAt: string;
   raw?: unknown;
 }
@@ -968,7 +993,7 @@ export interface BoardAgentReviewSummary {
   /** `effectiveReviewGateStatus` of the review: the status once every decision applies, which can differ from `status` both ways. */
   effectiveStatus: AgentReviewGateStatus;
   /** The agent answered the request after this review; true when an item waits on the person's decision. */
-  requestAnswered?: { awaitingDecision: boolean };
+  requestAnswered?: import('./agentReviewFindings').ReviewRequestAnswerState;
 }
 
 export type BoardStatusProjection = Pick<
@@ -978,9 +1003,11 @@ export type BoardStatusProjection = Pick<
   | 'git'
   | 'githubPullRequest'
   | 'githubPullRequestNumber'
+  | 'githubPullRequestUrl'
   | 'ciChecks'
   | 'reviews'
   | 'merge'
+  | 'branchPublication'
   | 'health'
   | 'summary'
   | 'implementationRetry'
@@ -989,6 +1016,26 @@ export type BoardStatusProjection = Pick<
   agentReview: BoardAgentReviewSummary;
   bugReplay?: import('./bugReplay').BoardBugReplaySummary;
 };
+
+/** The facts behind a delivery state, read from the task's latest pull request evidence. */
+export interface BoardDeliveryFacts {
+  /** The checks that failed for the pull request's head: the first three names, and how many failed. */
+  failingChecks?: { names: string[]; count: number };
+  /** Who asked for changes and how many threads are unresolved. */
+  feedback?: Pick<import('./pullRequestFeedback').PullRequestFeedbackSummary, 'unresolvedCount' | 'reviewers'>;
+  /** The platform holds the merge back on a base that moved. */
+  baseMoved?: { base: string; reason: 'BEHIND' | 'CONFLICTS' };
+  /** Why the last push failed, as recorded. */
+  pushError?: string;
+  /** Whose move a pull request with requested changes waits on (`reviewTurn`). */
+  turn?: 'AUTHOR' | 'REVIEWERS';
+  /**
+   * A merge in progress in the task's own worktree beside an open pull request,
+   * as PR Status reads it: Push update finishes it. Git counts the files it
+   * stopped on as conflicted until then, resolved or not.
+   */
+  mergeInProgress?: boolean;
+}
 
 export interface BoardTaskSummary {
   id: string;
@@ -1000,6 +1047,10 @@ export interface BoardTaskSummary {
   forkedFromTaskId?: string;
   updatedAt: string;
   projection: BoardStatusProjection;
+  /** The pull request it was opened from was rewritten under a worktree with nothing of its own (`pullRequestRewrittenUnder`). */
+  pullRequestRewritten?: boolean;
+  /** What a delivery that waits on the person turns on, for the Inbox to say beside its word. */
+  delivery?: BoardDeliveryFacts;
 }
 
 export interface BoardSnapshot {
@@ -1068,6 +1119,8 @@ export interface CreateTaskRequest {
   runtimeId?: AgentRuntimeId;
   agentSettings?: AgentExecutionSettings;
   attachmentDraftId?: string;
+  /** An issue the task works on. Its text is captured when the task is created. */
+  issue?: import('./remoteWork').RemoteWorkRef;
 }
 
 export interface ExistingWorktree {
@@ -1124,6 +1177,8 @@ export interface StartRunRequest {
   instruction?: string;
   mode?: Exclude<AgentRunMode, 'REVIEW'>;
   settings?: AgentExecutionSettings;
+  /** A request from the Review tab that starts the task's first turn: the instruction item by item. */
+  reviewRequest?: ReviewRequestRecord;
 }
 
 export interface CancelRunRequest {
@@ -1180,12 +1235,17 @@ export interface AskSideQuestionRequest {
 }
 
 /**
- * What an Ask question is about: a finding of the task's current review, or a line
- * range of the current diff (the old side's numbers on removed lines).
+ * What an Ask question is about: a finding of the task's current review; a line
+ * range of the current diff (the old side's numbers on removed lines); a section
+ * of the review gate's walkthrough, by its index; a changed file; or a thread
+ * of the task's pull request.
  */
 export type AskSubject =
   | { kind: 'FINDING'; reviewRunId: string; findingId: string }
-  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number };
+  | { kind: 'LINES'; path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }
+  | { kind: 'STAGE'; reviewRunId: string; section: number }
+  | { kind: 'FILE'; path: string }
+  | { kind: 'THREAD'; discussionId: string };
 
 export type SideQuestionModelChoice = Pick<AgentExecutionSettings, 'model' | 'modelProvider' | 'reasoningEffort'> & {
   runtimeId: AgentRuntimeId;
@@ -1385,7 +1445,7 @@ export interface UpdateAppSettingsRequest {
   selectedRepositoryId?: string | null;
 }
 
-export type ExternalToolId = 'git' | 'codex' | 'gh';
+export type ExternalToolId = 'git' | 'codex' | 'gh' | 'glab';
 export type ExternalToolResolutionSource = 'env' | 'override' | 'settings' | 'auto';
 export type ExternalToolProbeStatus = 'ok' | 'error';
 
@@ -1525,6 +1585,8 @@ export interface CreatePullRequestRequest {
   title?: string;
   /** Target for a new imported-work PR. An existing PR keeps its own target. */
   baseBranch?: string;
+  /** For a task opened from an issue: close it when the new pull request merges. */
+  closeIssue?: boolean;
 }
 
 export interface RefreshGitHubRequest {
@@ -1617,6 +1679,28 @@ export interface TaskManagerApi extends ApplicationPreviewApi, BugReplayApi {
   listExistingWorktrees(repositoryId: string): Promise<ExistingWorktree[]>;
   previewImport(input: PreviewImportRequest): Promise<ImportPreview>;
   importTask(input: ImportTaskRequest): Promise<Task>;
+  /** Open issues or pull requests of a registered checkout's remote repository. */
+  listRemoteWork(input: import('./remoteWork').ListRemoteWorkRequest): Promise<import('./remoteWork').RemoteWorkListing>;
+  /** Opens a pull request in a new task at its exact head; an already opened one returns its task. */
+  openPullRequest(input: import('./remoteWork').OpenPullRequestRequest): Promise<Task>;
+  /** Moves a clean pull request task to the pull request's newer head. */
+  syncPullRequest(input: import('./remoteWork').SyncPullRequestRequest): Promise<Task>;
+  /** Marks the task's draft pull request ready for review. */
+  markPullRequestReady(input: import('./pullRequestActions').MarkPullRequestReadyRequest): Promise<PullRequestSnapshotRecord>;
+  /** How the task's pull request can merge, for the merge dialog. */
+  readPullRequestMergeOptions(input: import('./pullRequestActions').ReadPullRequestMergeOptionsRequest): Promise<import('./pullRequestActions').PullRequestMergeOptions>;
+  /** Merges exactly the head the person saw. */
+  mergePullRequest(input: import('./pullRequestActions').MergePullRequestRequest): Promise<PullRequestSnapshotRecord>;
+  /** Posts the person's replies on the task's pull request, resolves the threads they chose and asks reviewers again. */
+  replyToPullRequest(input: import('./pullRequestActions').ReplyToPullRequestRequest): Promise<import('./pullRequestActions').ReplyToPullRequestResult>;
+  /** Resolves a thread on the task's pull request, or reopens one. */
+  resolvePullRequestDiscussion(input: import('./pullRequestActions').ResolvePullRequestDiscussionRequest): Promise<void>;
+  /** Runs the current head's failed checks again where the platform ran them. */
+  rerunPullRequestChecks(input: import('./pullRequestActions').RerunPullRequestChecksRequest): Promise<import('./pullRequestActions').RerunPullRequestChecksResult>;
+  /** Merges the commits the worktree lacks into its branch; the files a conflict stops on are left for the agent. */
+  mergePullRequestUpdate(input: import('./pullRequestActions').MergePullRequestUpdateRequest): Promise<import('./pullRequestActions').PullRequestUpdate>;
+  /** The end of each failing check's log for the pull request's current head. */
+  readPullRequestCheckLogs(input: import('./pullRequestActions').ReadPullRequestCheckLogsRequest): Promise<import('./pullRequestActions').PullRequestCheckLog[]>;
   reconnectWorktree(input: ReconnectWorktreeRequest): Promise<WorktreeRecord>;
   updateWorktreeComparison(input: UpdateWorktreeComparisonRequest): Promise<WorktreeRecord>;
   listDesigns(): Promise<DesignListItem[]>;
@@ -1754,8 +1838,16 @@ export interface TaskManagerApi extends ApplicationPreviewApi, BugReplayApi {
   startReview(input: StartReviewRequest): Promise<RunRecord>;
   /** Dismisses or restores a finding of the current, completed review. */
   decideReviewFinding(input: DecideReviewFindingRequest): Promise<ReviewFindingDecision>;
+  /** Accepts the agent's answer to an item of the latest request after the review, or reopens it. */
+  decideReviewRequestItem(input: DecideReviewRequestItemRequest): Promise<ReviewRequestItemDecision>;
   /** What changed from the code a review read to the worktree now. */
   readReviewChanges(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** The change a review read: from the base it compared against to the code it read. */
+  readReviewedDiff(input: import('./reviewRounds').ReadReviewChangesRequest): Promise<import('./reviewRounds').ReviewChangesResult>;
+  /** A capture's commits, oldest first, from the base it compares against to the head it captured. */
+  listTaskCommits(input: ReadTaskCommitsRequest): Promise<TaskCommitsResult>;
+  /** One of a capture's commits, as its change against its first parent. */
+  readTaskCommitDiff(input: ReadTaskCommitDiffRequest): Promise<TaskCommitDiffResult>;
   /** Records a question in Ask and starts its read-only answer run. */
   askSideQuestion(input: AskSideQuestionRequest): Promise<TaskInstruction>;
   stopSideQuestion(input: StopSideQuestionRequest): Promise<void>;

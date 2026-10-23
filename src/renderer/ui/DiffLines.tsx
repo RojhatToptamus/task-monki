@@ -1,5 +1,5 @@
 import type { MouseEvent } from 'react';
-import type { DiffLine } from '../model/diffEvidence';
+import { diffLineCode, type DiffLine } from '../model/diffEvidence';
 
 /** Shared line presentation for Evidence and configuration review. */
 export function DiffLines({ lines, path, onOpenPathMenu }: {
@@ -53,17 +53,4 @@ function DiffLineRow({
       </code>
     </div>
   );
-}
-
-function diffLineCode(line: DiffLine): string {
-  if (line.kind === 'addition' && line.content.startsWith('+')) {
-    return line.content.slice(1);
-  }
-  if (line.kind === 'deletion' && line.content.startsWith('-')) {
-    return line.content.slice(1);
-  }
-  if (line.kind === 'context' && line.content.startsWith(' ')) {
-    return line.content.slice(1);
-  }
-  return line.content;
 }

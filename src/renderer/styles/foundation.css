@@ -1,7 +1,8 @@
 :root {
-  /* Type — the seven roles in DESIGN.md 8.2. A component never sets a size
+  /* Type — the eight roles in DESIGN.md 8.2. A component never sets a size
      that is not one of these. */
   --t-title: 22px;
+  --t-chapter: 17px;
   --t-heading: 15px;
   --t-label: 13px;
   --t-body: 13px;
@@ -19,6 +20,7 @@
   --lh-meta: 16px;
   --lh-ui: 18px;
   --lh-body: 20px;
+  --lh-chapter: 24px;
   --lh-title: 28px;
   --lh-prose: 1.55;
 
@@ -40,6 +42,8 @@
   --h-toolbar: 28px;
   --h-compact: 24px;
   --h-icon: 28px;
+  /* A mark that sits on a line of text: a badge, an avatar. */
+  --h-mark: 20px;
 
   /* Rows, bars and heads (DESIGN.md §3): a dense row (rail, index, menu), a
      content row or file head, a two-line or table row, a toolbar under a head,
@@ -419,7 +423,7 @@ summary,
   .tm-settings__nav-item,
   .tm-listrail__item,
   .tm-review__index-file,
-  .tm-review__index-finding,
+  .tm-review__index-fold,
   .tm-card__hit,
   .tm-inbox-row__hit,
   .tm-previews__identity,

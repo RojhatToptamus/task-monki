@@ -2,9 +2,15 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   ReviewChangesResult,
+  TaskCommitDiffResult,
+  TaskCommitsResult,
   ReviewFindingDecision,
+  ReviewRequestItemDecision,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -21,6 +27,23 @@ import type {
   CreateTaskRequest,
   ExistingWorktree,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  RemoteWorkListing,
+  SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  RerunPullRequestChecksResult,
+  ReadPullRequestMergeOptionsRequest,
+  PullRequestMergeOptions,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReplyToPullRequestResult,
+  ReadPullRequestCheckLogsRequest,
+  PullRequestCheckLog,
+  MergePullRequestUpdateRequest,
+  PullRequestUpdate,
   ImportPreview,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
@@ -362,6 +385,22 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
     importTask: (input: ImportTaskRequest) => post<Task>(baseUrl, '/api/tasks/import', input),
+    listRemoteWork: (input: ListRemoteWorkRequest) => post<RemoteWorkListing>(baseUrl, '/api/remote/list', input),
+    openPullRequest: (input: OpenPullRequestRequest) => post<Task>(baseUrl, '/api/remote/pull-request/open', input),
+    syncPullRequest: (input: SyncPullRequestRequest) => post<Task>(baseUrl, '/api/remote/pull-request/sync', input),
+    markPullRequestReady: (input: MarkPullRequestReadyRequest) => post<PullRequestSnapshotRecord>(baseUrl, '/api/remote/pull-request/ready', input),
+    rerunPullRequestChecks: (input: RerunPullRequestChecksRequest) =>
+      post<RerunPullRequestChecksResult>(baseUrl, '/api/remote/pull-request/rerun-checks', input),
+    resolvePullRequestDiscussion: async (input: ResolvePullRequestDiscussionRequest) => {
+      await post<Record<string, never>>(baseUrl, '/api/remote/pull-request/resolve', input);
+    },
+    readPullRequestMergeOptions: (input: ReadPullRequestMergeOptionsRequest) =>
+      post<PullRequestMergeOptions>(baseUrl, '/api/remote/pull-request/merge-options', input),
+    mergePullRequest: (input: MergePullRequestRequest) => post<PullRequestSnapshotRecord>(baseUrl, '/api/remote/pull-request/merge', input),
+    replyToPullRequest: (input: ReplyToPullRequestRequest) => post<ReplyToPullRequestResult>(baseUrl, '/api/remote/pull-request/replies', input),
+    readPullRequestCheckLogs: (input: ReadPullRequestCheckLogsRequest) =>
+      post<PullRequestCheckLog[]>(baseUrl, '/api/remote/pull-request/check-logs', input),
+    mergePullRequestUpdate: (input: MergePullRequestUpdateRequest) => post<PullRequestUpdate>(baseUrl, '/api/remote/pull-request/update', input),
     previewImport: (input: PreviewImportRequest) => post<ImportPreview>(baseUrl, '/api/tasks/import/preview', input),
     listExistingWorktrees: (repositoryId: string) =>
       get<ExistingWorktree[]>(baseUrl, `/api/worktrees?${new URLSearchParams({ repositoryId })}`),
@@ -493,8 +532,12 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RunRecord>(baseUrl, '/api/runs/review', input),
     decideReviewFinding: (input: DecideReviewFindingRequest) =>
       post<ReviewFindingDecision>(baseUrl, '/api/review/decide-finding', input),
+    decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+      post<ReviewRequestItemDecision>(baseUrl, '/api/review/decide-answer', input),
     readReviewChanges: (input: ReadReviewChangesRequest) =>
       post<ReviewChangesResult>(baseUrl, '/api/review/changes', input),
+    readReviewedDiff: (input: ReadReviewChangesRequest) =>
+      post<ReviewChangesResult>(baseUrl, '/api/review/reviewed-diff', input),
     askSideQuestion: (input: AskSideQuestionRequest) =>
       post<TaskInstruction>(baseUrl, '/api/side-question/ask', input),
     stopSideQuestion: (input: StopSideQuestionRequest) =>
@@ -510,6 +553,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
     createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/git/delivery-commit', input),
+    listTaskCommits: (input: ReadTaskCommitsRequest) =>
+      post<TaskCommitsResult>(baseUrl, '/api/git/task-commits', input),
+    readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+      post<TaskCommitDiffResult>(baseUrl, '/api/git/task-commit-diff', input),
     preflightGitHub: (input: GitHubPreflightRequest) =>
       post<GitHubRepositoryRecord>(baseUrl, '/api/github/preflight', input),
     publishBranch: (input: PublishBranchRequest) =>

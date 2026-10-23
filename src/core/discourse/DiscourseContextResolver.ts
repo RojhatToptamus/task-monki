@@ -14,6 +14,7 @@ import {
   type DiscourseMentionTaskEntry
 } from '../../shared/discourse';
 import type { Repository, Task, TaskSnapshot } from '../../shared/contracts';
+import { taskGoal } from '../../shared/promptTemplates';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
 
 const PREVIEW_TTL_MS = 2 * 60 * 1_000;
@@ -287,8 +288,9 @@ export class DiscourseContextResolver {
     const git = worktree ? snapshot.gitSnapshots
       .filter((candidate) => candidate.worktreeId === worktree.id)
       .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0] : undefined;
+    // The task's goal, as its agent has it: a task opened from an issue or pull request may have no request of its own.
     const recordedContext = JSON.stringify({
-      task: { id: task.id, title: task.title, description: task.prompt,
+      task: { id: task.id, title: task.title, description: taskGoal(task),
         phase: task.workflowPhase, resolution: task.resolution, updatedAt: task.updatedAt },
       repository: { id: repositoryId, name: repositoryName },
       worktree: worktree ? { id: worktree.id, branch: worktree.branchName, status: worktree.status } : null,

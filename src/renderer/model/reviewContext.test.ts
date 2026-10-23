@@ -11,7 +11,15 @@ import {
   splitCheckoutLines,
   wholeFileState
 } from './reviewContext';
-import { anchorReviewFindings, buildReviewDiffRows, diffFileSignature, lineAnchorKey, type ReviewFindingView } from './reviewWorkspace';
+import {
+  anchorReviewFindings,
+  buildReviewDiffRows,
+  diffFileSignature,
+  lineAnchorKey,
+  reviewGutterWidth,
+  reviewRowRange,
+  type ReviewFindingView
+} from './reviewWorkspace';
 
 // The checkout's file: 61 lines, line 10 changed and line 41 added since the base.
 const checkout = Array.from({ length: 61 }, (_, index) => {
@@ -112,6 +120,29 @@ describe('filled gaps', () => {
 
   it('leaves no gap once every line is revealed', () => {
     expect(gaps(revealLines(filled, new Set(fillableLines(filled))).lines)).toEqual([]);
+  });
+
+  it('finds a run shown on its own, such as a key change, by its lines before and after lines open around it', () => {
+    const run = (lines: typeof filled.lines) => {
+      const rows = buildReviewDiffRows(lines);
+      const range = reviewRowRange(rows, 'n38', 'n44');
+      return range ? rows.slice(range.from, range.to + 1).flatMap((row) => (row.kind === 'line' ? [row.line.newLine] : [])) : [];
+    };
+    expect(run(filled.lines)).toEqual([38, 39, 40, 41, 42, 43, 44]);
+    expect(run(revealLines(filled, new Set([30, 31, 32, 33, 34, 35, 36, 37, 45])).lines)).toEqual([38, 39, 40, 41, 42, 43, 44]);
+    expect(reviewRowRange(buildReviewDiffRows(filled.lines), 'n44', 'n38')).toBeUndefined();
+  });
+
+  it('keeps one gutter while the checkout fills a file and every line of it opens, so code never moves sideways', () => {
+    // The checkout runs on to line 1261, past where the change's own line numbers end.
+    const longer = `${[...checkout, ...Array.from({ length: 1200 }, (_, index) => `const tail${index} = ${index};`)].join('\n')}\n`;
+    const arrived = fillFileGaps(file, { status: 'TEXT', text: longer, blobSha1: BLOB }).file;
+    const opened = { ...arrived, blocks: arrived.blocks.map((block) => revealLines(block, new Set(fillableLines(block)))) };
+    const width = reviewGutterWidth([file], true);
+    expect(reviewGutterWidth([arrived], true)).toBe(width);
+    expect(reviewGutterWidth([opened], true)).toBe(width);
+    // An earlier capture never fills, so its gutter is as wide as its own numbers need.
+    expect(reviewGutterWidth([file], false)).toBeLessThan(width);
   });
 
   it('never changes what was viewed, and anchors a finding to an unchanged line once it shows', () => {

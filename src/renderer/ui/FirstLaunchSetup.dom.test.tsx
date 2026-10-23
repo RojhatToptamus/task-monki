@@ -57,7 +57,8 @@ describe('FirstLaunchSetup', () => {
           tools: {
             git: tool('git', 'Git', true),
             codex: tool('codex', 'Codex', true),
-            gh: tool('gh', 'GitHub CLI', false)
+            gh: tool('gh', 'GitHub CLI', false),
+            glab: tool('glab', 'GitLab CLI', false)
           }
         }}
         models={[model]}

@@ -91,6 +91,77 @@ describe('validateCurrentStoreRecords', () => {
     expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
   });
 
+  it('accepts durable decisions on the agent\'s answers and rejects decisions outside their contract', () => {
+    const reviewRunId = randomUUID();
+    const accept = { id: randomUUID(), reviewRunId, instructionId: randomUUID(), item: 2, kind: 'ACCEPT' as const, createdAt: NOW };
+    const withDecisions = (decisions: unknown[]) => {
+      const task = validTask();
+      task.projection.agentReview = { status: 'STALE', runId: reviewRunId, requestItemDecisions: decisions as never };
+      const state = createEmptyState();
+      state.tasks = [task];
+      return state;
+    };
+
+    expect(() => validateCurrentStoreRecords(withDecisions([accept, { ...accept, id: randomUUID(), kind: 'REOPEN' }]))).not.toThrow();
+    for (const malformed of [
+      { ...accept, kind: 'DONE' },
+      { ...accept, item: 0 },
+      { ...accept, item: 101 },
+      { ...accept, instructionId: 'request' },
+      { ...accept, note: 'A decision takes no note.' }
+    ]) {
+      expect(() => validateCurrentStoreRecords(withDecisions([malformed]))).toThrow('tasks.projection contains a malformed record');
+    }
+    expect(() => validateCurrentStoreRecords(withDecisions(Array.from({ length: 201 }, () => ({ ...accept, id: randomUUID() })))))
+      .toThrow('tasks.projection contains a malformed record');
+
+    // A reply recorded before the answers named their items still loads; a later one names both its request and items.
+    const withAnswer = (requestAnswer: unknown) => {
+      const state = withDecisions([]);
+      state.tasks[0]!.projection.agentReview = { status: 'STALE', runId: reviewRunId, requestAnswer: requestAnswer as never };
+      return state;
+    };
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true }))).not.toThrow();
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true, instructionId: accept.instructionId, decisionItems: [2] }))).not.toThrow();
+    expect(() => validateCurrentStoreRecords(withAnswer({ awaitingDecision: true, instructionId: accept.instructionId })))
+      .toThrow('tasks.projection contains a malformed record');
+
+    const eventState = createEmptyState();
+    eventState.events = [{
+      id: randomUUID(), type: 'REVIEW_REQUEST_ITEM_DECIDED' as const, taskId: randomUUID(),
+      source: 'ui' as const, sourceEventId: 'decision', occurredAt: NOW, receivedAt: NOW,
+      payload: { decision: { ...accept, item: '2' } }
+    }];
+    expect(() => validateCurrentStoreRecords(eventState)).toThrow('events contains a malformed record');
+  });
+
+  it('accepts a review observation\'s feedback summary only in its durable shape', () => {
+    const rollup = {
+      id: randomUUID(), taskId: randomUUID(), iterationId: randomUUID(), worktreeId: randomUUID(),
+      pullRequestNumber: 82, headSha: 'head', status: 'CHANGES_REQUESTED', observedAt: NOW,
+      feedback: {
+        artifactId: randomUUID(), digest: 'a'.repeat(64), unresolvedCount: 2, discussionCount: 3,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }]
+      }
+    };
+    const stateWith = (record: unknown) => {
+      const state = createEmptyState();
+      state.reviewRollups = [record as never];
+      return state;
+    };
+    expect(() => validateCurrentStoreRecords(stateWith(rollup))).not.toThrow();
+    for (const feedback of [
+      { ...rollup.feedback, artifactId: 'feedback.json' },
+      { ...rollup.feedback, digest: 'abc' },
+      { ...rollup.feedback, unresolvedCount: -1 },
+      { ...rollup.feedback, reviewers: [{ name: 'alice', state: 'BLOCKED' }] },
+      { ...rollup.feedback, reviewers: [{ name: ' alice ', state: 'APPROVED' }] },
+      { ...rollup.feedback, reviewers: Array.from({ length: 21 }, (_, index) => ({ name: `r${index}`, state: 'REQUESTED' })) }
+    ]) {
+      expect(() => validateCurrentStoreRecords(stateWith({ ...rollup, feedback }))).toThrow('reviewRollups contains a malformed record');
+    }
+  });
+
   it('requires a side question to name its thread and keeps its fields off other messages', () => {
     const task = validTask();
     const iteration = {

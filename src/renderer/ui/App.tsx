@@ -11,9 +11,14 @@ import {
   EMPTY_REVIEW_DRAFT,
   TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
+  leavablePullRequestHeads,
+  remoteProviderName,
+  remoteWorkNoun,
   type CreateTaskRequest,
   type DecideReviewFindingRequest,
+  type DecideReviewRequestItemRequest,
   type ImportTaskRequest,
+  type OpenPullRequestRequest,
   type CreateBoardRequest,
   type Board,
   type BoardSnapshot,
@@ -34,7 +39,10 @@ import {
   type RepositoryImpact,
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
+  type PullRequestMergeMethod,
+  type PullRequestReply,
   type RefinePromptRequest,
+  type RemoteProvider,
   type TaskDetailSnapshot,
   type TaskManagerAppSettings,
   type SideQuestionModelChoice,
@@ -67,6 +75,8 @@ import {
   selectTaskEvents,
   selectTaskRuns
 } from '../model/selectors';
+import { checksMayNotHaveStarted } from '../model/prStatus';
+import { deliveryProvider } from '../model/deliveryWords';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import {
   createUpdateRefreshScheduler,
@@ -1634,9 +1644,18 @@ export function App() {
   const selectedPullRequest = selectedTask && taskDetail
     ? selectLatestPullRequest(taskDetail, selectedTask)
     : undefined;
+  const selectedPullRequestHeads = useMemo(
+    () => taskDetail ? leavablePullRequestHeads(
+      taskDetail.task.remoteSource?.pullRequest?.headSha, taskDetail.pullRequests, taskDetail.branchPublications) : [],
+    [taskDetail]
+  );
   const selectedCiRollup = selectedTask && taskDetail
     ? selectLatestCiRollup(taskDetail, selectedTask)
     : undefined;
+  const selectedChecksMayNotHaveStarted = useMemo(
+    () => Boolean(taskDetail && checksMayNotHaveStarted(selectedPullRequest, taskDetail.ciRollups)),
+    [taskDetail, selectedPullRequest]
+  );
   const selectedReviewRollup = selectedTask && taskDetail
     ? selectLatestReviewRollup(taskDetail, selectedTask)
     : undefined;
@@ -1834,7 +1853,8 @@ export function App() {
       const created = await taskManagerApi.createTask(input);
       rememberRepository(input.repositoryId);
       taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
-      setNewTaskTextDraft({ title: '', prompt: '' });
+      // A task from an issue used its own text, so the New work draft stays.
+      if (!input.issue) setNewTaskTextDraft({ title: '', prompt: '' });
       await taskDataCoordinator.refreshBoard();
       await openTaskDetail(created.id);
     } catch (caught) {
@@ -1853,6 +1873,19 @@ export function App() {
       await openTaskDetail(imported.id);
     } catch (caught) {
       reportActionError(caught, 'Could not import existing work.');
+      throw caught;
+    }
+  };
+
+  const openPullRequest = async (input: OpenPullRequestRequest) => {
+    try {
+      const opened = await taskManagerApi.openPullRequest(input);
+      rememberRepository(input.repositoryId);
+      taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
+      await taskDataCoordinator.refreshBoard();
+      await openTaskDetail(opened.id);
+    } catch (caught) {
+      reportActionError(caught, `Could not open the ${remoteWorkNoun(input.pullRequest.repository.provider, 'PULL_REQUEST')}.`);
       throw caught;
     }
   };
@@ -1895,10 +1928,10 @@ export function App() {
     }
   };
 
-  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings) => {
+  const startRun = async (taskId: string, instruction?: string, settings?: AgentExecutionSettings, reviewRequest?: ReviewRequestRecord) => {
     setError(undefined);
     try {
-      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings }));
+      await withAppAction(() => taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings, ...(reviewRequest ? { reviewRequest } : {}) }));
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to start run.');
@@ -2067,16 +2100,107 @@ export function App() {
     }
   };
 
-  const createPullRequest = async (taskId: string, title?: string, baseBranch?: string) => {
+  // What a task's delivery steps report is in its platform's words, as its page reads them.
+  const deliveryPlatform = (taskId: string): RemoteProvider => {
+    const detail = taskDetail?.task.id === taskId ? taskDetail : undefined;
+    const task = detail?.task ?? snapshot.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return 'GITHUB';
+    return deliveryProvider(task, detail?.repository ?? snapshot.repositories.find((repository) => repository.id === task.repositoryId));
+  };
+
+  const createPullRequest = async (taskId: string, title?: string, baseBranch?: string, closeIssue?: boolean) => {
     setError(undefined);
+    const noun = remoteWorkNoun(deliveryPlatform(taskId), 'PULL_REQUEST');
     try {
-      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch }));
-      notify('Draft pull request created.', 'success');
+      await withAppAction(() => taskManagerApi.createPullRequest({ taskId, title, baseBranch, closeIssue }));
+      // Only the creation dialog creates a pull request; Push update shows its result in PR Status.
+      if (title !== undefined) notify(`Draft ${noun} created.`, 'success');
       await refresh();
     } catch (caught) {
       // The creation dialog keeps its inputs and displays the failure for retry.
       if (title !== undefined) throw caught;
-      reportActionError(caught, 'Failed to create pull request.');
+      reportActionError(caught, `Failed to create ${noun}.`);
+    }
+  };
+
+  const markPullRequestReady = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.markPullRequestReady({ taskId }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not mark it ready for review.');
+    }
+  };
+
+  // The merge dialog shows its own failure and keeps its choices for another try.
+  const mergePullRequest = async (taskId: string, method: PullRequestMergeMethod, expectedHeadSha: string, deleteBranch: boolean) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.mergePullRequest({ taskId, method, expectedHeadSha, deleteBranch }));
+    } finally {
+      await refresh();
+    }
+  };
+
+  const replyToPullRequest = async (taskId: string, replies: PullRequestReply[], reviewers: string[]) => {
+    setError(undefined);
+    try {
+      const result = await withAppAction(() => taskManagerApi.replyToPullRequest({ taskId, replies, requestReviewFrom: reviewers }));
+      // The replies land on the platform, out of view, so a toast says they did.
+      if (result.posted > 0 || result.requested.length > 0) {
+        const posted = result.posted > 0 ? `Posted ${result.posted} ${result.posted === 1 ? 'reply' : 'replies'}` : '';
+        const asked = result.requested.length > 0 ? `asked ${result.requested.map((name) => `@${name}`).join(' and ')} to review again` : '';
+        const message = [posted, asked].filter(Boolean).join(' and ');
+        notify(`${message.charAt(0).toUpperCase()}${message.slice(1)}.`, 'success');
+      }
+      return result;
+    } finally {
+      await refresh();
+    }
+  };
+
+  // The files a merge stops on feed the agent's instruction, so a failure is reported here and
+  // still stops that step; a reading that fails after the merge does not.
+  const mergePullRequestUpdate = async (taskId: string, from: 'PULL_REQUEST' | 'BASE') => {
+    setError(undefined);
+    const update = await withAppAction(() => taskManagerApi.mergePullRequestUpdate({ taskId, from })).catch((caught: unknown) => {
+      reportActionError(caught, 'Could not merge the update.');
+      throw caught;
+    });
+    await refresh().catch(() => undefined);
+    return update;
+  };
+
+  // The checks run again on the platform, out of view, so a toast says they started.
+  const rerunPullRequestChecks = async (taskId: string) => {
+    setError(undefined);
+    try {
+      const result = await withAppAction(() => taskManagerApi.rerunPullRequestChecks({ taskId }));
+      notify(`Running ${result.started === 1 ? 'the failed check' : 'the failed checks'} again.`, 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not run the checks again.');
+    }
+  };
+
+  // The thread shows its own failure where it was clicked; the change reads back with the pull request.
+  const resolvePullRequestDiscussion = async (taskId: string, discussionId: string, resolved: boolean) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.resolvePullRequestDiscussion({ taskId, discussionId, resolved }));
+    } finally {
+      await refresh();
+    }
+  };
+
+  const syncPullRequest = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await withAppAction(() => taskManagerApi.syncPullRequest({ taskId }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not sync the branch.');
     }
   };
 
@@ -2086,7 +2210,7 @@ export function App() {
       await withAppAction(() => taskManagerApi.refreshGitHub({ taskId }));
       await refresh();
     } catch (caught) {
-      reportActionError(caught, 'Failed to refresh GitHub.');
+      reportActionError(caught, `Failed to refresh ${remoteProviderName(deliveryPlatform(taskId))}.`);
     }
   };
 
@@ -2329,6 +2453,18 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, input.kind === 'DISMISS' ? 'Could not dismiss the finding.' : 'Could not restore the finding.');
+      throw caught;
+    }
+  };
+
+  // Accepting the agent's answer to a request item, or reopening it, records the person's decision.
+  const decideReviewRequestItem = async (input: DecideReviewRequestItemRequest) => {
+    if (!selectedTask) return;
+    try {
+      await taskManagerApi.decideReviewRequestItem(input);
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, input.kind === 'ACCEPT' ? 'Could not accept the answer.' : 'Could not reopen the answer.');
       throw caught;
     }
   };
@@ -2869,6 +3005,8 @@ export function App() {
             gitSnapshots={selectedGitSnapshots}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
+            pullRequestHeads={selectedPullRequestHeads}
+            checksMayNotHaveStarted={selectedChecksMayNotHaveStarted}
             ciRollup={selectedCiRollup}
             reviewRollup={selectedReviewRollup}
             mergeSnapshot={selectedMergeSnapshot}
@@ -2928,12 +3066,22 @@ export function App() {
             onRetry={retryRun}
             onReview={startReview}
             onDecideReviewFinding={decideReviewFinding}
+            onDecideReviewRequestItem={decideReviewRequestItem}
             onSyncAgentGoal={syncAgentGoal}
             onUpdateAgentNativeSession={updateAgentNativeSession}
             onRespondToInteraction={respondToInteraction}
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
+            onSyncPullRequest={syncPullRequest}
             onRefreshGitHub={refreshGitHub}
+            onMarkPullRequestReady={markPullRequestReady}
+            onReadPullRequestMergeOptions={(taskId) => taskManagerApi.readPullRequestMergeOptions({ taskId })}
+            onMergePullRequest={mergePullRequest}
+            onReplyToPullRequest={replyToPullRequest}
+            onResolvePullRequestDiscussion={resolvePullRequestDiscussion}
+            onRerunPullRequestChecks={rerunPullRequestChecks}
+            onReadPullRequestCheckLogs={(taskId) => taskManagerApi.readPullRequestCheckLogs({ taskId })}
+            onMergePullRequestUpdate={mergePullRequestUpdate}
             onReadArtifact={readArtifact}
             onTransition={transitionTask}
             onArchive={archiveTask}
@@ -3135,6 +3283,8 @@ export function App() {
           onCreate={createTask}
           onImport={importTask}
           onPreviewImport={taskManagerApi.previewImport}
+          onListRemoteWork={taskManagerApi.listRemoteWork}
+          onOpenPullRequest={openPullRequest}
           onListExistingWorktrees={taskManagerApi.listExistingWorktrees}
           onOpenExistingTask={async (taskId) => { await openTaskDetail(taskId); }}
           onRefinePrompt={refinePrompt}

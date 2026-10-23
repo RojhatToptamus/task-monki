@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { IPC_INVOKE_CHANNELS, ipcErrorMessage } from './ipcChannels';
+import { IPC_INVOKE_CHANNELS } from './ipcChannels';
 
 const repositoryRoot = process.cwd();
 
@@ -31,11 +31,5 @@ describe('Electron IPC channel manifest', () => {
       ...IPC_INVOKE_CHANNELS
     ]);
     expect(IPC_INVOKE_CHANNELS).toContain('agent:respondToInteraction');
-  });
-
-  it('hands the renderer the main process’s own words when a call fails', () => {
-    expect(ipcErrorMessage("Error invoking remote method 'bug:view:open': Error: Write a path such as /checkout.")).toBe('Write a path such as /checkout.');
-    expect(ipcErrorMessage("Error invoking remote method 'bug:capture:save': BugCaseValidationError: Query keys repeat.")).toBe('Query keys repeat.');
-    expect(ipcErrorMessage('Write a path such as /checkout.')).toBe('Write a path such as /checkout.');
   });
 });

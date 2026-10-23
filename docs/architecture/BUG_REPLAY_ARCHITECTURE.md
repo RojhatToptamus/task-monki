@@ -383,12 +383,12 @@ text as Markdown code, so it never renders as a link, an image or a mention.
 
 ## Evidence and persistence
 
-Schema 31, migration 14, adds `bug_captures`, `bug_cases`, `bug_case_versions`,
+Task store schema 31 and SQLite migration 15 add `bug_captures`, `bug_cases`, `bug_case_versions`,
 `bug_case_decisions`, `bug_replay_runs` and `bug_replay_files`. Cases and runs
 use optimistic revisions; a stale write is refused. Versions are insert-only;
 each keeps what the recording showed for its checks in its payload, bounded
 to 16 distinct answers or values per check. Like the case document, it can
-hold a typed password, which every surface masks. Migration 15 adds
+hold a typed password, which every surface masks. Migration 16 adds
 `bug_replay_approvals`, one row per repository and approval digest, which goes
 with its repository and is deleted when revoked. Evidence (screenshots,
 action, network and console logs, run frames, service logs) is stored as managed

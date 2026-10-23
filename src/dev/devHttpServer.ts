@@ -4,6 +4,7 @@ import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/SqliteTaskStore';
 import { PreviewError } from 'previewhost';
 import { ImportPreviewError } from '../core/git/ImportPreview';
+import { RemoteWorkError } from '../core/remote/RemoteWorkError';
 import type {
   AppUpdateEvent,
   CreateBoardRequest,
@@ -709,6 +710,51 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.importTask((await readJson()) as never));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/remote/list') {
+        sendJson(response, requestId, 200, await options.service.listRemoteWork((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/open') {
+        sendJson(response, requestId, 200, await options.service.openPullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/sync') {
+        sendJson(response, requestId, 200, await options.service.syncPullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/ready') {
+        sendJson(response, requestId, 200, await options.service.markPullRequestReady((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/rerun-checks') {
+        sendJson(response, requestId, 200, await options.service.rerunPullRequestChecks((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/resolve') {
+        await options.service.resolvePullRequestDiscussion((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/merge-options') {
+        sendJson(response, requestId, 200, await options.service.readPullRequestMergeOptions((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/merge') {
+        sendJson(response, requestId, 200, await options.service.mergePullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/replies') {
+        sendJson(response, requestId, 200, await options.service.replyToPullRequest((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/update') {
+        sendJson(response, requestId, 200, await options.service.mergePullRequestUpdate((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/remote/pull-request/check-logs') {
+        sendJson(response, requestId, 200, await options.service.readPullRequestCheckLogs((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/tasks/import/preview') {
         sendJson(response, requestId, 200, await options.service.previewImport((await readJson()) as never));
         return;
@@ -1068,6 +1114,18 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         sendJson(response, requestId, 200, await options.service.readReviewChanges((await readJson()) as never));
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/api/review/reviewed-diff') {
+        sendJson(response, requestId, 200, await options.service.readReviewedDiff((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/git/task-commits') {
+        sendJson(response, requestId, 200, await options.service.listTaskCommits((await readJson()) as never));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/git/task-commit-diff') {
+        sendJson(response, requestId, 200, await options.service.readTaskCommitDiff((await readJson()) as never));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/api/review/decide-finding') {
         sendJson(
           response,
@@ -1075,6 +1133,10 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           200,
           await options.service.decideReviewFinding((await readJson()) as never)
         );
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/review/decide-answer') {
+        sendJson(response, requestId, 200, await options.service.decideReviewRequestItem((await readJson()) as never));
         return;
       }
 
@@ -1569,6 +1631,10 @@ function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
   }
   if (error instanceof ImportPreviewError) {
     return new DevApiHttpError(400, 'INVALID_IMPORT_COMPARISON', error.message);
+  }
+  // GitHub and GitLab failures the person can act on; their messages carry no credentials.
+  if (error instanceof RemoteWorkError) {
+    return new DevApiHttpError(error.code === 'NOT_FOUND' ? 404 : error.code === 'FAILED' ? 502 : 409, `REMOTE_${error.code}`, error.message);
   }
   if (error instanceof TaskCreationRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);

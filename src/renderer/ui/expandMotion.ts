@@ -220,9 +220,13 @@ export function parseDuration(value: string): number | undefined {
   return Number.isFinite(amount) && amount > 0 ? amount : undefined;
 }
 
+/** The person asked for less motion: every change is instant. */
+export function prefersReducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 function motionAllowed(element: HTMLElement): boolean {
-  return typeof element.animate === 'function' &&
-    !(typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  return typeof element.animate === 'function' && !prefersReducedMotion();
 }
 
 /** The element's children, looking through boxes that do not render one (a portal slot). */

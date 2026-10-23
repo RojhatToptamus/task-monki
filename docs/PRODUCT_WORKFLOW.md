@@ -236,6 +236,81 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Issues and pull requests
+
+The task composer's source switch offers New work, Issue, Pull request (Merge
+request on GitLab) and Checkout. Issue and Pull request list the open items of
+the selected checkout's GitHub or GitLab repository, most recently updated
+first. When the checkout has several platform remotes, a menu chooses one;
+`upstream` leads, then `origin`. One search field searches the platform and
+also takes a link, `#12`, `!12` or `owner/repo#12`; a link or number names one
+item, which is chosen. Only github.com and gitlab.com are supported. Lists are
+read when the source opens and as the person searches; Task Monki does not poll
+or keep a copy.
+
+Reads go through the platform's CLI (`gh`, `glab`) with its signed-in account.
+A missing CLI, a signed-out CLI, an item in another repository, a pull request
+chosen as an issue, and an unreachable host each show their reason in the list
+with Retry where retrying can help. Task Monki stores no platform token.
+
+An issue starts new work. Task Monki reads the issue again when the task is
+created and keeps its title, body, labels and ten most recent comments as an
+immutable snapshot. The title defaults to the issue's; instructions are
+optional. Agents receive the snapshot's text as readers see it, without markup
+or hidden comments, quoted with its author and capture time, between boundary
+lines named by the snapshot, as data that grants no permission and cannot
+change the execution boundary or the person's instructions. Later edits on the
+platform do not change what agents read. The Overview's Request shows the
+issue's link and its captured text.
+
+A pull request opens existing work. Task Monki reads it, fetches its exact
+head (`refs/pull/N/head`, or `refs/merge-requests/N/head` on GitLab) and its
+target into the repository's objects without creating a remote, a
+remote-tracking ref or FETCH_HEAD, and checks it out in a managed worktree on
+a new task branch with repository hooks turned off. The recorded base is the
+merge base, so the diff equals the platform's. A pull request whose branch
+names begin or end with a space or hold invisible characters cannot be used
+("Task Monki cannot use this pull request: a branch name holds invisible
+characters."), nor one whose target shares no history with it ("has no common
+history with its target branch"). The task opens idle In progress, with the
+pull request linked in PR Status. Nothing runs: agent review is available
+before any turn, coding needs an explicit instruction, and Preview keeps its
+per-start approval. The request saved in the Agent tab's composer is that
+instruction; without one, Start asks for it. A request saved for a task opened
+from an issue or a pull request can be cleared again. Open pull requests only.
+A link to an issue or pull request that is closed or merged, and that no task
+holds, is not offered; the list says why.
+
+Choosing an issue or pull request that already has a task, including an
+archived one or a task that delivered that pull request, opens that task. One
+task holds each item; a Fork alternative keeps the issue through its prompt.
+
+A task opened from an issue opens its draft pull request in the issue's
+repository. It pushes through `origin`, a contributor's fork when that is a
+different repository, else through the remote that is the issue's repository.
+Create draft PR offers "Add “Closes #N” to the description", on by default; the
+body then starts `Closes #N`, otherwise `Related to #N`. The platform closes the issue
+when the pull request merges into the default branch; agent completion never
+does.
+
+For an opened pull request, Refresh records the worktree's evidence first, then
+the platform's reading, and fetches the head it read only when the checkout
+lacks it, so Git evidence states whether the branch is ahead of it, behind it
+or both. Sync branch moves a clean worktree to the newer head: a fast forward, or,
+after the author rewrote the pull request, a move that is allowed only while
+the branch holds no commits of its own, counting the ones Task Monki pushed. A
+rewrite that shares no history with the branch is refused ("has no common
+history with this branch"), and each Sync checks the branch names again.
+Push update sends new commits to the pull request's own branch, fast forward
+only, for a same-repository pull request whose remote pushes to that repository
+alone. The push is leased on the head Task Monki last saw, so a branch that
+moved or was deleted after its merge is left as it is. A pull request from a
+fork stays local. Task Monki's own Git commands in these worktrees (staging,
+commits, merges, moves, pushes and review snapshots) run no repository hooks
+and skip LFS downloads. A push that did not land, proved by the branch still at
+the leased head, is a failed push that is safe to retry; any other uncertain
+result follows the existing AMBIGUOUS rules.
+
 ## Import existing work
 
 The task composer can attach an existing primary checkout or registered linked
@@ -269,8 +344,10 @@ Start implementation requires an explicit instruction and warns that coding
 changes the original imported checkout. Request changes and
 Investigate checks supply that instruction through the same first-run path.
 Later unsuccessful runs still require retry or continuation before review.
-Retry retains the original instruction from the runtime prompt artifact; it does
-not rewrite the source task description or provider-native goal.
+The first instruction is recorded as that turn's message: retry, follow-ups and
+Fork alternative read it once from the task's instructions and never nest an
+earlier prompt. Recording it does not rewrite the source task description or
+provider-native goal.
 
 A new PR requires a separate target branch. A `HEAD` or commit comparison can
 remain unchanged. An existing PR keeps its target branch.
@@ -448,6 +525,16 @@ Rules:
   actions.
 - Delivery actions are paused while review-derived follow-up work is running.
 - After follow-up completes, the task returns to Review and needs a fresh review.
+- An agent review also writes a walkthrough of the change, intent by intent,
+  which Task Monki checks against the code the review read before keeping it.
+  The Review tab reads the change in two modes: the Guide (the walkthrough,
+  each intent beside its code) and the Diff (the complete change). A
+  walkthrough of earlier code stays as context, never as current; on someone
+  else's pull request, none is written until the person asks.
+- The Diff can also read the branch commit by commit: each commit's change
+  against its first parent, with its message. A commit is history: feedback
+  shows at its files' tops, and comments and viewed marks belong to the change
+  as a whole, never to a commit.
 
 The detailed source of truth is
 `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
@@ -539,7 +626,8 @@ Review:
 - Allow Run agent review when no implementation-side run is active.
 - Require the current implementation-side run to have completed successfully;
   unsuccessful or older superseded runs are not valid review sources.
-- Imported work in Review can start review before its first coding run.
+- Imported work, and a pull request opened as a task, can start review before
+  its first coding run.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -584,16 +672,44 @@ lost runs do not need this separate resolution action.
 
 In Review:
 
-- Prioritize PR Status: one linked PR identity, one headline, exact check rows
-  when available, review line when delivery-affecting, merge line when known,
-  and freshness.
-- For failed checks, show the `Investigate failure` action and expandable check
-  rows instead of repeating a prose explanation of the failure.
-- Allow GitHub refresh actions.
-- Offer failing-CI investigation only when the selected PR Status state is
+- Prioritize PR Status: the Now panel holds the pull request's one step (its
+  blocker, one fact, the actions that take it); the record column holds the
+  pull request itself, with a row per gate (checks, reviews, threads, merge).
+- Allow Run agent review as in Review: In Review is Review with a pull request
+  open, and the detached review leaves the task In Review.
+- For failed checks, list the failed checks with the end of each log on request
+  and offer `Fix checks`, which sends the agent the logs as quoted data, and
+  `Re-run failed` for a check that may have failed by chance, which runs the
+  pull request's own failed runs or jobs again without the agent.
+- Allow GitHub refresh actions from the pull request's record.
+- Offer failing-CI repair only when the selected PR Status state is
   `Checks failed`; stale, diverged, or locally unpublished work should surface
-  its own next action instead. Investigation starts implementation-side work,
-  not a GitHub state update.
+  its own next action instead. Repair starts implementation-side work, not a
+  GitHub state update.
+- The person's writes to the platform are explicit steps: `Mark as ready`,
+  `Merge` (the head they saw, through a dialog with the repository's methods
+  and Delete branch), and `Reply on GitHub` (a reply to each discussion the
+  agent answered, Resolve thread, and asking reviewers again). A reply is in
+  the person's voice: it starts as "Changed in <head>." only when the agent
+  answered Fixed and the thread's file changed since the review, otherwise
+  empty, with the agent's own words quoted above it for the person alone and
+  Resolve thread unchecked. In the Review tab each open thread can be answered
+  in place, and resolved or reopened from its head, and a reviewer can be
+  asked again from the pull request's record. Nothing posts on its own or on
+  an agent's behalf, and an agent's answer is never posted as the person's.
+- On the Review tab, the agent's answer to each item of the person's latest
+  request after the review sits on the item's own band, and the item stays
+  the person's until they accept the answer: an agent's Fixed never settles
+  it. Add to request sends an answered item again as the person's comment on
+  its lines, quoting it.
+- A branch that moved beside the worktree (`Pull changes`) or a base that moved
+  ahead (`Update with <base>`) is merged by Task Monki, which commits
+  uncommitted work first. A clean merge waits for `Push update`; when Git stops
+  on conflicts in text, the agent resolves the files without Git commands that
+  write, and `Push update` finishes the merge once no file holds a conflict
+  marker. A file that needs a version chosen (a deletion, a binary, a link)
+  undoes the merge, for the person to merge in their editor or Git client.
+  Neither update is offered on a fork or in an imported checkout.
 
 Done:
 
@@ -679,6 +795,20 @@ one draft PR for the Task Monki-owned branch, then records PR identity, check
 details, GitHub review rollup, merge state, and whether the PR head is fresh
 against the local worktree.
 
+Each refresh also reads what reviewers said on the pull request: review
+threads, review summaries, conversation comments and each reviewer's state.
+PR Status says who requested changes, who it waits on and how many threads are
+unresolved, and Address comments adds the unresolved ones the agent was not
+sent to the review request and opens it on the Review tab, where the threads
+sit on their lines. People's words reach the agent only when the person sends
+them, quoted and attributed. The person answers, resolves or reopens a thread
+themselves, from the Review tab or Reply on GitHub; nothing posts on its own.
+Whose turn it is decides what is asked of the person: once they wrote the
+latest comment, or asked again every reviewer who requested changes, the pull
+request waits on its reviewers (Waiting for review), and neither the Now panel,
+the board nor the Inbox asks anything of them until a reviewer answers. A
+request for changes the person made themselves stays theirs to answer.
+
 Push update is shown only here, and so is Create draft PR once a PR exists.
 Before then, Create draft PR sits with the finishing actions when finishing
 holds the Overview's Now panel, and in PR Status otherwise, under the same
@@ -699,12 +829,12 @@ competing badges. Headline priority is:
 1. Merged.
 2. Closed without merge.
 3. Branch diverged or stale.
-4. Local changes not pushed.
+4. Changes not pushed.
 5. PR has newer commits.
 6. Checks failed.
 7. Checks pending, canceled, or no required checks ran.
-8. GitHub changes requested.
-9. GitHub review waiting.
+8. Changes requested.
+9. Waiting for review.
 10. Ready to merge.
 11. Draft PR.
 12. Open PR.
@@ -719,8 +849,10 @@ canceled buckets from `gh pr checks`. Canceled checks are distinct from
 failures, but they still block ready-to-merge status until GitHub reports merge
 readiness. Ready to merge requires explicit current PR, check, review, and
 merge evidence for the same PR head; absent check or review evidence must not
-be treated as success. The PR number is the link to GitHub; do not add a
-separate Open PR button when the number can be rendered as a link.
+be treated as success, except that a repository without CI reports no checks
+at all, and then the platform's own merge state decides. The PR number is the
+link to GitHub; do not add a separate Open PR button when the number can be
+rendered as a link.
 
 The detailed PR Status source of truth is
 `docs/workflows/PR_STATUS_CARD_FLOW.md`.

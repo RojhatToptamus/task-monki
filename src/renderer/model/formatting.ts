@@ -66,3 +66,45 @@ export function looksLikeInternalEnum(value: string): boolean {
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+
+/** A base the pull request fell behind or conflicts with, as the Now panel, the record and the Inbox say it. */
+export function baseMovedLine(reason: 'BEHIND' | 'CONFLICTS', base: string | undefined): string {
+  if (reason === 'CONFLICTS') return base ? `Conflicts with ${base}` : 'Conflicts';
+  return base ? `Behind ${base}` : 'Behind its base';
+}
+
+/** Names as a sentence lists them: "alice", "alice and bob", "alice, bob and 2 more". */
+export function listNames(names: readonly string[]): string {
+  if (names.length <= 2) return names.join(' and ');
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
+}
+
+/**
+ * Where a comment points in the diff, as the agent and the person read it. The
+ * person's own comments sit on the old side only on removed lines; a platform's
+ * thread there can sit on any line of the old file, so it names the old file.
+ */
+export function formatCommentLocation(
+  comment: { path: string; side?: 'NEW' | 'OLD'; line?: number; endLine?: number },
+  oldSide: 'removed' | 'old' = 'removed'
+): string {
+  if (!comment.line) return `${comment.path} (whole file)`;
+  const range = Boolean(comment.endLine && comment.endLine > comment.line);
+  const lines = range ? `${comment.line}-${comment.endLine}` : `${comment.line}`;
+  return comment.side === 'OLD'
+    ? `${comment.path} (${oldSide} line${range ? 's' : ''} ${lines})`
+    : `${comment.path}:${lines}`;
+}
+
+/**
+ * A person's initials for their avatar, from a name or an account: "Rojhat
+ * Toptamus" and "RojhatToptamus" read RT, "github-actions[bot]" GA, "octocat" O.
+ */
+export function personInitials(name: string | undefined): string {
+  const words = (name ?? '')
+    .replace(/\[bot\]$/iu, '')
+    .replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2')
+    .split(/[\s._-]+/u)
+    .filter(Boolean);
+  return words.slice(0, 2).map((word) => [...word][0]!.toUpperCase()).join('') || '?';
+}

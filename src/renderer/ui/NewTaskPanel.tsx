@@ -20,11 +20,17 @@ import type {
   ExistingWorktree,
   ImportTaskRequest,
   ImportPreview,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
   PreviewImportRequest,
   RefinePromptRequest,
   RefinePromptResponse,
+  RemoteRepositoryRef,
+  RemoteWorkListing,
+  RemoteWorkSummary,
   Repository
 } from '../../shared/contracts';
+import { remoteWorkLabel, remoteWorkNoun } from '../../shared/contracts';
 import {
   type AttachmentDraftSnapshot,
   type ClipboardAttachmentImage,
@@ -62,6 +68,11 @@ import {
 import { AttachmentComposerShell } from './AttachmentComposerShell';
 import { useTaskAttachments } from './useTaskAttachments';
 import { ImportWorkFields, branchTaskTitle } from './ImportWorkFields';
+import { RemoteWorkFields } from './RemoteWorkFields';
+import { defaultRemoteProvider } from '../model/remoteWork';
+
+/** Where a new task starts: a description, an issue, a pull request, or a local checkout. */
+type TaskSource = 'new' | 'issue' | 'pull' | 'checkout';
 
 /** The modal grows to its writing size and back on the drawer curve, its head held at its corner. */
 const PANEL_MOTION: ExpandMotion = { duration: '--motion-slow', easing: '--ease-drawer', scale: true };
@@ -87,6 +98,8 @@ interface NewTaskPanelProps {
   onListExistingWorktrees?(repositoryId: string): Promise<ExistingWorktree[]>;
   onPreviewImport?(input: PreviewImportRequest): Promise<ImportPreview>;
   onOpenExistingTask?(taskId: string): Promise<void>;
+  onListRemoteWork?(input: ListRemoteWorkRequest): Promise<RemoteWorkListing>;
+  onOpenPullRequest?(input: OpenPullRequestRequest): Promise<void>;
   onRefinePrompt(
     input: Pick<
       RefinePromptRequest,
@@ -127,6 +140,8 @@ export function NewTaskPanel({
   onListExistingWorktrees,
   onPreviewImport,
   onOpenExistingTask,
+  onListRemoteWork,
+  onOpenPullRequest,
   onRefinePrompt,
   onCancelPromptRefinement,
   onStageAttachmentBatch,
@@ -142,7 +157,17 @@ export function NewTaskPanel({
   const [agentProfileId, setAgentProfileId] = useState(initialTextDraft?.agentProfileId);
   const [title, setTitle] = useState(initialTextDraft?.title ?? '');
   const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
-  const [importing, setImporting] = useState(false);
+  const [source, setSource] = useState<TaskSource>('new');
+  const importing = source === 'checkout';
+  const remoteKind = source === 'issue' ? 'ISSUE' as const : source === 'pull' ? 'PULL_REQUEST' as const : undefined;
+  const [remoteQuery, setRemoteQuery] = useState('');
+  const [remoteRepository, setRemoteRepository] = useState<RemoteRepositoryRef>();
+  const [remoteSelected, setRemoteSelected] = useState<RemoteWorkSummary>();
+  const [remoteRefresh, setRemoteRefresh] = useState(0);
+  const [remoteListing, setRemoteListing] = useState<{ scope: string; query: string; data?: RemoteWorkListing; error?: string }>();
+  // Text written for an issue or pull request stays apart from the New work draft; choosing another item clears it.
+  const [remoteTitle, setRemoteTitle] = useState<string>();
+  const [issuePrompt, setIssuePrompt] = useState('');
   const [checkoutPath, setCheckoutPath] = useState('');
   const [checkoutQuery, setCheckoutQuery] = useState('');
   const [checkoutRefresh, setCheckoutRefresh] = useState(0);
@@ -188,7 +213,7 @@ export function NewTaskPanel({
   const [isClosing, setIsClosing] = useState(false);
   // A writing size for a long description; imported work has none, so it keeps the usual size.
   const [expandedPreference, setExpandedPreference] = useState(readNewTaskExpanded);
-  const expanded = expandedPreference && !importing;
+  const expanded = expandedPreference && source === 'new';
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
@@ -277,7 +302,7 @@ export function NewTaskPanel({
     selectedRuntime &&
       selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
   );
-  const effectiveAttachmentsEnabled = !importing && attachmentsEnabled && runtimeSupportsAttachments;
+  const effectiveAttachmentsEnabled = (source === 'new' || source === 'issue') && attachmentsEnabled && runtimeSupportsAttachments;
   const runtimeModels = models.filter((candidate) => candidate.runtimeId === runtimeId);
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
   const effectiveReasoningEffort =
@@ -346,8 +371,52 @@ export function NewTaskPanel({
     );
     return () => { canceled = true; };
   }, [importing, selectedRepositoryId, onListExistingWorktrees, checkoutRefresh]);
+  // The repository, kind and remote a listing is for; the query narrows it.
+  const remoteScope = remoteKind && selectedRepositoryId
+    ? JSON.stringify([selectedRepositoryId, remoteKind, remoteRepository ?? null]) : undefined;
+  const remoteSearch = remoteQuery.trim();
+  const currentRemoteListing = remoteListing?.scope === remoteScope && remoteListing?.query === remoteSearch ? remoteListing : undefined;
+  // While the next query loads, the last results for the same scope stay in place.
+  const shownRemoteListing = currentRemoteListing ?? (remoteListing?.data && remoteListing.scope === remoteScope ? remoteListing : undefined);
+  useEffect(() => {
+    if (!remoteKind || !selectedRepositoryId || !onListRemoteWork || !remoteScope) return;
+    let canceled = false;
+    const request: ListRemoteWorkRequest = {
+      repositoryId: selectedRepositoryId, kind: remoteKind,
+      ...(remoteRepository ? { remote: remoteRepository } : {}),
+      ...(remoteSearch ? { query: remoteSearch } : {})
+    };
+    // Typing searches the platform; a short pause keeps one request per word.
+    const timer = window.setTimeout(() => {
+      void onListRemoteWork(request).then(
+        (data) => {
+          if (canceled) return;
+          setRemoteListing({ scope: remoteScope, query: remoteSearch, data });
+          // A pasted link or number names one item: choose it.
+          if (data.exact && data.items.length === 1) chooseRemote(data.items[0]);
+        },
+        (caught: unknown) => {
+          if (!canceled) setRemoteListing({ scope: remoteScope, query: remoteSearch, error: caught instanceof Error ? caught.message : 'Could not reach the platform.' });
+        }
+      );
+    }, remoteSearch ? 300 : 0);
+    return () => { canceled = true; window.clearTimeout(timer); };
+  }, [remoteKind, selectedRepositoryId, remoteRepository, remoteSearch, remoteScope, onListRemoteWork, remoteRefresh]);
+  const remoteProvider = shownRemoteListing?.data?.remote?.provider ?? defaultRemoteProvider(selectedRepository) ?? 'GITHUB';
+  const effectiveRemoteTitle = remoteTitle ?? remoteSelected?.title ?? '';
+  // A list that could not be read says why in place; the footer adds nothing to it.
+  const remoteFooterQuiet = !remoteSelected && Boolean(currentRemoteListing?.error ?? currentRemoteListing?.data?.unavailable);
+  const remoteDisabledReason = !remoteKind ? undefined
+    : !remoteSelected ? `Choose ${remoteKind === 'ISSUE' ? 'an issue' : `a ${remoteWorkNoun(remoteProvider, remoteKind)}`}.`
+    : remoteSelected.existingTaskId ? undefined
+    : !effectiveRemoteTitle.trim() ? 'Enter a title.' : undefined;
   const composerLocked =
     Boolean(disabled) || isSubmitting || isRefining || creationOutcomeUnknown;
+  const chooseRemote = (item: RemoteWorkSummary | undefined) => {
+    setRemoteSelected(item);
+    setRemoteTitle(undefined);
+    setError(undefined);
+  };
 
   const updateTitle = (value: string) => {
     setTitle(value);
@@ -442,6 +511,34 @@ export function NewTaskPanel({
     let creationNeedsUnchangedRetry = false;
     let created = false;
     try {
+      if (remoteKind && remoteSelected?.existingTaskId && onOpenExistingTask) {
+        await onOpenExistingTask(remoteSelected.existingTaskId);
+        created = true;
+        return;
+      }
+      // Work opened from a pull request or a checkout keeps the agent settings chosen here, over the defaults.
+      const chosenSettings: AgentExecutionSettings = {
+        ...defaultAgentSettings,
+        runtimeId: runtimeId || undefined,
+        model: selectedModel?.model,
+        modelProvider: selectedModel?.modelProvider,
+        reasoningEffort: effectiveReasoningEffort || undefined,
+        ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
+          networkAccess: effectiveNetworkAccess
+        }) : {})
+      };
+      if (source === 'pull') {
+        if (!remoteSelected || remoteDisabledReason || !onOpenPullRequest) throw new Error(remoteDisabledReason ?? 'Choose a pull request.');
+        await onOpenPullRequest({
+          repositoryId: selectedRepositoryId,
+          pullRequest: remoteSelected.ref,
+          title: effectiveRemoteTitle,
+          runtimeId: runtimeId || undefined,
+          agentSettings: chosenSettings
+        });
+        created = true;
+        return;
+      }
       if (importing) {
         if (!selectedCheckout || selectedCheckout.unavailableReason || !onImport) {
           throw new Error('Select an available checkout.');
@@ -458,16 +555,7 @@ export function NewTaskPanel({
             title: effectiveImportTitle,
             prompt: '',
             runtimeId: runtimeId || undefined,
-            agentSettings: {
-              ...defaultAgentSettings,
-              runtimeId: runtimeId || undefined,
-              model: selectedModel?.model,
-              modelProvider: selectedModel?.modelProvider,
-              reasoningEffort: effectiveReasoningEffort || undefined,
-              ...(permissionPreset ? settingsForExecutionPolicyPreset(permissionPreset, {
-                networkAccess: effectiveNetworkAccess
-              }) : {})
-            }
+            agentSettings: chosenSettings
           });
         }
         created = true;
@@ -480,10 +568,14 @@ export function NewTaskPanel({
       const permissionSettings = settingsForExecutionPolicyPreset(permissionPreset, {
         networkAccess: effectiveNetworkAccess
       });
+      if (source === 'issue' && (!remoteSelected || remoteDisabledReason)) {
+        throw new Error(remoteDisabledReason ?? 'Choose an issue.');
+      }
       try {
         await onCreate({
-          title,
-          prompt,
+          ...(source === 'issue' && remoteSelected
+            ? { title: effectiveRemoteTitle, prompt: issuePrompt, issue: remoteSelected.ref }
+            : { title, prompt }),
           agentProfileId,
           repositoryId: selectedRepositoryId,
           creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
@@ -637,14 +729,15 @@ export function NewTaskPanel({
 
   const createDisabled = importing
     ? Boolean(disabled) || isSubmitting || Boolean(importDisabledReason)
+    : source === 'pull'
+      ? Boolean(disabled) || isSubmitting || Boolean(remoteDisabledReason)
     :
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
     modelDiscoveryStatus !== 'idle' ||
     modelCatalogFailed ||
-    !title.trim() ||
-    !prompt.trim() ||
+    (source === 'issue' ? Boolean(remoteDisabledReason) : !title.trim() || !prompt.trim()) ||
     !selectedRepositoryId ||
     !runtimeId ||
     (!selectedModel && !canDeferModelSelection) ||
@@ -652,6 +745,21 @@ export function NewTaskPanel({
     attachmentsHaveErrors ||
     selectedRuntimeRejectsAttachments ||
     selectedModelRejectsImages;
+  const sources: TaskSource[] = [
+    'new',
+    ...(onListRemoteWork ? ['issue' as const] : []),
+    ...(onListRemoteWork && onOpenPullRequest ? ['pull' as const] : []),
+    ...(onImport ? ['checkout' as const] : [])
+  ];
+  const changeSource = (value: TaskSource) => {
+    if (value === source) return;
+    setSource(value);
+    setPreviewResult(undefined);
+    setError(undefined);
+    // Issues and pull requests are separate lists; a choice in one is not kept for the other.
+    setRemoteQuery('');
+    chooseRemote(undefined);
+  };
   // The model and access chips: in the description's toolbar for new work, in
   // their own row for imported work, which has no description.
   const runChips = <>
@@ -702,6 +810,12 @@ export function NewTaskPanel({
         onDrop={dropAttachments}
         onSubmit={submit}
         onKeyDown={(event) => {
+          if (event.key === 'Escape' && remoteKind && remoteQuery) {
+            event.preventDefault();
+            event.stopPropagation();
+            setRemoteQuery('');
+            return;
+          }
           if (event.key === 'Escape' && importing && checkoutQuery) {
             event.preventDefault();
             event.stopPropagation();
@@ -709,7 +823,7 @@ export function NewTaskPanel({
             event.currentTarget.querySelector<HTMLInputElement>('input[aria-label="Filter checkouts"]')?.focus();
             return;
           }
-          if (!importing && isExpandShortcut(event)) {
+          if (source === 'new' && isExpandShortcut(event)) {
             event.preventDefault();
             changeExpanded(!expanded, false);
             return;
@@ -730,23 +844,23 @@ export function NewTaskPanel({
         tabIndex={-1}
       >
         <header className="newtask-modal__header">
-          {onImport ? (
+          {sources.length > 1 ? (
             <div className="segmented segmented--compact" role="group" aria-label="Task source" onKeyDown={(event) => {
               if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
               event.preventDefault();
-              const next = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-pressed="false"]:not(:disabled)');
+              const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+              const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              const next = buttons[(index + (event.key === 'ArrowLeft' ? -1 : 1) + buttons.length) % buttons.length];
               next?.focus(); next?.click();
             }}>
-              {[false, true].map((value) => (
-                <button key={String(value)} type="button" className="segmented__btn"
-                  aria-pressed={importing === value}
+              {sources.map((value) => (
+                <button key={value} type="button" className="segmented__btn"
+                  aria-pressed={source === value}
                   disabled={composerLocked || attachmentsBusy || activeAttachmentItems.length > 0}
                   title={activeAttachmentItems.length > 0 ? 'Remove attachments before changing the task source.' : undefined}
-                  onClick={() => {
-                    if (value === importing) return;
-                    setImporting(value); setPreviewResult(undefined); setError(undefined);
-                  }}>
-                  {value ? 'Import existing work' : 'New work'}
+                  onClick={() => changeSource(value)}>
+                  {value === 'new' ? 'New work' : value === 'issue' ? 'Issue'
+                    : value === 'pull' ? remoteWorkLabel(remoteProvider, 'PULL_REQUEST') : 'Checkout'}
                 </button>
               ))}
             </div>
@@ -754,7 +868,7 @@ export function NewTaskPanel({
             <strong>New task</strong>
           </div>}
           <div className="newtask-modal__head-actions">
-            {!importing ? <ExpandToggle expanded={expanded} onToggle={(animate) => changeExpanded(!expanded, animate)} /> : null}
+            {source === 'new' ? <ExpandToggle expanded={expanded} onToggle={(animate) => changeExpanded(!expanded, animate)} /> : null}
             <Tooltip label="Close" shortcut="Esc">
               <button type="button" className="tm-iconbtn" aria-label="Close" disabled={isSubmitting} onClick={closePanel}>
                 <X aria-hidden="true" size={16} />
@@ -765,7 +879,7 @@ export function NewTaskPanel({
 
         <div className="newtask-modal__body">
           <section className="newtask-section" aria-label="Task essentials">
-            {!(importing && selectedCheckout?.existingTaskId) ? <fieldset className="field tm-newtask-repository">
+            {!(importing && selectedCheckout?.existingTaskId) && !(remoteKind && remoteSelected?.existingTaskId) ? <fieldset className="field tm-newtask-repository">
               <legend>Repository</legend>
               <RepositorySelect
                 options={repositoryOptions}
@@ -780,9 +894,29 @@ export function NewTaskPanel({
                   setComparison('local');
                   setCommitRef('');
                   setPreviewResult(undefined);
+                  setRemoteRepository(undefined);
+                  setRemoteQuery('');
+                  chooseRemote(undefined);
                 }}
               />
             </fieldset> : null}
+            {remoteKind ? (
+              <RemoteWorkFields key={`${selectedRepositoryId}:${remoteKind}`} kind={remoteKind} provider={remoteProvider}
+                listing={shownRemoteListing?.data} loading={!currentRemoteListing} error={currentRemoteListing?.error}
+                selected={remoteSelected} locked={composerLocked} query={remoteQuery} onQuery={setRemoteQuery}
+                onSelect={chooseRemote} repositoryName={selectedRepository?.name}
+                onRemote={(remote) => { setRemoteRepository(remote); chooseRemote(undefined); }}
+                onRetry={() => { setRemoteListing(undefined); setRemoteRefresh((value) => value + 1); }}
+              />
+            ) : null}
+            {source === 'pull' && remoteSelected && !remoteSelected.existingTaskId ? (
+              <div className="field">
+                <span className="field__header"><label htmlFor="pull-task-title">Title</label>{effectiveRemoteTitle !== remoteSelected.title ?
+                  <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setRemoteTitle(undefined)}>Use {remoteWorkNoun(remoteProvider, 'PULL_REQUEST')} title</button> : null}</span>
+                <input id="pull-task-title" value={effectiveRemoteTitle} disabled={composerLocked} placeholder="Short imperative summary"
+                  onChange={(event) => setRemoteTitle(event.target.value)} />
+              </div>
+            ) : null}
             {importing ? (
               <ImportWorkFields key={selectedRepositoryId} checkouts={checkoutOptions} selected={selectedCheckout} locked={composerLocked}
                 query={checkoutQuery} onQuery={setCheckoutQuery}
@@ -803,24 +937,26 @@ export function NewTaskPanel({
                 onRetry={() => { setCheckouts(undefined); setPreviewResult(undefined); setCheckoutRefresh((value) => value + 1); }}
               />
             ) : null}
-            {!importing ? <>
-            <label className="field">
-              <span>Title</span>
+            {source === 'new' || (source === 'issue' && remoteSelected && !remoteSelected.existingTaskId) ? <>
+            <div className="field">
+              <span className="field__header"><label htmlFor="task-title">Title</label>{source === 'issue' && remoteSelected && effectiveRemoteTitle !== remoteSelected.title ?
+                <button type="button" className="field__restore" disabled={composerLocked} onClick={() => setRemoteTitle(undefined)}>Use issue title</button> : null}</span>
               <input
+                id="task-title"
                 ref={titleInputRef}
-                value={title}
-                onChange={(event) => updateTitle(event.target.value)}
+                value={source === 'issue' ? effectiveRemoteTitle : title}
+                onChange={(event) => source === 'issue' ? setRemoteTitle(event.target.value) : updateTitle(event.target.value)}
                 placeholder="Short imperative summary"
                 disabled={composerLocked}
               />
-            </label>
+            </div>
 
-            <div className="field field--prompt">
+            <div className={`field field--prompt${source === 'issue' ? ' field--instructions' : ''}`}>
               <span className="field__header">
                 <span className="field__label">
-                  <label htmlFor="task-description">Description</label>
+                  <label htmlFor="task-description">{source === 'issue' ? 'Instructions' : 'Description'}</label>
                 </span>
-                {!importing ? <span className="field__header-actions">
+                {source === 'new' ? <span className="field__header-actions">
                   {restorable !== undefined && !proposal ? (
                     <button
                       className="field__restore"
@@ -881,12 +1017,12 @@ export function NewTaskPanel({
               >
                 <textarea
                   id="task-description"
-                  value={prompt}
-                  onChange={(event) => updatePrompt(event.target.value)}
+                  value={source === 'issue' ? issuePrompt : prompt}
+                  onChange={(event) => source === 'issue' ? setIssuePrompt(event.target.value) : updatePrompt(event.target.value)}
                   onPaste={pasteAttachments}
-                  placeholder={
-                    'Describe the implementation request, constraints, and expected verification.'
-                  }
+                  placeholder={source === 'issue'
+                    ? 'Anything the issue leaves out'
+                    : 'Describe the implementation request, constraints, and expected verification.'}
                   disabled={composerLocked || isRefining}
                 />
               </AttachmentComposerShell>
@@ -914,7 +1050,7 @@ export function NewTaskPanel({
                   Remove the attachments or choose a runtime that supports them.
                 </p>
               ) : null}
-              {currentProposal ? (
+              {source === 'new' && currentProposal ? (
                 <RefinementProposal
                   refined={currentProposal.prompt}
                   onAccept={acceptProposal}
@@ -925,7 +1061,7 @@ export function NewTaskPanel({
             </> : null}
           </section>
 
-          {importing && !selectedCheckout?.existingTaskId ? (
+          {(importing && !selectedCheckout?.existingTaskId) || (source === 'pull' && remoteSelected && !remoteSelected.existingTaskId) ? (
             <div className="tm-chip-row newtask-run">
               <span className="newtask-run__label">Agent</span>
               {runChips}
@@ -937,17 +1073,17 @@ export function NewTaskPanel({
               {error}
             </p>
           ) : null}
-          {currentRefinementWarning ? (
+          {source === 'new' && currentRefinementWarning ? (
             <p className="tm-notice" data-tone="waiting">{currentRefinementWarning}</p>
           ) : null}
           {/* Creating still works; only starting waits for the runtime, so this is a warning. */}
-          {!importing && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
+          {(source === 'new' || source === 'issue') && selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="tm-notice" data-tone="waiting">
               {selectedRuntimeReadiness.detail}
               {selectedRuntimeReadiness.nextAction ? ` ${selectedRuntimeReadiness.nextAction}.` : ''}
             </p>
           ) : null}
-          {!importing && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
+          {(source === 'new' || source === 'issue') && selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
             <p className="tm-notice" data-tone="waiting">{selectedRuntimeReadiness.detail}</p>
           ) : null}
         </div>
@@ -955,6 +1091,12 @@ export function NewTaskPanel({
         <footer className="newtask-modal__footer">
           {importing ? <p className="import-work__footer-note" role="status">
             {importDisabledReason ?? (selectedCheckout?.existingTaskId ? 'This checkout is already tracked.' : 'Imports as In progress. No files move and no agent starts.')}
+          </p> : source === 'pull' ? <p className="import-work__footer-note" role="status">
+            {remoteSelected?.existingTaskId || remoteFooterQuiet ? '' : remoteDisabledReason ?? (remoteSelected?.crossRepository
+              ? 'Opens as In progress. No agent starts, and Task Monki does not push to forks.'
+              : 'Opens as In progress. No agent starts.')}
+          </p> : source === 'issue' && (remoteDisabledReason || remoteSelected?.existingTaskId) ? <p className="import-work__footer-note" role="status">
+            {remoteSelected?.existingTaskId || remoteFooterQuiet ? '' : remoteDisabledReason}
           </p> : (
             <span className="newtask-modal__hint" aria-hidden="true"><kbd>{SUBMIT_SHORTCUT}</kbd> to create</span>
           )}
@@ -967,21 +1109,21 @@ export function NewTaskPanel({
             >
               {creationOutcomeUnknown ? 'Close' : 'Cancel'}
             </button>
-            {!(importing && selectedCheckout?.existingTaskId) ? <button
+            {!(importing && selectedCheckout?.existingTaskId) && !(remoteKind && remoteSelected?.existingTaskId) ? <button
               className="primary-button"
               type="submit"
               disabled={createDisabled}
               aria-busy={isSubmitting}
               aria-keyshortcuts="Meta+Enter Control+Enter"
               aria-label={
-                importing ? 'Import' : selectedRepository
+                importing ? 'Import' : source === 'pull' ? `Open ${remoteWorkNoun(remoteProvider, 'PULL_REQUEST')}` : selectedRepository
                   ? `Create task in ${selectedRepository.name}`
                   : 'Create task'
               }
             >
               <PendingLabel
-                label={importing ? 'Import' : creationOutcomeUnknown ? 'Retry creation' : 'Create task'}
-                pendingLabel={importing ? 'Importing…' : 'Creating…'}
+                label={importing ? 'Import' : source === 'pull' ? 'Open' : creationOutcomeUnknown ? 'Retry creation' : 'Create task'}
+                pendingLabel={importing ? 'Importing…' : source === 'pull' ? 'Opening…' : 'Creating…'}
                 pending={isSubmitting}
               />
             </button> : null}

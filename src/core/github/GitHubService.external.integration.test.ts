@@ -5,6 +5,7 @@ import { TaskMonkiScenarioRegistry } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { git } from '../git/gitCli';
 import * as gitCli from '../git/gitCli';
+import { GitHubCli } from './GitHubCli';
 import { GitHubService } from './GitHubService';
 
 const scenarios = new TaskMonkiScenarioRegistry();
@@ -103,7 +104,7 @@ else if (args[0] === 'pr' && args[1] === 'create') {
     const worktree = (await s.store.getCurrentWorktree(task.id))!;
     const observed = (await s.store.getLatestGitSnapshot(task.id))!;
     const configBefore = await git(s.repositoryPath, ['config', '--local', '--list']);
-    const service = new GitHubService();
+    const service = new GitHubService(new GitHubCli());
     const input = {
       task, worktree, remoteName: 'origin', remoteUrl: remote,
       expectedHeadSha: observed.headSha!, expectedGitCommonDir: observed.gitCommonDir
@@ -150,7 +151,7 @@ else { process.stderr.write('Unexpected mutation'); process.exit(1); }
       baseRef: 'HEAD', title: 'Existing PR', prompt: 'Existing work.'
     });
     const worktree = (await s.store.getCurrentWorktree(task.id))!;
-    const service = new GitHubService(gh);
+    const service = new GitHubService(new GitHubCli(gh));
     const matching = {
       number: 42, url: 'https://github.com/example/project/pull/42', state: 'OPEN', isDraft: true,
       headRefName: 'main', headRefOid: worktree.headSha, baseRefName: 'release', isCrossRepository: false,
@@ -167,7 +168,13 @@ else { process.stderr.write('Unexpected mutation'); process.exit(1); }
     await fs.writeFile(dataPath, JSON.stringify({ error: 'GitHub is unavailable' }));
     await expect(service.findOpenPullRequest(worktree)).rejects.toThrow();
     const commands = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[]);
-    expect(commands.every((args) => args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]!))).toBe(true);
-    expect(commands.every((args) => args.includes('github.com/example/project'))).toBe(true);
+    // Every lookup is a read of this repository: the pull request commands, and the GraphQL query for its feedback.
+    const feedbackReads = commands.filter((args) => args[0] === 'api' && args[1] === 'graphql');
+    expect(feedbackReads.length).toBeGreaterThan(0);
+    expect(feedbackReads.every((args) => args.includes('owner=example') && args.includes('name=project') &&
+      args.some((arg) => arg.startsWith('query=query(')) && !args.some((arg) => /mutation/u.test(arg)))).toBe(true);
+    const pullRequestCommands = commands.filter((args) => !feedbackReads.includes(args));
+    expect(pullRequestCommands.every((args) => args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]!))).toBe(true);
+    expect(pullRequestCommands.every((args) => args.includes('github.com/example/project'))).toBe(true);
   });
 });

@@ -3,8 +3,11 @@
 Date: 2026-07-02
 
 This document describes the current Task Monki PR Status implementation and
-delivery workflow. The card is rendered by `PrStatusCard` in
-`src/renderer/ui/TaskDetail.tsx`, driven by
+delivery workflow. While a pull request is open, its step is the Overview's Now
+panel (`deliveryStep` in `src/renderer/ui/TaskDetail.tsx`), and the pull request
+itself is the first group of the record column (`PullRequestRecord`, driven by
+`buildPullRequestRecord` in `src/renderer/model/pullRequestRecord.ts`). Before a
+pull request exists, `PrStatusCard` offers to open one. Both read
 `buildPrStatusViewModel` and `buildPrStatusActionState` in
 `src/renderer/model/prStatus.ts`.
 
@@ -16,23 +19,172 @@ It answers:
 - does this task have a linked PR?
 - is the local worktree ahead of the PR, behind it, dirty, stale, or diverged?
 - are GitHub checks passing, pending, canceled, blocked, or failing?
-- is GitHub review waiting or requesting changes?
+- is GitHub review waiting or requesting changes, from whom, and how many
+  review threads are unresolved?
 - is GitHub reporting the PR mergeable, merged, or closed without merge?
 - which GitHub delivery action is currently valid?
 
 While a linked pull request is not merged — open, or closed without merge,
 where `Create draft PR` can start a new one — PR Status holds the Overview's
-Now panel: its headline is the panel's title, and its lead action
-(`Investigate failure`, `Push update`, or `Create draft PR`) is the panel's
-primary, with any disabled reason stated beside it. The panel's title is the
-board card's word for the task; the PR's own headline follows its identity only
-when it adds something. A merged pull request hands the panel to finishing, and
-so does an agent review that asks for action, since the board card leads with
-it; PR Status then becomes a flat "Pull request" section in the work column,
-where no action competes with the panel's primary. Before any pull request
-exists, `Create draft PR` sits with the finishing actions when finishing holds
-the Now panel, together with any publish failure line, and in the PR Status
-section otherwise, under the same publish guard, so it appears exactly once.
+Now panel with one step: a title, the one fact the step turns on (`fact`: who
+asked for changes, what is not pushed, or the base it is behind), and the
+actions that take it, lead first. The panel's title is the board card's word
+for the task, or the PR's headline when that word only repeats the lane; the
+board's word follows the order below, so the title, the fact and the lead
+action name the same blocker. Failed checks are listed in place of a fact, each
+row opening the end of its log. A merged pull request hands the panel to finishing, and so
+does an agent review that asks for action, since the board card leads with it.
+While another step holds the panel, the pull request's actions stay on the
+page as a Delivery section (`deliverySection`): its headline and fact as facts,
+the same actions, quiet. It is left out while every action is paused, as while
+the agent works, since it would only repeat the record.
+
+The pull request's record sits first in the record column whenever one exists:
+its state icon, number and title (a link to the platform), the branch and the
+base it merges into, then a row per gate — Checks (a summary that opens into a
+row per check, failures first; "Not reported yet" while a head's checks have
+not registered), Reviews (each reviewer's own state), Threads
+(unresolved, opening the Review tab), and Merge (no conflicts, behind or
+conflicting with the base, held by branch rules or, on GitLab, by the reason no
+other gate states, or merged and when). Merged or closed, it keeps only what
+ended it. The refresh control and the time of the last reading sit in its head;
+while a delivery action runs, Refresh is disabled and its reason takes the
+time's place, tied to the control. It asks for nothing; the Now panel does. Before
+any pull request exists, `Create draft PR` sits with the finishing actions when
+finishing holds the Now panel, together with any publish failure line, and in
+the PR Status section otherwise, under the same publish guard, so it appears
+exactly once.
+
+The step's actions, in the order they lead:
+
+```text
+Refresh              the recorded checks, reviews or merge state are for an earlier head, or a push was refused after the PR was last read
+Sync branch          a task opened from a PR, behind it or rewritten under it
+Push update          the worktree holds commits or changes the PR does not, or a merge Git stopped on
+Pull changes         the PR's branch moved beside the worktree's own commits, not on a fork or in an imported checkout
+Update with <base>   the platform holds the merge on a base that moved, not on a fork or in an imported checkout
+Fix checks           a check failed for the current head
+Re-run failed        beside Fix checks, when a failed check ran in the PR's own repository
+Address comments     an unresolved thread or a review asking for changes was not sent
+Reply on GitHub      the agent answered sent discussions and nobody replied since
+Mark as ready        a current draft whose checks did not fail and whose base did not move
+Merge                the evidence for the current head says the platform would merge it
+Create draft PR      the PR closed without merge and the branch can be published
+Archive task         the PR closed without merge
+```
+
+A base that moved leads over failed checks, as its step does: the headline
+reads Merge blocked and the fact names the base ("Conflicts with main", "Behind
+main"), while Fix checks stays offered after Update with <base>. A fork's pull
+request, or one delivered from an imported checkout, reads the same but offers
+no Update with <base> (`canUpdateBase`): Task Monki pushes nothing to a fork and
+writes no commit in a checkout it does not own.
+
+Pull changes and Update with <base> merge the commits the worktree lacks into
+its branch (`mergePullRequestUpdate`). Task Monki fetches them as objects only,
+with no ref moves, commits uncommitted work first as Push update does, records
+`BRANCH_UPDATE_REQUESTED`, then runs `git merge --ff --no-edit` with hooks as
+for a delivery commit (none for an opened pull request). A clean merge sends the
+agent nothing: Push update is the next step. When Git stops on conflicts in text
+it merged line by line, the merge stays in progress and the agent is asked to
+resolve the listed files without Git commands that write. A file that needs a
+version chosen instead (a deletion on one side, a binary, a link or a
+submodule) undoes the merge, and the person merges in their editor or Git
+client. While the merge is in progress, PR Status leads
+with Push update (fact "Merge in progress": the agent cannot stage what it
+fixed, so Git's count of conflicted files says nothing) and offers neither
+update again. Push update refuses while a conflicted file still holds a conflict
+marker (a line that starts `<<<<<<< ` or `>>>>>>> `) or still needs a version
+chosen, then commits the merge and pushes. After a base merge, the merged base becomes the task's base, so the
+diff holds only the task's own changes; after Pull changes merges a head that
+brought base commits in, the task's base moves to the newest base commit the
+branch holds. Neither update is offered on a fork or in an imported checkout.
+
+Fix checks reads the end of each failing log first (`readPullRequestCheckLogs`,
+at most three checks whose logs the platform serves, so a failed check of
+another system takes none of them; 150 lines each, colour codes and timestamps
+removed) and quotes it in the follow-up as data. Only the last megabyte of a
+log is read for that, and a log that marks its error ends at its last error;
+credentials are redacted in the lines kept, before the last cut, which can fall
+inside a long line. "Earlier lines left
+out" says only that lines before the shown end were dropped. Re-run failed asks
+the platform to run the failed checks again without sending the agent anything,
+for a flaky check: on GitHub it posts
+`repos/<owner>/<repo>/actions/runs/<run>/rerun-failed-jobs` for each failed
+Actions run of the pull request's own repository, and on GitLab
+`projects/:id/jobs/:job/retry` for each failed job of the merge request's own
+project. Each run or job is asked on its own: one the platform refuses does not
+stop the rest, and the step fails only when none started. A check from a fork's
+run or another system is left to its platform.
+`PR_CHECKS_RERUN_REQUESTED` records what was asked, and PR Status reads the
+pull request again.
+
+A head just pushed reports no checks until its CI registers them, and so does
+a head for a moment after its failed checks are run again. When the pull
+request had checks before, no checks for its head reads "Checks pending", with
+"Not reported yet" on the record's Checks row, never Ready to merge, until a
+reading taken a minute
+after the head's checks went missing still finds none
+(`checksMayNotHaveStarted`). PR Status refreshes only on request and after
+Task Monki's own steps, so that later reading is the person's Refresh; the
+reading after Re-run failed waits a few seconds for the checks to be listed
+again.
+
+Mark as ready, Merge and the replies are the person's writes to the
+platform, each an explicit click:
+
+- Mark as ready runs `gh pr ready`, or on GitLab removes the title's draft
+  marker.
+- Merge opens a dialog with the methods the repository allows (GitHub's
+  `squashMergeAllowed` and its neighbours, GitLab's `squash_option`), the
+  platform's default first, and Delete branch for a branch of the same
+  repository that the platform does not delete itself (checked for the task's
+  own branch, unchecked for a pull request someone else opened). It merges
+  through `PUT .../pulls/N/merge` with `sha` set to the head the person saw, so
+  the platform refuses a pull request that moved; `gh pr merge` is not used,
+  since it also deletes and switches local branches. Task Monki observes the
+  worktree first and refuses while it holds changes the pull request does not
+  (uncommitted, unpushed, diverged or conflicted); a commit that already is the
+  pull request's head is not unpushed work, whatever the local branch tracks.
+  On GitLab the dialog follows
+  the merge request's own Delete source branch choice, and the merge sends
+  `should_remove_source_branch` only to delete, since an explicit false would
+  override that choice. A merge that landed is not reported as failed when the
+  reading after it fails; the next refresh records it.
+- Reply on GitHub lists each discussion the agent answered Fixed or Not
+  changed, with the agent's note quoted above the reply for the person alone,
+  never posted, and a reply in the person's voice that they write, edit or
+  leave out. It starts as "Changed in <head>." only when the agent answered
+  Fixed and the thread's file changed since the review the request followed
+  (`readReviewChanges`, from the code that review read to the worktree, which
+  the pull request holds by then); otherwise it starts empty. Resolve thread,
+  for a resolvable thread, starts unchecked: the agent's answer is its report,
+  so resolving is the person's call. On GitHub it offers Ask <reviewer> to
+  review again for each reviewer who requested changes. A thread takes its
+  reply in place; a review or a comment, which has no thread, takes one comment
+  that quotes what each reply answers. A refused reply does not stop the rest,
+  and the dialog keeps each refusal with its reason; a reply that landed while
+  resolving its thread failed stays in view, marked replied, and is not posted
+  again. A reply that lands also clears what the person typed under that
+  discussion in the Review tab; a refused one keeps it. With every reply posted and no one left to ask,
+  only Close remains; while posting cannot start, the dialog says why ("Write
+  each reply first", "Choose a reply first").
+  `PR_REPLIES_POSTED` records which discussions were answered: a review's answer
+  is a comment of its own, so this record is what keeps Reply from offering it
+  again until a later request sends that discussion to the agent anew.
+- In the Review tab, each open thread ends in a reply row, so a reply is
+  written where the thread is read and can be checked against its code first.
+  Once the agent answered the thread, its note is quoted above the reply row
+  for the person alone, and the reply starts as in the dialog, from "Changed in
+  <head>." or empty, with Resolve thread unchecked; the reply goes through the
+  same path and the same record. The drafted fact only fills the field: Task
+  Monki keeps just what the person typed, so a reply posted from the dialog
+  does not come back in the row. The check on a thread's head resolves it, or
+  reopens a resolved one, with no reply (GitHub's `resolveReviewThread` and
+  `unresolveReviewThread`, GitLab's `resolved` on the discussion), and
+  `PR_REPLIES_POSTED` records it as resolved or reopened. Each write reads the
+  pull request again afterwards, and the worktree's evidence is recorded only
+  when it changed, so the diff being read keeps its place.
 
 Finish remains local acceptance. It owns `Commit`, `Mark done`, and
 `Mark done anyway`, the owner override that is never the recommended step and
@@ -43,9 +195,13 @@ History (the Overview's view of the Activity Timeline) renders beside PR Status
 as supporting task context. It may
 summarize meaningful delivery changes such as first PR availability, branch
 publication failure, check verdict changes, GitHub review decisions, and merge
-outcomes. It must not log `Refresh GitHub` clicks or unchanged PR/check/review
-captures. PR Status remains the place to inspect current delivery state and run
-GitHub delivery actions.
+outcomes. Task Monki's own merge for Pull changes or Update with <base> is a Git
+row, "Pull changes requested" or "Update with <base> requested", with "<ref> at
+<short sha>": it is recorded before Git merges, so it names the step, and
+conflicts Git stops on follow as their own row. It must not log
+`Refresh GitHub` clicks or unchanged PR/check/review captures. PR Status
+remains the place to inspect current delivery state and run GitHub delivery
+actions.
 
 ## Source Of Truth
 
@@ -82,33 +238,44 @@ GitHub responses. It reads the current Task Monki snapshot.
 
 ## Real Render Surface
 
-In the Now panel the headline is the title; as a section, a quiet "Pull
-request" label leads and the headline follows the PR identity:
+Before a pull request exists, PR Status is an Overview section that offers
+opening one:
 
 ```text
-<headline>                           Updated Jul 2, 10:05  ↻
-#82 <PR title>
-<freshness / lead / guidance / evidence>
-[primary action] [secondary action]
-> Checks                                                 3
-    > build        Failed       12s
+Pull request                         Updated Jul 2, 10:05  ↻
+<headline, once there is one>
+<lead: why opening one is or is not possible>
+[Create draft PR]
+<reason the action is disabled>
 ```
+
+Once one exists, the pull request's record holds its facts (identity, state,
+branches, checks, reviewers and threads), and a Delivery section holds the
+steps above with the headline and the fact behind the first step. Delivery is
+left out while every step is paused, as while the agent works.
 
 Real classes:
 
-- root: `tm-prstatus` (`tm-prstatus--now` inside the Now panel)
+- PR Status root and head: `tm-prstatus`, `tm-prstatus__head`
 - refresh line and button: `tm-prstatus__refreshline`, `tm-prstatus__refresh`
-- PR identity and section headline: `tm-prstatus__identity`, `tm-prstatus__state`
-- freshness problem: `tm-prstatus__freshness`
-- lead, guidance and evidence lines: `tm-prstatus__fact`
+- headline: `tm-prstatus__identity`, `tm-prstatus__state`
+- lead line: `tm-prstatus__fact`
 - actions: `tm-prstatus__actions`
 - disabled action title wrapper: `tm-actiontitle`
-- check list: `tm-prchecks`, `tm-prcheck`
+- record root and check list: `tm-prrecord`, `tm-prrecord__checks`,
+  `tm-prrecord__check`
 
-Disabled buttons keep their normal button position. PR Status buttons expose
-the reason through the `tm-actiontitle` wrapper's HTML `title` attribute.
-Finish actions in the Overview's Now panel state the reason once beside the
-actions, tied with `aria-describedby`.
+Disabled buttons keep their normal button position. Actions in the Overview's
+Now panel, the pull request's steps and Finish actions alike, and in the
+Delivery section state each distinct reason once below the actions, tied with
+`aria-describedby`, and set no `title`; past three actions, all but the first
+two wait under More with their reasons inline. Create draft on the PR Status
+card is the one PR Status action inside the `tm-actiontitle` wrapper: its HTML
+`title` carries the reason unless it is the lead line, and the card states the
+reason once below it. Refresh
+is the exception: its reason stands in the refresh line, in place of the time,
+unless the card already states it beside Create draft, and its tooltip only
+names it.
 
 Tones map to semantic CSS variables:
 
@@ -129,11 +296,23 @@ browser dev server client. In browser/dev mode,
 `src/renderer/api/taskManagerClient.ts` calls these HTTP endpoints:
 
 ```text
-POST /api/github/pr/create   -> TaskManagerService.createPullRequest(...)
-POST /api/github/refresh     -> TaskManagerService.refreshGitHub(...)
-POST /api/git/delivery-commit -> TaskManagerService.createDeliveryCommit(...)
-POST /api/tasks/transition   -> TaskManagerService.transitionTask(...)
-POST /api/runs/continue      -> investigation follow-up run
+POST /api/github/pr/create                  -> TaskManagerService.createPullRequest(...)
+POST /api/github/refresh                    -> TaskManagerService.refreshGitHub(...)
+POST /api/remote/list                       -> TaskManagerService.listRemoteWork(...)
+POST /api/remote/pull-request/open          -> TaskManagerService.openPullRequest(...)
+POST /api/remote/pull-request/sync          -> TaskManagerService.syncPullRequest(...)
+POST /api/remote/pull-request/ready         -> TaskManagerService.markPullRequestReady(...)
+POST /api/remote/pull-request/rerun-checks  -> TaskManagerService.rerunPullRequestChecks(...)
+POST /api/remote/pull-request/resolve       -> TaskManagerService.resolvePullRequestDiscussion(...)
+POST /api/remote/pull-request/merge-options -> TaskManagerService.readPullRequestMergeOptions(...)
+POST /api/remote/pull-request/merge         -> TaskManagerService.mergePullRequest(...)
+POST /api/remote/pull-request/replies       -> TaskManagerService.replyToPullRequest(...)
+POST /api/remote/pull-request/check-logs    -> TaskManagerService.readPullRequestCheckLogs(...)
+POST /api/remote/pull-request/update        -> TaskManagerService.mergePullRequestUpdate(...)
+POST /api/git/delivery-commit               -> TaskManagerService.createDeliveryCommit(...)
+POST /api/tasks/transition                  -> TaskManagerService.transitionTask(...)
+POST /api/runs/continue                     -> investigation follow-up run
+POST /api/runs/start                        -> first turn on existing work, for Fix checks or a merge conflict
 ```
 
 `TaskManagerService` serializes these task actions through `withTaskAction` so
@@ -141,8 +320,22 @@ two delivery mutations do not race for the same task.
 
 ## GitHub And Git Commands Used
 
-Task Monki uses the local `gh` CLI through `GitHubService`. It does not call
-GitHub REST or GraphQL directly from app code.
+Task Monki uses the local `gh` CLI through one `GitHubCli`, which serves both
+`GitHubService` and `GitHubRemoteWork`, so a missing or signed-out `gh` reads
+the same on every call, preflight included ("GitHub CLI was not found.",
+"GitHub CLI is not signed in to github.com."). It does not call GitHub REST or
+GraphQL directly from app code. On gitlab.com, `GitLabService` does the same
+through `glab api` and GitLab's REST API; the card, records and rules below are
+shared, and Task Monki's own words become MR, `!N` and GitLab, in PR Status and
+in History alike. Push errors and check, branch and person names read as the
+platform wrote them. A task is delivered on the platform it was opened from;
+otherwise on the host of its recorded pull request, so a remote added later does
+not move it; otherwise on GitLab when the checkout's only platform remotes are
+on GitLab, and on GitHub in every other case (`deliveryFor` in
+`TaskManagerService`, `deliveryProvider` in the renderer). The checkout's GitHub
+remote is `origin` when it is on GitHub, otherwise the first GitHub remote
+(`upstream` first), read with the same remote grammar as GitLab's; preflight
+records its canonical host and a URL without credentials.
 
 Official GitHub CLI docs checked for the command surfaces:
 
@@ -151,6 +344,48 @@ Official GitHub CLI docs checked for the command surfaces:
 - `gh pr view`: https://cli.github.com/manual/gh_pr_view
 - `gh pr checks`: https://cli.github.com/manual/gh_pr_checks
 - `gh auth status`: https://cli.github.com/manual/gh_auth_status
+- `gh api graphql`, for review feedback: `PullRequest.reviewThreads`,
+  `latestReviews`, `latestOpinionatedReviews`, `reviewRequests` and `comments`
+  (https://docs.github.com/en/graphql/reference/objects#pullrequest)
+
+GitLab review feedback comes from `GET .../merge_requests/:iid/discussions`
+(pages of 100, up to five), `.../reviewers` and `.../approvals`
+(https://docs.gitlab.com/api/discussions/, https://docs.gitlab.com/api/merge_requests/).
+
+## Review Feedback
+
+Each PR observation also reads what people said: review threads on lines and
+files, review summaries, and conversation comments, with each reviewer's
+state (requested changes, approved, commented, or asked and waiting). It is a
+read; nothing is written back. `PullRequestFeedback` is stored as the task's
+immutable `pull-request-feedback` artifact, and `ReviewRollupRecord.feedback`
+keeps a summary the card reads without the artifact: the artifact id, a
+digest, the unresolved thread count, the discussion count, the reviewers, the
+account that read it (`viewer`), and the platform's time of the person's latest
+comment and of anyone else's (`lastViewerCommentAt`, `lastOtherCommentAt`),
+which decide whose turn it is.
+An unchanged reading keeps its artifact; a read that fails keeps the last
+reading of the same PR, and the PR status still records.
+
+Review threads (GitHub) and discussions (GitLab) are read a page of 100 at a
+time, up to five pages, so the newest are read too; a GitHub conversation is
+its last 30 comments.
+
+What is kept is what a reader sees on the platform: HTML comments outside code
+and invisible characters (zero-width, direction marks and bidirectional
+controls, and tag characters), which both platforms hide, and comments a
+maintainer minimized are left out, and a bot's conversation comment (a
+deployment or coverage report) is not feedback; a bot's review threads are.
+Check and workflow names are stored without invisible characters too. An agent
+is sent the text the Review tab shows, never markup or attributes it hides. A
+reviewer that is a bot is marked as one, and is never asked to review again:
+the platform ignores such a request. A thread keeps its first
+comment and its nine most recent replies. Every body is bounded, and past a
+shared budget, open discussions keep their bodies at the bound while resolved
+ones keep only their start. Past 100 discussions, open ones are kept first,
+then the most recent; a reading that left anything out says so, and the Review
+tab links to the rest on the platform. A GitLab diff note written on an earlier
+head than the MR's is outdated.
 
 Local Git evidence is collected with the configured `git` executable through
 `src/core/git/gitCli.ts`.
@@ -173,6 +408,10 @@ git rev-list --count <base>..HEAD
 git add -A
 git diff --cached --quiet
 git commit -m "Task: <title>"
+git merge --ff --no-edit -m <message> <sha>
+git diff --name-only --diff-filter=U -z
+git merge --abort
+git commit --no-edit --cleanup=strip
 git push --set-upstream <remote> HEAD
 git ls-remote --heads <remote> refs/heads/<branch>
 ```
@@ -258,6 +497,40 @@ Dirty managed worktrees are allowed at the user action level because the backend
 creates a delivery commit. Conflicted, diverged, unavailable, and unknown states
 are blocked. Managed tasks also require a committed diff.
 
+## Linked tasks
+
+A task opened from an issue passes the issue's repository explicitly (`gh ...
+--repo host/owner/repo`) and, when it pushes through a fork, names the head as
+`owner:branch`. The PR body's Summary starts with `Closes #N`, or
+`Related to #N` when the person turned off "Add “Closes #N” to the description".
+
+A task opened from a pull request never creates one. Its PR Status reads the
+linked pull request by number. Push update publishes local commits to the pull
+request's own branch with `git push --force-with-lease=refs/heads/<branch>:<last
+seen head> -- <remote> <sha>:refs/heads/<branch>`: same repository only, the
+remote's single push URL naming it, fast forward from the last seen head only,
+no upstream change, hooks off. A fork pull request offers no Push update; while
+the worktree holds work the pull request does not, the card states "Task Monki
+does not push to forks". After a push, PR Status waits up to about six seconds
+for the platform to report the pushed head before it records the pull request.
+A push the lease refuses, like any push the remote refuses for commits the
+branch lacks, records "Remote branch has newer commits". While the pull request
+was last read before the refusal, those commits are unread: the step is
+Refresh, under Push failed, since bringing in the recorded head would merge
+only what the worktree holds. One read ends that step. Once Git is measured
+against the head read (an opened pull request's branch always is; a task's own
+branch once its upstream is that head), Git decides what is left: Pull changes
+while the branch lacks it, Push update once the worktree holds it. A task's own
+branch whose upstream was not fetched brings the head in with Pull changes,
+which moves no remote-tracking ref: once the worktree's head moves past the
+refused one, the step is Push update.
+
+`PR_NEWER_COMMITS` and a rewritten pull request the worktree has no commits of
+its own against (headline "PR rewritten") offer Sync branch, the lead action;
+it is disabled while the worktree has changes. Git evidence for these tasks measures
+the branch against the observed pull request head, so ahead, behind and
+diverged are exact. Without a recorded snapshot, the card offers Refresh only.
+
 ## Refresh Flow
 
 For an unlinked external checkout, Refresh performs read-only PR discovery.
@@ -268,9 +541,15 @@ its target branch. If the local HEAD is newer, the same action publishes the
 update; discovery alone does not complete that action.
 
 External publication requires clean, current Git evidence and one verified push
-destination in the selected GitHub repository. It pushes the verified commit to
+destination in the selected repository: the remote has one push URL, and it
+names the same platform, host and path. It pushes the verified commit to
 the exact branch ref without changing upstream configuration or publishing tags.
-The publication record retains the destination URL for uncertain-push reconciliation.
+The publication record retains the destination URL, without the user and
+password an https URL can carry, for uncertain-push reconciliation, which
+checks the remote's configured URL when it names the same destination. Every
+publication record, a managed task's included, stores its error with
+credentials redacted (`recordablePublication`), so a push error reads without
+them in PR Status and History.
 A new imported-work PR requires an explicit target branch. Task Monki verifies
 that branch in the selected GitHub repository before publication. The request
 does not change the checkout's stored comparison or existing review evidence.
@@ -306,7 +585,7 @@ pushes a branch or invokes `gh pr create`.
 
 ## Failing Check Investigation Flow
 
-`Investigate failure` appears only when the selected PR Status state is
+`Fix checks` appears only when the selected PR Status state is
 `CHECKS_FAILED`. This is stricter than reading the latest CI rollup alone:
 terminal and freshness states win first, so stale, diverged, or locally
 unpublished work never inherits a failure investigation action from non-current
@@ -317,12 +596,22 @@ selectedStatus === CHECKS_FAILED
 ciRollup.status === FAILING or BLOCKED
 ```
 
-Clicking it does not call GitHub. It starts implementation-side follow-up work:
+Clicking it writes nothing to the platform. It first reads the end of each
+failing log from the platform (`readPullRequestCheckLogs`), once for the head's
+failed checks as their pages stand, so logs the Fix checks step already read are
+reused, then starts implementation-side work: a follow-up of the task's
+source run, or, for an imported checkout or an opened pull request before its
+first turn, the task's first turn. A log read that fails leaves the agent each
+check's link.
 
 ```text
 TaskDetail.investigateFailingChecks
-  -> buildFailingChecksInvestigationPrompt(view)
-  -> taskManagerApi.continueRun({ runId, instruction })
+  -> runDeliveryAction(...)
+  -> taskManagerApi.readPullRequestCheckLogs({ taskId })
+  -> buildFailingChecksInvestigationPrompt(view, provider, { entries, boundary })
+  -> taskManagerApi.continueRun({ taskId, runId, instruction })
+     or, before the first turn on existing work,
+     taskManagerApi.startRun({ taskId, instruction, mode: 'IMPLEMENTATION', settings })
 ```
 
 The prompt includes:
@@ -332,8 +621,13 @@ The prompt includes:
 - head SHA
 - branch and base
 - failing check names, workflow, state, event, timestamps, and link
+- the end of each failing log that was read
 
-If there is no completed source run to continue, the button is disabled with:
+Everything from the branch on is quoted as data between boundary lines that
+carry a value new to each request.
+
+If there is no source run to continue and the task is not existing work before
+its first turn, the button is disabled with:
 
 ```text
 No completed run is available.
@@ -401,20 +695,65 @@ reviewDecision REVIEW_REQUIRED   -> REQUESTED
 otherwise                        -> NOT_REQUESTED
 ```
 
-Merge status:
+GitLab review status:
 
 ```text
-mergedAt exists                  -> MERGED
-state == CLOSED                  -> CLOSED_UNMERGED
-state == MERGED                  -> MERGED
-mergeStateStatus CLEAN/HAS_HOOKS -> MERGEABLE
-mergeable == MERGEABLE           -> MERGEABLE
-mergeStateStatus BLOCKED/DIRTY/BEHIND/DRAFT -> BLOCKED
-mergeStateStatus UNKNOWN or mergeable UNKNOWN -> UNKNOWN
-otherwise                        -> NOT_MERGED
+requested_changes (merge reason or a reviewer's state) -> CHANGES_REQUESTED
+approved, no approvals left, at least one approver     -> APPROVED
+approvals left, or merge reason not_approved           -> REQUESTED
+otherwise                                              -> NOT_REQUESTED
 ```
 
-Only the first 80 check detail rows are stored.
+A project without approval rules reports itself approved with nobody in
+`approved_by`, which is not an approval. The GitLab review record carries no
+`reviewDecision`: GitLab's merge reason changes from one reading to the next
+while the review stands, so it is merge evidence.
+
+Merge status. `mergeable` reports only Git conflicts, so GitHub's merge state
+decides; a draft, or a PR held by branch protection (required reviews, checks
+or resolved conversations), is not mergeable yet for reasons its own evidence
+states, and only conflicts or a branch that must be updated block it:
+
+```text
+mergedAt exists                          -> MERGED
+state == CLOSED                          -> CLOSED_UNMERGED
+state == MERGED                          -> MERGED
+mergeStateStatus CLEAN/HAS_HOOKS/UNSTABLE -> MERGEABLE
+mergeStateStatus DIRTY/BEHIND            -> BLOCKED
+mergeStateStatus DRAFT/BLOCKED           -> NOT_MERGED, or BLOCKED when mergeable == CONFLICTING
+mergeStateStatus UNKNOWN                 -> UNKNOWN
+no mergeStateStatus                      -> from mergeable: MERGEABLE, BLOCKED (CONFLICTING), UNKNOWN, else NOT_MERGED
+```
+
+GitLab reports the first reason an MR cannot merge in `detailed_merge_status`,
+which `gitLabMergeReason` in `src/shared/pullRequestActions.ts` classifies once
+for the adapter and the record alike. `mergeable` is MERGEABLE; `checking`,
+`unchecked`, `preparing` and `approvals_syncing` are COMPUTING; reasons the
+draft, review or check evidence states, or that a person settles on GitLab
+(`draft_status`, `not_approved`, `requested_changes`, `ci_must_pass`,
+`ci_still_running`, `discussions_not_resolved`, `not_open`, and the policy
+checks) are NOT_MERGED; a conflict, a needed rebase or a lock is BLOCKED; a
+reason GitLab adds later is UNKNOWN. The record's Merge gate names each
+NOT_MERGED reason no other gate states: `not_approved` "Needs approval",
+`status_checks_must_pass` "Waiting on status checks",
+`security_policy_pipeline_check` "Waiting on security policies", `merge_time`
+"Waiting on merge time", a missing issue reference the project requires "Needs
+an issue reference", and `title_regex` "Needs a matching title". `not_open`, and
+the reasons the draft, reviews, checks or threads state, get no Merge row.
+Because GitLab names the draft first, a reviewer's own `requested_changes`
+state also makes the review CHANGES_REQUESTED. A `locked` merge request, which
+GitLab is merging, reads open.
+
+The head pipeline's own status is one more `Pipeline` check whenever no listed
+job reads the same: the jobs read leaves out trigger jobs, stops at its first
+100 and can fail, so a pipeline that failed or still runs never reads as
+passing, and one that exists never reads as no checks. Its link is the
+pipeline's, so it has no log and no re-run. A merged-results pipeline
+(`refs/merge-requests/<iid>/merge` or `/train`) is evidence for the merge
+request's head.
+
+The check counts cover every check; at most 80 check detail rows are stored,
+failures first, so a failure past that limit is still counted and listed.
 
 ## Completion Policy Coupling
 
@@ -517,8 +856,9 @@ the current local branch.
 ## Full Render Matrix
 
 The examples below use the real labels and action names from the current UI.
-`[refresh]` is the icon-only refresh button. Its tooltip is either
-`Refresh PR status` or the disabled reason.
+`[refresh]` is the icon-only refresh button. Its tooltip names it
+(`Refresh pull request`, or `Refresh merge request` on GitLab); while it is
+disabled, its reason stands beside it in place of the time.
 
 ### NO_PR, no worktree
 
@@ -628,7 +968,7 @@ Last push failed: <stored publication error>
 ```text
 PR Status
 o No PR
-Remote branch has newer commits. Sync the branch before pushing again.
+Remote branch has newer commits
 [Create draft PR disabled]
 ```
 
@@ -638,14 +978,12 @@ Remote branch has newer commits. Sync the branch before pushing again.
 PR Status                         Jul 2, 10:56
 o Draft PR
 #82 Refresh auth token
-No checks reported
 [refresh]
 ```
 
-Tone: `info`. When no check verdict leads, the evidence line says what is
-missing: `Checks not observed` (no rollup), `No checks reported` (zero rows, as
-in a repository without CI), `Checks not applicable`, or `Checks unknown`. None
-of these outranks GitHub review or draft state.
+Tone: `info`. A pull request without checks, as in a repository without CI,
+leaves the headline to its review and draft state; the record's Checks row
+reads None.
 
 ### OPEN
 
@@ -658,35 +996,34 @@ o Open PR
 
 Tone: `neutral`.
 
-### LOCAL_NOT_PUSHED, dirty worktree
+### LOCAL_NOT_PUSHED, dirty worktree or local head newer
 
 ```text
 PR Status                         Jul 2, 10:56
-o Local changes not pushed
+o Changes not pushed
 #82 Refresh auth token
-Local worktree has uncommitted changes.
 [Push update]
 ```
 
-### LOCAL_NOT_PUSHED, local head newer
-
-```text
-PR Status                         Jul 2, 10:56
-o Local changes not pushed
-#82 Refresh auth token
-Local branch has newer commits.
-[Push update]
-```
+A freshness state's title says what moved, so its step carries a fact only
+when it adds to the title: how many files Push update commits first ("2
+uncommitted files"), a merge Git stopped on that Push update finishes ("Merge
+in progress"), answers not pushed yet ("Codex answered 1
+comment"), a failed or unconfirmed push's error, a rewrite ("No commits of its
+own") and a fork.
 
 ### LOCAL_NOT_PUSHED, retryable publication failure
 
 ```text
 PR Status                         Jul 2, 10:56
-o Local changes not pushed
+o Push failed
 #82 Refresh auth token
-Last push failed: <stored publication error>
+<stored publication error>
 [Push update]
 ```
+
+A push whose result is not known reads "Push unconfirmed", with the stored
+error when there is one, until a reading of the remote settles it.
 
 ### BRANCH_DIVERGED, local and PR both changed
 
@@ -694,23 +1031,25 @@ Last push failed: <stored publication error>
 PR Status                         Jul 2, 10:56
 o Branch diverged
 #82 Refresh auth token
-Local branch and PR branch both changed.
-[refresh]
+[Pull changes]
 ```
 
 No push action is shown.
 
-### BRANCH_DIVERGED, remote has newer commits
+### Push failed, remote has newer commits
 
 ```text
 PR Status                         Jul 2, 10:56
-o Branch diverged
+o Push failed
 #82 Refresh auth token
-Remote branch has newer commits. Sync the branch before pushing again.
-[refresh]
+Remote branch has newer commits
+[Refresh]
 ```
 
-No push action is shown.
+No push action is shown. After a refresh reads the new head, the step is Pull
+changes, then Push update once the worktree holds that head or its own head
+moved past the refused one, since Pull changes moves no remote-tracking ref. A
+failed or unconfirmed push takes the error tone, as on the board.
 
 ### PR_NEWER_COMMITS
 
@@ -718,18 +1057,19 @@ No push action is shown.
 PR Status                         Jul 2, 10:56
 o PR has newer commits
 #82 Refresh auth token
-This worktree is behind the PR.
-[refresh]
+[Sync branch]
 ```
+
+A task opened from the pull request syncs its branch; a task's own pull
+request offers Pull changes instead.
 
 ### STALE
 
 ```text
 PR Status                         Jul 2, 10:56
-o Stale
+o Checks stale
 #82 Refresh auth token
-Refresh PR status for the current head.
-[refresh]
+[Refresh]
 ```
 
 Stale means at least one recorded CI, review, or merge head SHA does not match
@@ -742,7 +1082,7 @@ investigation actions from stale check evidence.
 PR Status                         Jul 2, 10:56
 o Checks failed
 #82 Refresh auth token
-[refresh] [Investigate failure]
+[refresh] [Fix checks]
 Checks 6
   > lint-and-test  Failed   3m
   > build          Failed   2m
@@ -794,30 +1134,52 @@ Checks 2
 ```
 
 This renders only when `ciRollup.status == NO_CHECKS` and the total check count
-is greater than zero. Aggregate check summaries render only when GitHub did not
-return individual check rows; otherwise the expandable rows are the evidence.
+is greater than zero. The record's Checks row states the counts, and opens into
+a row per check when the platform returned them.
 
-### GITHUB_CHANGES_REQUESTED
-
-```text
-PR Status                         Jul 2, 10:56
-o GitHub changes requested
-#82 Refresh auth token
-[refresh]
-```
-
-Tone: `error`. This is GitHub review evidence, not Task Monki agent-review evidence.
-
-### GITHUB_REVIEW_WAITING
+### GITHUB_CHANGES_REQUESTED (Changes requested)
 
 ```text
 PR Status                         Jul 2, 10:56
-o GitHub review waiting
+o Changes requested
 #82 Refresh auth token
+alice requested changes, 3 unresolved threads
+[Address comments] [refresh]
+```
+
+Tone: `action`. This is GitHub review evidence, not Task Monki agent-review evidence.
+
+The feedback line, on any open PR whose feedback was read with it, says who
+requested changes, who it waits on and how many threads are unresolved;
+approvals are left to the review state. `Address comments` appears while an
+unresolved thread, or a review requesting changes, was not sent to the agent
+since anyone else last wrote on it: it adds those to the review request and
+opens the Review tab's request sheet. Nothing is sent until the person sends
+it there. It leads the panel after Fix checks, Sync branch and Push
+update, and the panel lists what it would send, one row per comment that opens
+its thread in Review.
+
+The state follows whose turn it is (`reviewTurn`). It is the author's while a
+reviewer's request or an unresolved thread stands unanswered. It is the
+reviewers' once the person wrote after everyone else on the platform's clock,
+or asked again every reviewer who requested changes (GitHub shows that reviewer
+as requested while the verdict stands): the card reads Waiting for review with
+"Waiting on alice", offers nothing, and the Inbox and board raise nothing. A
+reviewer's next comment or review hands the turn back. A request for changes the
+person made themselves, on a pull request they took on as a task, stays theirs.
+
+### GITHUB_REVIEW_WAITING (Waiting for review)
+
+```text
+PR Status                         Jul 2, 10:56
+o Waiting for review
+#82 Refresh auth token
+Waiting on alice
 [refresh]
 ```
 
-Tone: `action`.
+Tone: `action`. Also the state of a pull request whose requested changes the
+person answered: the fact names who it waits on.
 
 ### READY_TO_MERGE
 
@@ -825,7 +1187,6 @@ Tone: `action`.
 PR Status                         Jul 2, 10:56
 o Ready to merge
 #82 Refresh auth token
-Approved · Mergeable
 [refresh]
 ```
 
@@ -858,11 +1219,12 @@ Tone: `success`. No create or push action is shown.
 PR Status                         Jul 2, 10:56
 o Closed without merge
 #82 Refresh auth token
-[refresh] [Create draft PR]
+[refresh] [Create draft PR] [Archive task]
 ```
 
 Tone: `error`. The old PR snapshot is terminal, but Task Monki may still offer
-`Create draft PR` if the current task branch is publishable.
+`Create draft PR` if the current task branch is publishable; `Archive task` is
+the task's own way out under a merge policy.
 
 ### UNKNOWN
 
@@ -875,9 +1237,9 @@ o Unknown
 
 Unknown is the fallback when a PR exists but no higher priority status applies.
 
-## Check Details Rendering
+## Check Rendering
 
-Check rows are grouped by severity order:
+The record lists the current head's checks in severity order:
 
 ```text
 failed
@@ -887,63 +1249,68 @@ skipped
 passed
 ```
 
-Each check is a collapsed `details` row:
+Each row shows the check's state mark, name, status word, run time once it
+finished, and a link to its page. The mark carries the tone; the word stays
+neutral:
 
 ```text
-> <dot> <name>          <Status label> <short meta>
+<mark> <name>          <Status word> <run time> <link>
 ```
 
-Opening the row shows stored evidence only:
-
-```text
-Workflow: CI
-Status: FAILURE
-Event: pull_request
-Started: 2026-07-02T08:56:45Z
-Completed: 2026-07-02T08:56:48Z
-URL: https://github.com/...
-Description: ...
-```
-
-The card does not render GitHub Actions log output because Task Monki does not
-store logs for this feature.
+The Fix checks step lists up to three failed checks, then how many more
+failed. Each row opens the end of its log, read from the platform when a row
+is first opened, once per head; a new head's rows start closed. Task Monki does
+not store logs.
 
 ## Action Pauses
 
-`buildPrStatusActionState` layers runtime pauses over evidence gates.
-The PR Status card renders these reasons as disabled action titles, not inline
-helper text.
+`buildPrStatusActionState` layers runtime pauses over evidence gates. A pause
+disables every step that acts on the branch or the platform: Sync branch, Push
+update, Pull changes, Update with <base>, Fix checks, Re-run failed, Reply on
+GitHub, Mark as ready, Merge and Create draft PR. Refresh stays available except
+while a delivery action runs, and Address comments, which only adds to the
+request in the Review tab, and Archive task stay available under any pause. A
+disabled action states its reason once below the actions, and Create draft also
+carries it on its title. While a delivery action runs, the reason takes the
+time's place in the record's refresh line; on the card before a pull request
+exists, it is stated once, beside Create draft, and the disabled Refresh points
+at it (`aria-describedby`).
 
 ```text
-delivery action in flight:
-  disables refresh, create/push, investigate
-  disabled title: GitHub action is in progress.
+delivery action in flight (either platform, or local, such as a commit):
+  disables Refresh and every step that acts
+  disabled reason: Action in progress
 
 agent review starting:
-  disables create/push/investigate
-  refresh remains available
-  disabled title: Delivery actions pause while review starts.
+  disables every step that acts; Refresh remains available
+  disabled reason: Delivery actions pause while review starts.
 
 agent review running:
-  disables create/push/investigate
-  refresh remains available
-  disabled title: Delivery actions pause while review runs.
+  disables every step that acts; Refresh remains available
+  disabled reason: Delivery actions pause while review runs.
 
 implementation running:
-  disables create/push/investigate
-  refresh remains available
-  disabled title: Delivery actions pause while the agent runs.
+  disables every step that acts; Refresh remains available
+  disabled reason: Delivery actions pause while the agent runs.
 
-failing checks with no source run:
-  disables Investigate failure
-  disabled title: No completed run is available.
+question in Ask reading the live worktree:
+  disables every step that acts; Refresh remains available
+  disabled reason: Delivery actions pause while a question is answered.
+
+implementation outcome that requires a retry:
+  disables every step that acts; Refresh remains available
+  disabled reason: the recorded retry reason
+
+no source run to continue, outside existing work before its first turn:
+  disables Fix checks, Pull changes and Update with <base>
+  disabled reason: No completed run is available.
 ```
 
 Review and Finish use the reverse pause relationship:
 
 ```text
-GitHub delivery running -> Run review stays visible but disabled.
-GitHub delivery running -> Finish actions pause during GitHub actions.
+delivery action running -> Run review stays visible but disabled.
+delivery action running -> Finish actions pause during delivery actions.
 review running          -> Finish actions pause while review runs.
 implementation running  -> Finish actions pause while the agent runs.
 ```
@@ -952,8 +1319,8 @@ When review is `NOT_RUN` and another task action pauses review actions, the
 `Run review` remains in place, disabled, with the pause reason on
 the `tm-actiontitle` wrapper. Do not replace it with dangling explanatory text.
 
-The delivery `Commit` action now uses `runDeliveryAction`, so PR Status and
-Finish pause consistently during local delivery commits.
+The delivery `Commit` action uses `runDeliveryAction`, so PR Status and Finish
+pause consistently during local delivery commits.
 
 ## Board Card Pull Request
 
@@ -969,12 +1336,64 @@ checks canceled
 changes requested
 review waiting
 checks passing, mergeable
+checks passing
 ```
 
 Projection scalars alone never claim "ready to merge"; that needs delivery
-evidence for the current head. A note the card's status word already states is
-dropped, so "Checks failed" never sits beside "checks failing". The note takes
-no tone: the status word carries it.
+evidence for the current head. "mergeable" needs a ready PR GitHub or GitLab
+calls mergeable; a draft with passing checks reads "checks passing". Once the
+person answered and the turn is the reviewers' (`reviewTurn`), "changes
+requested" reads "review waiting". A note the card's status word already states
+is dropped on either platform, so "Checks failed" never sits beside "checks
+failing" and "Changes requested" never beside "changes requested". The note
+takes no tone: the status word carries it.
+
+A delivery state the person owes a step on carries its facts on the board
+summary (`BoardTaskSummary.delivery`, read at request time, never stored): the
+failed checks' names, who asked for changes and how many threads are
+unresolved, the base a blocked merge waits on, and why the last push failed.
+The Inbox states that fact beneath the word ("unit and lint failed", "unit,
+lint and 3 more failed", "alice requested changes, 2 unresolved threads",
+"Conflicts with main"). Delivery raises nothing while an agent turn runs, since
+the turn may be the fix, nor while the pull request waits on its reviewers;
+conflicts an agent turn is resolving, as after a merge Git stopped on, raise
+nothing until it ends. Once it ends, a merge Task Monki left in progress in a
+managed worktree with an open pull request (`delivery.mergeInProgress`) reads
+"Changes not pushed" with "Merge in progress" beneath it, the step Push update
+finishes; a conflict with no such merge keeps "Git conflicts". The word follows
+the Now panel's step order: a push the
+remote refused ("Push failed") or one that may have landed ("Push
+unconfirmed"), as the publication record says; while a blocker stands, a branch
+that diverged from the pull request ("Branch diverged", or "PR rewritten" under
+a worktree with nothing of its own) or fixes not pushed ("Changes not pushed");
+a base that moved ("Merge blocked", with "Conflicts with main" or "Behind
+main"), failed checks, requested changes, then a merge the platform blocks for
+another reason. Push update keeps an open pull request open in the projection
+while it runs, so the task never reads as having none. Conflicts, failed
+checks, a blocked merge and a refused push raise the task's health to error; a
+reading that clears one (the conflicts committed, checks passing, the merge no
+longer blocked, a push that landed) lowers it to what still stands, so a
+delivery that recovered never reads "Delivery needs attention".
+
+A pull request opened as a task that merges on the platform completes the task
+under the merge policy between turns, In progress included; a run in flight
+holds completion until it ends. In any phase, a worktree that held work the
+pull request does not when Task Monki last observed it (uncommitted, unpushed,
+diverged or conflicted) keeps the task open: a merge someone else made does not
+ship fixes that were never pushed.
+
+Between turns, an open PR's own progress (Branch diverged, Changes not pushed,
+Checks stale) is the task's status word in any phase, so a PR opened as a task,
+which starts In progress, reads as the PR card does. A PR rewritten under a
+worktree that holds nothing of its own reads "PR rewritten", as PR Status says
+it: the board summary carries `pullRequestRewritten`, decided by the same
+`pullRequestRewrittenUnder` rule PR Status uses. A merged PR asks nothing more:
+its last review decision or check result raises no attention, and the word is
+Merged (or Ready to mark done under a manual policy).
+
+Platform times are recorded in the store's canonical form: GitHub reports
+`mergedAt` without milliseconds, and an observation is refused at write time
+when a value could not be loaded again.
 
 ## Evidence Updates And Projection
 
@@ -1003,13 +1422,15 @@ Core and renderer coverage lives in:
 - `src/core/projection/reducer.test.ts`
 - `src/core/app/TaskManagerService.workflowPolicies.test.ts`
 - `src/core/app/TaskManagerService.reviewPrActions.integration.test.ts`
+- `src/core/app/TaskManagerService.remoteWork.integration.test.ts`
 - `src/core/github/GitHubService.test.ts`
 
 Important test expectations:
 
 - full PR status card state matrix
 - failing checks beat GitHub review waiting
-- terminal and freshness states do not duplicate ready evidence text
+- a merge Git stopped on leads with Push update, offers neither update again,
+  and is finished by Push update only once no conflict marker remains
 - closed-unmerged PR can offer a replacement draft PR when publishable
 - remote-newer push failure blocks delivery mutation
 - retryable publication failures remain retryable

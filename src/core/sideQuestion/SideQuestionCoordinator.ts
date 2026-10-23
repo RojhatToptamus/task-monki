@@ -4,6 +4,8 @@ import {
   effectiveReviewFindings,
   effectiveReviewGateStatus,
   isImplementationRunMode,
+  parsePullRequestFeedback,
+  parseReviewWalkthrough,
   type AgentExecutionSettings,
   type AskSideQuestionRequest,
   type AskSubject,
@@ -15,6 +17,7 @@ import {
   type TaskInstruction
 } from '../../shared/contracts';
 import {
+  taskGoal,
   SIDE_QUESTION_CONVERSATION_LIMIT,
   SIDE_QUESTION_HISTORY_LIMIT,
   buildSideQuestionPrompt,
@@ -72,7 +75,8 @@ interface QuestionTarget {
 /**
  * Ask: side questions about a task, on every task tab. Questions are durable
  * `TaskInstruction` records with role SIDE and a renderer-owned thread ID, optionally
- * about a subject (a finding of the current review, or lines of the diff). Each is
+ * about a subject (a finding of the current review, lines of the diff, a section of the
+ * review's walkthrough, a changed file, or a thread of the pull request). Each is
  * answered by one SIDE_QUESTION run in a fresh read-only session on the task's runtime,
  * beside the main conversation, with the recent conversation and the current review in
  * its prompt. The run reads the live worktree, or a read-only snapshot of it while
@@ -110,7 +114,10 @@ export class SideQuestionCoordinator {
       if (existing && !retry) return existing;
 
       const { iteration, worktree } = questionWorktree(detail);
+      // A subject that is no longer the task's is refused before anything is recorded.
       if (subject?.kind === 'FINDING') findingSubject(detail, subject);
+      if (subject?.kind === 'STAGE') await this.stageSubject(detail, subject);
+      if (subject?.kind === 'THREAD') await this.threadSubject(detail, subject);
       if (detail.runs.some((run) => run.mode === 'SIDE_QUESTION' && ACTIVE_AGENT_RUN_STATUSES.has(run.status))) {
         throw new Error('Wait for the current answer to finish, or stop it.');
       }
@@ -327,13 +334,10 @@ export class SideQuestionCoordinator {
       .filter((revision) => implementationRunIds.has(revision.runId))
       .sort((left, right) => left.observedAt.localeCompare(right.observedAt) || left.revision - right.revision)
       .at(-1);
-    const git = detail.gitSnapshots
-      .filter((item) => item.iterationId === iterationId)
-      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
-      .at(-1);
+    const git = latestCapture(detail);
     const { worktree } = questionWorktree(detail);
     return {
-      task: { title: detail.task.title, request: detail.task.prompt },
+      task: { title: detail.task.title, request: taskGoal(detail.task) },
       conversation,
       ...(plan ? { plan: { ...(plan.explanation ? { explanation: plan.explanation } : {}), steps: plan.steps } } : {}),
       implementationActive: detail.runs.some(isActiveWorktreeWriter),
@@ -356,23 +360,71 @@ export class SideQuestionCoordinator {
     };
   }
 
-  /** The subject with the diff around it: the reviewed capture for a finding, the latest capture for lines. */
+  /**
+   * The subject with what it is about: a finding with the reviewed capture's diff,
+   * lines or a file with the latest capture's, a walkthrough section as written,
+   * and a thread as quoted data.
+   */
   private async subjectContext(
     detail: TaskDetailSnapshot,
     subject: AskSubject
   ): Promise<NonNullable<SideQuestionPromptContext['subject']>> {
-    if (subject.kind === 'FINDING') {
-      const { finding, reviewedSnapshotId } = findingSubject(detail, subject);
-      const snapshot = detail.gitSnapshots.find((candidate) => candidate.id === reviewedSnapshotId);
-      const diff = finding.path ? await this.diffExcerpt(snapshot?.diffArtifactId, finding.path, finding.line) : undefined;
-      return { kind: 'FINDING', finding, ...(diff ? { diff } : {}) };
+    switch (subject.kind) {
+      case 'FINDING': {
+        const { finding, reviewedSnapshotId } = findingSubject(detail, subject);
+        const snapshot = detail.gitSnapshots.find((candidate) => candidate.id === reviewedSnapshotId);
+        const diff = finding.path ? await this.diffExcerpt(snapshot?.diffArtifactId, finding.path, finding.line) : undefined;
+        return { kind: 'FINDING', finding, ...(diff ? { diff } : {}) };
+      }
+      case 'LINES':
+      case 'FILE': {
+        const line = subject.kind === 'LINES' && subject.side === 'NEW' ? subject.line : undefined;
+        const diff = await this.diffExcerpt(latestCapture(detail)?.diffArtifactId, subject.path, line);
+        return { ...subject, ...(diff ? { diff } : {}) };
+      }
+      case 'STAGE': {
+        const { walkthrough, section } = await this.stageSubject(detail, subject);
+        return { kind: 'STAGE', number: subject.section + 1, count: walkthrough.sections.length, section };
+      }
+      case 'THREAD': {
+        const { feedback, discussion } = await this.threadSubject(detail, subject);
+        return {
+          kind: 'THREAD',
+          provider: feedback.provider,
+          discussion,
+          ...(feedback.viewer ? { viewer: feedback.viewer } : {}),
+          // Its authors cannot know this boundary, so their words cannot end their own quote.
+          boundary: randomUUID()
+        };
+      }
     }
-    const latest = detail.gitSnapshots
-      .filter((item) => item.iterationId === detail.task.currentIterationId)
-      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
+  }
+
+  /** A stage names a section of the walkthrough the review gate shows, current or kept as earlier context. */
+  private async stageSubject(detail: TaskDetailSnapshot, subject: Extract<AskSubject, { kind: 'STAGE' }>) {
+    const stored = detail.task.projection.agentReview?.walkthrough;
+    if (stored?.status !== 'STORED' || stored.reviewRunId !== subject.reviewRunId) {
+      throw new Error('This walkthrough is no longer the task’s.');
+    }
+    const text = await this.options.readArtifact(stored.artifactId).catch(() => '');
+    const walkthrough = parseReviewWalkthrough(text, stored.reviewRunId);
+    const section = walkthrough?.sections[subject.section];
+    if (!walkthrough || !section) throw new Error('This section is not part of the walkthrough.');
+    return { walkthrough, section };
+  }
+
+  /** A thread names a discussion of the task's pull request, as last read. */
+  private async threadSubject(detail: TaskDetailSnapshot, subject: Extract<AskSubject, { kind: 'THREAD' }>) {
+    const rollup = detail.reviewRollups
+      .filter((record) => record.iterationId === detail.task.currentIterationId)
+      .sort((left, right) => left.observedAt.localeCompare(right.observedAt))
       .at(-1);
-    const diff = await this.diffExcerpt(latest?.diffArtifactId, subject.path, subject.side === 'NEW' ? subject.line : undefined);
-    return { ...subject, ...(diff ? { diff } : {}) };
+    const number = rollup?.pullRequestNumber;
+    const text = rollup?.feedback ? await this.options.readArtifact(rollup.feedback.artifactId).catch(() => '') : '';
+    const feedback = number === undefined ? undefined : parsePullRequestFeedback(text, number);
+    const discussion = feedback?.discussions.find((candidate) => candidate.id === subject.discussionId);
+    if (!feedback || !discussion) throw new Error('This discussion is no longer part of the pull request.');
+    return { feedback, discussion };
   }
 
   private async diffExcerpt(artifactId: string | undefined, path: string, line?: number): Promise<string | undefined> {
@@ -452,6 +504,14 @@ function threadKey(taskId: string, threadId: string): string {
   return `${taskId}:${threadId}`;
 }
 
+/** Task Monki's latest Git capture of the task's current iteration. */
+function latestCapture(detail: TaskDetailSnapshot) {
+  return detail.gitSnapshots
+    .filter((item) => item.iterationId === detail.task.currentIterationId)
+    .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt))
+    .at(-1);
+}
+
 function requireUuid(value: unknown, label: string): string {
   if (typeof value !== 'string' || !UUID.test(value)) throw new Error(`A valid ${label} ID is required.`);
   return value;
@@ -516,10 +576,13 @@ function findingSubject(detail: TaskDetailSnapshot, subject: Extract<AskSubject,
 const SUBJECT_TEXT_MAX_LENGTH = 1_000;
 const SUBJECT_LINE_MAX = 10_000_000;
 
-/** A subject checked for shape; whether a finding still exists is checked against the task. */
+/**
+ * A subject checked for shape; whether a finding, a walkthrough section or a thread
+ * still exists is checked against the task.
+ */
 function askSubject(value: unknown): AskSubject | undefined {
   if (value === undefined) return undefined;
-  const invalid = () => new Error('Ask about a valid finding or line range.');
+  const invalid = () => new Error('Ask about a valid finding, section, file, thread or line range.');
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   const record = value as Record<string, unknown>;
   const text = (key: string) => {
@@ -543,5 +606,12 @@ function askSubject(value: unknown): AskSubject | undefined {
     if (end !== undefined && end <= start) throw invalid();
     return { kind: 'LINES', path: text('path'), side: record.side, line: start, ...(end !== undefined ? { endLine: end } : {}) };
   }
+  if (record.kind === 'STAGE') {
+    const section = record.section;
+    if (typeof section !== 'number' || !Number.isSafeInteger(section) || section < 0) throw invalid();
+    return { kind: 'STAGE', reviewRunId: requireUuid(record.reviewRunId, 'review run'), section };
+  }
+  if (record.kind === 'FILE') return { kind: 'FILE', path: text('path') };
+  if (record.kind === 'THREAD') return { kind: 'THREAD', discussionId: text('discussionId') };
   throw invalid();
 }

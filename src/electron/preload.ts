@@ -3,7 +3,10 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AddDesignReferencesRequest,
   DecideReviewFindingRequest,
+  DecideReviewRequestItemRequest,
   ReadReviewChangesRequest,
+  ReadTaskCommitDiffRequest,
+  ReadTaskCommitsRequest,
   AskSideQuestionRequest,
   EndSideThreadRequest,
   StopSideQuestionRequest,
@@ -15,6 +18,17 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   ImportTaskRequest,
+  ListRemoteWorkRequest,
+  OpenPullRequestRequest,
+  SyncPullRequestRequest,
+  MarkPullRequestReadyRequest,
+  ResolvePullRequestDiscussionRequest,
+  RerunPullRequestChecksRequest,
+  ReadPullRequestMergeOptionsRequest,
+  MergePullRequestRequest,
+  ReplyToPullRequestRequest,
+  ReadPullRequestCheckLogsRequest,
+  MergePullRequestUpdateRequest,
   PreviewImportRequest,
   ReconnectWorktreeRequest,
   UpdateWorktreeComparisonRequest,
@@ -108,14 +122,18 @@ import {
   IPC_UPDATE_CHANNEL,
   IPC_SOFTWARE_UPDATE_CHANNEL,
   IPC_WINDOW_CHROME_CHANNEL,
-  ipcErrorMessage,
   type IpcInvokeChannel
 } from '../shared/ipcChannels';
 
+// Electron rejects an invoke with "Error invoking remote method '<channel>': "
+// and the handler error's toString(); the renderer receives only its message.
+const REMOTE_ERROR_NAME = /^\w*Error(?: \[\w+\])?: /u;
+
 function invokeIpc(channel: IpcInvokeChannel, ...args: unknown[]): Promise<any> {
   return ipcRenderer.invoke(channel, ...args).catch((error: unknown) => {
-    if (error instanceof Error) error.message = ipcErrorMessage(error.message);
-    throw error;
+    const prefix = `Error invoking remote method '${channel}': `;
+    if (!(error instanceof Error) || !error.message.startsWith(prefix)) throw error;
+    throw new Error(error.message.slice(prefix.length).replace(REMOTE_ERROR_NAME, ''));
   });
 }
 
@@ -276,6 +294,17 @@ const api: TaskManagerApi = {
     ),
   createTask: (input: CreateTaskRequest) => invokeIpc('task:create', input),
   importTask: (input: ImportTaskRequest) => invokeIpc('task:import', input),
+  listRemoteWork: (input: ListRemoteWorkRequest) => invokeIpc('remote:list', input),
+  openPullRequest: (input: OpenPullRequestRequest) => invokeIpc('remote:openPullRequest', input),
+  syncPullRequest: (input: SyncPullRequestRequest) => invokeIpc('remote:syncPullRequest', input),
+  markPullRequestReady: (input: MarkPullRequestReadyRequest) => invokeIpc('remote:markPullRequestReady', input),
+  resolvePullRequestDiscussion: (input: ResolvePullRequestDiscussionRequest) => invokeIpc('remote:resolvePullRequestDiscussion', input),
+  rerunPullRequestChecks: (input: RerunPullRequestChecksRequest) => invokeIpc('remote:rerunPullRequestChecks', input),
+  readPullRequestMergeOptions: (input: ReadPullRequestMergeOptionsRequest) => invokeIpc('remote:readPullRequestMergeOptions', input),
+  mergePullRequest: (input: MergePullRequestRequest) => invokeIpc('remote:mergePullRequest', input),
+  replyToPullRequest: (input: ReplyToPullRequestRequest) => invokeIpc('remote:replyToPullRequest', input),
+  readPullRequestCheckLogs: (input: ReadPullRequestCheckLogsRequest) => invokeIpc('remote:readPullRequestCheckLogs', input),
+  mergePullRequestUpdate: (input: MergePullRequestUpdateRequest) => invokeIpc('remote:mergePullRequestUpdate', input),
   previewImport: (input: PreviewImportRequest) => invokeIpc('task:importPreview', input),
   listExistingWorktrees: (repositoryId: string) => invokeIpc('worktree:list', repositoryId),
   reconnectWorktree: (input: ReconnectWorktreeRequest) => invokeIpc('worktree:reconnect', input),
@@ -335,8 +364,12 @@ const api: TaskManagerApi = {
     invokeIpc('agent:startReview', input),
   decideReviewFinding: (input: DecideReviewFindingRequest) =>
     invokeIpc('agent:decideReviewFinding', input),
+  decideReviewRequestItem: (input: DecideReviewRequestItemRequest) =>
+    invokeIpc('agent:decideReviewRequestItem', input),
   readReviewChanges: (input: ReadReviewChangesRequest) =>
     invokeIpc('agent:readReviewChanges', input),
+  readReviewedDiff: (input: ReadReviewChangesRequest) =>
+    invokeIpc('agent:readReviewedDiff', input),
   askSideQuestion: (input: AskSideQuestionRequest) => invokeIpc('agent:askSideQuestion', input),
   stopSideQuestion: (input: StopSideQuestionRequest) =>
     invokeIpc('agent:stopSideQuestion', input),
@@ -349,6 +382,10 @@ const api: TaskManagerApi = {
   refreshEvidence: (input: RefreshEvidenceRequest) => invokeIpc('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
     invokeIpc('git:deliveryCommit', input),
+  listTaskCommits: (input: ReadTaskCommitsRequest) =>
+    invokeIpc('git:listTaskCommits', input),
+  readTaskCommitDiff: (input: ReadTaskCommitDiffRequest) =>
+    invokeIpc('git:readTaskCommitDiff', input),
   preflightGitHub: (input: GitHubPreflightRequest) => invokeIpc('github:preflight', input),
   publishBranch: (input: PublishBranchRequest) => invokeIpc('github:publish', input),
   createPullRequest: (input: CreatePullRequestRequest) =>

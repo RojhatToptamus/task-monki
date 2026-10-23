@@ -67,6 +67,69 @@ describe('ReviewSnapshotStore', () => {
     expect(diff).not.toContain('staged.js');
   });
 
+  it('runs no repository hook, even one the checkout itself carries, while capturing', async () => {
+    const { repo, store } = await repository();
+    const marker = path.join(path.dirname(repo), 'hook-ran');
+    await git(repo, ['config', 'core.hooksPath', '.githooks']);
+    await write(repo, '.githooks/post-index-change', `#!/bin/sh\necho ran >> '${marker}'\n`);
+    await fs.chmod(path.join(repo, '.githooks', 'post-index-change'), 0o755);
+    await write(repo, 'app.js', 'changed\n');
+    const tree = await store.capture(repo);
+    await store.pin(repo, 'task-1', 'review-1', tree);
+    await write(repo, 'app.js', 'changed again\n');
+    expect((await store.changesSince(repo, 'task-1', 'review-1', tree)).status).toBe('READY');
+    await expect(fs.access(marker)).rejects.toThrow();
+    // Control: an ordinary index write in the checkout runs it.
+    await git(repo, ['add', 'app.js']);
+    await expect(fs.access(marker)).resolves.toBeUndefined();
+  });
+
+  it('indexes the change a review read from its base, renames and deletions included, and reads it back as one diff', async () => {
+    const { repo, store } = await repository();
+    await write(repo, 'src/old-name.ts', 'one\ntwo\nthree\nfour\nfive\nsix\n');
+    await write(repo, 'src/gone.ts', 'gone 1\ngone 2\n');
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '--quiet', '-m', 'more']);
+    const base = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    await git(repo, ['mv', 'src/old-name.ts', 'src/new-name.ts']);
+    await write(repo, 'src/new-name.ts', 'one\ntwo\nthree\nfour\nFIVE\nsix\n');
+    await git(repo, ['rm', '--quiet', 'src/gone.ts']);
+    await write(repo, 'app.js', 'export const a = 10;\nexport const b = 2;\n');
+    await write(repo, 'notes.md', 'untracked\n');
+    const tree = await store.capture(repo);
+    await store.pin(repo, 'task-1', 'review-1', tree);
+
+    const index = await store.changeIndex(repo, base, tree);
+    if (index.status !== 'READY') throw new Error(`Expected the change index, got ${index.reason}.`);
+    expect(index.files.map(({ hunks, ...file }) => ({
+      ...file,
+      head: hunks.map((hunk) => [hunk.newStart, hunk.newCount]),
+      base: hunks.map((hunk) => [hunk.oldStart, hunk.oldCount])
+    })).sort((left, right) => left.path.localeCompare(right.path))).toEqual([
+      { path: 'app.js', status: 'modified', additions: 1, deletions: 1, head: [[1, 2]], base: [[1, 2]] },
+      { path: 'notes.md', status: 'added', additions: 1, deletions: 0, head: [[1, 1]], base: [[0, 0]] },
+      { path: 'src/gone.ts', status: 'deleted', additions: 0, deletions: 2, head: [[0, 0]], base: [[1, 2]] },
+      { path: 'src/new-name.ts', status: 'renamed', oldPath: 'src/old-name.ts', additions: 1, deletions: 1, head: [[2, 5]], base: [[2, 5]] }
+    ]);
+    // The prompt's form: a deleted file's hunks at the base, a renamed one's source.
+    expect(index.text.split('\n').sort()).toEqual([
+      'app.js modified +1 -1 head 1-2',
+      'notes.md new +1 -0 head 1',
+      'src/gone.ts deleted +0 -2 base 1-2',
+      'src/new-name.ts renamed from src/old-name.ts +1 -1 head 2-6'
+    ]);
+
+    // The Guide reads the same change, whatever the worktree holds since.
+    await write(repo, 'app.js', 'edited after the review\n');
+    const reviewed = await store.reviewedDiff(repo, 'task-1', 'review-1', base, tree);
+    expect(reviewed).toMatchObject({ status: 'READY', reviewRunId: 'review-1', tree });
+    const diff = reviewed.status === 'READY' ? reviewed.diff : '';
+    expect(diff).toContain('rename from src/old-name.ts');
+    expect(diff).toContain('+export const a = 10;');
+    expect(diff).not.toContain('edited after the review');
+    expect(await store.reviewedDiff(repo, 'task-1', 'review-2', base)).toEqual({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' });
+  });
+
   it('never shows another tree as a review\'s, and lets a deleted task\'s reviews go', async () => {
     const { repo, store } = await repository();
     const tree = await store.capture(repo);

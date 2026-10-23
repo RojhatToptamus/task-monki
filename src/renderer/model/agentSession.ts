@@ -43,12 +43,16 @@ export function isActiveRunStatus(status: RunRecord['status']): boolean {
  * echoes contain generated prompts; authored text has its own owner.
  */
 export function sessionTurn(run: RunRecord, items: AgentItemRecord[], instructions: TaskInstruction[], options: {
-  prompt?: string; cwd?: string; plans?: AgentPlanRevisionRecord[]; interactions?: InteractionRequestRecord[];
+  prompt?: string;
+  /** The issue a task without a request of its own was opened from; its first turn starts from it. */
+  openedFrom?: string;
+  cwd?: string; plans?: AgentPlanRevisionRecord[]; interactions?: InteractionRequestRecord[];
 } = {}): SessionTurn {
   const runInstructions = instructions.filter((item) => item.runId === run.id);
   const authored = runInstructions.find((item) => item.mode !== 'STEER');
   const opener: SessionTurnOpener | undefined = authored
     ? { kind: 'prompt', key: authored.id, text: authored.text, at: run.startedAt, ...(authored.reviewRequest ? { reviewRequest: authored.reviewRequest } : {}) }
+    : options.openedFrom && !options.prompt?.trim() ? { kind: 'marker', key: `${run.id}:marker`, label: options.openedFrom, at: run.startedAt }
     : options.prompt !== undefined ? { kind: 'prompt', key: `${run.id}:prompt`, text: options.prompt, at: run.startedAt }
     : run.mode === 'RETRY' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Retried', at: run.startedAt }
     : run.mode === 'FOLLOW_UP' ? { kind: 'marker', key: `${run.id}:marker`, label: 'Continued', at: run.startedAt }

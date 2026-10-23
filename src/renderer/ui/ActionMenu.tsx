@@ -14,6 +14,10 @@ export interface ActionMenuItem {
   /** A short value on the label's line, right-aligned and muted, such as a state word. */
   meta?: string;
   metaTone?: 'blocked';
+  /** A short muted value before the label, such as a step's number. */
+  lead?: string;
+  /** Where the person is now, such as the stage being read: it takes the selected plane. */
+  current?: boolean;
   /** Starts a new group: a separator is drawn before this item. */
   separated?: boolean;
   /** A submenu ("Open with"): the item opens these instead of acting. */
@@ -64,6 +68,7 @@ function MenuItems({ items, options }: { items: ActionMenuItem[]; options: MenuB
       disabled: item.disabled,
       'aria-label': item.label,
       'aria-describedby': describedBy || undefined,
+      'aria-current': item.current ? true : undefined,
       textValue: item.label,
       onSelect: (event: Event) => {
         if (!closeOnSelect) event.preventDefault();
@@ -71,6 +76,7 @@ function MenuItems({ items, options }: { items: ActionMenuItem[]; options: MenuB
       }
     };
     const content = <>
+      {item.lead !== undefined ? <span className="tm-action-menu__lead" aria-hidden="true">{item.lead}</span> : null}
       {copy}
       {item.pressed !== undefined ? <span className="tm-action-menu__check" aria-hidden="true">{item.pressed ? <Check size={13} /> : null}</span> : null}
     </>;
@@ -92,12 +98,14 @@ function MenuNote({ id, note }: { id: string; note: string }) {
 }
 
 /** The shared Radix menu, styled with Task Monki's tokens. */
-export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', disabled, label, tooltip, trigger, triggerRef, items, note, open, closeOnSelect = true, onOpenChange }: {
+export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple', align = 'end', side = 'top', wide = false, disabled, label, tooltip, trigger, triggerRef, items, note, open, closeOnSelect = true, onOpenChange }: {
   className?: string;
   selection?: 'single' | 'multiple';
   align?: 'start' | 'end';
   /** Preferred side; Radix flips it when the window has no room. */
   side?: 'top' | 'bottom';
+  /** The widest menu, for labels such as titles that wrap to a second line rather than being cut. */
+  wide?: boolean;
   disabled?: boolean;
   label: string;
   /** Names an icon-only trigger; a trigger that shows its value needs none. */
@@ -121,7 +129,8 @@ export function ActionMenu({ className = 'tm-action-menu', selection = 'multiple
       {tooltip ? <Tooltip label={tooltip}>{button}</Tooltip> : button}
     </div>
     <DropdownMenu.Portal>
-      <DropdownMenu.Content className="tm-action-menu__popover" aria-label={label} aria-describedby={note ? `${id}-note` : undefined} side={side} align={align} sideOffset={6} collisionPadding={8}>
+      <DropdownMenu.Content className={`tm-action-menu__popover${wide ? ' tm-action-menu__popover--wide' : ''}`} aria-label={label}
+        aria-describedby={note ? `${id}-note` : undefined} side={side} align={align} sideOffset={6} collisionPadding={8}>
         <MenuItems items={items} options={{ id, selection, closeOnSelect }} />
         {note ? <MenuNote id={id} note={note} /> : null}
       </DropdownMenu.Content>

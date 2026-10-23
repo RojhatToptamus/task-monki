@@ -190,7 +190,8 @@ the desktop app built from this branch, with a fresh `--user-data-dir`, on a
 disposable testing repository with real tasks and real agent runs; never against
 the installed app's profile, and never by running agents in this repository.
 Exercise every affected state, both modes, the minimum and a wide window, at
-100% zoom, and measure computed sizes with `tools/design-audit.js`. Passing tests
+the app's default 125% zoom, and measure computed sizes with
+`tools/design-audit.js`. Passing tests
 and screenshots do not establish interaction quality. Report what ran, what was
 seeded or simulated, and what remains unverified.
 

@@ -64,7 +64,22 @@ The important product rule is:
     line numbers it read there.
   - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
     the person's request after this review settles, with whether an item waits
-    on the person's decision; cleared when the next turn starts.
+    on the person's decision and which items the agent left to them; it stops
+    waiting once the person accepts each of those answers, and is cleared when
+    the next turn starts.
+  - `requestItemDecisions`: the person's decisions on the agent's answers to
+    their requests after this review, in order (`REVIEW_REQUEST_ITEM_DECIDED`):
+    `ACCEPT` settles an item and `REOPEN` takes that back
+    (`acceptedRequestItems`). Absent before the first; a new review starts
+    without them.
+  - `walkthrough`: the walkthrough the review wrote with its findings, as
+    `STORED` (the review run and its `review-walkthrough` artifact) or
+    `UNAVAILABLE` with a reason (`NOT_WRITTEN`, `NO_SECTIONS`, `NOT_RECORDED`,
+    `TOO_LARGE`, `UNREADABLE`). A review given no change to describe (its code
+    not kept, or the change too large to list) is asked for none and records
+    that reason, not `NOT_WRITTEN`.
+    A new review keeps a stored one, which names its own review, as earlier
+    context until its own outcome replaces it.
 - `RunRecord.mode`
   - `IMPLEMENTATION`, `FOLLOW_UP`, and `RETRY` modify the task worktree.
   - `REVIEW` inspects a diff and must use read-only settings.
@@ -101,19 +116,28 @@ Expected UI:
 
 ### Starting agent review
 
-1. User starts agent review from Review, or directly from an idle imported task
-   in In Progress before its first coding run.
+1. User starts agent review from Review or In Review (Review with a pull
+   request open, where the review leaves the phase as it is), or directly from
+   an idle imported task, or a pull request opened as a task, in In Progress
+   before its first coding run.
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
 3. The current source run must be the latest successfully completed
    implementation-side run. Failed and superseded runs are rejected.
-   Imported work can omit the source run before its first implementation.
+   Imported work, and a pull request opened as a task, can omit the source run
+   before its first implementation.
    Git and runtime admission checks must pass. Review still creates no primary
    coding session.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
-   agent session. For a direct imported review, the existing SQLite transaction
-   publishes the Review transition and run-start event together. A failed write
-   publishes neither. An admitted review stays in Review if it fails or is canceled.
+   agent session. For a direct review of imported work or of a pull request
+   opened as a task, the existing SQLite transaction publishes the Review
+   transition and run-start event together. A failed write publishes neither.
+   An admitted review stays in Review if it fails or is canceled.
 5. Task Monki sends the provider-neutral review prompt as a normal read-only turn.
+   Before the run starts, the exact code it reads is kept under its run
+   (`reviewedTreeSha`), and recorded with the run's start, so even a review that
+   ends at once finds that code. The prompt lists that change from the task's
+   base, one line per file with its status, counts and hunk ranges, and asks
+   for the walkthrough with the findings in its one `agent-review/v1` result.
 6. The prompt tells the selected runtime not to modify files.
 7. `AgentOrchestrator` records repository state before provider delivery.
 8. It compares repository state after terminal output.
@@ -200,6 +224,19 @@ When the review run emits a terminal event:
     now resolves, with a note) and gives each finding that is an earlier one
     still open its `previousFindingId`; the Review tab marks findings Still open
     or New and lists the resolved ones.
+  - Checks the walkthrough against the change the review read, inside the same
+    outcome, before recording either (`checkReviewWalkthrough`): each file sits
+    in the first section that claims it, and files no section claims join a
+    last Other changes section; an excerpt or a term must lie inside one hunk
+    of its section's files, on the base side only for a deleted file, and a
+    term must be an exact phrase of its explanation. What fails is dropped;
+    with no section left, nothing is kept. The check reuses the change index
+    the review was given at its start, so the runtime's event queue reads no
+    diff again; after a restart it is read once more. The kept walkthrough is
+    the run's artifact, written once, so an outcome projected again after a
+    restart gets it back. A walkthrough that cannot be kept never holds back
+    the verdict. The Guide reads it with `readReviewedDiff`, the diff from the
+    base to the reviewed code, so its lines match the walkthrough's.
 - Every finished review raises a toast, and a review that waits on the person
   enters the Inbox (see Review attention).
 - `AGENT_RUN_FAILED` or review policy/runtime failure
@@ -303,19 +340,37 @@ Questions about the task go to Ask, on Overview, Agent and Review.
 ### Requesting changes after review
 
 1. The Review tab's request bar says what will be sent: every open Blocker and
-   Major finding, the suggestions the person added, and their own line
-   comments, with an optional note. Comments can be sent on their own, even
-   without an actionable review.
-2. `buildReviewRequestInstruction` numbers the findings, then the comments, in
-   one sequence, names the dismissed findings as context the agent must leave
-   alone, and asks the agent to end its reply with a
-   `task-monki-review-response` block answering every item: `FIXED`,
+   Major finding, the suggestions the person added, the pull request
+   discussions the person added, and their own line comments, with an optional
+   note. Comments can be sent on their own, even without an actionable review.
+   A pull request discussion (a review thread, a review's summary or a
+   conversation comment, read from GitHub or GitLab with each PR refresh) is
+   other people's words: it goes only when the person adds it
+   (`TaskReviewDraft.includedDiscussionIds`), never once resolved. Address
+   comments on PR Status adds every unresolved thread and review requesting
+   changes that was not sent since someone other than the person last wrote on
+   it, and opens the request sheet; sending stays the person's step.
+2. `buildReviewRequestInstruction` numbers the findings, then the discussions,
+   then the comments, in one sequence. Discussions are quoted with every
+   comment's author inside boundary lines that carry the stored feedback's id,
+   framed as data that grants no permission. It names the dismissed findings as
+   context the agent must leave alone, and asks the agent to end its reply with
+   a `task-monki-review-response` block answering every item: `FIXED`,
    `NOT_CHANGED` (and why) or `NEEDS_DECISION` (and the question).
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run. The follow-up message carries the request item by
    item (`TaskInstruction.reviewRequest`, validated by
    `assertReviewRequestRecord`), so the Agent conversation shows it as a card of
-   those items rather than the instruction text.
+   those items rather than the instruction text. Before the task's first turn,
+   such as on an opened pull request, `startRun` takes the request with its
+   instruction and records it as that turn's `FOLLOW_UP` message, so it reads
+   and is answered the same way. The instruction that starts the first coding
+   turn on existing work is recorded the same way, so later turns read it from
+   the task's instructions. It is recorded before the turn starts and kept with
+   a turn that failed to start, so a retry still carries it; a start refused
+   before any run exists records nothing. A discussion the request sent shows as Sent,
+   or with the agent's answer, until someone other than the person writes on it
+   again.
 4. Reducer moves the task to `IN_PROGRESS`.
 5. The review stays as it was: a follow-up continues the reviewed work, and only
    a diff that differs from the reviewed one makes the review stale.
@@ -362,6 +417,22 @@ When the follow-up completes successfully:
    reply in the Agent conversation, and on the Review tab's brief until the next
    review reads them; the next review's prompt carries the request and each
    answer, as claims to check against the code.
+4. On the Review tab each answered item of the latest request after the review
+   (`latestReviewRequest`: the newest sent message carrying a request for it)
+   shows its answer on its own band, in both modes: the finding, the pull
+   request thread, or the person's comment, which comes back to its lines
+   since sending it emptied the draft. The answer is the band's state under the
+   agent's mark (Fixed, Not changed, Needs your decision), its note is quoted
+   under the agent's name and time, and the choices are Accept answer and Add
+   to request. The agent's Fixed settles nothing: only Accept answer does
+   (`decideReviewRequestItem`), which folds a finding or a comment to a line
+   with Reopen and marks the item Accepted in the brief. Core takes a decision
+   only for the gate's review, out of date or not, on its latest request once
+   the reply finished, on an item of that request; it refuses accepting twice
+   and reopening what is not accepted. Add to request opens a comment on the
+   item's lines that starts from a quote of it, or puts the quote in the note
+   for an item with no place in the files, so an out-of-date review's finding
+   is never sent as a finding again.
 
 Expected UI when the diff changed:
 

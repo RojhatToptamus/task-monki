@@ -5,6 +5,7 @@ import type {
 } from '../../shared/contracts';
 import { TASK_INSTRUCTION_MAX_LENGTH, isImplementationRunMode } from '../../shared/contracts';
 import { getPostRunActionState } from '../model/postRunActions';
+import { issueOpener } from '../model/remoteWork';
 import { canStopTaskRun } from '../model/runProgress';
 import type { RunFailureBannerViewModel } from '../model/taskView';
 import { clampClip, earlierHistory, isActiveRunStatus, reviewTurnOutcome, type HistoryWindow, type SessionTurn } from '../model/agentSession';
@@ -101,7 +102,7 @@ export function AgentSession(props: AgentSessionProps) {
     [props.runs]
   );
   const turns = useSessionTurns({
-    prompt: task.prompt, runs: conversationRuns, items: props.items, instructions: props.instructions,
+    prompt: task.prompt, openedFrom: issueOpener(task), runs: conversationRuns, items: props.items, instructions: props.instructions,
     plans: props.plans, interactions: props.interactions, cwd: props.worktreePath
   });
   const pending = props.instructions.filter((item) => ['QUEUED', 'HELD'].includes(item.status)

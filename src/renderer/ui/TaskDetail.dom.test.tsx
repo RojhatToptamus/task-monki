@@ -3,8 +3,9 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/codex/codexCapabilities';
-import { EMPTY_REVIEW_DRAFT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
-import { makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
+import { EMPTY_REVIEW_DRAFT, REVIEW_REQUEST_ITEM_LIMIT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
+import type { PullRequestCheckLog } from '../../shared/pullRequestActions';
+import { makeAgentItemRecord, makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
 import type { BugReplaySnapshot } from '../../shared/bugReplay';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { TaskDetail } from './TaskDetail';
@@ -14,6 +15,7 @@ vi.mock('../api/taskManagerClient', () => ({
     getApplicationPreview: vi.fn(async () => ({ name: 'fixture', hasConfigurationFile: true })),
     readArtifact: vi.fn(async () => 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n'),
     readReviewChanges: vi.fn(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' })),
+    listTaskCommits: vi.fn(async () => ({ status: 'UNAVAILABLE' })),
     onUpdate: vi.fn(() => () => undefined),
     getBugReplay: vi.fn(async ({ taskId }: { taskId: string }) => ({ taskId, availability: { canRecord: false }, runs: [], runCount: 0, earlierCases: [], storage: { usedBytes: 0, limitBytes: 1 } })),
     checkBugVerdictCurrency: vi.fn(async () => ({ state: 'NONE' })),
@@ -31,7 +33,8 @@ function detailProps(): ComponentProps<typeof TaskDetail> {
     gitSnapshot: makeGitSnapshotRecord({ status: 'DIRTY', untrackedCount: 1 }),
     gitSnapshots: [], events: [], runs: [], sessions: [], items: [], goalSnapshots: [], planRevisions: [], usageSnapshots: [], settingsObservations: [], subagentObservations: [], artifacts: [], attachments: [], interactions: [],
     onPrepareWorktree: vi.fn(), onRestoreWorktree: vi.fn(), onStart: vi.fn(), onCancel: vi.fn(), onSteer: vi.fn(), onContinue: vi.fn(), onSendReviewRequest: vi.fn(), onRetry: vi.fn(), onReview: vi.fn(), onSyncAgentGoal: vi.fn(), onUpdateAgentNativeSession: vi.fn(), onRespondToInteraction: vi.fn(), onCreateDeliveryCommit: vi.fn(), onCreatePullRequest: vi.fn(), onRefreshGitHub: vi.fn(), onTransition: vi.fn(), onArchive: vi.fn(), onRequestDelete: vi.fn(), onModalOpenChange: vi.fn(),
-    onListExistingWorktrees: vi.fn(async () => []), onReconnectWorktree: vi.fn(), onUpdateWorktreeComparison: vi.fn(), onRefreshEvidence: vi.fn()
+    onListExistingWorktrees: vi.fn(async () => []), onReconnectWorktree: vi.fn(), onUpdateWorktreeComparison: vi.fn(), onRefreshEvidence: vi.fn(),
+    onSyncPullRequest: vi.fn(), onMarkPullRequestReady: vi.fn(), onReadPullRequestMergeOptions: vi.fn(), onMergePullRequest: vi.fn(), onReplyToPullRequest: vi.fn(), onResolvePullRequestDiscussion: vi.fn(), onRerunPullRequestChecks: vi.fn(), onReadPullRequestCheckLogs: vi.fn(async () => []), onMergePullRequestUpdate: vi.fn()
   };
 }
 
@@ -93,7 +96,8 @@ describe('imported task actions', () => {
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
       'task-1',
       'Fix the imported validation bug.',
-      props.task!.agentSettings
+      props.task!.agentSettings,
+      undefined
     ));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Run agent review' }));
@@ -151,7 +155,7 @@ describe('imported task actions', () => {
     fireEvent.change(target, { target: { value: 'release/next' } });
     fireEvent.click(submit);
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(props.onCreatePullRequest).toHaveBeenLastCalledWith('task-1', props.task!.title, 'release/next');
+    expect(props.onCreatePullRequest).toHaveBeenLastCalledWith('task-1', props.task!.title, 'release/next', undefined);
     expect(props.onUpdateWorktreeComparison).not.toHaveBeenCalled();
   });
 
@@ -185,7 +189,8 @@ describe('imported task actions', () => {
     // An out-of-date review's findings are context only: nothing is left to send.
     expect(screen.queryByRole('button', { name: /^\d+ fix/ })).toBeNull();
     expect(screen.queryAllByRole('button', { name: 'Request changes' }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
-    expect(screen.getByText('From the earlier review')).toBeDefined();
+    expect(screen.getByRole('article', { name: 'Major finding: Invalid input accepted' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Dismiss this finding' })).toBeNull();
     expect(props.onStart).not.toHaveBeenCalled();
     expect(props.onContinue).not.toHaveBeenCalled();
   });
@@ -206,10 +211,12 @@ describe('imported task actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
     expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Request changes' })).getByRole('button', { name: 'Request changes' }));
+    // The first turn carries the request item by item, so its answers read as a round.
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith(
       'task-1',
       expect.stringContaining('Invalid input accepted'),
-      props.task!.agentSettings
+      props.task!.agentSettings,
+      expect.objectContaining({ reviewRunId: 'review-1', items: [expect.objectContaining({ number: 1, kind: 'FINDING', findingId: 'finding-1' })] })
     ));
     expect(props.onContinue).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
@@ -283,6 +290,32 @@ describe('Overview decision slot', () => {
     expect(screen.getByRole('region', { name: 'Pull request' }).contains(create[0])).toBe(true);
   });
 
+  it('says once on the pull request card why Create draft waits while another delivery action runs', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    // An imported checkout reads its pull request again from the card before one exists.
+    const props = detailProps();
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'READY', projection: { worktree: 'PRESENT', git: 'COMMITTED_UNPUSHED' } });
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'COMMITTED_UNPUSHED', commitsAheadOfBase: 1, committedDiffFileCount: 1 });
+    let finishRefresh!: () => void;
+    props.onRefreshGitHub = vi.fn(() => new Promise<void>((resolve) => { finishRefresh = resolve; }));
+    render(<TaskDetail {...props} />);
+    const card = screen.getByRole('region', { name: 'Pull request' });
+    const create = within(card).getByRole('button', { name: 'Create draft PR' }) as HTMLButtonElement;
+    expect(create.disabled).toBe(false);
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Refresh pull request' }));
+    await waitFor(() => expect(create.disabled).toBe(true));
+    const reason = document.getElementById(create.getAttribute('aria-describedby')!)?.textContent;
+    expect(reason).toBeTruthy();
+    expect(within(card).getAllByText(reason!)).toHaveLength(1);
+    // The disabled Refresh points at the same reason rather than stating it again.
+    expect(within(card).getByRole('button', { name: 'Refresh pull request' }).getAttribute('aria-describedby'))
+      .toBe(create.getAttribute('aria-describedby'));
+
+    await act(async () => finishRefresh());
+    expect(create.disabled).toBe(false);
+  });
+
   it('leads with finishing once the pull request is merged, not with a review', () => {
     HTMLElement.prototype.scrollTo = vi.fn();
     const props = managed('MISSING', 'REVIEW');
@@ -299,6 +332,413 @@ describe('Overview decision slot', () => {
     expect(within(slot).queryByRole('button', { name: 'Run agent review' })).toBeNull();
   });
 });
+
+describe('Pull request feedback', () => {
+  function feedbackDetail(threads: number, configure?: (props: ReturnType<typeof detailProps>) => void) {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const props = detailProps();
+    const artifactId = '00000000-0000-4000-8000-0000000000fb';
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      githubPullRequestUrl: 'https://github.com/acme/widgets/pull/82', reviews: 'CHANGES_REQUESTED'
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: 'f'.repeat(40), upstreamSha: 'f'.repeat(40) });
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY',
+      state: 'OPEN', isDraft: false, headRefOid: 'f'.repeat(40), title: 'Save layouts', observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: 'f'.repeat(40), status: 'CHANGES_REQUESTED',
+      observedAt: TEST_NOW, feedback: { artifactId, digest: 'a'.repeat(64), unresolvedCount: threads, discussionCount: threads,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }] } };
+    props.onReadArtifact = vi.fn(async () => JSON.stringify({
+      schema: 'task-monki/pull-request-feedback/v1', provider: 'GITHUB', number: 82, headSha: 'f'.repeat(40), capturedAt: TEST_NOW,
+      reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+      discussions: Array.from({ length: threads }, (_, index) => ({
+        id: `PRRT_${index + 1}`, kind: 'THREAD', path: 'output.txt', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+        comments: [{ author: 'alice', body: index ? `Thread ${index + 1}.` : 'Handle a null layout.', truncated: false }], commentCount: 1
+      }))
+    }));
+    function Stateful() {
+      const [draft, setDraft] = useState(EMPTY_REVIEW_DRAFT);
+      return <TaskDetail {...props} reviewDraft={draft} onReviewDraftChange={setDraft} />;
+    }
+    configure?.(props);
+    render(<Stateful />);
+    return props;
+  }
+
+  it('offers to address what reviewers left unresolved, and shows the request before anything is sent', async () => {
+    const props = feedbackDetail(1);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByText('alice requested changes, 1 unresolved thread')).toBeDefined();
+    // What was asked is read before it is sent: each comment by who wrote it and where.
+    const asked = await within(slot).findByRole('list', { name: 'Comments' });
+    expect(within(asked).getByRole('button', { name: /alice Handle a null layout\. output\.txt:1/u })).toBeDefined();
+    const address = await within(slot).findByRole('button', { name: 'Address comments' });
+    fireEvent.click(address);
+
+    expect(await screen.findByRole('tab', { name: 'Review', selected: true })).toBeDefined();
+    const sheet = await screen.findByRole('dialog', { name: 'Address comments' });
+    expect(within(within(sheet).getByRole('region', { name: 'From GitHub' })).getByText('Handle a null layout.')).toBeDefined();
+    // Nothing went to the agent: sending is the sheet's own step.
+    expect(props.onSendReviewRequest).not.toHaveBeenCalled();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Address comments' }));
+    await waitFor(() => expect(props.onSendReviewRequest).toHaveBeenCalledWith(
+      'run-1',
+      expect.stringContaining('----- BEGIN GITHUB REVIEW 00000000 -----'),
+      expect.objectContaining({ items: [expect.objectContaining({ kind: 'DISCUSSION', discussionId: 'PRRT_1', author: 'alice' })] })
+    ));
+  });
+
+  it('waits on the reviewers once the person answered after them, and asks nothing of the person', async () => {
+    feedbackDetail(1, (configured) => {
+      configured.reviewRollup = { ...configured.reviewRollup!, feedback: { ...configured.reviewRollup!.feedback!,
+        lastOtherCommentAt: '2026-07-07T10:00:00.000Z', lastViewerCommentAt: '2026-07-07T11:00:00.000Z' } };
+    });
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByText('Waiting for review')).toBeDefined();
+    expect(within(slot).getByText('Waiting on alice')).toBeDefined();
+    // The thread was never sent, but the person answered after alice: it is hers to read now.
+    await screen.findByRole('tab', { name: 'Overview', selected: true });
+    expect(within(slot).queryByRole('button', { name: 'Address comments' })).toBeNull();
+    expect(within(slot).queryByRole('list', { name: 'Comments' })).toBeNull();
+  });
+
+  it('asks a person to review again from beside their name, and never an app', async () => {
+    const props = feedbackDetail(1, (configured) => {
+      configured.reviewRollup = { ...configured.reviewRollup!, feedback: { ...configured.reviewRollup!.feedback!,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }, { name: 'ci-review', state: 'CHANGES_REQUESTED', bot: true }] } };
+      configured.onReplyToPullRequest = vi.fn(async () => ({ posted: 0, resolved: 0, requested: ['alice'], failed: [] }));
+    });
+    const record = screen.getByText('Pull request', { selector: 'h3' }).closest('section')!;
+    expect(within(record).queryByRole('button', { name: 'Ask ci-review to review again' })).toBeNull();
+    fireEvent.click(within(record).getByRole('button', { name: 'Ask alice to review again' }));
+    await waitFor(() => expect(props.onReplyToPullRequest).toHaveBeenCalledWith('task-1', [], ['alice']));
+  });
+
+  it('keeps nothing typed under a discussion once its answer is posted from Reply, so it is not posted twice', async () => {
+    const props = feedbackDetail(2, (configured) => {
+      // Two threads the agent answered in its last round: alice's and bob's.
+      configured.onReadArtifact = vi.fn(async () => JSON.stringify({
+        schema: 'task-monki/pull-request-feedback/v1', provider: 'GITHUB', number: 82, headSha: 'f'.repeat(40), capturedAt: TEST_NOW,
+        reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+        discussions: [['PRRT_1', 'alice', 'Handle a null layout.'], ['PRRT_2', 'bob', 'Name the constant.']].map(([id, author, body]) => ({
+          id, kind: 'THREAD', path: 'output.txt', side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+          comments: [{ author, body, truncated: false }], commentCount: 1
+        }))
+      }));
+      const round = { items: [
+        { number: 1, kind: 'DISCUSSION' as const, provider: 'GITHUB' as const, discussionId: 'PRRT_1', author: 'alice', text: 'Handle a null layout.' },
+        { number: 2, kind: 'DISCUSSION' as const, provider: 'GITHUB' as const, discussionId: 'PRRT_2', author: 'bob', text: 'Name the constant.' }
+      ] };
+      configured.agentInstructions = [{ id: 'request-1', taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sourceRunId: 'run-1',
+        sessionId: 'session-1', order: 1, text: 'Address the comments.', mode: 'FOLLOW_UP', status: 'SUBMITTED', runId: 'run-2', reviewRequest: round,
+        createdAt: TEST_NOW, updatedAt: TEST_NOW }];
+      configured.task = makeTaskRecord({ ...configured.task, currentRunId: 'run-2' });
+      configured.run = makeRunRecord({ id: 'run-2', mode: 'FOLLOW_UP', status: 'COMPLETED', endedAt: TEST_NOW });
+      configured.runs = [makeRunRecord({ id: 'run-1', status: 'COMPLETED' }), configured.run];
+      configured.items = [makeAgentItemRecord({ id: 'answers', runId: 'run-2', payload: {
+        text: 'Handled both.\n```task-monki-review-response\n[{"item": 1, "outcome": "FIXED"}, {"item": 2, "outcome": "FIXED"}]\n```'
+      } })];
+      // alice's reply landed, though resolving her thread failed; the platform refused bob's.
+      configured.onReplyToPullRequest = vi.fn(async () => ({ posted: 1, resolved: 0, requested: [], failed: [
+        { discussionId: 'PRRT_1', error: 'Could not resolve the thread.', replied: true },
+        { discussionId: 'PRRT_2', error: 'The thread is locked.' }
+      ] }));
+    });
+
+    // The person starts answering both threads where they are read, and posts nothing there.
+    fireEvent.click(screen.getByRole('tab', { name: 'Review' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Reply to alice' }), { target: { value: 'Typed for alice.' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Reply to bob' }), { target: { value: 'Typed for bob.' } });
+
+    // Then answers both from the Overview, in their own words: Task Monki saw no change to name, so each reply starts empty.
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }));
+    fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByRole('button', { name: 'Reply on GitHub' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Reply on GitHub' });
+    for (const name of ['@alice', '@bob']) {
+      const field = within(dialog).getByRole('textbox', { name: `Reply to ${name}` }) as HTMLTextAreaElement;
+      expect(field.value).toBe('');
+      fireEvent.change(field, { target: { value: `Answered ${name}.` } });
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Post 2 replies' }));
+    await waitFor(() => expect(props.onReplyToPullRequest).toHaveBeenCalledTimes(1));
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Close' }));
+
+    // alice's thread has her answer already; bob's keeps what was typed for the reply that did not land.
+    fireEvent.click(screen.getByRole('tab', { name: 'Review' }));
+    expect((await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByRole('textbox', { name: 'Reply to bob' }) as HTMLTextAreaElement).value).toBe('Typed for bob.');
+  });
+
+  it('starts a reply from the head only for a thread whose file changed since the review the agent\'s Fixed followed', async () => {
+    const readChanges = vi.mocked(taskManagerApi.readReviewChanges);
+    readChanges.mockImplementation(async () => ({ status: 'READY', reviewRunId: 'review-1', tree: 'tree-1',
+      diff: 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n' }));
+    try {
+      feedbackDetail(2, (configured) => {
+        configured.onReadArtifact = vi.fn(async () => JSON.stringify({
+          schema: 'task-monki/pull-request-feedback/v1', provider: 'GITHUB', number: 82, headSha: 'f'.repeat(40), capturedAt: TEST_NOW,
+          reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+          discussions: [['PRRT_1', 'alice', 'output.txt'], ['PRRT_2', 'bob', 'other.txt']].map(([id, author, path]) => ({
+            id, kind: 'THREAD', path, side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+            comments: [{ author, body: `Fix ${path}.`, truncated: false }], commentCount: 1
+          }))
+        }));
+        configured.agentInstructions = [{ id: 'request-1', taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sourceRunId: 'run-1',
+          sessionId: 'session-1', order: 1, text: 'Address the comments.', mode: 'FOLLOW_UP', status: 'SUBMITTED', runId: 'run-2', createdAt: TEST_NOW,
+          updatedAt: TEST_NOW, reviewRequest: { reviewRunId: 'review-1', items: [
+            { number: 1, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_1', author: 'alice', text: 'Fix output.txt.' },
+            { number: 2, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_2', author: 'bob', text: 'Fix other.txt.' }
+          ] } }];
+        configured.task = makeTaskRecord({ ...configured.task, currentRunId: 'run-2',
+          projection: { ...configured.task!.projection, agentReview: { status: 'STALE', runId: 'review-1' } } });
+        configured.run = makeRunRecord({ id: 'run-2', mode: 'FOLLOW_UP', status: 'COMPLETED', endedAt: TEST_NOW });
+        configured.runs = [makeRunRecord({ id: 'run-1', status: 'COMPLETED' }), makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' }), configured.run];
+        configured.items = [makeAgentItemRecord({ id: 'answers', runId: 'run-2', payload: {
+          text: 'Both.\n```task-monki-review-response\n[{"item": 1, "outcome": "FIXED", "note": "Trimmed it."}, {"item": 2, "outcome": "FIXED", "note": "Renamed it."}]\n```'
+        } })];
+      });
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Reply on GitHub' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Reply on GitHub' });
+      await waitFor(() => expect((within(dialog).getByRole('textbox', { name: 'Reply to @alice' }) as HTMLTextAreaElement).value)
+        .toBe('Changed in fffffff.'));
+      // bob's file did not change since the review, so his reply is the person's to write; the agent's word is only quoted.
+      expect((within(dialog).getByRole('textbox', { name: 'Reply to @bob' }) as HTMLTextAreaElement).value).toBe('');
+      expect(within(dialog).getByText('Renamed it.')).toBeDefined();
+      expect(readChanges).toHaveBeenCalledWith({ taskId: 'task-1', reviewRunId: 'review-1' });
+    } finally {
+      readChanges.mockImplementation(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' }));
+    }
+  });
+
+  it('holds a request with more items than one can carry, and says why before anything is sent', async () => {
+    const props = feedbackDetail(REVIEW_REQUEST_ITEM_LIMIT + 1);
+    // A hundred comments are a page of buttons whose names jsdom computes slowly, so the controls are found by their words.
+    fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByText('Address comments', { selector: 'button' }));
+    const send = within(await screen.findByRole('dialog', { name: 'Address comments' })).getByText('Address comments', { selector: 'button' });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById(send.getAttribute('aria-describedby')!)?.textContent).toBe(`${REVIEW_REQUEST_ITEM_LIMIT + 1} items, ${REVIEW_REQUEST_ITEM_LIMIT} at most`);
+    fireEvent.click(send);
+    expect(props.onSendReviewRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('Pull request steps', () => {
+  it('reads a failed check\'s log once per attempt, and starts a re-run\'s or a new head\'s checks closed', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    const props = detailProps();
+    let resolveLogs!: (logs: PullRequestCheckLog[]) => void;
+    props.onReadPullRequestCheckLogs = vi.fn(() => new Promise<PullRequestCheckLog[]>((resolve) => { resolveLogs = resolve; }));
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, ciChecks: 'FAILING'
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    const at = (head: string, check: { name: string; status: 'failed'; link?: string }): ComponentProps<typeof TaskDetail> => ({ ...props,
+      gitSnapshot: makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head }),
+      pullRequest: { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+        isDraft: false, headRefOid: head, title: 'Save layouts', observedAt: TEST_NOW },
+      ciRollup: { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'FAILING', requiredStatus: 'UNKNOWN', totalCount: 1, pendingCount: 0,
+        passingCount: 0, failingCount: 1, skippedCount: 0, canceledCount: 0, checkDetails: [check], observedAt: TEST_NOW }
+    });
+    const firstRun = { name: 'test', status: 'failed' as const, link: 'https://github.com/acme/widgets/actions/runs/1/job/1' };
+    const view = render(<TaskDetail {...at('e'.repeat(40), firstRun)} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    const row = within(slot).getByRole('button', { name: 'test log' });
+    fireEvent.click(row);
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+    expect(within(slot).getByText('Reading the log…')).toBeDefined();
+    await act(async () => resolveLogs([{ name: 'test', link: firstRun.link, text: 'FAIL src/app.test.ts', truncated: false }]));
+    expect(within(slot).getByText('FAIL src/app.test.ts')).toBeDefined();
+    fireEvent.click(row);
+    fireEvent.click(row);
+    expect(within(slot).getByText('FAIL src/app.test.ts')).toBeDefined();
+    expect(props.onReadPullRequestCheckLogs).toHaveBeenCalledTimes(1);
+
+    // Re-run failed keeps the head; its attempt is another check with another log.
+    view.rerender(<TaskDetail {...at('e'.repeat(40), { ...firstRun, link: 'https://github.com/acme/widgets/actions/runs/1/job/2' })} />);
+    const rerun = within(screen.getByRole('region', { name: 'Current step' })).getByRole('button', { name: 'test log' });
+    expect(rerun.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(rerun);
+    expect(props.onReadPullRequestCheckLogs).toHaveBeenCalledTimes(2);
+    await act(async () => resolveLogs([{ name: 'test', link: 'https://github.com/acme/widgets/actions/runs/1/job/2', text: 'FAIL again', truncated: false }]));
+    expect(screen.getByText('FAIL again')).toBeDefined();
+    expect(screen.queryByText('FAIL src/app.test.ts')).toBeNull();
+
+    // A status with no page of its own is the same row on every head.
+    view.rerender(<TaskDetail {...at('f'.repeat(40), { name: 'test', status: 'failed' })} />);
+    const next = within(screen.getByRole('region', { name: 'Current step' })).getByRole('button', { name: 'test log' });
+    expect(next.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('FAIL again')).toBeNull();
+    expect(screen.queryByText('No log for this check')).toBeNull();
+  });
+
+  it('merges only the head the person saw, with the method and branch they chose', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const head = 'f'.repeat(40);
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      ciChecks: 'PASSING', reviews: 'APPROVED', merge: 'MERGEABLE'
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head });
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+      isDraft: false, headRefOid: head, headRefName: 'task/save', baseRefName: 'main', title: 'Save layouts', observedAt: TEST_NOW };
+    props.ciRollup = { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'PASSING', requiredStatus: 'UNKNOWN', totalCount: 1,
+      pendingCount: 0, passingCount: 1, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [{ name: 'unit', status: 'passed' }], observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: head, status: 'APPROVED', observedAt: TEST_NOW };
+    props.mergeSnapshot = { ...owner, id: 'merge-1', pullRequestNumber: 82, headSha: head, status: 'MERGEABLE', mergedAt: null, observedAt: TEST_NOW };
+    props.onReadPullRequestMergeOptions = vi.fn(async () => ({
+      methods: ['MERGE', 'SQUASH'] as Array<'MERGE' | 'SQUASH'>, defaultMethod: 'MERGE' as const,
+      deletesBranchOnMerge: false, canDeleteBranch: true, head: 'task/save', base: 'main'
+    }));
+    props.onMergePullRequest = vi.fn(async () => undefined);
+    render(<TaskDetail {...props} />);
+
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('heading', { name: 'Ready to merge' })).toBeDefined();
+    // A pull request already ready for review is not offered as a draft step.
+    expect(within(slot).queryByRole('button', { name: 'Mark as ready' })).toBeNull();
+    fireEvent.click(within(slot).getByRole('button', { name: 'Merge' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Merge pull request' });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Squash' }));
+    // The task's own branch is deleted with the merge unless the person keeps it.
+    expect((within(dialog).getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    expect(props.onMergePullRequest).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Squash and merge' }));
+    await waitFor(() => expect(props.onMergePullRequest).toHaveBeenCalledWith('task-1', 'SQUASH', head, true));
+  });
+
+  it('lets Task Monki merge a moved base, and sends the agent only the files a merge stopped on', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = movedBaseProps();
+    const update = { sha: 'a'.repeat(40), ref: 'main', commits: 2 };
+    const merge = vi.fn()
+      .mockResolvedValueOnce({ ...update, conflicts: [] })
+      .mockResolvedValueOnce({ ...update, conflicts: ['src/save.ts'] });
+    const followUp = vi.fn(async () => undefined);
+    render(<TaskDetail {...props} onMergePullRequestUpdate={merge} onContinue={followUp} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    const updateWithMain = within(slot).getByRole('button', { name: 'Update with main' }) as HTMLButtonElement;
+
+    // A clean merge asks nothing of the agent: Push update is the next step.
+    fireEvent.click(updateWithMain);
+    await waitFor(() => expect(merge).toHaveBeenCalledWith('task-1', 'BASE'));
+    await waitFor(() => expect(updateWithMain.disabled).toBe(false));
+    expect(followUp).not.toHaveBeenCalled();
+
+    // A merge Git stopped on sends the agent the files, and leaves every Git write to Task Monki.
+    fireEvent.click(updateWithMain);
+    await waitFor(() => expect(followUp).toHaveBeenCalledTimes(1));
+    expect(followUp).toHaveBeenCalledWith('run-1', expect.stringContaining('- `src/save.ts`'));
+    expect(followUp).toHaveBeenCalledWith('run-1', expect.stringContaining('Do not run Git commands that change the repository'));
+  });
+
+  it('names a merge the agent resolved as the work Push update finishes, not as conflicts', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = movedBaseProps();
+    // Git still counts the files the agent fixed as conflicted: it cannot stage them.
+    props.task = makeTaskRecord({ ...props.task, projection: { ...props.task!.projection, git: 'CONFLICTED', health: 'ERROR' } });
+    props.gitSnapshot = makeGitSnapshotRecord({ ...props.gitSnapshot, status: 'CONFLICTED', conflictedCount: 1, operationInProgress: 'merge', aheadCount: 1 });
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('heading', { name: 'Changes not pushed' })).toBeDefined();
+    expect(within(slot).getByText('Merge in progress')).toBeDefined();
+    expect(within(slot).getByRole('button', { name: 'Push update' })).toBeDefined();
+    expect(screen.queryByText('Git conflicts')).toBeNull();
+  });
+
+  it('names a fork\'s moved base as the task\'s state without offering to update a branch only its author can push to', () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const props = movedBaseProps();
+    const head = props.pullRequest!.headRefOid!;
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    props.task = makeTaskRecord({ ...props.task, projection: { ...props.task!.projection, ciChecks: 'FAILING' }, remoteSource: {
+      provider: 'GITHUB', host: 'github.com', repositoryPath: 'acme/widgets', kind: 'PULL_REQUEST', number: 82,
+      url: 'https://github.com/acme/widgets/pull/82', title: 'Save layouts',
+      snapshotArtifactId: '00000000-0000-4000-8000-000000000082', capturedAt: TEST_NOW,
+      pullRequest: { headRefName: 'save', baseRefName: 'main', crossRepository: true, headRepositoryPath: 'contributor/widgets', headSha: head, mergeBaseSha: 'b'.repeat(40) }
+    } });
+    // Its checks failed as well: the base that moved still leads, as the platform holds the merge on it.
+    props.ciRollup = { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'FAILING', requiredStatus: 'UNKNOWN', totalCount: 1, pendingCount: 0,
+      passingCount: 0, failingCount: 1, skippedCount: 0, canceledCount: 0, checkDetails: [{ name: 'test', status: 'failed' }], observedAt: TEST_NOW };
+    render(<TaskDetail {...props} />);
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('heading', { name: 'Merge blocked' })).toBeDefined();
+    expect(screen.getByText('Conflicts with main')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Update with main' })).toBeNull();
+  });
+
+  it('keeps the pull request steps on the page while the agent review holds the Now panel', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    const head = 'f'.repeat(40);
+    const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+    props.task = makeTaskRecord({ ...props.task, workflowPhase: 'REVIEW', currentRunId: 'run-1', projection: {
+      worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82,
+      ciChecks: 'PASSING', reviews: 'APPROVED', merge: 'MERGEABLE',
+      agentReview: { status: 'NEEDS_CHANGES', runId: 'review-1', result: { schemaVersion: 'agent-review/v1', verdict: 'NEEDS_CHANGES', summary: 'Fix validation.',
+        findings: [{ id: 'finding-1', severity: 'MAJOR', title: 'Invalid input accepted', explanation: 'Reject an invalid value.' }] } }
+    } });
+    props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+    props.runs = [props.run, makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' })];
+    props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head });
+    props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+      isDraft: false, headRefOid: head, headRefName: 'task/save', baseRefName: 'main', title: 'Save layouts', observedAt: TEST_NOW };
+    props.ciRollup = { ...owner, id: 'ci-1', pullRequestNumber: 82, headSha: head, status: 'PASSING', requiredStatus: 'UNKNOWN', totalCount: 1,
+      pendingCount: 0, passingCount: 1, failingCount: 0, skippedCount: 0, canceledCount: 0, checkDetails: [{ name: 'unit', status: 'passed' }], observedAt: TEST_NOW };
+    props.reviewRollup = { ...owner, id: 'review-rollup-1', pullRequestNumber: 82, headSha: head, status: 'APPROVED', observedAt: TEST_NOW };
+    props.mergeSnapshot = { ...owner, id: 'merge-1', pullRequestNumber: 82, headSha: head, status: 'MERGEABLE', mergedAt: null, observedAt: TEST_NOW };
+    props.onReadPullRequestMergeOptions = vi.fn(async () => ({
+      methods: ['MERGE'] as Array<'MERGE'>, defaultMethod: 'MERGE' as const, deletesBranchOnMerge: false, canDeleteBranch: true, head: 'task/save', base: 'main'
+    }));
+    props.onMergePullRequest = vi.fn(async () => undefined);
+    render(<TaskDetail {...props} />);
+
+    // The review's step leads; merging is still a step the page offers, beside it.
+    const slot = screen.getByRole('region', { name: 'Current step' });
+    expect(within(slot).getByRole('button', { name: 'Request changes' })).toBeDefined();
+    expect(within(slot).queryByRole('button', { name: 'Merge' })).toBeNull();
+    const delivery = screen.getByRole('heading', { name: 'Delivery' }).closest('section')!;
+    expect(within(delivery).getByText('Ready to merge')).toBeDefined();
+    fireEvent.click(within(delivery).getByRole('button', { name: 'Merge' }));
+    expect(await screen.findByRole('dialog', { name: 'Merge pull request' })).toBeDefined();
+    expect(props.onMergePullRequest).not.toHaveBeenCalled();
+  });
+
+});
+
+/** An open pull request the platform holds back because it conflicts with a base that moved. */
+function movedBaseProps(): ComponentProps<typeof TaskDetail> {
+  const head = 'f'.repeat(40);
+  const owner = { taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1' };
+  const props = detailProps();
+  props.worktree = { ...props.worktree!, ownership: 'MANAGED', branchName: 'task/save' };
+  props.task = makeTaskRecord({ ...props.task, workflowPhase: 'IN_REVIEW', currentRunId: 'run-1', projection: {
+    worktree: 'PRESENT', git: 'PUSHED', agentRun: 'COMPLETED', githubPullRequest: 'OPEN_READY', githubPullRequestNumber: 82, merge: 'BLOCKED'
+  } });
+  props.run = makeRunRecord({ id: 'run-1', status: 'COMPLETED' });
+  props.runs = [props.run];
+  props.gitSnapshot = makeGitSnapshotRecord({ status: 'PUSHED', headSha: head, upstreamSha: head });
+  props.pullRequest = { ...owner, id: 'pr-1', number: 82, url: 'https://github.com/acme/widgets/pull/82', status: 'OPEN_READY', state: 'OPEN',
+    isDraft: false, headRefOid: head, headRefName: 'task/save', baseRefName: 'main', title: 'Save layouts', observedAt: TEST_NOW };
+  props.mergeSnapshot = { ...owner, id: 'merge-1', pullRequestNumber: 82, headSha: head, status: 'BLOCKED', mergedAt: null, observedAt: TEST_NOW,
+    raw: { mergeStateStatus: 'DIRTY', mergeable: 'CONFLICTING' } };
+  return props;
+}
 
 describe('Agent pre-run setup', () => {
   it('reviews a Preview handoff in the initial prompt and stays in Preview if the draft cannot be saved', async () => {
@@ -464,7 +904,26 @@ describe('Agent pre-run setup', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
     expect(screen.getByRole('button', { name: 'Access: Custom' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
-    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings));
+    await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, props.task!.agentSettings, undefined));
+  });
+
+  it('starts a task opened from an issue from the Agent tab with no request of the person\'s own', async () => {
+    HTMLElement.prototype.scrollTo = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const props = detailProps();
+    props.worktree = { ...props.worktree!, ownership: 'MANAGED' };
+    props.task = makeTaskRecord({ ...props.task, prompt: '', remoteSource: {
+      provider: 'GITHUB', host: 'github.com', repositoryPath: 'acme/widgets', kind: 'ISSUE', number: 12,
+      url: 'https://github.com/acme/widgets/issues/12', title: 'Crash on save',
+      snapshotArtifactId: '00000000-0000-4000-8000-000000000012', capturedAt: '2026-10-17T00:00:00.000Z'
+    } });
+    Object.assign(props, readyRuntime());
+    render(<TaskDetail {...props} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
+    const start = screen.getByRole('button', { name: 'Start implementation' }) as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    fireEvent.click(start);
+    await waitFor(() => expect(props.onStart).toHaveBeenCalled());
   });
 
   it('starts implementation with the execution settings reviewed on the Agent tab', async () => {
@@ -480,7 +939,7 @@ describe('Agent pre-run setup', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start implementation' }));
     await waitFor(() => expect(props.onStart).toHaveBeenCalledWith('task-1', undefined, {
       networkAccess: true
-    }));
+    }, undefined));
     expect(screen.queryByRole('button', { name: 'Prepare worktree' })).toBeNull();
   });
 });

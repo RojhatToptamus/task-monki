@@ -45,6 +45,13 @@ describe('projection reducer', () => {
     }), run)).toEqual(projection);
   });
 
+  it('keeps an open pull request open while an update to it is requested', () => {
+    const open = { ...createInitialProjection(now), githubPullRequest: 'OPEN_DRAFT' as const, githubPullRequestNumber: 3 };
+    expect(reduceProjection(open, createEvent('PR_CREATE_REQUESTED', {}))).toMatchObject({ githubPullRequest: 'OPEN_DRAFT', githubPullRequestNumber: 3 });
+    // A closed one is being replaced, so none is open until the new one is read.
+    expect(reduceProjection({ ...open, githubPullRequest: 'CLOSED_UNMERGED' }, createEvent('PR_CREATE_REQUESTED', {})).githubPullRequest).toBe('NOT_CREATED');
+  });
+
   it('keeps preview lifecycle events out of task workflow and agent projections', () => {
     const state = createEmptyState();
     const task = createTask();
@@ -105,9 +112,12 @@ describe('projection reducer', () => {
     }
   );
 
-  it('records finding decisions only for the current review and resets them for a new review', () => {
+  it('records decisions on findings and answers only for the current review and resets them for a new review', () => {
     const decision = (id: string, reviewRunId: string) => ({
       id, reviewRunId, findingId: 'leak', kind: 'DISMISS' as const, dismissReason: 'ACCEPTED' as const, createdAt: now
+    });
+    const acceptance = (id: string, reviewRunId: string) => ({
+      id, reviewRunId, instructionId: 'request', item: 1, kind: 'ACCEPT' as const, createdAt: now
     });
     const task = createTask({
       workflowPhase: 'REVIEW',
@@ -125,7 +135,11 @@ describe('projection reducer', () => {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('first', 'review-run') }),
       id: 'decided-first', runId: undefined, receivedAt: '2026-06-20T11:00:00.000Z'
     });
-    const ignored = applyEventToState(decided, {
+    const answered = [acceptance('accepted', 'review-run'), acceptance('accepted-other', 'older-review')].reduce(
+      (current, value) => applyEventToState(current, { ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: value }), id: value.id, runId: undefined }),
+      decided
+    );
+    const ignored = applyEventToState(answered, {
       ...createEvent('AGENT_REVIEW_FINDING_DECIDED', { decision: decision('other', 'older-review') }),
       id: 'decided-other', runId: undefined
     });
@@ -133,7 +147,8 @@ describe('projection reducer', () => {
       status: 'NEEDS_CHANGES',
       runId: 'review-run',
       updatedAt: now,
-      findingDecisions: [decision('first', 'review-run')]
+      findingDecisions: [decision('first', 'review-run')],
+      requestItemDecisions: [acceptance('accepted', 'review-run')]
     });
 
     const rerun = createRun({ id: 'next-review', mode: 'REVIEW', status: 'RUNNING' });
@@ -146,6 +161,34 @@ describe('projection reducer', () => {
       runId: 'next-review',
       findingDecisions: []
     });
+    expect(restarted.tasks[0].projection.agentReview?.requestItemDecisions).toBeUndefined();
+  });
+
+  it('stops waiting on the person once every answer the agent left to them is accepted, and waits again on a reopen', () => {
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      projection: { ...createInitialProjection(now), agentReview: { status: 'STALE', runId: 'review-run', updatedAt: now } }
+    });
+    const state = { ...createEmptyState(), tasks: [task], runs: [createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })] };
+    const decide = (current: typeof state, id: string, item: number, kind: 'ACCEPT' | 'REOPEN') => applyEventToState(current, {
+      ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: { id, reviewRunId: 'review-run', instructionId: 'request', item, kind, createdAt: now } }),
+      id, runId: undefined
+    });
+    const answered = (current: typeof state) => applyEventToState(current, {
+      ...createEvent('REVIEW_REQUEST_ANSWERED', { reviewRunId: 'review-run', instructionId: 'request', needsDecision: 2, decisionItems: [2, 3] }),
+      runId: undefined
+    });
+    const waiting = answered(state);
+    const awaiting = (current: typeof state) => current.tasks[0].projection.agentReview?.requestAnswer?.awaitingDecision;
+    expect(awaiting(waiting)).toBe(true);
+    // A Fixed item accepted settles nothing the person was asked; one of two questions still waits.
+    const one = decide(decide(waiting, 'fixed', 1, 'ACCEPT'), 'second', 2, 'ACCEPT');
+    expect(awaiting(one)).toBe(true);
+    const both = decide(one, 'third', 3, 'ACCEPT');
+    expect(awaiting(both)).toBe(false);
+    expect(awaiting(decide(both, 'reopened', 3, 'REOPEN'))).toBe(true);
+    // Answers accepted while the reply's evidence was still being captured count once the reply lands.
+    expect(awaiting(answered(decide(decide(state, 'early-2', 2, 'ACCEPT'), 'early-3', 3, 'ACCEPT')))).toBe(false);
   });
 
   it('separates agent completion from process exit', () => {
@@ -904,6 +947,28 @@ describe('projection reducer', () => {
 
     expect(withDivergence.tasks[0].workflowPhase).toBe('IN_PROGRESS');
     expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
+  });
+
+  it('lowers an error once the delivery problem behind it clears, and keeps one that still stands', () => {
+    const read = (projection: ReturnType<typeof createInitialProjection>, type: DomainEvent['type'], payload: unknown) =>
+      reduceProjection(projection, createEvent(type, payload));
+    // A merge Task Monki finished: the conflicts end, then the platform no longer blocks it.
+    const conflicted = { ...createInitialProjection(now), health: 'ERROR' as const, git: 'CONFLICTED' as const, merge: 'BLOCKED' as const };
+    const merged = read(conflicted, 'GIT_SNAPSHOT_CAPTURED', { status: 'COMMITTED_UNPUSHED' });
+    expect(merged.health).toBe('ERROR');
+    expect(read(merged, 'MERGE_SNAPSHOT_CAPTURED', { status: 'MERGEABLE' }).health).toBe('HEALTHY');
+
+    // Checks passing on a re-run clear only their own error: the refused push still stands, until a push lands.
+    const failed = read(read({ ...createInitialProjection(now), ciChecks: 'FAILING' as const, health: 'ERROR' as const },
+      'BRANCH_PUBLISH_FAILED', { error: 'Remote branch has newer commits' }), 'CI_ROLLUP_CAPTURED', { status: 'PASSING' });
+    expect(failed.health).toBe('ERROR');
+    const pushed = read(failed, 'BRANCH_PUBLISHED', {});
+    expect(pushed.health).toBe('HEALTHY');
+    expect(pushed.findings.map((finding) => finding.code)).not.toContain('BRANCH_PUBLISH_FAILED');
+
+    // A failed turn keeps the task in error whatever the delivery readings say.
+    const failedTurn = { ...createInitialProjection(now), agentRun: 'FAILED' as const, ciChecks: 'FAILING' as const, health: 'ERROR' as const };
+    expect(read(failedTurn, 'CI_ROLLUP_CAPTURED', { status: 'PASSING' }).health).toBe('ERROR');
   });
 
   it('records merged snapshots without treating incomplete event data as completion evidence', () => {

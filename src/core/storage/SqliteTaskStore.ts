@@ -19,6 +19,7 @@ import type {
   Board,
   BoardColor,
   BoardSnapshot,
+  BoardDeliveryFacts,
   BoardTaskSummary,
   BranchPublicationRecord,
   CiRollupRecord,
@@ -65,12 +66,33 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { DESIGN_LIMITS, validateDesignPreviewTarget } from '../../shared/design';
+import { startsFromExistingWork } from '../../shared/promptTemplates';
+import {
+  PULL_REQUEST_FEEDBACK_LIMITS,
+  feedbackTurnFacts,
+  reviewTurn,
+  unresolvedDiscussionCount,
+  type PullRequestFeedback,
+  type PullRequestFeedbackSummary
+} from '../../shared/pullRequestFeedback';
+import {
+  leavablePullRequestHeads,
+  parseRemoteWorkReference,
+  pullRequestRewrittenUnder,
+  remoteWorkKey,
+  taskRemoteSourceRef,
+  type RemoteWorkRef,
+  type TaskRemoteSource
+} from '../../shared/remoteWork';
+import { REVIEW_WALKTHROUGH_MAX_BYTES } from '../../shared/reviewWalkthrough';
 import {
   BOARD_COLORS,
   REVIEW_FINDING_DECISION_LIMIT,
+  REVIEW_REQUEST_ITEM_DECISION_LIMIT,
   TASK_STORE_SCHEMA_VERSION,
   ARTIFACT_KINDS,
   CODEX_RUNTIME_ID,
+  baseMovedReason,
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
@@ -83,8 +105,10 @@ import {
   isTaskCreationToken,
   openReviewFindings,
   reviewDraftProblem,
+  holdsUnshippedWork,
   verifiedChecksMatchMergeHead,
   type ReviewFindingDecision,
+  type ReviewRequestItemDecision,
   type TaskReviewDraft
 } from '../../shared/contracts';
 import {
@@ -104,7 +128,10 @@ import {
 import { AttachmentStoreError } from './AttachmentErrors';
 import {
   validateCurrentStoreRecords,
-  validateTaskInstructionConversation
+  validatePullRequestFeedbackSummary,
+  validatePullRequestObservation,
+  validateTaskInstructionConversation,
+  validateTaskRemoteSource
 } from './currentStoreValidation';
 import {
   AppDatabase,
@@ -135,6 +162,24 @@ export interface CreateTaskStoreInput extends CreateTaskRequest {
    * resolved settings. It is never copied into the durable task record.
    */
   creationFingerprintInput?: CreateTaskRequest;
+  /** The issue the task was opened from, as the service read it from the platform. */
+  remote?: RemoteTaskSourceInput;
+}
+
+interface RemoteTaskSourceInput {
+  /** The source without its artifact, which the store creates from `snapshot`. */
+  source: Omit<TaskRemoteSource, 'snapshotArtifactId'>;
+  /** The captured text agents read, stored as the task's `remote-source` artifact. */
+  snapshot: string;
+}
+
+/** A pull request opened as a task: its managed worktree starts at the exact head. */
+interface OpenRemoteWorktreeInput {
+  branchName: string;
+  worktreePath: string;
+  baseRef?: string;
+  baseSha: string;
+  headSha: string;
 }
 
 export interface ImportedTaskEvidence {
@@ -228,6 +273,7 @@ interface PrSyncInput {
   ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
   reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
+  feedback?: PullRequestFeedback;
 }
 
 function completionPolicyAfterPullRequestSync(
@@ -250,9 +296,10 @@ function shouldCompleteFromPullRequestSync(
   task: Task,
   pullRequest: PullRequestSnapshotRecord,
   ci: CiRollupRecord,
-  merge: MergeSnapshotRecord
+  merge: MergeSnapshotRecord,
+  git: GitSnapshotRecord | undefined
 ): boolean {
-  if (!taskAllowsMergeCompletion(task)) {
+  if (!taskAllowsMergeCompletion(task, git, pullRequest.headRefOid)) {
     return false;
   }
   if (merge.status !== 'MERGED' || !completionPolicyRequiresMerge(task.completionPolicy)) {
@@ -277,9 +324,18 @@ function shouldCompleteFromPullRequestSync(
   );
 }
 
-function taskAllowsMergeCompletion(task: Task): boolean {
+// A task In progress completes on merge only when no turn is open or unsettled:
+// a pull request opened as a task starts In progress, and merging it on the
+// platform ends it. A failed, interrupted or lost turn stays the person's to settle.
+const MERGE_COMPLETION_SETTLED_RUNS = new Set<Task['projection']['agentRun']>(['IDLE', 'COMPLETED']);
+
+// Work the worktree held when last observed, such as fixes never pushed, keeps
+// the task open: a merge someone else made does not ship it.
+function taskAllowsMergeCompletion(task: Task, git: GitSnapshotRecord | undefined, pullRequestHeadSha: string | undefined): boolean {
   return (
-    ['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) &&
+    (['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) ||
+      (task.workflowPhase === 'IN_PROGRESS' && MERGE_COMPLETION_SETTLED_RUNS.has(task.projection.agentRun))) &&
+    !(git && holdsUnshippedWork(git, pullRequestHeadSha)) &&
     task.projection.agentReview?.status !== 'RUNNING' &&
     !getImplementationRetryReason(task)
   );
@@ -301,6 +357,9 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
   'pr-body': 256 * 1024,
+  'remote-source': 256 * 1024,
+  'pull-request-feedback': PULL_REQUEST_FEEDBACK_LIMITS.bytes,
+  'review-walkthrough': REVIEW_WALKTHROUGH_MAX_BYTES,
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -505,6 +564,7 @@ function taskCreationMetadata(
       runtimeId: requestedRuntimeId,
       agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
       ...(fingerprintInput.agentProfileId !== undefined ? { agentProfileId: fingerprintInput.agentProfileId } : {}),
+      ...(fingerprintInput.issue !== undefined ? { issue: remoteWorkKey(fingerprintInput.issue) } : {}),
       attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
@@ -890,7 +950,7 @@ export class SqliteTaskStore {
       boards: state.boards,
       tasks: state.tasks
         .filter((task) => task.kind === 'NORMAL')
-        .map(projectBoardTask),
+        .map((task) => projectBoardTask(task, state)),
       interactionRequests: state.interactionRequests.filter(
         (interaction) =>
           (interaction.status === 'PENDING' || interaction.status === 'RESPONDING') &&
@@ -1954,12 +2014,26 @@ export class SqliteTaskStore {
   async getLatestGitSnapshot(taskId: string): Promise<GitSnapshotRecord | undefined> {
     await this.init();
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
-    const iterationId = task?.currentIterationId;
-    return clone(
-      this.state.gitSnapshots
-        .filter((snapshot) => snapshot.taskId === taskId && snapshot.iterationId === iterationId)
-        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0]
-    );
+    return clone(task ? latestGitSnapshot(this.state, task) : undefined);
+  }
+
+  /** One capture of the task's Git state; none when it belongs to another task. */
+  async getGitSnapshot(taskId: string, snapshotId: string): Promise<GitSnapshotRecord | undefined> {
+    await this.init();
+    return clone(this.state.gitSnapshots.find((snapshot) => snapshot.id === snapshotId && snapshot.taskId === taskId));
+  }
+
+  /** The newest check rollup recorded for a pull request's head. */
+  async findCiRollup(taskId: string, pullRequestNumber: number, headSha: string | undefined): Promise<CiRollupRecord | undefined> {
+    await this.init();
+    return clone(this.state.ciRollups.find((record) =>
+      record.taskId === taskId && record.pullRequestNumber === pullRequestNumber && record.headSha === headSha));
+  }
+
+  /** The newest reading of what people said on a pull request. */
+  async findPullRequestFeedback(taskId: string, pullRequestNumber: number): Promise<PullRequestFeedbackSummary | undefined> {
+    await this.init();
+    return clone(latestPullRequestFeedback(this.state, taskId, pullRequestNumber));
   }
 
   async getLatestPullRequest(taskId: string): Promise<PullRequestSnapshotRecord | undefined> {
@@ -1970,6 +2044,16 @@ export class SqliteTaskStore {
         .filter((pr) => pr.taskId === taskId && pr.iterationId === task?.currentIterationId)
         .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0]
     );
+  }
+
+  /** The task's newest event of one type, read without copying the rest of the store. */
+  async getLatestTaskEvent(taskId: string, type: DomainEvent['type']): Promise<DomainEvent | undefined> {
+    await this.init();
+    let latest: DomainEvent | undefined;
+    for (const event of this.state.events) {
+      if (event.taskId === taskId && event.type === type && (!latest || event.receivedAt >= latest.receivedAt)) latest = event;
+    }
+    return clone(latest);
   }
 
   async createDesignBundle(
@@ -2461,7 +2545,8 @@ export class SqliteTaskStore {
       if (this.state.runs.some((run) => run.taskId === task.id)) {
         throw new Error('This task has already run. Send a follow-up instead.');
       }
-      if (typeof input.prompt !== 'string' || input.prompt.length > 65_536 || (!input.draftOnly && !input.prompt.trim())) {
+      // A task opened from an issue or a pull request has a goal without a request of its own, as at creation.
+      if (typeof input.prompt !== 'string' || input.prompt.length > 65_536 || (!input.draftOnly && !input.prompt.trim() && !task.remoteSource)) {
         throw new Error('Enter a prompt of at most 65,536 characters.');
       }
       await this.withMessageAttachments(task.id, input.draftOnly ? undefined : input.attachmentDraftId, (addedIds) => {
@@ -3241,6 +3326,66 @@ export class SqliteTaskStore {
     return worktree ? this.state.tasks.find((task) => task.id === worktree.taskId) : undefined;
   }
 
+  /** The task opened from this issue or pull request, or that delivered this pull request. */
+  async findTaskForRemoteWork(ref: RemoteWorkRef): Promise<Task | undefined> {
+    await this.init();
+    return clone(this.findTaskForRemoteWorkFromState(ref));
+  }
+
+  /** The task of each of these issues and pull requests that has one, by `remoteWorkKey`. */
+  async findTasksForRemoteWork(refs: readonly RemoteWorkRef[]): Promise<Map<string, Task>> {
+    await this.init();
+    return new Map([...this.tasksForRemoteWorkFromState(refs)].map(([key, task]) => [key, clone(task)]));
+  }
+
+  private findTaskForRemoteWorkFromState(ref: RemoteWorkRef): Task | undefined {
+    return this.tasksForRemoteWorkFromState([ref]).get(remoteWorkKey(ref));
+  }
+
+  /**
+   * One pass over the tasks, then, for a pull request no task was opened from,
+   * one over the recorded pull requests, newest first: every sync adds one, so
+   * each distinct URL is read once.
+   */
+  private tasksForRemoteWorkFromState(refs: readonly RemoteWorkRef[]): Map<string, Task> {
+    const wanted = new Set(refs.map(remoteWorkKey));
+    const found = new Map<string, Task>();
+    for (const task of this.state.tasks) {
+      const key = task.remoteSource ? remoteWorkKey(taskRemoteSourceRef(task.remoteSource)) : undefined;
+      if (key && wanted.has(key) && !found.has(key)) found.set(key, task);
+    }
+    const delivered = new Set(refs.filter((ref) => ref.kind === 'PULL_REQUEST').map(remoteWorkKey).filter((key) => !found.has(key)));
+    const read = new Set<string>();
+    for (const pullRequest of this.state.pullRequests) {
+      if (delivered.size === 0) break;
+      if (!pullRequest.url || read.has(pullRequest.url)) continue;
+      read.add(pullRequest.url);
+      const linked = parseRemoteWorkReference(pullRequest.url);
+      if (!linked?.repository || linked.kind !== 'PULL_REQUEST') continue;
+      const key = remoteWorkKey({ repository: linked.repository, kind: linked.kind, number: linked.number });
+      if (!delivered.delete(key)) continue;
+      const task = this.state.tasks.find((candidate) => candidate.id === pullRequest.taskId);
+      if (task) found.set(key, task);
+    }
+    return found;
+  }
+
+  /**
+   * Opens a pull request as a task with its managed worktree record, or returns
+   * the task that already holds it. The caller creates the worktree on disk.
+   */
+  openPullRequestTask(
+    input: CreateTaskStoreInput & { remote: RemoteTaskSourceInput },
+    worktree: (task: Task) => OpenRemoteWorktreeInput
+  ): Promise<{ task: Task; created: boolean }> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(input.remote.source));
+      if (existing) return { task: clone(existing), created: false };
+      return { task: await this.createTaskRecord(input, 'ui', undefined, undefined, worktree), created: true };
+    });
+  }
+
   importTask(input: ImportTaskRequest, evidence: ImportedTaskEvidence): Promise<Task> {
     return this.serializeMutation(async () => {
       if (!evidence.snapshot.headSha || !evidence.snapshot.baseSha ||
@@ -3494,7 +3639,8 @@ export class SqliteTaskStore {
     input: CreateTaskStoreInput,
     source: DomainEvent['source'],
     fork?: { sourceTaskId: string; sourceRunId: string },
-    imported?: ImportedTaskEvidence
+    imported?: ImportedTaskEvidence,
+    openedWorktree?: (task: Task) => OpenRemoteWorktreeInput
   ): Promise<Task> {
     await this.init();
 
@@ -3502,6 +3648,22 @@ export class SqliteTaskStore {
       const existing = this.resolveTaskCreationRetryFromState(input);
       if (existing) {
         return clone(existing);
+      }
+    }
+    const remote = input.remote;
+    if (remote) {
+      // Only a new task opened from an item holds it: a pull request with its worktree, an issue without one.
+      if (fork || imported || (remote.source.kind === 'PULL_REQUEST') !== Boolean(openedWorktree)) {
+        throw new Error('A pull request opens with its worktree; an issue opens without one.');
+      }
+      // One task per remote item: choosing it again opens the task it already has.
+      const existing = this.findTaskForRemoteWorkFromState(taskRemoteSourceRef(remote.source));
+      if (existing) return clone(existing);
+      // Checked as stored, before anything is written: a value the store could not load fails this action, not startup.
+      try {
+        validateTaskRemoteSource({ ...remote.source, snapshotArtifactId: randomUUID() });
+      } catch {
+        throw new Error('This item has a value Task Monki cannot record.');
       }
     }
 
@@ -3536,7 +3698,7 @@ export class SqliteTaskStore {
       repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
-      workflowPhase: imported ? 'IN_PROGRESS' : 'READY',
+      workflowPhase: imported || openedWorktree ? 'IN_PROGRESS' : 'READY',
       resolution: 'NONE',
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
@@ -3552,7 +3714,7 @@ export class SqliteTaskStore {
     if (!task.title) {
       throw new Error('Task title is required.');
     }
-    if (!task.prompt && !imported) {
+    if (!task.prompt && !imported && !remote) {
       throw new Error('Task prompt is required.');
     }
     const repository = this.state.repositories.find(
@@ -3627,6 +3789,17 @@ export class SqliteTaskStore {
         })
       );
 
+      // An alternative keeps the issue through its prompt; only the opened task holds the source.
+      if (remote) {
+        const snapshot = await this.createTextArtifact(task.id, 'remote-source', remote.snapshot);
+        this.state = {
+          ...this.state,
+          tasks: this.state.tasks.map((candidate) => candidate.id === task.id
+            ? { ...candidate, remoteSource: { ...remote.source, snapshotArtifactId: snapshot.id } }
+            : candidate)
+        };
+      }
+
       if (fork) {
         this.state = applyEventToState(
           this.state,
@@ -3657,6 +3830,10 @@ export class SqliteTaskStore {
         await this.recordGitSnapshotInternal({
           ...snapshot, taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id
         }, diffEvidence, false);
+      }
+      if (openedWorktree) {
+        const created = this.state.tasks.find((candidate) => candidate.id === task.id)!;
+        await this.createIterationAndWorktreeInternal({ task: created, ...openedWorktree(created), ownership: 'MANAGED' }, false);
       }
       await this.persistSnapshot();
     } catch (error) {
@@ -4117,10 +4294,12 @@ export class SqliteTaskStore {
       );
       if (alreadyPublished) return clone(stored);
 
+      // A review is a gate of the Review phase: work that existed before the task, an imported
+      // checkout or an opened pull request, moves there when its review starts before any turn.
+      const reviewedWorktree = this.state.worktrees.find((worktree) => worktree.id === task.currentWorktreeId && worktree.id === run.worktreeId);
       if (run.mode === 'REVIEW' && task.workflowPhase === 'IN_PROGRESS' && !task.currentRunId &&
-          this.state.worktrees.some((worktree) => worktree.id === task.currentWorktreeId &&
-            worktree.id === run.worktreeId && worktree.ownership === 'EXTERNAL')) {
-        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for imported work.', false);
+          reviewedWorktree && startsFromExistingWork(task, reviewedWorktree)) {
+        await this.transitionTaskInternal(task.id, 'REVIEW', 'Agent review requested for existing work.', false);
       }
       const bindsCurrentTask = !isDetachedRunMode(run.mode);
       const advancesWorkflow = bindsCurrentTask && run.mode !== 'DESIGN';
@@ -4199,30 +4378,63 @@ export class SqliteTaskStore {
     });
   }
 
-  /**
-   * Records a decision on the current review's findings. `decide` runs inside the
-   * serialized mutation against the current task, so its checks and the recorded
-   * event cannot interleave with another change to the review. It throws to refuse.
-   */
+  /** Records a decision on the current review's findings. */
   async recordReviewFindingDecision(
     taskId: string,
     decide: (task: Task) => ReviewFindingDecision
   ): Promise<ReviewFindingDecision> {
+    return this.recordReviewDecision(taskId, {
+      type: 'AGENT_REVIEW_FINDING_DECIDED',
+      recorded: (review) => review.findingDecisions,
+      limit: REVIEW_FINDING_DECISION_LIMIT,
+      decide: (task) => decide(clone(task))
+    });
+  }
+
+  /** Records the person's decision on the agent's answer to a request item, against the task's messages and runs. */
+  async recordReviewRequestItemDecision(
+    taskId: string,
+    decide: (task: Task, messages: readonly TaskInstruction[], runs: readonly RunRecord[]) => ReviewRequestItemDecision
+  ): Promise<ReviewRequestItemDecision> {
+    return this.recordReviewDecision(taskId, {
+      type: 'REVIEW_REQUEST_ITEM_DECIDED',
+      recorded: (review) => review.requestItemDecisions,
+      limit: REVIEW_REQUEST_ITEM_DECISION_LIMIT,
+      decide: (task) => decide(
+        clone(task),
+        clone(this.state.taskInstructions.filter((message) => message.taskId === task.id)),
+        clone(this.state.runs.filter((run) => run.taskId === task.id))
+      )
+    });
+  }
+
+  /**
+   * Records a decision of the person's on the current review. `decide` runs
+   * inside the serialized mutation against the task as it is now, so its checks
+   * and the recorded event cannot interleave with a new request or a new review.
+   * It throws to refuse, as a review past its decision limit does.
+   */
+  private recordReviewDecision<T>(taskId: string, input: {
+    type: 'AGENT_REVIEW_FINDING_DECIDED' | 'REVIEW_REQUEST_ITEM_DECIDED';
+    recorded(review: NonNullable<Task['projection']['agentReview']>): readonly unknown[] | undefined;
+    limit: number;
+    decide(task: Task): T;
+  }): Promise<T> {
     return this.serializeMutation(async () => {
       await this.init();
       await this.refreshAgentRuntimeProjectionInternal();
       const task = this.state.tasks.find((candidate) => candidate.id === taskId);
       if (!task || task.kind !== 'NORMAL') throw new Error('Task not found.');
-      const decision = decide(clone(task));
+      const decision = input.decide(task);
       const review = task.projection.agentReview;
       const reviewRun = this.state.runs.find((run) => run.id === review?.runId && run.taskId === task.id && run.mode === 'REVIEW');
       if (!review || !reviewRun) throw new Error('This review is no longer current.');
-      if ((review.findingDecisions ?? []).length >= REVIEW_FINDING_DECISION_LIMIT) {
+      if ((input.recorded(review) ?? []).length >= input.limit) {
         throw new Error('This review has reached its decision limit. Run the review again.');
       }
       await this.appendEventInternal(
         createDomainEvent({
-          type: 'AGENT_REVIEW_FINDING_DECIDED',
+          type: input.type,
           taskId: task.id,
           iterationId: reviewRun.iterationId,
           worktreeId: reviewRun.worktreeId,
@@ -4393,6 +4605,40 @@ export class SqliteTaskStore {
     );
     if (persist) await this.persistSnapshot();
     return clone(stored);
+  }
+
+  /**
+   * The diff base of a task's managed worktree after its branch moved on: the
+   * merge base the platform diffs a pull request against, or a base commit
+   * Task Monki merged in. The iteration's copy of the base moves with it, and
+   * both stay ancestors of the head.
+   */
+  async updateWorktreeBase(
+    worktreeId: string,
+    base: { baseRef: string; baseSha: string; headSha?: string }
+  ): Promise<WorktreeRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const worktree = this.state.worktrees.find((candidate) => candidate.id === worktreeId);
+      const task = worktree ? this.state.tasks.find((candidate) => candidate.id === worktree.taskId) : undefined;
+      if (!worktree || task?.kind !== 'NORMAL' || worktree.ownership !== 'MANAGED' ||
+          task.currentWorktreeId !== worktree.id || !isGitObjectId(base.baseSha) || (base.headSha !== undefined && !isGitObjectId(base.headSha))) {
+        throw new Error('Only the current managed worktree of a task can change its base.');
+      }
+      const now = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        iterations: this.state.iterations.map((iteration) => iteration.id === worktree.iterationId
+          ? { ...iteration, baseRef: base.baseRef, baseSha: base.baseSha, updatedAt: now }
+          : iteration)
+      };
+      return this.updateWorktreeInternal({
+        ...worktree,
+        baseRef: base.baseRef,
+        baseSha: base.baseSha,
+        ...(base.headSha ? { headSha: base.headSha } : {})
+      }, 'WORKTREE_VERIFIED');
+    });
   }
 
   async updateExistingWorktree(
@@ -4613,17 +4859,23 @@ export class SqliteTaskStore {
     worktree: WorktreeRecord,
     remoteName: string,
     headSha: string,
-    remoteUrl?: string
+    remoteUrl?: string,
+    /** An opened pull request's branch, when the push goes there instead of the task branch. */
+    remoteBranch?: string,
+    /** That branch's head as last observed, which the push is leased on. */
+    previousRemoteSha?: string
   ): Promise<BranchPublicationRecord> {
+    const branchName = remoteBranch ?? worktree.branchName;
     return this.recordBranchPublication({
       taskId: task.id,
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
       remoteName,
       ...(remoteUrl ? { remoteUrl } : {}),
-      branchName: worktree.branchName,
-      remoteRef: `${remoteName}/${worktree.branchName}`,
+      branchName,
+      remoteRef: `${remoteName}/${branchName}`,
       headSha,
+      ...(previousRemoteSha ? { previousRemoteSha } : {}),
       status: 'PUSHING'
     });
   }
@@ -4728,9 +4980,11 @@ export class SqliteTaskStore {
       ...input.ci,
       observedAt
     };
+    const feedback = await this.pullRequestFeedbackSummary(pullRequest, input.feedback);
     const reviews: ReviewRollupRecord = {
       id: randomUUID(),
       ...input.reviews,
+      ...(feedback.summary ? { feedback: feedback.summary } : {}),
       observedAt
     };
     const merge: MergeSnapshotRecord = {
@@ -4738,6 +4992,12 @@ export class SqliteTaskStore {
       ...input.merge,
       observedAt
     };
+    try {
+      validatePullRequestObservation({ pullRequest, ci, reviews, merge });
+    } catch {
+      if (feedback.artifact) await this.cleanupUnpublishedArtifacts([feedback.artifact]);
+      throw new Error('The platform reported a pull request value Task Monki cannot record.');
+    }
 
     this.state = {
       ...this.state,
@@ -4796,7 +5056,7 @@ export class SqliteTaskStore {
     );
     const taskBeforeMerge = this.state.tasks.find((task) => task.id === merge.taskId);
     const shouldComplete = taskBeforeMerge
-      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge)
+      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge, latestGitSnapshot(this.state, taskBeforeMerge))
       : false;
     await this.appendEvent(
       createDomainEvent({
@@ -4828,8 +5088,46 @@ export class SqliteTaskStore {
       };
     }
 
-    await this.persistSnapshot();
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      if (feedback.artifact) await this.cleanupUnpublishedArtifacts([feedback.artifact]);
+      throw error;
+    }
     return clone(pullRequest);
+  }
+
+  /**
+   * What a review observation keeps of its feedback. Unchanged feedback keeps
+   * the artifact it has; feedback that could not be read, or does not fit,
+   * keeps the last reading of the same pull request.
+   */
+  private async pullRequestFeedbackSummary(
+    pullRequest: PullRequestSnapshotRecord,
+    feedback: PullRequestFeedback | undefined
+  ): Promise<{ summary?: PullRequestFeedbackSummary; artifact?: ArtifactRecord }> {
+    const previous = latestPullRequestFeedback(this.state, pullRequest.taskId, pullRequest.number);
+    if (!feedback || feedback.number !== pullRequest.number) return { summary: previous };
+    const digest = createHash('sha256').update(JSON.stringify({ ...feedback, capturedAt: undefined })).digest('hex');
+    // Unchanged feedback keeps its artifact and summary, and is not written out again.
+    if (previous?.digest === digest) return { summary: previous };
+    const content = JSON.stringify(feedback);
+    if (Buffer.byteLength(content, 'utf8') > PULL_REQUEST_FEEDBACK_LIMITS.bytes) return { summary: previous };
+    const candidate: PullRequestFeedbackSummary = {
+      artifactId: randomUUID(),
+      digest,
+      unresolvedCount: unresolvedDiscussionCount(feedback.discussions),
+      discussionCount: feedback.discussions.length,
+      reviewers: feedback.reviewers,
+      ...feedbackTurnFacts(feedback)
+    };
+    try {
+      validatePullRequestFeedbackSummary(candidate);
+    } catch {
+      return { summary: previous };
+    }
+    const artifact = await this.createTextArtifact(pullRequest.taskId, 'pull-request-feedback', content);
+    return { artifact, summary: { ...candidate, artifactId: artifact.id } };
   }
 
   async appendEvent(event: DomainEvent, persist = true): Promise<void> {
@@ -4943,6 +5241,37 @@ export class SqliteTaskStore {
       throw error;
     }
     return clone(stored);
+  }
+
+  /**
+   * Keeps a review's checked walkthrough as an artifact of its run, once: a run
+   * that has one gets it back, so an outcome projected again after a restart
+   * writes nothing new. A walkthrough past its limit is refused before any byte
+   * is written, and nothing is returned.
+   */
+  async recordReviewWalkthrough(reviewRunId: string, content: string): Promise<ArtifactRecord | undefined> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      await this.refreshAgentRuntimeProjectionInternal();
+      const run = this.state.runs.find((candidate) => candidate.id === reviewRunId);
+      if (run?.mode !== 'REVIEW') throw new Error('A walkthrough belongs to a review run of a task.');
+      const existing = this.state.artifacts.find((artifact) => artifact.runId === run.id && artifact.kind === 'review-walkthrough');
+      if (existing) return clone(existing);
+      const limit = ARTIFACT_BYTE_LIMITS['review-walkthrough'];
+      // The document is never cut: whatever does not fit whole is not kept.
+      if (Buffer.byteLength(content, 'utf8') > limit - artifactTruncationMarker('review-walkthrough', limit).byteLength) {
+        return undefined;
+      }
+      const artifact = await this.createArtifactRecord(run.taskId, 'review-walkthrough', { runId: run.id }, content);
+      this.state = { ...this.state, artifacts: [artifact, ...this.state.artifacts] };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        await this.cleanupUnpublishedArtifacts([artifact]);
+        throw error;
+      }
+      return clone(artifact);
+    });
   }
 
   private async createTextArtifact(
@@ -5392,6 +5721,7 @@ function validateLoadedTaskState(current: StoreState): void {
   validatePersistedAttachments(current);
 }
 
+/** A task's remote source names its own captured text, and only one task claims an item. */
 function validatePersistedRelationships(state: StoreState): void {
   const tasks = indexUniqueRecords(state.tasks, 'tasks');
   const iterations = indexUniqueRecords(state.iterations, 'iterations');
@@ -5568,6 +5898,29 @@ function validatePersistedRelationships(state: StoreState): void {
     }
   }
 
+  for (const review of reviewRollups.values()) {
+    if (review.feedback) {
+      assertTaskArtifact(
+        artifacts,
+        review.taskId,
+        review.feedback.artifactId,
+        'pull-request-feedback',
+        'pull request feedback artifact ownership'
+      );
+    }
+  }
+
+  // One task holds each issue or pull request, with its own captured text.
+  const remoteKeys = new Set<string>();
+  for (const task of tasks.values()) {
+    if (!task.remoteSource) continue;
+    assertTaskArtifact(artifacts, task.id, task.remoteSource.snapshotArtifactId, 'remote-source', 'task remote source');
+    const key = remoteWorkKey(taskRemoteSourceRef(task.remoteSource));
+    if (remoteKeys.has(key)) invalidPersistedRelationship('task remote source');
+    remoteKeys.add(key);
+  }
+
+  const messages = new Map(state.taskInstructions.map((message) => [message.id, message]));
   for (const task of state.tasks) {
     const iteration = task.currentIterationId
       ? iterations.get(task.currentIterationId)
@@ -5580,7 +5933,7 @@ function validatePersistedRelationships(state: StoreState): void {
       : undefined;
     const run = task.currentRunId ? runs.get(task.currentRunId) : undefined;
     if (hasRuntimeProjection) {
-      assertAgentReviewOwnership(runs, artifacts, gitSnapshots, task);
+      assertAgentReviewOwnership(runs, artifacts, gitSnapshots, messages, task);
     }
     if (
       (task.currentIterationId && (!iteration || iteration.taskId !== task.id)) ||
@@ -5609,6 +5962,7 @@ function assertAgentReviewOwnership(
   runs: ReadonlyMap<string, RunRecord>,
   artifacts: ReadonlyMap<string, ArtifactRecord>,
   gitSnapshots: ReadonlyMap<string, GitSnapshotRecord>,
+  messages: ReadonlyMap<string, TaskInstruction>,
   task: Task
 ): void {
   const review = task.projection.agentReview;
@@ -5666,6 +6020,29 @@ function assertAgentReviewOwnership(
     if (!reviewRun || decision.reviewRunId !== reviewRun.id) {
       invalidPersistedRelationship('task agent review decision ownership');
     }
+  }
+
+  // A decision on an answer names a request the task's own messages sent after this review, and one of its items.
+  for (const decision of review.requestItemDecisions ?? []) {
+    const request = messages.get(decision.instructionId);
+    if (
+      !reviewRun ||
+      decision.reviewRunId !== reviewRun.id ||
+      request?.taskId !== task.id ||
+      request.reviewRequest?.reviewRunId !== reviewRun.id ||
+      !request.reviewRequest.items.some((item) => item.number === decision.item)
+    ) {
+      invalidPersistedRelationship('task agent review answer decision ownership');
+    }
+  }
+
+  // A stored walkthrough, this review's or an earlier one kept as context, is its review run's artifact.
+  if (review.walkthrough?.status === 'STORED') {
+    const walkthroughRun = runs.get(review.walkthrough.reviewRunId);
+    if (!walkthroughRun || walkthroughRun.taskId !== task.id || walkthroughRun.mode !== 'REVIEW') {
+      invalidPersistedRelationship('task agent review walkthrough ownership');
+    }
+    assertRunArtifact(artifacts, walkthroughRun, review.walkthrough.artifactId, 'review-walkthrough');
   }
 }
 
@@ -7397,7 +7774,71 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return Number.isFinite(time) && new Date(time).toISOString() === value;
 }
 
-function projectBoardTask(task: Task): BoardTaskSummary {
+/** The newest Git evidence of a task's current iteration. */
+function latestGitSnapshot(state: StoreState, task: Task): GitSnapshotRecord | undefined {
+  return state.gitSnapshots
+    .filter((snapshot) => snapshot.taskId === task.id && snapshot.iterationId === task.currentIterationId)
+    .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+}
+
+/** The newest reading of what people said on a pull request; each observation carries the last one forward. */
+function latestPullRequestFeedback(state: StoreState, taskId: string, pullRequestNumber: number | undefined): PullRequestFeedbackSummary | undefined {
+  return state.reviewRollups.find((record) => record.taskId === taskId && record.pullRequestNumber === pullRequestNumber)?.feedback;
+}
+
+/** The opened pull request was rewritten under a worktree with nothing of its own, as PR Status reads it. */
+function boardPullRequestRewritten(task: Task, state: StoreState): boolean {
+  const opened = task.remoteSource?.kind === 'PULL_REQUEST' ? task.remoteSource.pullRequest : undefined;
+  if (!opened || task.projection.git !== 'DIVERGED') return false;
+  const publications = state.branchPublications.filter((record) => record.taskId === task.id);
+  const pushed = publications.filter((record) => record.iterationId === task.currentIterationId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+  return pullRequestRewrittenUnder({
+    leavableHeads: leavablePullRequestHeads(opened.headSha, state.pullRequests.filter((record) => record.taskId === task.id), publications),
+    localHead: latestGitSnapshot(state, task)?.headSha,
+    diverged: true,
+    pushUnconfirmed: pushed?.status === 'AMBIGUOUS'
+  });
+}
+
+/**
+ * The facts behind a delivery state the person owes a step on, read only for
+ * a task whose projection asks: the latest records are first in each list.
+ */
+function boardDeliveryFacts(task: Task, state: StoreState): BoardDeliveryFacts | undefined {
+  const projection = task.projection;
+  const failing = projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED';
+  const changes = projection.reviews === 'CHANGES_REQUESTED';
+  const blocked = projection.merge === 'BLOCKED';
+  const pushFailed = projection.branchPublication === 'FAILED' || projection.branchPublication === 'AMBIGUOUS';
+  // A merge in progress beside an open pull request, read from the Git evidence PR Status reads: in the
+  // task's own worktree, Push update finishes it. An imported checkout's merge is its owner's.
+  const merging = (projection.githubPullRequest === 'OPEN_DRAFT' || projection.githubPullRequest === 'OPEN_READY') &&
+    state.worktrees.find((worktree) => worktree.id === task.currentWorktreeId)?.ownership === 'MANAGED' &&
+    latestGitSnapshot(state, task)?.operationInProgress === 'merge';
+  if (projection.githubPullRequest === 'MERGED' || (!failing && !changes && !blocked && !pushFailed && !merging)) return undefined;
+  const number = projection.githubPullRequestNumber;
+  const own = (record: { taskId: string }) => record.taskId === task.id;
+  const pullRequest = state.pullRequests.find((record) => own(record) && record.number === number);
+  const ci = failing ? state.ciRollups.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
+  const feedback = changes ? latestPullRequestFeedback(state, task.id, number) : undefined;
+  const merge = blocked ? state.mergeSnapshots.find((record) => own(record) && record.pullRequestNumber === number) : undefined;
+  const reason = merge ? baseMovedReason(merge.raw) : undefined;
+  const pushError = pushFailed ? state.branchPublications.find(own)?.error?.split('\n')[0]?.slice(0, 200) : undefined;
+  const failed = ci?.checkDetails?.filter((check) => check.status === 'failed') ?? [];
+  const turn = feedback ? reviewTurn(feedback) : undefined;
+  const facts: BoardDeliveryFacts = {
+    ...(failed.length ? { failingChecks: { names: failed.slice(0, 3).map((check) => check.name), count: failed.length } } : {}),
+    ...(feedback ? { feedback: { unresolvedCount: feedback.unresolvedCount, reviewers: feedback.reviewers } } : {}),
+    ...(turn ? { turn } : {}),
+    ...(reason && pullRequest?.baseRefName ? { baseMoved: { base: pullRequest.baseRefName, reason } } : {}),
+    ...(pushError ? { pushError } : {}),
+    ...(merging ? { mergeInProgress: true } : {})
+  };
+  return Object.keys(facts).length > 0 ? facts : undefined;
+}
+
+function projectBoardTask(task: Task, state: StoreState): BoardTaskSummary {
   const review = task.projection.agentReview;
   const findingCounts: BoardTaskSummary['projection']['agentReview']['findingCounts'] = {};
   for (const finding of openReviewFindings(review?.result, review?.findingDecisions ?? [])) {
@@ -7418,9 +7859,11 @@ function projectBoardTask(task: Task): BoardTaskSummary {
       git: task.projection.git,
       githubPullRequest: task.projection.githubPullRequest,
       githubPullRequestNumber: task.projection.githubPullRequestNumber,
+      githubPullRequestUrl: task.projection.githubPullRequestUrl,
       ciChecks: task.projection.ciChecks,
       reviews: task.projection.reviews,
       merge: task.projection.merge,
+      branchPublication: task.projection.branchPublication,
       health: task.projection.health,
       summary: task.projection.summary,
       implementationRetry: task.projection.implementationRetry,
@@ -7434,7 +7877,9 @@ function projectBoardTask(task: Task): BoardTaskSummary {
         ...(review?.requestAnswer ? { requestAnswered: review.requestAnswer } : {})
       },
       ...(task.projection.bugReplay ? { bugReplay: boardBugReplay(task.projection.bugReplay) } : {})
-    }
+    },
+    ...(boardPullRequestRewritten(task, state) ? { pullRequestRewritten: true } : {}),
+    ...((delivery) => delivery ? { delivery } : {})(boardDeliveryFacts(task, state))
   };
 }
 

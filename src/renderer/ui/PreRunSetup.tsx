@@ -32,7 +32,8 @@ export function PreRunSetup({
   disabled,
   action,
   onSettingsChange,
-  onDiscoverModels
+  onDiscoverModels,
+  promptOptional
 }: {
   prompt: string;
   promptDraft?: string;
@@ -45,7 +46,10 @@ export function PreRunSetup({
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
-  action?: { label: string; pendingLabel?: string; pending?: boolean; disabled?: boolean; title?: string; onClick(): void };
+  /** Starting receives the request just saved. */
+  action?: { label: string; pendingLabel?: string; pending?: boolean; disabled?: boolean; title?: string; onClick(request: string): void };
+  /** A task opened from an issue starts from the issue: a request of the person's own is optional. */
+  promptOptional?: boolean;
   onSettingsChange(settings: AgentExecutionSettings): void;
   onDiscoverModels?(runtimeId: string): Promise<void>;
 }) {
@@ -57,7 +61,7 @@ export function PreRunSetup({
   const pendingText = useRef<string | undefined>(undefined);
   const selectedModel = selectModel(models, settings.model, runtimeId, settings.modelProvider);
   const files = useTaskAttachments({ ...attachmentOptions, model: selectedModel, blocked: saving, preserveDraftOnClose: true });
-  const dirty = text.trim() !== saved || !text.trim() || files.items.length > 0;
+  const dirty = text.trim() !== saved || (!text.trim() && !promptOptional) || files.items.length > 0;
   const changePrompt = (value: string) => {
     setText(value);
     pendingText.current = value;
@@ -71,7 +75,7 @@ export function PreRunSetup({
     void writes.current.catch(() => setSaveError('The draft could not be saved. Keep this page open and try again.'));
   };
   const savePrompt = async (): Promise<boolean> => {
-    if (saving || files.busy || files.hasErrors || files.modelError || !text.trim()) return false;
+    if (saving || files.busy || files.hasErrors || files.modelError || (!text.trim() && !promptOptional)) return false;
     setSaving(true);
     try {
       await writes.current.catch(() => undefined);
@@ -90,7 +94,7 @@ export function PreRunSetup({
   // Starting saves the prompt first, so there is no separate save step.
   const submit = async () => {
     if (dirty && !(await savePrompt())) return;
-    if (action && !action.disabled) action.onClick();
+    if (action && !action.disabled) action.onClick(text.trim());
   };
   const availableRuntimes = runtimes.filter((runtime) => runtime.preflight.runtime.id === runtimeId);
   const readiness = availableRuntimes[0]?.preflight.readiness;
@@ -98,7 +102,7 @@ export function PreRunSetup({
   const presets = availableRuntimes[0]?.preflight.capabilities.executionPolicy.presets ?? [];
   const preset = matchingExecutionPolicyPreset(presets, settings);
   const fileError = files.draftError ?? files.modelError ?? files.overflowError;
-  const canSubmit = !saving && !files.busy && !files.hasErrors && !files.modelError && text.trim().length > 0
+  const canSubmit = !saving && !files.busy && !files.hasErrors && !files.modelError && (text.trim().length > 0 || Boolean(promptOptional))
     && (action ? !action.disabled : dirty);
 
   return <section className="tm-prerun" aria-label="Start this task">

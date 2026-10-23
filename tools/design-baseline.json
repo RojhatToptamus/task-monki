@@ -1,8 +1,8 @@
 {
   "styles": {
-    "line-height-literal": 72,
-    "height-literal": 28,
-    "hover-background-shorthand": 16
+    "line-height-literal": 65,
+    "height-literal": 26,
+    "hover-background-shorthand": 15
   },
   "renderer": {
     "native-title-on-button": 21

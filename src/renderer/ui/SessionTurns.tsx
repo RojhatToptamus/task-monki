@@ -22,7 +22,8 @@ import { ReportedQuote } from './ReportedQuote';
  * every refresh, so finished turns are reused by record revision; only the
  * live turn is re-projected while output streams. Callers pass the runs of one
  * conversation; `prompt` opens the earliest non-review turn when no authored
- * message does.
+ * message does, and `openedFrom` names the issue it starts from when there is
+ * no prompt.
  */
 export function useSessionTurns(input: {
   runs: RunRecord[];
@@ -32,8 +33,9 @@ export function useSessionTurns(input: {
   interactions: InteractionRequestRecord[];
   cwd?: string;
   prompt?: string;
+  openedFrom?: string;
 }): SessionTurn[] {
-  const { runs, items, instructions, plans, interactions, cwd, prompt } = input;
+  const { runs, items, instructions, plans, interactions, cwd, prompt, openedFrom } = input;
   const cache = useRef(new Map<string, { fingerprint: string; turn: SessionTurn }>());
   return useMemo(() => {
     const ordered = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
@@ -49,9 +51,10 @@ export function useSessionTurns(input: {
       const runPlans = plansByRun.get(turnRun.id) ?? [];
       const runInteractions = interactionsByRun.get(turnRun.id) ?? [];
       const turnPrompt = turnRun === first ? prompt : undefined;
+      const turnOpenedFrom = turnRun === first ? openedFrom : undefined;
       const fingerprint = isActiveRunStatus(turnRun.status) ? '' : [
         turnRun.status, turnRun.endedAt, turnRun.lastEventAt, turnRun.eventCount, turnRun.finalMessage, turnRun.terminalReason,
-        turnPrompt, cwd,
+        turnPrompt, turnOpenedFrom, cwd,
         ...runItems.map((record) => `${record.id}@${record.updatedAt}`),
         ...runInstructions.map((record) => `${record.id}@${record.updatedAt}`),
         ...runInteractions.map((record) => `${record.id}@${record.status}@${record.respondedAt}@${record.resolvedAt}`),
@@ -59,13 +62,13 @@ export function useSessionTurns(input: {
       ].join('\u0000');
       const cached = cache.current.get(turnRun.id);
       const turn = fingerprint && cached?.fingerprint === fingerprint ? cached.turn
-        : sessionTurn(turnRun, runItems, runInstructions, { prompt: turnPrompt, cwd, plans: runPlans, interactions: runInteractions });
+        : sessionTurn(turnRun, runItems, runInstructions, { prompt: turnPrompt, openedFrom: turnOpenedFrom, cwd, plans: runPlans, interactions: runInteractions });
       if (fingerprint) next.set(turnRun.id, { fingerprint, turn });
       return turn;
     });
     cache.current = next;
     return turns;
-  }, [prompt, runs, items, instructions, plans, interactions, cwd]);
+  }, [prompt, openedFrom, runs, items, instructions, plans, interactions, cwd]);
 }
 
 function groupByRun<T extends { runId?: string }>(records: T[]): Map<string, T[]> {

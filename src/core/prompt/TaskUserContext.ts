@@ -1,5 +1,8 @@
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { AgentUserInputRequest } from '../../shared/agent';
+import type { Task } from '../../shared/contracts';
+import { buildRemoteWorkContext } from '../../shared/promptTemplates';
+import { parseRemoteWorkSnapshot } from '../../shared/remoteWork';
 
 // Bound prompt growth without silently forgetting a user decision.
 const MAX_USER_CONTEXT_LENGTH = 131_072;
@@ -60,7 +63,24 @@ export async function readTaskUserContext(
       `Question: ${question.question}\nAnswer: ${(answers[question.id] ?? []).join('; ')}`
     ).join('\n\n')}`);
   }
-  if (!messages.length) return '';
+  const remote = await readTaskRemoteContext(store, detail.task);
+  if (!messages.length) return remote;
   messages.sort((a, b) => a.at.localeCompare(b.at));
-  return `Earlier user instructions and answers, in order (user intent, not evidence of execution):\n${messages.map((message) => message.text).join('\n\n')}`;
+  return [
+    remote,
+    `Earlier user instructions and answers, in order (user intent, not evidence of execution):\n${messages.map((message) => message.text).join('\n\n')}`
+  ].filter(Boolean).join('\n\n');
+}
+
+/**
+ * The issue or pull request the task was opened from, as captured then. Later
+ * edits on the platform do not change what the agent reads.
+ */
+async function readTaskRemoteContext(store: SqliteTaskStore, task: Task): Promise<string> {
+  const source = task.remoteSource;
+  if (!source) return '';
+  // The identity still names the item when the captured text is unreadable; it is reported as unavailable.
+  const snapshot = await store.readArtifact(source.snapshotArtifactId)
+    .then((text) => parseRemoteWorkSnapshot(text, source.number), () => undefined);
+  return buildRemoteWorkContext(source, snapshot);
 }
