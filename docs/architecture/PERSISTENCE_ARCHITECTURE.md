@@ -252,6 +252,9 @@ on the agent's answers to a request: `REVIEW_REQUEST_ITEM_DECIDED` carries one
 (`ACCEPT` or `REOPEN`, the review, the message that carried the request and the
 item's number), and the review gate keeps them in order as
 `requestItemDecisions`, at most 200 per review, cleared when a new review starts.
+`REVIEW_REQUEST_ANSWERED` names the request and the items the agent left to the
+person, which the gate's `requestAnswer` keeps (`instructionId`,
+`decisionItems`), so accepting each of their answers ends the wait.
 Startup refuses a decision whose review is not the gate's, or whose request is
 not one of the task's messages sent after that review holding that item. The
 tree a review reads is pinned under its run before the run starts and recorded

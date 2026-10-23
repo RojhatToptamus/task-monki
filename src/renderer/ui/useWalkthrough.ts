@@ -38,8 +38,10 @@ export function useWalkthrough(taskId: string, state: ReviewWalkthroughState | u
   const key = reviewRunId && artifactId ? `${taskId}\u0000${reviewRunId}\u0000${artifactId}` : undefined;
   const [reading, setReading] = useState<Reading>();
 
+  // Both are immutable for their review: a reading already held for this one is not read again.
+  const held = reading?.key === key;
   useEffect(() => {
-    if (!key || !reviewRunId || !artifactId) return;
+    if (!key || !reviewRunId || !artifactId || held) return;
     let canceled = false;
     void Promise.all([
       taskManagerApi.readArtifact({ artifactId }).then((text) => parseReviewWalkthrough(text, reviewRunId), () => undefined),
@@ -49,7 +51,7 @@ export function useWalkthrough(taskId: string, state: ReviewWalkthroughState | u
       if (!canceled) setReading({ key, walkthrough, diff });
     });
     return () => { canceled = true; };
-  }, [key, taskId, reviewRunId, artifactId]);
+  }, [key, taskId, reviewRunId, artifactId, held]);
 
   const current = reading?.key === key ? reading : undefined;
   const files = useMemo(

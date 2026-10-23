@@ -64,7 +64,9 @@ The important product rule is:
     line numbers it read there.
   - `requestAnswer`: set by `REVIEW_REQUEST_ANSWERED` once the agent's reply to
     the person's request after this review settles, with whether an item waits
-    on the person's decision; cleared when the next turn starts.
+    on the person's decision and which items the agent left to them; it stops
+    waiting once the person accepts each of those answers, and is cleared when
+    the next turn starts.
   - `requestItemDecisions`: the person's decisions on the agent's answers to
     their requests after this review, in order (`REVIEW_REQUEST_ITEM_DECIDED`):
     `ACCEPT` settles an item and `REOPEN` takes that back

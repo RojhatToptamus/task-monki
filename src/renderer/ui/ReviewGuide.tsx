@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useId, useMemo, useRef } from 'react';
 import { stageProgress } from '../model/reviewWalkthrough';
 import { ReviewBands } from './ReviewBands';
 import { useFileNotes } from './ReviewFileRow';
@@ -16,7 +16,7 @@ import type { ReviewModel } from './useReviewModel';
 export function ReviewGuide({ model }: { model: ReviewModel }) {
   const { guide } = model;
   // Disclosures the person opens in this visit fade in; those open before show still.
-  const [opened] = useState(() => new Set<string>());
+  const opened = useRef(new Set<string>()).current;
   const entries = useMemo(() => new Map(model.ordered.map((entry) => [entry.file.id, entry])), [model.ordered]);
   const notes = useFileNotes(model);
   const scope: GuideScope = { model, entries, notes, opened };

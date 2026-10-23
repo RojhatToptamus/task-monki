@@ -1325,7 +1325,13 @@ function projection(value: unknown): void {
     ]);
     optionalTimestamp(review, 'updatedAt', 'tasks.projection');
     if (review.requestAnswer !== undefined) {
-      booleanField(persistedRecord(review.requestAnswer, 'tasks.projection'), 'awaitingDecision', 'tasks.projection');
+      const answer = persistedRecord(review.requestAnswer, 'tasks.projection');
+      booleanField(answer, 'awaitingDecision', 'tasks.projection');
+      optionalUuidFields(answer, 'tasks.projection', ['instructionId']);
+      if (answer.decisionItems !== undefined && (!Array.isArray(answer.decisionItems) ||
+        answer.decisionItems.some((item) => !Number.isSafeInteger(item) || (item as number) < 1 || (item as number) > REVIEW_REQUEST_ITEM_LIMIT))) {
+        invalid('tasks.projection');
+      }
     }
     if (review.result !== undefined) reviewResult(review.result);
     if (review.walkthrough !== undefined) reviewWalkthrough(review.walkthrough);

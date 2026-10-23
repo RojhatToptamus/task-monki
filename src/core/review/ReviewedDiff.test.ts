@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseReviewedDiff, reviewedDiffExcerpt } from './ReviewedDiff';
+import { changeIndexText, parseReviewedDiff, reviewedDiffExcerpt } from './ReviewedDiff';
 
 const DIFF = [
   '# Git diff evidence',
@@ -38,6 +38,18 @@ const DIFF = [
 describe('reviewed diff evidence', () => {
   it('reads every changed path, including untracked files, once', () => {
     expect(parseReviewedDiff(DIFF).map(({ path, hunks }) => [path, hunks.length])).toEqual([['src/a.ts', 1], ['src/new.ts', 1]]);
+  });
+
+  it('lists the change one line per file, quoting a path that holds a space so it never reads as a field', () => {
+    const files = parseReviewedDiff([
+      'diff --git a/docs/User Guide.md b/docs/User Guide.md', '--- a/docs/User Guide.md', '+++ b/docs/User Guide.md',
+      '@@ -2 +2,2 @@', '-old', '+new', '+more',
+      'diff --git a/src/a.ts b/src/a.ts', 'deleted file mode 100644', '--- a/src/a.ts', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-a', '-b', '-c', ''
+    ].join('\n'));
+    expect(changeIndexText(files).split('\n')).toEqual([
+      '"docs/User Guide.md" modified +2 -1 head 2-3',
+      'src/a.ts deleted +0 -3 base 1-3'
+    ]);
   });
 
   it('prints one file’s hunks as an excerpt', () => {

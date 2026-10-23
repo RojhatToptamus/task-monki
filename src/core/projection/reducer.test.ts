@@ -164,6 +164,30 @@ describe('projection reducer', () => {
     expect(restarted.tasks[0].projection.agentReview?.requestItemDecisions).toBeUndefined();
   });
 
+  it('stops waiting on the person once every answer the agent left to them is accepted, and waits again on a reopen', () => {
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      projection: { ...createInitialProjection(now), agentReview: { status: 'STALE', runId: 'review-run', updatedAt: now } }
+    });
+    const state = { ...createEmptyState(), tasks: [task], runs: [createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })] };
+    const decide = (current: typeof state, id: string, item: number, kind: 'ACCEPT' | 'REOPEN') => applyEventToState(current, {
+      ...createEvent('REVIEW_REQUEST_ITEM_DECIDED', { decision: { id, reviewRunId: 'review-run', instructionId: 'request', item, kind, createdAt: now } }),
+      id, runId: undefined
+    });
+    const waiting = applyEventToState(state, {
+      ...createEvent('REVIEW_REQUEST_ANSWERED', { reviewRunId: 'review-run', instructionId: 'request', needsDecision: 2, decisionItems: [2, 3] }),
+      runId: undefined
+    });
+    const awaiting = (current: typeof state) => current.tasks[0].projection.agentReview?.requestAnswer?.awaitingDecision;
+    expect(awaiting(waiting)).toBe(true);
+    // A Fixed item accepted settles nothing the person was asked; one of two questions still waits.
+    const one = decide(decide(waiting, 'fixed', 1, 'ACCEPT'), 'second', 2, 'ACCEPT');
+    expect(awaiting(one)).toBe(true);
+    const both = decide(one, 'third', 3, 'ACCEPT');
+    expect(awaiting(both)).toBe(false);
+    expect(awaiting(decide(both, 'reopened', 3, 'REOPEN'))).toBe(true);
+  });
+
   it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();

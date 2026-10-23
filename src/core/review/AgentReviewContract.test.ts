@@ -33,6 +33,11 @@ describe('AgentReviewContract', () => {
     expect(parseAgentReviewOutput('```json\n{"verdict": "PASSED", "summary": "Fine.", "findings": []}\n```')).not.toHaveProperty('walkthrough');
   });
 
+  it('reads a result block nested, indented, under a list item', () => {
+    const output = parseAgentReviewOutput(['Review:', '- Result:', '  ```json', '  {"verdict": "PASSED", "summary": "Fine.", "findings": []}', '  ```'].join('\n'));
+    expect(output.result).toMatchObject({ verdict: 'PASSED', summary: 'Fine.' });
+  });
+
   it('keeps a result whose text quotes a fenced block, since only a fence on its own line closes the JSON', () => {
     const output = parseAgentReviewOutput([
       'One finding.',

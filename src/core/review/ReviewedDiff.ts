@@ -73,6 +73,11 @@ export function changeIndexText(files: readonly ReviewedDiffFile[]): string {
   return lines.join('\n');
 }
 
+/** A path as the index lists it: quoted when it holds a space, so it never reads as the line's next field. */
+function indexPath(path: string): string {
+  return /\s/u.test(path) ? JSON.stringify(path) : path;
+}
+
 function changeIndexLine(file: ReviewedDiffFile): string {
   const side = file.status === 'deleted' ? 'base' : 'head';
   const ranges = file.hunks.flatMap((hunk) => {
@@ -81,9 +86,9 @@ function changeIndexLine(file: ReviewedDiffFile): string {
   });
   const listed = ranges.slice(0, CHANGE_INDEX_RANGE_LIMIT);
   return [
-    file.path,
+    indexPath(file.path),
     file.status === 'added' ? 'new' : file.status,
-    ...(file.oldPath ? [`from ${file.oldPath}`] : []),
+    ...(file.oldPath ? [`from ${indexPath(file.oldPath)}`] : []),
     `+${file.additions} -${file.deletions}`,
     ...(listed.length > 0 ? [`${side} ${listed.join(', ')}`] : []),
     ...(ranges.length > listed.length ? [`and ${ranges.length - listed.length} more hunks`] : [])

@@ -4207,7 +4207,7 @@ export class TaskManagerService {
       const gate = detail.task.projection.agentReview;
       // Only an outcome the gate takes keeps one: its own review, not out of date.
       const tree = gate?.runId === run.id && gate.status !== 'STALE' ? gate.reviewedTreeSha : undefined;
-      const base = detail.gitSnapshots.find((snapshot) => snapshot.id === run.beforeGitSnapshotId)?.baseSha;
+      const base = reviewBase(detail.gitSnapshots, run);
       const worktree = detail.worktrees.find((candidate) => candidate.id === run.worktreeId);
       if (!tree || !base || !worktree) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
       const index = await this.reviewSnapshots.changeIndex(worktree.worktreePath, base, tree);
@@ -4239,8 +4239,7 @@ export class TaskManagerService {
   async readReviewedDiff(input: ReadReviewChangesRequest): Promise<ReviewChangesResult> {
     const { task, review, worktree, recordedTree } = await this.requireReviewOfTask(input, 'Reviewed changes');
     if (!worktree) return { status: 'UNAVAILABLE', reason: 'UNREADABLE' };
-    const base = (await this.store.getTaskDetail(task.id)).gitSnapshots
-      .find((snapshot) => snapshot.id === review.beforeGitSnapshotId)?.baseSha;
+    const base = reviewBase((await this.store.getTaskDetail(task.id)).gitSnapshots, review);
     if (!base) return { status: 'UNAVAILABLE', reason: 'NOT_RECORDED' };
     return this.reviewSnapshots.reviewedDiff(worktree.worktreePath, task.id, review.id, base, recordedTree);
   }
@@ -5857,8 +5856,9 @@ export class TaskManagerService {
   /** A finished reply to a review request: how many items the agent answered, and how many wait on the person. */
   private async recordReviewRequestAnswer(run: RunRecord): Promise<void> {
     const detail = await this.store.getTaskDetail(run.taskId);
-    const request = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest)?.reviewRequest;
-    if (!request?.reviewRunId) return;
+    const instruction = detail.taskInstructions.find((item) => item.runId === run.id && item.reviewRequest);
+    const request = instruction?.reviewRequest;
+    if (!instruction || !request?.reviewRunId) return;
     const completed = detail.runs.find((candidate) => candidate.id === run.id) ?? run;
     const reply = await runReplyText(completed, (id) => this.agentRuntimeStore.readArtifact(id));
     const { answers } = parseReviewResponse(reply, request);
@@ -5873,7 +5873,9 @@ export class TaskManagerService {
         source: 'provider',
         payload: {
           reviewRunId: request.reviewRunId,
-          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length
+          instructionId: instruction.id,
+          needsDecision: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').length,
+          decisionItems: answers.filter((answer) => answer.outcome === 'NEEDS_DECISION').map((answer) => answer.item)
         }
       })
     );
@@ -7219,4 +7221,12 @@ function sameDesignWorkspace(left: GitSnapshotRecord, right: GitSnapshotRecord):
     left.branch === right.branch && left.gitCommonDir === right.gitCommonDir &&
     left.dirtyFingerprint === right.dirtyFingerprint && left.stagedCount === right.stagedCount &&
     !right.conflictedCount && !right.operationInProgress;
+}
+
+/**
+ * The base a review compared against: that of the Git snapshot it started from.
+ * Its walkthrough is checked, and its Guide read, from this base to the code it read.
+ */
+function reviewBase(gitSnapshots: readonly GitSnapshotRecord[], review: Pick<RunRecord, 'beforeGitSnapshotId'>): string | undefined {
+  return gitSnapshots.find((snapshot) => snapshot.id === review.beforeGitSnapshotId)?.baseSha;
 }

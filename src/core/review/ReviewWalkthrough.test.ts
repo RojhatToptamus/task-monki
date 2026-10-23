@@ -139,4 +139,10 @@ describe('checkReviewWalkthrough', () => {
     expect(checkReviewWalkthrough({ sections: [section('Retry failed uploads', ['src/elsewhere.ts'])] }, CHANGE))
       .toEqual({ status: 'UNAVAILABLE', reason: 'NO_SECTIONS' });
   });
+
+  it('reads a path the agent kept quoted, as the change index quotes one that holds a space', () => {
+    const spaced: ReviewedChange = { ...CHANGE, files: [{ path: 'docs/User Guide.md', status: 'modified', additions: 1, deletions: 0, hunks: [hunk(2, 1, 2, 2)] }] };
+    const check = checkReviewWalkthrough({ sections: [section('Document retries', ['"docs/User Guide.md"'])] }, spaced);
+    expect(check).toMatchObject({ status: 'VALID', droppedCount: 0, walkthrough: { sections: [{ files: [{ path: 'docs/User Guide.md' }] }] } });
+  });
 });

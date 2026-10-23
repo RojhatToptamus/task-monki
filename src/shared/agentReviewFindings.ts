@@ -82,7 +82,7 @@ export interface AgentReviewGateProjection {
    * review, and whether an item waits on the person's decision. Cleared when the next
    * turn starts.
    */
-  requestAnswer?: { awaitingDecision: boolean };
+  requestAnswer?: ReviewRequestAnswerState;
   /**
    * The person's decisions on the agent's answers to their requests after this
    * review, in the order they were made; absent before the first.
@@ -126,6 +126,17 @@ export type ReviewFindingDecision =
     note?: string;
   })
   | (ReviewFindingDecisionBase & { kind: 'RESTORE' });
+
+/**
+ * The agent's reply to the person's latest request after a review: whether it
+ * waits on the person, and which items it left to them (`decisionItems`, of the
+ * request `instructionId`). Accepting each of those answers settles the wait.
+ */
+export interface ReviewRequestAnswerState {
+  awaitingDecision: boolean;
+  instructionId?: string;
+  decisionItems?: number[];
+}
 
 /** Decisions on answers kept per review; a review that reaches it must be run again. */
 export const REVIEW_REQUEST_ITEM_DECISION_LIMIT = 200;

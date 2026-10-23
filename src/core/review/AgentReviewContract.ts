@@ -71,9 +71,12 @@ function normalizeResolvedFinding(value: unknown): AgentReviewResolvedFinding | 
   return { previousFindingId, title, ...(note ? { note } : {}) };
 }
 
-/** Fences on lines of their own: a JSON string holds no line break, so its backticks never close the block. */
+/**
+ * Fences on lines of their own, indented or not: a JSON string holds no line
+ * break, so its backticks never close the block.
+ */
 function lastJsonBlock(text: string): string | undefined {
-  return [...text.matchAll(/^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gimu)].at(-1)?.[1]?.trim();
+  return [...text.matchAll(/^[ \t]*```json[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*$/gimu)].at(-1)?.[1]?.trim();
 }
 
 function parseJson(text: string | undefined): unknown {

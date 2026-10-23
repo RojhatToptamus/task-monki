@@ -17,6 +17,8 @@ export function useReviewKeys(model: ReviewModel) {
   const focusedDiscussion = model.discussions.find((discussion) => discussion.id === model.focusedDiscussionId);
   const canSubmit = Boolean(props.requestChanges && !props.requestChanges.disabledReason && !props.requestChanges.busy && props.plan.queued);
   const stages = model.guide.model?.stages;
+  // An answered item goes into the request again from under its answer, in the person's words, as its band offers.
+  const answers = model.bands.answers;
 
   return (event: ReactKeyboardEvent<HTMLElement>) => {
     const target = event.target as HTMLElement;
@@ -79,10 +81,12 @@ export function useReviewKeys(model: ReviewModel) {
     } else if (key === 'r' && focusedDiscussion && !focusedDiscussion.resolved && props.onReplyToDiscussion) {
       // The reply row is under every open discussion; R puts the caret in it.
       if (actions.focusReply(focusedDiscussion.id)) event.preventDefault();
-    } else if (key === 'f' && focusedDiscussion && !focusedDiscussion.resolved && model.canComment) {
+    } else if (key === 'f' && focusedDiscussion && !focusedDiscussion.resolved && model.canComment &&
+      (!answers?.discussions.has(focusedDiscussion.id) || model.bands.includedDiscussions.has(focusedDiscussion.id))) {
       event.preventDefault();
       actions.toggleDiscussion(focusedDiscussion.id);
-    } else if (key === 'f' && focusedFinding?.state === 'OPEN' && !isBlockingFinding(focusedFinding) && model.findingsActionable) {
+    } else if (key === 'f' && focusedFinding?.state === 'OPEN' && !isBlockingFinding(focusedFinding) && model.findingsActionable &&
+      (!answers?.findings.has(focusedFinding.id) || model.bands.included.has(focusedFinding.id))) {
       event.preventDefault();
       actions.toggleIncluded(focusedFinding.id);
     } else if (key === 'c' && selection && model.canComment) {

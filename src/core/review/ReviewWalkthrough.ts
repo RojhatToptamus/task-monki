@@ -102,7 +102,7 @@ function checkSection(
   const own = new Map<string, ReviewedDiffFile>();
   for (const entry of list(value.files)) {
     // A file is named by its path, or by an object that carries it.
-    const path = trimmed(isRecord(entry) ? entry.path : entry);
+    const path = filePath(isRecord(entry) ? entry.path : entry);
     const file = path ? change.get(path) : undefined;
     if (!file || claimed.has(file.path) || own.has(file.path)) {
       dropped += 1;
@@ -142,7 +142,7 @@ function checkSection(
  */
 function checkLines(value: unknown, files: ReadonlyMap<string, ReviewedDiffFile>): ReviewWalkthroughLines | undefined {
   if (!isRecord(value)) return undefined;
-  const path = trimmed(value.path);
+  const path = filePath(value.path);
   const file = path ? files.get(path) : undefined;
   const side = value.side ?? 'head';
   if (!file || (side !== 'head' && side !== 'base') || (side === 'base') !== (file.status === 'deleted')) return undefined;
@@ -179,6 +179,12 @@ function walkthroughFile(file: ReviewedDiffFile): ReviewWalkthroughFile {
 
 function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+/** A path as the agent wrote it; the change index quotes one that holds a space, and the agent may keep the quotes. */
+function filePath(value: unknown): string | undefined {
+  const path = trimmed(value);
+  return path && /^".*"$/u.test(path) ? trimmed(path.slice(1, -1)) : path;
 }
 
 function trimmed(value: unknown): string | undefined {

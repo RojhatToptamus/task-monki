@@ -19,6 +19,7 @@ import {
   REVIEW_REQUEST_ITEM_DECISION_LIMIT,
   REVIEW_WALKTHROUGH_UNAVAILABLE_REASONS,
   TASK_STORE_SCHEMA_VERSION,
+  acceptedRequestItems,
   createInitialProjection,
   isDetachedRunMode,
   isImplementationRunMode,
@@ -1159,7 +1160,13 @@ function reduceAgentReview(
       ) {
         return base;
       }
-      return { ...base, requestItemDecisions: [...decisions, decision] };
+      const requestItemDecisions = [...decisions, decision];
+      // The reply waits on the person while an answer it left to them is not accepted.
+      const answer = base.requestAnswer;
+      const requestAnswer = answer?.instructionId === decision.instructionId && answer.decisionItems
+        ? { ...answer, awaitingDecision: answer.decisionItems.some((item) => !acceptedRequestItems(requestItemDecisions, decision.instructionId).has(item)) }
+        : answer;
+      return { ...base, requestItemDecisions, ...(requestAnswer ? { requestAnswer } : {}) };
     }
     // The exact code the review read was kept.
     case 'REVIEW_SNAPSHOT_RECORDED': {
@@ -1171,7 +1178,14 @@ function reduceAgentReview(
     case 'REVIEW_REQUEST_ANSWERED': {
       const needsDecision = getNumber(event.payload, 'needsDecision');
       if (base.runId !== getString(event.payload, 'reviewRunId') || needsDecision === undefined) return base;
-      return { ...base, requestAnswer: { awaitingDecision: needsDecision > 0 }, updatedAt: event.receivedAt };
+      const instructionId = getString(event.payload, 'instructionId');
+      const items = (event.payload as Record<string, unknown>).decisionItems;
+      const decisionItems = Array.isArray(items) && items.every((item) => Number.isSafeInteger(item) && item > 0) ? items as number[] : undefined;
+      return {
+        ...base,
+        requestAnswer: { awaitingDecision: needsDecision > 0, ...(instructionId && decisionItems ? { instructionId, decisionItems } : {}) },
+        updatedAt: event.receivedAt
+      };
     }
     // Committing the reviewed changes moves the reviewed state to the new commit;
     // the clean tree's fingerprint keeps edits made after it counting.

@@ -973,7 +973,7 @@ export interface BoardAgentReviewSummary {
   /** `effectiveReviewGateStatus` of the review: the status once every decision applies, which can differ from `status` both ways. */
   effectiveStatus: AgentReviewGateStatus;
   /** The agent answered the request after this review; true when an item waits on the person's decision. */
-  requestAnswered?: { awaitingDecision: boolean };
+  requestAnswered?: import('./agentReviewFindings').ReviewRequestAnswerState;
 }
 
 export type BoardStatusProjection = Pick<
