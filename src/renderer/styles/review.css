@@ -168,7 +168,8 @@
 .tm-diffline--annotated .tm-diffline__num { position: relative; background: transparent; box-shadow: none; color: var(--faint); user-select: none; transition: background-color var(--motion-fast) var(--ease-out); }
 .tm-diffline--annotated.tm-diffline--addition .tm-diffline__num { color: var(--verified-ink); }
 .tm-diffline--annotated.tm-diffline--deletion .tm-diffline__num { color: var(--blocked-ink); }
-.tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
+/* The lines a comment is being written about read the same on every kind of line. */
+.tm-diffline--annotated.tm-diffline--selected .tm-diffline__num { background-color: var(--sel); color: var(--accent-ink); }
 .tm-review-line-group { position: relative; }
 .tm-review-line__comment { position: absolute; top: 2px; left: 4px; display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: var(--r-2xs); background-color: var(--card); box-shadow: inset 0 0 0 1px var(--edge-raised); color: var(--accent-ink); opacity: 0; transition: opacity var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 /* The "+" shows on the row under the pointer, and fills when the pointer is on the number itself.
@@ -189,9 +190,11 @@
 .tm-review-general > :first-child { border-top: 0; }
 .tm-review-block:last-child > .tm-review-line-group:last-child > :last-child:is(.tm-review-thread, .tm-review-comment, .tm-review-comment-composer),
 .tm-review-general > :last-child { border-bottom: 0; }
-/* The thread jumped to, or the one the keys act on: a mark down its left edge, along the file's own. */
+/* The thread jumped to or the one the keys act on, a comment the keys are in, and a comment being written
+   while the keys are back on its band: a mark down its left edge, along the file's own. */
 .tm-review-thread--focused,
-:is(.tm-review-thread, .tm-review-comment):focus-visible { box-shadow: inset 2px 0 var(--focus-ring); }
+:is(.tm-review-thread, .tm-review-comment-composer):focus-visible,
+.tm-review-comment:focus-within { box-shadow: inset 2px 0 var(--focus-ring); }
 
 /* Each author's mark hangs in the gutter beside their name, so every comment's words start on the code column. */
 .tm-review-thread__comment { position: relative; display: grid; gap: 2px; min-width: 0; }
@@ -281,16 +284,19 @@
 .tm-review-thread--folded > :is(.tm-review-answer__settled, .tm-review-thread__struck) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tm-reply > .tm-review-answer__quote { margin-left: 24px; }
 
-/* Writing in the diff, a comment or a reply, is a field on the code column that
-   grows into a composer: the field, then its choices and the primary under it. */
+/* Writing in the diff is a field on the code column, then its choices and the primary under it. A reply
+   is the thread's last row, a field that grows into a composer; a comment being written is the comment it
+   becomes, the person's head over its field. */
 .tm-review-thread__reply-row { position: relative; display: grid; gap: 6px; margin-top: 8px; }
 .tm-review-thread__reply-row > .tm-review-thread__avatar { top: 4px; }
+.tm-review-comment-composer > .tm-review-thread__comment { gap: 6px; }
 .tm-review-thread__reply-input { display: block; width: 100%; min-height: var(--h-toolbar); max-height: min(200px, 24vh); padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: var(--field); box-shadow: inset 0 0 0 1px var(--field-edge); color: var(--text); font: var(--t-body)/var(--lh-body) var(--font-ui); resize: none; field-sizing: content; }
 .tm-review-thread__reply-input:disabled { background: var(--field-disabled); color: var(--text-disabled); }
-.tm-review-thread__reply-row--open .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
+:is(.tm-review-thread__reply-row--open, .tm-review-comment-composer) .tm-review-thread__reply-input { min-height: 64px; padding-block: 6px; }
 .tm-review-thread__reply-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* A choice leading the row hangs its padding in the gutter, so its mark starts on the code column. */
+.tm-review-thread__reply-tools > .ghost-button:first-child { margin-left: -8px; }
 .tm-resolve-check { display: flex; align-items: center; gap: 8px; min-height: var(--h-compact); color: var(--text-soft); font-size: var(--t-help); }
-.tm-review-comment-composer > .tm-review-thread__reply-row { margin-top: 0; }
 .tm-review-comment-composer__spacer { flex: 1; }
 
 /* A suggested change reads as a diff in a well: the lines it replaces, then the lines it suggests. */

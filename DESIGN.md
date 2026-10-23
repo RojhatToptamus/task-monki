@@ -1720,8 +1720,10 @@ control's icon, state or tooltip already carries.
   widen it. The "+"
   shows on the row under the pointer and fills when the pointer is on the
   number. Pressing a number, or dragging across several, opens one comment for
-  that line or range. Then the marker and code that wraps, in its syntax colour
-  (§7.9); the gutter takes the row's tint.
+  that line or range, and Shift on another number widens it; its lines keep
+  `--sel` and accent ink in the gutter on every kind of line while it is
+  written. Then the marker and code that wraps, in its syntax colour (§7.9);
+  the gutter takes the row's tint.
 - *Threads.* What is said about the code is part of the file, not a card on
   it: under the last line of its range, a band across the file on `--card`
   with a `--hair` seam where it meets code (bands in a row share one), no ring,
@@ -1795,13 +1797,16 @@ control's icon, state or tooltip already carries.
   files. A resolved thread, or a remark that asks for nothing, folds to one line
   that opens it. None goes to the agent unless added; N and P step through open
   discussions after the findings.
-- *Comments* are the person's own, in the same band: their mark and You, the
-  lines they are about when the row does not say it, and icon-only Edit and
-  Delete on the head while the pointer or the keys are on it. They can be
-  written any time the current diff is shown and are saved with the task as
-  written. The line composer is the reply row's: the field on the code column,
-  then Ask at its left, which hands the lines and the text to Ask instead of
-  the request, and Cancel and Comment.
+- *Comments* are the person's own, in the same band: their mark and You, and
+  icon-only Edit and Delete on the head while the pointer or the keys are on
+  it. They can be written any time the current diff is shown and are saved
+  with the task as written. One is written at a time, and its composer is the
+  comment it becomes: the same head, the field on the code column, then Ask at
+  its left (it hands the lines and the text to Ask instead of the request),
+  Cancel and Comment; Edit turns the words into the field in place. Choosing
+  other lines moves it with its words. ⌘↵ saves, and the saved comment takes
+  the keys; Escape closes it when nothing typed would be lost, and otherwise
+  leaves it open with its words, where C returns; Cancel discards.
 - *Answers.* Once the agent answered the person's latest request after the
   review, each answered item's own band, a finding, a thread or a comment, says
   the answer: its outcome under the agent's mark at the end of the head
@@ -1834,8 +1839,8 @@ control's icon, state or tooltip already carries.
   Dismiss; its findings are never sent, the person's comments still are.
 - *Keys.* G the other mode, J/K files, [ and ] intents in the Guide, N/P open
   findings, V viewed and on to the next unviewed file, D dismiss, A ask, F add
-  or take out a suggestion or discussion, R reply to the discussion, C comment
-  on the chosen lines, ⌘↵ the request sheet and then send, ⌘⇧F the file being
+  or take out a suggestion or discussion, R reply to the discussion, C back to
+  the comment being written, ⌘↵ the request sheet and then send, ⌘⇧F the file being
   read full screen and back in the Diff (Escape returns). Every move of the
   code is the one travel (§12).
 

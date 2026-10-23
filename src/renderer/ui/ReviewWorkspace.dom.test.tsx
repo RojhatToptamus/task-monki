@@ -263,6 +263,61 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(screen.getAllByLabelText('Comment')).toHaveLength(1);
   });
 
+  it('never loses what the person writes: Escape leaves written words and C returns to them, a wider range keeps them, and an empty comment closes', async () => {
+    api.readArtifact.mockResolvedValueOnce(`# Git diff evidence\n\n${section('Unstaged diff', fileDiff('src/a.ts', '@@ -1,2 +1,3 @@\n-gone\n+one\n+two\n+three'))}`);
+    render(<Harness findings={[]} />);
+    await screen.findByRole('region', { name: 'src/a.ts' });
+    const number = (value: string) => [...document.querySelectorAll<HTMLElement>('.tm-diffline--addition .tm-diffline__num')]
+      .find((element) => element.textContent === value)!;
+    // jsdom has no PointerEvent, so a mouse event of the pointer's type carries the press and its Shift.
+    const press = (value: string, shiftKey = false) => {
+      fireEvent(number(value), new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, shiftKey }));
+      fireEvent.pointerUp(window);
+    };
+
+    // Pressing a number puts the caret in a comment on its line; with nothing written, Escape closes it.
+    press('1');
+    let field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    expect(document.activeElement).toBe(field);
+    fireEvent.keyDown(field, { key: 'Escape' });
+    expect(screen.queryByLabelText('Comment')).toBeNull();
+
+    // Once something is written, Escape keeps it and hands the keys back to the review; C returns the caret.
+    press('1');
+    field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: 'Collapse these.' } });
+    fireEvent.keyDown(field, { key: 'Escape' });
+    const composer = field.closest('form')!;
+    expect((screen.getByLabelText('Comment') as HTMLTextAreaElement).value).toBe('Collapse these.');
+    expect(document.activeElement).toBe(composer);
+    fireEvent.keyDown(composer, { key: 'c' });
+    expect(document.activeElement).toBe(field);
+
+    // Shift on another number widens the lines the comment is about, and its words come along.
+    press('3', true);
+    expect(screen.getByText('Lines 1–3')).toBeDefined();
+    expect((screen.getByLabelText('Comment') as HTMLTextAreaElement).value).toBe('Collapse these.');
+
+    // Cancelled, it goes, and the keys go back to the line it was under.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Comment')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Comment on line 3' }));
+  });
+
+  it('gives the keys to a saved comment where it was written', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    render(<Harness findings={[]} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Comment on line 1' }));
+    const field = screen.getByLabelText('Comment');
+    fireEvent.change(field, { target: { value: 'Return seconds here.' } });
+    fireEvent.keyDown(field, { key: 'Enter', metaKey: true });
+    // Saved, it holds the keys where it was written.
+    const band = document.querySelector<HTMLElement>('[data-comment-id]')!;
+    expect(document.activeElement).toBe(band);
+    expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
+  });
+
   it('reads the person’s comment as every comment reads, and says its line once that line is not shown', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     render(<Harness findings={[]} draft={{ ...EMPTY_REVIEW_DRAFT, comments: [{ id: 'far', path: 'src/rateLimit.ts', side: 'NEW', line: 40, text: 'Cap the `burst`.' }] }} />);

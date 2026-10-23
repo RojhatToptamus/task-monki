@@ -8,7 +8,7 @@ import type { ReviewModel } from './useReviewModel';
  * The Review keys, for the tab's section: J/K files, [ and ] the Guide's stages,
  * N/P open findings and discussions, V viewed and on, G the other mode at the
  * same place, D/A/F the focused finding, R the focused discussion's reply, C
- * the selected lines, Escape the lines a move chose. The order they step
+ * the comment being written, Escape the lines a move chose. The order they step
  * through is the mode's; a held key repeating arrives at once.
  */
 export function useReviewKeys(model: ReviewModel) {
@@ -89,9 +89,10 @@ export function useReviewKeys(model: ReviewModel) {
       (!answers?.findings.has(focusedFinding.id) || model.bands.included.has(focusedFinding.id))) {
       event.preventDefault();
       actions.toggleIncluded(focusedFinding.id);
-    } else if (key === 'c' && selection && model.canComment) {
+    } else if (key === 'c' && commentDraft && model.canComment) {
+      // The comment being written takes the caret back, as R does a reply.
       event.preventDefault();
-      actions.commentOnSelection();
+      actions.writeComment();
     } else if (key === 'escape' && selection && !commentDraft) {
       actions.clearSelection();
     } else if (key === 'escape' && focusedFile && !sheetOpen) {

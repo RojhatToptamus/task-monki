@@ -1,4 +1,4 @@
-import { useCallback, useId, useState } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
@@ -125,7 +125,7 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
  */
 function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment; about?: string; answer?: ItemAnswer }) {
   const actions = useReviewActions();
-  const { viewer, canComment } = useReviewBands();
+  const { canComment } = useReviewBands();
   if (answer?.accepted) {
     return (
       <div className="tm-review-thread tm-review-thread--folded" data-comment-id={comment.id} tabIndex={-1}>
@@ -139,11 +139,7 @@ function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment;
   return (
     <div className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
       <div className="tm-review-thread__comment">
-        <Avatar name={viewer} className="tm-review-thread__avatar" />
-        <header className="tm-review-thread__head">
-          <span className="tm-review-thread__author">You</span>
-          {about ? <span className="tm-review-thread__about">{about}</span> : null}
-          <span className="tm-review-thread__spacer" />
+        <OwnHead about={about}>
           {answer ? <AnswerState answer={answer} /> : canComment ? (
             <span className="tm-review-thread__actions tm-review-comment__actions">
               <Tooltip label="Edit">
@@ -158,7 +154,7 @@ function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment;
               </Tooltip>
             </span>
           ) : null}
-        </header>
+        </OwnHead>
         <CommentText text={comment.text} />
       </div>
       {answer ? <RequestItemAnswer answer={answer} /> : null}
@@ -167,13 +163,16 @@ function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment;
 }
 
 /**
- * A comment is written as a reply is: a field on the code column under the line
- * or range it is about, its choices under it. What is typed stays its own, so a
- * keystroke renders the composer alone; it is kept while the file folds.
+ * The comment being written is the comment it becomes: the same head, its words
+ * as a field on the code column, and its choices under it. What is typed stays
+ * its own, so a keystroke renders the composer alone; it is kept while the file
+ * folds and while the person chooses other lines for it. ⌘↵ saves; Escape
+ * closes it when nothing typed would be lost, and otherwise leaves it with its
+ * words, where C returns.
  */
 function CommentComposer({ draft, about }: { draft: CommentDraft; about?: string }) {
   const actions = useReviewActions();
-  const { viewer, canAskAboutLines } = useReviewBands();
+  const { canAskAboutLines } = useReviewBands();
   const [text, setText] = useState(actions.commentText);
   // Opened again in the same place, it starts from what the new draft holds.
   const [opened, setOpened] = useState(draft);
@@ -182,25 +181,20 @@ function CommentComposer({ draft, about }: { draft: CommentDraft; about?: string
     setText(actions.commentText());
   }
   const id = useId();
-  // A comment that starts from a quote of what it answers takes the caret after it.
-  const caretAtEnd = useCallback((field: HTMLTextAreaElement | null) => field?.setSelectionRange(field.value.length, field.value.length), []);
   return (
-    <form className="tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); actions.saveComment(); }}>
-      <div className="tm-review-thread__reply-row tm-review-thread__reply-row--open">
-        <Avatar name={viewer} className="tm-review-thread__avatar" />
-        {about ? <span className="tm-review-thread__about">{about}</span> : null}
+    <form className="tm-review-comment-composer" tabIndex={-1} onSubmit={(event) => { event.preventDefault(); actions.saveComment(); }}>
+      <div className="tm-review-thread__comment">
+        <OwnHead about={about} />
         <label className="tm-visually-hidden" htmlFor={id}>Comment</label>
         <textarea
-          ref={caretAtEnd}
           id={id}
           className="tm-review-thread__reply-input"
-          autoFocus
           rows={2}
           value={text}
           placeholder="Add a comment"
           onChange={(event) => { setText(event.target.value); actions.setCommentText(event.target.value); }}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') { event.preventDefault(); actions.closeComposer(); }
+            if (event.key === 'Escape') { event.preventDefault(); actions.leaveComposer(); }
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.saveComment(); }
           }}
         />
@@ -222,6 +216,22 @@ function CommentComposer({ draft, about }: { draft: CommentDraft; about?: string
         </div>
       </div>
     </form>
+  );
+}
+
+/** The person's head on what they write: their mark, You, the lines when its place does not say them, then its controls. */
+function OwnHead({ about, children }: { about?: string; children?: ReactNode }) {
+  const { viewer } = useReviewBands();
+  return (
+    <>
+      <Avatar name={viewer} className="tm-review-thread__avatar" />
+      <header className="tm-review-thread__head">
+        <span className="tm-review-thread__author">You</span>
+        {about ? <span className="tm-review-thread__about">{about}</span> : null}
+        <span className="tm-review-thread__spacer" />
+        {children}
+      </header>
+    </>
   );
 }
 
