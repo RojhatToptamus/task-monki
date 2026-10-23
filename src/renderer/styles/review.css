@@ -8,11 +8,12 @@
    column after the marker. */
 .tm-review { --review-index-width: 248px; --review-marker: 18px; display: flex; flex: 1; flex-direction: column; min-height: 0; }
 
-/* The toolbar: the rail's switch over the rail, then the review's state, what is
-   compared, the view, and the review action. */
-.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 0; border-bottom: 1px solid var(--hair); }
-.tm-review__rail-switch { flex: 0 0 auto; width: calc(var(--review-index-width) - 16px); margin: 0 8px; }
-.tm-review__rail-switch .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
+/* The toolbar: the mode, in one place in both, then the review's state, and in
+   the Diff what is compared and the view; then the review action. */
+.tm-review__bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; height: var(--h-bar); padding: 0 16px 0 8px; border-bottom: 1px solid var(--hair); }
+.tm-review__modes { flex: 0 0 auto; }
+:is(.tm-review__modes, .tm-review__rail-switch) .segmented__btn { height: var(--h-compact); font-size: var(--t-help); }
+.tm-review__rail-switch { flex: 0 0 auto; margin: 8px 8px 0; }
 .tm-review__rail-count { margin-left: 5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .tm-review__headline { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; color: var(--text); font-size: var(--t-body); font-weight: var(--w-medium); white-space: nowrap; }
 .tm-review__headline[data-tone='blocked'] { color: var(--blocked-ink); }
@@ -22,13 +23,17 @@
 .tm-review__meta code { font-family: var(--font-mono); }
 .tm-review__bar-end { margin-left: auto; }
 .tm-review__scope .tm-action-menu__trigger { gap: 4px; padding: 0 6px 0 8px; color: var(--text-soft); font-size: var(--t-body); }
+/* A stage's title can be long: it is cut at the trigger, whole in the menu. */
+.tm-review__scope-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-review__view__trigger.tm-action-menu__trigger { width: var(--h-icon); padding: 0; }
 .tm-review__notice { margin: 0; padding: 8px 16px; background: var(--waiting-bg); color: var(--waiting-ink); font-size: var(--t-help); }
 
 .tm-review__work { display: grid; flex: 1; grid-template-columns: var(--review-index-width) minmax(0, 1fr); min-height: 0; }
+.tm-review[data-review-mode='guide'] .tm-review__work { grid-template-columns: minmax(0, 1fr); }
 
-/* The rail: files in reading order, or every finding and comment by what happens to it. */
-.tm-review__index { display: flex; flex-direction: column; gap: 1px; min-height: 0; padding: 8px; overflow-y: auto; background: var(--panel); }
+/* The rail: its switch on top, then files in reading order, or every finding and comment by what happens to it. */
+.tm-review__rail { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.tm-review__index { display: flex; flex: 1; flex-direction: column; gap: 1px; min-height: 0; padding: 8px; overflow-y: auto; }
 .tm-review__index-group { display: flex; flex-direction: column; gap: 1px; }
 .tm-review__index-label { margin: 10px 8px 4px; color: var(--muted); font-size: var(--t-help); font-weight: var(--w-medium); }
 .tm-review__index-group:first-child .tm-review__index-label { margin-top: 2px; }
@@ -38,11 +43,12 @@
 .tm-review-files__sel { position: absolute; top: 0; right: 0; left: 0; border-radius: var(--r-xs); background: var(--sel); pointer-events: none; transition: transform var(--motion-move) var(--ease-in-out); }
 .tm-review__index-file { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 8px; border-radius: var(--r-xs); color: var(--text-soft); text-align: left; transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out); }
 .tm-review__index-file[aria-current='true'] { color: var(--text); }
-.tm-review__index-file.tm-review__index-file--viewed { color: var(--faint); }
+.tm-review__index-file.tm-review__index-file--viewed { color: var(--muted); }
 .tm-review__index-file:hover { background-color: var(--hover); color: var(--text); }
 .tm-review__index-path { display: flex; flex: 1; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; }
 .tm-review__index-name { flex: 0 1 auto; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--t-help); text-overflow: ellipsis; }
-.tm-review__index-dir { flex: 0 10 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-meta); text-overflow: ellipsis; }
+/* The folder takes what room the name leaves, so it is cut before the name is. */
+.tm-review__index-dir { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--t-meta); text-overflow: ellipsis; }
 .tm-review__index-feedback { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 3px; color: var(--muted); font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
 .tm-review__index-feedback[data-tone='blocked'] { color: var(--blocked-ink); }
 .tm-review__index-viewed { flex: 0 0 auto; color: var(--faint); }
@@ -67,10 +73,10 @@
 .tm-review__severity[data-severity='BLOCKER'],
 .tm-review__severity[data-severity='MAJOR'] { color: var(--blocked-ink); }
 
-/* The one scroller every mode reads the code in. Heads stick at --review-sticky-top,
-   and a travel lands what it moves to under that line; a mode that pins something
-   above its heads raises it. */
-.tm-review__scroller { --review-sticky-top: 0px; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; outline: none; }
+/* The one scroller both modes read the code in. Heads stick at --review-sticky-top,
+   and a travel lands what it moves to under that line; a part that pins something
+   above its heads raises it. Its size is what the Guide reads its layout from. */
+.tm-review__scroller { --review-sticky-top: 0px; container: review-scroller / size; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; outline: none; }
 .tm-review__diff { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; }
 .tm-review__empty { margin: 0; padding: 12px 0; color: var(--muted); font-size: var(--t-body); }
 
@@ -112,7 +118,7 @@
    location, the other files (by their hidden attribute) and the foot step
    aside; the file's head becomes the sheet's 48px first line and its code runs
    edge to edge. It passes over its neighbours while it moves there and back. */
-.tm-review[data-file-full-screen] :is(.tm-review__bar, .tm-review__foot, .tm-review__index, .tm-review-brief, .tm-review-general) { display: none; }
+.tm-review[data-file-full-screen] :is(.tm-review__bar, .tm-review__foot, .tm-review__rail, .tm-review-brief, .tm-review-general) { display: none; }
 .tm-review[data-file-full-screen] .tm-review__work { grid-template-columns: minmax(0, 1fr); }
 .tm-review[data-file-full-screen] .tm-review__diff { padding: 0; }
 .tm-review-file[data-expanded] { border: 0; border-radius: 0; }
@@ -254,6 +260,22 @@
 .tm-review-comment__actions { opacity: 0; transition: opacity var(--motion-fast) var(--ease-out); }
 .tm-review-comment:hover .tm-review-comment__actions,
 .tm-review-comment:focus-within .tm-review-comment__actions { opacity: 1; }
+
+/* The agent's answer to an item of the person's request, on the item's band: the
+   answer as the head's state under the agent's mark, its note quoted (a 2px rule,
+   attributed above), then the person's choices. Accepted, a finding or a comment
+   folds to a line, its words cut short where the line ends. */
+.tm-review-answer__state { display: inline-flex; align-items: center; gap: 6px; }
+.tm-review-answer { display: grid; gap: 4px; margin-top: 6px; }
+.tm-review-answer__quote { display: grid; gap: 2px; margin: 0; padding-left: 12px; box-shadow: inset 2px 0 0 var(--edge-raised); }
+.tm-review-answer__by { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: var(--t-help); font-variant-numeric: tabular-nums; }
+.tm-review-answer__agent { color: var(--text); font-weight: var(--w-medium); }
+.tm-review-answer__quote blockquote { margin: 0; color: var(--text-soft); line-height: var(--lh-prose); overflow-wrap: anywhere; text-wrap: pretty; }
+/* The buttons' own padding sits in the gutter, so their words start on the code column (8px, a ghost button's side padding). */
+.tm-review-answer__actions { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
+.tm-review-answer__settled { color: var(--muted); }
+.tm-review-thread--folded > .tm-review-answer__settled { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tm-reply > .tm-review-answer__quote { margin-left: 24px; }
 
 /* Writing in the diff, a comment or a reply, is a field on the code column that
    grows into a composer: the field, then its choices and the primary under it. */

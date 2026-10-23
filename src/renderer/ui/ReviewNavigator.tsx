@@ -1,67 +1,76 @@
-import { useCallback, useMemo, type ReactElement } from 'react';
+import { useCallback, type ReactElement } from 'react';
 import { Check } from 'lucide-react';
-import { isBlockingFinding, remoteProviderName, type AgentReviewResolvedFinding, type ReviewComment } from '../../shared/contracts';
+import { remoteProviderName, type AgentReviewResolvedFinding, type ReviewComment } from '../../shared/contracts';
 import { formatFindingLocation } from '../model/findings';
 import { formatCommentLocation } from '../model/formatting';
 import { discussionAuthor, discussionSummary, formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
 import { discussionStateWord } from '../model/reviewRounds';
-import { normalizeReviewPath, type ReviewFindingView } from '../model/reviewWorkspace';
-import { ReviewFileList, ReviewFileRow } from './ReviewFileRow';
+import type { ReviewFindingView } from '../model/reviewWorkspace';
+import { ReviewFileList, ReviewFileRow, useFileNotes } from './ReviewFileRow';
 import { settledLabel, severityLabel } from './ReviewFindingThread';
 import type { ReviewModel } from './useReviewModel';
 
+export type ReviewRail = 'files' | 'feedback';
+
 /**
- * The Diff's navigator: the files in reading order, with the current one under
- * the `--sel` plane, or every finding, comment and discussion by what happens
- * to it.
+ * The Diff's navigator: its switch on top, then the files in reading order,
+ * with the current one under the `--sel` plane, or every finding, comment and
+ * discussion by what happens to it. The workspace keeps the choice, so a trip
+ * to the Guide and back finds it as it was.
  */
-export function ReviewNavigator({ model, rail }: { model: ReviewModel; rail: 'files' | 'feedback' }) {
+export function ReviewNavigator({ model, rail, onRailChange }: { model: ReviewModel; rail: ReviewRail; onRailChange(rail: ReviewRail): void }) {
   const { actions, props } = model;
   const comments = props.draft.comments;
-  // What is said about each file, counted once per change to any of it.
-  const notes = useMemo(() => new Map(model.ordered.map(({ file }) => {
-    const findings = model.openFindingsByFile.get(file.id) ?? [];
-    const path = normalizeReviewPath(file.path);
-    const count = findings.length +
-      comments.filter((comment) => normalizeReviewPath(comment.path) === path).length +
-      (model.discussionsByFile.get(file.id) ?? []).filter((discussion) => !discussion.resolved).length;
-    return [file.id, { count, blocking: findings.some(isBlockingFinding) }];
-  })), [comments, model.discussionsByFile, model.openFindingsByFile, model.ordered]);
+  const notes = useFileNotes(model);
   const openFile = useCallback((fileId: string) => actions.showFile(fileId, { open: true }), [actions]);
+  const viewedCount = model.ordered.filter(({ file }) => model.viewedIds.has(file.id)).length;
+  const fileCount = model.ordered.length;
+  const feedbackCount = (props.findingsSendable ? props.plan.send.length + props.plan.suggestions.length : model.openFindings.length) +
+    comments.length + model.discussions.filter((discussion) => !discussion.resolved).length;
   return (
-    <nav className="tm-review__index" aria-label={rail === 'files' ? 'Files' : 'Feedback'}>
-      {rail === 'files' ? (
-        <ReviewFileList current={model.activeFileId}>
-          {model.ordered.map(({ file }) => (
-            <ReviewFileRow
-              key={file.id}
-              file={file}
-              current={model.activeFileId === file.id}
-              viewed={model.viewedIds.has(file.id)}
-              feedback={notes.get(file.id)?.count ?? 0}
-              blocking={notes.get(file.id)?.blocking ?? false}
-              onSelect={openFile}
-            />
-          ))}
-        </ReviewFileList>
-      ) : (
-        <FeedbackList
-          plan={props.plan}
-          findingsSendable={props.findingsSendable}
-          findings={props.findings}
-          comments={comments}
-          discussions={model.discussions}
-          moreDiscussionsUrl={props.moreDiscussionsUrl}
-          resolved={props.resolvedFindings ?? []}
-          focusedFindingId={model.focusedFindingId}
-          focusedDiscussionId={model.focusedDiscussionId}
-          onShowFinding={actions.showFinding}
-          onShowComment={actions.showComment}
-          onShowDiscussion={actions.showDiscussion}
-        />
-      )}
-    </nav>
+    <div className="tm-review__rail">
+      <div className="segmented segmented--fill tm-review__rail-switch" role="group" aria-label="Show">
+        <button type="button" className="segmented__btn" aria-pressed={rail === 'files'} onClick={() => onRailChange('files')}>
+          Files<span className="tm-review__rail-count" aria-label={viewedCount ? `${viewedCount} of ${fileCount} viewed` : undefined}>{viewedCount ? `${viewedCount}/${fileCount}` : `${fileCount}`}</span>
+        </button>
+        <button type="button" className="segmented__btn" aria-pressed={rail === 'feedback'} onClick={() => onRailChange('feedback')}>
+          Feedback<span className="tm-review__rail-count">{feedbackCount}</span>
+        </button>
+      </div>
+      <nav className="tm-review__index" aria-label={rail === 'files' ? 'Files' : 'Feedback'}>
+        {rail === 'files' ? (
+          <ReviewFileList current={model.activeFileId}>
+            {model.ordered.map(({ file }) => (
+              <ReviewFileRow
+                key={file.id}
+                file={file}
+                current={model.activeFileId === file.id}
+                viewed={model.viewedIds.has(file.id)}
+                feedback={notes.get(file.id)?.count ?? 0}
+                blocking={notes.get(file.id)?.blocking ?? false}
+                onSelect={openFile}
+              />
+            ))}
+          </ReviewFileList>
+        ) : (
+          <FeedbackList
+            plan={props.plan}
+            findingsSendable={props.findingsSendable}
+            findings={props.findings}
+            comments={comments}
+            discussions={model.discussions}
+            moreDiscussionsUrl={props.moreDiscussionsUrl}
+            resolved={props.resolvedFindings ?? []}
+            focusedFindingId={model.focusedFindingId}
+            focusedDiscussionId={model.focusedDiscussionId}
+            onShowFinding={actions.showFinding}
+            onShowComment={actions.showComment}
+            onShowDiscussion={actions.showDiscussion}
+          />
+        )}
+      </nav>
+    </div>
   );
 }
 

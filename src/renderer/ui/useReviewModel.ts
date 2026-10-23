@@ -7,15 +7,29 @@ import type {
   ReviewComment,
   ReviewFindingDismissReason,
   ReviewRequestItem,
+  ReviewRequestItemDecisionKind,
+  ReviewWalkthroughState,
   TaskReviewDraft,
   WorktreeRecord
 } from '../../shared/contracts';
 import type { DiffBlock, DiffEvidenceScope, DiffFile } from '../model/diffEvidence';
 import type { DiscussionView, ReplyDraft } from '../model/pullRequestFeedback';
+import type { WholeFileState } from '../model/reviewContext';
 import type { ReviewRequestPlan } from '../model/reviewFollowUp';
-import { feedbackOrder } from '../model/reviewNavigation';
-import { orderReviewFiles, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
-import { readBriefFolded, readReviewFileOrder, readViewedFiles, writeBriefFolded, writeReviewFileOrder, writeViewedFiles } from '../model/reviewPreferences';
+import { requestItemPlace, requestItemQuote, reviewBandAnswers, type ReviewBandAnswers, type ReviewRoundView } from '../model/reviewRounds';
+import { feedbackOrder, type FeedbackRef, type ReviewMode } from '../model/reviewNavigation';
+import { orderReviewFiles, reviewFileRole, type OrderedReviewFile, type ReviewFileOrder } from '../model/reviewOrder';
+import {
+  readBriefFolded,
+  readReviewFileOrder,
+  readReviewMode,
+  readViewedFiles,
+  writeBriefFolded,
+  writeReviewFileOrder,
+  writeReviewMode,
+  writeViewedFiles
+} from '../model/reviewPreferences';
+import { buildGuide, filesByFolder, guideReadingOrder, guideReveal, walkthroughUnavailableWords, type GuideModel } from '../model/reviewWalkthrough';
 import {
   anchorReviewComments,
   anchorReviewDiscussions,
@@ -24,6 +38,7 @@ import {
   diffFileSignature,
   diffLineId,
   filesChangedSinceReview,
+  lineAnchor,
   lineAnchorKey,
   normalizeReviewPath,
   reviewGutterWidth,
@@ -42,6 +57,7 @@ import { useDiffArtifact } from './useDiffArtifact';
 import { useReviewChanges } from './useReviewChanges';
 import { useReviewContext } from './useReviewContext';
 import { useScrollSpy } from './useScrollSpy';
+import type { WalkthroughView } from './useWalkthrough';
 
 /**
  * The Review tab's state and data, held once for the bar, the navigator, the
@@ -57,6 +73,8 @@ export interface ReviewWorkspaceProps {
     status: AgentReviewGateStatus;
     reviewedAt?: string;
     runId?: string;
+    /** The exact code the review reads, kept as a Git tree once it starts. */
+    reviewedTreeSha?: string;
     /** The implementation agent is taking a turn after the review, such as fixing a request. */
     working?: boolean;
   };
@@ -97,6 +115,15 @@ export interface ReviewWorkspaceProps {
   resolvedFindings?: readonly AgentReviewResolvedFinding[];
   /** Hands the selected lines, and what was typed about them, to Ask instead of the request. */
   onAskAboutLines?(lines: { path: string; side: 'NEW' | 'OLD'; line: number; endLine?: number }, text: string): void;
+  /** Asks about a stage of the walkthrough (its section), a file of the change, or a discussion. */
+  onAskAboutStage?(section: number): void;
+  onAskAboutFile?(path: string): void;
+  onAskAboutDiscussion?(discussionId: string): void;
+  /**
+   * The review's walkthrough, as the gate records it, read with the code it
+   * describes; and the agent that wrote it.
+   */
+  walkthrough?: { state: ReviewWalkthroughState; view: WalkthroughView; author: string };
   /** A file shown full screen takes the whole page; the page hides its own chrome meanwhile. */
   onFullScreenChange?(fullScreen: boolean): void;
   /** Another surface asked to see the request, such as the Overview's Request changes; cleared once it opens. */
@@ -119,6 +146,15 @@ export interface ReviewWorkspaceProps {
   onReplyTextChange?(discussionId: string, text: string | undefined): void;
   /** The person's account on the pull request's platform: their mark on what they write. */
   viewer?: string;
+  /** The implementation agent's answers to the person's requests, on the items' bands. */
+  answers?: {
+    /** Who answers: its name heads each quoted answer. */
+    agent: string;
+    /** The latest request after the review, once answered: its items take the person's decisions. */
+    round?: ReviewRoundView;
+    /** Accepts the answer to an item of `round`, or reopens it; absent when the task takes no decisions. */
+    onDecide?(item: number, kind: ReviewRequestItemDecisionKind): Promise<void>;
+  };
   /** The implementation agent is waiting on the person: a question while it fixes a request, or a turn that stopped and needs continuing. */
   agentRequest?: { label: string; action: string; onOpen(): void };
   /** What people said on the pull request, with what the person did about each. */
@@ -176,8 +212,14 @@ export interface ReviewBandsState {
   canRestore: boolean;
   canAskAboutFinding: boolean;
   canAskAboutLines: boolean;
+  canAskAboutDiscussion: boolean;
   canReply: boolean;
   canResolve: boolean;
+  /** Who answers the person's requests. */
+  agent?: string;
+  /** The latest request's answered items; absent while its reply runs, and for an earlier capture. */
+  answers?: ReviewBandAnswers;
+  canDecideAnswers: boolean;
 }
 
 /** Everything the Review tab's parts can do. Each one keeps its identity for the tab's life. */
@@ -203,6 +245,26 @@ export interface ReviewActions {
   setOrder(order: ReviewFileOrder): void;
   foldBrief(folded: boolean): void;
 
+  /** Reads the review the other way, keeping the place: the file and line being read, and in the Guide, its stage. */
+  setMode(mode: ReviewMode): void;
+  /** The Diff of one stage's files, from the place being read when it is one of them. */
+  openInDiff(section: number): void;
+  /** Moves to the overview or a stage of the walkthrough. */
+  showStage(stage: GuideStageId, options?: { instant?: boolean }): void;
+  /** Opens or folds a stage's other files ("N more files"). */
+  toggleStageFiles(section: number): void;
+  /** Opens a file's other changes ("3 more changes"). */
+  openMoreChanges(fileId: string): void;
+  /** Moves to lines of a file, opening what hides them; `mark` keeps them chosen until the next move. */
+  showLines(fileId: string, anchors: readonly string[], options?: { mark?: boolean }): void;
+  /** Lights lines while something that points at them is under the pointer or the keys; none clears them. */
+  lightLines(fileId?: string, anchors?: readonly string[]): void;
+  /** Clears the lines a move chose; false when none were. */
+  clearMarks(): boolean;
+  askAboutStage(section: number): void;
+  askAboutFile(fileId: string): void;
+  askAboutDiscussion(discussionId: string): void;
+
   focusFinding(findingId: string): void;
   focusDiscussion(discussionId: string): void;
   setDismissing(findingId: string | undefined): void;
@@ -220,6 +282,14 @@ export interface ReviewActions {
   resolveDiscussion(discussionId: string, resolved: boolean): Promise<void>;
   /** Puts the caret in a discussion's reply row; false when it has none. */
   focusReply(discussionId: string): boolean;
+  /** Accepts the agent's answer to an item of the latest request, or reopens it. */
+  decideAnswer(item: number, kind: ReviewRequestItemDecisionKind): Promise<void>;
+  /**
+   * Sends an answered item again in the person's words: a comment on its lines,
+   * starting from a quote of it, opened under its band (`at`); one with no
+   * place in the files is quoted in the note.
+   */
+  requestAgain(item: ReviewRequestItem, at?: string): void;
 
   /** The gutter: pressing a number, dragging across several, Shift extending the last choice. */
   beginSelect(fileId: string, blockId: string, index: number, event: ReactPointerEvent): void;
@@ -264,14 +334,75 @@ export function useReviewBands(): ReviewBandsState {
 
 export type ReviewModel = ReturnType<typeof useReviewModel>;
 
+/** The overview, or a stage by its section's index. */
+export type GuideStageId = 'overview' | number;
+
+/**
+ * What the Guide shows: the walkthrough (`ready`), the earlier one while the
+ * next is read (`loading`), or why there is none: none yet, one being written
+ * with a running review, or one the review could not give (`reason`).
+ */
+export interface GuideView {
+  status: 'loading' | 'ready' | 'none' | 'running' | 'unavailable';
+  model?: GuideModel;
+  reason?: string;
+  author?: string;
+  /** Before a walkthrough, the change's files by folder. */
+  folders: ReadonlyArray<{ folder: string; fileIds: string[] }>;
+  /** The stages whose other files are open, and the files whose other changes are. */
+  openGroups: ReadonlySet<number>;
+  openMore: ReadonlySet<string>;
+  /** Feedback with no place in the change. */
+  outside: { findings: readonly ReviewFindingView[]; discussions: readonly DiscussionView[] };
+}
+
+/**
+ * The files one mode reads, where its feedback sits, and the order its keys go:
+ * the Diff's captured files, or the walkthrough's (the code the review read).
+ */
+interface ReviewReading {
+  files: DiffFile[];
+  filesById: ReadonlyMap<string, DiffFile>;
+  /** Every file, in the mode's reading order. */
+  ordered: OrderedReviewFile[];
+  /** The files J and K step through. */
+  fileIds: string[];
+  anchors: ReviewAnchors;
+  findingsByFile: ReadonlyMap<string, ReviewFindingView[]>;
+  discussionsByFile: ReadonlyMap<string, DiscussionView[]>;
+  openFindingsByFile: ReadonlyMap<string, ReviewFindingView[]>;
+  openDiscussionsByFile: ReadonlyMap<string, DiscussionView[]>;
+  /** N and P. */
+  feedback: FeedbackRef[];
+  /** Each file's change as this mode reads it (`diffFileSignature`). */
+  signatures: ReadonlyMap<string, string>;
+  /** Folded until the person opens it, besides a viewed file. */
+  foldedByDefault(entry: OrderedReviewFile): boolean;
+  gutterWidth: number;
+}
+
+/** A filter the Diff takes from a stage: its files only. */
+interface DiffFilter { title: string; fileIds: ReadonlySet<string> }
+
+interface GuideOpen { key?: string; groups: ReadonlySet<number>; more: ReadonlySet<string> }
+
 const NO_FINDINGS: ReviewFindingView[] = [];
 const NO_DISCUSSIONS: DiscussionView[] = [];
+const NO_COMMENTS: ReviewComment[] = [];
+const NO_FILES: DiffFile[] = [];
+const NO_GUIDE_OPEN: GuideOpen = { groups: new Set(), more: new Set() };
 /** A file shown alone moves to the top of the column, and back to its place. */
 const FILE_MOTION: ExpandMotion = { duration: '--motion-move', easing: '--ease-in-out' };
 /** The file being read is the topmost one in the scroller's top 30%. */
 const READING_BAND = (scroller: HTMLElement) => scroller.clientHeight * 0.3;
+/** The stage being read is the one at the scroller's top. */
+const STAGE_BAND = () => 40;
 /** About six lines of the code a band is about stay above it when it is moved to. */
 const BAND_CONTEXT = 120;
+/** Lines moved to keep three lines above them. */
+const LINE_CONTEXT = 60;
+/** A file viewed keeps the signatures of its last few changes. */
+const VIEWED_SIGNATURES = 4;
 
 export const SCOPE_LABELS: Record<ReviewScope, string> = {
   all: 'All changes',
@@ -280,13 +411,20 @@ export const SCOPE_LABELS: Record<ReviewScope, string> = {
   'since-review': 'Since the review'
 };
 
-/** Where travel to an element leaves it: a file's head at the sticky line; a band under its file's stuck head, with code above it. */
+/**
+ * Where travel to an element leaves it: a file's head at the sticky line; a
+ * stage just past its seam, so the seam never doubles the bar's line; a band or
+ * lines under their file's stuck head, with code above them, never above the
+ * file's own head.
+ */
 function landing(scroller: HTMLElement, element: HTMLElement): number {
+  if (element.hasAttribute('data-stage')) return scrollTopFor(scroller, element) + 1;
   const file = element.closest<HTMLElement>('[data-file-id]');
   if (file === element) return scrollTopFor(scroller, element);
-  if (!file) return scrollTopFor(scroller, element, BAND_CONTEXT);
+  const context = element.hasAttribute('data-line-anchor') ? LINE_CONTEXT : BAND_CONTEXT;
+  if (!file) return scrollTopFor(scroller, element, context);
   const head = file.querySelector('.tm-review-file__head')?.getBoundingClientRect().height ?? 0;
-  return Math.max(scrollTopFor(scroller, file), scrollTopFor(scroller, element, head + BAND_CONTEXT));
+  return Math.max(scrollTopFor(scroller, file), scrollTopFor(scroller, element, head + context));
 }
 
 /** An attribute value inside a selector's quotes. */
@@ -294,9 +432,97 @@ function quoted(value: string): string {
   return `"${value.replace(/["\\]/g, '\\$&')}"`;
 }
 
+/** Rows of a file by their place (`lineAnchor`): every block's, latest last. */
+function linesOf(scope: ParentNode, anchors: readonly string[]): HTMLElement[] {
+  return anchors.flatMap((anchor) => [...scope.querySelectorAll<HTMLElement>(`[data-line-anchor=${quoted(anchor)}]`)]);
+}
+
+/**
+ * The place being read in a scroller: the file under way, and the first of its
+ * lines under its head, with how far from the scroller's top it is; a mode
+ * switch puts the same line at the same height. Above the files, such as on
+ * the overview or the brief, no file is under way, whichever was read last.
+ */
+function readPlace(scroller: HTMLElement, fileId: string | undefined): { fileId: string; lineAnchor?: string; offset: number } | undefined {
+  const file = fileId ? [...scroller.querySelectorAll<HTMLElement>(`[data-file-id=${quoted(fileId)}]`)].find((element) => !element.hidden) : undefined;
+  if (!fileId || !file) return undefined;
+  const top = scroller.getBoundingClientRect().top + scroller.clientTop;
+  const bottom = top + scroller.clientHeight;
+  const line = Math.max(top, file.querySelector('.tm-review-file__head')?.getBoundingClientRect().bottom ?? top);
+  const row = [...file.querySelectorAll<HTMLElement>('[data-line-anchor]')].find((candidate) => {
+    const box = candidate.getBoundingClientRect();
+    return box.bottom > line + 1 && box.top < bottom;
+  });
+  if (row?.dataset.lineAnchor) return { fileId, lineAnchor: row.dataset.lineAnchor, offset: row.getBoundingClientRect().top - top };
+  const box = file.getBoundingClientRect();
+  return box.bottom > top && box.top < bottom ? { fileId, offset: Math.max(0, box.top - top) } : undefined;
+}
+
+/** What each file holds of the feedback anchored in the files, and what of it still asks for something. */
+function feedbackByFile(files: readonly DiffFile[], anchors: ReviewAnchors) {
+  const findingsByFile = new Map(buildReviewIndex(files, anchors.findings).map((entry) => [entry.file.id, entry.findings]));
+  const discussionsByFile = new Map(files.map((file) => [file.id, [
+    ...(anchors.discussions.byFile.get(file.id) ?? []),
+    ...file.blocks.flatMap((block) => block.lines.flatMap((line, index) => anchors.discussions.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []))
+  ]]));
+  return {
+    findingsByFile,
+    discussionsByFile,
+    // A file's head says what still asks for something, and a folded file keeps a row for each.
+    openFindingsByFile: new Map([...findingsByFile].map(([fileId, list]) => [fileId, list.filter((finding) => finding.state === 'OPEN')])),
+    openDiscussionsByFile: new Map([...discussionsByFile].map(([fileId, list]) => [fileId, list.filter((discussion) => discussion.open)]))
+  };
+}
+
+function readingOf({ files, ordered, fileIds, anchors, feedback, signatures, gutterWidth, foldedByDefault }: {
+  files: DiffFile[];
+  ordered: OrderedReviewFile[];
+  fileIds?: string[];
+  anchors: ReviewAnchors;
+  feedback: ReturnType<typeof feedbackByFile>;
+  signatures: ReadonlyMap<string, string>;
+  gutterWidth: number;
+  foldedByDefault(entry: OrderedReviewFile): boolean;
+}): ReviewReading {
+  const order = ordered.map((entry) => entry.file.id);
+  return {
+    files,
+    filesById: new Map(files.map((file) => [file.id, file])),
+    ordered,
+    fileIds: fileIds ?? order,
+    anchors,
+    ...feedback,
+    // N and P step through what still asks for something, in reading order.
+    feedback: feedbackOrder({
+      general: { findings: anchors.findings.general, discussions: anchors.discussions.general },
+      files: order,
+      findingsByFile: feedback.findingsByFile,
+      discussionsByFile: feedback.discussionsByFile
+    }),
+    signatures,
+    foldedByDefault,
+    gutterWidth
+  };
+}
+
+/** Opens a stage's other files, or a file's other changes, in the Guide state kept for one walkthrough. */
+function openInGuide(state: GuideOpen, key: string, open: { group?: number; more?: string }): GuideOpen {
+  const current = state.key === key ? state : { ...NO_GUIDE_OPEN, key };
+  const groups = open.group === undefined || current.groups.has(open.group) ? current.groups : new Set([...current.groups, open.group]);
+  const more = open.more === undefined || current.more.has(open.more) ? current.more : new Set([...current.more, open.more]);
+  return groups === current.groups && more === current.more && state.key === key ? state : { key, groups, more };
+}
+
 interface PendingTravel {
-  attribute: 'data-file-id' | 'data-finding-id' | 'data-discussion-id' | 'data-comment-id';
-  value: string;
+  /** What to move to; none moves to the top. */
+  attribute?: 'data-file-id' | 'data-finding-id' | 'data-discussion-id' | 'data-comment-id' | 'data-stage' | 'data-line-anchor';
+  value?: string;
+  /** The file the element is in, for lines; when they do not show, its head is moved to. */
+  within?: string;
+  /** Puts the element this far from the scroller's top, instead of where `landing` would. */
+  offset?: number;
+  /** Lines chosen until the next move. */
+  mark?: readonly string[];
   instant: boolean;
   focus: boolean;
 }
@@ -341,7 +567,18 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   // Measured from this review's own code, the findings' lines are on the old side.
   const findingSide = exactChanges && props.changesSince?.reviewRunId === review?.runId ? 'REVIEWED' : 'NEW';
   const anchoredFindings = useMemo(() => anchorReviewFindings(files, visibleFindings, findingSide), [files, visibleFindings, findingSide]);
-  const anchoredComments = useMemo(() => anchorReviewComments(files, draft.comments), [files, draft.comments]);
+  // The agent's answers wait for the diff as findings do. The answered request's own comments left the
+  // draft when it went, so they sit where they were written again, before any written since.
+  const bandAnswers = useMemo(
+    () => (props.answers?.round && !props.historical && !loading ? reviewBandAnswers(props.answers.round) : undefined),
+    [loading, props.answers?.round, props.historical]
+  );
+  const shownComments = useMemo(() => (bandAnswers?.comments.size
+    ? [...[...bandAnswers.comments.values()].map((sent) => sent.comment), ...draft.comments]
+    : draft.comments), [bandAnswers, draft.comments]);
+  // The latest request's comments were written on the code the review read: measured from that code, their lines are on the old side, as its findings' are.
+  const anchoredComments = useMemo(() => anchorReviewComments(files, shownComments, (comment) =>
+    (findingSide === 'REVIEWED' && comment.side === 'NEW' && bandAnswers?.comments.has(comment.id) ? 'REVIEWED' : comment.side)), [bandAnswers, files, findingSide, shownComments]);
   // Discussions wait for the diff as findings do, and belong to the current head, not an earlier capture.
   const discussions = props.historical || loading ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
   const discussionsOnLines = Boolean(props.discussionsOnLines) && effectiveScope !== 'since-review';
@@ -350,54 +587,124 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     () => ({ findings: anchoredFindings, discussions: anchoredDiscussions, comments: anchoredComments }),
     [anchoredComments, anchoredDiscussions, anchoredFindings]
   );
-  const findingsByFile = useMemo(() => new Map(buildReviewIndex(files, anchoredFindings).map((entry) => [entry.file.id, entry.findings])), [files, anchoredFindings]);
-  const discussionsByFile = useMemo(() => new Map(files.map((file) => [file.id, [
-    ...(anchoredDiscussions.byFile.get(file.id) ?? []),
-    ...file.blocks.flatMap((block) => block.lines.flatMap((line, index) => anchoredDiscussions.byLine.get(lineAnchorKey(file.id, block.id, line, index)) ?? []))
-  ]])), [files, anchoredDiscussions]);
-  // What still asks for something in each file: its head says it, and a folded file keeps a row for each.
-  const openFindingsByFile = useMemo(() => new Map([...findingsByFile].map(([fileId, list]) => [fileId, list.filter((finding) => finding.state === 'OPEN')])), [findingsByFile]);
-  const openDiscussionsByFile = useMemo(() => new Map([...discussionsByFile].map(([fileId, list]) => [fileId, list.filter((discussion) => discussion.open)])), [discussionsByFile]);
+  const diffFeedback = useMemo(() => feedbackByFile(files, anchors), [anchors, files]);
 
   const [order, setOrder] = useState<ReviewFileOrder>(readReviewFileOrder);
-  const ordered = useMemo(() => orderReviewFiles(files, findingsByFile, order), [files, findingsByFile, order]);
-  const fileIds = useMemo(() => ordered.map((entry) => entry.file.id), [ordered]);
-  // N and P step through what still asks for something, in reading order.
-  const feedback = useMemo(() => feedbackOrder({
-    general: { findings: anchoredFindings.general, discussions: anchoredDiscussions.general },
-    files: fileIds,
-    findingsByFile,
-    discussionsByFile
-  }), [anchoredDiscussions.general, anchoredFindings.general, discussionsByFile, fileIds, findingsByFile]);
-  const filesById = useMemo(() => new Map(files.map((file) => [file.id, file])), [files]);
+  const ordered = useMemo(() => orderReviewFiles(files, diffFeedback.findingsByFile, order), [diffFeedback.findingsByFile, files, order]);
+  // A stage opened in the Diff narrows it to the stage's files, while any of them is in it: never an empty scope.
+  const [diffFilter, setDiffFilter] = useState<DiffFilter>();
+  const diffOrdered = useMemo(() => {
+    const kept = diffFilter ? ordered.filter((entry) => diffFilter.fileIds.has(entry.file.id)) : ordered;
+    return kept.length ? kept : ordered;
+  }, [diffFilter, ordered]);
+  // Each file's change has one signature per capture; viewed holds while unchanged lines open.
+  const signatures = useMemo(() => new Map(capturedFiles.map((file) => [file.id, diffFileSignature(file)])), [capturedFiles]);
+  const diffReading = useMemo(
+    () => readingOf({ files, ordered: diffOrdered, anchors, feedback: diffFeedback, signatures, gutterWidth, foldedByDefault: (entry) => entry.role === 'generated' }),
+    [anchors, diffFeedback, diffOrdered, files, gutterWidth, signatures]
+  );
+
+  // The walkthrough, over the code the review read: this review's findings, the discussions where they sit
+  // (on their lines while that code is the head the platform read them on), and the person's comments while
+  // that code is what the Diff shows. An earlier walkthrough is context, written on code since changed.
+  const walkthrough = props.walkthrough;
+  const stored = walkthrough?.state.status === 'STORED' ? walkthrough.state : undefined;
+  // It is the code shown while the diff has not moved since the review: the review's own walkthrough, or an
+  // earlier one written on the very tree the review reads (a review run again on unchanged code).
+  const writtenOn = walkthrough?.view.walkthrough?.tree;
+  const guideCurrent = Boolean(stored && review && review.status !== 'STALE' &&
+    (writtenOn && review.reviewedTreeSha ? writtenOn === review.reviewedTreeSha : stored.reviewRunId === review.runId));
+  const ownWalkthrough = Boolean(stored && stored.reviewRunId === review?.runId);
+  // Once the code moved on, the comments the latest request carried still sit in the review's own
+  // walkthrough with their answers: a request names its review only when it was sent while that review
+  // was current, so they were written on the code the walkthrough shows. Comments written since were not.
+  const guideComments = useMemo(
+    () => (guideCurrent ? shownComments : ownWalkthrough && bandAnswers ? [...bandAnswers.comments.values()].map((sent) => sent.comment) : NO_COMMENTS),
+    [bandAnswers, guideCurrent, ownWalkthrough, shownComments]
+  );
+  const guideFiles = walkthrough?.view.files ?? NO_FILES;
+  const guideDiscussions = props.historical ? NO_DISCUSSIONS : props.discussions ?? NO_DISCUSSIONS;
+  const guideAnchors = useMemo<ReviewAnchors>(() => ({
+    findings: anchorReviewFindings(guideFiles, ownWalkthrough ? findings : NO_FINDINGS),
+    discussions: anchorReviewDiscussions(guideFiles, guideDiscussions, Boolean(props.discussionsOnLines) && guideCurrent),
+    comments: anchorReviewComments(guideFiles, guideComments)
+  }), [findings, guideComments, guideCurrent, guideDiscussions, guideFiles, ownWalkthrough, props.discussionsOnLines]);
+  const guideModel = useMemo(
+    () => (walkthrough?.view.walkthrough && walkthrough.view.files ? buildGuide(walkthrough.view.walkthrough, walkthrough.view.files, guideAnchors) : undefined),
+    [guideAnchors, walkthrough?.view.files, walkthrough?.view.walkthrough]
+  );
+  const folders = useMemo(() => filesByFolder(files), [files]);
+  const [guideOpenState, setGuideOpen] = useState<GuideOpen>(NO_GUIDE_OPEN);
+  const guideOpen = guideModel && guideOpenState.key === guideModel.reviewRunId ? guideOpenState : NO_GUIDE_OPEN;
+  const guideFeedback = useMemo(() => feedbackByFile(guideFiles, guideAnchors), [guideAnchors, guideFiles]);
+  const guideSignatures = useMemo(() => new Map(guideFiles.map((file) => [file.id, diffFileSignature(file)])), [guideFiles]);
+  const guideReading = useMemo(() => {
+    if (!guideModel) {
+      // Before a walkthrough, the Guide reads the Diff's files by folder, each folded to its head.
+      const byId = new Map(ordered.map((entry) => [entry.file.id, entry]));
+      const byFolder = folders.flatMap((group) => group.fileIds.flatMap((id) => byId.get(id) ?? []));
+      return readingOf({ files, ordered: byFolder, anchors, feedback: diffFeedback, signatures, gutterWidth, foldedByDefault: () => true });
+    }
+    const stageOrder = guideModel.stages.flatMap((stage) => [...stage.shown, ...stage.folded]);
+    return readingOf({
+      files: guideFiles,
+      ordered: stageOrder.map((id) => {
+        const file = guideModel.files.get(id)!.file.file;
+        return { file, role: reviewFileRole(file.path) };
+      }),
+      fileIds: guideReadingOrder(guideModel, guideOpen.groups),
+      anchors: guideAnchors,
+      feedback: guideFeedback,
+      signatures: guideSignatures,
+      gutterWidth: reviewGutterWidth(guideFiles, false),
+      foldedByDefault: (entry) => !guideModel.files.get(entry.file.id)?.file.shown
+    });
+  }, [anchors, diffFeedback, files, folders, guideAnchors, guideFeedback, guideFiles, guideModel, guideOpen.groups, guideSignatures, gutterWidth, ordered, signatures]);
+
+  // The mode the person last read this task in, else the Guide when its walkthrough is the code shown.
+  const [chosenMode, setChosenMode] = useState<ReviewMode>(() => readReviewMode(props.taskId) ?? (guideCurrent ? 'guide' : 'diff'));
+  const mode: ReviewMode = props.historical ? 'diff' : chosenMode;
+  const reading = mode === 'guide' ? guideReading : diffReading;
+  const { filesById, ordered: readingOrdered, fileIds, findingsByFile, discussionsByFile } = reading;
   const openFindings = useMemo(() => findings.filter((finding) => finding.state === 'OPEN'), [findings]);
   const findingsActionable = props.findingsSendable && !props.historical;
-  const canComment = !props.historical;
+  // Comments are written on the code shown now: never on an earlier capture or an earlier walkthrough.
+  const canComment = !props.historical && (mode === 'diff' || !guideModel || guideCurrent);
   const included = useMemo(() => new Set(plan.send.map((finding) => finding.id)), [plan.send]);
   const includedDiscussions = useMemo(() => new Set(plan.discussions.map((discussion) => discussion.id)), [plan.discussions]);
   const reReview = Boolean(props.resolvedFindings?.length || findings.some((finding) => finding.previousFindingId));
 
-  // Each file's change has one signature per capture; viewed holds while unchanged lines open.
-  const signatures = useMemo(() => new Map(capturedFiles.map((file) => [file.id, diffFileSignature(file)])), [capturedFiles]);
-  const [viewed, setViewed] = useState<Record<string, string>>(() => readViewedFiles(props.taskId));
+  // Viewed is one system for both modes, by path: a file is viewed in a mode while its change there is one
+  // the person marked, in that mode or, while the walkthrough is the code shown, in the other.
+  const [viewed, setViewed] = useState<Record<string, string[]>>(() => readViewedFiles(props.taskId));
+  const viewedIn = (target: ReviewReading, fileId: string) => {
+    const file = target.filesById.get(fileId);
+    const signature = target.signatures.get(fileId);
+    return Boolean(file && signature && viewed[file.path]?.includes(signature));
+  };
   const viewedIds = useMemo(
-    () => new Set(files.filter((file) => viewed[file.path] === signatures.get(file.id)).map((file) => file.id)),
-    [files, signatures, viewed]
+    () => new Set(reading.files.filter((file) => viewed[file.path]?.includes(reading.signatures.get(file.id) ?? '')).map((file) => file.id)),
+    [reading, viewed]
   );
-  // Collapsing is the person's choice per file; a viewed or generated file starts collapsed.
-  const [collapsedOverride, setCollapsedOverride] = useState<Record<string, boolean>>({});
-  const isCollapsed = (entry: OrderedReviewFile) => collapsedOverride[entry.file.id] ?? (viewedIds.has(entry.file.id) || entry.role === 'generated');
+  // Collapsing is the person's choice per file and mode; a viewed file starts collapsed, and so does a generated
+  // file in the Diff and a file among a stage's others in the Guide.
+  const [collapsedOverride, setCollapsedOverride] = useState<Record<ReviewMode, Record<string, boolean>>>({ guide: {}, diff: {} });
+  const collapsedIn = (target: ReviewMode, entry: OrderedReviewFile) => collapsedOverride[target][entry.file.id] ??
+    (viewedIn(target === 'guide' ? guideReading : diffReading, entry.file.id) || (target === 'guide' ? guideReading : diffReading).foldedByDefault(entry));
+  const isCollapsed = (entry: OrderedReviewFile) => collapsedIn(mode, entry);
 
   const [focusedFindingId, setFocusedFindingId] = useState<string>();
   const [focusedDiscussionId, setFocusedDiscussionId] = useState<string>();
   const [dismissingId, setDismissingId] = useState<string>();
-  // The navigator follows the reading position; a navigation sets it where it lands.
-  const [activeFileId, setActiveFileId] = useScrollSpy(scrollerRef, 'data-file-id', READING_BAND, fileIds.join('\u0000'));
+  // The navigator and a stage's file list follow the reading position; a navigation sets it where it lands.
+  const [activeFileId, setActiveFileId] = useScrollSpy(scrollerRef, 'data-file-id', READING_BAND, `${mode}\u0000${fileIds.join('\u0000')}`);
+  const [activeStageKey, setActiveStage] = useScrollSpy(scrollerRef, 'data-stage', STAGE_BAND, mode === 'guide' && guideModel ? `${guideModel.reviewRunId}:${guideModel.stages.length}` : '');
+  const activeStage: GuideStageId | undefined = activeStageKey === undefined ? undefined : activeStageKey === 'overview' ? 'overview' : Number(activeStageKey);
   // Show only this file: the file alone at the top of the column, the navigator
   // beside it. Moving to another file moves the focus; leaving returns the list
-  // to where it was read.
+  // to where it was read. The Diff's alone.
   const [focusedFileId, setFocusedFileId] = useState<string>();
-  const focusedFile = focusedFileId && fileIds.includes(focusedFileId) ? focusedFileId : undefined;
+  const focusedFile = mode === 'diff' && focusedFileId && fileIds.includes(focusedFileId) ? focusedFileId : undefined;
   const listScroll = useRef<{ fileId: string; top: number }>(undefined);
   const [selection, setSelection] = useState<LineSelection>();
   const selectionRef = useRef<LineSelection | undefined>(undefined);
@@ -419,8 +726,9 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
 
   // The actions read what is current when they run, never what was current when the tab first rendered.
   const latest = {
-    props, ordered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, focusedFile, selection, commentDraft,
-    signatures, included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile
+    props, mode, ordered: readingOrdered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, collapsedIn, focusedFile,
+    selection, commentDraft, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
+    included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile
   };
   const live = useRef(latest);
   useLayoutEffect(() => { live.current = latest; });
@@ -431,8 +739,24 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       : scrollerRef.current?.querySelector<HTMLElement>(`[data-file-id=${quoted(fileId)}]`) ?? null);
     const entryOf = (fileId: string | undefined) => now().ordered.find((entry) => entry.file.id === fileId);
     const entryOfPath = (path: string) => now().ordered.find((entry) => normalizeReviewPath(entry.file.path) === normalizeReviewPath(path));
-    const expand = (fileId: string) => setCollapsedOverride((current) => ({ ...current, [fileId]: false }));
+    const expandIn = (target: ReviewMode, fileId: string) => setCollapsedOverride((current) => ({ ...current, [target]: { ...current[target], [fileId]: false } }));
+    const expand = (fileId: string) => expandIn(now().mode, fileId);
     const openIfCollapsed = (entry: OrderedReviewFile | undefined) => { if (entry && now().isCollapsed(entry)) expand(entry.file.id); };
+    // In the Guide, a place may wait behind its stage's other files or its file's other changes.
+    const revealIn = (target: ReviewMode, fileId: string, anchor?: string) => {
+      const { guide } = now();
+      const need = target === 'guide' && guide ? guideReveal(guide, fileId, anchor) : undefined;
+      if (guide && need && (need.group !== undefined || need.more !== undefined)) setGuideOpen((current) => openInGuide(current, guide.reviewRunId, need));
+    };
+    // The file read is where a move lands; in the Guide, so is its stage.
+    const follow = (fileId: string) => {
+      setActiveFileId(fileId);
+      const stage = now().mode === 'guide' ? now().guide?.files.get(fileId)?.stage : undefined;
+      if (stage !== undefined) setActiveStage(String(stage));
+    };
+    // The line a band sits under: the last of its range, on its side.
+    const bandPlace = (path: string, place: { side?: 'NEW' | 'OLD'; line?: number; endLine?: number }) =>
+      (place.line ? lineAnchor(path, place.side ?? 'NEW', place.endLine && place.endLine > place.line ? place.endLine : place.line) : undefined);
     const updateDraft = (patch: Partial<TaskReviewDraft>) => now().props.onDraftChange({ ...now().props.draft, ...patch });
     const go = (target: PendingTravel) => setPendingTravel(target);
 
@@ -467,8 +791,12 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       setFocusedDiscussionId(undefined);
       const entry = now().ordered.find((candidate) => (now().findingsByFile.get(candidate.file.id) ?? []).some((finding) => finding.id === findingId));
       followFullScreen(entry?.file.id);
+      if (entry) {
+        const finding = now().findingsByFile.get(entry.file.id)?.find((candidate) => candidate.id === findingId);
+        revealIn(now().mode, entry.file.id, finding ? bandPlace(entry.file.path, finding) : undefined);
+        follow(entry.file.id);
+      }
       openIfCollapsed(entry);
-      if (entry) setActiveFileId(entry.file.id);
       go({ attribute: 'data-finding-id', value: findingId, instant, focus: true });
     };
     const showDiscussion = (discussionId: string, { instant = false } = {}) => {
@@ -476,16 +804,59 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       setFocusedFindingId(undefined);
       const entry = now().ordered.find((candidate) => (now().discussionsByFile.get(candidate.file.id) ?? []).some((discussion) => discussion.id === discussionId));
       followFullScreen(entry?.file.id);
+      if (entry) {
+        const discussion = now().discussionsByFile.get(entry.file.id)?.find((candidate) => candidate.id === discussionId);
+        revealIn(now().mode, entry.file.id, discussion ? bandPlace(entry.file.path, discussion) : undefined);
+        follow(entry.file.id);
+      }
       openIfCollapsed(entry);
-      if (entry) setActiveFileId(entry.file.id);
       go({ attribute: 'data-discussion-id', value: discussionId, instant, focus: true });
     };
     const showFile = (fileId: string, { open = false, instant = false } = {}) => {
       const { focusedFile: current } = now();
       if (current && fileId !== current) { showFullScreen(fileId, false); return; }
-      if (open) openIfCollapsed(entryOf(fileId));
-      setActiveFileId(fileId);
+      if (open) {
+        revealIn(now().mode, fileId);
+        openIfCollapsed(entryOf(fileId));
+      }
+      follow(fileId);
       go({ attribute: 'data-file-id', value: fileId, instant, focus: false });
+    };
+    // Switching modes keeps the place: the same line at the same height, opening whatever hides it. Lines
+    // match only while both modes read one code, the Diff's own or a walkthrough of it; on an earlier
+    // walkthrough, the file is kept.
+    const switchMode = (next: ReviewMode, filter?: DiffFilter) => {
+      const current = now();
+      if (current.props.historical || current.mode === next) return;
+      const scroller = scrollerRef.current;
+      const read = scroller ? readPlace(scroller, current.activeFileId) : undefined;
+      // A stage's Diff holds its files alone: a place outside them is not kept.
+      const kept = read && (!filter || filter.fileIds.has(read.fileId)) ? read : undefined;
+      const place: { fileId: string; lineAnchor?: string; offset?: number } | undefined = kept && current.guide && !current.guideCurrent ? { fileId: kept.fileId } : kept;
+      setDiffFilter(next === 'diff' ? filter : undefined);
+      setFocusedFileId(undefined);
+      const entry = place ? current.readings[next].ordered.find((candidate) => candidate.file.id === place.fileId) : undefined;
+      if (place && entry) {
+        revealIn(next, place.fileId, place.lineAnchor);
+        if (place.lineAnchor && current.collapsedIn(next, entry)) expandIn(next, place.fileId);
+        setActiveFileId(place.fileId);
+      }
+      setChosenMode(next);
+      writeReviewMode(current.props.taskId, next);
+      go(place && entry
+        ? { attribute: place.lineAnchor ? 'data-line-anchor' : 'data-file-id', value: place.lineAnchor ?? place.fileId, within: place.fileId, ...(place.offset !== undefined ? { offset: place.offset } : {}), instant: true, focus: false }
+        : { instant: true, focus: false });
+    };
+    // A stage in the Diff: its files of the change the review read, all of it and never a Git layer of it. Once
+    // the code moved on from the walkthrough, the Diff leads as it does for the review, with what changed since
+    // it. The one stage of a one-intent change is the whole change, so its Diff is not narrowed.
+    const openStageInDiff = (section: number) => {
+      const { guide, guideCurrent } = now();
+      const stages = guide?.stages ?? [];
+      const stage = stages[section];
+      if (!stage) return;
+      setScope(guideCurrent ? 'all' : undefined);
+      switchMode('diff', stages.length > 1 ? { title: stage.title, fileIds: new Set(stage.files.map((file) => file.file.id)) } : undefined);
     };
 
     const applySelection = (next?: LineSelection) => { selectionRef.current = next; setSelection(next); };
@@ -529,8 +900,11 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         const comment = now().props.draft.comments.find((candidate) => candidate.id === commentId);
         const entry = comment ? entryOfPath(comment.path) : undefined;
         followFullScreen(entry?.file.id);
+        if (entry && comment) {
+          revealIn(now().mode, entry.file.id, bandPlace(entry.file.path, comment));
+          follow(entry.file.id);
+        }
         openIfCollapsed(entry);
-        if (entry) setActiveFileId(entry.file.id);
         go({ attribute: 'data-comment-id', value: commentId, instant: false, focus: false });
       },
       showRequestItem: (item) => {
@@ -541,13 +915,15 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       },
       showFullScreen,
       setFileViewed: (fileId, next) => {
-        const file = now().filesById.get(fileId);
-        const signature = now().signatures.get(fileId);
+        const { mode: current, readings, guideCurrent, props: { taskId } } = now();
+        const file = readings[current].filesById.get(fileId);
+        const signature = readings[current].signatures.get(fileId);
         if (!file || !signature) return;
-        const taskId = now().props.taskId;
-        setViewed((current) => {
-          const updated = { ...current };
-          if (next) updated[file.path] = signature;
+        // While the walkthrough is the code the Diff shows, the file's change is one in both modes, so one mark serves both.
+        const twin = guideCurrent ? readings[current === 'guide' ? 'diff' : 'guide'].signatures.get(fileId) : undefined;
+        setViewed((stored) => {
+          const updated = { ...stored };
+          if (next) updated[file.path] = [...new Set([signature, ...(twin ? [twin] : []), ...(stored[file.path] ?? [])])].slice(0, VIEWED_SIGNATURES);
           else delete updated[file.path];
           writeViewedFiles(taskId, updated);
           return updated;
@@ -556,23 +932,92 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       toggleCollapsed: (fileId, all) => {
         const entry = entryOf(fileId);
         if (!entry) return;
+        const { mode: target, ordered: entries } = now();
         const next = !now().isCollapsed(entry);
-        setCollapsedOverride((current) => (all ? Object.fromEntries(now().ordered.map((candidate) => [candidate.file.id, next])) : { ...current, [fileId]: next }));
+        setCollapsedOverride((current) => ({
+          ...current,
+          [target]: all ? Object.fromEntries(entries.map((candidate) => [candidate.file.id, next])) : { ...current[target], [fileId]: next }
+        }));
       },
-      setAllCollapsed: (collapsed) => setCollapsedOverride(Object.fromEntries(now().ordered.map((entry) => [entry.file.id, collapsed]))),
+      setAllCollapsed: (collapsed) => {
+        const { mode: target, ordered: entries } = now();
+        setCollapsedOverride((current) => ({ ...current, [target]: Object.fromEntries(entries.map((entry) => [entry.file.id, collapsed])) }));
+      },
       revealLines: (blockId, from, to) => now().reveal(blockId, from, to),
       setWholeFile: (fileId, whole) => {
         const entry = entryOf(fileId);
         if (whole) openIfCollapsed(entry);
         now().setWholeFile(fileId, whole);
       },
-      setScope,
+      setScope: (next) => { setScope(next); setDiffFilter(undefined); },
       setOrder: (next) => { setOrder(next); writeReviewFileOrder(next); },
       foldBrief: (folded) => {
         const { briefRound: round, props: current } = now();
         setBriefFold({ round, folded });
         writeBriefFolded(current.taskId, round, folded);
       },
+
+      // From a stage, the Diff opens narrowed to its files, as the stage's Open in Diff does; elsewhere it is the mode alone.
+      setMode: (next) => {
+        const current = now();
+        const scroller = scrollerRef.current;
+        if (next === 'diff' && current.mode === 'guide' && current.guide && scroller) {
+          const read = readPlace(scroller, current.activeFileId);
+          const section = read ? current.guide.files.get(read.fileId)?.stage : current.activeStage === 'overview' ? undefined : current.activeStage;
+          if (section !== undefined) { openStageInDiff(section); return; }
+        }
+        switchMode(next);
+      },
+      openInDiff: openStageInDiff,
+      showStage: (stage, { instant = false } = {}) => {
+        const { guide } = now();
+        if (!guide) return;
+        setActiveStage(String(stage));
+        // The stage's first file is where its code starts; on the overview no file is under way.
+        setActiveFileId(stage === 'overview' ? undefined : guide.stages[stage]?.shown[0]);
+        go({ attribute: 'data-stage', value: String(stage), instant, focus: false });
+      },
+      toggleStageFiles: (section) => {
+        const { guide } = now();
+        if (!guide) return;
+        setGuideOpen((current) => {
+          const base = current.key === guide.reviewRunId ? current : { ...NO_GUIDE_OPEN, key: guide.reviewRunId };
+          const groups = new Set(base.groups);
+          if (!groups.delete(section)) groups.add(section);
+          return { ...base, groups };
+        });
+      },
+      openMoreChanges: (fileId) => {
+        const { guide } = now();
+        if (guide) setGuideOpen((current) => openInGuide(current, guide.reviewRunId, { more: fileId }));
+      },
+      showLines: (fileId, anchors, { mark = false } = {}) => {
+        const entry = entryOf(fileId);
+        if (!entry || !anchors.length) return;
+        revealIn(now().mode, fileId, anchors[0]);
+        openIfCollapsed(entry);
+        follow(fileId);
+        go({ attribute: 'data-line-anchor', value: anchors[0], within: fileId, instant: false, focus: false, ...(mark ? { mark: anchors } : {}) });
+      },
+      // Lit by setting an attribute on the rows themselves, so the pointer never renders a row.
+      lightLines: (fileId, anchors) => {
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        scroller.querySelectorAll('[data-lit]').forEach((row) => row.removeAttribute('data-lit'));
+        const file = fileElement(fileId);
+        if (file && anchors) for (const row of linesOf(file, anchors)) row.setAttribute('data-lit', '');
+      },
+      clearMarks: () => {
+        const marked = scrollerRef.current?.querySelectorAll('[data-marked]') ?? [];
+        marked.forEach((row) => row.removeAttribute('data-marked'));
+        return marked.length > 0;
+      },
+      askAboutStage: (section) => now().props.onAskAboutStage?.(section),
+      askAboutFile: (fileId) => {
+        const file = now().filesById.get(fileId);
+        if (file) now().props.onAskAboutFile?.(file.path);
+      },
+      askAboutDiscussion: (discussionId) => now().props.onAskAboutDiscussion?.(discussionId),
 
       focusFinding: (findingId) => { setFocusedFindingId(findingId); setFocusedDiscussionId(undefined); },
       focusDiscussion: (discussionId) => { setFocusedDiscussionId(discussionId); setFocusedFindingId(undefined); },
@@ -592,6 +1037,19 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         const field = scrollerRef.current?.querySelector<HTMLTextAreaElement>(`[data-discussion-id=${quoted(discussionId)}] .tm-review-thread__reply-input`);
         field?.focus();
         return Boolean(field);
+      },
+      decideAnswer: (item, kind) => now().props.answers?.onDecide?.(item, kind) ?? Promise.resolve(),
+      requestAgain: (item, at) => {
+        const quote = requestItemQuote(item);
+        const place = requestItemPlace(item);
+        const entry = at && place ? entryOfPath(place.path) : undefined;
+        if (!at || !place || !entry) {
+          const note = now().props.draft.note.trimEnd();
+          updateDraft({ note: note ? `${note}\n\n${quote}\n` : `${quote}\n` });
+          return;
+        }
+        commentText.current = `${quote}\n\n`;
+        setCommentDraft({ key: at, fileId: entry.file.id, ...place, path: entry.file.path });
       },
 
       beginSelect: (fileId, blockId, index, event) => {
@@ -695,8 +1153,9 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       notifyError: (message) => now().notify(message, 'error')
     };
     // Every value the actions read comes through `live`, and the setters never change.
-  }, [scrollerRef, setActiveFileId]);
+  }, [scrollerRef, setActiveFileId, setActiveStage]);
 
+  const canDecideAnswers = Boolean(props.answers?.onDecide);
   const bands = useMemo<ReviewBandsState>(() => ({
     focusedFindingId,
     focusedDiscussionId,
@@ -715,12 +1174,17 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     canRestore: Boolean(props.onRestoreFinding),
     canAskAboutFinding: Boolean(props.onAskAboutFinding),
     canAskAboutLines: Boolean(props.onAskAboutLines),
+    canAskAboutDiscussion: Boolean(props.onAskAboutDiscussion),
     canReply: Boolean(props.onReplyToDiscussion),
-    canResolve: Boolean(props.onResolveDiscussion)
+    canResolve: Boolean(props.onResolveDiscussion),
+    agent: props.answers?.agent,
+    answers: bandAnswers,
+    canDecideAnswers
   }), [
-    canComment, commentDraft, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId, included, includedDiscussions,
-    props.findingsSendable, props.onAskAboutFinding, props.onAskAboutLines, props.onDismissFinding, props.onReplyToDiscussion,
-    props.onResolveDiscussion, props.onRestoreFinding, props.replyDrafts, props.replyTexts, props.viewer, reReview
+    bandAnswers, canComment, canDecideAnswers, commentDraft, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId, included,
+    includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
+    props.onDismissFinding, props.onReplyToDiscussion, props.onResolveDiscussion, props.onRestoreFinding, props.replyDrafts, props.replyTexts,
+    props.viewer, reReview
   ]);
 
   // Another surface asked to see the request; it opens once, so coming back to the tab does not reopen it.
@@ -730,15 +1194,27 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     props.onRequestSheetOpened?.();
   }, [props.requestSheetPending]);
 
-  // The move starts in the frame its target first renders.
+  // The move starts in the frame its target first renders. Lines a move chose stay chosen until the next one.
   useLayoutEffect(() => {
     if (!pendingTravel) return;
     setPendingTravel(undefined);
     const scroller = scrollerRef.current;
-    const element = scroller?.querySelector<HTMLElement>(`[${pendingTravel.attribute}=${quoted(pendingTravel.value)}]`);
-    if (!scroller || !element) return;
-    travel(scroller, landing(scroller, element), { instant: pendingTravel.instant });
-    if (pendingTravel.focus) element.focus({ preventScroll: true });
+    if (!scroller) return;
+    scroller.querySelectorAll('[data-marked]').forEach((row) => row.removeAttribute('data-marked'));
+    const { attribute, value, within, offset, mark, instant, focus } = pendingTravel;
+    if (!attribute || value === undefined) {
+      travel(scroller, 0, { instant });
+      return;
+    }
+    const file = within ? scroller.querySelector<HTMLElement>(`[data-file-id=${quoted(within)}]`) : null;
+    const scope = file ?? scroller;
+    // Lines take the latest block that shows them; lines that do not show leave the file's head.
+    const element = (attribute === 'data-line-anchor' ? linesOf(scope, [value]).at(-1) : scope.querySelector<HTMLElement>(`[${attribute}=${quoted(value)}]`)) ?? file;
+    if (!element) return;
+    const top = scroller.getBoundingClientRect().top + scroller.clientTop;
+    travel(scroller, offset === undefined ? landing(scroller, element) : scroller.scrollTop + element.getBoundingClientRect().top - top - offset, { instant });
+    if (mark && file) for (const row of linesOf(file, mark)) row.setAttribute('data-marked', '');
+    if (focus) element.focus({ preventScroll: true });
   }, [pendingTravel, scrollerRef]);
 
   // The page hides its tab bar while a file is full screen, and gets it back when the tab closes.
@@ -754,7 +1230,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     if (!discussionId || !discussions.some((discussion) => discussion.id === discussionId)) return;
     actions.showDiscussion(discussionId);
     props.onDiscussionRevealed?.();
-  }, [props.revealDiscussionId, ordered, discussions]);
+  }, [props.revealDiscussionId, readingOrdered, discussions]);
 
   const brief: ReviewBriefContent | undefined = props.brief && (props.brief.asked || props.brief.report || props.brief.reviewer || props.brief.round) && !props.historical
     ? { ...props.brief, ...(props.brief.round ? { round: { ...props.brief.round, onShowItem: actions.showRequestItem } } : {}) }
@@ -770,35 +1246,60 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       : effectiveScope === 'since-review' ? 'Nothing changed since the review.' : 'No changes in this scope.'
     : undefined;
 
+  // The Guide shows the walkthrough the gate keeps, the earlier one included, while it is read; or why there is none.
+  const guideStatus: GuideView['status'] = stored
+    ? walkthrough?.view.loading ? 'loading' : guideModel ? 'ready' : 'unavailable'
+    : review?.status === 'RUNNING' ? 'running'
+      : walkthrough?.state.status === 'UNAVAILABLE' ? 'unavailable' : 'none';
+  const guide: GuideView = {
+    status: guideStatus,
+    model: guideModel,
+    ...(guideStatus === 'unavailable' ? {
+      reason: walkthroughUnavailableWords(walkthrough?.state.status === 'UNAVAILABLE' ? walkthrough.state.reason : walkthrough?.view.diffUnavailable ?? 'UNPARSED')
+    } : {}),
+    author: walkthrough?.author,
+    folders,
+    openGroups: guideOpen.groups,
+    openMore: guideOpen.more,
+    outside: { findings: guideAnchors.findings.general, discussions: guideAnchors.discussions.general }
+  };
+
   return {
     props,
     actions,
     bands,
-    anchors,
+    mode,
+    guide,
+    activeStage,
+    /** The stage the Diff is narrowed to. */
+    diffFilter: mode === 'diff' && diffOrdered !== ordered ? diffFilter : undefined,
+    anchors: reading.anchors,
     loading,
     incomplete: diff.inspection.completeness === 'INCOMPLETE' && !diff.loading,
     /** Why there is no code to show: loading, unreadable, or an empty scope. */
     emptyText: unavailable ?? emptyScope,
     brief,
     briefFolded,
-    files,
-    ordered,
+    files: reading.files,
+    ordered: readingOrdered,
     fileIds,
-    gutterWidth,
-    wholeFile: context.wholeFile,
+    gutterWidth: reading.gutterWidth,
+    // The checkout fills the Diff's files, which the Guide reads too before a walkthrough; a walkthrough's
+    // files are the code the review read, from the base, never the exact changes since a review.
+    wholeFile: mode === 'diff' || !guideModel ? context.wholeFile : noWholeFile,
     effectiveScope,
     sinceReviewAvailable,
     sinceReviewLabel,
-    exactChanges,
+    exactChanges: (mode === 'diff' || !guideModel) && exactChanges,
     stale,
     order,
     findingsByFile,
     discussionsByFile,
-    openFindingsByFile,
-    openDiscussionsByFile,
+    openFindingsByFile: reading.openFindingsByFile,
+    openDiscussionsByFile: reading.openDiscussionsByFile,
     openFindings,
     discussions,
-    feedback,
+    feedback: reading.feedback,
     findingsActionable,
     canComment,
     viewedIds,
@@ -812,4 +1313,10 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     sheetOpen,
     pathMenu
   };
+}
+
+const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };
+
+function noWholeFile(): WholeFileState {
+  return NO_WHOLE_FILE;
 }

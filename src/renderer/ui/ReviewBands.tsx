@@ -1,12 +1,14 @@
-import { useId, useState } from 'react';
+import { useCallback, useId, useState } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
 import { formatDiscussionLocation, type DiscussionView } from '../model/pullRequestFeedback';
+import type { BandAnswer } from '../model/reviewRounds';
 import { sideLines, type ReviewFindingView } from '../model/reviewWorkspace';
 import { Avatar } from './Avatar';
 import { ReviewDiscussionThread } from './ReviewDiscussionThread';
 import { ReviewFindingThread } from './ReviewFindingThread';
+import { AnswerState, ReopenAnswer, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 import { useReviewActions, useReviewBands, type CommentDraft } from './useReviewModel';
@@ -16,7 +18,8 @@ import { useReviewActions, useReviewBands, type CommentDraft } from './useReview
  * above the files. The reviewer's findings, then people's discussions, then the
  * person's own comments, then the composer when it opens here (`at`). A
  * discussion on its line says nothing more of its place; at its file's top or
- * above the files, it says where it points.
+ * above the files, it says where it points. Whatever the agent answered in the
+ * person's latest request says the answer, and takes the person's decision on it.
  */
 export function ReviewBands({ place, at, file, findings, discussions, comments }: {
   place: 'line' | 'file' | 'general';
@@ -31,6 +34,23 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
   const actions = useReviewActions();
   const state = useReviewBands();
   const draft = state.commentDraft;
+  // An answer of the latest request takes the person's decision, and goes in the request again from here.
+  const itemAnswer = (band: BandAnswer | undefined): ItemAnswer | undefined => band && {
+    outcome: band.outcome,
+    note: band.note,
+    agent: state.agent,
+    at: state.answers?.answeredAt,
+    accepted: band.accepted,
+    ...(state.canDecideAnswers ? { onDecide: (kind) => actions.decideAnswer(band.item.number, kind) } : {}),
+    ...(state.canComment ? { onRequestAgain: () => actions.requestAgain(band.item, at) } : {})
+  };
+  // One sent in an earlier request still says what the agent answered, for the person alone.
+  const discussionAnswer = (discussion: DiscussionView): ItemAnswer | undefined => {
+    const sent = discussion.sent;
+    if (!sent?.outcome) return undefined;
+    return itemAnswer(state.answers?.discussions.get(discussion.id)) ??
+      { outcome: sent.outcome, note: sent.note, agent: state.agent, at: sent.answeredAt, accepted: false };
+  };
   return (
     <>
       {findings?.map((finding) => (
@@ -38,6 +58,7 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
           key={finding.id}
           finding={finding}
           round={finding.previousFindingId ? 'STILL_OPEN' : state.reReview ? 'NEW' : undefined}
+          answer={itemAnswer(state.answers?.findings.get(finding.id))}
           focused={state.focusedFindingId === finding.id}
           actionable={state.findingsActionable}
           inRequest={state.included.has(finding.id)}
@@ -56,6 +77,7 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
           <ReviewDiscussionThread
             key={discussion.id}
             discussion={discussion}
+            answer={discussionAnswer(discussion)}
             location={place === 'general' ? formatDiscussionLocation(discussion) : undefined}
             about={place === 'file' ? (discussion.line ? commentAbout(lines) : undefined)
               : place === 'line' && commentNeedsAbout(lines) ? commentAbout(lines) : undefined}
@@ -72,6 +94,7 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
               onPost: (body, resolve) => actions.replyToDiscussion(discussion.id, body, resolve)
             } : undefined}
             onResolve={state.canResolve && discussion.resolvable ? (resolved) => actions.resolveDiscussion(discussion.id, resolved) : undefined}
+            onAsk={state.canAskAboutDiscussion ? () => actions.askAboutDiscussion(discussion.id) : undefined}
             // Only on its own lines is the diff shown the code the comment was written on.
             codeLines={place === 'line' && file ? (start, end) => sideLines(file, lines.side, start, end) : undefined}
           />
@@ -80,16 +103,31 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
       {/* A comment being edited gives its place to the composer. */}
       {comments?.map((comment) => (draft?.editingId === comment.id
         ? <CommentComposer key={comment.id} draft={draft} />
-        : <ReviewCommentBand key={comment.id} comment={comment} />))}
+        : <ReviewCommentBand key={comment.id} comment={comment} answer={itemAnswer(state.answers?.comments.get(comment.id))} />))}
       {draft && !draft.editingId && draft.key === at ? <CommentComposer key="composer" draft={draft} /> : null}
     </>
   );
 }
 
-/** The person's own comment reads as theirs: their mark and You, with Edit and Delete on its head. */
-function ReviewCommentBand({ comment }: { comment: ReviewComment }) {
+/**
+ * The person's own comment reads as theirs: their mark and You, with Edit and
+ * Delete on its head. One they sent that the agent answered says the answer
+ * instead, quotes it, and folds to a line once they accept it.
+ */
+function ReviewCommentBand({ comment, answer }: { comment: ReviewComment; answer?: ItemAnswer }) {
   const actions = useReviewActions();
   const { viewer, canComment } = useReviewBands();
+  if (answer?.accepted) {
+    const line = comment.text.split('\n').map((value) => value.trim()).find(Boolean) ?? '';
+    return (
+      <div className="tm-review-thread tm-review-thread--folded" data-comment-id={comment.id} tabIndex={-1}>
+        <span className="tm-review-thread__author">You</span>
+        <span className="tm-review-answer__settled" title={comment.text}>{line}</span>
+        <span>Accepted</span>
+        <ReopenAnswer answer={answer} />
+      </div>
+    );
+  }
   return (
     <div className="tm-review-comment" data-comment-id={comment.id} tabIndex={-1}>
       <div className="tm-review-thread__comment">
@@ -98,7 +136,7 @@ function ReviewCommentBand({ comment }: { comment: ReviewComment }) {
           <span className="tm-review-thread__author">You</span>
           {commentNeedsAbout(comment) ? <span className="tm-review-comment__about">{commentAbout(comment)}</span> : null}
           <span className="tm-review-thread__spacer" />
-          {canComment ? (
+          {answer ? <AnswerState answer={answer} /> : canComment ? (
             <span className="tm-review-thread__actions tm-review-comment__actions">
               <Tooltip label="Edit">
                 <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Edit comment" onClick={() => actions.editComment(comment)}>
@@ -117,6 +155,7 @@ function ReviewCommentBand({ comment }: { comment: ReviewComment }) {
           <p>{comment.text}</p>
         </div>
       </div>
+      {answer ? <RequestItemAnswer answer={answer} /> : null}
     </div>
   );
 }
@@ -137,6 +176,8 @@ function CommentComposer({ draft }: { draft: CommentDraft }) {
     setText(actions.commentText());
   }
   const id = useId();
+  // A comment that starts from a quote of what it answers takes the caret after it.
+  const caretAtEnd = useCallback((field: HTMLTextAreaElement | null) => field?.setSelectionRange(field.value.length, field.value.length), []);
   return (
     <form className="tm-review-comment-composer" onSubmit={(event) => { event.preventDefault(); actions.saveComment(); }}>
       <div className="tm-review-thread__reply-row tm-review-thread__reply-row--open">
@@ -144,6 +185,7 @@ function CommentComposer({ draft }: { draft: CommentDraft }) {
         {commentNeedsAbout(draft) ? <span className="tm-review-comment__about">{commentAbout(draft)}</span> : null}
         <label className="tm-visually-hidden" htmlFor={id}>Comment</label>
         <textarea
+          ref={caretAtEnd}
           id={id}
           className="tm-review-thread__reply-input"
           autoFocus

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { feedbackOrder, nextUnviewed, reviewPlace, stepFeedback, stepFile, stepStage } from './reviewNavigation';
-import { lineAnchor, type ReviewFindingView } from './reviewWorkspace';
+import { feedbackOrder, nextUnviewed, stepFeedback, stepThrough } from './reviewNavigation';
+import type { ReviewFindingView } from './reviewWorkspace';
 
 const files = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
 
@@ -9,16 +9,16 @@ function finding(id: string, state: ReviewFindingView['state'] = 'OPEN'): Review
 }
 
 describe('the Review keys', () => {
-  it('steps J and K through the files in reading order, from the first when none is current, stopping at the ends', () => {
+  it('steps J and K through the files, and [ and ] through the stages, from the first when none is current, stopping at the ends', () => {
     // Reading the brief above the files, J goes to the first file, never past it.
-    expect(stepFile(files, undefined, 1)).toBe('src/a.ts');
-    expect(stepFile(files, 'src/a.ts', 1)).toBe('src/b.ts');
-    expect(stepFile(files, 'src/b.ts', -1)).toBe('src/a.ts');
-    expect(stepFile(files, 'src/c.ts', 1)).toBe('src/c.ts');
-    expect(stepFile(files, 'src/a.ts', -1)).toBe('src/a.ts');
+    expect(stepThrough(files, undefined, 1)).toBe('src/a.ts');
+    expect(stepThrough(files, 'src/a.ts', 1)).toBe('src/b.ts');
+    expect(stepThrough(files, 'src/b.ts', -1)).toBe('src/a.ts');
+    expect(stepThrough(files, 'src/c.ts', 1)).toBe('src/c.ts');
+    expect(stepThrough(files, 'src/a.ts', -1)).toBe('src/a.ts');
     // A file the scope no longer holds starts the order again.
-    expect(stepFile(files, 'src/gone.ts', 1)).toBe('src/a.ts');
-    expect(stepFile([], undefined, 1)).toBeUndefined();
+    expect(stepThrough(files, 'src/gone.ts', 1)).toBe('src/a.ts');
+    expect(stepThrough([], undefined, 1)).toBeUndefined();
   });
 
   it('steps N and P through what still asks for something: what has no place first, then file by file in reading order', () => {
@@ -46,21 +46,5 @@ describe('the Review keys', () => {
     expect(nextUnviewed(files, 'src/a.ts', new Set(['src/a.ts', 'src/b.ts']))).toBe('src/c.ts');
     expect(nextUnviewed(files, 'src/b.ts', new Set(['src/b.ts']))).toBe('src/c.ts');
     expect(nextUnviewed(files, 'src/c.ts', new Set(['src/c.ts']))).toBeUndefined();
-  });
-
-  it('steps [ and ] through stages from the one holding the current file', () => {
-    const stages = [{ id: 'model', fileIds: ['src/a.ts'] }, { id: 'ui', fileIds: ['src/b.ts', 'src/c.ts'] }];
-    expect(stepStage(stages, 'src/c.ts', -1)?.id).toBe('model');
-    expect(stepStage(stages, 'src/a.ts', 1)?.id).toBe('ui');
-    expect(stepStage(stages, 'src/b.ts', 1)?.id).toBe('ui');
-    expect(stepStage(stages, undefined, 1)?.id).toBe('model');
-    expect(stepStage([], 'src/a.ts', 1)).toBeUndefined();
-  });
-
-  it('names the place G keeps by the anchor its row carries, whatever form the path comes in', () => {
-    expect(reviewPlace({ id: 'file-1', path: './src/a.ts' }, { side: 'NEW', line: 12 })).toEqual({ fileId: 'file-1', lineAnchor: lineAnchor('src/a.ts', 'NEW', 12) });
-    // A removed line and an added one with the same number are two places.
-    expect(lineAnchor('src/a.ts', 'OLD', 12)).not.toBe(lineAnchor('src/a.ts', 'NEW', 12));
-    expect(reviewPlace({ id: 'file-1', path: 'src/a.ts' })).toEqual({ fileId: 'file-1' });
   });
 });

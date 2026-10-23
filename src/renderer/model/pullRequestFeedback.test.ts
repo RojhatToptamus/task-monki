@@ -4,6 +4,7 @@ import type { DomainEvent, PullRequestDiscussion, PullRequestFeedback } from '..
 import {
   buildDiscussionViews,
   buildReplyDrafts,
+  changedPaths,
   commentParts,
   discussionTranscript,
   pullRequestFeedbackLine,
@@ -54,7 +55,42 @@ describe('discussion views', () => {
 });
 
 describe('replies to post', () => {
-  it('drafts the agent\'s answer for each discussion until the person answers it, on the platform or from here', () => {
+  it('starts a reply from the change Task Monki saw, never from the agent\'s words', () => {
+    const answered = (outcome: 'FIXED' | 'NOT_CHANGED', note: string) => ({ outcome, note });
+    const all = feedback([
+      discussion('changed'),
+      discussion('untouched', { path: 'src/other.ts' }),
+      discussion('kept'),
+      discussion('whole', { kind: 'REVIEW', resolvable: false, reviewState: 'CHANGES_REQUESTED', path: undefined, side: undefined, line: undefined })
+    ]);
+    const sent = sentDiscussions([{
+      at: sentAt,
+      answeredAt: '2026-10-10T12:14:00.000Z',
+      request: { reviewRunId: 'review-1', items: ['changed', 'untouched', 'kept', 'whole'].map((id, index) => ({
+        number: index + 1, kind: 'DISCUSSION' as const, provider: 'GITHUB' as const, discussionId: id, text: 'x'
+      })) },
+      answers: [
+        { item: 1, ...answered('FIXED', 'Null layouts return early.') },
+        { item: 2, ...answered('FIXED', 'Handled in save.ts.') },
+        { item: 3, ...answered('NOT_CHANGED', 'The caller checks it.') },
+        { item: 4, ...answered('FIXED', 'Done.') }
+      ]
+    }]);
+    const views = buildDiscussionViews(all, sent);
+    const changed = { reviewRunId: 'review-1', paths: changedPaths([{ path: 'src/save.ts' }]) };
+    const drafts = buildReplyDrafts(views, 'me', 'abcdef1234567', new Map(), changed);
+    // A Fixed answer names the head only when the thread's file changed since the review; anything else starts empty.
+    expect(drafts.map((draft) => [draft.discussionId, draft.body])).toEqual([
+      ['changed', 'Changed in abcdef1.'], ['untouched', ''], ['kept', ''], ['whole', '']
+    ]);
+    // The agent's note goes with the draft for the person to read, and never into what is posted.
+    expect(drafts[0]).toMatchObject({ note: 'Null layouts return early.', answeredAt: '2026-10-10T12:14:00.000Z' });
+    expect(drafts.some((draft) => draft.body.includes(draft.note ?? '\u0000'))).toBe(false);
+    // Changes measured from another review say nothing about this request's files.
+    expect(buildReplyDrafts(views, 'me', 'abcdef1234567', new Map(), { ...changed, reviewRunId: 'review-2' })[0]?.body).toBe('');
+  });
+
+  it('offers a reply for each answered discussion until the person answers it, on the platform or from here', () => {
     const review = discussion('review', { kind: 'REVIEW', resolvable: false, reviewState: 'CHANGES_REQUESTED', path: undefined, side: undefined, line: undefined });
     const answeredThere = discussion('answered-there', {
       comments: [...discussion('x').comments, { author: 'me', createdAt: '2026-10-10T13:00:00Z', body: 'Fixed.', truncated: false }]
@@ -62,9 +98,9 @@ describe('replies to post', () => {
     const all = feedback([discussion('thread'), review, answeredThere]);
     const first = round(['thread', 'review', 'answered-there'], [{ item: 1, outcome: 'FIXED' }, { item: 2, outcome: 'NOT_CHANGED' }, { item: 3, outcome: 'FIXED' }]);
     const views = buildDiscussionViews(all, sentDiscussions([first]));
-    expect(buildReplyDrafts(views, 'me', 'abcdef1234567').map((draft) => [draft.discussionId, draft.body, draft.resolvable])).toEqual([
-      ['thread', 'Fixed in abcdef1.', true],
-      ['review', 'Not changed.', false]
+    expect(buildReplyDrafts(views, 'me', 'abcdef1234567').map((draft) => [draft.discussionId, draft.resolvable])).toEqual([
+      ['thread', true],
+      ['review', false]
     ]);
 
     // A review's answer is a comment of its own, so only the record of posting it says it was answered.

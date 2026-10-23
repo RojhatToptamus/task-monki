@@ -6,6 +6,7 @@ import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from '../../core/agent/co
 import { EMPTY_REVIEW_DRAFT, REVIEW_REQUEST_ITEM_LIMIT, type AgentModel, type AgentRuntimeState } from '../../shared/contracts';
 import type { PullRequestCheckLog } from '../../shared/pullRequestActions';
 import { makeAgentItemRecord, makeGitSnapshotRecord, makeRunRecord, makeTaskRecord, TEST_NOW } from '../../testSupport/rendererRecords';
+import { taskManagerApi } from '../api/taskManagerClient';
 import { TaskDetail } from './TaskDetail';
 
 vi.mock('../api/taskManagerClient', () => ({
@@ -443,10 +444,15 @@ describe('Pull request feedback', () => {
     fireEvent.change(await screen.findByRole('textbox', { name: 'Reply to alice' }), { target: { value: 'Typed for alice.' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Reply to bob' }), { target: { value: 'Typed for bob.' } });
 
-    // Then posts the agent's answers from the Overview.
+    // Then answers both from the Overview, in their own words: Task Monki saw no change to name, so each reply starts empty.
     fireEvent.click(screen.getByRole('tab', { name: 'Overview' }));
     fireEvent.click(await within(screen.getByRole('region', { name: 'Current step' })).findByRole('button', { name: 'Reply on GitHub' }));
     const dialog = await screen.findByRole('dialog', { name: 'Reply on GitHub' });
+    for (const name of ['@alice', '@bob']) {
+      const field = within(dialog).getByRole('textbox', { name: `Reply to ${name}` }) as HTMLTextAreaElement;
+      expect(field.value).toBe('');
+      fireEvent.change(field, { target: { value: `Answered ${name}.` } });
+    }
     fireEvent.click(within(dialog).getByRole('button', { name: 'Post 2 replies' }));
     await waitFor(() => expect(props.onReplyToPullRequest).toHaveBeenCalledTimes(1));
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Close' }));
@@ -455,6 +461,48 @@ describe('Pull request feedback', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Review' }));
     expect((await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement).value).toBe('');
     expect((screen.getByRole('textbox', { name: 'Reply to bob' }) as HTMLTextAreaElement).value).toBe('Typed for bob.');
+  });
+
+  it('starts a reply from the head only for a thread whose file changed since the review the agent\'s Fixed followed', async () => {
+    const readChanges = vi.mocked(taskManagerApi.readReviewChanges);
+    readChanges.mockImplementation(async () => ({ status: 'READY', reviewRunId: 'review-1', tree: 'tree-1',
+      diff: 'diff --git a/output.txt b/output.txt\n--- a/output.txt\n+++ b/output.txt\n@@ -1 +1 @@\n-old\n+new\n' }));
+    try {
+      feedbackDetail(2, (configured) => {
+        configured.onReadArtifact = vi.fn(async () => JSON.stringify({
+          schema: 'task-monki/pull-request-feedback/v1', provider: 'GITHUB', number: 82, headSha: 'f'.repeat(40), capturedAt: TEST_NOW,
+          reviewers: [{ name: 'alice', state: 'CHANGES_REQUESTED' }], truncated: false,
+          discussions: [['PRRT_1', 'alice', 'output.txt'], ['PRRT_2', 'bob', 'other.txt']].map(([id, author, path]) => ({
+            id, kind: 'THREAD', path, side: 'NEW', line: 1, resolvable: true, resolved: false, outdated: false,
+            comments: [{ author, body: `Fix ${path}.`, truncated: false }], commentCount: 1
+          }))
+        }));
+        configured.agentInstructions = [{ id: 'request-1', taskId: 'task-1', iterationId: 'iteration-1', worktreeId: 'worktree-1', sourceRunId: 'run-1',
+          sessionId: 'session-1', order: 1, text: 'Address the comments.', mode: 'FOLLOW_UP', status: 'SUBMITTED', runId: 'run-2', createdAt: TEST_NOW,
+          updatedAt: TEST_NOW, reviewRequest: { reviewRunId: 'review-1', items: [
+            { number: 1, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_1', author: 'alice', text: 'Fix output.txt.' },
+            { number: 2, kind: 'DISCUSSION', provider: 'GITHUB', discussionId: 'PRRT_2', author: 'bob', text: 'Fix other.txt.' }
+          ] } }];
+        configured.task = makeTaskRecord({ ...configured.task, currentRunId: 'run-2',
+          projection: { ...configured.task!.projection, agentReview: { status: 'STALE', runId: 'review-1' } } });
+        configured.run = makeRunRecord({ id: 'run-2', mode: 'FOLLOW_UP', status: 'COMPLETED', endedAt: TEST_NOW });
+        configured.runs = [makeRunRecord({ id: 'run-1', status: 'COMPLETED' }), makeRunRecord({ id: 'review-1', mode: 'REVIEW', status: 'COMPLETED' }), configured.run];
+        configured.items = [makeAgentItemRecord({ id: 'answers', runId: 'run-2', payload: {
+          text: 'Both.\n```task-monki-review-response\n[{"item": 1, "outcome": "FIXED", "note": "Trimmed it."}, {"item": 2, "outcome": "FIXED", "note": "Renamed it."}]\n```'
+        } })];
+      });
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Reply on GitHub' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Reply on GitHub' });
+      await waitFor(() => expect((within(dialog).getByRole('textbox', { name: 'Reply to @alice' }) as HTMLTextAreaElement).value)
+        .toBe('Changed in fffffff.'));
+      // bob's file did not change since the review, so his reply is the person's to write; the agent's word is only quoted.
+      expect((within(dialog).getByRole('textbox', { name: 'Reply to @bob' }) as HTMLTextAreaElement).value).toBe('');
+      expect(within(dialog).getByText('Renamed it.')).toBeDefined();
+      expect(readChanges).toHaveBeenCalledWith({ taskId: 'task-1', reviewRunId: 'review-1' });
+    } finally {
+      readChanges.mockImplementation(async () => ({ status: 'UNAVAILABLE', reason: 'NOT_RECORDED' }));
+    }
   });
 
   it('holds a request with more items than one can carry, and says why before anything is sent', async () => {

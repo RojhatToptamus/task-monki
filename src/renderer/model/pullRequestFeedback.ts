@@ -14,7 +14,9 @@ import {
   type ReviewResponseOutcome
 } from '../../shared/contracts';
 import { INVISIBLE_CHARACTERS } from '../../shared/remoteWork';
+import type { DiffFile } from './diffEvidence';
 import { formatCommentLocation, listNames } from './formatting';
+import { normalizeReviewPath } from './reviewWorkspace';
 
 /** A discussion's summary, a comment's text and its transcript sit with the feedback contract; the Review tab reads them from here. */
 export { discussionCommentText, discussionSummary, discussionTranscript };
@@ -22,11 +24,14 @@ export { discussionCommentText, discussionSummary, discussionTranscript };
 /** What became of a discussion the person sent to the agent. */
 interface DiscussionSent {
   at: string;
+  /** The review the request followed. */
+  reviewRunId?: string;
   /** Its latest comment when sent, in the platform's clock. */
   seenAt?: string;
-  /** The agent's answer, once its reply gave one. */
+  /** The agent's answer, once its reply gave one, and when the reply finished. */
   outcome?: ReviewResponseOutcome;
   note?: string;
+  answeredAt?: string;
 }
 
 /** A pull request discussion as the Review tab shows it. */
@@ -42,13 +47,17 @@ export interface DiscussionView extends PullRequestDiscussion {
 
 /** A request the person sent and the agent's answers to it. */
 export interface ReviewRequestRound {
+  /** The message that carried it. */
+  instructionId: string;
   at: string;
   request: ReviewRequestRecord;
   answers: readonly ReviewResponseAnswer[];
+  /** When the agent's reply finished; absent while it runs. */
+  answeredAt?: string;
 }
 
 /** The discussions each request sent; a later request supersedes an earlier one. */
-export function sentDiscussions(rounds: readonly ReviewRequestRound[]): Map<string, DiscussionSent> {
+export function sentDiscussions(rounds: readonly Omit<ReviewRequestRound, 'instructionId'>[]): Map<string, DiscussionSent> {
   const sent = new Map<string, DiscussionSent>();
   for (const round of [...rounds].sort((left, right) => time(left.at) - time(right.at))) {
     const answers = new Map(round.answers.map((answer) => [answer.item, answer]));
@@ -57,8 +66,13 @@ export function sentDiscussions(rounds: readonly ReviewRequestRound[]): Map<stri
       const answer = answers.get(item.number);
       sent.set(item.discussionId, {
         at: round.at,
+        ...(round.request.reviewRunId ? { reviewRunId: round.request.reviewRunId } : {}),
         ...(item.seenAt ? { seenAt: item.seenAt } : {}),
-        ...(answer ? { outcome: answer.outcome, ...(answer.note ? { note: answer.note } : {}) } : {})
+        ...(answer ? {
+          outcome: answer.outcome,
+          ...(answer.note ? { note: answer.note } : {}),
+          ...(round.answeredAt ? { answeredAt: round.answeredAt } : {})
+        } : {})
       });
     }
   }
@@ -100,7 +114,7 @@ export function buildDiscussionViews(
   });
 }
 
-/** An answer to a discussion, ready for the person to post where the discussion lives. */
+/** A discussion the agent answered, for the person to reply to where the discussion lives. */
 export interface ReplyDraft {
   discussionId: string;
   kind: PullRequestDiscussion['kind'];
@@ -109,10 +123,28 @@ export interface ReplyDraft {
   summary: string;
   location?: string;
   outcome: 'FIXED' | 'NOT_CHANGED';
-  /** Written from the agent's answer; the person edits it before anything is posted. */
+  /** The agent's note on its answer, and when it answered: shown to the person, never posted. */
+  note?: string;
+  answeredAt?: string;
+  /**
+   * Where the person's reply starts: the fact "Changed in <head>." when the agent
+   * answered Fixed and the discussion's file changed since the review, otherwise
+   * nothing. The person writes the rest before anything is posted.
+   */
   body: string;
   /** A thread the reply can resolve. */
   resolvable: boolean;
+}
+
+/** The files changed since a review, by normalized path: what the replies to its request may say changed. */
+export interface ChangedSinceReview {
+  reviewRunId: string;
+  paths: ReadonlySet<string>;
+}
+
+/** The paths a diff changes, normalized; a renamed file under both its names. */
+export function changedPaths(files: readonly Pick<DiffFile, 'path' | 'oldPath'>[]): Set<string> {
+  return new Set(files.flatMap((file) => [file.path, ...(file.oldPath ? [file.oldPath] : [])].map(normalizeReviewPath)));
 }
 
 /**
@@ -134,15 +166,18 @@ export function repliedDiscussions(events: readonly DomainEvent[]): Map<string, 
 
 /**
  * Discussions the agent answered that no one has replied to on the platform
- * since: each answer becomes a reply the person can post. A fix names the head
- * it is in; a decision the agent left to the person is the person's to answer.
+ * since: each is a reply for the person to write. A public reply never repeats
+ * the agent: it starts from the one fact Task Monki observed, that a file the
+ * agent said it fixed changed since the review, named by the head that holds
+ * it. A decision the agent left to the person is the person's to answer.
  */
 export function buildReplyDrafts(
   discussions: readonly DiscussionView[],
   viewer: string | undefined,
   headSha: string | undefined,
   /** When the person answered each discussion from Task Monki, in this clock. */
-  replied: ReadonlyMap<string, string> = new Map()
+  replied: ReadonlyMap<string, string> = new Map(),
+  changed?: ChangedSinceReview
 ): ReplyDraft[] {
   return discussions.flatMap((discussion): ReplyDraft[] => {
     const sent = discussion.sent;
@@ -151,10 +186,8 @@ export function buildReplyDrafts(
     if (time(replied.get(discussion.id) ?? '') > time(sent.at)) return [];
     const since = time(sent.seenAt ?? sent.at);
     if (viewer && discussion.comments.some((comment) => comment.author === viewer && time(comment.createdAt) > since)) return [];
-    const note = sent.note?.trim();
-    const body = sent.outcome === 'FIXED'
-      ? [headSha ? `Fixed in ${headSha.slice(0, 7)}.` : 'Fixed.', note].filter(Boolean).join(' ')
-      : note ? `Not changed. ${note}` : 'Not changed.';
+    const fileChanged = Boolean(discussion.path && changed && sent.reviewRunId === changed.reviewRunId &&
+      changed.paths.has(normalizeReviewPath(discussion.path)));
     const location = formatDiscussionLocation(discussion);
     const author = discussionAuthor(discussion);
     return [{
@@ -164,7 +197,9 @@ export function buildReplyDrafts(
       summary: discussionSummary(discussion),
       ...(location ? { location } : {}),
       outcome: sent.outcome,
-      body,
+      ...(sent.note ? { note: sent.note } : {}),
+      ...(sent.answeredAt ? { answeredAt: sent.answeredAt } : {}),
+      body: sent.outcome === 'FIXED' && fileChanged && headSha ? `Changed in ${headSha.slice(0, 7)}.` : '',
       resolvable: discussion.resolvable && !discussion.resolved
     }];
   });

@@ -106,7 +106,7 @@ export function isTraveling(scroller: HTMLElement): boolean {
 /** Scrolls the least that shows all of `element` under the sticky line, at once: for a control the keys moved. */
 export function keepInView(scroller: HTMLElement, element: Element): void {
   const box = element.getBoundingClientRect();
-  const top = stickyLine(scroller);
+  const top = stickyLine(scroller, element);
   const bottom = scroller.getBoundingClientRect().top + scroller.clientTop + scroller.clientHeight;
   if (box.bottom > bottom) travel(scroller, scroller.scrollTop + box.bottom - bottom, { instant: true });
   else if (box.top < top) travel(scroller, scroller.scrollTop - (top - box.top), { instant: true });
@@ -114,11 +114,15 @@ export function keepInView(scroller: HTMLElement, element: Element): void {
 
 /** The scroll position that puts `element`'s top `margin` under the sticky line. */
 export function scrollTopFor(scroller: HTMLElement, element: Element, margin = 0): number {
-  return scroller.scrollTop + element.getBoundingClientRect().top - stickyLine(scroller) - margin;
+  return scroller.scrollTop + element.getBoundingClientRect().top - stickyLine(scroller, element) - margin;
 }
 
-/** Where sticky heads rest on screen: the scroller's top, past what sticks there (`--review-sticky-top`). */
-function stickyLine(scroller: HTMLElement): number {
-  const stickyTop = Number.parseFloat(getComputedStyle(scroller).getPropertyValue('--review-sticky-top')) || 0;
+/**
+ * Where sticky heads rest on screen above `element`: the scroller's top, past
+ * what sticks there (`--review-sticky-top`), as the element's place sets it, so a
+ * part of the scroller that pins a line of its own lands what it holds below it.
+ */
+function stickyLine(scroller: HTMLElement, element: Element): number {
+  const stickyTop = Number.parseFloat(getComputedStyle(element).getPropertyValue('--review-sticky-top')) || 0;
   return scroller.getBoundingClientRect().top + scroller.clientTop + stickyTop;
 }

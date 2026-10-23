@@ -101,14 +101,19 @@ export interface AnchoredComments {
  * shows, or one on the whole file, sits under the file's header. Each comment
  * anchors once, so a file shown in several blocks never repeats it.
  */
-export function anchorReviewComments(files: readonly DiffFile[], comments: readonly ReviewComment[]): AnchoredComments {
+export function anchorReviewComments(
+  files: readonly DiffFile[],
+  comments: readonly ReviewComment[],
+  /** The side a comment's numbers are on: its own, or the code a review read (`REVIEWED`), as `anchorReviewFindings` takes it. */
+  sideOf: (comment: ReviewComment) => ReviewComment['side'] | 'REVIEWED' = (comment) => comment.side
+): AnchoredComments {
   const byLine = new Map<string, ReviewComment[]>();
   const byFile = new Map<string, ReviewComment[]>();
   const filesByPath = new Map(files.map((file) => [normalizeReviewPath(file.path), file]));
   for (const comment of comments) {
     const file = filesByPath.get(normalizeReviewPath(comment.path));
     if (!file) continue;
-    const anchor = comment.line ? findRowAnchor(file, comment.side, comment.line, comment.endLine) : undefined;
+    const anchor = comment.line ? findRowAnchor(file, sideOf(comment), comment.line, comment.endLine) : undefined;
     const map = anchor ? byLine : byFile;
     const key = anchor ?? file.id;
     map.set(key, [...(map.get(key) ?? []), comment]);

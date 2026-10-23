@@ -1,18 +1,21 @@
-import { lineAnchor, type ReviewFindingView } from './reviewWorkspace';
+import type { ReviewFindingView } from './reviewWorkspace';
 
 /**
  * Where the Review keys lead, in the order a review is read: J and K step
- * through the files, N and P through what still asks for something, V marks a
- * file viewed and moves on to the next unviewed one, [ and ] step through the
- * stages of a walkthrough, and a place is what G keeps across the modes. Each
- * answer is a target; moving the code there is the caller's.
+ * through the files, [ and ] through a walkthrough's stages, N and P through
+ * what still asks for something, and V marks a file viewed and moves on to the
+ * next unviewed one. Each answer is a target; moving the code there is the
+ * caller's.
  */
 
-/** The next or previous file, stopping at the ends; with none current, the first. */
-export function stepFile(files: readonly string[], current: string | undefined, delta: 1 | -1): string | undefined {
-  const position = current === undefined ? -1 : files.indexOf(current);
-  if (position < 0) return files[0];
-  return files[Math.min(files.length - 1, Math.max(0, position + delta))];
+/** The two ways to read a review: the walkthrough, stage by stage, or the complete diff. */
+export type ReviewMode = 'guide' | 'diff';
+
+/** The next or previous item of an order (files, stages), stopping at the ends; with none current, the first. */
+export function stepThrough(order: readonly string[], current: string | undefined, delta: 1 | -1): string | undefined {
+  const position = current === undefined ? -1 : order.indexOf(current);
+  if (position < 0) return order[0];
+  return order[Math.min(order.length - 1, Math.max(0, position + delta))];
 }
 
 /** Something that still asks for the person: an open finding or an open discussion. */
@@ -52,25 +55,4 @@ export function stepFeedback(order: readonly FeedbackRef[], current: FeedbackRef
 /** After `fileId` is marked viewed, the first file after it, in reading order, not yet viewed. */
 export function nextUnviewed(files: readonly string[], fileId: string, viewed: ReadonlySet<string>): string | undefined {
   return files.slice(files.indexOf(fileId) + 1).find((candidate) => !viewed.has(candidate));
-}
-
-/** A stage of a walkthrough, with its files in reading order. */
-export interface ReviewStageRef { id: string; fileIds: readonly string[] }
-
-/**
- * The next or previous stage from the one holding the current file, stopping at
- * the ends; with no current file, the first stage. A review without stages has none.
- */
-export function stepStage(stages: readonly ReviewStageRef[], currentFileId: string | undefined, delta: 1 | -1): ReviewStageRef | undefined {
-  const position = currentFileId === undefined ? -1 : stages.findIndex((stage) => stage.fileIds.includes(currentFileId));
-  if (position < 0) return stages[0];
-  return stages[Math.min(stages.length - 1, Math.max(0, position + delta))];
-}
-
-/** A place both modes can open: a file, and the line in it when one is known (`lineAnchor`). */
-export interface ReviewPlace { fileId: string; lineAnchor?: string }
-
-/** The place to keep for a file and, when the person is on one, a line of it. */
-export function reviewPlace(file: { id: string; path: string }, line?: { side: 'NEW' | 'OLD'; line: number }): ReviewPlace {
-  return line ? { fileId: file.id, lineAnchor: lineAnchor(file.path, line.side, line.line) } : { fileId: file.id };
 }

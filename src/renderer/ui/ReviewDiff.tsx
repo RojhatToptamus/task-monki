@@ -14,6 +14,7 @@ export function ReviewDiff({ model }: { model: ReviewModel }) {
   const { anchors, focusedFile, commentDraft, selection } = model;
   const general = { findings: anchors.findings.general, discussions: anchors.discussions.general };
   const worktree = model.props.historical ? undefined : model.props.worktree;
+  const askable = Boolean(model.props.onAskAboutFile) && !model.props.historical;
   return (
     <div className="tm-review__diff">
       {model.brief ? <ReviewBrief content={model.brief} folded={model.briefFolded} onFoldedChange={model.actions.foldBrief} /> : null}
@@ -40,6 +41,7 @@ export function ReviewDiff({ model }: { model: ReviewModel }) {
             canComment={model.canComment}
             exactChanges={model.exactChanges}
             worktree={worktree}
+            askable={askable}
             fullScreen={focusedFile === id}
             hidden={Boolean(focusedFile) && focusedFile !== id}
           />

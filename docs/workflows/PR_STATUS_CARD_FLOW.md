@@ -152,17 +152,21 @@ platform, each an explicit click:
   override that choice. A merge that landed is not reported as failed when the
   reading after it fails; the next refresh records it.
 - Reply on GitHub lists each discussion the agent answered Fixed or Not
-  changed, with a reply written from the answer ("Fixed in <head>. <note>")
-  that the person edits or leaves out, Resolve thread for a resolvable thread
-  (checked for Fixed: the agent's answer is its report, so resolving stays the
-  person's call), and, on GitHub, Ask <reviewer> to review again for each
-  reviewer who requested changes. A thread takes its reply in place; a review
-  or a comment, which has no thread, takes one comment that quotes what each
-  reply answers. A refused reply does not stop the rest, and the dialog keeps
-  each refusal with its reason; a reply that landed while resolving its thread
-  failed stays in view, marked replied, and is not posted again. A reply that
-  lands also clears what the person typed under that discussion in the Review
-  tab; a refused one keeps it. With every reply posted and no one left to ask,
+  changed, with the agent's note quoted above the reply for the person alone,
+  never posted, and a reply in the person's voice that they write, edit or
+  leave out. It starts as "Changed in <head>." only when the agent answered
+  Fixed and the thread's file changed since the review the request followed
+  (`readReviewChanges`, from the code that review read to the worktree, which
+  the pull request holds by then); otherwise it starts empty. Resolve thread,
+  for a resolvable thread, starts unchecked: the agent's answer is its report,
+  so resolving is the person's call. On GitHub it offers Ask <reviewer> to
+  review again for each reviewer who requested changes. A thread takes its
+  reply in place; a review or a comment, which has no thread, takes one comment
+  that quotes what each reply answers. A refused reply does not stop the rest,
+  and the dialog keeps each refusal with its reason; a reply that landed while
+  resolving its thread failed stays in view, marked replied, and is not posted
+  again. A reply that lands also clears what the person typed under that
+  discussion in the Review tab; a refused one keeps it. With every reply posted and no one left to ask,
   only Close remains; while posting cannot start, the dialog says why ("Write
   each reply first", "Choose a reply first").
   `PR_REPLIES_POSTED` records which discussions were answered: a review's answer
@@ -170,12 +174,13 @@ platform, each an explicit click:
   again until a later request sends that discussion to the agent anew.
 - In the Review tab, each open thread ends in a reply row, so a reply is
   written where the thread is read and can be checked against its code first.
-  An agent's answer to the thread is where the reply starts and Resolve thread
-  starts checked for Fixed, as in the dialog; the reply goes through the same
-  path and the same record. The agent's answer only fills the field: Task Monki
-  keeps just what the person typed, so a reply posted from the dialog does not
-  come back in the row. The check on a thread's head resolves it, or reopens
-  a resolved one, with no reply (GitHub's `resolveReviewThread` and
+  Once the agent answered the thread, its note is quoted above the reply row
+  for the person alone, and the reply starts as in the dialog, from "Changed in
+  <head>." or empty, with Resolve thread unchecked; the reply goes through the
+  same path and the same record. The drafted fact only fills the field: Task
+  Monki keeps just what the person typed, so a reply posted from the dialog
+  does not come back in the row. The check on a thread's head resolves it, or
+  reopens a resolved one, with no reply (GitHub's `resolveReviewThread` and
   `unresolveReviewThread`, GitLab's `resolved` on the discussion), and
   `PR_REPLIES_POSTED` records it as resolved or reopened. Each write reads the
   pull request again afterwards, and the worktree's evidence is recorded only

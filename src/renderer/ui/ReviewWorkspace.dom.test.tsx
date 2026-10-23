@@ -4,8 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_REVIEW_DRAFT, type ArtifactRecord, type TaskReviewDraft } from '../../shared/contracts';
 import type { DiscussionView } from '../model/pullRequestFeedback';
 import { planReviewRequest } from '../model/reviewFollowUp';
-import { reviewPlace } from '../model/reviewNavigation';
-import type { ReviewFindingView } from '../model/reviewWorkspace';
+import type { ReviewRoundView } from '../model/reviewRounds';
+import { lineAnchor, type ReviewFindingView } from '../model/reviewWorkspace';
 import { ReviewWorkspace, type ReviewWorkspaceProps } from './ReviewWorkspace';
 
 const api = vi.hoisted(() => ({ readArtifact: vi.fn(), readReviewChanges: vi.fn() }));
@@ -311,6 +311,65 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(onSubmit).toHaveBeenCalledOnce();
   });
 
+  it('settles an answered item only when the person accepts its answer, and sends one again as their own comment', async () => {
+    api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
+    const round: Omit<ReviewRoundView, 'accepted'> = {
+      instructionId: 'request-1', reviewRunId: 'review-1', at: '2026-07-07T10:00:00.000Z', answeredAt: '2026-07-07T10:20:00.000Z',
+      request: { reviewRunId: 'review-1', items: [
+        { number: 1, kind: 'FINDING', findingId: 'f1', severity: 'MAJOR', title: 'Limiter state is per process', path: 'src/rateLimit.ts', line: 1 },
+        { number: 2, kind: 'COMMENT', path: 'src/rateLimit.ts', side: 'NEW', line: 1, text: 'Which window?' }
+      ] },
+      answers: [{ item: 1, outcome: 'FIXED', note: 'Moved to Redis.' }, { item: 2, outcome: 'NOT_CHANGED', note: 'One minute stays.' }]
+    };
+    const decided: Array<[number, string]> = [];
+    const onSubmit = vi.fn();
+    function Answered() {
+      const [accepted, setAccepted] = useState<ReadonlySet<number>>(new Set());
+      const onDecide = async (item: number, kind: 'ACCEPT' | 'REOPEN') => {
+        decided.push([item, kind]);
+        setAccepted((current) => new Set(kind === 'ACCEPT' ? [...current, item] : [...current].filter((number) => number !== item)));
+      };
+      return <Harness review={{ status: 'STALE', runId: 'review-1' }} onSubmit={onSubmit} answers={{ agent: 'Codex', round: { ...round, accepted }, onDecide }}
+        brief={{ round: { key: round.instructionId, request: round.request, answers: round.answers, accepted } }} />;
+    }
+    render(<Answered />);
+
+    // The agent's answer is the band's state under its mark, and its note is quoted under its name.
+    const finding = await screen.findByRole('article', { name: 'Major finding: Limiter state is per process' });
+    expect(within(finding).getByText('Fixed')).toBeDefined();
+    expect(within(finding).getByText('Moved to Redis.').closest('figure')?.textContent).toContain('Codex');
+    // The person's comment went with the request, so it is back on its line with its own answer.
+    const comment = document.querySelector<HTMLElement>('[data-comment-id="request:request-1:2"]')!;
+    expect(within(comment).getByText('Which window?')).toBeDefined();
+    expect(within(comment).getByText('Not changed')).toBeDefined();
+    expect(within(comment).queryByRole('button', { name: 'Edit comment' })).toBeNull();
+
+    // The agent's Fixed settles nothing; accepting it does, and folds the finding to a line the brief agrees with.
+    fireEvent.click(within(finding).getByRole('button', { name: 'Accept answer' }));
+    await waitFor(() => expect(document.querySelector('[data-finding-id="f1"]')?.textContent).toContain('Accepted'));
+    expect(decided).toEqual([[1, 'ACCEPT']]);
+    const answers = screen.getByRole('list', { name: 'Answers to the review request' });
+    expect(within(answers).getByText('Accepted')).toBeDefined();
+    expect(within(answers).getByText('Not changed')).toBeDefined();
+    fireEvent.click(within(document.querySelector<HTMLElement>('[data-finding-id="f1"]')!).getByRole('button', { name: 'Reopen' }));
+    await waitFor(() => expect(screen.getByRole('article', { name: 'Major finding: Limiter state is per process' })).toBeDefined());
+    expect(decided).toEqual([[1, 'ACCEPT'], [1, 'REOPEN']]);
+
+    // Sent again, an answered item is the person's comment on its lines, starting from a quote of it; an out-of-date
+    // review's finding never goes as a finding again.
+    fireEvent.click(within(screen.getByRole('article', { name: 'Major finding: Limiter state is per process' })).getByRole('button', { name: 'Add to request' }));
+    const field = screen.getByLabelText('Comment') as HTMLTextAreaElement;
+    expect(field.value).toBe('> Limiter state is per process\n\n');
+    expect(field.selectionStart).toBe(field.value.length);
+    fireEvent.change(field, { target: { value: `${field.value}Still one bucket per replica.` } });
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      includedFindingIds: [],
+      comments: [expect.objectContaining({ path: 'src/rateLimit.ts', side: 'NEW', line: 1, text: '> Limiter state is per process\n\nStill one bucket per replica.' })]
+    }));
+  });
+
   it('shows every change for an out-of-date review when nothing changed since it, never an empty scope', async () => {
     api.readArtifact.mockImplementation(async () => diffFor('src/rateLimit.ts'));
     render(<Harness
@@ -357,6 +416,13 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(within(file).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
     expect(within(file).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
     expect(api.readReviewChanges).toHaveBeenCalledWith({ taskId: expect.any(String), reviewRunId: 'review-1' });
+    // Before a walkthrough the Guide reads these same files, and their removed lines take no comment there either.
+    fireEvent.click(screen.getByRole('button', { name: 'Guide' }));
+    const facts = screen.getByRole('region', { name: 'src/rateLimit.ts' });
+    fireEvent.click(within(facts).getByRole('button', { name: 'Expand src/rateLimit.ts' }));
+    expect(within(facts).queryByRole('button', { name: 'Comment on removed line 1' })).toBeNull();
+    expect(within(facts).getByRole('button', { name: 'Comment on line 1' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Diff' }));
 
     // Once a re-review is current, the previous round is offered, not led with.
     rerender(<Harness
@@ -365,6 +431,35 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     />);
     expect(await screen.findByRole('region', { name: 'src/other.ts' })).toBeDefined();
     expect(screen.getByRole('button', { name: /Changes to show/ }).textContent).toContain('All changes');
+  });
+
+  it('puts an answered comment on the line of the reviewed code it was written on, even after the agent moved the lines', async () => {
+    api.readArtifact.mockImplementation(async () => `# Git diff evidence\n\n${section('Committed diff', fileDiff('src/cli.js', '@@ -0,0 +1,5 @@\n+const usage = \'Usage\';\n+\n+const name = process.argv[2];\n+console.log(name ? greet(name) : usage);\n+export {};'))}\n${section('Staged diff', 'No staged diff.')}\n${section('Unstaged diff', 'No unstaged diff.')}`);
+    // The agent put two lines above the one the person commented on: line 2 of the reviewed code is now line 4.
+    api.readReviewChanges.mockResolvedValue({
+      status: 'READY', reviewRunId: 'review-1', tree: 'tree-1',
+      diff: fileDiff('src/cli.js', "@@ -1,3 +1,5 @@\n+const usage = 'Usage';\n+\n const name = process.argv[2];\n-console.log(greet(name));\n+console.log(name ? greet(name) : usage);\n export {};")
+    });
+    const round: ReviewRoundView = {
+      instructionId: 'request-1',
+      at: '2026-07-07T10:20:00.000Z',
+      request: { reviewRunId: 'review-1', items: [{ number: 1, kind: 'COMMENT', path: 'src/cli.js', side: 'NEW', line: 2, text: 'Print the usage without a name.' }] },
+      answers: [{ item: 1, outcome: 'FIXED', note: 'It prints the usage now.' }],
+      answeredAt: '2026-07-07T10:25:00.000Z',
+      reviewRunId: 'review-1',
+      accepted: new Set()
+    };
+    render(<Harness
+      findings={[]}
+      review={{ status: 'STALE', runId: 'review-1' }}
+      changesSince={{ reviewRunId: 'review-1', label: 'Since the review', refreshKey: 'git-2' }}
+      answers={{ agent: 'Codex', round }}
+    />);
+
+    const file = await screen.findByRole('region', { name: 'src/cli.js' });
+    const band = await within(file).findByText('Print the usage without a name.');
+    const row = band.closest('.tm-review-line-group')!.querySelector('code')!.textContent;
+    expect(row).toBe('Removed: console.log(greet(name));');
   });
 
   it('says when the agent is waiting on the person instead of the review’s verdict', async () => {
@@ -432,16 +527,17 @@ describe('ReviewWorkspace pull request discussions', () => {
     expect(within(opened).queryByRole('button', { name: 'Add to request' })).toBeNull();
   });
 
-  it('answers a thread where it is read: a reply starts from the agent\'s answer and posts with the resolving chosen', async () => {
+  it('answers a thread where it is read: a reply starts from the change seen, quotes the agent for the person alone, and resolves only when asked', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts', 'const window = 60;'));
     const onReplyToDiscussion = vi.fn(async () => undefined);
     const onResolveDiscussion = vi.fn(async () => undefined);
     const suggestion = discussion('suggest', { commentCount: 1, comments: [
       { author: 'alice', createdAt: '2026-07-07T09:00:00.000Z', body: 'Name it:\n\n```suggestion\nconst windowSeconds = 60;\n```', truncated: false }
     ] });
+    const answered = discussion('open', { sent: { at: '2026-07-07T10:00:00.000Z', outcome: 'FIXED', note: 'Returns seconds now.', answeredAt: '2026-07-07T10:20:00.000Z' } });
     const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
-      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
-    render(<Harness findings={[]} review={undefined} discussions={[discussion('open'), suggestion]} discussionsOnLines
+      outcome: 'FIXED' as const, note: 'Returns seconds now.', body: 'Changed in 1a2b3c4.', resolvable: true }]]);
+    render(<Harness findings={[]} review={undefined} discussions={[answered, suggestion]} discussionsOnLines answers={{ agent: 'Codex' }}
       replyDrafts={drafts} onReplyToDiscussion={onReplyToDiscussion} onResolveDiscussion={onResolveDiscussion} />);
     await screen.findAllByRole('article', { name: 'GitHub comment by alice' });
     const thread = (id: string) => document.querySelector<HTMLElement>(`article[data-discussion-id="${id}"]`)!;
@@ -451,7 +547,10 @@ describe('ReviewWorkspace pull request discussions', () => {
     expect(within(figure).getByText('const window = 60;')).toBeDefined();
     expect(within(figure).getByText('const windowSeconds = 60;')).toBeDefined();
 
-    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the agent's answer.
+    // The agent's answer is the thread's state, and its words are quoted above the reply row under its name, for the person alone.
+    expect(within(thread('open')).getByText('Fixed')).toBeDefined();
+    expect(within(thread('open')).getByText('Returns seconds now.').closest('figure')?.textContent).toContain('Codex');
+    // Every open thread ends in its reply row; R puts the caret there, and the reply starts from the change Task Monki saw.
     const input = within(thread('open')).getByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
     expect(input.value).toBe('');
     expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
@@ -459,14 +558,14 @@ describe('ReviewWorkspace pull request discussions', () => {
     fireEvent.keyDown(thread('open'), { key: 'r' });
     expect(document.activeElement).toBe(input);
     fireEvent.focusIn(input);
-    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
-    // Resolving stays the person's call.
+    expect(input.value).toBe('Changed in 1a2b3c4.');
+    // Resolving is the person's call, even on Fixed.
     const resolve = within(thread('open')).getByRole('checkbox', { name: 'Resolve thread' });
-    expect((resolve as HTMLInputElement).checked).toBe(true);
+    expect((resolve as HTMLInputElement).checked).toBe(false);
     fireEvent.click(resolve);
-    fireEvent.change(input, { target: { value: 'Returns seconds now.' } });
+    fireEvent.change(input, { target: { value: 'Changed in 1a2b3c4. Seconds now.' } });
     fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Returns seconds now.', false));
+    await waitFor(() => expect(onReplyToDiscussion).toHaveBeenCalledWith('open', 'Changed in 1a2b3c4. Seconds now.', true));
     // Posted, the row is empty again and folds back to its field.
     await waitFor(() => expect(input.value).toBe(''));
     expect(within(thread('open')).queryByRole('checkbox', { name: 'Resolve thread' })).toBeNull();
@@ -487,13 +586,13 @@ describe('ReviewWorkspace pull request discussions', () => {
       else typed.set(discussionId, text);
     };
     const drafts = new Map([['open', { discussionId: 'open', kind: 'THREAD' as const, author: 'alice', summary: 'Return seconds here.',
-      outcome: 'FIXED' as const, body: 'Fixed in 1a2b3c4. Returns seconds now.', resolvable: true }]]);
+      outcome: 'FIXED' as const, body: 'Changed in 1a2b3c4.', resolvable: true }]]);
     const shared = { findings: [], review: undefined, discussionsOnLines: true, replyTexts: typed, onReplyTextChange,
       onReplyToDiscussion: vi.fn(async () => undefined) };
     const first = render(<Harness {...shared} discussions={[discussion('open')]} replyDrafts={drafts} />);
     const input = await screen.findByRole('textbox', { name: 'Reply to alice' }) as HTMLTextAreaElement;
     fireEvent.focusIn(input);
-    expect(input.value).toBe('Fixed in 1a2b3c4. Returns seconds now.');
+    expect(input.value).toBe('Changed in 1a2b3c4.');
     first.unmount();
 
     // Posted from the Overview's dialog, the answer leaves the drafts and the thread waits on alice.
@@ -616,10 +715,11 @@ describe('ReviewWorkspace reading position', () => {
     expect(rows[1]!.getAttribute('aria-current')).toBe('true');
   });
 
-  it('marks each row with the place a walkthrough and G point at', async () => {
+  it('marks each row with the place a walkthrough and G point at, whatever form the path comes in', async () => {
     render(<Harness findings={[]} />);
     const file = await screen.findByRole('region', { name: 'src/a.ts' });
-    const anchored = (side: 'NEW' | 'OLD') => file.querySelector(`[data-line-anchor="${reviewPlace({ id: 'src/a.ts', path: 'src/a.ts' }, { side, line: 1 }).lineAnchor}"]`);
+    // A removed line and an added one with the same number are two places.
+    const anchored = (side: 'NEW' | 'OLD') => file.querySelector(`[data-line-anchor="${lineAnchor('./src/a.ts', side, 1)}"]`);
     expect(anchored('OLD')?.querySelector('code')?.textContent).toBe('Removed: a');
     expect(anchored('NEW')?.querySelector('code')?.textContent).toBe('Added: b');
   });

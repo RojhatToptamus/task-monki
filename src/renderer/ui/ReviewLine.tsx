@@ -12,7 +12,7 @@ import { useReviewActions } from './useReviewModel';
  * It renders again only when its own inputs change, and carries its place
  * (`data-line-anchor`) for what points at a line.
  */
-export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, selected, commentable, tokens }: {
+export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line, index, selected, commentable, plain, tokens }: {
   path: string;
   fileId: string;
   blockId: string;
@@ -23,15 +23,18 @@ export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line
   selected: boolean;
   /** Pressing the number comments on the line. */
   commentable: boolean;
+  /** A new file's line, read as plain code: every line is added, which its file's head says once. */
+  plain?: boolean;
   /** The code's syntax colour, once its side is tokenized. */
   tokens?: TokenLine;
 }) {
   const actions = useReviewActions();
   const removed = line.kind === 'deletion';
   const number = removed ? line.oldLine : line.newLine;
+  const kind = plain ? 'context' : line.kind;
   return (
     <div
-      className={`tm-diffline tm-diffline--${line.kind} tm-diffline--annotated${selected ? ' tm-diffline--selected' : ''}`}
+      className={`tm-diffline tm-diffline--${kind} tm-diffline--annotated${selected ? ' tm-diffline--selected' : ''}`}
       data-line-anchor={number === undefined ? undefined : lineAnchor(path, removed ? 'OLD' : 'NEW', number)}
       onContextMenu={(event) => actions.openPathMenu(path, event, line.newLine ?? line.oldLine)}
     >
@@ -55,9 +58,9 @@ export const ReviewLine = memo(function ReviewLine({ path, fileId, blockId, line
         {number ?? ''}
       </span>
       <span className="tm-diffline__marker" aria-hidden="true">
-        {line.kind === 'addition' ? '+' : removed ? '−' : ''}
+        {kind === 'addition' ? '+' : removed ? '−' : ''}
       </span>
-      <SyntaxCode text={diffLineCode(line)} tokens={tokens} kind={line.kind} />
+      <SyntaxCode text={diffLineCode(line)} tokens={tokens} kind={kind} />
     </div>
   );
 });

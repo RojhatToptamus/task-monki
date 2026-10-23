@@ -5,7 +5,7 @@ import type { AgentConversationRecords } from '../model/agentRecords';
 import { runtimeExecutionUnavailableReason } from '../model/runtimeReadiness';
 import { AgentModelSelector } from './AgentModelSelector';
 import { isActiveRunStatus } from '../model/agentSession';
-import { askPlaceholder, askSubjectLabel, sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions } from '../model/sideQuestions';
+import { askPlaceholder, askSubjectLabel, sideQuestionFollowUp, sideQuestionSnapshotNote, sideThreadQuestions, type AskSubjectNames } from '../model/sideQuestions';
 import { canStopTaskRun } from '../model/runProgress';
 import { ConversationPanel } from './ConversationPanel';
 import { Tooltip } from './Tooltip';
@@ -25,13 +25,13 @@ export interface AskConversation {
 /**
  * Ask: questions about the task, answered by a fresh read-only session on the model
  * chosen here, the task's own by default, so the implementation keeps working. A
- * question can be about a finding or lines of the diff. Nothing here reaches the
- * agent unless the person uses an answer; while the agent works, answers read a
- * snapshot of the worktree.
+ * question can be about a finding, lines or a file of the diff, an intent of the
+ * walkthrough, or a discussion. Nothing here reaches the agent unless the person
+ * uses an answer; while the agent works, answers read a snapshot of the worktree.
  */
 export function AskPanel({
   conversation, defaultModel, models, runtimes, onDiscoverModels, threadId, implementationActive, draft, onDraftChange,
-  subject, onSubjectChange, findingTitles, answerAction, focusToken, onClose, returnFocusRef, docked, autoFocus
+  subject, onSubjectChange, subjectNames, answerAction, focusToken, onClose, returnFocusRef, docked, autoFocus
 }: {
   conversation: AskConversation;
   /** The task's runtime and model, which answer until another is chosen. */
@@ -47,8 +47,8 @@ export function AskPanel({
   /** What the next question is about; cleared once it is asked. */
   subject?: AskSubject;
   onSubjectChange(subject: AskSubject | undefined): void;
-  /** The current review's finding titles, so a question names the finding it was about. */
-  findingTitles: ReadonlyMap<string, string>;
+  /** What the task's findings, intents and discussions are called, so a question names what it was about. */
+  subjectNames: AskSubjectNames;
   /** What an answer can be used for where the panel is open: a follow-up, or the review request. */
   answerAction: { label: string; onUse(text: string): void };
   /** Changes when the person asks from elsewhere, such as a finding, so the field takes focus. */
@@ -129,7 +129,7 @@ export function AskPanel({
         above: subject ? (
           <div className="tm-ask__subject">
             <CornerUpLeft size={13} aria-hidden="true" />
-            <span>{askSubjectLabel(subject, findingTitles)}</span>
+            <span>{askSubjectLabel(subject, subjectNames)}</span>
             <Tooltip label="Ask about the whole task instead">
               <button type="button" className="tm-iconbtn" aria-label="Ask about the whole task instead" onClick={() => onSubjectChange(undefined)}>
                 <X size={13} aria-hidden="true" />
@@ -145,7 +145,7 @@ export function AskPanel({
         const snapshot = sideQuestionSnapshotNote(question);
         return (
           <div key={turn.key} className="tm-side-conversation__exchange">
-            {question?.subject ? <p className="tm-ask__about">{askSubjectLabel(question.subject, findingTitles)}</p> : null}
+            {question?.subject ? <p className="tm-ask__about">{askSubjectLabel(question.subject, subjectNames)}</p> : null}
             <Turn turn={turn} onReadArtifact={conversation.readArtifact} />
             {snapshot ? <p className="tm-side-conversation__note">{snapshot}</p> : null}
             {answer ? (

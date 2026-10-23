@@ -59,7 +59,7 @@ function Harness(props: { conversation: AskConversation; implementationActive?: 
       onDraftChange={setDraft}
       subject={subject}
       onSubjectChange={setSubject}
-      findingTitles={new Map([['f1', 'Retries skip the backoff']])}
+      subjectNames={{ findings: new Map([['f1', 'Retries skip the backoff']]), discussions: new Map() }}
       answerAction={{ label: 'Use in follow-up', onUse: props.onUse ?? (() => undefined) }}
       onClose={() => undefined}
       docked

@@ -6,7 +6,9 @@ import type {
   ReplyToPullRequestResult
 } from '../../shared/contracts';
 import type { ReplyDraft } from '../model/pullRequestFeedback';
+import { REVIEW_OUTCOME_LABELS } from '../model/reviewRounds';
 import { useDialogFocusBoundary } from './dialogFocus';
+import { AnswerQuote } from './ReviewRound';
 import { StatusGlyph } from './StatusBadge';
 
 /** A method's segment and the verb its merge button says, in the platform's words. */
@@ -140,13 +142,17 @@ interface ReplyState {
 }
 
 /**
- * The agent's answers to a round, as replies the person posts where each
- * discussion lives. Nothing is posted until the person posts it, every reply
- * is theirs to edit or leave out, and resolving a thread is their call: the
- * agent's "Fixed" is its own report, not a verdict.
+ * The discussions the agent answered, each with a reply the person writes and
+ * posts where the discussion lives. A reply starts from the fact Task Monki
+ * observed, or from nothing; the agent's own words are quoted above it for the
+ * person alone and never posted. Nothing is posted until the person posts it,
+ * every reply is theirs to edit or leave out, and resolving a thread is their
+ * call, unchecked until they check it: the agent's "Fixed" is its own report,
+ * not a verdict.
  */
 export function ReplyToReviewersModal({
   platform,
+  agent,
   drafts,
   reviewers,
   onSubmit,
@@ -154,6 +160,8 @@ export function ReplyToReviewersModal({
   fallbackReturnFocusRef
 }: {
   platform: 'GitHub' | 'GitLab';
+  /** Who answered: its name heads each quoted answer. */
+  agent: string;
   drafts: ReplyDraft[];
   /** Reviewers who asked for changes, who can be asked to review again from here. */
   reviewers: string[];
@@ -162,7 +170,7 @@ export function ReplyToReviewersModal({
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [replies, setReplies] = useState<Record<string, ReplyState>>(() => Object.fromEntries(
-    drafts.map((draft) => [draft.discussionId, { include: true, body: draft.body, resolve: draft.resolvable && draft.outcome === 'FIXED' }])
+    drafts.map((draft) => [draft.discussionId, { include: true, body: draft.body, resolve: false }])
   ));
   const [asked, setAsked] = useState<Set<string>>(() => new Set(reviewers));
   const [busy, setBusy] = useState(false);
@@ -241,11 +249,12 @@ export function ReplyToReviewersModal({
                     onChange={(event) => update(draft.discussionId, { include: event.target.checked })} />
                   <span className="tm-reply__author">{draft.author ? `@${draft.author}` : 'Comment'}</span>
                   {draft.location ? <span className="tm-reply__where">{draft.location}</span> : null}
-                  <span className="tm-reply__outcome" data-outcome={draft.outcome}>{draft.outcome === 'FIXED' ? 'Fixed' : 'Not changed'}</span>
+                  <span className="tm-reply__outcome" data-outcome={draft.outcome}>{REVIEW_OUTCOME_LABELS[draft.outcome]}</span>
                 </label>
                 <p className="tm-reply__summary">{draft.summary}</p>
                 {state.include ? (
                   <>
+                    {draft.note ? <AnswerQuote agent={agent} at={draft.answeredAt} note={draft.note} /> : null}
                     <textarea id={bodyId} aria-label={`Reply to ${draft.author ? `@${draft.author}` : 'the comment'}`} rows={2}
                       value={state.body} disabled={busy} onChange={(event) => update(draft.discussionId, { body: event.target.value })} />
                     {draft.resolvable ? (

@@ -7,7 +7,9 @@ import { isTraveling } from './travel';
  * to `offset(scroller)`. It returns that element's `attribute` value, and a setter
  * for a navigation that decides it. It follows the person's own scrolling: a
  * travel's scrolling is never read back, so a navigation's choice holds until the
- * person scrolls. It reads again when `itemsKey` names a new set of items.
+ * person scrolls, and once they scroll above every item (an overview, a brief),
+ * none is being read. It reads again when `itemsKey` names a new set of items,
+ * keeping what a navigation chose when no item is in the band.
  *
  * `offset` must keep its identity between renders.
  */
@@ -24,20 +26,20 @@ export function useScrollSpy(
     if (!scroller) return;
     let frame = 0;
     let scheduled = false;
-    const read = () => {
+    const read = (scrolled: boolean) => {
       const items = scroller.querySelectorAll(`[${attribute}]:not([hidden])`);
       const top = scroller.getBoundingClientRect().top + scroller.clientTop;
       const index = topmostInBand(items.length, (position) => items[position]!.getBoundingClientRect(), top, top + offset(scroller));
       const value = index === undefined ? undefined : items[index]!.getAttribute(attribute) ?? undefined;
-      if (value !== undefined) setCurrent(value);
+      if (value !== undefined || scrolled) setCurrent(value);
     };
     // One read a frame, however many scroll events it brings.
     const onScroll = () => {
       if (scheduled || isTraveling(scroller)) return;
       scheduled = true;
-      frame = requestAnimationFrame(() => { scheduled = false; read(); });
+      frame = requestAnimationFrame(() => { scheduled = false; read(true); });
     };
-    read();
+    read(false);
     scroller.addEventListener('scroll', onScroll, { passive: true });
     const resize = new ResizeObserver(onScroll);
     resize.observe(scroller);

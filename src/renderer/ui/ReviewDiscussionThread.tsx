@@ -7,7 +7,9 @@ import { formatShortAge } from '../model/timeAgo';
 import { Avatar } from './Avatar';
 import { DisclosureChevron } from './DisclosureChevron';
 import { MessageMarkdown } from './MessageMarkdown';
+import { AnswerState, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
 import { SUBMIT_SHORTCUT, Tooltip } from './Tooltip';
+import { AgentMark } from './UiIcons';
 import { useClampOverflow } from './useClampOverflow';
 
 /** Replies shown before the rest fold behind a count. */
@@ -17,7 +19,7 @@ const REPLIES_SHOWN = 3;
 interface DiscussionReply {
   /** What the person typed and did not post. */
   text?: string;
-  /** The agent's answer to it, drafted as a reply. */
+  /** The agent answered it: where the person's reply starts. */
   draft?: ReplyDraft;
   /** Who replies: the person's account on the platform. */
   viewer?: string;
@@ -35,11 +37,14 @@ interface DiscussionReply {
  * the file under the line it is about, each comment under its author with their
  * mark in the gutter, its state on the platform, and a reply row under the
  * conversation. Add to request puts it in what the agent receives; nothing goes
- * unless added. A resolved thread, or a remark that asks for nothing, folds to
- * one line that opens it.
+ * unless added. Once the agent answered it, its state is the answer, quoted for
+ * the person alone above the reply row. A resolved thread, or a remark that asks
+ * for nothing, folds to one line that opens it.
  */
-export function ReviewDiscussionThread({ discussion, location, about, folded: foldedByDefault, focused, inRequest, onFocus, onToggleInclude, reply, onResolve, codeLines }: {
+export function ReviewDiscussionThread({ discussion, answer, location, about, folded: foldedByDefault, focused, inRequest, onFocus, onToggleInclude, onAsk, reply, onResolve, codeLines }: {
   discussion: DiscussionView;
+  /** The agent's answer to it, while nothing was said on it since. */
+  answer?: ItemAnswer;
   /** Its file and lines, above the files where no row says it. */
   location?: string;
   /** Its lines in words, at its file's top or under a range: "Line 12", "Lines 4–9". */
@@ -50,6 +55,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   inRequest: boolean;
   onFocus(): void;
   onToggleInclude?(discussionId: string): void;
+  /** Opens Ask about it. */
+  onAsk?(): void;
   /** Answering it on the platform, while the pull request is open. */
   reply?: DiscussionReply;
   /** Resolves the thread, or reopens it; rejects with the platform's reason. */
@@ -82,6 +89,8 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
   const platform = remoteProviderName(discussion.provider);
   const author = discussionAuthor(discussion) ?? 'Unknown';
   const state = discussionStateWord(discussion);
+  // What happened on the platform since outranks the agent's answer: resolved, or the person replied there.
+  const answered = answer && !discussion.resolved && !discussion.replied ? answer : undefined;
   const verdict = discussion.kind === 'REVIEW' ? reviewVerdictWords(discussion.reviewState) : undefined;
   const openLink = discussion.url ? (
     <Tooltip label={`Open on ${platform}`}>
@@ -127,9 +136,10 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           {verdict ? <span className="tm-review-thread__round">{verdict}</span> : null}
           <CommentAge comment={first} />
           <span className="tm-review-thread__spacer" />
-          {state ? <span className="tm-review-thread__round">{state}</span> : null}
+          {answered ? <AnswerState answer={answered} /> : state ? <span className="tm-review-thread__round">{state}</span> : null}
           <span className="tm-review-thread__actions">
-            {onToggleInclude && !discussion.resolved ? (
+            {/* An answered thread goes in the request again from under the answer, in the person's words. */}
+            {onToggleInclude && !discussion.resolved && (!answered?.onRequestAgain || inRequest) ? (
               <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
                 <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => {
                   onToggleInclude(discussion.id);
@@ -137,6 +147,13 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
                   if (inRequest && foldedByDefault && !opened) keepKeys();
                 }}>
                   {inRequest ? <><Check size={13} aria-hidden="true" />In request</> : 'Add to request'}
+                </button>
+              </Tooltip>
+            ) : null}
+            {onAsk ? (
+              <Tooltip label="Ask about this discussion">
+                <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Ask about this discussion" onClick={onAsk}>
+                  <AgentMark />
                 </button>
               </Tooltip>
             ) : null}
@@ -191,6 +208,7 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
           ))}
         </div>
       ) : null}
+      {answer ? <RequestItemAnswer answer={answer} /> : null}
       {resolveError ? <p className="form-error tm-review-thread__error" role="alert">{resolveError}</p> : null}
       {/* Answering is the conversation's last row, as on the platform. */}
       {reply && !discussion.resolved ? (
@@ -203,9 +221,11 @@ export function ReviewDiscussionThread({ discussion, location, about, folded: fo
 
 /**
  * The reply row under a discussion: the person's mark and a field that grows
- * into the composer when they write. The agent's answer, when it has one, is
- * where the reply starts; resolving is the person's choice beside Reply.
- * Nothing posts until they post it.
+ * into the composer when they write. Once the agent answered, the reply starts
+ * from the fact Task Monki observed, "Changed in <head>.", or from nothing; the
+ * agent's own words stay quoted above, for the person alone. Resolving is the
+ * person's choice beside Reply, unchecked until they check it. Nothing posts
+ * until they post it.
  */
 function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
   reply: DiscussionReply;
@@ -220,7 +240,7 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
   const [text, setText] = useState(reply.text ?? '');
   const [resolve, setResolve] = useState(false);
   const [focused, setFocused] = useState(false);
-  // The agent's answer starts the reply once, the first time the person opens it.
+  // The drafted fact starts the reply once, the first time the person opens it.
   const [started, setStarted] = useState(Boolean(reply.text));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -263,11 +283,8 @@ function ReplyComposer({ reply, author, platform, resolvable, onWarning }: {
         setFocused(true);
         if (started) return;
         setStarted(true);
-        if (!text && reply.draft) {
-          // The agent's answer is only in the field: what is kept for the task is what the person typed.
-          setText(reply.draft.body);
-          setResolve(resolvable && reply.draft.outcome === 'FIXED');
-        }
+        // The drafted fact is only in the field: what is kept for the task is what the person typed.
+        if (!text && reply.draft?.body) setText(reply.draft.body);
       }}
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false); }}
     >

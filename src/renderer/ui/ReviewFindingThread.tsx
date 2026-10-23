@@ -5,6 +5,7 @@ import { findingLevel, formatFindingLocation } from '../model/findings';
 import { isBlockingFinding } from '../../shared/contracts';
 import type { ReviewFindingView } from '../model/reviewWorkspace';
 import { ActionMenu, type ActionMenuItem } from './ActionMenu';
+import { AnswerState, ReopenAnswer, RequestItemAnswer, type ItemAnswer } from './ReviewRound';
 import { Tooltip } from './Tooltip';
 import { AgentMark } from './UiIcons';
 
@@ -36,14 +37,18 @@ export function settledLabel(finding: ReviewFindingView): string {
  * its title line, always visible. Blocker and Major go in the request; a Minor or
  * Nit is added from its title line. Dismissing asks why (incorrect, intentional,
  * or not now), optionally with a note; the next review honours the reason. A
- * dismissed finding folds to a line that keeps the reason.
+ * dismissed finding folds to a line that keeps the reason. Once the agent
+ * answered it in the person's request, its state is the answer, and accepting
+ * the answer folds it to a line too.
  */
 export function ReviewFindingThread({
-  finding, round, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
+  finding, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
 }: {
   finding: ReviewFindingView;
   /** In a re-review: an earlier finding still open, or one the earlier review did not raise. */
   round?: 'STILL_OPEN' | 'NEW';
+  /** The agent's answer to it in the person's latest request. */
+  answer?: ItemAnswer;
   focused: boolean;
   actionable: boolean;
   inRequest: boolean;
@@ -88,6 +93,17 @@ export function ReviewFindingThread({
     );
   }
 
+  if (answer?.accepted) {
+    return (
+      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
+        <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
+        <span className="tm-review-answer__settled" title={finding.title}>{finding.title}</span>
+        <span>Accepted</span>
+        <ReopenAnswer answer={answer} />
+      </div>
+    );
+  }
+
   const blocking = isBlockingFinding(finding);
   const dismissItems: ActionMenuItem[] = [
     ...(Object.keys(DISMISS_REASON_LABELS) as ReviewFindingDismissReason[]).map((value) => ({
@@ -107,10 +123,11 @@ export function ReviewFindingThread({
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         {round ? <span className="tm-review-thread__round">{round === 'STILL_OPEN' ? 'Still open' : 'New'}</span> : null}
         <strong>{finding.title}</strong>
+        {answer ? <AnswerState answer={answer} /> : null}
         {actionable ? (
           <span className="tm-review-thread__actions">
-            {/* Blocker and Major are in the request already; a suggestion is added here. */}
-            {!blocking && onToggleInclude ? (
+            {/* Blocker and Major are in the request already; a suggestion is added here, or under the agent's answer once it has one. */}
+            {!blocking && (!answer || inRequest) && onToggleInclude ? (
               <Tooltip label={inRequest ? 'Take out of the request' : 'Add to the request'} shortcut="F">
                 <button type="button" className="ghost-button tm-review-thread__include" aria-pressed={inRequest} onClick={() => onToggleInclude(finding.id)}>
                   {inRequest ? <><Check size={13} aria-hidden="true" />In request</> : 'Add to request'}
@@ -141,6 +158,7 @@ export function ReviewFindingThread({
       <p className="tm-review-thread__why">{finding.explanation}</p>
       {finding.recommendation ? <p className="tm-review-thread__fix">{finding.recommendation}</p> : null}
       {!actionable ? <p className="tm-review-thread__earlier">From the earlier review</p> : null}
+      {answer ? <RequestItemAnswer answer={answer} /> : null}
       {dismissing && onDismiss ? (
         <form className="tm-review-thread__dismiss" onSubmit={(event) => { event.preventDefault(); void run(() => onDismiss(finding.id, reason, note.trim() || undefined)); }}>
           <div className="segmented" role="group" aria-label="Why dismiss it">

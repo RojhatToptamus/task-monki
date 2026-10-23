@@ -15,6 +15,8 @@ export interface ReviewBriefContent {
   round?: {
     request: ReviewRequestRecord;
     answers: readonly ReviewResponseAnswer[];
+    /** Items whose answer the person accepted. */
+    accepted?: ReadonlySet<number>;
     onShowItem?(item: ReviewRequestItem): void;
     /** Present when an answer waits on the person's decision. */
     onReply?(): void;
@@ -69,7 +71,7 @@ export function ReviewBrief({ content, folded, onFoldedChange }: {
                 Answers to your request
                 {round.onReply ? <button type="button" className="ghost-button button--sm" onClick={round.onReply}>Reply</button> : null}
               </h3>
-              <ReviewAnswers request={round.request} answers={round.answers} onShowItem={round.onShowItem} />
+              <ReviewAnswers request={round.request} answers={round.answers} accepted={round.accepted} onShowItem={round.onShowItem} />
             </div>
           ) : null}
         </div>

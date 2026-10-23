@@ -25,6 +25,8 @@ export interface ReviewFileSegment {
   end: string;
   /** What the run is, above it, such as a walkthrough's caption. */
   caption?: ReactNode;
+  /** The person just opened it: it fades in. */
+  entering?: boolean;
 }
 
 export interface ReviewFileUnitProps {
@@ -47,8 +49,10 @@ export interface ReviewFileUnitProps {
   exactChanges: boolean;
   /** The checkout the file opens from; absent for an earlier capture. */
   worktree?: Pick<WorktreeRecord, 'id' | 'taskId'>;
-  /** Words and flags the caller adds to the head, after the file's own. */
-  headWords?: ReactNode;
+  /** The file's menu offers Ask about it. */
+  askable?: boolean;
+  /** A new file read as plain code: every line is added, which the head's New says once. */
+  plain?: boolean;
   /** These runs, in this order, instead of every block. */
   segments?: readonly ReviewFileSegment[];
   /** A gap-style row after the runs that opens what they leave out, such as "3 more changes". */
@@ -86,6 +90,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
       selection={selection?.blockId === block.id ? selection : undefined}
       canComment={props.canComment}
       exactChanges={props.exactChanges}
+      plain={props.plain}
     />
   );
   return (
@@ -115,7 +120,6 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
         {file.oldPath ? <span className="tm-review-file__word">from <code>{file.oldPath}</code></span>
           : file.status === 'added' || file.status === 'deleted' ? <span className="tm-review-file__word">{file.status === 'added' ? 'New' : 'Deleted'}</span> : null}
         {file.invisibleCharacters ? <span className="tm-review-file__word" data-tone="waiting">Invisible characters</span> : null}
-        {props.headWords}
         <span className="tm-review-file__spacer" />
         {findings.length ? (
           <span className="tm-review-file__count" data-tone={findings.some(isBlockingFinding) ? 'blocked' : undefined}>{findingWords(findings)}</span>
@@ -127,7 +131,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
             <input type="checkbox" aria-label="Viewed" checked={viewed} onChange={() => actions.setFileViewed(file.id, !viewed)} />
           </label>
         </Tooltip>
-        <FileMenu file={file} worktree={props.worktree} canComment={props.canComment} wholeFile={props.wholeFile} />
+        <FileMenu file={file} worktree={props.worktree} canComment={props.canComment} askable={Boolean(props.askable)} wholeFile={props.wholeFile} />
         {/* The head's Expand and Collapse are the chevron's, so this control names full screen. */}
         {fullScreen === undefined ? null : (
           <ExpandToggle
@@ -161,7 +165,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
           {props.segments ? props.segments.map((segment) => {
             const block = file.blocks.find((candidate) => candidate.id === segment.blockId);
             return block ? (
-              <div key={`${segment.blockId}:${segment.start}`} className="tm-review-block">
+              <div key={`${segment.blockId}:${segment.start}`} className="tm-review-block" data-entering={segment.entering ? '' : undefined}>
                 {segment.caption}
                 {blockRows(block, segment)}
               </div>
@@ -189,7 +193,7 @@ export const ReviewFileUnit = memo(function ReviewFileUnit(props: ReviewFileUnit
  * found once per render. The whole block is coloured, so a run shown on its own
  * reads a comment or string opened above it.
  */
-const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, composer, selection, canComment, exactChanges }: {
+const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, composer, selection, canComment, exactChanges, plain }: {
   file: DiffFile;
   block: DiffBlock;
   segment?: ReviewFileSegment;
@@ -198,6 +202,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
   selection?: LineSelection;
   canComment: boolean;
   exactChanges: boolean;
+  plain?: boolean;
 }) {
   const actions = useReviewActions();
   const syntax = useDiffSyntax(file.path, block.lines, file.oldPath);
@@ -227,6 +232,7 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
           index={index}
           selected={Boolean(chosen && index >= chosen.start && index <= chosen.end)}
           commentable={canComment && number !== undefined && !(exactChanges && line.kind === 'deletion')}
+          plain={plain}
           tokens={syntax[index]}
         />
         {findings || discussions || comments || composer === key
@@ -237,11 +243,12 @@ const ReviewRows = memo(function ReviewRows({ file, block, segment, anchors, com
   });
 });
 
-/** A file's "…" menu: comment on the whole file, read it whole, then where it opens. */
-function FileMenu({ file, worktree, canComment, wholeFile }: {
+/** A file's "…" menu: comment on the whole file, ask about it, read it whole, then where it opens. */
+function FileMenu({ file, worktree, canComment, askable, wholeFile }: {
   file: DiffFile;
   worktree?: Pick<WorktreeRecord, 'id' | 'taskId'>;
   canComment: boolean;
+  askable: boolean;
   wholeFile: WholeFileState;
 }) {
   const actions = useReviewActions();
@@ -255,8 +262,9 @@ function FileMenu({ file, worktree, canComment, wholeFile }: {
         : undefined;
   const items: ActionMenuItem[] = [
     ...(canComment ? [{ id: 'comment', label: 'Comment on file', onSelect: () => actions.commentOnFile(file.id) }] : []),
+    ...(askable ? [{ id: 'ask', label: 'Ask about this file', onSelect: () => actions.askAboutFile(file.id) }] : []),
     ...(whole ? [whole] : []),
-    ...openTargetItems.map((item, index) => (index === 0 && (canComment || whole) ? { ...item, separated: true } : item))
+    ...openTargetItems.map((item, index) => (index === 0 && (canComment || askable || whole) ? { ...item, separated: true } : item))
   ];
   if (!items.length) return null;
   return (
