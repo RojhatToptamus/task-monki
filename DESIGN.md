@@ -1742,7 +1742,9 @@ control's icon, state or tooltip already carries.
   tints on its lines, the label above it; folded, a thread is a 28px row on
   `--panel` like a gap, who or what it is first in `--muted`, its line cut short
   with all of it in its tooltip, and its way back (Restore, Reopen) at the end.
-  Feedback without a place in the files sits above them, framed as a file is.
+  A control that goes away when pressed, folding or opening its band, leaves
+  the keys on the band. Feedback without a place in the files sits above them,
+  framed as a file is.
 - *Gaps.* The unchanged lines between hunks are one 28px row on `--panel`: the
   count in words at the code column ("19 unchanged lines") and the enclosing
   symbol in mono `--faint`. When the checkout still holds the captured file
@@ -1806,7 +1808,9 @@ control's icon, state or tooltip already carries.
   Cancel and Comment; Edit turns the words into the field in place. Choosing
   other lines moves it with its words. ⌘↵ saves, and the saved comment takes
   the keys; Escape closes it when nothing typed would be lost, and otherwise
-  leaves it open with its words, where C returns; Cancel discards.
+  leaves it open with its words, where C returns; Cancel discards. Delete
+  folds a comment to a line with Restore, which brings it back where it was
+  until the request goes or the tab closes.
 - *Answers.* Once the agent answered the person's latest request after the
   review, each answered item's own band, a finding, a thread or a comment, says
   the answer: its outcome under the agent's mark at the end of the head

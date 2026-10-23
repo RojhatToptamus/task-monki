@@ -304,7 +304,7 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Comment on line 3' }));
   });
 
-  it('gives the keys to a saved comment where it was written', async () => {
+  it('gives the keys to a saved comment, and deletes one with a way back where it was', async () => {
     api.readArtifact.mockResolvedValueOnce(diffFor('src/rateLimit.ts'));
     render(<Harness findings={[]} />);
 
@@ -316,6 +316,15 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     const band = document.querySelector<HTMLElement>('[data-comment-id]')!;
     expect(document.activeElement).toBe(band);
     expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
+
+    // Deleted, it leaves the request and folds to a line whose Restore takes the keys; restored, it is back.
+    fireEvent.click(within(band).getByRole('button', { name: 'Delete comment' }));
+    expect(screen.queryByRole('button', { name: /^1 comment/ })).toBeNull();
+    const restore = screen.getByRole('button', { name: 'Restore' });
+    expect(document.activeElement).toBe(restore);
+    fireEvent.click(restore);
+    expect(screen.getByRole('button', { name: /^1 comment/ })).toBeDefined();
+    expect(document.activeElement?.textContent).toContain('Return seconds here.');
   });
 
   it('reads the person’s comment as every comment reads, and says its line once that line is not shown', async () => {
@@ -412,6 +421,8 @@ describe('ReviewWorkspace findings, comments and the request', () => {
     fireEvent.click(within(finding).getByRole('button', { name: 'Accept answer' }));
     await waitFor(() => expect(document.querySelector('[data-finding-id="f1"]')?.textContent).toContain('Accepted'));
     expect(decided).toEqual([[1, 'ACCEPT']]);
+    // The control went with the fold; the finding kept the keys.
+    expect(document.activeElement).toBe(document.querySelector('[data-finding-id="f1"]'));
     const answers = screen.getByRole('list', { name: 'Answers to the review request' });
     expect(within(answers).getByText('Accepted')).toBeDefined();
     expect(within(answers).getByText('Not changed')).toBeDefined();

@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Check, Undo2, X } from 'lucide-react';
 import type { ReviewFindingDismissReason } from '../../shared/contracts';
 import { findingLevel } from '../model/findings';
@@ -39,7 +39,8 @@ export function settledLabel(finding: ReviewFindingView): string {
  * or not now), optionally with a note; the next review honours the reason. A
  * dismissed finding folds to a line that keeps the reason. Once the agent
  * answered it in the person's request, its state is the answer, and accepting
- * the answer folds it to a line too.
+ * the answer folds it to a line too. Folded or open, it is one element, so the
+ * keys stay on it when it folds or opens.
  */
 export function ReviewFindingThread({
   finding, location, about, round, answer, focused, actionable, inRequest, dismissing, onDismissingChange, onFocus, onDismiss, onRestore, onAsk, onToggleInclude
@@ -68,6 +69,7 @@ export function ReviewFindingThread({
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const noteId = useId();
+  const rootRef = useRef<HTMLElement>(null);
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -75,6 +77,8 @@ export function ReviewFindingThread({
       await action();
       onDismissingChange(false);
       setNote('');
+      // What was pressed went with the fold, or with the opening: the finding keeps the keys.
+      rootRef.current?.focus({ preventScroll: true });
     } catch {
       // The shell reports the error; the thread keeps its input for a retry.
     } finally {
@@ -84,7 +88,7 @@ export function ReviewFindingThread({
 
   if (finding.state !== 'OPEN') {
     return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
+      <article ref={rootRef} className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         <span className="tm-review-thread__struck" title={finding.title}>{finding.title}</span>
         <span>{settledLabel(finding)}</span>
@@ -93,18 +97,18 @@ export function ReviewFindingThread({
             <Undo2 size={13} aria-hidden="true" />Restore
           </button>
         ) : null}
-      </div>
+      </article>
     );
   }
 
   if (answer?.accepted) {
     return (
-      <div className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
+      <article ref={rootRef} className="tm-review-thread tm-review-thread--folded" data-finding-id={finding.id} tabIndex={-1}>
         <span className="tm-review__severity" data-severity={finding.severity}>{severityLabel(finding)}</span>
         <span className="tm-review-answer__settled" title={finding.title}>{finding.title}</span>
         <span>Accepted</span>
         <ReopenAnswer answer={answer} />
-      </div>
+      </article>
     );
   }
 
@@ -117,6 +121,7 @@ export function ReviewFindingThread({
   ];
   return (
     <article
+      ref={rootRef}
       className={`tm-review-thread${focused ? ' tm-review-thread--focused' : ''}${actionable ? '' : ' tm-review-thread--earlier'}`}
       data-finding-id={finding.id}
       tabIndex={-1}

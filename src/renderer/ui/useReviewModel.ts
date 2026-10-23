@@ -197,6 +197,8 @@ export interface ReviewBandsState {
   reReview: boolean;
   viewer?: string;
   commentDraft?: CommentDraft;
+  /** The person's comments deleted since the tab opened: each folds to a line with Restore until the request goes. */
+  deletedCommentIds: ReadonlySet<string>;
   replyTexts?: ReadonlyMap<string, string>;
   replyDrafts?: ReadonlyMap<string, ReplyDraft>;
   canDismiss: boolean;
@@ -294,7 +296,9 @@ export interface ReviewActions {
   writeComment(): void;
   commentOnFile(fileId: string): void;
   editComment(comment: ReviewComment): void;
-  deleteComment(commentId: string): void;
+  /** Takes a comment out of the draft; it folds to a line with Restore. `focus` hands the keys to that Restore. */
+  deleteComment(commentId: string, options?: { focus?: boolean }): void;
+  restoreComment(commentId: string): void;
   /** What the open composer holds, kept while its file folds and opens again. */
   commentText(): string;
   setCommentText(text: string): void;
@@ -394,13 +398,17 @@ interface PendingTravel {
 
 /**
  * Where the keys go once a change to the person's comments has rendered, so
- * they never fall out of the tab: the composer's field, a comment, or a control
- * kept from before, such as the "+" of the line a cancelled comment was under.
+ * they never fall out of the tab: the composer's field, a comment (or its
+ * Restore once deleted), or a control kept from before, such as the "+" of the
+ * line a cancelled comment was under.
  */
 type PendingFocus =
   | { to: 'composer' }
-  | { to: 'comment'; id: string }
+  | { to: 'comment'; id: string; restore?: boolean }
   | { to: 'control'; element: Element | null | undefined };
+
+/** A comment taken out of the draft, and where it was, while it can be restored. */
+interface DeletedComment { comment: ReviewComment; index: number }
 
 export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObject<HTMLElement | null>) {
   const { review, findings, draft, plan } = props;
@@ -448,9 +456,12 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     () => (props.answers?.round && !props.historical && !loading ? reviewBandAnswers(props.answers.round) : undefined),
     [loading, props.answers?.round, props.historical]
   );
+  // A comment the person deleted keeps its place, folded with Restore, until the request goes.
+  const [deletedComments, setDeletedComments] = useState<readonly DeletedComment[]>([]);
+  const writtenComments = useMemo(() => withDeleted(draft.comments, deletedComments), [deletedComments, draft.comments]);
   const shownComments = useMemo(() => (bandAnswers?.comments.size
-    ? [...[...bandAnswers.comments.values()].map((sent) => sent.comment), ...draft.comments]
-    : draft.comments), [bandAnswers, draft.comments]);
+    ? [...[...bandAnswers.comments.values()].map((sent) => sent.comment), ...writtenComments]
+    : writtenComments), [bandAnswers, writtenComments]);
   // The latest request's comments were written on the code the review read: measured from that code, their lines are on the old side, as its findings' are.
   const anchoredComments = useMemo(() => anchorReviewComments(files, shownComments, (comment) =>
     (findingSide === 'REVIEWED' && comment.side === 'NEW' && bandAnswers?.comments.has(comment.id) ? 'REVIEWED' : comment.side)), [bandAnswers, files, findingSide, shownComments]);
@@ -605,7 +616,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   // The actions read what is current when they run, never what was current when the tab first rendered.
   const latest = {
     props, mode, ordered: readingOrdered, filesById, findingsByFile, discussionsByFile, discussions, isCollapsed, collapsedIn, focusedFile,
-    selection, commentDraft, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
+    selection, commentDraft, deletedComments, readings: { guide: guideReading, diff: diffReading }, guide: guideModel, guideCurrent, activeFileId, activeStage,
     included, includedDiscussions, briefRound, notify, reveal: context.reveal, setWholeFile: context.setWholeFile
   };
   const live = useRef(latest);
@@ -1015,7 +1026,24 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
         applySelection(undefined);
         showComposer({ key: comment.id, path: comment.path, side: comment.side, line: comment.line, endLine: comment.endLine, editingId: comment.id }, comment.text);
       },
-      deleteComment: (commentId) => updateDraft({ comments: now().props.draft.comments.filter((comment) => comment.id !== commentId) }),
+      deleteComment: (commentId, { focus = false } = {}) => {
+        const { props: current, commentDraft: open } = now();
+        const index = current.draft.comments.findIndex((comment) => comment.id === commentId);
+        if (index < 0) return;
+        if (open?.editingId === commentId) endComposer();
+        setDeletedComments((deleted) => [...deleted, { comment: current.draft.comments[index]!, index }]);
+        updateDraft({ comments: current.draft.comments.filter((comment) => comment.id !== commentId) });
+        if (focus) setPendingFocus({ to: 'comment', id: commentId, restore: true });
+      },
+      restoreComment: (commentId) => {
+        const { props: current, deletedComments: deleted } = now();
+        const entry = deleted.find((candidate) => candidate.comment.id === commentId);
+        if (!entry) return;
+        const comments = current.draft.comments;
+        updateDraft({ comments: [...comments.slice(0, entry.index), entry.comment, ...comments.slice(entry.index)] });
+        setDeletedComments((list) => list.filter((candidate) => candidate.comment.id !== commentId));
+        setPendingFocus({ to: 'comment', id: commentId });
+      },
       commentText: () => commentText.current,
       setCommentText: (text) => { commentText.current = text; },
       saveComment: () => {
@@ -1059,7 +1087,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
 
       setSheetOpen,
       // Sending answers the sheet, so it closes; a send that fails keeps the draft, and the summary opens it again.
-      submitRequest: () => { setSheetOpen(false); now().props.requestChanges?.onSubmit(); },
+      // What was deleted can no longer come back once the request goes.
+      submitRequest: () => { setSheetOpen(false); setDeletedComments([]); now().props.requestChanges?.onSubmit(); },
       setNote: (note) => updateDraft({ note }),
       openPathMenu: (path, event, line) => {
         const { worktree, historical } = now().props;
@@ -1077,6 +1106,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
   }, [scrollerRef, setActiveFileId, setActiveStage]);
 
   const canDecideAnswers = Boolean(props.answers?.onDecide);
+  const deletedCommentIds = useMemo(() => new Set(deletedComments.map((deleted) => deleted.comment.id)), [deletedComments]);
   const bands = useMemo<ReviewBandsState>(() => ({
     focusedFindingId,
     focusedDiscussionId,
@@ -1089,6 +1119,7 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     reReview,
     viewer: props.viewer,
     commentDraft,
+    deletedCommentIds,
     replyTexts: props.replyTexts,
     replyDrafts: props.replyDrafts,
     canDismiss: Boolean(props.onDismissFinding),
@@ -1102,8 +1133,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     answers: bandAnswers,
     canDecideAnswers
   }), [
-    bandAnswers, canComment, canDecideAnswers, commentDraft, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId, included,
-    includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
+    bandAnswers, canComment, canDecideAnswers, commentDraft, deletedCommentIds, dismissingId, findingsActionable, focusedDiscussionId, focusedFindingId,
+    included, includedDiscussions, props.answers?.agent, props.findingsSendable, props.onAskAboutDiscussion, props.onAskAboutFinding, props.onAskAboutLines,
     props.onDismissFinding, props.onReplyToDiscussion, props.onResolveDiscussion, props.onRestoreFinding, props.replyDrafts, props.replyTexts,
     props.viewer, reReview
   ]);
@@ -1154,7 +1185,8 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
       keepInView(scroller, form);
       return;
     }
-    const target = pendingFocus.to === 'control' ? pendingFocus.element : scroller.querySelector(`[data-comment-id=${quoted(pendingFocus.id)}]`);
+    const target = pendingFocus.to === 'control' ? pendingFocus.element
+      : scroller.querySelector(`[data-comment-id=${quoted(pendingFocus.id)}]${pendingFocus.restore ? ' .tm-review-thread__undo' : ''}`);
     (target instanceof HTMLElement && target.isConnected ? target : scroller).focus({ preventScroll: true });
   }, [pendingFocus, scrollerRef]);
 
@@ -1254,6 +1286,14 @@ export function useReviewModel(props: ReviewWorkspaceProps, scrollerRef: RefObje
     sheetOpen,
     pathMenu
   };
+}
+
+/** The draft's comments with the deleted ones back where they were: the latest deleted goes in first, so each lands where it left. */
+function withDeleted(comments: ReviewComment[], deleted: readonly DeletedComment[]): ReviewComment[] {
+  if (!deleted.length) return comments;
+  const all = [...comments];
+  for (const { comment, index } of [...deleted].reverse()) all.splice(Math.min(index, all.length), 0, comment);
+  return all;
 }
 
 const NO_WHOLE_FILE: WholeFileState = { kind: 'none' };

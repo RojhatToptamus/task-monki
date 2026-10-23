@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Undo2 } from 'lucide-react';
 import {
   remoteProviderName,
@@ -11,6 +11,7 @@ import {
 import { findingLevel } from '../model/findings';
 import { REVIEW_OUTCOME_LABELS, requestItemLocation, requestItemText } from '../model/reviewRounds';
 import { Message, MessageContent, MessageMeta, MessageTime } from './Message';
+import { BAND } from './reviewPlace';
 import { AgentMark } from './UiIcons';
 
 /** A request sent from the Review tab, as it reads in the conversation: item by item, then the note. */
@@ -122,11 +123,15 @@ export function AnswerQuote({ agent, at, note }: Pick<ItemAnswer, 'agent' | 'at'
   );
 }
 
-/** The person's decision on an answer: pending on its own control until it lands; the shell reports a failure. */
+/**
+ * The person's decision on an answer: pending on its own control until it lands; the shell reports a failure.
+ * The control goes with the decision, as the item folds or opens, so the item's band takes the keys first.
+ */
 function useAnswerDecision(answer: ItemAnswer) {
   const [pending, setPending] = useState(false);
-  const decide = async (kind: ReviewRequestItemDecisionKind) => {
+  const decide = async (kind: ReviewRequestItemDecisionKind, event: ReactMouseEvent<HTMLElement>) => {
     if (!answer.onDecide || pending) return;
+    event.currentTarget.closest<HTMLElement>(BAND)?.focus({ preventScroll: true });
     setPending(true);
     try {
       await answer.onDecide(kind);
@@ -157,7 +162,7 @@ export function RequestItemAnswer({ answer }: { answer: ItemAnswer }) {
           {answer.accepted ? <ReopenAnswer answer={answer} /> : (
             <>
               {answer.onDecide ? (
-                <button type="button" className="ghost-button button--sm" disabled={pending} onClick={() => void decide('ACCEPT')}>Accept answer</button>
+                <button type="button" className="ghost-button button--sm" disabled={pending} onClick={(event) => void decide('ACCEPT', event)}>Accept answer</button>
               ) : null}
               {answer.onRequestAgain ? (
                 <button type="button" className="ghost-button button--sm" onClick={answer.onRequestAgain}>Add to request</button>
@@ -175,7 +180,7 @@ export function ReopenAnswer({ answer }: { answer: ItemAnswer }) {
   const { pending, decide } = useAnswerDecision(answer);
   if (!answer.onDecide) return null;
   return (
-    <button type="button" className="ghost-button tm-review-thread__undo" disabled={pending} onClick={() => void decide('REOPEN')}>
+    <button type="button" className="ghost-button tm-review-thread__undo" disabled={pending} onClick={(event) => void decide('REOPEN', event)}>
       <Undo2 size={13} aria-hidden="true" />Reopen
     </button>
   );

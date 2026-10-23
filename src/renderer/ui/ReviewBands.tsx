@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, Trash2, Undo2 } from 'lucide-react';
 import type { ReviewComment } from '../../shared/contracts';
 import type { DiffFile } from '../model/diffEvidence';
 import { formatFindingLocation } from '../model/findings';
@@ -120,12 +120,25 @@ export function ReviewBands({ place, at, file, findings, discussions, comments }
 /**
  * The person's own comment reads as everyone's does: their mark and You, the
  * lines when its place does not say them, its words as markdown, and Edit and
- * Delete on its head. One they sent that the agent answered says the answer
- * instead, quotes it, and folds to a line once they accept it.
+ * Delete on its head. Deleted, it folds to a line with Restore until the
+ * request goes. One they sent that the agent answered says the answer instead,
+ * quotes it, and folds to a line once they accept it.
  */
 function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment; about?: string; answer?: ItemAnswer }) {
   const actions = useReviewActions();
-  const { canComment } = useReviewBands();
+  const { canComment, deletedCommentIds } = useReviewBands();
+  if (deletedCommentIds.has(comment.id)) {
+    return (
+      <div className="tm-review-thread tm-review-thread--folded" data-comment-id={comment.id} tabIndex={-1}>
+        <span className="tm-review-thread__author">You</span>
+        <span className="tm-review-thread__struck" title={comment.text}>{commentLine(comment)}</span>
+        <span>Deleted</span>
+        <button type="button" className="ghost-button tm-review-thread__undo" onClick={() => actions.restoreComment(comment.id)}>
+          <Undo2 size={13} aria-hidden="true" />Restore
+        </button>
+      </div>
+    );
+  }
   if (answer?.accepted) {
     return (
       <div className="tm-review-thread tm-review-thread--folded" data-comment-id={comment.id} tabIndex={-1}>
@@ -148,7 +161,7 @@ function ReviewCommentBand({ comment, about, answer }: { comment: ReviewComment;
                 </button>
               </Tooltip>
               <Tooltip label="Delete">
-                <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Delete comment" onClick={() => actions.deleteComment(comment.id)}>
+                <button type="button" className="tm-iconbtn tm-review__mini" aria-label="Delete comment" onClick={() => actions.deleteComment(comment.id, { focus: true })}>
                   <Trash2 size={13} aria-hidden="true" />
                 </button>
               </Tooltip>
