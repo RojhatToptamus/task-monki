@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { BugReplayProtectedInput } from '../../shared/bugReplay';
 import { canonicalJson, readJsonPointer } from '../../shared/bugCase';
-import { isInstallCommand, type ReplayTreeReader } from './ReplayDerivation';
+import { isInstallCommand, type ReplayJob, type ReplayTreeReader } from './ReplayDerivation';
 
 /**
  * The setup inputs a case version keeps fixed. A clean copy's starting state comes from the
- * recipe's jobs (install, migrate, seed), so a change to what those jobs read could make the bug
+ * jobs it runs (install, migrate, seed), so a change to what those jobs read could make the bug
  * vanish without fixing it. Long-running services are the code under test and are not pinned,
  * and code a seed shares with the app is listed for the reviewer instead of pinned, because one
  * file cannot be both kept fixed and fixed.
@@ -20,14 +20,6 @@ export interface ProtectedInputPlan {
   unresolved: string[];
 }
 
-export interface RecipeJob {
-  id: string;
-  type: string;
-  /** Directory relative to the export root; '.' for the root. */
-  directory: string;
-  command?: string[];
-}
-
 const SCRIPT_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
 const CODE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 const LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
@@ -39,7 +31,8 @@ export interface ProtectedTree extends ReplayTreeReader {
   blobs(paths: readonly string[]): Promise<Map<string, string>>;
 }
 
-export async function planProtectedInputs(jobs: RecipeJob[], tree: ProtectedTree): Promise<ProtectedInputPlan> {
+/** `jobs` are the clean copy's own, as the derivation lists them, so an install it adds is kept fixed too. */
+export async function planProtectedInputs(jobs: ReplayJob[], tree: ProtectedTree): Promise<ProtectedInputPlan> {
   const files = new Set(tree.files);
   const filePins = new Set<string>();
   const memberPins = new Map<string, { path: string; pointer: string }>();
@@ -69,8 +62,10 @@ export async function planProtectedInputs(jobs: RecipeJob[], tree: ProtectedTree
       const script = scriptName(tool, argv);
       if (script) await pinScript(scriptDirectory, script, depth);
     }
-    if (tool === 'turbo' && argv[1] === 'run' && argv[2]) {
-      for (const packageDirectory of packageNames.values()) await pinScript(packageDirectory, argv[2], depth);
+    // `turbo run <task>`, directly or through npx or a package manager, runs the task's script in every package.
+    const turbo = argv.findIndex((argument) => path.basename(argument) === 'turbo');
+    if (turbo >= 0 && argv[turbo + 1] === 'run' && argv[turbo + 2]) {
+      for (const packageDirectory of new Set(packageNames.values())) await pinScript(packageDirectory, argv[turbo + 2], depth);
     }
     for (const argument of argv.slice(1)) {
       if (argument.startsWith('-') || argument.includes('=')) continue;

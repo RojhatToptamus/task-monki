@@ -51,6 +51,14 @@ export interface ReplayCommandSummary {
   added?: boolean;
 }
 
+/** One service of a clean copy: its directory relative to the export root, '.' for the root. */
+export interface ReplayJob {
+  id: string;
+  type: string;
+  directory: string;
+  command?: string[];
+}
+
 export interface DerivedReplaySpec {
   spec: PreviewSpec;
   templateDigest: string;
@@ -64,8 +72,15 @@ export interface DerivedReplaySpec {
   outsideHosts: string[];
   secretIds: string[];
   managedDatabases: string[];
-  /** Directories, relative to the export root, that the recipe runs code in. */
-  serviceDirectories: Array<{ service: string; type: string; directory: string }>;
+  /** Every service the clean copy runs, the install jobs it adds included. */
+  jobs: ReplayJob[];
+}
+
+/** A directory the recipe runs code in, relative to the export root. */
+interface ServiceDirectory {
+  service: string;
+  type: string;
+  directory: string;
 }
 
 const ALLOWED_SERVICE_TYPES = new Set(['command', 'worker', 'job', 'static', 'postgres', 'redis']);
@@ -117,7 +132,7 @@ export async function deriveReplaySpec(input: ReplayDerivationInput): Promise<De
   checkStaticShape(spec);
   const environment = toEnvironment(spec);
   const services = environment.services as Record<string, Record<string, unknown>>;
-  const serviceDirectories: DerivedReplaySpec['serviceDirectories'] = [];
+  const serviceDirectories: ServiceDirectory[] = [];
   const commands: ReplayCommandSummary[] = [];
 
   // Every directory resolves inside the frozen copy; nothing may point at the live worktree.
@@ -208,7 +223,15 @@ export async function deriveReplaySpec(input: ReplayDerivationInput): Promise<De
     outsideHosts: hosts.slice(0, 10),
     secretIds,
     managedDatabases,
-    serviceDirectories
+    jobs: Object.entries(services).map(([id, service]) => {
+      const location = service.cwd ?? service.directory;
+      return {
+        id,
+        type: String(service.type),
+        directory: typeof location === 'string' ? relativeOf(location, input.exportRoot) : '.',
+        ...(Array.isArray(service.command) ? { command: service.command as string[] } : {})
+      };
+    })
   };
 }
 
@@ -231,7 +254,7 @@ function toEnvironment(spec: PreviewSpec): Record<string, unknown> & { services:
 
 async function ensureInstallJobs(
   services: Record<string, Record<string, unknown>>,
-  serviceDirectories: DerivedReplaySpec['serviceDirectories'],
+  serviceDirectories: ServiceDirectory[],
   input: ReplayDerivationInput,
   commands: ReplayCommandSummary[]
 ): Promise<string[]> {
@@ -412,7 +435,7 @@ function relativeOf(directory: string, exportRoot: string): string {
   return relative === '' ? '.' : relative;
 }
 
-function relativeDirectory(entries: DerivedReplaySpec['serviceDirectories'], service: string): string {
+function relativeDirectory(entries: ServiceDirectory[], service: string): string {
   return entries.find((entry) => entry.service === service)?.directory ?? '.';
 }
 

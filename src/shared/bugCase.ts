@@ -78,7 +78,6 @@ export type BugCaseAssertion =
   | { id: string; kind: 'dom.value'; target: BugCaseTarget; value: string; alsoAfterReload: boolean }
   | { id: string; kind: 'dom.visible'; target: BugCaseTarget; expected: boolean; alsoAfterReload: boolean }
   | { id: string; kind: 'dom.count'; target: BugCaseTarget; value: number; alsoAfterReload: boolean }
-  | { id: string; kind: 'page.path'; template: string }
   | {
       id: string;
       kind: 'request';
@@ -106,7 +105,6 @@ export type BugCaseCaptured =
   | { kind: 'value'; value: string }
   | { kind: 'visible'; value: boolean }
   | { kind: 'count'; value: number }
-  | { kind: 'path'; value: string }
   | { kind: 'status'; value: number | 'no-response' }
   | { kind: 'requestCount'; value: number }
   /** Canonical JSON of the observed value, or null when the pointer was absent. */
@@ -119,12 +117,15 @@ export interface BugCaseSignatureEntry {
   captured?: BugCaseCaptured;
 }
 
+/** The browser settings a recording and every replay of it share. */
 export interface BugCaseEnvironment {
   viewport: { width: number; height: number };
   deviceScaleFactor: number;
   colorScheme: 'light' | 'dark';
   locale: string;
   timezoneId: string;
+  /** The recording browser's user agent; without one, each browser keeps its own. */
+  userAgent?: string;
 }
 
 export interface BugCaseV1 {
@@ -140,8 +141,6 @@ export interface BugCaseV1 {
   sensitiveInputs: Array<{ id: string; value: string }>;
   keepBrowserStorageAfterReload: boolean;
 }
-
-export type BugCaseAssertionKind = BugCaseAssertion['kind'];
 
 export function isDomAssertion(
   assertion: BugCaseAssertion
@@ -307,8 +306,6 @@ function capturedFits(assertion: BugCaseAssertion, captured: BugCaseCaptured): b
       return captured.kind === 'visible';
     case 'dom.count':
       return captured.kind === 'count';
-    case 'page.path':
-      return captured.kind === 'path';
     case 'request':
       return captured.kind === 'status' || captured.kind === 'requestCount';
     case 'request.json':
@@ -320,7 +317,7 @@ function capturedFits(assertion: BugCaseAssertion, captured: BugCaseCaptured): b
 
 function parseEnvironment(value: unknown): BugCaseEnvironment {
   const record = requireRecord(value, 'The page environment');
-  onlyKeys(record, ['viewport', 'deviceScaleFactor', 'colorScheme', 'locale', 'timezoneId'], 'The page environment');
+  onlyKeys(record, ['viewport', 'deviceScaleFactor', 'colorScheme', 'locale', 'timezoneId', 'userAgent'], 'The page environment');
   const viewport = requireRecord(record.viewport, 'The viewport');
   onlyKeys(viewport, ['width', 'height'], 'The viewport');
   const width = requireInteger(viewport.width, 'The viewport width', 320, 3840);
@@ -333,7 +330,14 @@ function parseEnvironment(value: unknown): BugCaseEnvironment {
   if (!/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(locale)) throw new BugCaseValidationError('The locale is not valid.');
   const timezoneId = requireText(record.timezoneId, 'The time zone', 1, 64);
   if (!/^[A-Za-z0-9_+\-/]+$/.test(timezoneId)) throw new BugCaseValidationError('The time zone is not valid.');
-  return { viewport: { width, height }, deviceScaleFactor, colorScheme: record.colorScheme, locale, timezoneId };
+  const environment: BugCaseEnvironment = { viewport: { width, height }, deviceScaleFactor, colorScheme: record.colorScheme, locale, timezoneId };
+  if (record.userAgent !== undefined) {
+    // Sent as a request header: printable ASCII only.
+    const userAgent = requireText(record.userAgent, 'The user agent', 1, 512);
+    if (!/^[\x20-\x7e]+$/.test(userAgent)) throw new BugCaseValidationError('The user agent is not valid.');
+    environment.userAgent = userAgent;
+  }
+  return environment;
 }
 
 function parseStep(value: unknown, index: number, roles: Set<string>, sensitiveIds: Set<string>): BugCaseStep {
@@ -449,9 +453,6 @@ function parseAssertion(value: unknown, roles: Set<string>): BugCaseAssertion {
         value: requireInteger(record.value, 'An expected count', 0, 1000),
         alsoAfterReload: requireBoolean(record.alsoAfterReload)
       };
-    case 'page.path':
-      onlyKeys(record, ['id', 'kind', 'template'], 'A page check');
-      return { id, kind: 'page.path', template: requirePathTemplate(record.template) };
     case 'request': {
       onlyKeys(record, ['id', 'kind', 'method', 'origin', 'pathTemplate', 'queryKeys', 'count', 'status'], 'A request check');
       const method = requireText(record.method, 'A request method', 3, 7);
@@ -531,9 +532,6 @@ function parseCaptured(value: unknown): BugCaseCaptured {
     case 'count':
       onlyKeys(record, ['kind', 'value'], 'A recorded count');
       return { kind: 'count', value: requireInteger(record.value, 'A recorded count', 0, 1000) };
-    case 'path':
-      onlyKeys(record, ['kind', 'value'], 'A recorded path');
-      return { kind: 'path', value: requirePath(record.value) };
     case 'status':
       onlyKeys(record, ['kind', 'value'], 'A recorded status');
       return {
@@ -780,8 +778,6 @@ function describeAssertionOnce(assertion: BugCaseAssertion, document?: BugCaseV1
       return `${describeTarget(assertion.target)} should ${assertion.expected ? 'be visible' : 'not be visible'}`;
     case 'dom.count':
       return `${describeTarget(assertion.target)} should appear ${assertion.value} ${assertion.value === 1 ? 'time' : 'times'}`;
-    case 'page.path':
-      return `The page should be ${assertion.template}`;
     case 'request': {
       const request = `${assertion.method} ${assertion.pathTemplate}`;
       if (assertion.count.op === 'exactly' && assertion.count.n === 0) return `${request} should not be sent`;

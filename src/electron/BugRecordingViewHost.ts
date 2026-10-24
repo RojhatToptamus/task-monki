@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { RecorderSession, type CdpConnection } from '../core/bugReplay/recorder/RecorderSession';
 import type { RecordingBrowserHost, RecordingViewHandle, RecordingViewInput } from '../core/bugReplay/BugRecordingService';
+import type { BugCaseEnvironment } from '../shared/bugCase';
 import type { BugRecordingViewBounds, ShowBugRecordingViewRequest } from '../shared/bugReplay';
 import { normalizeDesignCanvasBounds } from './DesignCanvasHost';
 
@@ -121,6 +122,12 @@ export interface BugRecordingViewRuntime {
     };
   }): RecordingView;
   chromiumVersion: string;
+  /** Electron's default user agent. */
+  userAgent: string;
+  /** Whether pages here render dark: the system's appearance. */
+  prefersDark(): boolean;
+  /** The pixel density of the display the app's window is on. */
+  scaleFactor(): number;
 }
 
 interface ActiveRecording {
@@ -173,6 +180,15 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
       window.webContents.off('did-start-navigation', this.onRendererReset);
       window.webContents.off('render-process-gone', this.onRendererReset);
     }
+  }
+
+  environment(): Pick<BugCaseEnvironment, 'colorScheme' | 'deviceScaleFactor' | 'userAgent'> {
+    return {
+      colorScheme: this.runtime.prefersDark() ? 'dark' : 'light',
+      // The display's own density keeps the page sharp; within what a case may state.
+      deviceScaleFactor: Math.min(3, Math.max(1, this.runtime.scaleFactor())),
+      userAgent: browserUserAgent(this.runtime.userAgent)
+    };
   }
 
   async open(input: RecordingViewInput): Promise<RecordingViewHandle> {
@@ -281,7 +297,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
       debuggerApi.attach('1.3');
       debuggerApi.on('detach', active.detachListener);
       await withDeadline(recorder.attach(), VIEW_OPEN_TIMEOUT_MS);
-      await withDeadline(recorder.pinViewport({ nativeDensity: true }), VIEW_OPEN_TIMEOUT_MS);
+      await withDeadline(recorder.pinViewport(), VIEW_OPEN_TIMEOUT_MS);
       await withDeadline(contents.loadURL(input.startUrl), PAGE_LOAD_TIMEOUT_MS);
       if (input.signal.aborted || active.closing) throw new Error('The recording ended.');
     } catch (error) {
@@ -360,7 +376,7 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
     const rounded = Math.max(0.25, Math.round(scale * 1000) / 1000);
     if (active.scale === rounded || active.closing) return;
     active.scale = rounded;
-    await active.recorder.pinViewport({ scale: rounded, nativeDensity: true }).catch(() => undefined);
+    await active.recorder.pinViewport({ scale: rounded }).catch(() => undefined);
   }
 
   private allowRequest(active: ActiveRecording, details: RecordingRequestDetails): boolean {
@@ -418,6 +434,14 @@ export class BugRecordingViewHost implements RecordingBrowserHost {
     await active.session.clearCache().catch(() => undefined);
     await active.session.clearAuthCache().catch(() => undefined);
   }
+}
+
+/**
+ * The user agent a browser would send: Electron's, without the app's own product token and
+ * Electron's, so the app under test sees the browser its people use.
+ */
+function browserUserAgent(electronUserAgent: string): string {
+  return electronUserAgent.replace(/\(KHTML, like Gecko\) (?:\S+ )*?(Chrome\/)/, '(KHTML, like Gecko) $1').replace(/ Electron\/\S+/, '');
 }
 
 const VIEW_OPEN_TIMEOUT_MS = 15_000;

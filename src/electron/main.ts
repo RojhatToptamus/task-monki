@@ -5,7 +5,9 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  nativeTheme,
   powerMonitor,
+  screen,
   session,
   shell,
   WebContentsView,
@@ -1250,7 +1252,10 @@ void app.whenReady().then(async () => {
         const { session: targetSession, ...preferences } = webPreferences;
         return new WebContentsView({ webPreferences: { ...preferences, session: targetSession as never } }) as never;
       },
-      chromiumVersion: process.versions.chrome
+      chromiumVersion: process.versions.chrome,
+      userAgent: app.userAgentFallback,
+      prefersDark: () => nativeTheme.shouldUseDarkColors,
+      scaleFactor: () => (mainWindow && !mainWindow.isDestroyed() ? screen.getDisplayMatching(mainWindow.getBounds()) : screen.getPrimaryDisplay()).scaleFactor
     });
   }
   // Checked once: the replay toolchain is fixed for the life of the process.

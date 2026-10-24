@@ -100,11 +100,6 @@ export interface BugReplayRequestObservation {
   matches: BugReplayRequestFact[];
 }
 
-export interface BugReplayPathObservation {
-  kind: 'path';
-  path: string;
-}
-
 export interface BugReplayConsoleObservation {
   kind: 'console';
   errors: string[];
@@ -113,7 +108,6 @@ export interface BugReplayConsoleObservation {
 export type BugReplayObservation =
   | BugReplayDomObservation
   | BugReplayRequestObservation
-  | BugReplayPathObservation
   | BugReplayConsoleObservation;
 
 export type BugReplaySignalKind =

@@ -59,27 +59,56 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     return undefined;
   }
 
-  function labelText(element) {
-    if (element.labels && element.labels.length) return clip(Array.from(element.labels).map((label) => label.innerText).join(' '), 200);
-    const id = element.getAttribute('aria-labelledby');
-    if (id) {
-      const text = id.split(/\s+/).map((part) => document.getElementById(part)).filter(Boolean).map((node) => node.innerText || node.textContent).join(' ');
-      if (norm(text)) return clip(text, 200);
+  // Names and texts are read the way replays' locators match them: the words the markup holds,
+  // never as CSS shows them (text-transform), which only check values read.
+  function domText(node) {
+    let text = '';
+    for (let child = node.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 3) text += child.nodeValue || '';
+      else if (child.nodeType === 1 && !['SCRIPT', 'NOSCRIPT', 'STYLE'].includes(child.nodeName)) text += domText(child);
     }
-    return undefined;
+    if (node.shadowRoot) text += domText(node.shadowRoot);
+    return text;
+  }
+
+  // A name from content, as accessibility computes it: an icon's label or alt text stands for the
+  // icon, nothing hidden counts, and a block child is a word of its own.
+  function contentName(node) {
+    let text = '';
+    for (let child = node.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 3) {
+        text += child.nodeValue || '';
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const style = getComputedStyle(child);
+      if (child.getAttribute('aria-hidden') === 'true' || style.display === 'none' || style.visibility === 'hidden') continue;
+      const own = child.getAttribute('aria-label') || (child.tagName === 'IMG' ? child.getAttribute('alt') : '');
+      const token = norm(own) ? own : contentName(child);
+      text += style.display === 'inline' ? token : ' ' + token + ' ';
+    }
+    return text;
+  }
+
+  function labelledBy(element) {
+    return (element.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => id && document.getElementById(id)).filter(Boolean);
+  }
+
+  // The label a locator finds a field by: the element it is labelled by, or its first label.
+  function labelText(element) {
+    const labels = labelledBy(element);
+    const label = labels[0] || (element.labels && element.labels[0]);
+    return label ? clip(domText(label), 200) || undefined : undefined;
   }
 
   function accessibleName(element, role) {
+    const labelled = norm(labelledBy(element).map(contentName).join(' '));
+    if (labelled) return clip(labelled, 200);
     const aria = element.getAttribute('aria-label');
     if (norm(aria)) return clip(aria, 200);
-    const labelled = element.getAttribute('aria-labelledby');
-    if (labelled) {
-      const text = labelled.split(/\s+/).map((part) => document.getElementById(part)).filter(Boolean).map((node) => node.innerText || node.textContent).join(' ');
-      if (norm(text)) return clip(text, 200);
-    }
     const tag = element.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
-      const label = labelText(element);
+      const label = element.labels && element.labels.length ? clip(Array.from(element.labels).map(contentName).join(' '), 200) : '';
       if (label) return label;
       const type = (element.getAttribute('type') || '').toLowerCase();
       if (['button', 'submit', 'reset'].includes(type)) return clip(element.value || (type === 'submit' ? 'Submit' : type === 'reset' ? 'Reset' : ''), 200);
@@ -89,7 +118,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     }
     if (tag === 'IMG') return clip(element.getAttribute('alt'), 200) || undefined;
     if (role && ['button', 'link', 'checkbox', 'radio', 'menuitem', 'tab', 'option', 'heading', 'switch', 'treeitem', 'listitem'].includes(role)) {
-      const text = clip(element.innerText || element.textContent, 200);
+      const text = clip(contentName(element), 200);
       if (text) return text;
     }
     if (element.getAttribute('title')) return clip(element.getAttribute('title'), 200);
@@ -134,7 +163,7 @@ export const RECORDER_SCRIPT = String.raw`(() => {
     const placeholder = element.getAttribute('placeholder');
     if (placeholder) result.placeholder = clip(placeholder, 200);
     if (!['input', 'select', 'textarea'].includes(tag)) {
-      const text = clip(element.innerText || element.textContent, 300);
+      const text = clip(domText(element), 300);
       if (text) result.text = text;
     }
     if (!result.name && !result.label) {

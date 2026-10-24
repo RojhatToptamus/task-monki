@@ -85,6 +85,16 @@ async function load() {
   }
 }
 
+// What the page knows of the browser it runs in: a recording and its replays must agree.
+document.getElementById('browser').textContent = [
+  matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+  `${devicePixelRatio}x`,
+  navigator.languages.join(','),
+  new Date(Date.UTC(2026, 0, 2, 3, 4)).toLocaleString(),
+  navigator.userAgent,
+  String(navigator.serviceWorker && navigator.serviceWorker.register).includes('[native code]') ? 'service workers' : 'no service workers'
+].join(' | ');
+
 document.getElementById('apply').addEventListener('click', applyCoupon);
 document.getElementById('checkout').addEventListener('click', checkout);
 const updates = new EventSource('/events');

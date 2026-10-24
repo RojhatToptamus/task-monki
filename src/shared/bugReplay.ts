@@ -601,12 +601,6 @@ export type BugExpectationView =
       id: string;
       /** "The last step raised an error". */
       recorded: string;
-    }
-  | {
-      /** A check the editor has no control for: it can only be kept or removed. */
-      kind: 'other';
-      id: string;
-      statement: string;
     };
 
 /**

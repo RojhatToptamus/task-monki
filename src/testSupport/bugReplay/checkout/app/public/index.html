@@ -7,6 +7,8 @@
       body { font: 14px/1.5 system-ui, sans-serif; margin: 32px; }
       section { margin-bottom: 20px; }
       [hidden] { display: none; }
+      /* Shown in capitals, named in the words the markup holds. */
+      label[for=coupon], #apply { text-transform: uppercase; }
     </style>
   </head>
   <body>
@@ -26,6 +28,7 @@
       <p data-testid="order-total" id="order-total"></p>
     </section>
     <p>Updates: <span id="updates">0</span></p>
+    <p>Browser: <span data-testid="browser" id="browser"></span></p>
     <script src="/app.js"></script>
   </body>
 </html>

@@ -25,10 +25,10 @@ import type { BugCaptureRecord, BugCaseRecord, BugCaseVersionRecord, BugReplayFi
 import { deriveReplaySpec, replayEnvironmentName, ReplayEligibilityError, staticEligibility, type DerivedReplaySpec } from './ReplayDerivation';
 import { ReplayEnvironmentError, type StartedReplayEnvironment } from './ReplayEnvironment';
 import { ReplaySourceError } from './ReplaySourceFreezer';
-import { isEnvFileName, planProtectedInputs, type RecipeJob } from './ProtectedInputs';
+import { isEnvFileName, planProtectedInputs } from './ProtectedInputs';
 import { leaseRequestFor } from './BugReplayLease';
-import { oneLine, redactEvidence } from './BugReplayContext';
-import { persistableLog, type RecorderNotice, type RecorderPickOutcome, type RecorderSession } from './recorder/RecorderSession';
+import { oneLine } from './BugReplayContext';
+import type { RecorderNotice, RecorderPickOutcome, RecorderSession } from './recorder/RecorderSession';
 import { BUG_REPLAY_FILE_LIMITS } from '../storage/sqlite/SqliteBugReplayStore';
 
 /**
@@ -62,6 +62,8 @@ export interface RecordingViewHandle {
 
 /** The Electron host implements this; it owns the view, its session and its debugger. */
 export interface RecordingBrowserHost {
+  /** The browser settings only the host knows; a recording and its replays apply them alike. */
+  environment(): Pick<BugCaseEnvironment, 'colorScheme' | 'deviceScaleFactor' | 'userAgent'>;
   open(input: RecordingViewInput): Promise<RecordingViewHandle>;
 }
 
@@ -439,20 +441,10 @@ export class BugRecordingService implements BugRecordingSessions {
     const published: BugReplayFileRecord[] = [];
     let saved = false;
     try {
-      // Evidence on disk never holds request bodies or typed passwords, with or without a view.
-      const sensitive = sensitiveValues(capture.log);
-      const persisted = redactEvidence(persistableLog(capture.log), sensitive);
-      const publish = async (kind: 'ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT', mediaType: string, bytes: Buffer) => {
-        const file = await this.replay.store.publishFile({ taskId, ownerKind: 'CAPTURE', ownerId: captureId, kind, mediaType, bytes });
-        published.push(file);
-        return file;
-      };
-      const actionLog = await publish('ACTION_LOG', 'application/json', boundedJson(persisted.actions, BUG_REPLAY_FILE_LIMITS.ACTION_LOG, 'head'));
-      const network = await publish('NETWORK_LOG', 'application/json', boundedJson(persisted.requests, BUG_REPLAY_FILE_LIMITS.NETWORK_LOG, 'tail'));
-      const consoleLog = await publish('CONSOLE_LOG', 'application/json', boundedJson(persisted.console, BUG_REPLAY_FILE_LIMITS.CONSOLE_LOG, 'tail'));
-      const screenshots = capture.screenshot.length > 0 && capture.screenshot.length <= BUG_REPLAY_FILE_LIMITS.SCREENSHOT
-        ? [await publish('SCREENSHOT', 'image/png', capture.screenshot)]
-        : [];
+      // The marked page as the person saw it is the capture's only file; the case keeps the rest.
+      if (capture.screenshot.length > 0 && capture.screenshot.length <= BUG_REPLAY_FILE_LIMITS.SCREENSHOT) {
+        published.push(await this.replay.store.publishFile({ taskId, ownerKind: 'CAPTURE', ownerId: captureId, kind: 'SCREENSHOT', mediaType: 'image/png', bytes: capture.screenshot }));
+      }
       const described = describeCapture(capture.log);
       const now = new Date().toISOString();
       const envFiles = session.included.map((file) => ({ relativePath: file.relativePath, sha256: sha256(file.bytes) }));
@@ -473,12 +465,7 @@ export class BugRecordingService implements BugRecordingSessions {
         stepSummaries: described.stepSummaries,
         stepKinds: described.stepKinds,
         markedBoxes: (capture.log.mark?.picks ?? []).flatMap((pick) => (pick.box ? [{ css: pick.target.css, box: pick.box }] : [])),
-        fileIds: {
-          actionLog: actionLog.id,
-          network: network.id,
-          console: consoleLog.id,
-          screenshots: screenshots.map((file) => file.id)
-        },
+        fileIds: { screenshots: published.map((file) => file.id) },
         createdAt: now
       };
       const caseRecord: BugCaseRecord = {
@@ -496,8 +483,7 @@ export class BugRecordingService implements BugRecordingSessions {
       let version: BugCaseVersionRecord | undefined;
       if (withCheck && compiled.document) {
         const reader = await this.replay.treeReader(session.worktreePath, treeId);
-        const jobs = jobsOf(session.recipe.text);
-        const protectedPlan = await planProtectedInputs(jobs, reader).catch((error: unknown) => {
+        const protectedPlan = await planProtectedInputs(session.derived.jobs, reader).catch((error: unknown) => {
           throw new Error(error instanceof Error ? error.message : 'This setup job reads files Task Monki cannot track.');
         });
         const draftVersion: Omit<BugCaseVersionRecord, 'digest'> = {
@@ -669,7 +655,14 @@ export class BugRecordingService implements BugRecordingSessions {
         await this.replay.environment.warmUp(session.environment.origins, [{ role: 'primary', method: 'GET', path: '/' }], session.controller.signal);
         const host = this.host();
         if (!host) throw new Error('Recording needs the desktop app on macOS.');
-        const environment: BugCaseEnvironment = { ...DEFAULT_BUG_CASE_ENVIRONMENT, timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', locale: Intl.DateTimeFormat().resolvedOptions().locale || 'en-US' };
+        // What the person's own browser would show: the machine's time zone and locale, and the
+        // host's color scheme, pixel density and browser user agent. Replays apply the same.
+        const environment: BugCaseEnvironment = {
+          ...DEFAULT_BUG_CASE_ENVIRONMENT,
+          timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          locale: Intl.DateTimeFormat().resolvedOptions().locale || 'en-US',
+          ...host.environment()
+        };
         session.view = await host.open({
           sessionId: session.id,
           taskId: session.taskId,
@@ -900,7 +893,7 @@ function startTracker(derived: DerivedReplaySpec): StartTracker {
   const spec = derived.spec as { type?: string; services?: Record<string, { type?: string }> };
   const entries = spec.type === 'environment' && spec.services ? Object.entries(spec.services) : [];
   const installs = entries.filter(([id, service]) => service.type === 'job' && (derived.addedInstallJobs.includes(id) || /install/i.test(id)));
-  const directoryOf = (id: string) => derived.serviceDirectories.find((entry) => entry.service === id)?.directory;
+  const directoryOf = (id: string) => derived.jobs.find((job) => job.id === id)?.directory;
   // In the order they run: installs, then databases, then the other jobs, then the app's processes.
   const rank = ([id, service]: [string, { type?: string }]) =>
     installs.some(([installId]) => installId === id) ? 0 : service.type === 'postgres' || service.type === 'redis' ? 1 : service.type === 'job' ? 2 : 3;
@@ -1029,39 +1022,6 @@ function suggestedValueRows(log: BugRecordingLogV1, draft: BugCaptureDraft): Bug
     }
     return row;
   });
-}
-
-function jobsOf(recipeText: string): RecipeJob[] {
-  const spec = parseConfigurationFile(recipeText);
-  const services = spec.type === 'environment' ? Object.entries(spec.services) : [['app', spec] as const];
-  return services.map(([id, service]) => {
-    const record = service as Record<string, unknown>;
-    const directory = typeof record.cwd === 'string' ? record.cwd : typeof record.directory === 'string' ? record.directory : '.';
-    const normalized = path.posix.normalize(directory.replace(/\\/g, '/'));
-    return {
-      id,
-      type: String(record.type),
-      directory: normalized,
-      ...(Array.isArray(record.command) ? { command: record.command as string[] } : {})
-    };
-  });
-}
-
-/** JSON of a list within `max` bytes, keeping its first (`head`) or last (`tail`) items. */
-function boundedJson(value: unknown[], max: number, keep: 'head' | 'tail'): Buffer {
-  let items = value;
-  let bytes = Buffer.from(JSON.stringify(items));
-  while (bytes.length > max && items.length > 0) {
-    const count = Math.floor(items.length / 2);
-    items = keep === 'head' ? items.slice(0, count) : items.slice(items.length - count);
-    bytes = Buffer.from(JSON.stringify(items));
-  }
-  return bytes;
-}
-
-/** Values typed into password fields during the recording. */
-function sensitiveValues(log: BugRecordingLogV1): string[] {
-  return log.actions.flatMap((action) => (action.kind === 'fill' && action.sensitive && action.value ? [action.value] : []));
 }
 
 function sha256(bytes: Buffer): string {

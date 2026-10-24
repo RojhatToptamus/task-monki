@@ -27,11 +27,7 @@ const STORAGE_PREFIX = 'replay';
 export const KEPT_APPROVALS_PER_REPOSITORY = 10;
 
 export const BUG_REPLAY_FILE_LIMITS: Record<BugReplayFileKind, number> = {
-  ACTION_LOG: 2 * 1024 * 1024,
-  NETWORK_LOG: 1024 * 1024,
-  CONSOLE_LOG: 256 * 1024,
-  SCREENSHOT: 1024 * 1024,
-  RUN_FRAMES: 1024 * 1024
+  SCREENSHOT: 1024 * 1024
 };
 
 export class BugReplayStoreConflictError extends Error {

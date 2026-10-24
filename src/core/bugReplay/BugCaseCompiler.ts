@@ -307,8 +307,6 @@ export function describeCaptured(captured: BugCaseCaptured): string {
       return captured.value ? 'Was visible' : 'Was not visible';
     case 'count':
       return `Appeared ${captured.value} ${captured.value === 1 ? 'time' : 'times'}`;
-    case 'path':
-      return `Was ${captured.value}`;
     case 'status':
       return captured.value === 'no-response' ? 'Got no response' : `Returned ${captured.value}`;
     case 'requestCount':

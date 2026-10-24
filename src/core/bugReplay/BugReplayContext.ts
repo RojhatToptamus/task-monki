@@ -264,19 +264,6 @@ function codeSpan(value: string): string {
   return `${fence}${pad}${value}${pad}${fence}`;
 }
 
-/**
- * Evidence as it is written to disk: values typed into password fields and secret-like text are
- * masked in every string, so a log the app wrote cannot carry them into backups.
- */
-export function redactEvidence<T>(value: T, sensitive: readonly string[]): T {
-  if (typeof value === 'string') return redactProcessDiagnostic(value, sensitive) as T;
-  if (Array.isArray(value)) return value.map((item) => redactEvidence(item, sensitive)) as T;
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactEvidence(item, sensitive)])) as T;
-  }
-  return value;
-}
-
 function boundedLines(lines: string[], limit: number): string {
   const text = lines.join('\n');
   if (text.length <= limit) return text;

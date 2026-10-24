@@ -157,11 +157,6 @@ export function BugExpectationsDrawer({
                       <FixedExpectation key={row.id} name="No page error" was={row.recorded} removeLabel="Remove the page error expectation" disabled={saving}
                         onRemove={() => edit(removeExpectationRow(editor, row))} />
                     );
-                  case 'other':
-                    return (
-                      <FixedExpectation key={row.id} name={row.statement} removeLabel={`Remove the expectation ${row.statement}`} disabled={saving}
-                        onRemove={() => edit(removeExpectationRow(editor, row))} />
-                    );
                 }
               })}
             </ul>

@@ -284,8 +284,6 @@ export function expectationViews(document: BugCaseV1, recorded: Record<string, B
     } else if (assertion.kind === 'console.noUncaughtError') {
       const raised = observed?.kind === 'pageError' ? observed.raised : document.failureSignature.some((entry) => entry.assertionId === assertion.id);
       rows.push({ kind: 'pageError', id: assertion.id, recorded: raised ? 'The last step raised an error' : 'The last step raised no error' });
-    } else {
-      rows.push({ kind: 'other', id: assertion.id, statement: describeBugCaseAssertion(assertion, document) });
     }
   }
   return rows;

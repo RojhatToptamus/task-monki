@@ -216,10 +216,6 @@ export function holds(
       }
       return { holds: false, detail: `After: ${observed ?? `${targetWord(assertion)} was not found`}` };
     }
-    case 'page.path':
-      return observation?.kind === 'path' && pathMatchesTemplate(observation.path, assertion.template)
-        ? { holds: true, detail: '' }
-        : { holds: false, detail: `After: the page was ${observation?.kind === 'path' ? observation.path : 'not reached'}` };
     case 'console.noUncaughtError':
       return observation?.kind === 'console' && observation.errors.length === 0
         ? { holds: true, detail: '' }
@@ -281,8 +277,6 @@ function showsSignature(
       return Boolean(dom) && dom!.visible === captured.value && failsExpectation;
     case 'count':
       return Boolean(dom) && dom!.count === captured.value && failsExpectation;
-    case 'path':
-      return observation?.kind === 'path' && observation.path === captured.value;
     case 'status': {
       if (observation?.kind !== 'request') return false;
       return observation.matches.some((match) => {
@@ -499,8 +493,6 @@ export function observedValue(assertion: BugCaseAssertion, observation: BugRepla
       const dom = asDom(observation);
       return sentenceStart(times(dom?.count ?? 0));
     }
-    case 'page.path':
-      return observation?.kind === 'path' ? observation.path : undefined;
     case 'console.noUncaughtError':
       if (observation?.kind !== 'console') return undefined;
       return observation.errors.length > 0 ? clipValue(observation.errors[0].split('\n')[0]) : 'No error';
@@ -553,8 +545,6 @@ export function describeObserved(
       const dom = asDom(observation);
       return `${subject} appeared ${times(dom?.count ?? 0)}`;
     }
-    case 'page.path':
-      return observation?.kind === 'path' ? `the page was ${observation.path}` : undefined;
     case 'console.noUncaughtError':
       return observation?.kind === 'console' && observation.errors.length > 0 ? 'the page raised an error' : 'the page raised no error';
     case 'request': {
@@ -628,8 +618,6 @@ function capturedText(captured: BugCaseCaptured): string {
       return captured.value ? 'visible' : 'not visible';
     case 'count':
       return times(captured.value);
-    case 'path':
-      return captured.value;
     case 'status':
       return captured.value === 'no-response' ? 'no response' : String(captured.value);
     case 'requestCount':

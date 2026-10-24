@@ -56,7 +56,7 @@ interface Pointing {
 const BODY_RING = 60;
 /** Rows the live timeline sends; the steps count covers the rest. */
 const TIMELINE_ROWS = 80;
-/** UTF-8 bytes of recorded actions; below the stored action log's 2 MiB limit with room for the array. */
+/** UTF-8 bytes of recorded actions held in memory; a recording past it is incomplete. */
 const MAX_LOG_BYTES = 1536 * 1024;
 /**
  * What Chrome draws over the element under the pointer: the default theme's light `--accent-soft`
@@ -71,6 +71,8 @@ const POINTING_HIGHLIGHT = {
   borderColor: POINTING_TINT
 };
 const PICK_OBJECT_GROUP = 'tm-bug-pick';
+/** Replays block service workers by stubbing registration (`serviceWorkers: 'block'`); so does a recording. */
+const SERVICE_WORKERS_OFF = 'if (navigator.serviceWorker) navigator.serviceWorker.register = async () => {};';
 /** The top target's key among the targets in inspect mode; a frame is keyed by its session. */
 const TOP_TARGET = '';
 
@@ -139,18 +141,33 @@ export class RecorderSession {
     await send('Runtime.enable');
     await send('Network.enable', { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 1_000_000 });
     await send('Log.enable').catch(() => undefined);
+    await this.emulate(send);
   }
 
   /**
-   * Sets the page's CSS viewport so resizing the window never changes the layout being recorded.
-   * `scale` fits the pinned viewport into a smaller view; `nativeDensity` keeps the screen's own
-   * pixel density so text stays sharp while the layout stays the case's.
+   * The case's browser settings, sent as a replay's browser context sends them, so the page the
+   * person records is the page replays open: user agent and languages, locale, time zone, color
+   * scheme, no HTTP cache (a replay's request routing turns it off) and no service workers.
    */
-  async pinViewport(options: { scale?: number; nativeDensity?: boolean } = {}): Promise<void> {
+  private async emulate(send: (method: string, params?: Record<string, unknown>) => Promise<unknown>): Promise<void> {
+    const { userAgent, locale, timezoneId, colorScheme } = this.environment;
+    await send('Emulation.setUserAgentOverride', { userAgent: userAgent ?? '', acceptLanguage: locale });
+    await send('Emulation.setLocaleOverride', { locale }).catch(unlessInEffect);
+    await send('Emulation.setTimezoneOverride', { timezoneId }).catch(unlessInEffect);
+    await send('Emulation.setEmulatedMedia', { media: '', features: [{ name: 'prefers-color-scheme', value: colorScheme }] });
+    await send('Network.setCacheDisabled', { cacheDisabled: true });
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: SERVICE_WORKERS_OFF, runImmediately: true });
+  }
+
+  /**
+   * Pins the page's CSS viewport and pixel density to the case's, so resizing the window or moving
+   * it to another display never changes what is recorded. `scale` fits the viewport into a smaller view.
+   */
+  async pinViewport(options: { scale?: number } = {}): Promise<void> {
     await this.cdp.send('Emulation.setDeviceMetricsOverride', {
       width: this.environment.viewport.width,
       height: this.environment.viewport.height,
-      deviceScaleFactor: options.nativeDensity ? 0 : this.environment.deviceScaleFactor,
+      deviceScaleFactor: this.environment.deviceScaleFactor,
       mobile: false,
       ...(options.scale !== undefined && options.scale !== 1 ? { scale: options.scale } : {})
     });
@@ -830,24 +847,7 @@ function lowerCaseHeaders(headers: Record<string, string>): Record<string, strin
   return result;
 }
 
-/**
- * The log as it is kept on disk: no request or response bodies, and no value typed into a password
- * field. The case keeps those values for replay; evidence never does.
- */
-export function persistableLog(log: BugRecordingLogV1): BugRecordingLogV1 {
-  return {
-    ...log,
-    actions: log.actions.map((action) => {
-      if (!action.sensitive) return { ...action };
-      const { value: _value, ...rest } = action;
-      void _value;
-      return rest;
-    }),
-    requests: log.requests.map((request) => {
-      const copy: BugRecordingRequest = { ...request };
-      delete copy.requestJson;
-      delete copy.responseJson;
-      return copy;
-    })
-  };
+/** A frame in a renderer that already has the override keeps it, as Playwright lets it in replays. */
+function unlessInEffect(error: unknown): void {
+  if (!(error instanceof Error && error.message.includes('already in effect'))) throw error;
 }

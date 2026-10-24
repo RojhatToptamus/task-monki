@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { PreviewRuntime } from 'previewhost';
 import type { AppDatabaseTransaction, SqlReader } from '../storage/sqlite/AppDatabase';
-import type { SqliteBugReplayStore } from '../storage/sqlite/SqliteBugReplayStore';
+import { BUG_REPLAY_FILE_LIMITS, type SqliteBugReplayStore } from '../storage/sqlite/SqliteBugReplayStore';
 import type { SqliteTaskStore } from '../storage/SqliteTaskStore';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { ReviewSnapshotStore } from '../git/ReviewSnapshotStore';
@@ -33,7 +33,7 @@ import type { BugCaseRecord, BugCaseVersionRecord, BugReplayFileRecord, StoredBu
 import { computeGate, effectiveVersion, latestSets, openSetNeeds, owedRuns, qualificationOf, replayTerms, verdictAttempt, verificationCovered } from './BugReplayGate';
 import { evaluateRun } from './BugReplayVerdict';
 import type { BugReplayRunner } from './BugReplayRunner';
-import { deriveReplaySpec, ReplayEligibilityError, REPLAY_NAME_PATTERN, replayEnvironmentName } from './ReplayDerivation';
+import { deriveReplaySpec, ReplayEligibilityError, REPLAY_NAME_PATTERN, replayEnvironmentName, type DerivedReplaySpec } from './ReplayDerivation';
 import { changedProtectedInputs, type ProtectedTree } from './ProtectedInputs';
 import type { ReplayAuthorization } from './ReplayAuthorization';
 import { ReplayEnvironment, ReplayEnvironmentError } from './ReplayEnvironment';
@@ -46,7 +46,6 @@ import {
   buildBugReviewSection,
   findSuspiciousLines,
   oneLine,
-  redactEvidence,
   type BugContextRecords
 } from './BugReplayContext';
 import type { BugRecordingSessions, BugReplayCore, BugReplayTaskAccess, PendingReplayApproval } from './BugReplayPorts';
@@ -129,8 +128,11 @@ export class BugReplayService implements BugReplayCore {
   private readonly suspiciousCache = new Map<string, string[]>();
   private readonly sharedSetupCache = new Map<string, string[]>();
   private readonly protectedCache = new Map<string, string[]>();
-  /** The approval digest each waiting run last derived. */
-  private readonly derivedDigests = new Map<string, string>();
+  /**
+   * Each waiting run's spec as admission derived it. It cannot change while the run waits: its
+   * tree is fixed and its env files are checked first, so the heartbeat never derives it again.
+   */
+  private readonly admissionSpecs = new Map<string, DerivedReplaySpec>();
 
   constructor(private readonly options: BugReplayServiceOptions) {
     this.environment = new ReplayEnvironment(options.runtime, options.authorization);
@@ -862,8 +864,7 @@ export class BugReplayService implements BugReplayCore {
         });
       }
     }
-    const derived = await this.derive(run, version, worktreePath, tree, '/<export>');
-    remember(this.derivedDigests, run.id, derived.approvalDigest);
+    const derived = this.admissionSpecs.get(run.id) ?? remember(this.admissionSpecs, run.id, await this.derive(run, version, worktreePath, tree, '/<export>'));
     if (!(await this.approved(run.taskId, derived.approvalDigest))) return 'APPROVAL';
     if ((derived.managedDatabases.length > 0 || derived.secretIds.length > 0) && (await this.options.runtime().keystore.status()).state !== 'unlocked') {
       return 'KEYSTORE';
@@ -880,7 +881,7 @@ export class BugReplayService implements BugReplayCore {
    */
   private async mayBeApproved(run: StoredBugReplayRun, repositoryId: string): Promise<boolean> {
     if (this.options.authorization.hasLease(run.taskId)) return true;
-    const digest = this.derivedDigests.get(run.id);
+    const digest = this.admissionSpecs.get(run.id)?.approvalDigest;
     return this.options.store.read((reader) =>
       digest ? Boolean(this.options.store.keptApproval(reader, repositoryId, digest)) : this.options.store.hasKeptApprovals(reader, repositoryId)
     );
@@ -1082,18 +1083,14 @@ export class BugReplayService implements BugReplayCore {
     return next;
   }
 
+  /** A run's pictures; what it observed is in its record. */
   private async publishRunFiles(run: StoredBugReplayRun, result: Extract<Awaited<ReturnType<BugReplayRunner['run']>>, { kind: 'completed' }>) {
     const files: BugReplayFileRecord[] = [];
     try {
       for (const shot of result.screenshots.slice(0, 6)) {
         const bytes = await fs.readFile(shot.path).catch(() => undefined);
-        if (!bytes || bytes.length > 1024 * 1024) continue;
+        if (!bytes || bytes.length > BUG_REPLAY_FILE_LIMITS.SCREENSHOT) continue;
         files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'SCREENSHOT', mediaType: 'image/png', bytes }));
-      }
-      const sensitive = (await this.loadRunRecords(run))?.version.document.sensitiveInputs.map((input) => input.value) ?? [];
-      const frames = Buffer.from(JSON.stringify(redactEvidence(result.frames, sensitive)), 'utf8');
-      if (frames.length <= 1024 * 1024) {
-        files.push(await this.options.store.publishFile({ taskId: run.taskId, ownerKind: 'RUN', ownerId: run.id, kind: 'RUN_FRAMES', mediaType: 'application/json', bytes: frames }));
       }
     } catch (error) {
       await this.options.store.discardPublished(files);

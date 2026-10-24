@@ -632,6 +632,7 @@ function stubHost(): RecordingBrowserHost {
     screenshot: async () => Buffer.from('png')
   };
   return {
+    environment: () => ({ colorScheme: 'light', deviceScaleFactor: 1 }),
     open: async () => ({
       recorder: recorder as unknown as RecorderSession,
       chromium: '152.0.0.0',
@@ -686,24 +687,28 @@ describe('Saving a recording', () => {
     await until(() => recording.sessionView(w.task.id)?.phase === 'MARKING' && !recording.sessionView(w.task.id)?.detail, 'the pick');
     const revision = recording.sessionView(w.task.id)!.capture!.draftRevision;
 
-    // The disk fills up after two of the evidence files were written.
+    // The disk fills up after the capture's screenshot was written, while the bug is recorded.
     const published: BugReplayFileRecord[] = [];
     const publish = w.store.publishFile.bind(w.store);
-    const spy = vi.spyOn(w.store, 'publishFile').mockImplementation(async (input) => {
-      if (published.length === 2) throw new Error('No space left on device');
+    const publishing = vi.spyOn(w.store, 'publishFile').mockImplementation(async (input) => {
       const file = await publish(input);
       published.push(file);
       return file;
     });
-    await expect(recording.save(sessionId, revision, totalDraft(), true)).rejects.toThrow('No space left on device');
+    const recordingCapture = vi.spyOn(w.store, 'insertCapture').mockImplementation(() => {
+      throw new Error('database or disk is full');
+    });
+    await expect(recording.save(sessionId, revision, totalDraft(), true)).rejects.toThrow('database or disk is full');
 
     expect(recording.sessionView(w.task.id)).toMatchObject({ phase: 'MARKING' });
+    expect(published).toHaveLength(1);
     for (const file of published) {
       await expect(fs.access(path.join(w.persistence.paths.managedFilesRoot, file.storageKey))).rejects.toThrow();
     }
     expect(await w.store.read((reader) => w.store.activeCase(reader, w.task.id))).toBeUndefined();
 
-    spy.mockRestore();
+    publishing.mockRestore();
+    recordingCapture.mockRestore();
     w.runner.fallback = untilStopped;
     await recording.save(sessionId, revision, totalDraft(), true);
 
@@ -721,6 +726,7 @@ describe('A recording that stops while the bug is marked', () => {
     let notify: RecordingViewInput['notify'] | undefined;
     const base = stubHost();
     const host: RecordingBrowserHost = {
+      environment: base.environment,
       open: async (input) => {
         notify = input.notify;
         return base.open(input);
@@ -773,6 +779,7 @@ describe('Starting a recording on another page', () => {
       now: () => 4_200
     };
     const host: RecordingBrowserHost = {
+      environment: () => ({ colorScheme: 'light', deviceScaleFactor: 1 }),
       open: async () => ({
         recorder: recorder as unknown as RecorderSession,
         chromium: '152.0.0.0',

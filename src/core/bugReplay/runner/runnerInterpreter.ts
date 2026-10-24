@@ -64,7 +64,8 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
   const screenshot = async (page: Page, purpose: 'failure' | 'final', marks?: BugReplayElementMark[]) => {
     if (screenshots >= plan.maxScreenshots || page.isClosed()) return;
     try {
-      const bytes = await page.screenshot({ type: 'png', timeout: 5_000 });
+      // One pixel per CSS pixel at any density, as the recording's picture and the marks are.
+      const bytes = await page.screenshot({ type: 'png', scale: 'css', timeout: 5_000 });
       screenshots += 1;
       const name = `${purpose}-${screenshots}.png`;
       await fs.writeFile(path.join(plan.outDir, name), bytes, { mode: 0o600, flag: 'wx' });
@@ -141,7 +142,7 @@ export async function interpretBugCase(browser: Browser, plan: BugReplayRunPlan,
     const windowRequests = tracker.windowFacts();
     emit({ type: 'requests', phase: 'main', requests: windowRequests.slice(0, 200).map((fact) => reported(fact)) });
     for (const assertion of document.assertions) {
-      emit({ type: 'assertion', assertionId: assertion.id, phase: 'main', observation: observationFor(assertion, window.dom, windowRequests, page, pageErrors, document) });
+      emit({ type: 'assertion', assertionId: assertion.id, phase: 'main', observation: observationFor(assertion, window.dom, windowRequests, pageErrors, document) });
       assertionFrames += 1;
     }
     // What a reload opens is read before the final screenshot scrolls: an app that keeps its scroll
@@ -253,6 +254,7 @@ async function newContext(
     locale: environment.locale,
     timezoneId: environment.timezoneId,
     colorScheme: environment.colorScheme,
+    ...(environment.userAgent ? { userAgent: environment.userAgent } : {}),
     serviceWorkers: 'block',
     acceptDownloads: false,
     ...(storageState ? { storageState } : {})
@@ -824,7 +826,6 @@ function observationFor(
   assertion: BugCaseAssertion,
   dom: Map<string, BugReplayDomObservation>,
   requests: BugReplayRequestFact[],
-  page: Page,
   pageErrors: string[],
   document: BugCaseV1
 ) {
@@ -834,8 +835,6 @@ function observationFor(
     case 'dom.visible':
     case 'dom.count':
       return dom.get(assertion.id) ?? missingDom();
-    case 'page.path':
-      return { kind: 'path' as const, path: safeUrl(page.url())?.pathname ?? '/' };
     case 'console.noUncaughtError':
       return { kind: 'console' as const, errors: pageErrors.slice(0, 20) };
     case 'request':

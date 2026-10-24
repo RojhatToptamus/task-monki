@@ -121,15 +121,24 @@ class FakeView {
   setBorderRadius() {}
 }
 
+const ELECTRON_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Task Monki/0.5.0 Chrome/152.0.0.0 Electron/43.8.0 Safari/537.36';
+
+function fakeRuntime(view: FakeView, session: FakeSession, display: { dark: boolean; scaleFactor: number } = { dark: false, scaleFactor: 1 }): BugRecordingViewRuntime {
+  return {
+    chromiumVersion: '152.0.0.0',
+    userAgent: ELECTRON_USER_AGENT,
+    prefersDark: () => display.dark,
+    scaleFactor: () => display.scaleFactor,
+    sessionForPartition: () => session as unknown as RecordingSession,
+    createView: () => view as unknown as RecordingView
+  };
+}
+
 /** Opens a recording of the app at APP in a view of its own, as the recording service would. */
 async function openRecording() {
   const session = new FakeSession();
   const view = new FakeView();
-  const runtime: BugRecordingViewRuntime = {
-    chromiumVersion: '152.0.0.0',
-    sessionForPartition: () => session as unknown as RecordingSession,
-    createView: () => view as unknown as RecordingView
-  };
+  const runtime = fakeRuntime(view, session);
   const notices: Array<Parameters<RecordingViewInput['notify']>[0]> = [];
   const host = new BugRecordingViewHost(runtime);
   const handle = await host.open({
@@ -150,6 +159,16 @@ function navigation(url: string, isMainFrame = true) {
 }
 
 describe('The view a bug is recorded in', () => {
+  it('records with the system’s appearance, the display’s density and the user agent of a browser, not of Task Monki', () => {
+    const host = new BugRecordingViewHost(fakeRuntime(new FakeView(), new FakeSession(), { dark: true, scaleFactor: 2 }));
+
+    expect(host.environment()).toEqual({
+      colorScheme: 'dark',
+      deviceScaleFactor: 2,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+    });
+  });
+
   it('reaches only the clean copy’s own origin', async () => {
     const { session, contents } = await openRecording();
 

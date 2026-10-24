@@ -33,7 +33,7 @@ async function seedBug(profile: Awaited<ReturnType<typeof openProfile>>) {
   const version = versionRecord({ taskId });
   const runs = [...reproducedQualification(), ...attempt('attempt-1', 'tree-fix', ['PASSED', 'PASSED'], 10)].map((run) => ({ ...run, taskId }));
   const screenshot = await store.publishFile({ taskId, ownerKind: 'CAPTURE', ownerId: capture.id, kind: 'SCREENSHOT', mediaType: 'image/png', bytes: new Uint8Array(2048) });
-  const runLog = await store.publishFile({ taskId, ownerKind: 'RUN', ownerId: runs[2].id, kind: 'RUN_FRAMES', mediaType: 'application/json', bytes: new TextEncoder().encode('[]') });
+  const runShot = await store.publishFile({ taskId, ownerKind: 'RUN', ownerId: runs[2].id, kind: 'SCREENSHOT', mediaType: 'image/png', bytes: new Uint8Array(1024) });
   await store.write((tx) => {
     store.insertCapture(tx, capture);
     store.insertCase(tx, bugCase);
@@ -41,9 +41,9 @@ async function seedBug(profile: Awaited<ReturnType<typeof openProfile>>) {
     store.insertDecision(tx, { id: 'decision-1', caseId: bugCase.id, taskId, kind: 'APPROVED', versionId: version.id, createdAt: version.createdAt });
     for (const run of runs) store.insertRun(tx, run);
     store.recordFile(tx, screenshot);
-    store.recordFile(tx, runLog);
+    store.recordFile(tx, runShot);
   });
-  return { capture, bugCase, version, runs, files: [screenshot, runLog] };
+  return { capture, bugCase, version, runs, files: [screenshot, runShot] };
 }
 
 async function exists(file: string): Promise<boolean> {
@@ -95,7 +95,7 @@ describe('Bug Replay store', () => {
     const profile = await openProfile();
     const { capture, bugCase, files } = await seedBug(profile);
     const { store } = profile;
-    // The screenshot's payload now names the run log's bytes, and the decision another version.
+    // The capture's screenshot payload now names the run's screenshot bytes, and the decision another version.
     await store.write((tx) => {
       tx.run(`UPDATE bug_replay_files SET payload_json = json_set(payload_json, '$.storageKey', ?) WHERE id = ?`, [files[1].storageKey, files[0].id]);
       tx.run(`UPDATE bug_case_decisions SET payload_json = json_set(payload_json, '$.versionId', 'another-version') WHERE id = 'decision-1'`);
@@ -104,7 +104,7 @@ describe('Bug Replay store', () => {
     await expect(store.read((reader) => store.listDecisions(reader, bugCase.id))).rejects.toThrow('integrity check');
     await expect(store.read((reader) => store.filesFor(reader, 'CAPTURE', capture.id))).rejects.toThrow('integrity check');
     await expect(store.write((tx) => store.deleteForTask(tx, profile.task.id))).rejects.toThrow('integrity check');
-    expect(await store.readFile(files[1])).toHaveLength(2);
+    expect(await store.readFile(files[1])).toHaveLength(1024);
   });
 
   it('removes bytes published for a write that did not commit', async () => {

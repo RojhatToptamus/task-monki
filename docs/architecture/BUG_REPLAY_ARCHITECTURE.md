@@ -79,12 +79,15 @@ stated beside it.
    The view's session is private to the recording, allows only the run's own
    origins (plus `about:blank` and same-view `data:`/`blob:` subresources),
    denies popups, downloads and permission prompts, and is cleared when the
-   recording ends. A steps rail beside the page shows what was recorded as it
+   recording ends. The page gets the browser settings its replays get, which
+   the case keeps: the system's color scheme, the display's pixel density, a
+   browser's user agent without Task Monki's or Electron's name, the machine's
+   locale (also as the page's languages) and time zone, no HTTP cache and no
+   service workers. A steps rail beside the page shows what was recorded as it
    happens: each step a replay takes, inputs it cannot replay, requests that
    failed or were refused, and uncaught errors, the newest 80 rows, sent at
    most four times a second. A typed password is kept in the case so runs can
-   type it again, masked on every surface and left out of the stored action
-   log; the composer says so.
+   type it again, masked on every surface; the composer says so.
 6. **Mark.** Mark bug seals the window since the last action, notes the page's
    scroll, takes the screenshot and starts pointing. Pointing never blocks the
    person: Stop pointing, Escape, Back to recording and Discard stay available,
@@ -216,6 +219,9 @@ JSON values) is bounded so the page cannot make a report too large to count;
 a run that exceeds its time limit is still uncounted (Couldn't verify), since
 a slow machine looks the same.
 
+Each run opens the page with the case's browser settings, as the recording
+did. Screenshots keep one pixel per CSS pixel at any density.
+
 After the expectations are read, the runner scrolls the first element it found
 into view and reports where each found element sat in the final screenshot;
 core accepts only boxes for the case's own page expectations, at most five, on
@@ -230,8 +236,9 @@ cannot say anything about the recorded element: it ends `BLOCKED` with
 checks and steps found by a fallback, and the reviewer reads those notes.
 
 Before a run starts, the version's kept-fixed inputs are compared with the tree:
-the setup files the recipe's jobs read (pinned package scripts and the files
-they run) and the chosen env files by hash. A change gives `PROTECTED_INPUT_CHANGED`
+the setup files the clean copy's jobs read (pinned package scripts and the files
+they run, including the install scripts of an install the clean copy adds) and
+the chosen env files by hash. A change gives `PROTECTED_INPUT_CHANGED`
 or `ENV_FILES_CHANGED`, which say what changed; the person can adopt new env
 files as a new version. Code a seed shares with the app is listed for the
 reviewer instead of pinned.
@@ -391,12 +398,11 @@ to 16 distinct answers or values per check. Like the case document, it can
 hold a typed password, which every surface masks. Migration 16 adds
 `bug_replay_approvals`, one row per repository and approval digest, which goes
 with its repository and is deleted when revoked, and indexes the child columns
-deleting a task's bug looks up. Evidence (screenshots, action, network and
-console logs, run frames) is stored as managed
-files under `replay/<task>/<owner>/`, each kind with its own size limit; once
-256 MB is stored in all, no new recording starts until earlier evidence is
-deleted. Evidence is written without request or response bodies, and with
-typed passwords and secret-like text masked in every string. Settled runs beyond
+deleting a task's bug looks up. Evidence files are screenshots, the
+recording's and each run's, at most 1 MB each, stored as managed files under
+`replay/<task>/<owner>/`; what a run observed stays in its record. Once 256 MB
+is stored in all, no new recording starts until earlier evidence is deleted.
+Settled runs beyond
 the newest eight keep their records but lose their files, except the
 qualification and the attempts the verdict uses; records beyond the newest
 sixty go too, releasing the trees their attempts pinned. Deleting a task removes
@@ -456,8 +462,11 @@ bug becomes a record with no actions.
   `BugReplayService.integration.test.ts`.
 - Hand-off through the service, and Mark done refusing a verdict about other
   code: `TaskManagerService.bugReplay.integration.test.ts`.
-- The engine with a real browser, including WebSockets to undeclared hosts:
-  `BugReplayRunner.integration.test.ts` (skipped without
+- Recording and replay end to end in real browsers: a bug recorded with the
+  recorder, replayed until it reproduces and then passes, with the page seeing
+  the same browser settings in both, each step found by the locator the
+  recording named, screenshots at CSS size, page errors and WebSockets to
+  undeclared hosts: `BugReplayRunner.integration.test.ts` (skipped without
   `.local/design-browser-runtime`).
 - Pointing with a real browser on a page that swallows, forges and watches
   input, with picks in a shadow tree and in same-origin, same-site and
@@ -465,8 +474,8 @@ bug becomes a record with no actions.
   Escape: `recorder/RecorderSession.integration.test.ts` (skipped without
   `.local/design-browser-runtime`); placing a pick on the screenshot, the live
   steps and bounded bodies: `recorder/RecorderSession.test.ts`; what the
-  recording view lets through, and Escape while pointing:
-  `src/electron/BugRecordingViewHost.test.ts`.
+  recording view lets through, the settings it records with, and Escape while
+  pointing: `src/electron/BugRecordingViewHost.test.ts`.
 - Mounted UI: `TaskDetail.dom.test.tsx` (Remove bug),
   `bug/BugRecordingWorkspace.dom.test.tsx` (including the approval's order),
   `bug/BugCapturePanel.dom.test.tsx` (expectations, focus and naming),

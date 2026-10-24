@@ -41,7 +41,7 @@ export interface BugCaptureRecord {
   stepKinds?: BugStepKind[];
   /** Where each picked element sat in the capture's screenshot, by its structural CSS path. */
   markedBoxes?: Array<{ css: string; box: BugElementBox }>;
-  fileIds: { actionLog?: string; network?: string; console?: string; screenshots: string[] };
+  fileIds: { screenshots: string[] };
   createdAt: string;
 }
 
@@ -124,7 +124,7 @@ export interface BugReplayKeptApprovalRecord {
   keptAt: string;
 }
 
-export type BugReplayFileKind = 'ACTION_LOG' | 'NETWORK_LOG' | 'CONSOLE_LOG' | 'SCREENSHOT' | 'RUN_FRAMES';
+export type BugReplayFileKind = 'SCREENSHOT';
 
 export interface BugReplayFileRecord {
   id: string;
